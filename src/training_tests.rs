@@ -745,3 +745,123 @@ proptest::proptest! {
         proptest::prop_assert_eq!(labels_within(minimum, maximum, classes), expected);
     }
 }
+
+// Pairwise reduction: accuracy against F64, parity with the previous tree, and cost.
+
+/// The previous adjacent-pair tree, kept as the reference the folding tree must match.
+///
+/// Each level reshapes `[rows, w]` to `[rows, w/2, 2]` (after padding odd widths
+/// with one zero) and reduces the innermost pair.
+fn adjacent_pair_reference(input: Tensor<Cpu, 2>) -> Tensor<Cpu, 2> {
+    let [rows, mut width] = input.dims();
+    let mut values = input;
+    while width > 1 {
+        if !width.is_multiple_of(2) {
+            let zero = values.clone().narrow(1, 0, 1).zeros_like();
+            values = Tensor::cat(vec![values, zero], 1);
+            width += 1;
+        }
+        width /= 2;
+        values = values
+            .reshape([rows, width, 2])
+            .sum_dim(2)
+            .reshape([rows, width]);
+    }
+    values
+}
+
+/// One large term among tiny tail terms, wherever it sits, stays within 2e-7 of F64.
+///
+/// Flex's native reduction is sequential and errs by up to ~1e-3 here.
+#[test]
+fn folded_reduction_matches_f64_and_the_previous_tree_for_any_peak_position() {
+    let device = Default::default();
+    for classes in [50_303_usize, 151_936] {
+        let expected = (1.0 + (classes - 1) as f64 * (-16.0_f64).exp()).ln();
+        for position in [0, 1, 3, 7, 15, classes / 2, classes - 1] {
+            let mut values = vec![-16.0_f32; classes];
+            values[position] = 0.0;
+            let exps =
+                Tensor::<Cpu, 2>::from_data(TensorData::new(values, [1, classes]), &device).exp();
+            let folded = f64::from(pairwise_row_sums(exps.clone()).log().into_scalar());
+            let previous = f64::from(adjacent_pair_reference(exps).log().into_scalar());
+            assert!(
+                (folded - expected).abs() < 2e-7,
+                "V={classes} at {position}: {folded} vs {expected}"
+            );
+            // Both trees are within 2e-7 of F64, possibly on opposite sides.
+            assert!((folded - previous).abs() < 4e-7);
+        }
+    }
+}
+
+/// Fold widths shrink by about half and carry exactly the odd middle column.
+#[test]
+fn fold_widths_halve_and_carry_odd_columns() {
+    assert_eq!(fold_widths(2), (1, 1));
+    assert_eq!(fold_widths(3), (1, 2));
+    assert_eq!(fold_widths(151_936), (75_968, 75_968));
+    for width in 2..1_000 {
+        let (half, next) = fold_widths(width);
+        assert_eq!(2 * half + width % 2, width);
+        assert!(next >= 1 && next < width);
+    }
+}
+
+proptest::proptest! {
+    /// Random positive rows obey the pairwise F32 error bound against an F64 sum.
+    ///
+    /// For depth `k = ceil(log2 w)`, each input passes through at most `k`
+    /// additions, so `|error| <= k * 2^-24 * sum |x|` up to second-order terms.
+    #[test]
+    fn folded_row_sums_obey_the_pairwise_error_bound(
+        rows in proptest::collection::vec(
+            proptest::collection::vec(0.0f32..1e3, 1..300),
+            1..2,
+        ),
+    ) {
+        let row = &rows[0];
+        let width = row.len();
+        let tensor = Tensor::<Cpu, 2>::from_data(TensorData::new(row.clone(), [1, width]), &Default::default());
+        let actual = f64::from(pairwise_row_sums(tensor).into_scalar());
+        let exact = row.iter().map(|value| f64::from(*value)).sum::<f64>();
+        let depth = (usize::BITS - (width - 1).leading_zeros()) as f64;
+        let bound = (depth + 1.0) * f64::from(f32::EPSILON) / 2.0 * exact + 1e-30;
+        proptest::prop_assert!((actual - exact).abs() <= bound, "{actual} vs {exact} (bound {bound})");
+    }
+}
+
+/// Reports per-call cost of the row reductions; run with `--release --ignored --nocapture`.
+#[test]
+#[ignore = "timing report, not a correctness check"]
+fn reduction_cost_report() {
+    use std::time::Instant;
+    let device = Default::default();
+    let logits = Tensor::<Cpu, 2>::random(
+        [64, 151_936],
+        burn::tensor::Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let iterations = 10;
+    let time = |label: &str, run: &dyn Fn() -> Tensor<Cpu, 2>| {
+        let _ = run().into_data();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = run().into_data();
+        }
+        let milliseconds = start.elapsed().as_secs_f64() * 1e3 / f64::from(iterations);
+        println!("{label}: {milliseconds:.2} ms");
+    };
+    time("folded pairwise tree", &|| {
+        pairwise_row_sums(logits.clone())
+    });
+    time("previous adjacent-pair tree", &|| {
+        adjacent_pair_reference(logits.clone())
+    });
+    time("native sequential sum_dim", &|| logits.clone().sum_dim(1));
+    time("cross_entropy (folded)", &|| {
+        cross_entropy(logits.clone(), Tensor::zeros([64], &device))
+            .unwrap()
+            .reshape([1, 1])
+    });
+}
