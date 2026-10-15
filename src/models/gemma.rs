@@ -24,7 +24,10 @@
 //! and multimodal projector are **not executed**: their tensors are
 //! explicitly exempted from strict loading and listed in the load report's
 //! `allowlisted_ignored`, so image inputs are unsupported while text
-//! generation is exactly the text tower's.
+//! generation is exactly the text tower's. Because the multimodal
+//! reference never applies `final_logit_softcapping`, such a checkpoint
+//! with a non-null final soft-cap is refused rather than silently capped
+//! (every released multimodal Gemma 3 config sets `null`).
 //!
 //! # Pinned reference
 //!

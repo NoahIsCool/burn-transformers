@@ -62,8 +62,10 @@
 //!   so a non-null value would be silently ignored by the reference.
 //! * **Gemma 3 final soft-cap.** `Gemma3ForCausalLM` applies
 //!   `final_logit_softcapping` while the multimodal
-//!   `Gemma3ForConditionalGeneration` does not; this crate executes the
-//!   text tower and applies it. Every released Gemma 3 config sets `null`.
+//!   `Gemma3ForConditionalGeneration` does not. The architecture applies a
+//!   configured cap, as the text tower does, and the checkpoint contract
+//!   refuses a non-null cap for a multimodal-namespace checkpoint, whose
+//!   reference would not apply it. Every released Gemma 3 config sets `null`.
 //! * **Rejected.** Non-zero `attention_dropout`, bidirectional attention
 //!   (EmbeddingGemma), activations other than `gelu_pytorch_tanh`,
 //!   `gelu_new`, `gelu`, `silu`/`swish`, `relu`, a zero `sliding_window` or

@@ -164,6 +164,34 @@ fn multimodal_namespaces_load_the_text_tower_and_report_the_vision_tower() {
     }
 }
 
+/// A multimodal checkpoint with a final soft-cap fails before any payload is read.
+#[test]
+fn multimodal_checkpoints_refuse_a_final_soft_cap() {
+    let directory = multimodal("gemma3-text", "model.language_model", &[]);
+    let config = std::fs::read_to_string(directory.path().join("config.json")).unwrap();
+    let capped = GemmaConfig {
+        final_logit_softcapping: Some(30.0),
+        ..GemmaConfig::from_json_str(&config).unwrap()
+    };
+    let mut model = GemmaForCausalLm::<B>::init(capped.clone(), &Default::default()).unwrap();
+    let error = model
+        .load_checkpoint(directory.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, GemmaCheckpointLoadError::Config(config) if config.field == "final_logit_softcapping"),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none(), "nothing was installed");
+    // The same configuration loads the text-only namespace, whose reference caps.
+    let mut text_only = GemmaForCausalLm::<B>::init(capped, &Default::default()).unwrap();
+    let root = fixture("gemma3-text");
+    assert!(
+        text_only
+            .load_checkpoint(&root, &LoadOptions::default())
+            .is_ok()
+    );
+}
+
 /// Missing, unexpected, misshapen, stray-vision, and ambiguous checkpoints fail before installation.
 #[test]
 fn malformed_checkpoints_fail_before_installation() {

@@ -49,6 +49,15 @@
 //! exempted by prefix: they are reported in the load report's
 //! `allowlisted_ignored` list, never read, and any other unexpected tensor
 //! still fails the load. Text-only checkpoints get no exemption.
+//!
+//! The multimodal references also differ from the text-only ones in one
+//! numerical step: no Transformers 5.2 multimodal wrapper
+//! (`Gemma3ForConditionalGeneration`, which `AutoModelForCausalLM` builds
+//! for a `gemma3` checkpoint, or `PaliGemmaForConditionalGeneration`)
+//! applies `final_logit_softcapping`, while `Gemma2ForCausalLM` and
+//! `Gemma3ForCausalLM` do. A multimodal-namespace checkpoint with a non-null
+//! final soft-cap would therefore disagree with its own reference, so its
+//! contract is refused; every released multimodal Gemma 3 config sets `null`.
 
 use serde::{Deserialize, Serialize};
 
@@ -208,13 +217,16 @@ impl GemmaConfig {
     ///
     /// # Errors
     ///
-    /// Returns the configuration's validation error, or a [`ConfigError`]
-    /// when a dimension cannot be represented by the checkpoint format.
+    /// Returns the configuration's validation error, a [`ConfigError`] at
+    /// `final_logit_softcapping` for a multimodal source with a final
+    /// soft-cap (see the module documentation), or a [`ConfigError`] when a
+    /// dimension cannot be represented by the checkpoint format.
     pub fn checkpoint_contract(
         &self,
         options: GemmaCheckpointOptions,
     ) -> Result<GemmaCheckpointContract, ConfigError> {
         let architecture = self.architecture()?;
+        reject_unreferenced_final_softcap(&architecture, options.source)?;
         let mut contract = ContractBuilder::new(Dimensions::of(&architecture)?, options.source);
         contract.add_embedding();
         for layer in 0..architecture.num_layers() {
@@ -222,6 +234,30 @@ impl GemmaConfig {
         }
         contract.add_head(architecture.tie_word_embeddings);
         Ok(contract.finish())
+    }
+}
+
+/// Refuses a final soft-cap that a multimodal source's reference never applies.
+///
+/// Text-only sources follow `Gemma{2,3}ForCausalLM`, which cap the logits;
+/// the multimodal wrappers return the raw head logits, so executing the cap
+/// for them would silently change every logit.
+fn reject_unreferenced_final_softcap(
+    architecture: &GemmaArchitecture,
+    source: GemmaCheckpointSource,
+) -> Result<(), ConfigError> {
+    match (source, architecture.final_logit_softcap) {
+        (
+            GemmaCheckpointSource::Multimodal | GemmaCheckpointSource::LegacyMultimodal,
+            Some(cap),
+        ) => Err(ConfigError::new(
+            architecture.variant.model_type(),
+            "final_logit_softcapping",
+            format!(
+                "the {source:?} namespace belongs to a multimodal reference (Gemma3ForConditionalGeneration or PaliGemmaForConditionalGeneration) that never applies the final soft-cap {cap}; set it to null"
+            ),
+        )),
+        _ => Ok(()),
     }
 }
 

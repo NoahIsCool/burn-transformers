@@ -207,6 +207,46 @@ fn sources_select_their_namespaces() {
     }
 }
 
+/// A multimodal source refuses a final soft-cap its reference never applies.
+///
+/// Regression: a multimodal Gemma 3 checkpoint with a non-null
+/// `final_logit_softcapping` used to load and silently cap logits that
+/// `Gemma3ForConditionalGeneration` leaves raw.
+#[test]
+fn multimodal_sources_refuse_a_final_soft_cap() {
+    for variant in GemmaVariant::ALL {
+        let capped = GemmaConfig {
+            final_logit_softcapping: Some(30.0),
+            ..small(variant)
+        };
+        let uncapped = GemmaConfig {
+            final_logit_softcapping: None,
+            ..capped.clone()
+        };
+        for source in GemmaCheckpointSource::ALL {
+            let options = GemmaCheckpointOptions { source };
+            assert!(uncapped.checkpoint_contract(options).is_ok(), "{source:?}");
+            let result = capped.checkpoint_contract(options);
+            if source == GemmaCheckpointSource::TextOnly {
+                assert!(
+                    result.is_ok(),
+                    "{variant:?}: the text tower applies the cap"
+                );
+                continue;
+            }
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.field, "final_logit_softcapping",
+                "{variant:?} {source:?}"
+            );
+            assert!(
+                error.to_string().contains("Gemma3ForConditionalGeneration"),
+                "{error}"
+            );
+        }
+    }
+}
+
 /// Exactly one language embedding identifies the source.
 #[test]
 fn sources_are_detected_from_the_embedding_name() {
