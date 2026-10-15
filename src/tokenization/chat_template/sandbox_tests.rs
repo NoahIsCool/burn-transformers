@@ -148,6 +148,8 @@ fn bounded_operators_keep_minijinja_semantics() {
             "{{ [1] * -2 }}",
             "sequences and iterables can only be multiplied with integers",
         ),
+        // A map on the left is the candidate, so this is the engine's type error.
+        ("{{ {'a': 1} * [1] }}", "unsupported types"),
         ("{{ {} + 1 }}", "unsupported types"),
         ("{{ 'a' + 1 }}", "unsupported types"),
         ("{{ missing + 1 }}", "unsupported types"),
@@ -365,10 +367,35 @@ fn panics_never_escape_rendering() {
 #[test]
 fn format_widths_follow_printf() {
     let budget = RenderBudget::new(SMALL);
-    for format in ["%s", "%5d", "%-10s", "%.3f", "%08.2f", "100%", "%%", "%"] {
+    for format in [
+        "%s",
+        "%5d",
+        "%-10s",
+        "%.3f",
+        "%08.2f",
+        "100%",
+        "%%",
+        "%",
+        "%%99999999",
+        "%(a)5s",
+        "%(unterminated",
+    ] {
         check_format_widths(&budget, format).unwrap_or_else(|error| panic!("{format}: {error}"));
     }
-    for format in ["%65s", "%.65f", "%1.65f", "%#0+ -99s"] {
+    for format in [
+        "%65s",
+        "%.65f",
+        "%1.65f",
+        "%#0+ -99s",
+        "%% %65s",
+        "%(a)65s",
+        "%(a)-.65f",
+    ] {
         assert!(check_format_widths(&budget, format).is_err(), "{format}");
     }
+    // A mapping key works end to end, as in Python's `'%(a)s' % {'a': 1}`.
+    assert_eq!(
+        render_with("{{ '%(a)3s|%%' | format({'a': 'x'}) }}", SMALL).unwrap(),
+        "  x|%"
+    );
 }

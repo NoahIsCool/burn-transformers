@@ -464,22 +464,20 @@ pub(crate) fn bounded_multiply(
         budget.reserve_text(bytes, "string repetition `*`")?;
         return Ok(Value::from(text.repeat(count)));
     }
-    let repeated = if is_repeatable(&left) {
+    // Like MiniJinja: the first operand that is an object is the candidate,
+    // and it is repeated only when it is a sequence; a map on the left with a
+    // list on the right is therefore the engine's type error.
+    let candidate = if left.as_object().is_some() {
         Some((&left, &right))
-    } else if is_repeatable(&right) {
+    } else if right.as_object().is_some() {
         Some((&right, &left))
     } else {
         None
     };
-    if let Some((sequence, count)) = repeated {
+    if let Some((sequence, count)) = candidate.filter(|(sequence, _)| is_sequence(sequence)) {
         return repeat_sequence(budget, sequence, count);
     }
     engine_operation(state, Operator::Multiply, left, right)
-}
-
-/// Whether MiniJinja's `*` treats `value` as a repeatable sequence (an object list or iterable).
-fn is_repeatable(value: &Value) -> bool {
-    value.as_object().is_some() && is_sequence(value)
 }
 
 /// Repeats the items of `sequence` `count` times into one bounded list.
@@ -713,8 +711,9 @@ pub(crate) fn replaced_length(text: &str, from: &str, to: &str, count: Option<us
 /// Rejects printf field widths or precisions in `format` above the text allowance.
 ///
 /// MiniJinja's `format` pads a conversion such as `%999999999s` to its width
-/// before any size check; widths are read here the way printf reads them
-/// (flags, then digits, then `.` and digits).
+/// before any size check. Fields are read the way its printf parser reads
+/// them: `%%` is a literal percent sign; otherwise an optional `(key)`, flags
+/// (`-+ #0`), width digits, and `.` with precision digits.
 fn check_format_widths(budget: &RenderBudget, format: &str) -> Result<(), Error> {
     let allowance = budget.text_allowance();
     let bytes = format.as_bytes();
@@ -725,6 +724,17 @@ fn check_format_widths(budget: &RenderBudget, format: &str) -> Result<(), Error>
             continue;
         }
         index += 1;
+        if bytes.get(index) == Some(&b'%') {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index) == Some(&b'(') {
+            match bytes[index..].iter().position(|&byte| byte == b')') {
+                Some(close) => index += close + 1,
+                // MiniJinja rejects an unterminated key itself.
+                None => return Ok(()),
+            }
+        }
         while index < bytes.len() && b"-+ #0".contains(&bytes[index]) {
             index += 1;
         }
