@@ -1219,15 +1219,31 @@ fn seq2seq_auto_trait_dispatch_and_state_lifecycle() {
 /// Registry configuration traits enumerate every executable discriminator explicitly.
 #[test]
 fn automatic_config_discriminators_validate_and_match_runtime_registries() {
-    for config in [
-        AutoCausalConfig::DeepseekV2,
-        AutoCausalConfig::MuseGlimmer,
-        AutoCausalConfig::NemotronH,
-        AutoCausalConfig::Qwen3_5,
-        AutoCausalConfig::Qwen3Moe,
-    ] {
+    assert_eq!(
+        AutoCausalConfig::ALL,
+        [
+            AutoCausalConfig::DeepseekV2,
+            AutoCausalConfig::MuseGlimmer,
+            AutoCausalConfig::NemotronH,
+            AutoCausalConfig::Qwen3_5,
+            AutoCausalConfig::Qwen3Moe,
+        ]
+    );
+    for config in AutoCausalConfig::ALL {
         config.validate().unwrap();
+        assert_eq!(
+            AutoCausalConfig::from_model_type(config.model_type()),
+            Some(*config)
+        );
     }
+    assert_eq!(
+        AutoCausalConfig::ALL
+            .iter()
+            .map(|config| config.model_type())
+            .collect::<Vec<_>>(),
+        AutoCausalConfig::MODEL_TYPES
+    );
+    assert_eq!(AutoCausalConfig::from_model_type("llama"), None);
     AutoSeq2SeqConfig::T5.validate().unwrap();
     assert_eq!(
         AutoCausalConfig::MODEL_TYPES,
@@ -1334,4 +1350,60 @@ fn detection_accepts_the_legacy_nemotron_infinity_literal() {
         matches!(detect_model_type("{\"model_type\":-Infinity}").unwrap_err(),
         Error::Configuration { field, .. } if field == "auto.config_json")
     );
+}
+
+/// Each family's registry discriminator is the one its own configuration schema accepts,
+/// and the model, borrowed config, and family views agree.
+#[test]
+fn registry_entries_agree_with_family_schemas_and_views() {
+    let device = Default::default();
+    let entries = [
+        (
+            AutoCausalConfig::DeepseekV2,
+            <DeepseekV2Config as ModelConfig>::MODEL_TYPES,
+        ),
+        (
+            AutoCausalConfig::MuseGlimmer,
+            <MuseGlimmerTextConfig as ModelConfig>::MODEL_TYPES,
+        ),
+        (
+            AutoCausalConfig::NemotronH,
+            <NemotronHConfig as ModelConfig>::MODEL_TYPES,
+        ),
+        (
+            AutoCausalConfig::Qwen3_5,
+            <Qwen3_5TextConfig as ModelConfig>::MODEL_TYPES,
+        ),
+        (
+            AutoCausalConfig::Qwen3Moe,
+            <Qwen3MoeConfig as ModelConfig>::MODEL_TYPES,
+        ),
+    ];
+    assert_eq!(entries.len(), AutoCausalConfig::ALL.len());
+    for (family, schema_types) in entries {
+        assert!(schema_types.contains(&family.model_type()), "{family:?}");
+    }
+    for (json, family) in [
+        (
+            serde_json::to_string(&tiny_qwen()).unwrap(),
+            AutoCausalConfig::Qwen3_5,
+        ),
+        (
+            serde_json::to_string(&tiny_qwen_moe()).unwrap(),
+            AutoCausalConfig::Qwen3Moe,
+        ),
+        (
+            serde_json::to_string(&tiny_muse()).unwrap(),
+            AutoCausalConfig::MuseGlimmer,
+        ),
+        (
+            serde_json::to_string(&tiny_nemotron()).unwrap(),
+            AutoCausalConfig::NemotronH,
+        ),
+    ] {
+        let model = AutoCausalLm::<TestBackend>::from_config_json(&json, &device).unwrap();
+        assert_eq!(model.family(), family);
+        assert_eq!(model.config().family(), family);
+        assert_eq!(model.config().model_type(), family.model_type());
+    }
 }

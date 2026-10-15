@@ -1,10 +1,12 @@
 //! Local-only automatic checkpoint loading and generation-default normalization.
 //!
-//! The automatic registry performs family selection once, then hands strict
-//! tensor planning and installation back to the architecture-owned checkpoint
-//! contract. No filename heuristics select individual parameters. Qwen's two
-//! published namespace layouts are distinguished only after complete SafeTensors
-//! header discovery by checking which exact language prefix is present.
+//! The automatic registry performs family selection once, then runs one shared
+//! pipeline ([`load_causal_family`]) that hands strict tensor planning and
+//! installation back to the architecture-owned checkpoint contract through
+//! [`CausalFamily`]. No filename heuristics select individual parameters.
+//! Qwen's and Muse's two published namespace layouts are distinguished only
+//! after complete SafeTensors header discovery by checking which exact
+//! language prefix is present.
 //!
 //! Loading is a host-side boundary: canonical contained paths and bounded JSON are
 //! validated before tensor installation. Explicit generation defaults take precedence
@@ -34,7 +36,8 @@ use crate::{
     Error, GenerationConfig, LoadedModel, ModelSourceMetadata, ModelTokenizer, Result,
     SamplingStrategy,
     checkpoint::{
-        CheckpointManifest, ExecutionOutcome, LoadOptions, execute_local_load_plan,
+        CheckpointManifest, ExecutionOutcome, LoadOptions, LoadPlan, TensorSink,
+        execute_local_load_plan,
         quantization::{
             AuditedQuantizedExecutionOutcome, QuantizedBurnpackArtifact,
             execute_local_quantized_load_plan_audited,
@@ -42,22 +45,13 @@ use crate::{
     },
 };
 
-use super::{AutoCausalLm, AutoSeq2SeqLm, detect_model_type};
+use super::{
+    AutoCausalConfig, AutoCausalLm, AutoSeq2SeqLm, detect_model_type,
+    family::{CausalFamily, PlannedCheckpoint},
+    parse_family_config,
+};
 use crate::models::{
-    config::{ModelConfig, TokenIds},
-    deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
-    muse_glimmer::{
-        MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerForCausalLm,
-        MuseGlimmerTextConfig,
-    },
-    nemotron_h::{
-        NemotronHCheckpointOptions, NemotronHCheckpointProvenance, NemotronHConfig,
-        NemotronHForCausalLm,
-    },
-    qwen3_5::{
-        Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5ForCausalLm, Qwen3_5TextConfig,
-    },
-    qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig, Qwen3MoeForCausalLm},
+    config::TokenIds,
     t5::{T5Config, T5ForConditionalGeneration},
 };
 use burn::tensor::backend::Backend;
@@ -121,232 +115,65 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<LoadedModel<Self>> {
         let (root, json) = read_required_config(root.as_ref())?;
         let model_type = detect_model_type(&json)?;
-        if options.qwen_mtp && model_type != "qwen3_5_text" {
-            return Err(Error::configuration(
-                "auto_causal.qwen_mtp",
-                "Qwen MTP is defined only for qwen3_5_text checkpoints",
-            ));
-        }
-        if options.quantized_burnpack.is_some()
-            && !PACKED_CAUSAL_MODEL_TYPES.contains(&model_type.as_str())
-        {
-            return Err(Error::BackendCapability(format!(
-                "packed Burnpack loading for `{model_type}` is not yet certified; automatic packed execution is limited to {}",
-                PACKED_CAUSAL_MODEL_TYPES.join(", ")
-            )));
-        }
-        match model_type.as_str() {
-            "deepseek_v2" => {
-                let config = DeepseekV2Config::from_json_str(&json).map_err(|error| {
-                    Error::configuration("auto_causal.config", error.to_string())
-                })?;
-                let vocabulary_size = config.vocab_size;
-                let generation = resolve_generation_defaults(
-                    &root,
-                    config.eos_token_id.as_ref(),
-                    config.pad_token_id.as_ref(),
-                    vocabulary_size,
-                    options.generation.as_ref(),
-                )?;
-                let source = source_metadata(&root, &model_type, options)?;
-                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let contract = config
-                    .checkpoint_contract(DeepseekV2CheckpointOptions::default())
-                    .map_err(|error| {
-                        Error::configuration(
-                            format!("{}.{}", error.architecture, error.field),
-                            error.reason,
-                        )
-                    })?;
-                let plan = contract
-                    .build_load_plan(&manifest, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let mut model = DeepseekV2ForCausalLm::init(config, device)?;
-                let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                outcome.into_loaded(
-                    Self::DeepseekV2(model),
-                    tokenizer,
-                    generation,
-                    source,
-                    vocabulary_size,
-                )
-            }
-            "muse_glimmer_text" => {
-                let config = MuseGlimmerTextConfig::from_json_str(&json).map_err(|error| {
-                    Error::configuration("auto_causal.config", error.to_string())
-                })?;
-                let vocabulary_size = config.vocab_size;
-                let generation = resolve_generation_defaults(
-                    &root,
-                    config.eos_token_id.as_ref(),
-                    config.pad_token_id.as_ref(),
-                    vocabulary_size,
-                    options.generation.as_ref(),
-                )?;
-                let source = source_metadata(&root, &model_type, options)?;
-                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let source_layout = muse_source_layout(&manifest)?;
-                let contract = config
-                    .checkpoint_contract(MuseGlimmerCheckpointOptions {
-                        source: source_layout,
-                    })
-                    .map_err(|error| {
-                        Error::configuration(
-                            format!("{}.{}", error.architecture, error.field),
-                            error.reason,
-                        )
-                    })?;
-                let plan = contract
-                    .build_load_plan(&manifest, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let mut model = MuseGlimmerForCausalLm::init(config, device)?;
-                let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                outcome.into_loaded(
-                    Self::MuseGlimmer(model),
-                    tokenizer,
-                    generation,
-                    source,
-                    vocabulary_size,
-                )
-            }
-            "nemotron_h" => {
-                let config = NemotronHConfig::from_json_str(&json).map_err(|error| {
-                    Error::configuration("auto_causal.config", error.to_string())
-                })?;
-                let vocabulary_size = config.vocab_size;
-                let generation = resolve_generation_defaults(
-                    &root,
-                    config.eos_token_id.as_ref(),
-                    config.pad_token_id.as_ref(),
-                    vocabulary_size,
-                    options.generation.as_ref(),
-                )?;
-                let source = source_metadata(&root, &model_type, options)?;
-                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-                let architecture_options = match (&options.repository, &options.revision) {
-                    (Some(repository), Some(revision)) => NemotronHCheckpointOptions::default()
-                        .with_provenance(NemotronHCheckpointProvenance::new(repository, revision)),
-                    _ => NemotronHCheckpointOptions::default(),
-                };
-                let contract =
-                    config
-                        .checkpoint_contract(architecture_options)
-                        .map_err(|error| {
-                            Error::configuration(
-                                format!("{}.{}", error.architecture, error.field),
-                                error.reason,
-                            )
-                        })?;
-                let manifest = contract
-                    .discover_checkpoint(&root, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let plan = contract
-                    .build_load_plan(&manifest, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let mut model = NemotronHForCausalLm::init(config, device)?;
-                let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                outcome.into_loaded(
-                    Self::NemotronH(model),
-                    tokenizer,
-                    generation,
-                    source,
-                    vocabulary_size,
-                )
-            }
-            "qwen3_5_text" => {
-                let config = Qwen3_5TextConfig::from_json_str(&json).map_err(|error| {
-                    Error::configuration("auto_causal.config", error.to_string())
-                })?;
-                let vocabulary_size = config.vocab_size;
-                let generation = resolve_generation_defaults(
-                    &root,
-                    config.eos_token_id.as_ref(),
-                    config.pad_token_id.as_ref(),
-                    vocabulary_size,
-                    options.generation.as_ref(),
-                )?;
-                let source = source_metadata(&root, &model_type, options)?;
-                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let source_layout = qwen_source_layout(&manifest)?;
-                let contract = config
-                    .checkpoint_contract(Qwen3_5CheckpointOptions {
-                        source: source_layout,
-                        include_mtp: options.qwen_mtp,
-                    })
-                    .map_err(|error| {
-                        Error::configuration(
-                            format!("{}.{}", error.architecture, error.field),
-                            error.reason,
-                        )
-                    })?;
-                let plan = contract
-                    .build_load_plan(&manifest, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let mut executable_config = config;
-                if !options.qwen_mtp {
-                    // Base-only loading must not leave a randomly initialized MTP graph
-                    // reachable through the public speculative API.
-                    executable_config.mtp_num_hidden_layers = 0;
-                }
-                let mut model = Qwen3_5ForCausalLm::init(executable_config, device)?;
-                let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                outcome.into_loaded(
-                    Self::Qwen3_5(model),
-                    tokenizer,
-                    generation,
-                    source,
-                    vocabulary_size,
-                )
-            }
-            "qwen3_moe" => {
-                let config = Qwen3MoeConfig::from_json_str(&json).map_err(|error| {
-                    Error::configuration("auto_causal.config", error.to_string())
-                })?;
-                let vocabulary_size = config.vocab_size;
-                let generation = resolve_generation_defaults(
-                    &root,
-                    config.eos_token_id.as_ref(),
-                    config.pad_token_id.as_ref(),
-                    vocabulary_size,
-                    options.generation.as_ref(),
-                )?;
-                let source = source_metadata(&root, &model_type, options)?;
-                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let contract = config
-                    .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
-                    .map_err(|error| {
-                        Error::configuration(
-                            format!("{}.{}", error.architecture, error.field),
-                            error.reason,
-                        )
-                    })?;
-                let plan = contract
-                    .build_load_plan(&manifest, &options.checkpoint)
-                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let mut model = Qwen3MoeForCausalLm::init(config, device)?;
-                let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                outcome.into_loaded(
-                    Self::Qwen3Moe(model),
-                    tokenizer,
-                    generation,
-                    source,
-                    vocabulary_size,
-                )
-            }
-            _ => Err(Error::UnsupportedArchitecture(format!(
-                "causal model_type `{model_type}` is not executable; supported values: {}",
-                Self::MODEL_TYPES.join(", ")
-            ))),
-        }
+        validate_causal_options(&model_type, options)?;
+        Self::load_registered_family(&model_type, &root, &json, options, device)
     }
+}
+
+/// Rejects load options that do not apply to the detected causal family.
+fn validate_causal_options(model_type: &str, options: &AutoLoadOptions) -> Result<()> {
+    let qwen = AutoCausalConfig::Qwen3_5.model_type();
+    if options.qwen_mtp && model_type != qwen {
+        return Err(Error::configuration(
+            "auto_causal.qwen_mtp",
+            format!("Qwen MTP is defined only for {qwen} checkpoints"),
+        ));
+    }
+    if options.quantized_burnpack.is_some() && !PACKED_CAUSAL_MODEL_TYPES.contains(&model_type) {
+        return Err(Error::BackendCapability(format!(
+            "packed Burnpack loading for `{model_type}` is not yet certified; automatic packed execution is limited to {}",
+            PACKED_CAUSAL_MODEL_TYPES.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Strictly loads one causal family through the shared automatic pipeline.
+///
+/// The steps run in a fixed order so cheap validation precedes expensive
+/// work: parse the family configuration, resolve generation defaults, record
+/// provenance, load the optional tokenizer, discover and plan the checkpoint
+/// (family-specific), initialize the graph, then execute the plan with an
+/// optional packed sidecar. The bundle is returned only if the final load
+/// report is strictly valid.
+pub(super) fn load_causal_family<B, F>(
+    root: &Path,
+    json: &str,
+    model_type: &str,
+    options: &AutoLoadOptions,
+    device: &B::Device,
+) -> Result<LoadedModel<AutoCausalLm<B>>>
+where
+    B: Backend,
+    F: CausalFamily<B> + Into<AutoCausalLm<B>>,
+    <F as TensorSink>::Error: core::fmt::Display,
+{
+    let config = parse_family_config::<F::Config>(json, "auto_causal.config")?;
+    let tokens = F::token_metadata(&config);
+    let vocabulary_size = tokens.vocabulary_size;
+    let generation = resolve_generation_defaults(
+        root,
+        tokens.eos,
+        tokens.pad,
+        vocabulary_size,
+        options.generation.as_ref(),
+    )?;
+    let source = source_metadata(root, model_type, options)?;
+    let tokenizer = load_optional_tokenizer(root, options.load_tokenizer)?;
+    let PlannedCheckpoint { manifest, plan } = F::plan_checkpoint(&config, root, options)?;
+    let mut model = F::init_for_load(config, options, device)?;
+    let outcome = execute_causal_plan(root, &manifest, &plan, options, &mut model)?;
+    outcome.into_loaded(model.into(), tokenizer, generation, source, vocabulary_size)
 }
 
 /// Successful causal checkpoint execution, preserving sidecar-only counters.
@@ -397,10 +224,10 @@ impl CausalExecutionOutcome {
 }
 
 /// Executes a validated causal-family plan with an optional packed sidecar.
-fn execute_causal_plan<M: crate::checkpoint::TensorSink>(
+fn execute_causal_plan<M: TensorSink>(
     root: &Path,
     manifest: &CheckpointManifest,
-    plan: &crate::checkpoint::LoadPlan,
+    plan: &LoadPlan,
     options: &AutoLoadOptions,
     model: &mut M,
 ) -> Result<CausalExecutionOutcome>
@@ -450,8 +277,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
             )));
         }
 
-        let config = T5Config::from_json_str(&json)
-            .map_err(|error| Error::configuration("auto_seq2seq.config", error.to_string()))?;
+        let config = parse_family_config::<T5Config>(&json, "auto_seq2seq.config")?;
         let vocabulary_size = config.vocab_size;
         let generation = resolve_generation_defaults(
             &root,
@@ -476,60 +302,6 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
             vocabulary_size,
         )
         .map(|loaded| loaded.with_unsupported_generation_settings(generation.unsupported))
-    }
-}
-
-/// Distinguishes official wrapped and text-only Qwen parameter namespaces.
-fn qwen_source_layout(manifest: &CheckpointManifest) -> Result<Qwen3_5CheckpointSource> {
-    classify_qwen_names(manifest.tensors.keys().map(String::as_str))
-}
-
-/// Distinguishes released multimodal and standalone Muse text namespaces.
-fn muse_source_layout(manifest: &CheckpointManifest) -> Result<MuseGlimmerCheckpointSource> {
-    classify_muse_names(manifest.tensors.keys().map(String::as_str))
-}
-
-/// Classifies a previously validated set of checkpoint tensor names.
-fn classify_qwen_names<'a>(
-    names: impl IntoIterator<Item = &'a str>,
-) -> Result<Qwen3_5CheckpointSource> {
-    let mut wrapped = false;
-    let mut text_only = false;
-    for name in names {
-        wrapped |= name.starts_with("model.language_model.");
-        text_only |= name == "model.embed_tokens.weight";
-    }
-    match (wrapped, text_only) {
-        (true, false) => Ok(Qwen3_5CheckpointSource::Multimodal),
-        (false, true) => Ok(Qwen3_5CheckpointSource::TextOnly),
-        (false, false) => Err(Error::Checkpoint(
-            "Qwen checkpoint contains neither official language parameter namespace".into(),
-        )),
-        (true, true) => Err(Error::Checkpoint(
-            "Qwen checkpoint ambiguously contains wrapped and text-only language namespaces".into(),
-        )),
-    }
-}
-
-/// Classifies a validated Muse checkpoint key set without filename heuristics.
-fn classify_muse_names<'a>(
-    names: impl IntoIterator<Item = &'a str>,
-) -> Result<MuseGlimmerCheckpointSource> {
-    let mut wrapped = false;
-    let mut text_only = false;
-    for name in names {
-        wrapped |= name.starts_with("model.language_model.");
-        text_only |= name == "model.embed_tokens.weight";
-    }
-    match (wrapped, text_only) {
-        (true, false) => Ok(MuseGlimmerCheckpointSource::Multimodal),
-        (false, true) => Ok(MuseGlimmerCheckpointSource::TextOnly),
-        (false, false) => Err(Error::Checkpoint(
-            "Muse checkpoint contains neither official language parameter namespace".into(),
-        )),
-        (true, true) => Err(Error::Checkpoint(
-            "Muse checkpoint ambiguously contains wrapped and text-only language namespaces".into(),
-        )),
     }
 }
 

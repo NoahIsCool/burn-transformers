@@ -27,9 +27,20 @@ use crate::{
         },
     },
     models::{
-        deepseek_v2::model::tests_support::tiny_config as tiny_deepseek_config,
-        muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
-        qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection,
+        AutoCausalConfig,
+        deepseek_v2::{
+            DeepseekV2CheckpointOptions, model::tests_support::tiny_config as tiny_deepseek_config,
+        },
+        muse_glimmer::{
+            MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerLayerType,
+            MuseGlimmerTextConfig,
+        },
+        nemotron_h::{NemotronHBlockType, NemotronHCheckpointOptions, NemotronHConfig},
+        qwen3_5::{
+            Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5LayerType, Qwen3_5TextConfig,
+        },
+        qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig},
+        t5::T5FeedForwardProjection,
     },
 };
 
@@ -691,48 +702,38 @@ fn generation_defaults_reject_invalid_artifacts_and_tokens() {
     );
 }
 
-/// Qwen namespace detection accepts exactly one official layout.
+/// Every registered causal family reaches its own strict loader, never the fallback.
 #[test]
-fn qwen_namespace_detection_is_unambiguous() {
-    assert_eq!(
-        classify_qwen_names(["model.language_model.embed_tokens.weight"])
-            .expect("wrapped namespace"),
-        Qwen3_5CheckpointSource::Multimodal
-    );
-    assert_eq!(
-        classify_qwen_names(["model.embed_tokens.weight"]).expect("text namespace"),
-        Qwen3_5CheckpointSource::TextOnly
-    );
-    assert!(
-        classify_qwen_names([
-            "model.language_model.embed_tokens.weight",
-            "model.embed_tokens.weight"
-        ])
-        .is_err()
-    );
-    assert!(classify_qwen_names(["foreign.weight"]).is_err());
+fn every_registered_family_reaches_its_strict_loader() {
+    for family in AutoCausalConfig::ALL {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(
+            root.path().join("config.json"),
+            json!({"model_type": family.model_type(), "vocab_size": "not an integer"}).to_string(),
+        )
+        .unwrap();
+        let error = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options("fixture/registry", "registry"),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "auto_causal.config"),
+            "{family:?}: {error}"
+        );
+    }
 }
 
-/// Muse namespace detection accepts exactly one language-tower layout.
+/// Packed-sidecar certification names only registered causal families.
 #[test]
-fn muse_namespace_detection_is_unambiguous() {
-    assert_eq!(
-        classify_muse_names(["model.language_model.embed_tokens.weight"])
-            .expect("wrapped namespace"),
-        MuseGlimmerCheckpointSource::Multimodal
-    );
-    assert_eq!(
-        classify_muse_names(["model.embed_tokens.weight"]).expect("text namespace"),
-        MuseGlimmerCheckpointSource::TextOnly
-    );
-    assert!(
-        classify_muse_names([
-            "model.language_model.embed_tokens.weight",
-            "model.embed_tokens.weight"
-        ])
-        .is_err()
-    );
-    assert!(classify_muse_names(["foreign.weight"]).is_err());
+fn packed_certification_names_registered_families() {
+    for model_type in PACKED_CAUSAL_MODEL_TYPES {
+        assert!(
+            AutoCausalConfig::from_model_type(model_type).is_some(),
+            "{model_type}"
+        );
+    }
 }
 
 /// Required config reading rejects missing files and non-directory roots.
