@@ -453,15 +453,15 @@ impl PositionRule {
 
     /// Largest integer the rule's tensor arithmetic forms from positions below `span`.
     fn peak(self, span: usize) -> Result<i64> {
-        let last = signed_length(span, "key length exceeds i64")? - 1;
+        let span = signed_length(span, "key length exceeds i64")?;
         // Both addends are below `span`, so the sum is below `2 * span`;
-        // `checked_add` still guards spans beyond `i64::MAX / 2`.
+        // the verified `checked_add` still guards spans beyond `i64::MAX / 2`.
         let extent = match self {
             Self::Unrestricted => 0,
             Self::Window(window) => window,
             Self::Chunk { phase, .. } => phase,
         };
-        last.checked_add(extent).ok_or_else(|| {
+        rules::position_peak(span, extent).ok_or_else(|| {
             Error::configuration("attention.positions", "position arithmetic exceeds i64")
         })
     }

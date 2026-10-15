@@ -38,7 +38,8 @@
 //!
 //! # Geometry and positions
 //!
-//! [`mask_geometry_fault`] validates one mask call's extents, and
+//! [`mask_geometry_fault`] validates one mask call's extents,
+//! [`position_peak`] bounds the largest position value a rule forms, and
 //! [`rejects_short_keys`] and [`position_source`] decide which position
 //! vectors a mask needs. Queries are the bottom-right suffix of the keys, so
 //! valid-token ordinals of the queries start `K - Q` columns into the keys;
@@ -406,6 +407,30 @@ pub fn position_source(
 ))]
 pub fn aligned_position_peak(queries: i64, keys: i64) -> i64 {
     queries.max(keys) - 1
+}
+
+/// Largest value a reduced rule's tensor arithmetic forms over `span` local positions.
+///
+/// Positions are below `span`, so the largest is `(span - 1) + extent`, where
+/// `extent` is the window width or frame phase (zero when unrestricted).
+/// Returns `None` when that sum leaves `i64`. Reduced parameters are below the
+/// span, so a successful peak is below `2 * span - 1`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(peak =>
+    requires
+        span >= 0,
+    ensures
+        match peak {
+            Some(peak) => peak == span - 1 + extent,
+            None => span - 1 + extent > i64::MAX || span - 1 + extent < i64::MIN,
+        },
+        0 <= extent < span ==> match peak {
+            Some(peak) => peak < 2 * span - 1,
+            None => span - 1 + extent > i64::MAX,
+        },
+))]
+pub fn position_peak(span: i64, extent: i64) -> Option<i64> {
+    (span - 1).checked_add(extent)
 }
 
 #[cfg(test)]

@@ -28,9 +28,10 @@
 //!   their mathematical definitions; reducing a sliding window or a chunked
 //!   rule to local positions of a span excludes exactly the links the
 //!   absolute rule excludes on every local pair, with parameters below the
-//!   span (so `Unrestricted` collapse is exact); mask extents are validated in
-//!   a fixed order; and the ordinal query offset `K - Q` cannot underflow
-//!   once the alignment check passes;
+//!   span (so `Unrestricted` collapse is exact); the largest position value a
+//!   reduced rule forms is exact and below `2 * K - 1`; mask extents are
+//!   validated in a fixed order; and the ordinal query offset `K - Q` cannot
+//!   underflow once the alignment check passes;
 //! - `src/attention/widths.rs`: grouped-query projection widths, whose
 //!   success implies exact widths, head grouping, and representable element
 //!   counts for every projection matrix, with each error exactly when every

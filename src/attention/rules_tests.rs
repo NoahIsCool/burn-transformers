@@ -196,6 +196,19 @@ fn aligned_position_peak_is_the_largest_position() {
     }
 }
 
+/// Position peaks are `(span - 1) + extent`, rejected only beyond `i64`.
+#[test]
+fn position_peaks_add_the_extent_to_the_last_position() {
+    assert_eq!(position_peak(5, 0), Some(4));
+    assert_eq!(position_peak(5, 4), Some(8));
+    assert_eq!(position_peak(1, 0), Some(0));
+    assert_eq!(position_peak(0, 0), Some(-1));
+    assert_eq!(position_peak(i64::MAX, 0), Some(i64::MAX - 1));
+    assert_eq!(position_peak(i64::MAX, 1), Some(i64::MAX));
+    assert_eq!(position_peak(i64::MAX, 2), None);
+    assert_eq!(position_peak(i64::MAX / 2 + 2, i64::MAX / 2 + 1), None);
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(256))]
 
