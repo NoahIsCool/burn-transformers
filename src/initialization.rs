@@ -54,6 +54,12 @@
 //! precedence, the last match winning. [`ParameterInit::Keep`] leaves a
 //! parameter exactly as constructed (still lazy, if it was).
 //!
+//! Names are checked against the module before anything changes: every
+//! override must match at least one floating parameter, and every listed
+//! residual projection must name at least one `Linear` field. A misspelled
+//! path or a family-specific name (`c_proj` against a model that calls it
+//! `o_proj`) is therefore an error, not a silently skipped rule.
+//!
 //! # Contracts
 //!
 //! Replaced values keep their parameter identity, dtype, device, trainability
@@ -66,10 +72,13 @@
 //! before it is overwritten, so peak memory exceeds the model by at most one
 //! parameter.
 
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    collections::{BTreeSet, HashMap},
+};
 
 use burn::{
-    module::{Module, ModuleMapper, Param, ParamId},
+    module::{Module, ModuleMapper, ModuleVisitor, Param, ParamId},
     tensor::{DType, Distribution, Tensor, backend::Backend},
 };
 use serde::{Deserialize, Serialize};
@@ -192,9 +201,10 @@ pub struct InitPolicy {
     /// Scaling applied to residual projections' standard deviation.
     pub residual_scaling: ResidualScaling,
     /// Field names of `Linear` modules that write into the residual stream,
-    /// such as `o_proj` and `down_proj`.
+    /// such as `o_proj` and `down_proj`; each must exist in the module.
     pub residual_projections: Vec<String>,
-    /// Path-specific initializers, applied after role rules; the last match wins.
+    /// Path-specific initializers, applied after role rules; the last match
+    /// wins, and each must match at least one parameter of the module.
     pub overrides: Vec<InitOverride>,
 }
 
@@ -232,6 +242,9 @@ impl InitPolicy {
     }
 
     /// Adds GPT-2-style `1/sqrt(2 * layers)` scaling for the named residual projections.
+    ///
+    /// Each name is a `Linear` field name (`o_proj`, `down_proj`; GPT-2 uses
+    /// `c_proj`); [`apply`](Self::apply) rejects a name that no `Linear` has.
     pub fn with_depth_scaling<I, S>(mut self, layers: usize, residual_projections: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -244,6 +257,8 @@ impl InitPolicy {
     }
 
     /// Initializes every parameter at or below `path` with `init`, overriding role rules.
+    ///
+    /// [`apply`](Self::apply) rejects a path that matches no floating parameter.
     pub fn with_override(mut self, path: impl Into<String>, init: ParameterInit) -> Self {
         self.overrides.push(InitOverride {
             path: path.into(),
@@ -313,16 +328,66 @@ impl InitPolicy {
         }
     }
 
-    /// Validates the policy, then returns `module` with every parameter initialized by it.
+    /// Validates the policy and checks that its names exist in `module`.
     ///
-    /// The report lists every floating parameter with its role and the
-    /// initializer actually used, sorted by path.
-    pub fn apply<B: Backend, M: Module<B>>(&self, module: M) -> Result<(M, InitReport)> {
+    /// Beyond [`validate`](Self::validate), every override path must match at
+    /// least one floating parameter (exactly or as a component prefix), and
+    /// every entry of [`residual_projections`](Self::residual_projections)
+    /// must be the field name of at least one Burn `Linear`. The check only
+    /// reads parameter paths, so lazy parameters stay unmaterialized and the
+    /// module is left untouched, which makes it a cheap dry run before
+    /// [`apply`](Self::apply) consumes the module.
+    pub fn validate_for<B: Backend, M: Module<B>>(&self, module: &M) -> Result<()> {
         self.validate()?;
+        let mut survey = Survey::default();
+        module.visit(&mut survey);
+        for (index, entry) in self.overrides.iter().enumerate() {
+            if !survey.paths.iter().any(|path| under(path, &entry.path)) {
+                return Err(Error::configuration(
+                    format!("init.overrides[{index}].path"),
+                    format!(
+                        "`{}` matches no floating parameter of the module; paths are \
+                         dot-separated field names such as `layers.0.o_proj.weight`",
+                        entry.path
+                    ),
+                ));
+            }
+        }
+        if let Some(missing) = self
+            .residual_projections
+            .iter()
+            .find(|name| !survey.linear_fields.contains(*name))
+        {
+            let present = if survey.linear_fields.is_empty() {
+                "none".to_owned()
+            } else {
+                survey
+                    .linear_fields
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(Error::configuration(
+                "init.residual_projections",
+                format!(
+                    "`{missing}` names no Linear module field; Linear fields present: {present}"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks the policy against `module`, then returns it with every parameter initialized.
+    ///
+    /// Errors from [`validate_for`](Self::validate_for) are raised before any
+    /// parameter changes. The report lists every floating parameter with its
+    /// role and the initializer actually used, sorted by path.
+    pub fn apply<B: Backend, M: Module<B>>(&self, module: M) -> Result<(M, InitReport)> {
+        self.validate_for(&module)?;
         let mut mapper = Initializer {
             policy: self,
-            path: Vec::new(),
-            containers: Vec::new(),
+            location: ModulePath::default(),
             shared: HashMap::new(),
             report: InitReport::default(),
         };
@@ -371,73 +436,140 @@ struct SharedChoice {
     tensor: Option<Box<dyn Any>>,
 }
 
+/// Field names and their container types from the module root to the current field.
+///
+/// Burn reports, on entering each field, the type of the struct that holds
+/// it, so the last container of a parameter names its owning module type
+/// (`Struct:Linear` for `linear.weight`).
+#[derive(Debug, Default)]
+struct ModulePath {
+    /// Field names from the root to the current field.
+    names: Vec<String>,
+    /// Container type of each entered field, such as `Struct:Linear`.
+    containers: Vec<String>,
+}
+
+impl ModulePath {
+    /// Descends into field `name` held by a container of type `container`.
+    fn enter(&mut self, name: &str, container: &str) {
+        self.names.push(name.to_owned());
+        self.containers.push(container.to_owned());
+    }
+
+    /// Returns to the parent field.
+    fn exit(&mut self) {
+        self.names.pop();
+        self.containers.pop();
+    }
+
+    /// The dot-separated path of the current field; a root parameter is `$`.
+    fn joined(&self) -> String {
+        if self.names.is_empty() {
+            "$".to_owned()
+        } else {
+            self.names.join(".")
+        }
+    }
+
+    /// The field name of the `Linear` whose `weight` is the current field.
+    ///
+    /// `None` when the current field is not a `Linear` weight or when that
+    /// `Linear` is the root module (it then has no field name).
+    fn linear_weight_owner(&self) -> Option<&str> {
+        let field = self.names.last().map(String::as_str);
+        let owner = self.containers.last().map(String::as_str);
+        match (owner, field) {
+            (Some("Struct:Linear"), Some("weight")) => self
+                .names
+                .len()
+                .checked_sub(2)
+                .map(|index| self.names[index].as_str()),
+            _ => None,
+        }
+    }
+
+    /// Infers the current parameter's role from its owning module.
+    fn role(&self, residual_projections: &[String]) -> ParameterRole {
+        let field = self.names.last().map(String::as_str);
+        let owner = self.containers.last().map(String::as_str);
+        match (owner, field) {
+            (Some("Struct:Embedding"), Some("weight")) => ParameterRole::Embedding,
+            (Some("Struct:Linear"), Some("bias")) => ParameterRole::Bias,
+            (Some("Struct:Linear"), Some("weight")) => {
+                let residual = self
+                    .linear_weight_owner()
+                    .is_some_and(|name| residual_projections.iter().any(|listed| listed == name));
+                if residual {
+                    ParameterRole::ResidualProjection
+                } else {
+                    ParameterRole::Projection
+                }
+            }
+            _ => ParameterRole::Other,
+        }
+    }
+}
+
+/// Read-only pre-pass that records which names a policy may refer to.
+#[derive(Debug, Default)]
+struct Survey {
+    /// Position of the visitor in the module tree.
+    location: ModulePath,
+    /// Path of every floating parameter field, aliases included.
+    paths: Vec<String>,
+    /// Field names of the `Linear` modules that own a weight, sorted for messages.
+    linear_fields: BTreeSet<String>,
+}
+
+impl<B: Backend> ModuleVisitor<B> for Survey {
+    /// Records the entered field.
+    fn enter_module(&mut self, name: &str, container_type: &str) {
+        self.location.enter(name, container_type);
+    }
+
+    /// Restores the parent field.
+    fn exit_module(&mut self, _: &str, _: &str) {
+        self.location.exit();
+    }
+
+    /// Records the parameter's path and, for a `Linear` weight, its owner's field name.
+    ///
+    /// Only names are read, so a lazy parameter is not materialized.
+    fn visit_float<const D: usize>(&mut self, _: &Param<Tensor<B, D>>) {
+        self.paths.push(self.location.joined());
+        if let Some(field) = self.location.linear_weight_owner() {
+            self.linear_fields.insert(field.to_owned());
+        }
+    }
+}
+
 /// Module mapper that classifies parameters by owner and replaces their values.
 struct Initializer<'p> {
     /// Policy being applied.
     policy: &'p InitPolicy,
-    /// Field names from the root to the current parameter.
-    path: Vec<String>,
-    /// Container type of each entered field, such as `Struct:Linear`.
-    containers: Vec<String>,
+    /// Position of the mapper in the module tree.
+    location: ModulePath,
     /// Decision taken at the first field of each identity, reused by its aliases.
     shared: HashMap<ParamId, SharedChoice>,
     /// Parameters visited so far.
     report: InitReport,
 }
 
-impl Initializer<'_> {
-    /// Infers the role of the parameter at the current path from its owning module.
-    ///
-    /// Burn reports the struct that holds a field when entering it, so a
-    /// parameter's last container names its owning module type.
-    fn role(&self) -> ParameterRole {
-        let field = self.path.last().map(String::as_str);
-        let owner = self.containers.last().map(String::as_str);
-        let module_name = self
-            .path
-            .len()
-            .checked_sub(2)
-            .map(|index| self.path[index].as_str());
-        match (owner, field) {
-            (Some("Struct:Embedding"), Some("weight")) => ParameterRole::Embedding,
-            (Some("Struct:Linear"), Some("bias")) => ParameterRole::Bias,
-            (Some("Struct:Linear"), Some("weight"))
-                if module_name.is_some_and(|name| {
-                    self.policy
-                        .residual_projections
-                        .iter()
-                        .any(|candidate| candidate == name)
-                }) =>
-            {
-                ParameterRole::ResidualProjection
-            }
-            (Some("Struct:Linear"), Some("weight")) => ParameterRole::Projection,
-            _ => ParameterRole::Other,
-        }
-    }
-}
-
 impl<B: Backend> ModuleMapper<B> for Initializer<'_> {
     /// Records the field name and the type of the struct that holds it.
     fn enter_module(&mut self, name: &str, container_type: &str) {
-        self.path.push(name.to_owned());
-        self.containers.push(container_type.to_owned());
+        self.location.enter(name, container_type);
     }
 
     /// Restores the parent path after leaving a field.
     fn exit_module(&mut self, _: &str, _: &str) {
-        self.path.pop();
-        self.containers.pop();
+        self.location.exit();
     }
 
     /// Replaces one parameter according to its role, preserving identity and mapper.
     fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
-        let path = if self.path.is_empty() {
-            "$".to_owned()
-        } else {
-            self.path.join(".")
-        };
-        let role = self.role();
+        let path = self.location.joined();
+        let role = self.location.role(&self.policy.residual_projections);
         if let Some(choice) = self.shared.get(&param.id) {
             let init = choice.init;
             let shared = choice

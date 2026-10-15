@@ -215,12 +215,12 @@ fn overrides_take_precedence_in_registration_order() {
             .iter()
             .all(|value| *value == 0.0)
     );
-    // `block` is not a component prefix of `blocks`.
+    // `block` is not a component prefix of `blocks`, so it matches nothing.
     let partial = InitPolicy::keep().with_override("block", ParameterInit::Zeros);
-    let (model, _) = partial.apply(original.clone()).unwrap();
-    assert_eq!(
-        values(model.blocks[0].scale.val()),
-        values(original.blocks[0].scale.val())
+    let error = partial.apply(original.clone()).unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, .. } if field == "init.overrides[0].path"),
+        "{error}"
     );
     // Residual scaling still applies to an overridden residual projection.
     let scaled = InitPolicy::keep()
@@ -404,6 +404,72 @@ fn invalid_policies_are_rejected_with_field_paths() {
     }
 }
 
+/// Overrides and residual names that match nothing are errors, raised before any change.
+///
+/// A policy written for another family (GPT-2's `c_proj`) or a misspelled
+/// path would otherwise apply no override and no depth scaling while
+/// reporting success.
+#[test]
+fn names_that_match_nothing_are_rejected_before_initialization() {
+    let device = Default::default();
+    let original = model::<B>(&device);
+    let typo = InitPolicy::normal(0.02)
+        .with_override("head.weight", ParameterInit::Zeros)
+        .with_override("head.weigth", ParameterInit::Zeros);
+    let error = typo.validate_for(&original).unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, reason }
+            if field == "init.overrides[1].path" && reason.contains("`head.weigth`")),
+        "{error}"
+    );
+
+    let foreign = InitPolicy::normal(0.02).with_depth_scaling(2, ["o_proj", "c_proj"]);
+    let error = foreign.apply(original.clone()).unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, reason }
+            if field == "init.residual_projections"
+                && reason.contains("`c_proj`")
+                && reason.contains("head, o_proj, up")),
+        "{error}"
+    );
+    // A name must belong to a `Linear`, not merely to some module.
+    let not_linear = InitPolicy::keep().with_depth_scaling(2, ["embed"]);
+    assert!(not_linear.validate_for(&original).is_err());
+    // Names are checked even without depth scaling: they still decide roles.
+    let mut unscaled = InitPolicy::keep();
+    unscaled.residual_projections.push("down_proj".into());
+    assert!(unscaled.validate_for(&original).is_err());
+    // A root `Linear` has no field name, so it offers none to match.
+    let error = InitPolicy::keep()
+        .with_depth_scaling(1, ["o_proj"])
+        .validate_for(&LinearConfig::new(4, 4).init::<B>(&device))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("Linear fields present: none"),
+        "{error}"
+    );
+    // The root parameter path `$` is a valid override target.
+    let root = Param::from_tensor(Tensor::<B, 1>::ones([3], &device));
+    let (root, _) = InitPolicy::keep()
+        .with_override("$", ParameterInit::Zeros)
+        .apply(root)
+        .unwrap();
+    assert_eq!(values(root.val()), vec![0.0; 3]);
+}
+
+/// The dry run reads only names: lazy parameters stay unmaterialized.
+#[test]
+fn validate_for_leaves_lazy_parameters_untouched() {
+    let device = Default::default();
+    let linear = LinearConfig::new(8, 8).init::<B>(&device);
+    assert!(!linear.weight.is_initialized());
+    InitPolicy::normal(0.02)
+        .with_override("weight", ParameterInit::Zeros)
+        .validate_for(&linear)
+        .unwrap();
+    assert!(!linear.weight.is_initialized());
+}
+
 /// Policies and reports round-trip through JSON with readable tags.
 #[test]
 fn policies_and_reports_round_trip_through_json() {
@@ -414,7 +480,10 @@ fn policies_and_reports_round_trip_through_json() {
     assert_eq!(json["embedding"]["kind"], "normal");
     assert_eq!(json["residual_scaling"]["kind"], "depth_scaled");
     assert_eq!(serde_json::from_value::<InitPolicy>(json).unwrap(), policy);
-    let (_, report) = policy.apply(model::<B>(&Default::default())).unwrap();
+    let fitted = InitPolicy::normal(0.02)
+        .with_depth_scaling(2, ["o_proj"])
+        .with_override("head.weight", ParameterInit::Zeros);
+    let (_, report) = fitted.apply(model::<B>(&Default::default())).unwrap();
     let json = serde_json::to_string(&report).unwrap();
     assert_eq!(serde_json::from_str::<InitReport>(&json).unwrap(), report);
 }
