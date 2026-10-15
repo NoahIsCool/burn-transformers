@@ -32,14 +32,32 @@
 //!    window `p - W < j`, and key validity. When every row starts at the same
 //!    length and fills the block, a full read is exactly bottom-right causal,
 //!    which the attention call applies itself (one-token decode: no mask).
-//!    Excluded keys get probability zero and their values are zeroed
-//!    (`0 · NaN` would poison a row), and the learned sinks keep every row,
-//!    even a padding slot's, a finite softmax;
+//!    Excluded keys get probability zero (see "Clean tails" for when their
+//!    values are zeroed), and the learned sinks keep every row, even a
+//!    padding slot's, a finite softmax;
 //! 4. the routed experts of every block dispatch all rows' tokens together;
 //! 5. after the vocabulary projection succeeds, the step is published
 //!    atomically: lengths advance and ring writes land, or nothing changes. A
 //!    failure leaves the committed state untouched (write-ahead slots beyond
 //!    the lengths are unreachable).
+//!
+//! # Clean tails
+//!
+//! Invalid keys in a full-storage read are the slots at or beyond each row's
+//! end. The state tracks whether every such slot holds zero (a *clean
+//! tail*): true after allocation and `reset` (which zero every tensor),
+//! preserved by published steps (they fill exactly the slots they commit),
+//! by `reorder` (rows move with their lengths), and by truncation to zero.
+//! Truncating a row to a shorter non-zero length, or a step that fails after
+//! writing ahead, leaves bytes beyond the row's end (possibly non-finite, an
+//! overflowed F16 draft, say), so the flag clears and full layers zero
+//! invalid values before attending (`0 · NaN` would poison the row). While
+//! tails are clean that masked copy of every full layer's values (one
+//! `[batch, K, T, h]` select per layer and step) is skipped: on Flex, a
+//! ragged 8-row decode over about 1000 cached keys (width 256, four layers)
+//! took 7.5–8.1 ms per step instead of 11.8–12.9 ms. Ring slots cycle
+//! through a row's own older tokens, so ring layers always zero invalid
+//! values.
 //!
 //! Prefill rejects rows without valid tokens; decode accepts them as no-ops
 //! with exact zero outputs. Speculative transactions are not supported
@@ -208,6 +226,8 @@ pub struct GptOssDecodeState<B: Backend> {
     tensors: TensorDecodeState<B>,
     /// Group assignment the tensors were allocated for.
     layout: CacheLayout,
+    /// Whether every full-storage slot at or beyond a row's length is zero.
+    clean_tail: bool,
 }
 
 impl<B: Backend> GptOssDecodeState<B> {
@@ -231,7 +251,11 @@ impl<B: Backend> GptOssDecodeState<B> {
         }
         let layout = CacheLayout::plan(architecture, capacity, model.model.activation_dtype())?;
         let tensors = layout.allocate(config, batch_size, device)?;
-        Ok(Self { tensors, layout })
+        Ok(Self {
+            tensors,
+            layout,
+            clean_tail: true,
+        })
     }
 
     /// Borrows the generic cache state for diagnostics and lifecycle integration.
@@ -290,9 +314,11 @@ impl<B: Backend> ArchitectureDecodeState<B> for GptOssDecodeState<B> {
         self.tensors.lengths()
     }
 
-    /// Clears every row and zeroes every cache group.
+    /// Clears every row and zeroes every cache group, restoring clean tails.
     fn reset(&mut self) -> Result<()> {
-        self.tensors.reset().map_err(Into::into)
+        self.tensors.reset()?;
+        self.clean_tail = true;
+        Ok(())
     }
 
     /// Reorders or duplicates rows across every group atomically.
@@ -301,8 +327,19 @@ impl<B: Backend> ArchitectureDecodeState<B> for GptOssDecodeState<B> {
     }
 
     /// Rolls rows back to shorter lengths (the ring group only within its window).
+    ///
+    /// A row shortened to a non-zero length keeps its later bytes beyond the
+    /// new end, so tails are no longer known to be clean.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
-        self.tensors.truncate(lengths).map_err(Into::into)
+        let leaves_bytes = self
+            .tensors
+            .lengths()
+            .iter()
+            .zip(lengths)
+            .any(|(&from, &to)| to != 0 && to < from);
+        self.tensors.truncate(lengths)?;
+        self.clean_tail &= !leaves_bytes;
+        Ok(())
     }
 
     /// Returns the device holding the cache.
@@ -327,6 +364,8 @@ struct CachedKeys<'s, B: Backend> {
     angles: RotaryAngles<B>,
     /// Query heads `H`, the exclusion plane's head extent.
     heads: usize,
+    /// Whether invalid full-storage slots are known to hold zero.
+    clean_tail: bool,
     /// Read plan of the full group through the step's write-ahead.
     full_plan: Option<KvBatchReadPlan<B>>,
     /// Read plan of the ring group's committed history.
@@ -339,12 +378,18 @@ struct CachedKeys<'s, B: Backend> {
 
 impl<'s, B: Backend> CachedKeys<'s, B> {
     /// Starts a step appending the compact `batch` to `state`.
+    ///
+    /// `clean_tail` is the state's flag at the step's start; the caller
+    /// clears the state's own flag for the step's duration, because from the
+    /// first write-ahead until publication a failure would abandon bytes
+    /// beyond the lengths.
     fn new(
         state: &'s mut TensorDecodeState<B>,
         layout: &'s CacheLayout,
         batch: &'s CompactBatch<B>,
         angles: RotaryAngles<B>,
         heads: usize,
+        clean_tail: bool,
     ) -> Result<Self> {
         let step = state.step(batch.counts())?;
         let full_plan = layout
@@ -362,6 +407,7 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
             batch,
             angles,
             heads,
+            clean_tail,
             full_plan,
             ring_plan,
             full_mask: None,
@@ -480,7 +526,11 @@ impl<B: Backend> LayerKeys<B> for CachedKeys<'_, B> {
         };
         let (mask, causal) = self.visibility(ring, &segment)?;
         projection.key = segment.keys().clone();
-        projection.value = segment.masked_values();
+        projection.value = if ring || !self.clean_tail {
+            segment.masked_values()
+        } else {
+            segment.values().clone()
+        };
         attention.attend_with_hooks(projection, mask, None, causal, points, hooks)
     }
 }
@@ -545,8 +595,11 @@ impl<B: Backend> GptOssForCausalLm<B> {
         };
         let angles = self.model.rotary_tables(positions, context)?;
         let heads = self.architecture().query_heads;
-        let GptOssDecodeState { tensors, layout } = state;
-        let mut keys = CachedKeys::new(tensors, layout, &batch, angles, heads)?;
+        let clean_tail = core::mem::replace(&mut state.clean_tail, false);
+        let GptOssDecodeState {
+            tensors, layout, ..
+        } = state;
+        let mut keys = CachedKeys::new(tensors, layout, &batch, angles, heads, clean_tail)?;
         let mut hidden = self.model.embed_tokens.forward(tokens);
         let mut hidden_states = Vec::new();
         let mut router_logits = Vec::new();
@@ -560,7 +613,7 @@ impl<B: Backend> GptOssForCausalLm<B> {
                 router_logits.push(batch.restore(logits));
             }
         }
-        let step = keys.step;
+        let (step, clean_tail) = (keys.step, keys.clean_tail);
         if options.hidden_states {
             hidden_states.push(batch.restore(hidden.clone()));
         }
@@ -580,6 +633,7 @@ impl<B: Backend> GptOssForCausalLm<B> {
             options,
         )?;
         state.tensors.publish_step(step)?;
+        state.clean_tail = clean_tail;
         Ok(output)
     }
 

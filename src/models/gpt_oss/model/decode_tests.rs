@@ -1,6 +1,6 @@
 //! Batched cached execution: parity with the stateless graph and with
 //! row-by-row execution, padding layouts, ring wraparound, lifecycle
-//! operations, atomic failures, and timing.
+//! operations, clean-tail tracking, atomic failures, and timing.
 //!
 //! Cached and stateless passes evaluate the same F32 mathematics in
 //! different shapes (one block of new tokens against a cache versus the
@@ -540,6 +540,150 @@ fn full_storage_truncation_replays_exactly() {
             &format!("replayed column {column}"),
         );
     }
+}
+
+/// Returns the tiny model with every layer in full storage (window 40 > capacity).
+fn full_storage_model(seed: u64) -> GptOssForCausalLm<B> {
+    model_from(
+        GptOssConfig {
+            sliding_window: Some(40),
+            ..tiny_config()
+        },
+        seed,
+    )
+}
+
+/// Clean tails hold after allocation, steps, reorders, resets, and truncation to zero.
+#[test]
+fn clean_tails_follow_the_lifecycle() {
+    let model = full_storage_model(29);
+    let mut cache = state(&model, 2, 8);
+    assert!(cache.clean_tail);
+    let options = ForwardOptions::default();
+    model
+        .prefill(
+            input(ints([[1, 2, 3, 4], [5, 6, 7, 8]]), None, None),
+            &mut cache,
+            &options,
+        )
+        .unwrap();
+    cache.reorder(&[1, 0]).unwrap();
+    cache.truncate(&[0, 4]).unwrap();
+    assert!(
+        cache.clean_tail,
+        "steps, reorders, and truncation to zero keep tails clean"
+    );
+    model
+        .prefill(input(ints([[9], [10]]), None, None), &mut cache, &options)
+        .unwrap();
+    // Truncating to the current length keeps every byte reachable.
+    cache.truncate(&[1, 5]).unwrap();
+    assert!(cache.clean_tail, "a no-op truncation keeps tails clean");
+    cache.truncate(&[1, 2]).unwrap();
+    assert!(
+        !cache.clean_tail,
+        "a shortened row keeps bytes beyond its end"
+    );
+    let _ = decode_step(&model, &mut cache, ints([[11], [12]]));
+    assert!(!cache.clean_tail, "later steps do not clean old bytes");
+    cache.reset().unwrap();
+    assert!(cache.clean_tail);
+}
+
+/// Returns a two-row state whose row 0 holds NaN keys and values beyond its end.
+///
+/// Both rows prefill six tokens; truncation to `[2, 5]` keeps row 0's slots
+/// `2..6` as stale bytes, which are then overwritten with NaN in every
+/// full-storage layer, as a rejected and overflowed draft could leave them.
+fn poisoned_state(model: &GptOssForCausalLm<B>) -> GptOssDecodeState<B> {
+    let mut cache = state(model, 2, 8);
+    model
+        .prefill(
+            input(
+                ints([[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]]),
+                None,
+                None,
+            ),
+            &mut cache,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    cache.truncate(&[2, 5]).unwrap();
+    let architecture = model.architecture();
+    let nan = Tensor::<B, 4>::full(
+        [1, architecture.key_value_heads, 4, architecture.head_dim],
+        f32::NAN,
+        &Default::default(),
+    );
+    let full = cache.layout.full.expect("every layer uses full storage");
+    for slot in 0..cache.layout.slots.len() {
+        cache
+            .tensors
+            .main_mut()
+            .native_kv_mut(full.index)
+            .unwrap()
+            .write_sequence(slot, 0, 2, nan.clone(), nan.clone())
+            .unwrap();
+    }
+    cache
+}
+
+/// Non-finite bytes left beyond a truncated row never reach attention outputs.
+///
+/// An excluded key receives probability exactly zero, but `0 · NaN = NaN`,
+/// so only zeroing its value keeps the row finite. The second half forces
+/// the clean-tail flag over the same poisoned state, which skips that
+/// zeroing, and checks that the poison then does escape attention: the
+/// router refuses the non-finite scores it produces (the routed MLP's
+/// finiteness guard), so the step fails instead of returning logits. The
+/// first half is therefore sensitive to the masking.
+#[test]
+fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
+    let model = full_storage_model(31);
+    let mut cache = poisoned_state(&model);
+    assert_eq!(cache.ring_layers(), 0);
+    assert!(!cache.clean_tail, "a shortened row clears the flag");
+    let poisoned = decode_step(&model, &mut cache, ints([[13], [14]]));
+
+    let mut fresh = state(&model, 2, 8);
+    model
+        .prefill(
+            input(
+                ints([[0, 0, 0, 1, 2], [7, 8, 9, 10, 11]]),
+                Some(mask([[false, false, false, true, true], [true; 5]])),
+                None,
+            ),
+            &mut fresh,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let expected = decode_step(&model, &mut fresh, ints([[13], [14]]));
+    assert!(host(poisoned.clone()).iter().all(|value| value.is_finite()));
+    assert_close(poisoned, expected, TOLERANCE, "masked stale bytes");
+
+    let mut unmasked = poisoned_state(&model);
+    unmasked.clean_tail = true;
+    let error = model
+        .decode(
+            DecodeInput {
+                token_ids: ints([[13], [14]]),
+                position_ids: None,
+                token_mask: None,
+            },
+            &mut unmasked,
+            &ForwardOptions::default(),
+        )
+        .expect_err("without value zeroing the poison must escape attention");
+    assert!(error.to_string().contains("non-finite router"), "{error}");
+    assert_eq!(
+        unmasked.lengths(),
+        [2, 5],
+        "the failed step publishes nothing"
+    );
+    assert!(
+        !unmasked.clean_tail,
+        "a step failing after its write-ahead leaves tails unclean"
+    );
 }
 
 /// A failing step changes nothing; the same state then continues exactly.
