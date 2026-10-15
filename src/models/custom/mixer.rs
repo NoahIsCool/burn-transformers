@@ -56,6 +56,8 @@ use crate::{
     position::{RopeConfig, T5RelativePositionBias, T5RelativePositionBiasConfig, apply_rotary},
 };
 
+use super::{mamba2_geometry::mamba2_groups, pass::StackPass};
+
 /// Maximum SSD chunk width of a modular Mamba-2 mixer (Hugging Face `Mamba2Config` default).
 const MAMBA2_CHUNK_SIZE: usize = 256;
 
@@ -77,8 +79,10 @@ pub(super) fn mamba2_config(
         num_heads: spec.heads,
         head_dim: spec.head_dim,
         state_size: spec.state_dim,
-        // `group_size` heads share one B/C group; spec validation guarantees it divides `heads`.
-        groups: spec.heads.checked_div(spec.group_size).unwrap_or(0),
+        // `group_size` heads share one B/C group. A size that does not divide the
+        // heads (spec validation rejects it) yields zero groups, which the
+        // kernel's own validation rejects instead of regrouping silently.
+        groups: mamba2_groups(spec.heads, spec.group_size).unwrap_or(0),
         convolution_kernel: spec.convolution_kernel,
         chunk_size: MAMBA2_CHUNK_SIZE,
         time_step_clamp: TimeStepClamp::chunked_only(TimeStepLimits::at_least(0.0)),
@@ -87,8 +91,6 @@ pub(super) fn mamba2_config(
         convolution_bias: true,
     }
 }
-
-use super::pass::StackPass;
 
 /// Grouped-query attention with one optional position encoding and a connectivity rule.
 #[derive(Module, Debug)]

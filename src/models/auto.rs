@@ -80,6 +80,7 @@ use crate::models::config::{
 
 // Submodules document themselves with `//!`; an outer `///` here would make
 // rustdoc resolve their intra-doc links from this module's scope.
+mod defaults; // Verified Hugging Face generation-default arithmetic.
 mod family; // Family-specific steps of strict automatic causal loading.
 mod load; // Local artifact loading and generation-default normalization.
 

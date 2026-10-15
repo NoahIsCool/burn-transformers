@@ -61,6 +61,7 @@ mod common;
 mod feed_forward;
 mod init;
 mod layer;
+mod mamba2_geometry;
 mod mixer;
 mod norm;
 mod pass;

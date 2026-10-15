@@ -117,14 +117,17 @@ fn mamba2_spec_translates_to_the_shared_kernel_with_reference_defaults() {
         }
     );
     config.validate().unwrap();
-    // A zero group size (rejected by spec validation) translates to zero groups,
-    // which the kernel rejects instead of dividing by zero.
-    let degenerate = Mamba2Spec {
-        group_size: 0,
-        ..mamba_spec()
-    };
-    assert_eq!(mamba2_config(&degenerate, 8, 1e-5).groups, 0);
-    assert!(mamba2_config(&degenerate, 8, 1e-5).validate().is_err());
+    // Group sizes that are zero or do not divide the heads (both rejected by
+    // spec validation) translate to zero groups, which the kernel rejects
+    // instead of dividing by zero or silently regrouping the heads.
+    for group_size in [0, 3] {
+        let degenerate = Mamba2Spec {
+            group_size,
+            ..mamba_spec()
+        };
+        assert_eq!(mamba2_config(&degenerate, 8, 1e-5).groups, 0);
+        assert!(mamba2_config(&degenerate, 8, 1e-5).validate().is_err());
+    }
 }
 
 /// The modular mixer is the shared Mamba-2 mixer: identical weights give identical outputs.

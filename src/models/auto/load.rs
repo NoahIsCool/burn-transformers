@@ -49,7 +49,9 @@ use crate::{
 };
 
 use super::{
-    AutoCausalConfig, AutoCausalLm, AutoSeq2SeqLm, detect_model_type,
+    AutoCausalConfig, AutoCausalLm, AutoSeq2SeqLm,
+    defaults::sampling_top_k,
+    detect_model_type,
     family::{CausalFamily, PlannedCheckpoint},
 };
 use crate::models::{
@@ -65,8 +67,6 @@ const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Causal families whose packed installation path has an acceptance contract.
 const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["muse_glimmer_text", "qwen3_5_text", "qwen3_moe"];
-/// Hugging Face's `top_k` when sampling without an explicit value (`_get_default_generation_params`).
-const HUGGING_FACE_DEFAULT_TOP_K: usize = 50;
 
 // User policy and family-specific strict loading.
 
@@ -478,19 +478,6 @@ fn apply_local_generation_config(
         )?;
     }
     Ok(())
-}
-
-/// Resolves the sampling `top_k` exactly as Hugging Face's generation does.
-///
-/// An unset value takes Hugging Face's default of 50, zero disables top-k
-/// filtering, and every value is clamped to the vocabulary, as its top-k
-/// warper computes `min(top_k, vocabulary_size)`.
-fn sampling_top_k(top_k: Option<usize>, vocabulary_size: usize) -> Option<usize> {
-    match top_k {
-        Some(0) => None,
-        Some(top_k) => Some(top_k.min(vocabulary_size)),
-        None => Some(HUGGING_FACE_DEFAULT_TOP_K.min(vocabulary_size)),
-    }
 }
 
 /// Supported, architecture-independent subset of `generation_config.json`.

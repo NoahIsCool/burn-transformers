@@ -2249,19 +2249,3 @@ fn llama_family_aliases_load_through_one_registry_entry() {
         assert_eq!(logits.dims(), [1, 1, 96]);
     }
 }
-
-proptest::proptest! {
-    /// The sampling top-k is disabled exactly by zero and otherwise lies in `1..=vocabulary`.
-    #[test]
-    fn sampling_top_k_is_disabled_by_zero_and_clamped_otherwise(
-        top_k in proptest::option::of(0_usize..200),
-        vocabulary_size in 1_usize..100,
-    ) {
-        let resolved = sampling_top_k(top_k, vocabulary_size);
-        proptest::prop_assert_eq!(resolved.is_none(), top_k == Some(0));
-        if let Some(resolved) = resolved {
-            proptest::prop_assert!((1..=vocabulary_size).contains(&resolved));
-            proptest::prop_assert_eq!(resolved, top_k.unwrap_or(50).min(vocabulary_size));
-        }
-    }
-}
