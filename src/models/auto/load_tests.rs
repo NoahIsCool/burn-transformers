@@ -2069,10 +2069,13 @@ fn unsupported_generation_settings_are_reported_not_dropped() {
         resolved.unsupported,
         BTreeMap::from([
             ("max_length".to_owned(), json!(512)),
-            ("no_repeat_ngram_size".to_owned(), json!(3)),
             ("num_beams".to_owned(), json!(4)),
         ])
     );
+    // Applied settings are not reported: the n-gram constraint is active, and
+    // greedy decoding ignores min-p exactly as Hugging Face does.
+    assert_eq!(resolved.config.no_repeat_ngram_size, 3);
+    assert_eq!(resolved.config.min_p, None);
     // Sampling-only warpers matter once sampling is enabled.
     std::fs::write(
         &path,
@@ -2082,13 +2085,95 @@ fn unsupported_generation_settings_are_reported_not_dropped() {
     let resolved = resolve_generation_defaults(root.path(), None, None, 64, None).unwrap();
     assert_eq!(
         resolved.unsupported.keys().collect::<Vec<_>>(),
-        ["epsilon_cutoff", "min_p"]
+        ["epsilon_cutoff"]
     );
+    assert_eq!(resolved.config.min_p, Some(0.1));
     // Explicit defaults bypass the file and report nothing.
     let explicit = GenerationConfig::default();
     let resolved =
         resolve_generation_defaults(root.path(), None, None, 64, Some(&explicit)).unwrap();
     assert!(resolved.unsupported.is_empty());
+}
+
+/// `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` follow Hugging Face's processor rules.
+///
+/// Min-p is a sampling warper (ignored by greedy decoding); the n-gram and
+/// minimum-length constraints apply under every strategy, and zero or `null`
+/// disables them. Out-of-range values fail validation instead of being
+/// clamped, and negative counts are not valid JSON for the typed fields.
+#[test]
+fn generation_constraints_follow_hugging_face_processors() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let resolve = |json: serde_json::Value| {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        resolve_generation_defaults(root.path(), None, None, 64, None)
+    };
+    for (json, min_p, ngram, min_new) in [
+        (json!({"do_sample": true, "min_p": 0.05}), Some(0.05), 0, 0),
+        (json!({"do_sample": true, "min_p": 0.0}), Some(0.0), 0, 0),
+        (json!({"do_sample": false, "min_p": 0.05}), None, 0, 0),
+        (json!({"no_repeat_ngram_size": 3}), None, 3, 0),
+        (
+            json!({"do_sample": true, "no_repeat_ngram_size": 2}),
+            None,
+            2,
+            0,
+        ),
+        (json!({"no_repeat_ngram_size": 0}), None, 0, 0),
+        (
+            json!({"min_new_tokens": 4, "max_new_tokens": 8}),
+            None,
+            0,
+            4,
+        ),
+        (
+            json!({"min_new_tokens": null, "no_repeat_ngram_size": null, "min_p": null}),
+            None,
+            0,
+            0,
+        ),
+    ] {
+        let resolved = resolve(json.clone()).unwrap_or_else(|error| panic!("{json}: {error}"));
+        let config = &resolved.config;
+        assert_eq!(
+            (
+                config.min_p,
+                config.no_repeat_ngram_size,
+                config.min_new_tokens
+            ),
+            (min_p, ngram, min_new),
+            "{json}"
+        );
+        assert!(resolved.unsupported.is_empty(), "{json}");
+        crate::LogitsProcessor::<TestBackend>::new(config.clone(), 64, &Default::default())
+            .expect("resolved defaults build a logits processor");
+    }
+    for (json, expected) in [
+        (
+            json!({"do_sample": true, "min_p": 1.5}),
+            "min_p must be in [0, 1], found 1.5",
+        ),
+        (
+            json!({"min_new_tokens": 300}),
+            "min_new_tokens 300 exceeds max_new_tokens 256",
+        ),
+    ] {
+        let error = resolve(json.clone()).unwrap_err();
+        assert!(
+            matches!(&error, Error::Generation(reason) if reason == expected),
+            "{json}: {error}"
+        );
+    }
+    for json in [
+        json!({"no_repeat_ngram_size": -1}),
+        json!({"min_new_tokens": -2}),
+    ] {
+        assert!(
+            matches!(resolve(json.clone()).unwrap_err(), Error::Json { .. }),
+            "{json}"
+        );
+    }
 }
 
 /// Automatic loads attach the unsupported-settings report to the bundle.

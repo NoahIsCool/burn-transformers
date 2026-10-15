@@ -16,10 +16,13 @@
 //! `generation_config.json` follows the pinned Hugging Face `GenerationConfig`
 //! semantics (transformers `cfa309cf`): with `do_sample`, an unset `top_k`
 //! means Hugging Face's default of 50 (clamped to the vocabulary, as its top-k
-//! warper does), `top_k: 0` disables top-k, and `top_p >= 1` disables nucleus
-//! filtering. Behavior-changing settings without an equivalent here (beam
-//! search, `min_p`, `max_length`, ...) are recorded on the [`LoadedModel`]
-//! rather than silently dropped.
+//! warper does), `top_k: 0` disables top-k, `top_p >= 1` disables nucleus
+//! filtering, and `min_p` adds the min-p warper (Hugging Face applies every
+//! warper only when sampling). `no_repeat_ngram_size` and `min_new_tokens`
+//! apply under every strategy, with zero meaning disabled. Behavior-changing
+//! settings without an equivalent here (beam search, `typical_p`,
+//! `max_length`, ...) are recorded on the [`LoadedModel`] rather than silently
+//! dropped.
 //! Floating casts, packed layouts, aliases, and tensor shapes remain the responsibility
 //! of the selected architecture contract and shared checkpoint planner.
 
@@ -432,6 +435,12 @@ fn apply_local_generation_config(
     if let Some(max_new_tokens) = local.max_new_tokens {
         config.max_new_tokens = max_new_tokens;
     }
+    if let Some(min_new_tokens) = local.min_new_tokens {
+        config.min_new_tokens = min_new_tokens;
+    }
+    if let Some(size) = local.no_repeat_ngram_size {
+        config.no_repeat_ngram_size = size;
+    }
     if local.do_sample.unwrap_or(false) {
         config.strategy = SamplingStrategy::Sample;
         if let Some(temperature) = local.temperature {
@@ -441,6 +450,9 @@ fn apply_local_generation_config(
         // Hugging Face adds its nucleus warper only for `top_p < 1`. NaN is kept
         // so validation rejects it instead of silently disabling the filter.
         config.top_p = local.top_p.filter(|top_p| top_p.is_nan() || *top_p < 1.0);
+        // Hugging Face adds `MinPLogitsWarper` whenever `min_p` is set; validation
+        // rejects values outside `[0, 1]`, as its warper does.
+        config.min_p = local.min_p;
     }
     if let Some(penalty) = local.repetition_penalty {
         config.repetition_penalty = penalty;
@@ -495,6 +507,12 @@ struct LocalGenerationConfig {
     top_k: Option<usize>,
     /// Optional cumulative probability threshold for nucleus sampling.
     top_p: Option<f64>,
+    /// Optional min-p cutoff relative to the most likely token, applied when sampling.
+    min_p: Option<f64>,
+    /// Optional n-gram size that may not repeat; zero disables the constraint.
+    no_repeat_ngram_size: Option<usize>,
+    /// Optional count of new tokens before EOS may be selected; zero disables it.
+    min_new_tokens: Option<usize>,
     /// Optional multiplicative penalty applied to previously seen token logits.
     repetition_penalty: Option<f64>,
     /// Optional additive penalty for tokens already present in the sequence.
@@ -558,9 +576,6 @@ const UNSUPPORTED_GENERATION_SETTINGS: &[(&str, NeutralSetting, bool)] = &[
     ("max_length", NeutralSetting::Never, false),
     ("max_time", NeutralSetting::Absent, false),
     ("min_length", NeutralSetting::Number(0.0), false),
-    ("min_new_tokens", NeutralSetting::Absent, false),
-    ("min_p", NeutralSetting::Absent, true),
-    ("no_repeat_ngram_size", NeutralSetting::Number(0.0), false),
     ("num_beam_groups", NeutralSetting::Number(1.0), false),
     ("num_beams", NeutralSetting::Number(1.0), false),
     ("num_return_sequences", NeutralSetting::Number(1.0), false),
