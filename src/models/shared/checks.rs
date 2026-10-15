@@ -22,11 +22,17 @@ use super::plan;
 
 /// Handle to a `[minimum, maximum]` pair recorded by [`DeferredChecks`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RangeId(usize);
+pub(crate) struct RangeId(
+    /// Readback slot of the minimum; the maximum occupies the next slot.
+    usize,
+);
 
 /// Handle to the smallest per-row valid-token count recorded by [`DeferredChecks`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RowCountId(usize);
+pub(crate) struct RowCountId(
+    /// Readback slot of the smallest per-row count.
+    usize,
+);
 
 /// One host predicate evaluated after the fused readback.
 #[derive(Debug)]

@@ -467,6 +467,7 @@ proptest! {
 fn scatter_is_differentiable() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode wrapper around the deterministic Flex test backend.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     for columns in [vec![1, 2], vec![0, 2, 3]] {

@@ -160,6 +160,7 @@ proptest! {
 fn selection_is_differentiable() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode wrapper around the deterministic Flex test backend.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let states = Tensor::<AdBackend, 3>::ones([2, 3, 2], &device).require_grad();
