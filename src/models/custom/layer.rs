@@ -31,7 +31,7 @@ use burn::{
 
 use crate::{
     Error, Result,
-    architecture::{CrossAttentionSpec, DecoderLayerSpec, ResidualTopology},
+    architecture::{CrossAttentionSpec, DecoderLayerSpec, MixerSpec, ResidualTopology},
     attention::{AttentionConnectivity, AttentionPrecisionMode},
     experiment::{ExecutionContext, HiddenTransform},
     intervention::{Hooks, Layer, PointInfo, Stack},
@@ -274,6 +274,7 @@ impl<B: Backend> ModularLayer<B> {
         let projection = match &self.mixer {
             ModularMixer::Attention(attention) => attention.attention.q_proj.weight.val(),
             ModularMixer::Mla(mla) => mla.attention.kv_a_proj_with_mqa.weight.val(),
+            ModularMixer::Differential(differential) => differential.attention.q_proj.weight.val(),
             ModularMixer::DeltaNet(delta) => delta.in_proj_qkv.weight.val(),
         };
         let packed_weight = matches!(projection.dtype(), DType::QFloat(_));
@@ -326,6 +327,11 @@ impl<B: Backend> ModularLayer<B> {
         }
         if let (Some(policy), Some(heads)) = (&explicit, self.mixer.attention_heads()) {
             policy.validate([batch, heads, tokens, tokens], &hidden.device())?;
+            if policy.bias.is_some() && matches!(&self.mixer, ModularMixer::Differential(_)) {
+                return Err(Error::BackendCapability(
+                    "differential attention has no additive score-bias input".into(),
+                ));
+            }
             if policy
                 .bias
                 .as_ref()
@@ -379,8 +385,12 @@ impl<B: Backend> ModularLayer<B> {
 
     /// Selects numerical execution for attention branches; recurrent mixers are unchanged.
     pub(super) fn set_attention_precision(&mut self, mode: AttentionPrecisionMode) {
-        if let ModularMixer::Attention(attention) = &mut self.mixer {
-            attention.attention.precision_mode = mode;
+        match &mut self.mixer {
+            ModularMixer::Attention(attention) => attention.attention.precision_mode = mode,
+            ModularMixer::Differential(differential) => {
+                differential.attention.precision_mode = mode;
+            }
+            ModularMixer::Mla(_) | ModularMixer::DeltaNet(_) => {}
         }
         if let Some(attention) = &mut self.cross_attention {
             attention.attention.precision_mode = mode;
@@ -424,7 +434,7 @@ pub(super) fn ensure_executable(spec: &DecoderLayerSpec, field: &str) -> Result<
             "{field}.residual requests a learned gate but the specification does not define its activation, shape, or initialization"
         )));
     }
-    if matches!(spec.mixer, crate::architecture::MixerSpec::Mamba2(_)) {
+    if matches!(spec.mixer, MixerSpec::Mamba2(_)) {
         return Err(Error::BackendCapability(format!(
             "{field}.mixer requests Mamba2; the selective state-space kernel is not yet available as a shared module"
         )));

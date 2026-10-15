@@ -14,10 +14,10 @@ mod types;
 
 pub use spec::{
     Activation, AttentionOptions, AttentionSpec, ClampedSwiGluSpec, CrossAttentionSpec,
-    DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec, FeedForwardSpec, Mamba2Spec, MixerSpec,
-    MixtureOfExpertsSpec, MlaSpec, NormPlacement, NormalizationSpec, OutputGateActivation,
-    PositionEncodingSpec, ResidualTopology, RopeScaling, ScoreScale, Seq2SeqSpec,
-    SlidingWindowSpec,
+    DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec, DifferentialAttentionSpec,
+    FeedForwardSpec, Mamba2Spec, MixerSpec, MixtureOfExpertsSpec, MlaSpec, NormPlacement,
+    NormalizationSpec, OutputGateActivation, PositionEncodingSpec, ResidualTopology, RopeScaling,
+    ScoreScale, Seq2SeqSpec, SlidingWindowSpec,
 };
 pub use traits::{
     ArchitectureConfig, CausalLanguageModel, DecodeState, HookedModel, Seq2SeqLanguageModel,

@@ -1671,3 +1671,73 @@ fn mixer_validation_uses_the_block_normalization() {
         Some(AttentionConnectivity::Global)
     );
 }
+
+/// Differential attention validates head pairing, its shared config, and a bias-free position encoding.
+#[test]
+fn differential_attention_specs_are_validated() {
+    let valid = DifferentialAttentionSpec {
+        query_heads: 4,
+        key_value_heads: 2,
+        head_dim: 8,
+        lambda_init: 0.2,
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 8,
+            scaling: RopeScaling::None,
+        },
+        connectivity: AttentionConnectivity::Global,
+        bias: false,
+    };
+    let mut spec = decoder();
+    spec.layers[0].mixer = MixerSpec::DifferentialAttention(valid.clone());
+    spec.validate().unwrap();
+    let json = serde_json::to_string(&spec).unwrap();
+    assert_eq!(serde_json::from_str::<DecoderSpec>(&json).unwrap(), spec);
+    assert_eq!(
+        spec.layers[0].mixer.connectivity(),
+        Some(AttentionConnectivity::Global)
+    );
+    let check = |differential: DifferentialAttentionSpec, field: &str| {
+        assert_configuration_field(
+            MixerSpec::DifferentialAttention(differential).validate("mixer"),
+            field,
+        );
+    };
+    check(
+        DifferentialAttentionSpec {
+            query_heads: 3,
+            key_value_heads: 1,
+            ..valid.clone()
+        },
+        "mixer.differential_attention.query_heads",
+    );
+    check(
+        DifferentialAttentionSpec {
+            position: PositionEncodingSpec::T5RelativeBias {
+                buckets: 8,
+                max_distance: 16,
+                bidirectional: false,
+            },
+            ..valid.clone()
+        },
+        "mixer.position",
+    );
+    check(
+        DifferentialAttentionSpec {
+            connectivity: AttentionConnectivity::ChunkedLocal { chunk: 0 },
+            ..valid.clone()
+        },
+        "mixer.connectivity",
+    );
+    check(
+        DifferentialAttentionSpec {
+            position: PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 10,
+                scaling: RopeScaling::None,
+            },
+            ..valid
+        },
+        "mixer.position.rotary_dim",
+    );
+}

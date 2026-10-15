@@ -10,7 +10,7 @@
 //! | piece | module | role |
 //! | --- | --- | --- |
 //! | [`ModularLayer`] | `layer` | one block: mixer, optional cross-attention, optional feed-forward |
-//! | mixers | `mixer` | grouped-query attention, MLA, Gated DeltaNet |
+//! | mixers | `mixer` | grouped-query, latent (MLA), and differential attention; Gated DeltaNet |
 //! | feed-forward | `feed_forward` | gated, ungated, clamped SwiGLU, routed experts |
 //! | [`NormLayout`] | `norm` | identity, pre, post, or sandwich normalization per branch |
 //! | stack pass | `pass` | positions, padding, overrides, and tables shared by all blocks |
@@ -64,7 +64,7 @@ mod feed_forward;
 mod init;
 /// One heterogeneous residual block and its single execution path.
 mod layer;
-/// Grouped-query attention, MLA, and Gated DeltaNet sequence mixers.
+/// Grouped-query, latent, and differential attention and Gated DeltaNet mixers.
 mod mixer;
 /// Normalization operators and their placement around one residual branch.
 mod norm;

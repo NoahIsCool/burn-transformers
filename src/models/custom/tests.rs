@@ -1617,7 +1617,8 @@ impl<B: burn::tensor::backend::AutodiffBackend> burn::module::ModuleVisitor<B>
 /// Covers option-rich attention (Llama 3 RoPE, sinks, per-projection biases,
 /// full-width Q/K norm, SiLU gate, chunked-local connectivity), learned T5
 /// bias through the shared pass table, sliding MLA, a gated shared expert,
-/// clamped and ungated MLPs, and an attention-only block, over padded input.
+/// clamped and ungated MLPs, an attention-only block, and differential
+/// attention, over padded input.
 /// Routed experts that no token selects legitimately receive no gradient.
 #[cfg(feature = "autodiff")]
 #[test]

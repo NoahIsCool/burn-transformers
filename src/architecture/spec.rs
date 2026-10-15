@@ -17,6 +17,7 @@
 //! | --- | --- |
 //! | score scale, logit soft cap, learned sinks, per-projection biases, Q/K-norm scope, SiLU output gate, global / sliding / chunked-local connectivity | [`MixerSpec::AttentionWithOptions`] and [`AttentionOptions`] |
 //! | MLA score scale and connectivity | [`MlaSpec::score_scale`], [`MlaSpec::connectivity`] |
+//! | differential attention (DIFF Transformer) | [`MixerSpec::DifferentialAttention`] |
 //! | every shared RoPE scaling rule (linear, dynamic NTK, YaRN, Llama 3, LongRoPE, proportional) | [`RopeScaling`] |
 //! | ungated MLP, clamped SwiGLU, attention-only blocks | [`FeedForwardSpec::Ungated`], [`FeedForwardSpec::ClampedSwiGlu`], [`FeedForwardSpec::None`] |
 //! | router policy, shared-expert gate, expert biases | [`MixtureOfExpertsSpec`] |
@@ -51,8 +52,8 @@
 use crate::{
     Error, Result,
     attention::{
-        AttentionConnectivity, AttentionOutputGate, GroupedQueryAttentionConfig, ProjectionBias,
-        QueryKeyNormScope,
+        AttentionConnectivity, AttentionOutputGate, DifferentialAttentionConfig,
+        GroupedQueryAttentionConfig, ProjectionBias, QueryKeyNormScope,
     },
     delta_net::GatedDeltaNetConfig,
     feed_forward::{ClampedSwiGlu, DenseFeedForwardConfig, GatedFeedForwardConfig},
@@ -895,6 +896,82 @@ impl MlaSpec {
     }
 }
 
+/// Differential attention (DIFF Transformer, DiffLlama) over paired query heads.
+///
+/// Query head `i` and its partner `i + H/2` produce two softmax maps whose
+/// difference `A_i - lambda A_(i+H/2)` mixes paired values; each pair is RMS
+/// normalized (with the block's mixer epsilon) and scaled by `1 - lambda_init`
+/// (see [`crate::attention::DifferentialAttention`]). Scores use the
+/// conventional `1/sqrt(head_dim)` scale. The kernel has no additive-bias
+/// input, so the position encoding is RoPE or none.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DifferentialAttentionSpec {
+    /// Number of query heads; must be even because heads are used in pairs.
+    pub query_heads: usize,
+    /// Number of native key/value heads; must divide `query_heads`.
+    pub key_value_heads: usize,
+    /// Query/key/value width per head.
+    pub head_dim: usize,
+    /// Constant added to the learned lambda; DiffLlama uses
+    /// [`crate::attention::depth_lambda_init`] of the zero-based layer index.
+    pub lambda_init: f64,
+    /// Position transformation of queries and keys: RoPE or none.
+    pub position: PositionEncodingSpec,
+    /// Which keys each query may see; sliding windows require a causal stack.
+    #[serde(default)]
+    pub connectivity: AttentionConnectivity,
+    /// Whether all four projections carry additive biases.
+    #[serde(default)]
+    pub bias: bool,
+}
+
+impl DifferentialAttentionSpec {
+    /// The shared differential-attention configuration at `hidden_size`.
+    ///
+    /// `norm_epsilon` stabilizes the weightless pair RMS norm; the modular
+    /// models take it from the block's mixer normalization.
+    pub(crate) fn differential_config(
+        &self,
+        hidden_size: usize,
+        norm_epsilon: f64,
+    ) -> DifferentialAttentionConfig {
+        let mut config = DifferentialAttentionConfig::new(
+            hidden_size,
+            self.query_heads,
+            self.key_value_heads,
+            self.head_dim,
+            0,
+        );
+        config.lambda_init = self.lambda_init;
+        config.norm_epsilon = norm_epsilon;
+        config.bias = self.bias;
+        config
+    }
+
+    /// Validates dimensions, connectivity, the shared config, and the position encoding.
+    fn validate_in_block(
+        &self,
+        field: &str,
+        hidden_size: usize,
+        norm: NormalizationSpec,
+    ) -> Result<()> {
+        if self.position.is_t5_relative_bias() {
+            return Err(Error::configuration(
+                format!("{field}.position"),
+                "differential attention has no additive-bias input; use RoPE or no position encoding",
+            ));
+        }
+        self.connectivity.validate().map_err(|error| {
+            Error::configuration(format!("{field}.connectivity"), reason_of(error))
+        })?;
+        self.differential_config(hidden_size, norm.epsilon())
+            .validate()
+            .map_err(|error| nested(field, error))?;
+        self.position
+            .validate(self.head_dim, &format!("{field}.position"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sequence mixers
 // ---------------------------------------------------------------------------
@@ -941,6 +1018,11 @@ pub enum MixerSpec {
         /// Latent compression ranks and query/key/value head dimensions.
         MlaSpec,
     ),
+    /// Differential attention over paired query heads.
+    DifferentialAttention(
+        /// Head pairing, lambda constant, position encoding, and connectivity.
+        DifferentialAttentionSpec,
+    ),
     /// Gated DeltaNet linear attention.
     DeltaNet {
         /// Number of normalized query/key heads.
@@ -981,7 +1063,7 @@ impl MixerSpec {
     ///
     /// The compact forms normalize to explicit options: `Attention` uses the
     /// defaults and `SlidingAttention` a sliding-window connectivity. Returns
-    /// `None` for MLA and recurrent mixers.
+    /// `None` for MLA, differential attention, and recurrent mixers.
     #[must_use]
     pub fn grouped_query_attention(&self) -> Option<(&AttentionSpec, AttentionOptions)> {
         match self {
@@ -996,7 +1078,10 @@ impl MixerSpec {
                 },
             )),
             Self::AttentionWithOptions { attention, options } => Some((attention, *options)),
-            Self::Mla(_) | Self::DeltaNet { .. } | Self::Mamba2(_) => None,
+            Self::Mla(_)
+            | Self::DifferentialAttention(_)
+            | Self::DeltaNet { .. }
+            | Self::Mamba2(_) => None,
         }
     }
 
@@ -1005,6 +1090,7 @@ impl MixerSpec {
     pub fn connectivity(&self) -> Option<AttentionConnectivity> {
         match self {
             Self::Mla(mla) => Some(mla.connectivity),
+            Self::DifferentialAttention(differential) => Some(differential.connectivity),
             other => other
                 .grouped_query_attention()
                 .map(|(_, options)| options.connectivity),
@@ -1085,6 +1171,7 @@ impl MixerSpec {
                 norm,
             ),
             Self::Mla(spec) => spec.validate_in_block(field, hidden_size, norm),
+            Self::DifferentialAttention(spec) => spec.validate_in_block(field, hidden_size, norm),
             Self::DeltaNet {
                 key_heads,
                 value_heads,

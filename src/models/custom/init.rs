@@ -13,7 +13,7 @@
 //!
 //! [`InitPolicy::apply`] rejects residual-projection names that match no
 //! `Linear` field, so the names are derived from the blocks the spec actually
-//! contains: attention and MLA output projections are `o_proj`, Gated DeltaNet
+//! contains: attention, MLA, and differential-attention output projections are `o_proj`, Gated DeltaNet
 //! writes through `out_proj`, and every dense or expert MLP through
 //! `down_proj`. Attention-only stacks have no `down_proj`, and Mamba2 blocks
 //! (not yet executable) contribute nothing.
@@ -48,7 +48,8 @@ pub(super) fn scaled_init_policy<'a>(
             MixerSpec::Attention(_)
             | MixerSpec::SlidingAttention(_)
             | MixerSpec::AttentionWithOptions { .. }
-            | MixerSpec::Mla(_) => {
+            | MixerSpec::Mla(_)
+            | MixerSpec::DifferentialAttention(_) => {
                 residual_projections.insert("o_proj");
             }
         }

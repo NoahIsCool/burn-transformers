@@ -1,4 +1,4 @@
-//! Sequence mixers of a modular block: grouped-query attention, MLA, and Gated DeltaNet.
+//! Sequence mixers of a modular block: grouped-query, latent, and differential attention, and Gated DeltaNet.
 //!
 //! Each mixer maps `[batch, token, hidden]` to the same shape. Attention mixers
 //! combine three independently specified ingredients:
@@ -24,10 +24,12 @@ use burn::{
 use crate::{
     Error, Result,
     architecture::{
-        AttentionOptions, AttentionSpec, MixerSpec, MlaSpec, NormalizationSpec,
-        PositionEncodingSpec, TokenMask,
+        AttentionOptions, AttentionSpec, DifferentialAttentionSpec, MixerSpec, MlaSpec,
+        NormalizationSpec, PositionEncodingSpec, TokenMask,
     },
-    attention::{AttentionConnectivity, AttentionPrecisionMode, GroupedQueryAttention},
+    attention::{
+        AttentionConnectivity, AttentionPrecisionMode, DifferentialAttention, GroupedQueryAttention,
+    },
     delta_net::GatedDeltaNet,
     intervention::{AttentionPoints, Hooks, Layer, PointInfo},
     mla::MultiLatentAttention,
@@ -244,6 +246,70 @@ impl<B: Backend> ModularMla<B> {
     }
 }
 
+/// Differential attention with optional RoPE and a connectivity rule.
+#[derive(Module, Debug)]
+pub(super) struct ModularDifferential<B: Backend> {
+    /// Shared paired-head projections, lambda parameters, and kernel.
+    pub(super) attention: DifferentialAttention<B>,
+    /// Optional rotary policy over each full head.
+    #[module(skip)]
+    rope: Option<RopeConfig>,
+    /// Structural key visibility used unless an explicit policy replaces it.
+    #[module(skip)]
+    connectivity: AttentionConnectivity,
+}
+
+impl<B: Backend> ModularDifferential<B> {
+    /// Builds the shared layer of a validated spec; `norm` supplies the pair-norm epsilon.
+    pub(super) fn init(
+        spec: &DifferentialAttentionSpec,
+        hidden_size: usize,
+        norm: NormalizationSpec,
+        device: &B::Device,
+    ) -> Result<Self> {
+        Ok(Self {
+            attention: spec
+                .differential_config(hidden_size, norm.epsilon())
+                .init(device)?,
+            rope: spec.position.rope_config(spec.head_dim)?,
+            connectivity: spec.connectivity,
+        })
+    }
+
+    /// Structural key visibility of this layer.
+    pub(super) const fn connectivity(&self) -> AttentionConnectivity {
+        self.connectivity
+    }
+
+    /// Computes differential self-attention on `[batch, token, hidden]` residuals.
+    ///
+    /// The kernel has no additive-bias input, so an explicit policy carrying a
+    /// bias is rejected (validation reports it before any callback).
+    pub(super) fn forward(
+        &self,
+        hidden: Tensor<B, 3>,
+        pass: &StackPass<'_, B>,
+        layer: Layer,
+    ) -> Result<Tensor<B, 3>> {
+        let mut projection = self.attention.project_self(hidden)?;
+        if let Some(rope) = self.rope {
+            let angles = pass.rotary_angles(rope)?;
+            (projection.query, projection.key) =
+                apply_rotary(projection.query, projection.key, &angles)?;
+        }
+        let inputs = pass.self_attention(layer, self.connectivity, self.attention.query_heads)?;
+        if inputs.bias.is_some() {
+            return Err(Error::BackendCapability(
+                "differential attention has no additive score-bias input".into(),
+            ));
+        }
+        let output = self
+            .attention
+            .attend(projection, inputs.mask, inputs.causal)?;
+        Ok(zero_padded_queries(output, pass.token_mask()))
+    }
+}
+
 /// One executable sequence-mixing implementation.
 #[derive(Module, Debug)]
 // Burn 0.21 does not implement `Module` for `Box<M>`. Keeping modules inline is required so
@@ -260,6 +326,11 @@ pub(super) enum ModularMixer<B: Backend> {
     Mla(
         /// Compressed latent attention with independently selected position encoding.
         ModularMla<B>,
+    ),
+    /// Differential attention over paired query heads.
+    Differential(
+        /// Paired-head projections, lambda parameters, and optional RoPE.
+        ModularDifferential<B>,
     ),
     /// Gated DeltaNet linear attention (causal recurrent scan).
     DeltaNet(
@@ -285,9 +356,18 @@ impl<B: Backend> ModularMixer<B> {
         }
         match spec {
             MixerSpec::Mla(mla) => ModularMla::init(mla, hidden_size, norm, device).map(Self::Mla),
-            _ => Err(Error::BackendCapability(
+            MixerSpec::DifferentialAttention(differential) => {
+                ModularDifferential::init(differential, hidden_size, norm, device)
+                    .map(Self::Differential)
+            }
+            MixerSpec::Mamba2(_) => Err(Error::BackendCapability(
                 "the Mamba2 mixer is describable but has no shared executable kernel yet".into(),
             )),
+            // Translated by `grouped_query_attention` and `delta_net_config` above.
+            MixerSpec::Attention(_)
+            | MixerSpec::SlidingAttention(_)
+            | MixerSpec::AttentionWithOptions { .. }
+            | MixerSpec::DeltaNet { .. } => unreachable!("translated before this match"),
         }
     }
 
@@ -296,6 +376,7 @@ impl<B: Backend> ModularMixer<B> {
         match self {
             Self::Attention(attention) => Some(attention.connectivity()),
             Self::Mla(mla) => Some(mla.connectivity()),
+            Self::Differential(differential) => Some(differential.connectivity()),
             Self::DeltaNet(_) => None,
         }
     }
@@ -305,16 +386,19 @@ impl<B: Backend> ModularMixer<B> {
         match self {
             Self::Attention(attention) => Some(attention.attention.query_heads),
             Self::Mla(mla) => Some(mla.attention.config.num_heads),
+            Self::Differential(differential) => Some(differential.attention.query_heads),
             Self::DeltaNet(_) => None,
         }
     }
 
     /// Lists the projection, latent, and attention points this mixer emits.
+    ///
+    /// Differential attention and DeltaNet expose only the surrounding mixer points.
     pub(super) fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
         match self {
             Self::Attention(attention) => attention.activation_points(layer.self_attention()),
             Self::Mla(mla) => mla.attention.activation_points(layer.self_attention()),
-            Self::DeltaNet(_) => Vec::new(),
+            Self::Differential(_) | Self::DeltaNet(_) => Vec::new(),
         }
     }
 
@@ -329,6 +413,7 @@ impl<B: Backend> ModularMixer<B> {
         match self {
             Self::Attention(attention) => attention.forward_self(hidden, pass, layer, hooks),
             Self::Mla(mla) => mla.forward(hidden, pass, layer, hooks),
+            Self::Differential(differential) => differential.forward(hidden, pass, layer),
             Self::DeltaNet(delta) => delta.forward(hidden, pass.token_mask()),
         }
     }

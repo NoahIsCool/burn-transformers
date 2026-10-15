@@ -387,3 +387,113 @@ fn zero_centered_norms_reach_query_key_normalization() {
     assert!(norm.zero_centered);
     assert_eq!(norm.epsilon, 1e-5);
 }
+
+/// A two-pair differential-attention topology with full-head RoPE.
+fn differential() -> crate::architecture::DifferentialAttentionSpec {
+    crate::architecture::DifferentialAttentionSpec {
+        query_heads: 4,
+        key_value_heads: 2,
+        head_dim: 2,
+        lambda_init: crate::attention::depth_lambda_init(1),
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 2,
+            scaling: RopeScaling::None,
+        },
+        connectivity: AttentionConnectivity::Global,
+        bias: false,
+    }
+}
+
+/// The differential mixer equals the shared kernel applied to the rotated normalized input.
+#[test]
+fn differential_attention_blocks_run_the_shared_kernel() {
+    use crate::position::{RopeConfig, apply_rotary, rotary_angles};
+
+    let device = Default::default();
+    let layer = built(
+        &block(MixerSpec::DifferentialAttention(differential())),
+        &device,
+    );
+    let ModularMixer::Differential(mixer) = &layer.mixer else {
+        panic!("expected differential attention");
+    };
+    assert_eq!(
+        mixer.attention.lambda_init,
+        crate::attention::depth_lambda_init(1)
+    );
+    assert_eq!(mixer.attention.norm_epsilon, 1e-6);
+    let context = ExecutionContext::contiguous(1, 5, &device).unwrap();
+    let mut hooks = Hooks::new();
+    let normalized = hooks.capture(Layer::decoder(0).attention_input());
+    let mixed = hooks.capture(Layer::decoder(0).attention_output());
+    layer
+        .run_with_hooks(hidden(5, &device), &context, Layer::decoder(0), &mut hooks)
+        .unwrap();
+    let mut projection = mixer
+        .attention
+        .project_self(hooks.get(&normalized).unwrap())
+        .unwrap();
+    let rope = RopeConfig::new(2, 2, 10_000.0, crate::position::RopeScaling::None).unwrap();
+    let angles = rotary_angles(rope, context.positions.clone(), 5).unwrap();
+    (projection.query, projection.key) =
+        apply_rotary(projection.query, projection.key, &angles).unwrap();
+    let expected = mixer.attention.attend(projection, None, true).unwrap();
+    hooks
+        .get(&mixed)
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+    assert!(
+        !layer
+            .activation_points(Layer::decoder(0))
+            .contains(&Layer::decoder(0).self_attention().scores().info())
+    );
+}
+
+/// Differential attention rejects additive biases and encoder sliding windows, but accepts chunks.
+#[test]
+fn differential_attention_reports_unsupported_connectivity() {
+    let device = Default::default();
+    let layer = built(
+        &block(MixerSpec::DifferentialAttention(differential())),
+        &device,
+    );
+    let context = ExecutionContext::contiguous(1, 4, &device).unwrap();
+    let biased = context
+        .clone()
+        .with_attention(AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &device)));
+    let error = layer
+        .run(hidden(4, &device), &biased, Layer::decoder(0))
+        .unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)), "{error:?}");
+    let sliding = built(
+        &block(MixerSpec::DifferentialAttention(
+            crate::architecture::DifferentialAttentionSpec {
+                connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+                ..differential()
+            },
+        )),
+        &device,
+    );
+    assert!(
+        sliding
+            .run(hidden(4, &device), &context, Layer::encoder(0))
+            .is_err()
+    );
+    sliding
+        .run(hidden(4, &device), &context, Layer::decoder(0))
+        .unwrap();
+    let chunked = built(
+        &block(MixerSpec::DifferentialAttention(
+            crate::architecture::DifferentialAttentionSpec {
+                connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+                ..differential()
+            },
+        )),
+        &device,
+    );
+    chunked
+        .run(hidden(4, &device), &context, Layer::encoder(0))
+        .unwrap();
+}
