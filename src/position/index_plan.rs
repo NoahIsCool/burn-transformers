@@ -10,10 +10,15 @@
 //!   displacement `j - i`, so a `[query, key]` bias needs just
 //!   `query + key - 1` distinct buckets. Entry `t` of that table holds the
 //!   bucket for the anchor pair `(query_length - 1, t)`; the pair `(i, j)` reads
-//!   entry `j + (query_length - 1) - i`, which has the same displacement.
+//!   entry `j + (query_length - 1 - i)`, which has the same displacement.
 //!
 //! The proofs establish that no arithmetic overflows, every index lies inside
 //! its table, and each lookup preserves the key-minus-query displacement.
+//! [`mrope_frequency_axis`] and [`relative_table_length`] run as written at
+//! runtime. [`relative_table_index`] is the scalar specification of the T5
+//! index that the bias evaluates for all pairs at once as a device tensor
+//! expression; the proof applies to this function, and a unit test checks
+//! that every device entry equals it.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;

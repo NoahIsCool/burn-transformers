@@ -213,17 +213,72 @@ fn bucket_table_lists_anchor_displacements() {
         .expect("valid bias");
     let table = bias.bucket_table(3, 4, 5).expect("valid table");
     assert_eq!((table.query_length(), table.key_length()), (3, 4));
-    assert_eq!(table.buckets().len(), 6);
-    for (entry, &bucket) in table.buckets().iter().enumerate() {
+    assert_eq!(table.mapping(), bias.buckets());
+    assert_eq!(table.bucket_ids().len(), 6);
+    for (entry, &bucket) in table.bucket_ids().iter().enumerate() {
         // Anchor query position = offset + query_length - 1 = 7.
         let expected = bias.buckets().bucket_for_positions(7, entry);
         assert_eq!(bucket, expected as i64);
     }
-    let reused = bias.forward_with_table(&table, &device);
+    let reused = bias
+        .forward_with_table(&table, &device)
+        .expect("table from this bias");
     assert_eq!(
         reused.into_data(),
         bias.forward(3, 4, 5, &device).expect("forward").into_data()
     );
+}
+
+/// A table built by a bias with another bucket mapping is rejected, not misread.
+///
+/// More buckets would index the embedding out of range and the other
+/// direction mode would silently select the wrong learned scalars, so every
+/// mapping difference is a contextual configuration error.
+#[test]
+fn table_from_a_different_bucket_mapping_is_rejected() {
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(2, 8, 32, true)
+        .init::<Flex>(&device)
+        .expect("valid bias");
+    for (buckets, max_distance, bidirectional) in [(16, 32, true), (8, 64, true), (8, 32, false)] {
+        let other = T5RelativePositionBiasConfig::new(2, buckets, max_distance, bidirectional)
+            .init::<Flex>(&device)
+            .expect("valid bias");
+        let table = other.bucket_table(3, 5, 0).expect("valid table");
+        let error = bias
+            .forward_with_table(&table, &device)
+            .expect_err("mismatched mapping");
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, .. }
+                if field == "t5_relative_bias.table"),
+            "{error}"
+        );
+    }
+}
+
+/// The device table index equals the Verus-verified host index at every pair.
+///
+/// [`super::super::relative_table_index`] is the proved specification of the
+/// device formula; this links the two for square, wide, tall, and single-axis
+/// geometries.
+#[test]
+fn device_table_index_matches_verified_host_index() {
+    let device = Default::default();
+    for (query_length, key_length) in [(1, 1), (1, 7), (6, 1), (4, 4), (3, 9), (9, 3)] {
+        let entries = super::table_entries::<Flex>(query_length, key_length, &device)
+            .into_data()
+            .to_vec::<i32>()
+            .expect("I32 indices");
+        for query in 0..query_length {
+            for key in 0..key_length {
+                assert_eq!(
+                    entries[query * key_length + key] as usize,
+                    super::super::relative_table_index(query, key, query_length),
+                    "query={query}, key={key}, shape=[{query_length}, {key_length}]"
+                );
+            }
+        }
+    }
 }
 
 /// The reference initializer scale is `factor / sqrt(d_model)` and invalid inputs fail validation.

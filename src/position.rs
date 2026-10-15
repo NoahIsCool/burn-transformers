@@ -15,9 +15,11 @@
 //! [`T5RelativePositionBias`] looks them up through a linear-size displacement
 //! table.
 //!
-//! Pure integer index plans ([`mrope_frequency_axis`], [`relative_table_index`],
+//! Pure integer index plans ([`mrope_frequency_axis`], [`relative_table_length`],
 //! the T5 bucket assembly, and [`derive_batched_position_ids`]) are verified in
-//! place with Verus through `verus/position.rs`.
+//! place with Verus through `verus/position.rs`. [`relative_table_index`] is
+//! verified the same way as the specification of the device-side T5 table
+//! index, which a unit test checks entry by entry against it.
 
 mod frequencies;
 mod ids;

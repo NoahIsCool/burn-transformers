@@ -10,11 +10,17 @@
 //! has just `query + key - 1` distinct buckets. [`T5RelativeBucketTable`]
 //! evaluates those on the host in `O(query + key)` with the overflow-safe
 //! reference algorithm of [`T5RelativePositionBuckets`] and uploads one short
-//! vector. The device then builds the `[query, key]` index
-//! `j + (query - 1) - i` from two integer ranges (see
-//! [`super::relative_table_index`]), gathers bucket IDs, and looks up the
-//! learned table. No per-element host work or quadratic upload remains, and
-//! the learned lookup stays an autodiff-safe embedding.
+//! vector. The device then builds the `[query, key]` table index
+//! `j + (query - 1 - i)` as the broadcast sum of the key range and the
+//! reversed query range, gathers bucket IDs, and looks up the learned table.
+//! No per-element host work or quadratic upload remains, and the learned
+//! lookup stays an autodiff-safe embedding.
+//!
+//! The index formula is specified by [`super::relative_table_index`], whose
+//! host implementation Verus proves overflow-free, in bounds, and
+//! displacement-preserving (given the bounds [`T5RelativePositionBias::bucket_table`]
+//! checks). The proof covers that scalar function, not the device kernel; a
+//! unit test compares every device entry with it.
 
 use burn::{
     module::{Initializer, Module, Param},
@@ -165,7 +171,7 @@ impl<B: Backend> T5RelativePositionBias<B> {
         device: &B::Device,
     ) -> Result<Tensor<B, 4>> {
         let table = self.bucket_table(query_length, key_length, query_offset)?;
-        Ok(self.forward_with_table(&table, device))
+        self.forward_with_table(&table, device)
     }
 
     /// Computes the `query_length + key_length - 1` displacement buckets on the host.
@@ -246,6 +252,7 @@ impl<B: Backend> T5RelativePositionBias<B> {
         }
         Ok(T5RelativeBucketTable {
             buckets,
+            mapping: self.buckets,
             query_length,
             key_length,
         })
@@ -253,36 +260,49 @@ impl<B: Backend> T5RelativePositionBias<B> {
 
     /// Looks up the learned bias for a precomputed displacement table.
     ///
-    /// The device index `j + (query_length - 1) - i` is built from integer
-    /// ranges, gathers bucket IDs from the uploaded `query + key - 1` table,
-    /// and passes them through the learned `[buckets, heads]` embedding, giving
-    /// `[1, heads, query_length, key_length]`. The bucket IDs are identical to
-    /// a pairwise evaluation, so the result equals it exactly.
+    /// Gathers bucket IDs from the uploaded `query + key - 1` table with the
+    /// device index `j + (query_length - 1 - i)` (the formula of
+    /// [`super::relative_table_index`]) and passes them through the learned
+    /// `[buckets, heads]` embedding, giving `[1, heads, query_length,
+    /// key_length]`. The bucket IDs are identical to a pairwise evaluation, so
+    /// the result equals it exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when `table` was built by a bias with a
+    /// different bucket mapping (bucket count, saturation distance, or
+    /// direction mode): its IDs would index this bias's embedding out of
+    /// range or select the wrong learned scalars.
     pub fn forward_with_table(
         &self,
         table: &T5RelativeBucketTable,
         device: &B::Device,
-    ) -> Tensor<B, 4> {
+    ) -> Result<Tensor<B, 4>> {
+        if table.mapping != self.buckets {
+            return Err(Error::configuration(
+                "t5_relative_bias.table",
+                format!(
+                    "bucket table was built for {:?}, but this bias uses {:?}",
+                    table.mapping, self.buckets
+                ),
+            ));
+        }
         let query_length = table.query_length;
         let key_length = table.key_length;
         let buckets = Tensor::<B, 1, Int>::from_data(
             TensorData::new(table.buckets.clone(), [table.buckets.len()]),
             device,
         );
-        // `bucket_table` checked that every table index fits in i64.
-        let keys = Tensor::<B, 1, Int>::arange(0..key_length as i64, device)
-            .reshape([1, key_length])
-            .expand([query_length, key_length]);
-        let queries = Tensor::<B, 1, Int>::arange(0..query_length as i64, device)
-            .reshape([query_length, 1])
-            .expand([query_length, key_length]);
-        let entries = (keys - queries).add_scalar((query_length - 1) as i64);
         let bucket_ids = buckets
-            .select(0, entries.reshape([query_length * key_length]))
+            .select(
+                0,
+                table_entries::<B>(query_length, key_length, device)
+                    .reshape([query_length * key_length]),
+            )
             .reshape([query_length, key_length]);
-        embedding(self.weight.val(), bucket_ids)
+        Ok(embedding(self.weight.val(), bucket_ids)
             .permute([2, 0, 1])
-            .unsqueeze_dim(0)
+            .unsqueeze_dim(0))
     }
 
     /// Returns the validated host bucket mapping used by this table.
@@ -292,16 +312,42 @@ impl<B: Backend> T5RelativePositionBias<B> {
     }
 }
 
+/// Builds the `[query, key]` displacement-table index on the device.
+///
+/// Entry `(i, j)` is [`super::relative_table_index`]`(i, j, query_length) =
+/// j + (query_length - 1 - i)`: the key range broadcast against the reversed
+/// query range `query_length - 1, ..., 0`. Callers pass lengths accepted by
+/// [`T5RelativePositionBias::bucket_table`], which guarantees every entry is
+/// below `query_length + key_length - 1` and fits in `i64`.
+fn table_entries<B: Backend>(
+    query_length: usize,
+    key_length: usize,
+    device: &B::Device,
+) -> Tensor<B, 2, Int> {
+    let keys = Tensor::<B, 1, Int>::arange(0..key_length as i64, device)
+        .reshape([1, key_length])
+        .expand([query_length, key_length]);
+    let reversed_queries = Tensor::<B, 1, Int>::arange(0..query_length as i64, device)
+        .flip([0])
+        .reshape([query_length, 1])
+        .expand([query_length, key_length]);
+    keys + reversed_queries
+}
+
 /// Host displacement buckets for one `[query, key]` relative-bias geometry.
 ///
 /// Built by [`T5RelativePositionBias::bucket_table`]. Entry `t` is the bucket
 /// for displacement `t - (query_length - 1)` relative to the anchor query; the
 /// table is immutable and can be reused by every layer that shares the
-/// geometry, offset, and bucket configuration.
+/// geometry, offset, and bucket mapping. It records that mapping, so
+/// [`T5RelativePositionBias::forward_with_table`] rejects a table built by a
+/// differently configured bias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct T5RelativeBucketTable {
     /// `query_length + key_length - 1` bucket IDs in increasing displacement order.
     buckets: Vec<i64>,
+    /// Bucket mapping of the bias that built the table.
+    mapping: T5RelativePositionBuckets,
     /// Number of queries the table serves.
     query_length: usize,
     /// Number of keys the table serves.
@@ -311,8 +357,14 @@ pub struct T5RelativeBucketTable {
 impl T5RelativeBucketTable {
     /// Returns the bucket IDs ordered by increasing key-minus-query displacement.
     #[must_use]
-    pub fn buckets(&self) -> &[i64] {
+    pub fn bucket_ids(&self) -> &[i64] {
         &self.buckets
+    }
+
+    /// Returns the bucket mapping of the bias that built this table.
+    #[must_use]
+    pub const fn mapping(&self) -> T5RelativePositionBuckets {
+        self.mapping
     }
 
     /// Returns the number of queries.
