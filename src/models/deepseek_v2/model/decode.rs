@@ -58,6 +58,7 @@ use super::{
     DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, batch::rotary_contexts, block::BlockLayout,
     router_diagnostics,
 };
+use crate::models::deepseek_v2::plan::{LatentFault, latent_cache_bytes};
 
 /// Owner named when an input tensor is on another device than the cache.
 const DECODE_STATE: &str = "DeepSeek decode state";
@@ -156,25 +157,30 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
                 "backend cannot allocate DeepSeek MLA cache dtype {dtype:?}"
             )));
         }
-        let per_layer = batch_size
-            .checked_mul(config.capacity())
-            .and_then(|value| value.checked_mul(width))
-            .filter(|&elements| elements <= i32::MAX as usize)
-            .ok_or_else(|| {
-                Error::configuration(
+        // Verified: one layer's elements fit `i32::MAX` and the whole cache's
+        // bytes fit `usize`, which also bounds `bytes_per_token` and
+        // `allocated_bytes` once the state holds a row and a slot.
+        match latent_cache_bytes(
+            batch_size,
+            config.capacity(),
+            width,
+            model.model.layers.len(),
+            dtype.size(),
+        ) {
+            Ok(_) => {}
+            Err(LatentFault::LayerTooLarge) => {
+                return Err(Error::configuration(
                     "deepseek_v2.decode_state",
                     "one layer cache exceeds the portable signed tensor-index limit",
-                )
-            })?;
-        per_layer
-            .checked_mul(model.model.layers.len())
-            .and_then(|elements| elements.checked_mul(dtype.size()))
-            .ok_or_else(|| {
-                Error::configuration(
+                ));
+            }
+            Err(LatentFault::BytesOverflow) => {
+                return Err(Error::configuration(
                     "deepseek_v2.decode_state",
                     "cache byte count overflows usize",
-                )
-            })?;
+                ));
+            }
+        }
         // In-place staging writes speculative proposals into the full-history
         // slots beyond each committed length: transactions cost no memory.
         let spec = NativeKvCacheSpec::latent(

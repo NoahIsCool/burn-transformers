@@ -27,6 +27,17 @@
 //! * `rotary_contexts` returns the first active row's context (at least one),
 //!   whether every active context equals it, and each row's own context;
 //!
+//! the specifications attached to `src/models/deepseek_v2/plan.rs`:
+//!
+//! * `sparse_layer` is exactly the `moe_layer_freq` / `first_k_dense_replace`
+//!   rule and `any_sparse_layer` decides whether some layer qualifies;
+//! * `eligible_experts` is exactly `(experts / groups) * top_groups` or
+//!   reports overflow;
+//! * `latent_cache_bytes` accepts a latent cache exactly when one layer's
+//!   `batch * capacity * width` elements fit `i32::MAX` and the total bytes
+//!   fit `usize`, returning the exact total, which also bounds the per-token
+//!   bytes;
+//!
 //! and the specifications attached to `src/models/muse_glimmer/schedule.rs`:
 //!
 //! * `is_global_layer` is the backward-counted `(n - 1 - i) mod 4 = 0` rule
@@ -51,6 +62,9 @@
 
 #[path = "../src/models/deepseek_v2/model/batch.rs"]
 pub mod batch;
+
+#[path = "../src/models/deepseek_v2/plan.rs"]
+pub mod deepseek_plan;
 
 #[path = "../src/models/muse_glimmer/schedule.rs"]
 pub mod schedule;

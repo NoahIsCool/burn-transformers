@@ -17,6 +17,8 @@ mod load;
 pub mod mla;
 /// Executable DeepSeek decoder blocks, language-model graph, and compressed decode state.
 pub mod model;
+/// Dependency-free schedule, routing, and latent-cache arithmetic (Verus-verified).
+pub(crate) mod plan;
 
 pub use checkpoint::{DeepseekV2CheckpointContract, DeepseekV2CheckpointOptions};
 pub use load::{DeepseekV2CheckpointLoadError, DeepseekV2LoadError};
@@ -216,10 +218,12 @@ impl DeepseekV2Config {
     }
 
     /// Reports whether a decoder index uses shared+routed experts.
+    ///
+    /// Layer `i` is sparse when `moe_layer_freq != 0`, `i >=
+    /// first_k_dense_replace`, and `i mod moe_layer_freq = 0`; the predicate
+    /// is verified in `verus/deepseek_muse.rs`.
     pub fn is_moe_layer(&self, layer_index: usize) -> bool {
-        self.moe_layer_freq != 0
-            && layer_index >= self.first_k_dense_replace
-            && layer_index.is_multiple_of(self.moe_layer_freq)
+        plan::sparse_layer(layer_index, self.first_k_dense_replace, self.moe_layer_freq)
     }
 }
 
@@ -306,8 +310,8 @@ impl Validate for DeepseekV2Config {
                 "cannot exceed n_group",
             ));
         }
-        let eligible = (self.n_routed_experts / self.n_group)
-            .checked_mul(self.topk_group)
+        // Verified: exactly `(n_routed_experts / n_group) * topk_group`.
+        let eligible = plan::eligible_experts(self.n_routed_experts, self.n_group, self.topk_group)
             .ok_or_else(|| {
                 ConfigError::new(
                     FAMILY,
@@ -329,7 +333,12 @@ impl Validate for DeepseekV2Config {
                 "must leave at least one decoder layer eligible for MoE",
             ));
         }
-        if !(0..self.num_hidden_layers).any(|index| self.is_moe_layer(index)) {
+        // Verified: true exactly when some layer satisfies `is_moe_layer`.
+        if !plan::any_sparse_layer(
+            self.num_hidden_layers,
+            self.first_k_dense_replace,
+            self.moe_layer_freq,
+        ) {
             return Err(ConfigError::new(
                 FAMILY,
                 "moe_layer_freq",
