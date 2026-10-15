@@ -27,8 +27,10 @@
 //! * no positions at all for relative or position-free mixers (T5, Nemotron-H),
 //!   which still validate explicit positions when they accept them.
 //!
-//! Positions are inspected only under a bound `P_max`; the rotary context
-//! extent `1 + max p` then comes from the same readback.
+//! Explicit positions at padded columns are kept by default; the custom
+//! family replaces them by zero ([`PaddedPositions::ZeroFill`]) so padding
+//! sentinels are inert. Positions are inspected only under a bound `P_max`;
+//! the rotary context extent `1 + max p` then comes from the same readback.
 
 use burn::tensor::{Int, Tensor, backend::Backend};
 
@@ -60,6 +62,15 @@ pub(crate) enum ImplicitPositions {
     Unused,
 }
 
+/// Treatment of caller-supplied positions at padded columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaddedPositions {
+    /// Keep the caller's values; they are validated like any other position.
+    Keep,
+    /// Replace padded values by `0` before validation, so sentinels are inert.
+    ZeroFill,
+}
+
 /// Policy for rows that contain no valid token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmptyRows {
@@ -72,7 +83,8 @@ pub(crate) enum EmptyRows {
 /// Complete stateless input contract of one family entry point.
 ///
 /// Construct with [`InputContract::new`] and refine the defaults (no position
-/// bound, valid-token ordinals, rejected empty rows) with the builder methods.
+/// bound, valid-token ordinals, kept padded positions, rejected empty rows)
+/// with the builder methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InputContract<'a> {
     /// Tensor names reported in errors.
@@ -85,6 +97,8 @@ pub(crate) struct InputContract<'a> {
     pub(crate) position_limit: Option<usize>,
     /// Numbering of omitted positions.
     pub(crate) implicit_positions: ImplicitPositions,
+    /// Treatment of explicit positions at padded columns.
+    pub(crate) padded_positions: PaddedPositions,
     /// Policy for fully masked rows.
     pub(crate) empty_rows: EmptyRows,
 }
@@ -98,6 +112,7 @@ impl<'a> InputContract<'a> {
             vocabulary,
             position_limit: None,
             implicit_positions: ImplicitPositions::ValidTokenOrdinals,
+            padded_positions: PaddedPositions::Keep,
             empty_rows: EmptyRows::Reject,
         }
     }
@@ -111,6 +126,12 @@ impl<'a> InputContract<'a> {
     /// Selects how omitted positions are numbered.
     pub(crate) const fn with_implicit_positions(mut self, implicit: ImplicitPositions) -> Self {
         self.implicit_positions = implicit;
+        self
+    }
+
+    /// Selects how explicit positions at padded columns are treated.
+    pub(crate) const fn with_padded_positions(mut self, padded: PaddedPositions) -> Self {
+        self.padded_positions = padded;
         self
     }
 }
@@ -159,7 +180,13 @@ pub(crate) fn validate_input<B: Backend>(
     let [batch, sequence] = input.token_ids.dims();
     ensure_nonempty(batch, sequence, names.token_ids)?;
     validate_layout(input, batch, sequence, device, names, contract.owner)?;
-    let positions = resolve_positions(input, batch, sequence, contract.implicit_positions)?;
+    let positions = resolve_positions(
+        input,
+        batch,
+        sequence,
+        contract.implicit_positions,
+        contract.padded_positions,
+    )?;
 
     let mut checks = DeferredChecks::new();
     checks.values_below(
@@ -222,8 +249,9 @@ fn validate_layout<B: Backend>(
 
 /// Resolves explicit positions or derives the family's implicit numbering.
 ///
-/// Explicit positions are returned unchanged. The caller has already checked
-/// that the mask and positions share the token grid and device.
+/// Explicit positions are returned unchanged unless [`PaddedPositions::ZeroFill`]
+/// replaces padded entries by zero. The caller has already checked that the
+/// mask and positions share the token grid and device.
 ///
 /// # Errors
 ///
@@ -233,9 +261,15 @@ pub(crate) fn resolve_positions<B: Backend>(
     batch: usize,
     sequence: usize,
     implicit: ImplicitPositions,
+    padded: PaddedPositions,
 ) -> Result<Option<Tensor<B, 2, Int>>> {
     if let Some(explicit) = &input.position_ids {
-        return Ok(Some(explicit.clone()));
+        return Ok(Some(match (padded, &input.token_mask) {
+            (PaddedPositions::ZeroFill, Some(mask)) => explicit
+                .clone()
+                .mask_fill(mask.as_tensor().clone().bool_not(), 0),
+            _ => explicit.clone(),
+        }));
     }
     Ok(match (implicit, &input.token_mask) {
         (ImplicitPositions::ValidTokenOrdinals, Some(mask)) => Some(valid_token_ordinals(mask)),
@@ -275,6 +309,25 @@ pub(crate) fn physical_columns<B: Backend>(
     Ok(Tensor::<B, 1, Int>::arange(0..end, device)
         .reshape([1, sequence])
         .expand([batch, sequence]))
+}
+
+/// Validates position values against `0..limit` and returns the context `1 + max p`.
+///
+/// Used by staged entry points that receive already resolved positions; it
+/// performs exactly one device-to-host read.
+///
+/// # Errors
+///
+/// Returns [`Error::Shape`] for out-of-range positions and
+/// [`Error::BackendCapability`] when the backend cannot read the values.
+pub(crate) fn validate_position_values<B: Backend>(
+    positions: &Tensor<B, 2, Int>,
+    limit: usize,
+    name: &str,
+) -> Result<usize> {
+    let mut checks = DeferredChecks::new();
+    let range = checks.values_below(positions, limit, name, "position");
+    checks.run(name)?.context(range, name)
 }
 
 /// Validates token values against `0..vocabulary` with one device-to-host read.

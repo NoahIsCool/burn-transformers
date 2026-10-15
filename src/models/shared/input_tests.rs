@@ -125,6 +125,46 @@ fn composable_mask_check_defers_row_counts() {
     assert!(checks.run("test").is_err());
 }
 
+/// Kept padded positions are validated; zero-filled padded positions are inert.
+#[test]
+fn padded_explicit_positions_follow_policy() {
+    let sentinel = || {
+        input(
+            ints([[0, 4, 5]]),
+            Some(mask([[false, true, true]])),
+            Some(ints([[-1, 0, 1]])),
+        )
+    };
+    assert_same_error(
+        validate(&sentinel(), &contract()).unwrap_err(),
+        Error::shape(
+            "t.position_ids",
+            "position values in 0..8",
+            "observed range -1..=1",
+        ),
+    );
+    let zero_filled = validate(
+        &sentinel(),
+        &contract().with_padded_positions(PaddedPositions::ZeroFill),
+    )
+    .unwrap();
+    assert_eq!(int_values(zero_filled.positions.unwrap()), vec![0, 0, 1]);
+    assert_eq!(zero_filled.evaluated_context, 2);
+}
+
+/// Staged position validation returns the context extent from one readback.
+#[test]
+fn staged_position_validation_returns_context() {
+    assert_eq!(
+        validate_position_values(&ints([[2, 6]]), 7, "x.pos").unwrap(),
+        7
+    );
+    assert_same_error(
+        validate_position_values(&ints([[2, 7]]), 7, "x.pos").unwrap_err(),
+        Error::shape("x.pos", "position values in 0..7", "observed range 2..=7"),
+    );
+}
+
 /// Contracts without a position bound pass positions through uninspected.
 #[test]
 fn unbounded_positions_are_not_inspected() {

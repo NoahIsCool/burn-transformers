@@ -323,7 +323,7 @@ fn late_row_position_validation_preserves_committed_history() {
         assert_shape_error(
             error,
             "custom.decode.position_ids",
-            "values in 0..32",
+            "position values in 0..32",
             &format!("observed range {invalid_position}..={invalid_position}"),
         );
         assert_eq!(state.lengths(), &[2, 2]);

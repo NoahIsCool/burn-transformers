@@ -604,3 +604,58 @@ proptest::proptest! {
         proptest::prop_assert!(model.normalize_decoder(completed).is_err());
     }
 }
+
+/// Range runners read context values once; prevalidated blocks stay exact and still reject bad grids.
+///
+/// `forward_prevalidated` must reproduce the checked `HiddenTransform::forward`
+/// bit for bit, and its sync-free context check must report the same errors as
+/// the full check for position and padding tensors that do not match the
+/// hidden grid (CUS-3).
+#[test]
+fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
+    let device = Default::default();
+    let model = ModularCausalLm::<B>::init(spec(NormPlacement::Pre), &device)
+        .unwrap()
+        .map(&mut FixedParameters::default());
+    let state = model.embed(input([[1, 2, 3]])).unwrap();
+    let layer = &model.layers()[0];
+    let address = Layer::decoder(0);
+    let checked = HiddenTransform::forward(
+        layer,
+        state.hidden.clone(),
+        &state.context,
+        address,
+        &mut Hooks::new(),
+    )
+    .unwrap();
+    let prevalidated = layer
+        .forward_prevalidated(
+            state.hidden.clone(),
+            &state.context,
+            address,
+            &mut Hooks::new(),
+        )
+        .unwrap();
+    assert_eq!(checked.into_data(), prevalidated.into_data());
+
+    let mut short_positions = state.context.clone();
+    short_positions.positions = Tensor::<B, 2, Int>::from_ints([[0, 1]], &device);
+    let mut short_mask = state.context.clone();
+    short_mask.token_mask = Some(crate::architecture::TokenMask::new(Tensor::<
+        B,
+        2,
+        burn::tensor::Bool,
+    >::from_bool(
+        [[true, true]].into(),
+        &device,
+    )));
+    for context in [short_positions, short_mask] {
+        let full = layer
+            .validate_context(&state.hidden, &context, address)
+            .unwrap_err();
+        let sync_free = layer
+            .validate_prevalidated(&state.hidden, &context, address)
+            .unwrap_err();
+        assert_eq!(full.to_string(), sync_free.to_string());
+    }
+}

@@ -235,19 +235,29 @@ pub(crate) fn prepare_stateful_rows<B: Backend>(
 }
 
 /// Host copies of the mask, token IDs, and explicit positions of one call.
-#[derive(Debug)]
-struct HostInput {
+///
+/// Families with their own stateful contracts (for example the custom
+/// history-replay decoder) use this directly to validate on the host after a
+/// single device-to-host transfer. Callers must have checked that every tensor
+/// shares one device and the `[batch, sequence]` grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostInput {
     /// Row-major validity flags, or `None` when every token is valid.
-    mask: Option<Vec<bool>>,
+    pub(crate) mask: Option<Vec<bool>>,
     /// Row-major token IDs.
-    tokens: Vec<i64>,
+    pub(crate) tokens: Vec<i64>,
     /// Row-major explicit positions, when supplied.
-    positions: Option<Vec<i64>>,
+    pub(crate) positions: Option<Vec<i64>>,
 }
 
 impl HostInput {
     /// Reads every per-token tensor of `input` in one transfer.
-    fn read<B: Backend>(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BackendCapability`] when the backend cannot read the
+    /// tensors or returns an unexpected number of values.
+    pub(crate) fn read<B: Backend>(
         input: &CausalLmInput<B>,
         batch: usize,
         sequence: usize,
@@ -300,7 +310,7 @@ impl HostInput {
     }
 
     /// Lists every row's valid columns, treating an absent mask as all valid.
-    fn valid_indices(&self, batch: usize, sequence: usize) -> Vec<Vec<usize>> {
+    pub(crate) fn valid_indices(&self, batch: usize, sequence: usize) -> Vec<Vec<usize>> {
         match &self.mask {
             Some(mask) => mask
                 .chunks_exact(sequence)
