@@ -1,4 +1,4 @@
-//! Verus harness for the checkpoint loader's pure layout arithmetic.
+//! Verus harness for the checkpoint loader's pure layout and packing arithmetic.
 //!
 //! Verifies, in place, the specifications attached to `src/checkpoint/layout.rs`:
 //!
@@ -13,7 +13,15 @@
 //! - `tensor_file_offset` computes `8 + header + begin` or reports overflow;
 //! - `slice_block` keeps every slice and concatenation block inside its tensor
 //!   with overflow-free arithmetic, and consecutive target blocks partition the
-//!   output in order.
+//!   output in order;
+//! - `section_starts` returns prefix-sum section starts only when the split
+//!   lengths sum exactly to the axis, so every section lies inside the axis, and
+//!   reports overflow or the exact mismatching total otherwise.
+//!
+//! It also verifies `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed
+//! lengths (`n` and `ceil(n / 2)`, never above `n`), the two's-complement nibble
+//! and byte encodings and their inverses, nibble joining and splitting, and
+//! in-bounds code reads.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
 //! driven by these plans, file I/O, and error mapping remain covered by tests.
@@ -25,3 +33,6 @@
 
 #[path = "../src/checkpoint/layout.rs"]
 pub mod layout;
+
+#[path = "../src/checkpoint/quantization/packing.rs"]
+pub mod packing;

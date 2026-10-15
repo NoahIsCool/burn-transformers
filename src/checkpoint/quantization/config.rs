@@ -31,11 +31,15 @@ impl SymmetricQuantization {
     }
 
     /// Computes the packed bytes required for `elements` values.
+    ///
+    /// This is `n` for Q8 and `ceil(n / 2)` for Q4; the Verus-checked
+    /// `packing::packed_len` proves the formula never overflows.
     pub(crate) fn packed_bytes(self, elements: usize) -> Result<usize> {
-        match self {
-            Self::Q8 => Ok(elements),
-            Self::Q4 => Ok(elements / 2 + elements % 2),
-        }
+        let width = match self {
+            Self::Q8 => super::packing::CodeWidth::Byte,
+            Self::Q4 => super::packing::CodeWidth::Nibble,
+        };
+        Ok(super::packing::packed_len(width, elements))
     }
 }
 
@@ -51,6 +55,9 @@ pub struct QuantizationGroupSize(
 );
 
 impl QuantizationGroupSize {
+    /// Largest supported group size; bounds per-group stack buffers.
+    pub const MAX: usize = 128;
+
     /// Creates a supported group size.
     pub fn new(value: usize) -> Result<Self> {
         match value {

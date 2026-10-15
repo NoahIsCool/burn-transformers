@@ -6,11 +6,13 @@
 //! the maximum reduction. Ties round away from zero. Zero groups use `s = 1`,
 //! and a subnormal fallback prevents nonzero groups from acquiring a zero scale.
 //!
-//! Two scans per group avoid a whole-tensor decoded F32 copy. Q4 uses low-nibble
-//! first signed codes, zeroes an unused final nibble, and excludes the asymmetric
-//! minimum code. Persisted scales must be positive and finite. Native packed
-//! execution additionally requires row/group alignment; representable storage
-//! alone does not establish backend or autodiff support.
+//! Each group is decoded once into a stack buffer of at most 128 `f32` values,
+//! which avoids a whole-tensor decoded copy while reading every source byte only
+//! once. Q4 uses low-nibble-first signed codes, zeroes an unused final nibble,
+//! and excludes the asymmetric minimum code (see the `packing` module). Persisted
+//! scales must be positive and finite. Native packed execution additionally
+//! requires row/group alignment; representable storage alone does not establish
+//! backend or autodiff support.
 
 use std::io::Write;
 
@@ -20,10 +22,21 @@ use burn::tensor::{
 };
 
 use super::{
-    QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizedTensorMetadata,
-    Result, SourceFloatDType, SymmetricQuantization, WeightQuantizationConfig,
-    classify_weight_for_quantization, provenance::quantized_payload_sha256,
+    QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizationGroupSize,
+    QuantizedTensorMetadata, Result, SourceFloatDType, SymmetricQuantization,
+    WeightQuantizationConfig, classify_weight_for_quantization,
+    packing::{
+        CodeWidth, encode_byte, encode_nibble, join_nibbles, read_code, reserved_code,
+        split_nibbles,
+    },
+    provenance::quantized_payload_sha256,
 };
+
+/// Bytes of little-endian scales encoded per staging write or digest update.
+///
+/// Encoding scales through one reusable 64 KiB buffer keeps memory bounded while
+/// turning one 4-byte `write(2)` per scale into one write per 16,384 scales.
+pub(super) const SCALE_CHUNK_BYTES: usize = 64 * 1024;
 
 // Validated packed ownership and storage/backend conversion boundaries.
 
@@ -145,13 +158,14 @@ impl QuantizedWeight {
 
     /// Writes the canonical tensor payload: packed bytes, then `f32` LE scales.
     ///
-    /// Scales are encoded individually to avoid allocating a second combined
-    /// payload. The caller owns framing and tensor offsets in the outer Burnpack.
+    /// Packed codes go out in one write. Scales are encoded through a bounded
+    /// [`SCALE_CHUNK_BYTES`] buffer, one write per chunk, so the payload is never
+    /// assembled as a second combined copy and an unbuffered file sees a handful
+    /// of large writes rather than one syscall per scale. The caller owns framing
+    /// and tensor offsets in the outer Burnpack.
     pub fn write_burnpack_payload<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_all(&self.packed_values)?;
-        for scale in &self.scales {
-            writer.write_all(&scale.to_le_bytes())?;
-        }
+        for_each_scale_chunk(&self.scales, |chunk| writer.write_all(chunk))?;
         Ok(())
     }
 
@@ -173,8 +187,14 @@ impl QuantizedWeight {
                 context: "dequantized f32 tensor",
                 requested: elements,
             })?;
+        let width = code_width(self.metadata.scheme);
         for index in 0..elements {
-            let code = decode_code(self.metadata.scheme, &self.packed_values, index);
+            let code = read_code(width, &self.packed_values, index).ok_or(
+                QuantizationError::PackedLengthMismatch {
+                    expected: elements,
+                    actual: self.packed_values.len(),
+                },
+            )?;
             let scale = self.scales[index / self.metadata.group_size.get()];
             values.push(f32::from(code) * scale);
         }
@@ -297,10 +317,11 @@ pub fn quantize_weight(
 
 /// Quantizes a single unpacked floating-point tensor with bounded temporary work.
 ///
-/// The source is never copied into a whole-tensor `f32` staging buffer. Instead,
-/// each group is scanned once for its maximum absolute value and once to emit
-/// integer codes. Arithmetic, including `f64` input conversion, is intentionally
-/// performed in `f32` so results are stable across source dtypes and backends.
+/// The source is never copied into a whole-tensor `f32` staging buffer. Each
+/// group of at most [`QuantizationGroupSize::MAX`] values is decoded once into a
+/// stack buffer, which then supplies both the maximum reduction and the codes.
+/// Arithmetic, including `f64` input conversion, is intentionally performed in
+/// `f32` so results are stable across source dtypes and backends.
 pub fn quantize_tensor_data(
     source: &TensorData,
     config: WeightQuantizationConfig,
@@ -329,38 +350,96 @@ pub fn quantize_tensor_data(
             requested: groups,
         })?;
 
-    for group in 0..groups {
-        let start = group
-            .checked_mul(group_size)
-            .ok_or(QuantizationError::ShapeElementOverflow)?;
-        let end = start.saturating_add(group_size).min(elements);
+    let width = code_width(config.scheme);
+    let mut buffer = [0.0_f32; QuantizationGroupSize::MAX];
+    for (group, encoded) in source
+        .as_bytes()
+        .chunks(group_size * source_dtype.byte_width())
+        .enumerate()
+    {
+        let start = group * group_size;
+        let values = &mut buffer[..encoded.len() / source_dtype.byte_width()];
+        decode_group(encoded, source_dtype, values);
         let mut max_abs = 0.0_f32;
-        for index in start..end {
-            let value = read_f32(source, source_dtype, index)?;
+        for (offset, value) in values.iter().enumerate() {
             if !value.is_finite() {
-                return Err(QuantizationError::NonFiniteValue { index });
+                return Err(QuantizationError::NonFiniteValue {
+                    index: start + offset,
+                });
             }
             max_abs = max_abs.max(value.abs());
         }
-
         let scale = canonical_scale(max_abs, config.scheme);
         scales.push(scale);
-        for index in start..end {
-            let value = read_f32(source, source_dtype, index)?;
+        for (offset, &value) in values.iter().enumerate() {
             let code = quantize_value(value, scale, config.scheme);
-            push_code(config.scheme, &mut packed_values, index, code);
+            push_code(width, &mut packed_values, start + offset, code);
         }
     }
 
+    // Codes are clamped to `[-q_max, q_max]` and scales are positive and finite
+    // by construction, so the persisted-payload validation of `from_parts` would
+    // only re-scan what this loop just produced.
     debug_assert_eq!(packed_values.len(), packed_len);
-    QuantizedWeight::from_parts(metadata, packed_values, scales).map(|mut weight| {
-        weight.stats = ReferenceQuantizationStats {
+    debug_assert_eq!(scales.len(), groups);
+    debug_assert!(validate_scales(&scales).is_ok());
+    debug_assert!(validate_codes(config.scheme, elements, &packed_values).is_ok());
+    Ok(QuantizedWeight {
+        metadata,
+        packed_values,
+        scales,
+        stats: ReferenceQuantizationStats {
             source_elements: elements,
             group_count: groups,
             peak_group_elements: elements.min(group_size),
-        };
-        weight
+        },
     })
+}
+
+/// Decodes one group of native-endian source scalars into `f32`, once.
+///
+/// `encoded` holds exactly `values.len()` scalars: the caller splits the
+/// length-validated source into whole groups. F16/BF16 widen exactly; F64
+/// rounds to the nearest F32, and the caller rejects non-finite results.
+fn decode_group(encoded: &[u8], dtype: SourceFloatDType, values: &mut [f32]) {
+    match dtype {
+        SourceFloatDType::F16 => {
+            for (value, bytes) in values.iter_mut().zip(encoded.as_chunks::<2>().0) {
+                *value = f16::from_bits(u16::from_ne_bytes(*bytes)).to_f32();
+            }
+        }
+        SourceFloatDType::Bf16 => {
+            for (value, bytes) in values.iter_mut().zip(encoded.as_chunks::<2>().0) {
+                *value = bf16::from_bits(u16::from_ne_bytes(*bytes)).to_f32();
+            }
+        }
+        SourceFloatDType::F32 | SourceFloatDType::Flex32 => {
+            for (value, bytes) in values.iter_mut().zip(encoded.as_chunks::<4>().0) {
+                *value = f32::from_ne_bytes(*bytes);
+            }
+        }
+        SourceFloatDType::F64 => {
+            for (value, bytes) in values.iter_mut().zip(encoded.as_chunks::<8>().0) {
+                *value = f64::from_ne_bytes(*bytes) as f32;
+            }
+        }
+    }
+}
+
+/// Calls `sink` with consecutive little-endian encodings of at most
+/// [`SCALE_CHUNK_BYTES`] bytes of scales, reusing one bounded buffer.
+pub(super) fn for_each_scale_chunk<E>(
+    scales: &[f32],
+    mut sink: impl FnMut(&[u8]) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    const SCALES_PER_CHUNK: usize = SCALE_CHUNK_BYTES / core::mem::size_of::<f32>();
+    let mut buffer = Vec::with_capacity(scales.len().min(SCALES_PER_CHUNK) * 4);
+    for chunk in scales.chunks(SCALES_PER_CHUNK) {
+        buffer.clear();
+        buffer.extend(chunk.iter().flat_map(|scale| scale.to_le_bytes()));
+        sink(&buffer)?;
+    }
+    Ok(())
 }
 
 // Scalar reference arithmetic and canonical wire-code validation.
@@ -393,47 +472,6 @@ fn validate_source_bytes(
     Ok(())
 }
 
-/// Decodes one prevalidated native-endian source scalar into the F32 quantizer domain.
-///
-/// F16/BF16 values widen exactly; F64 values round to F32. The caller checks
-/// finite values after conversion, including overflow introduced by narrowing.
-fn read_f32(source: &TensorData, dtype: SourceFloatDType, index: usize) -> Result<f32> {
-    let width = dtype.byte_width();
-    let offset = index
-        .checked_mul(width)
-        .ok_or(QuantizationError::ByteLengthOverflow {
-            context: "source element offset",
-        })?;
-    let bytes = source.as_bytes();
-    let value = match dtype {
-        SourceFloatDType::F16 => {
-            let bits = u16::from_ne_bytes([bytes[offset], bytes[offset + 1]]);
-            f16::from_bits(bits).to_f32()
-        }
-        SourceFloatDType::Bf16 => {
-            let bits = u16::from_ne_bytes([bytes[offset], bytes[offset + 1]]);
-            bf16::from_bits(bits).to_f32()
-        }
-        SourceFloatDType::F32 | SourceFloatDType::Flex32 => f32::from_ne_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]),
-        SourceFloatDType::F64 => f64::from_ne_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ]) as f32,
-    };
-    Ok(value)
-}
-
 /// Computes `max_abs / qmax`, using one for zero groups and a subnormal fallback.
 ///
 /// If division underflows to zero, retaining `max_abs` keeps the scale positive
@@ -452,36 +490,30 @@ fn quantize_value(value: f32, scale: f32, scheme: SymmetricQuantization) -> i8 {
     (value / scale).round().clamp(-qmax, qmax) as i8
 }
 
-/// Appends a Q8 code or packs a Q4 code with even indices in the low nibble.
-///
-/// The caller visits contiguous increasing indices, so every odd index completes
-/// the byte created by its preceding even index.
-fn push_code(scheme: SymmetricQuantization, output: &mut Vec<u8>, index: usize, code: i8) {
+/// Maps a quantization precision to its packed code width.
+const fn code_width(scheme: SymmetricQuantization) -> CodeWidth {
     match scheme {
-        SymmetricQuantization::Q8 => output.push(code as u8),
-        SymmetricQuantization::Q4 => {
-            let nibble = (code as u8) & 0x0f;
-            if index.is_multiple_of(2) {
-                output.push(nibble);
-            } else if let Some(byte) = output.last_mut() {
-                *byte |= nibble << 4;
-            }
-        }
+        SymmetricQuantization::Q8 => CodeWidth::Byte,
+        SymmetricQuantization::Q4 => CodeWidth::Nibble,
     }
 }
 
-/// Reads a prevalidated packed code, sign-extending a Q4 two's-complement nibble.
-fn decode_code(scheme: SymmetricQuantization, packed: &[u8], index: usize) -> i8 {
-    match scheme {
-        SymmetricQuantization::Q8 => packed[index] as i8,
-        SymmetricQuantization::Q4 => {
-            let byte = packed[index / 2];
-            let nibble = if index.is_multiple_of(2) {
-                byte & 0x0f
-            } else {
-                byte >> 4
-            };
-            ((nibble as i8) << 4) >> 4
+/// Appends a Q8 code or packs a Q4 code with even indices in the low nibble.
+///
+/// The caller visits contiguous increasing indices, so every odd index completes
+/// the byte created by its preceding even index. Codes come from
+/// [`quantize_value`] and therefore lie in `[-q_max, q_max]`.
+fn push_code(width: CodeWidth, output: &mut Vec<u8>, index: usize, code: i8) {
+    match width {
+        CodeWidth::Byte => output.push(encode_byte(code)),
+        CodeWidth::Nibble => {
+            let nibble = encode_nibble(code);
+            if index.is_multiple_of(2) {
+                output.push(join_nibbles(nibble, 0));
+            } else if let Some(byte) = output.last_mut() {
+                let (low, _) = split_nibbles(*byte);
+                *byte = join_nibbles(low, nibble);
+            }
         }
     }
 }
@@ -498,19 +530,23 @@ fn validate_scales(scales: &[f32]) -> Result<()> {
 
 /// Rejects asymmetric reserved codes and nonzero unused high-nibble padding.
 fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8]) -> Result<()> {
+    let width = code_width(scheme);
+    let reserved = reserved_code(width);
     for index in 0..elements {
-        let value = decode_code(scheme, packed, index);
-        let reserved = match scheme {
-            SymmetricQuantization::Q8 => -128,
-            SymmetricQuantization::Q4 => -8,
-        };
+        let value =
+            read_code(width, packed, index).ok_or(QuantizationError::PackedLengthMismatch {
+                expected: elements,
+                actual: packed.len(),
+            })?;
         if value == reserved {
             return Err(QuantizationError::InvalidQuantizedValue { index, value });
         }
     }
-    if scheme == SymmetricQuantization::Q4
+    if width == CodeWidth::Nibble
         && elements % 2 == 1
-        && packed.last().is_some_and(|byte| byte & 0xf0 != 0)
+        && packed
+            .last()
+            .is_some_and(|&byte| split_nibbles(byte).1 != 0)
     {
         return Err(QuantizationError::InvalidMetadata {
             reason: "unused final Q4 high nibble must be zero".into(),
@@ -523,3 +559,7 @@ fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8])
 const fn ceil_div(value: usize, divisor: usize) -> usize {
     value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
+
+#[cfg(test)]
+#[path = "reference_tests.rs"]
+mod tests;

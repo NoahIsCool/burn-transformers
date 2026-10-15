@@ -132,8 +132,15 @@ pub fn classify_weight_for_quantization(name: &str, shape: &[usize]) -> Quantiza
 }
 
 /// Recognizes embedding path components conservatively, ignoring ASCII case.
+///
+/// Lookup tables are excluded; an `embed_`-prefixed *output* projection such as
+/// GPT-NeoX's untied LM head `embed_out` is a linear layer and stays eligible,
+/// like every other family's `lm_head`.
 fn is_embedding(component: &str) -> bool {
     let component = component.to_ascii_lowercase();
+    if is_unembedding(&component) {
+        return false;
+    }
     matches!(
         component.as_str(),
         "embed_tokens"
@@ -148,6 +155,11 @@ fn is_embedding(component: &str) -> bool {
     ) || component.starts_with("embed_")
         || component.ends_with("_embedding")
         || component.ends_with("_embeddings")
+}
+
+/// Recognizes `embed_`-prefixed output projections (unembeddings), not lookup tables.
+fn is_unembedding(component: &str) -> bool {
+    matches!(component, "embed_out" | "embed_output")
 }
 
 /// Recognizes normalization components whose scales should retain source precision.

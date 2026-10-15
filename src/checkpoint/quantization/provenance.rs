@@ -584,13 +584,58 @@ pub(crate) fn packed_payload_sha256(bytes: &[u8]) -> String {
 }
 
 /// Computes the writer-side digest without allocating a combined payload.
+///
+/// Scales are hashed in the same bounded little-endian chunks that the staging
+/// writer emits, so the digest covers exactly the canonical payload bytes.
 pub(crate) fn quantized_payload_sha256(packed_values: &[u8], scales: &[f32]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(packed_values);
-    for scale in scales {
-        hasher.update(scale.to_le_bytes());
-    }
+    let _ = super::reference::for_each_scale_chunk(scales, |chunk| {
+        hasher.update(chunk);
+        Ok::<(), std::convert::Infallible>(())
+    });
     hex_digest(hasher.finalize())
+}
+
+/// Writer adapter that SHA-256-hashes exactly the bytes its inner writer accepts.
+///
+/// Staging a payload through this adapter computes its digest in the same pass
+/// as the write, and the digest then describes the staged bytes themselves
+/// rather than a separate re-encoding of the in-memory weight.
+pub(crate) struct DigestingWriter<W> {
+    /// Destination receiving the payload.
+    inner: W,
+    /// Running digest of every accepted byte, in order.
+    hasher: Sha256,
+}
+
+impl<W: std::io::Write> DigestingWriter<W> {
+    /// Wraps a destination with an empty running digest.
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Returns the lowercase hexadecimal digest of all accepted bytes.
+    pub(crate) fn finish(self) -> String {
+        hex_digest(self.hasher.finalize())
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for DigestingWriter<W> {
+    /// Forwards one write and hashes only the prefix the destination accepted.
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.hasher.update(&buffer[..written]);
+        Ok(written)
+    }
+
+    /// Flushes the destination; the digest holds no buffered bytes.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Enforces canonical lowercase SHA-256 spelling.

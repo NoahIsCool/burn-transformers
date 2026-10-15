@@ -870,6 +870,7 @@ fn manifest_v2_requires_provenance_while_v1_remains_compatible() {
 
 /// Historical constructors and the unsuffixed version constant retain v1 semantics.
 #[test]
+#[allow(deprecated)]
 fn compatibility_manifest_api_remains_v1_compatible_without_changing_current_v2() {
     assert_eq!(
         BURNPACK_QUANTIZATION_FORMAT_VERSION,
@@ -1296,5 +1297,30 @@ proptest! {
         prop_assert_eq!(first.stats().group_count, values.len() / group_size + usize::from(values.len() % group_size != 0));
         prop_assert_eq!(first.metadata().packed_value_bytes as usize,
             if q4 { values.len() / 2 + values.len() % 2 } else { values.len() });
+    }
+}
+
+/// Output projections sharing the `embed_` prefix are linear layers, not lookup tables.
+#[test]
+fn unembedding_projections_are_eligible_while_embedding_tables_are_not() {
+    assert_eq!(
+        classify_weight_for_quantization("embed_out.weight", &[50_432, 4096]),
+        QuantizationEligibility::Eligible
+    );
+    assert_eq!(
+        classify_weight_for_quantization("gpt_neox.embed_out.weight", &[64, 32]),
+        QuantizationEligibility::Eligible
+    );
+    for table in [
+        "gpt_neox.embed_in.weight",
+        "embed_in.weight",
+        "model.embed_tokens.weight",
+        "decoder.embed_positions.weight",
+    ] {
+        assert_eq!(
+            classify_weight_for_quantization(table, &[64, 32]),
+            QuantizationEligibility::Excluded(QuantizationExclusion::Embedding),
+            "{table}"
+        );
     }
 }

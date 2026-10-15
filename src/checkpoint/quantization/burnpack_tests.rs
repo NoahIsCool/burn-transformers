@@ -458,8 +458,10 @@ fn limits_bound_counts_payloads_manifests_and_configuration() {
         })
     ));
 
+    // The empty-manifest envelope is estimated at 512 bytes and one entry at
+    // several hundred more, so 600 bytes admits the envelope but not the entry.
     let estimate_limits = BurnpackSessionLimits {
-        max_manifest_bytes: 3_000,
+        max_manifest_bytes: 600,
         ..BurnpackSessionLimits::default()
     };
     let mut estimate_session = QuantizedBurnpackSession::with_limits(
@@ -1055,12 +1057,17 @@ fn provenance_validation_and_both_size_limits_are_transactional() {
     legacy.packed_execution = PackedExecutionSupport::BurnQFloatMatmul;
     let exact_v1_staging =
         payload(&weight).len() as u64 + legacy.to_json_pretty().unwrap().len() as u64;
+    // Admit exactly the appended entry's estimate, leaving no room for provenance.
+    let mut probe = QuantizedBurnpackSession::new(directory.path().join("probe.bpk")).unwrap();
+    probe.append_quantized("q.weight", weight.clone()).unwrap();
+    let appended_estimate = usize::try_from(probe.stats().estimated_manifest_bytes).unwrap();
+    drop(probe);
     for (case, limits) in [
         ("invalid", BurnpackSessionLimits::default()),
         (
             "estimated manifest",
             BurnpackSessionLimits {
-                max_manifest_bytes: 5_000,
+                max_manifest_bytes: appended_estimate,
                 ..BurnpackSessionLimits::default()
             },
         ),
@@ -1732,5 +1739,119 @@ fn burnpack_boundary_parent_alias_retargeting_cannot_redirect_publication() {
             .dequantize_f32()
             .unwrap(),
         source
+    );
+}
+
+/// A weight read from a v2 artifact re-stages into a v1 session that still finalizes.
+#[test]
+fn v2_read_weights_restage_into_a_publishable_v1_session() {
+    let directory = tempdir().unwrap();
+    let bound = directory.path().join("bound.bpk");
+    let source = TensorData::new(
+        (0..64).map(|value| value as f32).collect::<Vec<_>>(),
+        [2, 32],
+    );
+    let mut session = QuantizedBurnpackSession::new(&bound).unwrap();
+    session
+        .append("q.weight", &source, config(SymmetricQuantization::Q4))
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    session.finalize().unwrap();
+    let carried = QuantizedBurnpackArtifact::open(&bound)
+        .unwrap()
+        .read_weight("q.weight")
+        .unwrap();
+    assert!(carried.metadata().payload_sha256.is_some());
+
+    let restaged = directory.path().join("restaged.bpk");
+    let mut legacy = QuantizedBurnpackSession::new(&restaged).unwrap();
+    let summary = legacy
+        .append_quantized("q.weight", carried.clone())
+        .unwrap();
+    assert!(summary.metadata.payload_sha256.is_none());
+    legacy.finalize().unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(&restaged).unwrap();
+    assert_eq!(artifact.manifest().format_version, 1);
+    let reread = artifact.read_weight("q.weight").unwrap();
+    assert_eq!(reread.packed_values(), carried.packed_values());
+    assert_eq!(reread.scales(), carried.scales());
+
+    // Binding provenance later attaches the session's own staged digest.
+    let rebound = directory.path().join("rebound.bpk");
+    let mut session = QuantizedBurnpackSession::new(&rebound).unwrap();
+    session
+        .append_quantized("q.weight", carried.clone())
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    assert_eq!(
+        session.manifest().tensors["q.weight"].payload_sha256,
+        carried.metadata().payload_sha256
+    );
+}
+
+/// A carried digest that disagrees with the staged bytes rolls the append back.
+#[test]
+fn carried_digest_mismatch_rolls_back_the_append() {
+    let directory = tempdir().unwrap();
+    let weight = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 32], [1, 32]),
+        config(SymmetricQuantization::Q8),
+    )
+    .unwrap();
+    let (mut metadata, packed, scales) = weight.into_parts();
+    metadata.payload_sha256 = Some("0".repeat(64));
+    // The digest-verified constructor is the crate-internal path that skips hashing.
+    let forged =
+        QuantizedWeight::from_payload_digest_verified_parts(metadata, packed, scales).unwrap();
+    let mut session = QuantizedBurnpackSession::new(directory.path().join("forged.bpk")).unwrap();
+    let before = session.stats();
+    assert!(matches!(
+        session.append_quantized("q.weight", forged),
+        Err(QuantizationError::PackedPayloadDigestMismatch { name, .. }) if name == "q.weight"
+    ));
+    assert_eq!(session.stats(), before);
+    assert_eq!(session.staging_len_for_test(), 0);
+    assert!(session.manifest().tensors.is_empty());
+}
+
+/// Manifest estimates bound the real pretty JSON tightly enough for large MoE inventories.
+#[test]
+fn manifest_estimate_is_a_tight_upper_bound() {
+    let directory = tempdir().unwrap();
+    let source = TensorData::new(vec![0.5_f32; 64], [2, 32]);
+    let mut session = QuantizedBurnpackSession::new(directory.path().join("moe.bpk")).unwrap();
+    let mut names = Vec::new();
+    for layer in [0, 7, 93] {
+        for expert in [0, 31, 127] {
+            for projection in ["gate_proj", "up_proj", "down_proj"] {
+                names.push(format!(
+                    "model.layers.{layer}.mlp.experts.{expert}.{projection}.weight"
+                ));
+            }
+        }
+    }
+    names.push("model.layers.0.self_attn.\"quoted\\\\name\".weight".into());
+    for name in &names {
+        session
+            .append(name, &source, config(SymmetricQuantization::Q4))
+            .unwrap();
+    }
+    let unbound_actual = session.manifest().to_json_pretty().unwrap().len() as u64;
+    let unbound_estimate = session.stats().estimated_manifest_bytes;
+    assert!(unbound_estimate >= unbound_actual);
+    session.bind_provenance(fixture_provenance()).unwrap();
+    let bound_actual = session.manifest().to_json_pretty().unwrap().len() as u64;
+    assert!(session.stats().estimated_manifest_bytes >= bound_actual);
+    // Each entry is charged at most a small fixed slack over its bound JSON size.
+    let slack_per_entry = unbound_estimate.saturating_sub(bound_actual) / names.len() as u64;
+    assert!(
+        slack_per_entry < 128,
+        "slack {slack_per_entry} bytes per entry"
+    );
+    // At this per-entry size, Burn Store's 99,999-tensor limit binds before 64 MiB.
+    let per_entry = unbound_estimate / names.len() as u64;
+    assert!(
+        per_entry * 99_999 < 64 * 1024 * 1024,
+        "{per_entry} bytes per entry"
     );
 }
