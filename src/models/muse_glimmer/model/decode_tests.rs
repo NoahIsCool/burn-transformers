@@ -1263,6 +1263,76 @@ fn batched_rows_match_independent_rows_across_ring_wraparound() {
     }
 }
 
+/// One-row chunks over ragged rows and wrapped rings match one unchunked call.
+///
+/// With one query row per chunk, every chunk at or past row `W - 1` skips
+/// the ring history and reads only its window of fresh keys, so ragged rows
+/// (different `L_b` and `n_b`), interior holes, a finished row, and wrapped
+/// rings all run through `MuseKeySlicing::RingHistory` slices (and the global
+/// layer through verified prefix limits). Logits must match the unbounded
+/// model at every step.
+#[test]
+fn chunked_ring_slices_match_unbounded_ragged_batches() {
+    let device = Default::default();
+    let unbounded = scaled_model(20.0)
+        .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+        .expect("unbounded fixture");
+    let chunked = scaled_model(20.0)
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 1 << 20))
+        .expect("one-row chunks");
+    let steps: [(Vec<i64>, Vec<bool>, [usize; 2]); 3] = [
+        (
+            vec![3, 17, 5, 9, 30, 12, 0, 0, 7, 1, 22, 0, 4, 8, 15, 16, 23, 0],
+            [
+                [true; 6],
+                [false, false, true, true, true, false],
+                [true, true, true, true, true, false],
+            ]
+            .concat(),
+            [3, 6],
+        ),
+        (
+            vec![2, 19, 6, 11, 13, 14, 0, 21, 0, 24, 0, 0, 0, 0, 0],
+            [[true; 5], [true, false, true, false, true], [false; 5]].concat(),
+            [3, 5],
+        ),
+        (vec![25, 26, 27], vec![true; 3], [3, 1]),
+    ];
+    let mut expected_state = unbounded
+        .new_decode_state(CacheConfig::new(3, 16).unwrap(), 3, &device)
+        .unwrap();
+    let mut actual_state = chunked
+        .new_decode_state(CacheConfig::new(3, 16).unwrap(), 3, &device)
+        .unwrap();
+    for (index, (tokens, mask, shape)) in steps.into_iter().enumerate() {
+        let expected = run_step(
+            &unbounded,
+            &mut expected_state,
+            tokens.clone(),
+            Some(mask.clone()),
+            shape,
+        );
+        let actual = run_step(&chunked, &mut actual_state, tokens, Some(mask), shape);
+        for (actual, expected) in [
+            (actual.logits, expected.logits),
+            (
+                actual.final_hidden_state.unwrap(),
+                expected.final_hidden_state.unwrap(),
+            ),
+        ] {
+            actual
+                .into_data()
+                .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
+        }
+        assert_eq!(
+            actual_state.lengths(),
+            expected_state.lengths(),
+            "step {index}"
+        );
+    }
+    assert_eq!(actual_state.lengths(), &[12, 7, 6]);
+}
+
 /// Cached decoding after ring wraparound matches the stateless forward of each row.
 #[test]
 fn batched_cached_logits_match_stateless_rows_after_wraparound() {
