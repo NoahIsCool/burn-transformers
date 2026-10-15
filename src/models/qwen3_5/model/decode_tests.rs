@@ -83,16 +83,23 @@ fn assert_zero<const D: usize>(tensor: Tensor<TestBackend, D>) {
     );
 }
 
-/// Exact physical cache contents for one batch row across every group.
+/// Exact readable cache contents for one batch row across every group.
 #[derive(Debug, PartialEq)]
 struct CacheRowSnapshot {
-    /// Materialized main-cache keys, values, association matrices, and convolution history.
+    /// Readable main-cache keys and values, association matrices, and convolution history.
     tensors: Vec<TensorData>,
 }
 
-/// Materializes one row so failed/no-op calls can prove byte-exact isolation.
-fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> CacheRowSnapshot {
-    let bank = state.tensor_state().main();
+/// Copies one bank's readable KV slots `[0, length)` of `row` for every layer.
+///
+/// Slots at or beyond a row's working length are unreachable by any read:
+/// write-ahead and in-place staging may leave abandoned tokens there, which
+/// is the cache's documented logical (not byte-exact) atomicity.
+fn readable_kv(
+    bank: &crate::cache::TensorCacheBank<TestBackend>,
+    row: usize,
+    length: usize,
+) -> Vec<TensorData> {
     let mut tensors = Vec::new();
     for group in 0..bank.native_kv_count() {
         let cache = bank.native_kv(group).expect("native group");
@@ -101,16 +108,25 @@ fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> Ca
                 cache.keys(layer).expect("keys"),
                 cache.values(layer).expect("values"),
             ] {
-                let [_, heads, time, width] = tensor.dims();
-                tensors.push(
-                    tensor
-                        .clone()
-                        .slice([row..row + 1, 0..heads, 0..time, 0..width])
-                        .into_data(),
-                );
+                let [_, heads, _, width] = tensor.dims();
+                if length > 0 {
+                    tensors.push(
+                        tensor
+                            .clone()
+                            .slice([row..row + 1, 0..heads, 0..length, 0..width])
+                            .into_data(),
+                    );
+                }
             }
         }
     }
+    tensors
+}
+
+/// Materializes one row so failed/no-op calls can prove exact isolation of readable state.
+fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> CacheRowSnapshot {
+    let bank = state.tensor_state().main();
+    let mut tensors = readable_kv(bank, row, state.tensor_state().working_lengths()[row]);
     for group in 0..bank.recurrent_count() {
         let cache = bank.recurrent(group).expect("recurrent group");
         for layer in 0..cache.spec().layers() {
@@ -967,23 +983,6 @@ fn fully_masked_prefill_is_rejected_without_advancing_state() {
     assert_eq!(state.lengths(), &[0]);
 }
 
-/// The cached mask exposes every old key and only the causal current prefix.
-#[test]
-fn cached_causal_mask_uses_bottom_right_alignment() {
-    let device = Default::default();
-    let mask = cached_causal_mask::<TestBackend>(2, 3, 1, &device)
-        .expect("causal geometry")
-        .into_data();
-    assert_eq!(
-        mask.as_slice::<bool>().expect("bool mask"),
-        &[
-            false, false, false, true, true, // query at absolute position 2
-            false, false, false, false, true, // query at absolute position 3
-            false, false, false, false, false, // query at absolute position 4
-        ]
-    );
-}
-
 /// Scatter semantics preserve valid order and define padding outputs as zero.
 #[test]
 fn compact_scatter_restores_rectangular_positions() {
@@ -1096,7 +1095,7 @@ fn mtp_full_and_incremental_paths_are_equivalent() {
     );
 }
 
-/// A rejected target/MTP suffix rolls both tensor banks back byte-exactly.
+/// A rejected target/MTP suffix restores every readable target and MTP cache slot.
 #[test]
 fn speculative_transaction_restores_target_and_mtp_bytes() {
     let device = Default::default();
@@ -1125,26 +1124,10 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
         .prefill_mtp_cache(prompt, target.clone(), &mut state)
         .unwrap();
     let main_before = cache_row_snapshot(&state, 0);
-    let mtp_before = state
-        .tensor_state()
-        .mtp()
-        .unwrap()
-        .native_kv(0)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    let mtp_values_before = state
-        .tensor_state()
-        .mtp()
-        .unwrap()
-        .native_kv(0)
-        .unwrap()
-        .values(0)
-        .unwrap()
-        .clone()
-        .into_data();
+    let mtp_readable = |state: &Qwen3_5DecodeState<TestBackend>| {
+        readable_kv(state.tensor_state().mtp().unwrap(), 0, 1)
+    };
+    let mtp_before = mtp_readable(&state);
     let mark = state.mark().unwrap();
     model
         .forward_mtp_cached(
@@ -1175,32 +1158,7 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
     assert_eq!(state.tensor_state().lengths(), &[2]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
     assert_eq!(cache_row_snapshot(&state, 0), main_before);
-    assert_eq!(
-        state
-            .tensor_state()
-            .mtp()
-            .unwrap()
-            .native_kv(0)
-            .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        mtp_before
-    );
-    assert_eq!(
-        state
-            .tensor_state()
-            .mtp()
-            .unwrap()
-            .native_kv(0)
-            .unwrap()
-            .values(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        mtp_values_before
-    );
+    assert_eq!(mtp_readable(&state), mtp_before);
 }
 
 /// Captures committed bytes, proposal cursors, and both logical cache timelines.
@@ -1208,7 +1166,7 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
 struct ContractSnapshot {
     /// Physical main-cache contents captured independently for every batch row.
     rows: Vec<CacheRowSnapshot>,
-    /// Full native-KV buffers from the main bank and optional MTP bank.
+    /// Readable MTP native-KV slots of every row (main-bank rows are in `rows`).
     auxiliary: Vec<TensorData>,
     /// Committed target-cache cursor for each sequence.
     lengths: Vec<usize>,
@@ -1229,12 +1187,15 @@ fn contract_snapshot(state: &Qwen3_5DecodeState<TestBackend>) -> ContractSnapsho
     let tensors = state.tensor_state();
     let mut auxiliary = Vec::new();
     let mut staged = Vec::new();
+    if let (Some(bank), Some(lengths)) = (tensors.mtp(), tensors.mtp_working_lengths()) {
+        for (row, &length) in lengths.iter().enumerate() {
+            auxiliary.extend(readable_kv(bank, row, length));
+        }
+    }
     for bank in std::iter::once(tensors.main()).chain(tensors.mtp()) {
         for group in 0..bank.native_kv_count() {
             let cache = bank.native_kv(group).unwrap();
             for layer in 0..cache.spec().layers() {
-                auxiliary.push(cache.keys(layer).unwrap().clone().into_data());
-                auxiliary.push(cache.values(layer).unwrap().clone().into_data());
                 for row in 0..state.batch_size() {
                     staged.push(cache.staged_length(layer, row).unwrap());
                 }
@@ -1261,48 +1222,6 @@ fn contract_snapshot(state: &Qwen3_5DecodeState<TestBackend>) -> ContractSnapsho
         staged,
         transaction: tensors.has_active_transaction(),
     }
-}
-
-/// Produces a complete, nonzero synthetic write set with the real cache geometry.
-fn contract_pending(
-    state: &Qwen3_5DecodeState<TestBackend>,
-    counts: &[usize],
-) -> PendingQwenCacheWrites<TestBackend> {
-    let mut pending = PendingQwenCacheWrites::new();
-    for (row, &count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
-        if let Some(spec) = state.layout.native_kv {
-            for layer in 0..spec.layers() {
-                let cache = state.tensors.main().native_kv(0).unwrap();
-                let keys = cache
-                    .keys(layer)
-                    .unwrap()
-                    .clone()
-                    .narrow(0, row, 1)
-                    .narrow(2, 0, count)
-                    + 1.0;
-                pending.native_kv.push(PendingNativeKvWrite {
-                    cache_layer: layer,
-                    sequence: row,
-                    start: state.tensors.working_lengths()[row],
-                    values: keys.clone() + 1.0,
-                    keys,
-                });
-            }
-        }
-        if let Some(spec) = state.layout.recurrent {
-            let cache = state.tensors.main().recurrent(0).unwrap();
-            for layer in 0..spec.layers() {
-                pending.recurrent.push(PendingRecurrentWrite {
-                    cache_layer: layer,
-                    sequence: row,
-                    token_count: count,
-                    matrix: cache.matrix(layer).unwrap().clone().narrow(0, row, 1) + 1.0,
-                    convolution: cache.convolution(layer).unwrap().clone().narrow(0, row, 1) + 1.0,
-                });
-            }
-        }
-    }
-    pending
 }
 
 /// Builds an MTP-enabled model without changing the ordinary hybrid fixture.
@@ -1394,156 +1313,108 @@ fn cache_contract_model_schedule_mismatch_is_atomic() {
     assert_eq!(contract_snapshot(&state), before);
 }
 
-/// Missing rows or layers cannot advance metadata despite otherwise well-shaped tensors.
+/// An incomplete step write set is rejected at publication without changing any readable state.
+///
+/// Every batched call records all of its layers in one step; publication
+/// requires each active row of every layer to be written exactly once. A
+/// family bug that skipped a layer would therefore fail atomically.
 #[test]
-fn cache_contract_pending_cardinality_is_atomic() {
+fn cache_contract_incomplete_step_is_atomic() {
     let device = Default::default();
     let model = tiny_model(&device);
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
         .unwrap();
     let before = contract_snapshot(&state);
-    for case in 0..3 {
-        let mut pending = contract_pending(&state, &[1]);
-        let counts: &[usize] = if case == 0 { &[] } else { &[1] };
-        if case == 1 {
-            pending.native_kv.clear();
-        }
-        if case == 2 {
-            pending.recurrent.pop();
-        }
-        let error = pending
-            .commit(&mut state.tensors, &state.layout, counts)
-            .unwrap_err();
-        assert!(error.to_string().contains(if case == 0 {
-            "describe 0 rows"
-        } else {
-            "coverage mismatch"
-        }));
-        assert_eq!(contract_snapshot(&state), before);
-    }
-}
-
-/// Native appends must have unique active coordinates, the working cursor, and exact time axes.
-#[test]
-fn cache_contract_pending_native_coordinates_are_atomic() {
-    let device = Default::default();
-    let model = tiny_model(&device);
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    for case in 0..7 {
-        let counts = if case == 6 { [1, 0] } else { [1, 1] };
-        let mut pending = contract_pending(&state, &counts);
-        let write = pending.native_kv.last_mut().unwrap();
-        match case {
-            0 => write.sequence = 2,
-            1 => write.cache_layer = 1,
-            2 => write.start = 1,
-            3 => write.keys = Tensor::zeros([1, 1, 2, 4], &device),
-            4 => write.values = Tensor::zeros([1, 1, 2, 4], &device),
-            5 => write.sequence = 0,
-            6 => write.sequence = 1,
-            _ => unreachable!(),
-        }
-        let error = pending
-            .commit(&mut state.tensors, &state.layout, &counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "outside 2"
-            } else {
-                "invalid or duplicate Qwen native write"
-            }),
-            "case {case}: {error}"
+    let mut writes = state.tensors.step(&[1]).unwrap();
+    let recurrent = state.tensors.main().recurrent(RECURRENT_GROUP).unwrap();
+    for layer in 0..recurrent.spec().layers() {
+        writes.push_recurrent_row(
+            RECURRENT_GROUP,
+            layer,
+            0,
+            recurrent.matrix(layer).unwrap().clone() + 1.0,
+            recurrent.convolution(layer).unwrap().clone() + 1.0,
         );
-        assert_eq!(contract_snapshot(&state), before, "case {case}");
     }
-}
-
-/// DeltaNet replacements cover every active row and layer exactly once at the declared token count.
-#[test]
-fn cache_contract_pending_recurrent_coordinates_are_atomic() {
-    let device = Default::default();
-    let model = tiny_model(&device);
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    for case in 0..5 {
-        let counts = if case == 4 { [1, 0] } else { [1, 1] };
-        let mut pending = contract_pending(&state, &counts);
-        let write = pending.recurrent.last_mut().unwrap();
-        match case {
-            0 => write.sequence = 2,
-            1 => write.cache_layer = 3,
-            2 => write.token_count = 2,
-            3 => write.cache_layer = 0,
-            4 => write.sequence = 1,
-            _ => unreachable!(),
-        }
-        let error = pending
-            .commit(&mut state.tensors, &state.layout, &counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "outside 2"
-            } else {
-                "invalid or duplicate Qwen recurrent write"
-            }),
-            "case {case}: {error}"
-        );
-        assert_eq!(contract_snapshot(&state), before, "case {case}");
-    }
-}
-
-/// Failure preparing a late recurrent tensor cannot publish earlier prepared KV appends.
-#[test]
-fn cache_contract_pending_tensor_geometry_is_atomic() {
-    let device = Default::default();
-    let model = tiny_model(&device);
-    let mut state = model
-        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    let mut pending = contract_pending(&state, &[1]);
-    pending.recurrent.last_mut().unwrap().matrix = Tensor::zeros([1, 2, 3, 4], &device);
-    let error = pending
-        .commit(&mut state.tensors, &state.layout, &[1])
-        .unwrap_err();
-    assert!(error.to_string().contains("shape"), "{error}");
+    // The full-attention layer is missing.
+    let error = state.tensors.publish_step(writes).unwrap_err();
+    assert!(error.to_string().contains("missing write"), "{error}");
     assert_eq!(contract_snapshot(&state), before);
-    contract_pending(&state, &[1])
-        .commit(&mut state.tensors, &state.layout, &[1])
-        .unwrap();
-    assert_eq!(state.lengths(), &[1]);
-    assert_ne!(contract_snapshot(&state), before);
 }
 
-/// Hybrid transactions need one post-token recurrent snapshot for each accepted prefix.
+/// A transaction decodes several tokens in one call and commits any accepted prefix exactly.
+///
+/// Full attention stages the tokens in place and DeltaNet keeps the state
+/// after each token, so committing a prefix of `a` tokens must equal having
+/// decoded exactly those `a` tokens: the next call's logits match a state that
+/// decoded the prefix one token at a time.
 #[test]
-fn cache_contract_transactional_hybrid_chunk_rejection_is_atomic() {
+fn transactional_multi_token_decode_commits_any_prefix() {
     let device = Default::default();
     let model = contract_mtp_model(&device);
-    let mut state = model
-        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
-        .unwrap();
-    let mark = state.mark().unwrap();
-    let before = contract_snapshot(&state);
-    let error = contract_pending(&state, &[2])
-        .commit(&mut state.tensors, &state.layout, &[2])
-        .unwrap_err();
-    assert!(error.to_string().contains("at most one token per row"));
-    assert_eq!(contract_snapshot(&state), before);
-    contract_pending(&state, &[1])
-        .commit(&mut state.tensors, &state.layout, &[1])
-        .unwrap();
-    assert_eq!(state.lengths(), &[0]);
-    assert_eq!(state.tensors.working_lengths(), &[1]);
-    state.rollback(mark).unwrap();
-    assert_eq!(state.tensors.working_lengths(), &[0]);
-    assert_eq!(cache_row_snapshot(&state, 0), before.rows[0]);
+    let prompt = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let tokens = [4, 5, 6];
+    let decode = |state: &mut Qwen3_5DecodeState<TestBackend>, ids: &[i32]| {
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 1, Int>::from_ints(ids, &device)
+                        .reshape([1, ids.len()]),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits
+    };
+    for accepted in 0..=tokens.len() {
+        let mut speculative = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 3, &device)
+            .unwrap();
+        model
+            .prefill(prompt.clone(), &mut speculative, &ForwardOptions::default())
+            .unwrap();
+        let before = cache_row_snapshot(&speculative, 0);
+        let mark = speculative.mark().unwrap();
+        let staged = decode(&mut speculative, &tokens);
+        assert_eq!(speculative.tensors.working_lengths(), &[6]);
+        speculative.commit_prefixes(mark, accepted, 0).unwrap();
+        assert_eq!(speculative.lengths(), &[3 + accepted]);
+
+        let mut sequential = model
+            .new_decode_state(CacheConfig::new(1, 12).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(prompt.clone(), &mut sequential, &ForwardOptions::default())
+            .unwrap();
+        let mut sequential_logits = Vec::new();
+        for &token in &tokens[..accepted] {
+            sequential_logits.push(decode(&mut sequential, &[token]));
+        }
+        if accepted > 0 {
+            assert_close(
+                staged.clone().narrow(1, 0, accepted),
+                Tensor::cat(sequential_logits, 1),
+            );
+        } else {
+            assert_eq!(cache_row_snapshot(&speculative, 0), before);
+        }
+        // The next token continues identically from both states.
+        assert_close(
+            decode(&mut speculative, &[7]),
+            decode(&mut sequential, &[7]),
+        );
+    }
 }
 
 /// MTP prompt alignment validates both tensors and the already-committed target cursor.
@@ -1628,7 +1499,11 @@ fn cache_contract_mtp_cached_shapes_are_atomic() {
     }
 }
 
-/// Auxiliary prefill and multi-token proposal calls are forbidden inside an open transaction.
+/// Auxiliary prefill is forbidden inside a transaction; staged MTP calls stop at staging capacity.
+///
+/// Multi-token MTP calls are allowed inside a transaction (speculative
+/// verification re-runs the MTP layer over the accepted target pairs), but a
+/// call that would exceed the staging capacity fails without staging anything.
 #[test]
 fn cache_contract_mtp_transaction_rejections_are_atomic() {
     let device = Default::default();
@@ -1647,7 +1522,19 @@ fn cache_contract_mtp_transaction_rejections_are_atomic() {
         .unwrap_err();
     assert!(error.to_string().contains("prefill Qwen MTP cache"));
     assert_eq!(contract_snapshot(&state), before);
+    // Staging capacity is max_draft_tokens + 1 = 3.
     let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[1, 2, 3, 4]], &device),
+            Tensor::zeros([1, 4, 8], &device),
+            None,
+            0,
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("staging"), "{error}");
+    assert_eq!(contract_snapshot(&state), before);
+    model
         .forward_mtp_cached(
             Tensor::from_ints([[1, 2]], &device),
             Tensor::zeros([1, 2, 8], &device),
@@ -1655,10 +1542,13 @@ fn cache_contract_mtp_transaction_rejections_are_atomic() {
             0,
             &mut state,
         )
-        .unwrap_err();
-    assert!(error.to_string().contains("exactly one token per call"));
-    assert_eq!(contract_snapshot(&state), before);
+        .unwrap();
+    assert_eq!(
+        state.tensor_state().mtp_working_lengths(),
+        Some([2].as_slice())
+    );
     state.rollback(mark).unwrap();
+    assert_eq!(contract_snapshot(&state).mtp_working, before.mtp_working);
 }
 
 /// Reordering and duplicating a ragged beam moves both DeltaNet history and full-attention KV.

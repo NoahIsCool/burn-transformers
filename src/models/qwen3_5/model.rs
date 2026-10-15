@@ -40,6 +40,7 @@ use crate::models::shared::{
     ensure_same_device, select_hidden, validate_input,
 };
 
+pub(crate) mod batch;
 mod decode;
 mod mtp;
 mod speculative;

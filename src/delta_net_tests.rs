@@ -1595,3 +1595,179 @@ fn batched_rows_match_their_recurrences() {
             );
     }
 }
+
+/// Builds `[batch, sequence, width]` smooth hidden states for mixer tests.
+fn smooth_hidden(batch: usize, sequence: usize, width: usize) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, Int>::arange(0..(batch * sequence * width) as i64, &Default::default())
+        .float()
+        .mul_scalar(0.613)
+        .sin()
+        .reshape([batch, sequence, width])
+}
+
+/// A long projected prefill takes the chunked rule and still equals token-by-token decode.
+#[test]
+fn projected_mixer_chunked_prefill_matches_decode() {
+    let device = Default::default();
+    TestBackend::seed(&device, 11);
+    let mut config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    config.convolution_kernel = 3;
+    config.prefill_chunk_size = 4;
+    let mixer = config.init::<TestBackend>(&device).unwrap();
+    let sequence = 23;
+    assert!(
+        !prefers_recurrence(sequence, 2 * 2 * 2),
+        "must exercise the chunked rule"
+    );
+    let hidden = smooth_hidden(2, sequence, 4);
+    let mut prefill_state = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+    let prefill = mixer
+        .forward_with_state(
+            hidden.clone(),
+            None,
+            &mut prefill_state,
+            DeltaNetMode::ChunkedPrefill,
+        )
+        .unwrap();
+    let mut decode_state = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+    let decode = Tensor::cat(
+        (0..sequence)
+            .map(|index| {
+                mixer
+                    .forward_with_state(
+                        hidden.clone().narrow(1, index, 1),
+                        None,
+                        &mut decode_state,
+                        DeltaNetMode::Recurrent,
+                    )
+                    .unwrap()
+            })
+            .collect(),
+        1,
+    );
+    let tolerance = Tolerance::rel_abs(2e-4, 2e-5);
+    prefill
+        .into_data()
+        .assert_approx_eq::<f32>(&decode.into_data(), tolerance);
+    prefill_state
+        .recurrent
+        .into_data()
+        .assert_approx_eq::<f32>(&decode_state.recurrent.into_data(), tolerance);
+    prefill_state
+        .convolution
+        .into_data()
+        .assert_approx_eq::<f32>(&decode_state.convolution.into_data(), tolerance);
+}
+
+/// Mixer snapshots equal the state after feeding each column alone, padding included.
+#[test]
+fn mixer_snapshots_match_column_by_column_states() {
+    let device = Default::default();
+    TestBackend::seed(&device, 13);
+    for kernel in [1, 3] {
+        let mut config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+        config.convolution_kernel = kernel;
+        let mixer = config.init::<TestBackend>(&device).unwrap();
+        let hidden = smooth_hidden(2, 5, 4);
+        let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [
+                [true, false, true, true, false],
+                [false, true, true, false, true],
+            ]
+            .into(),
+            &device,
+        ));
+        let mut start = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+        // A non-zero incoming state makes the convolution history observable.
+        start.convolution = start.convolution.clone() + 0.25;
+        start.recurrent = start.recurrent.clone() + 0.125;
+
+        let mut snapshot_state = start.clone();
+        let (output, snapshots) = mixer
+            .forward_with_snapshots(hidden.clone(), Some(&mask), &mut snapshot_state)
+            .unwrap();
+        let mut recurrent_state = start.clone();
+        let recurrent = mixer
+            .forward_with_state(
+                hidden.clone(),
+                Some(&mask),
+                &mut recurrent_state,
+                DeltaNetMode::Recurrent,
+            )
+            .unwrap();
+        assert_eq!(
+            output.into_data().to_vec::<f32>().unwrap(),
+            recurrent.into_data().to_vec::<f32>().unwrap()
+        );
+
+        let mut column_state = start.clone();
+        for column in 0..5 {
+            let column_mask = TokenMask::new(mask.as_tensor().clone().narrow(1, column, 1));
+            mixer
+                .forward_with_state(
+                    hidden.clone().narrow(1, column, 1),
+                    Some(&column_mask),
+                    &mut column_state,
+                    DeltaNetMode::Recurrent,
+                )
+                .unwrap();
+            let [batch, _, heads, key_dim, value_dim] = snapshots.recurrent.dims();
+            snapshots
+                .recurrent
+                .clone()
+                .narrow(1, column, 1)
+                .reshape([batch, heads, key_dim, value_dim])
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &column_state.recurrent.clone().into_data(),
+                    Tolerance::rel_abs(1e-5, 1e-6),
+                );
+            let [_, _, channels, width] = snapshots.convolution.dims();
+            assert_eq!(width, kernel - 1);
+            if width == 0 {
+                // Burn reads a zero in a reshape target as "keep this axis".
+                continue;
+            }
+            assert_eq!(
+                snapshots
+                    .convolution
+                    .clone()
+                    .narrow(1, column, 1)
+                    .reshape([batch, channels, width])
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap(),
+                column_state
+                    .convolution
+                    .clone()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            snapshot_state
+                .recurrent
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            recurrent_state
+                .recurrent
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+        );
+        assert_eq!(
+            snapshot_state
+                .convolution
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            recurrent_state
+                .convolution
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+        );
+    }
+}

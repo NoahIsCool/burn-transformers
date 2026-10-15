@@ -1,4 +1,4 @@
-//! Cache-aware Qwen3.5/Qwen3.8 causal inference.
+//! Cache-aware Qwen3.5/Qwen3.8 causal inference, one batched pass per call.
 //!
 //! Qwen's hybrid schedule has two physically different histories. A full-attention
 //! layer retains every native key/value head, whereas a DeltaNet layer retains only
@@ -6,34 +6,62 @@
 //! [`Qwen3_5DecodeState`] maps model-layer indices monotonically into one cache group
 //! of each kind, keeping runtime state outside Burn's parameter [`burn::module::Module`] graph.
 //!
-//! Masked rectangular batches are compacted one row at a time before model math.
-//! This is more than an optimization detail: a padding token must not shift the
-//! causal-convolution history or consume a logical RoPE position. Results at masked
-//! output positions are defined as zero; valid positions are scattered back to the
-//! caller's rectangular shape.
-
-use std::collections::BTreeSet;
+//! # Batched execution
+//!
+//! Every prefill or decode call runs the whole batch through each layer once.
+//! The rectangular input is first arranged in the compact right-padded layout
+//! of [`CompactBatch`]: row `b`'s `n_b` valid tokens occupy slots `0..n_b`,
+//! slot `i` is cache position `W_b + i`, and padding consumes neither a cache
+//! position, a rotary position, nor convolution history. Then, per layer:
+//!
+//! * full attention writes the new rotated keys and values straight into
+//!   their cache slots ([`TensorDecodeState::write_kv_ahead`]) and attends over
+//!   one zero-copy view of `[0, W_b + n_b)`. A batch whose rows share one
+//!   cursor and token count uses the backend's bottom-right causal path with no
+//!   mask; any other batch uses one `[B, 1, N, K]` exclusion plane built from
+//!   cache positions and shared by every layer;
+//! * DeltaNet reads every row's state at once, runs the masked chunked
+//!   prefill or the recurrence over the batch, and records the new batch state.
+//!
+//! All writes belong to one [`TensorStepWrites`], published only after the
+//! vocabulary projection succeeds; a failed call leaves every length and every
+//! readable cache position unchanged (slots beyond the lengths may hold the
+//! abandoned write-ahead tokens, which nothing can read).
+//!
+//! # Speculative transactions
+//!
+//! Inside a transaction the step stages proposals instead of committing them.
+//! Full-attention groups stage in place, so keys still attend through one
+//! view. A DeltaNet recurrence cannot be rewound, so a multi-token step keeps
+//! the state after every token ([`GatedDeltaNet::forward_with_snapshots`]) and
+//! a later prefix commit selects the snapshot at the accepted boundary.
+//!
+//! [`GatedDeltaNet::forward_with_snapshots`]: crate::delta_net::GatedDeltaNet::forward_with_snapshots
 
 use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
     architecture::DecodeState as ArchitectureDecodeState,
+    attention::GroupedQueryAttention,
     cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
-        TensorCacheBank, TensorCacheError, TensorCacheMark, TensorDecodeState,
+        CacheConfig, DecodeStateError, KvBatchReadPlan, KvCacheStorage, NativeKvCacheSpec,
+        RecurrentStateSpec, TensorCacheError, TensorCacheMark, TensorDecodeState, TensorStepWrites,
     },
     delta_net::{DeltaNetMode, GatedDeltaNetState},
     models::shared::{
-        DeferredChecks, EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
+        DeferredChecks, EmptyRows, StatefulContract, StatefulRows, ensure_same_device,
         implicit_position_ids, prepare_stateful_rows, select_hidden_with_last_columns,
         validate_logits_selection,
     },
-    position::{RopeConfig, RotaryAngles, apply_rotary, rotary_angles},
+    position::{
+        RopeConfig, RotaryAngles, RotaryFrequencies, apply_rotary, rotary_angles_from_frequencies,
+    },
 };
 
 use super::{
     INPUT_NAMES, Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5MtpPrediction, Qwen3_5TextModel,
+    batch::CompactBatch,
 };
 use crate::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
 
@@ -46,7 +74,7 @@ const DECODE_STATE: &str = "Qwen decode state";
 
 /// Public stateful operation whose empty-row semantics differ intentionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatefulPhase {
+pub(super) enum StatefulPhase {
     /// Every prompt row must contain at least one token.
     Prefill,
     /// Finished rows may contribute zero new tokens while peers continue.
@@ -139,7 +167,7 @@ pub struct Qwen3_5DecodeState<B: Backend> {
 }
 
 impl<B: Backend> Qwen3_5DecodeState<B> {
-    /// Allocates a state whose topology exactly matches `model`.
+    /// Allocates a state whose topology exactly matches `model`, without speculative staging.
     ///
     /// Full-attention storage deliberately remains full even when `config`
     /// contains a sliding-window hint: Qwen labels these layers global and
@@ -150,23 +178,6 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self> {
-        if config.capacity() > model.config().max_position_embeddings {
-            return Err(Error::configuration(
-                "qwen3_5.decode_state.capacity",
-                format!(
-                    "{} exceeds max_position_embeddings {}",
-                    config.capacity(),
-                    model.config().max_position_embeddings
-                ),
-            ));
-        }
-        if config.capacity() > i32::MAX as usize {
-            return Err(Error::configuration(
-                "qwen3_5.decode_state.capacity",
-                "must fit Burn's portable signed position-index range",
-            ));
-        }
-
         Self::new_with_staging(model, config, batch_size, 0, device)
     }
 
@@ -178,12 +189,6 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
         staging_capacity: usize,
         device: &B::Device,
     ) -> Result<Self> {
-        if model.mtp.as_ref().is_some_and(|mtp| mtp.layers.len() != 1) {
-            return Err(Error::BackendCapability(
-                "cached Qwen MTP currently supports the released single-layer auxiliary graph"
-                    .into(),
-            ));
-        }
         if config.capacity() > model.config().max_position_embeddings {
             return Err(Error::configuration(
                 "qwen3_5.decode_state.capacity",
@@ -454,9 +459,10 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
 impl<B: Backend> Qwen3_5ForCausalLm<B> {
     /// Allocates the batch-one transactional state required by MTP speculation.
     ///
-    /// The target stages `K + 1` tokens (the guaranteed target lead plus as many
-    /// accepted drafts), while the shifted MTP bank stages at most `K + 1`
-    /// inputs. Both use independent logical cursors and an atomic prefix commit.
+    /// A cycle verifies the target lead token plus up to `K` drafts in one
+    /// pass, staging `K + 1` target tokens, and re-runs the MTP layer over the
+    /// accepted pairs, staging at most `K + 1` MTP tokens. Both banks use
+    /// independent logical cursors and an atomic prefix commit.
     pub fn new_speculative_decode_state(
         &self,
         config: CacheConfig,
@@ -499,10 +505,13 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
 
     /// Evaluates shifted MTP inputs against its independent incremental KV cache.
     ///
-    /// Before the first call, callers prefill pairs `(x_(i+1), h_i)` for the
-    /// prompt. During speculation each call contains exactly one pair and is
-    /// staged transactionally. The returned hidden state is recurrently fed to
-    /// the next draft step, as prescribed by the released Qwen runtime.
+    /// Pair `j` combines `next_token_ids[0, j] = x_(t+1)` with the hidden state
+    /// `h_t` that preceded it (see [`Self::forward_mtp`]); all pairs of one call
+    /// append consecutively to the MTP cache, inside or outside a transaction.
+    /// Prefill passes the shifted prompt pairs; speculative verification passes
+    /// the accepted target pairs; drafting passes one pair per step whose
+    /// hidden state is the previous MTP output, as the released runtime does.
+    /// `step` selects the MTP layer `step mod mtp_num_hidden_layers`.
     pub fn forward_mtp_cached(
         &self,
         next_token_ids: Tensor<B, 2, Int>,
@@ -523,28 +532,19 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 format!("[{batch}, {sequence}]"),
             ));
         }
-        if state.tensors.has_active_transaction() && sequence != 1 {
-            return Err(Error::Generation(
-                "transactional Qwen MTP decoding accepts exactly one token per call".into(),
-            ));
-        }
+        let device = state.tensors.device().clone();
         ensure_same_device(
             "qwen.mtp.next_token_ids",
             &next_token_ids.device(),
-            state.tensors.device(),
+            &device,
             DECODE_STATE,
         )?;
         ensure_same_device(
             "qwen.mtp.hidden_state",
             &target_or_mtp_hidden.device(),
-            state.tensors.device(),
+            &device,
             DECODE_STATE,
         )?;
-        let committed = state
-            .tensors
-            .mtp_lengths()
-            .and_then(|lengths| lengths.first().copied())
-            .ok_or_else(|| Error::Cache("Qwen MTP metadata is not enabled".into()))?;
         let baseline = state
             .tensors
             .mtp_working_lengths()
@@ -584,7 +584,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 ensure_same_device(
                     "qwen.mtp.position_ids",
                     &positions.device(),
-                    state.tensors.device(),
+                    &device,
                     DECODE_STATE,
                 )?;
                 let range = checks.values_below(
@@ -596,12 +596,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 (positions, Some(range))
             }
             None => (
-                implicit_position_ids(
-                    baseline,
-                    sequence,
-                    state.tensors.device(),
-                    INPUT_NAMES.position_ids,
-                )?,
+                implicit_position_ids(baseline, sequence, &device, INPUT_NAMES.position_ids)?,
                 None,
             ),
         };
@@ -611,45 +606,39 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             None => end,
         };
         ensure_cacheable_rotary_context(self.model.rope, evaluated_context, "Qwen")?;
-        let embedding = self.model.embed_tokens.forward(next_token_ids);
-        let mut hidden = mtp.fuse(embedding, target_or_mtp_hidden)?;
-        let layer_count = mtp.layers.len();
-        if layer_count == 0 {
-            return Err(Error::Cache("Qwen MTP graph contains no layer".into()));
+        // One call writes one MTP layer, so a step covers the whole MTP group
+        // only for the released single-layer graph.
+        if mtp.layers.len() != 1 {
+            return Err(Error::BackendCapability(
+                "cached Qwen MTP currently supports the released single-layer auxiliary graph"
+                    .into(),
+            ));
         }
-        let layer_index = step % layer_count;
-        let rotary = rotary_angles(self.model.rope, positions, evaluated_context)?;
-        let mut pending = PendingQwenCacheWrites::new();
-        let bank = state
-            .tensors
-            .mtp()
-            .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?;
-        hidden = mtp.layers[layer_index].forward_cached(
-            hidden,
-            Some(&rotary),
-            0,
-            committed,
-            baseline,
-            bank,
-            Qwen3_5LayerCache::FullAttention(layer_index),
-            &mut pending,
-            DeltaNetMode::Recurrent,
+        let layer_index = step % mtp.layers.len();
+        let layout = CompactBatch::new(&[(0..sequence).collect()], sequence, &[baseline], &device)?;
+        let embedding = self.model.embed_tokens.forward(next_token_ids);
+        let hidden = mtp.fuse(embedding, target_or_mtp_hidden)?;
+        let mut writes = state.tensors.mtp_step(&[sequence])?;
+        let mut attention = AttentionStep::new(
+            self.model.rope,
+            evaluated_context,
+            positions,
+            hidden.dtype(),
+            &state.tensors,
+            &writes,
         )?;
-        hidden = mtp.norm.forward(hidden);
-        let write = match (
-            pending.native_kv.pop(),
-            pending.native_kv.is_empty(),
-            pending.recurrent.is_empty(),
-        ) {
-            (Some(write), true, true) => write,
-            _ => {
-                return Err(Error::Cache(
-                    "Qwen MTP layer produced an invalid cache write set".into(),
-                ));
-            }
-        };
+        let hidden = mtp.layers[layer_index].cached_step(
+            hidden,
+            Qwen3_5LayerCache::FullAttention(layer_index),
+            &layout,
+            &mut state.tensors,
+            &mut writes,
+            Some(&mut attention),
+            DeltaStep::Terminal(DeltaNetMode::Recurrent),
+        )?;
+        let hidden = mtp.norm.forward(hidden);
         let logits = self.project_hidden(hidden.clone())?;
-        commit_mtp_write(&mut state.tensors, write, sequence)?;
+        state.tensors.publish_step(writes)?;
         Ok(Qwen3_5MtpPrediction {
             logits,
             hidden_state: hidden,
@@ -715,10 +704,10 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
 
     /// Evaluates a rectangular prompt/decode segment and appends only valid tokens.
     ///
-    /// Each row is compacted according to `token_mask`, evaluated against its own
-    /// committed length, and scattered back into the rectangular output. If row
-    /// `b` has baseline `L_b`, its `i`th valid implicit position is `L_b + i` and
-    /// its full-attention query can see keys `j <= L_b + i`.
+    /// If row `b` has working length `W_b`, its `i`th valid implicit position
+    /// is `W_b + i` and its full-attention query can see keys `j <= W_b + i`.
+    /// Padded positions and every position of a row without valid tokens
+    /// return zeros and leave that row's cache untouched.
     fn forward_with_decode_state(
         &self,
         input: CausalLmInput<B>,
@@ -726,94 +715,110 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         options: &ForwardOptions,
         phase: StatefulPhase,
     ) -> Result<CausalLmOutput<B>> {
+        self.cached_forward(input, state, options, phase, false)
+    }
+
+    /// Runs one batched cached call; `keep_final_hidden` also returns the final states.
+    ///
+    /// `final_hidden_state` is filled when either `options.hidden_states` or
+    /// `keep_final_hidden` is set; speculative verification uses the latter to
+    /// read every verified position's state without the per-layer trace.
+    pub(super) fn cached_forward(
+        &self,
+        input: CausalLmInput<B>,
+        state: &mut Qwen3_5DecodeState<B>,
+        options: &ForwardOptions,
+        phase: StatefulPhase,
+        keep_final_hidden: bool,
+    ) -> Result<CausalLmOutput<B>> {
         if options.attentions {
             return Err(Error::BackendCapability(
                 "Qwen attention probability capture requires the reference attention path".into(),
             ));
         }
         state.validate_for_model(self)?;
-        let prepared = prepare_stateful_input(self, &input, state, phase)?;
-        validate_logits_selection(&options.logits, prepared.sequence)?;
-        let device = input.token_ids.device();
-        let diagnostic_count = self.model.layers.len() + 2;
-        let mut pending = PendingQwenCacheWrites::new();
-        let mut final_rows = Vec::with_capacity(prepared.batch);
-        let mut diagnostic_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
-            (0..diagnostic_count)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
+        let rows = prepare_stateful_input(self, &input, state, phase)?;
+        validate_logits_selection(&options.logits, rows.sequence)?;
+        let keep_final = options.hidden_states || keep_final_hidden;
+        if rows.token_counts.iter().all(|&count| count == 0) {
+            // Every row is finished: an exact no-op with zero outputs.
+            return self.inactive_output(&rows, options, keep_final, state.tensors.device());
+        }
+        let device = state.tensors.device().clone();
+        let layout = CompactBatch::new(
+            &rows.valid_indices,
+            rows.sequence,
+            state.tensors.working_lengths(),
+            &device,
+        )?;
+        // Padding slots are evaluated (and discarded), so they carry token 0
+        // and position 0 instead of the caller's arbitrary sentinels.
+        let tokens = layout.compact(&input.token_ids, 0);
+        let positions = match &input.position_ids {
+            Some(positions) => layout.compact(positions, 0),
+            None => layout.cache_positions().clone(),
+        };
+        // Every active context is within the cacheable range, where rotary
+        // frequencies do not depend on the context, so the largest serves all rows.
+        let context = rows
+            .active_contexts()
+            .map(|(_, context)| context)
+            .max()
+            .unwrap_or(1);
+        let pass = self.model.run_cached(
+            tokens,
+            positions,
+            context,
+            &layout,
+            &mut state.tensors,
+            &state.layout.schedule,
+            phase,
+            options.hidden_states,
+        )?;
+        let selected = layout.select(pass.hidden.clone(), &options.logits, rows.last_columns())?;
+        let logits = self.project_hidden(selected)?;
+        let final_hidden_state = keep_final.then(|| layout.restore(pass.hidden));
+        let hidden_states = pass
+            .hidden_states
+            .into_iter()
+            .map(|hidden| layout.restore(hidden))
+            .collect();
+        state.tensors.publish_step(pass.writes)?;
+        Ok(CausalLmOutput {
+            logits,
+            final_hidden_state,
+            hidden_states,
+            attentions: Vec::new(),
+            routers: Vec::new(),
+            load_balancing_loss: None,
+        })
+    }
+
+    /// Returns the zero outputs of a call in which no row appends a token.
+    ///
+    /// No layer is evaluated and no cache changes. Qwen's vocabulary
+    /// projections have no bias, so zero hidden states give exact zero logits.
+    fn inactive_output(
+        &self,
+        rows: &StatefulRows,
+        options: &ForwardOptions,
+        keep_final: bool,
+        device: &B::Device,
+    ) -> Result<CausalLmOutput<B>> {
+        let zeros = Tensor::<B, 3>::zeros(
+            [rows.batch, rows.sequence, self.config().hidden_size],
+            (device, self.model.embed_tokens.weight.val().dtype()),
+        );
+        let selected =
+            select_hidden_with_last_columns(zeros.clone(), rows.last_columns(), &options.logits)?;
+        let hidden_states = if options.hidden_states {
+            vec![zeros.clone(); self.model.layers.len() + 2]
         } else {
             Vec::new()
         };
-
-        for sequence_index in 0..prepared.batch {
-            let Some(plan) = prepared.compact_row::<B>(sequence_index, &device)? else {
-                let empty = empty_hidden_row(self, prepared.sequence, &device);
-                final_rows.push(empty.clone());
-                if options.hidden_states {
-                    for destination in &mut diagnostic_rows {
-                        destination.push(empty.clone());
-                    }
-                }
-                continue;
-            };
-            let tokens = plan.compact(&input.token_ids);
-            let committed_baseline = state.tensors.lengths()[sequence_index];
-            let baseline = state.tensors.working_lengths()[sequence_index];
-            let positions = match &input.position_ids {
-                Some(position_ids) => plan.compact(position_ids),
-                None => implicit_position_ids(
-                    baseline,
-                    plan.count(),
-                    &device,
-                    INPUT_NAMES.position_ids,
-                )?,
-            };
-            let evaluated_context = prepared.evaluated_contexts[sequence_index];
-            let (compact, compact_diagnostics) = self.model.forward_compact_row(
-                tokens,
-                positions,
-                sequence_index,
-                committed_baseline,
-                baseline,
-                evaluated_context,
-                &state.tensors,
-                &state.layout.schedule,
-                &mut pending,
-                phase.delta_mode(),
-                options.hidden_states,
-            )?;
-            final_rows.push(plan.scatter(compact)?);
-            if options.hidden_states {
-                if compact_diagnostics.len() != diagnostic_count {
-                    return Err(Error::Cache(format!(
-                        "Qwen hidden-state count must be {diagnostic_count}, found {}",
-                        compact_diagnostics.len()
-                    )));
-                }
-                for (destination, compact_state) in
-                    diagnostic_rows.iter_mut().zip(compact_diagnostics)
-                {
-                    destination.push(plan.scatter(compact_state)?);
-                }
-            }
-        }
-
-        let hidden = concat_rows(final_rows, "qwen.hidden")?;
-        let hidden_states = diagnostic_rows
-            .into_iter()
-            .map(|rows| concat_rows(rows, "qwen.hidden_states"))
-            .collect::<Result<Vec<_>>>()?;
-        let selected = select_hidden_with_last_columns(
-            hidden.clone(),
-            prepared.last_columns(),
-            &options.logits,
-        )?;
-        let logits = self.project_hidden(selected)?;
-        pending.commit(&mut state.tensors, &state.layout, &prepared.token_counts)?;
         Ok(CausalLmOutput {
-            logits,
-            final_hidden_state: options.hidden_states.then_some(hidden),
+            logits: self.project_hidden(selected)?,
+            final_hidden_state: keep_final.then_some(zeros),
             hidden_states,
             attentions: Vec::new(),
             routers: Vec::new(),
@@ -822,24 +827,64 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
     }
 }
 
+/// Compact outputs and unpublished cache writes of one batched pass.
+struct CachedPass<B: Backend> {
+    /// Final-normalized compact hidden states `[B, N, hidden]`.
+    hidden: Tensor<B, 3>,
+    /// Embedding, every block output, and the normalized output, when requested.
+    hidden_states: Vec<Tensor<B, 3>>,
+    /// Every layer's cache update, published by the caller after projection.
+    writes: TensorStepWrites<B>,
+}
+
 impl<B: Backend> Qwen3_5TextModel<B> {
-    /// Evaluates one compacted row and records, but does not publish, its state.
+    /// Runs every layer once over the compact batch and records its cache writes.
+    ///
+    /// `tokens` and `positions` are compact `[B, N]` (see [`CompactBatch`]);
+    /// `context` is the largest evaluated rotary context of the call.
     #[allow(clippy::too_many_arguments)]
-    fn forward_compact_row(
+    fn run_cached(
         &self,
-        token_ids: Tensor<B, 2, Int>,
+        tokens: Tensor<B, 2, Int>,
         positions: Tensor<B, 2, Int>,
-        sequence_index: usize,
-        committed_baseline: usize,
-        baseline: usize,
-        evaluated_context: usize,
-        state: &TensorDecodeState<B>,
+        context: usize,
+        layout: &CompactBatch<B>,
+        tensors: &mut TensorDecodeState<B>,
         schedule: &[Qwen3_5LayerCache],
-        pending: &mut PendingQwenCacheWrites<B>,
-        delta_mode: DeltaNetMode,
+        phase: StatefulPhase,
         retain_hidden_states: bool,
-    ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
-        let mut hidden = self.embed_tokens.forward(token_ids);
+    ) -> Result<CachedPass<B>> {
+        if schedule.len() != self.layers.len() {
+            return Err(Error::Cache(format!(
+                "Qwen cache schedule has {} entries for {} model layers",
+                schedule.len(),
+                self.layers.len()
+            )));
+        }
+        let mut writes = tensors.step(layout.counts())?;
+        // A recurrence cannot be rewound, so a staged multi-token step keeps
+        // the state after every token for a later prefix commit.
+        let delta =
+            if tensors.has_active_transaction() && layout.counts().iter().any(|&count| count > 1) {
+                DeltaStep::Snapshots
+            } else {
+                DeltaStep::Terminal(phase.delta_mode())
+            };
+        let mut hidden = self.embed_tokens.forward(tokens);
+        let mut attention = schedule
+            .iter()
+            .any(|slot| matches!(slot, Qwen3_5LayerCache::FullAttention(_)))
+            .then(|| {
+                AttentionStep::new(
+                    self.rope,
+                    context,
+                    positions,
+                    hidden.dtype(),
+                    tensors,
+                    &writes,
+                )
+            })
+            .transpose()?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
             self.layers.len() + 2
         } else {
@@ -848,32 +893,15 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        let rotary = if schedule
-            .iter()
-            .any(|slot| matches!(slot, Qwen3_5LayerCache::FullAttention(_)))
-        {
-            Some(rotary_angles(self.rope, positions, evaluated_context)?)
-        } else {
-            None
-        };
-        if schedule.len() != self.layers.len() {
-            return Err(Error::Cache(format!(
-                "Qwen cache schedule has {} entries for {} model layers",
-                schedule.len(),
-                self.layers.len()
-            )));
-        }
-        for (layer, slot) in self.layers.iter().zip(schedule.iter().copied()) {
-            hidden = layer.forward_cached(
+        for (layer, &slot) in self.layers.iter().zip(schedule) {
+            hidden = layer.cached_step(
                 hidden,
-                rotary.as_ref(),
-                sequence_index,
-                committed_baseline,
-                baseline,
-                state.main(),
                 slot,
-                pending,
-                delta_mode,
+                layout,
+                tensors,
+                &mut writes,
+                attention.as_mut(),
+                delta,
             )?;
             if retain_hidden_states {
                 hidden_states.push(hidden.clone());
@@ -883,29 +911,120 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        Ok((hidden, hidden_states))
+        Ok(CachedPass {
+            hidden,
+            hidden_states,
+            writes,
+        })
+    }
+}
+
+/// How a DeltaNet layer evolves and records its recurrent state in one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeltaStep {
+    /// Run the given kernel and record every row's terminal state.
+    Terminal(DeltaNetMode),
+    /// Run the recurrence and record every row's state after each token.
+    Snapshots,
+}
+
+/// Per-step state shared by every full-attention layer of one bank.
+///
+/// Rotary tables, the read plan through the step's own tokens, and the
+/// exclusion mask depend only on the step's positions and lengths, not on the
+/// layer, so they are built once and reused.
+struct AttentionStep<B: Backend> {
+    /// Cosine/sine tables `[B, 1, N, rotary]` in the activation dtype.
+    rotary: RotaryAngles<B>,
+    /// Batched read of `[0, W_b + n_b)` after each layer's write-ahead.
+    plan: KvBatchReadPlan<B>,
+    /// Exclusion mask `[B, heads, N, K]`, built by the first layer that needs it.
+    mask: Option<Tensor<B, 4, Bool>>,
+}
+
+impl<B: Backend> AttentionStep<B> {
+    /// Builds the step's rotary tables (frequencies computed once) and read plan.
+    fn new(
+        rope: RopeConfig,
+        context: usize,
+        positions: Tensor<B, 2, Int>,
+        dtype: DType,
+        tensors: &TensorDecodeState<B>,
+        writes: &TensorStepWrites<B>,
+    ) -> Result<Self> {
+        let frequencies = RotaryFrequencies::new(rope, context)?;
+        Ok(Self {
+            rotary: rotary_angles_from_frequencies(&frequencies, positions)?.to_dtype(dtype),
+            plan: tensors.kv_read_plan_through(writes, NATIVE_KV_GROUP)?,
+            mask: None,
+        })
+    }
+
+    /// Projects, rotates, writes ahead, and attends one full-attention layer.
+    ///
+    /// The new keys and values land in their cache slots before attention,
+    /// which then reads keys and values `[B, kv_heads, K, d]` through one
+    /// view. Invalid slots (beyond a row's `W_b + n_b`) have their values
+    /// zeroed so that stale non-finite bytes cannot poison a row. Outputs at
+    /// padding slots are zeroed for the same reason.
+    fn attend(
+        &mut self,
+        module: &GroupedQueryAttention<B>,
+        normalized: Tensor<B, 3>,
+        cache_layer: usize,
+        layout: &CompactBatch<B>,
+        tensors: &mut TensorDecodeState<B>,
+        writes: &mut TensorStepWrites<B>,
+    ) -> Result<Tensor<B, 3>> {
+        let mut projection = module.project_self(normalized)?;
+        (projection.query, projection.key) =
+            apply_rotary(projection.query, projection.key, &self.rotary)?;
+        tensors.write_kv_ahead(
+            writes,
+            NATIVE_KV_GROUP,
+            cache_layer,
+            projection.key.clone(),
+            projection.value.clone(),
+        )?;
+        let segment = tensors
+            .read_kv_through(writes, NATIVE_KV_GROUP, cache_layer, &self.plan)?
+            .materialize()
+            .ok_or_else(|| Error::Cache("Qwen attention step read no key".into()))?;
+        let uniform = layout.is_uniform();
+        let mask = if uniform {
+            None
+        } else if let Some(mask) = &self.mask {
+            Some(mask.clone())
+        } else {
+            let mask =
+                segment.exclusion_mask(layout.cache_positions(), module.query_heads, None)?;
+            self.mask = Some(mask.clone());
+            Some(mask)
+        };
+        projection.key = segment.keys().clone();
+        projection.value = segment.masked_values();
+        // With every row sharing one cursor and width, causality is the
+        // bottom-right rule over `[0, W + N)` and needs no mask.
+        let mixed = module.attend(projection, mask, None, uniform)?;
+        Ok(layout.zero_padding(mixed))
     }
 }
 
 impl<B: Backend> Qwen3_5DecoderLayer<B> {
-    /// Evaluates one residual block against its mapped external cache slot.
+    /// Evaluates one residual block over the compact batch against its cache slot.
     ///
-    /// Native keys are rotated before being deferred, so later decode calls never
-    /// need the old hidden states or old position IDs. DeltaNet defers its FP32
-    /// terminal matrix and activation-dtype convolution tail after the complete
-    /// compact segment. The caller publishes both only after the full operation.
+    /// Full attention needs the step's [`AttentionStep`]; DeltaNet reads every
+    /// row's working state and records the update as `delta` prescribes.
     #[allow(clippy::too_many_arguments)]
-    fn forward_cached(
+    fn cached_step(
         &self,
         hidden: Tensor<B, 3>,
-        rotary: Option<&RotaryAngles<B>>,
-        sequence_index: usize,
-        committed_baseline: usize,
-        baseline: usize,
-        bank: &TensorCacheBank<B>,
         slot: Qwen3_5LayerCache,
-        pending: &mut PendingQwenCacheWrites<B>,
-        delta_mode: DeltaNetMode,
+        layout: &CompactBatch<B>,
+        tensors: &mut TensorDecodeState<B>,
+        writes: &mut TensorStepWrites<B>,
+        attention: Option<&mut AttentionStep<B>>,
+        delta: DeltaStep,
     ) -> Result<Tensor<B, 3>> {
         if slot.layer_type() != self.layer_type {
             return Err(Error::Cache(format!(
@@ -915,78 +1034,86 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
         }
         let residual = hidden.clone();
         let normalized = self.input_layernorm.forward(hidden);
-        match slot {
+        let mixed = match slot {
             Qwen3_5LayerCache::FullAttention(cache_layer) => {
-                let attention = self.self_attn.as_ref().ok_or_else(|| {
+                let module = self.self_attn.as_ref().ok_or_else(|| {
                     Error::Checkpoint("Qwen full-attention layer has no attention module".into())
                 })?;
-                let rotary = rotary.ok_or_else(|| {
-                    Error::Cache("Qwen full-attention layer has no rotary angles".into())
+                let attention = attention.ok_or_else(|| {
+                    Error::Cache("Qwen full-attention layer has no attention step".into())
                 })?;
-                let mut projection = attention.project_self(normalized)?;
-                (projection.query, projection.key) =
-                    apply_rotary(projection.query, projection.key, rotary)?;
-                let new_keys = projection.key.clone();
-                let new_values = projection.value.clone();
-                let query_sequence = projection.query.dims()[2];
-                let cache = bank.native_kv(NATIVE_KV_GROUP)?;
-                let history = if cache.has_active_staging() {
-                    cache.read_working_sequence(cache_layer, sequence_index, committed_baseline)?
-                } else {
-                    cache.read_sequence(cache_layer, sequence_index, baseline)?
-                };
-                if history.retained_positions() != (0..baseline) {
-                    return Err(Error::Cache(
-                        "Qwen full-attention cache evicted required global history".into(),
-                    ));
-                }
-                if let Some((past_keys, past_values)) = history.materialize() {
-                    projection.key = Tensor::cat(vec![past_keys, projection.key], 2);
-                    projection.value = Tensor::cat(vec![past_values, projection.value], 2);
-                }
-                let mask = cached_causal_mask::<B>(
-                    baseline,
-                    query_sequence,
-                    attention.query_heads,
-                    &projection.query.device(),
-                )?;
-                let mixed = attention.attend(projection, Some(mask), None, false)?;
-                let hidden = finish_residual(self, residual, mixed)?;
-                pending.native_kv.push(PendingNativeKvWrite {
-                    cache_layer,
-                    sequence: sequence_index,
-                    start: baseline,
-                    keys: new_keys,
-                    values: new_values,
-                });
-                Ok(hidden)
+                attention.attend(module, normalized, cache_layer, layout, tensors, writes)?
             }
             Qwen3_5LayerCache::DeltaNet(cache_layer) => {
-                let delta = self.linear_attn.as_ref().ok_or_else(|| {
-                    Error::Checkpoint("Qwen linear layer has no DeltaNet module".into())
-                })?;
-                let cache = bank.recurrent(RECURRENT_GROUP)?;
-                let cached = if cache.has_active_staging() {
-                    cache.read_working_sequence(cache_layer, sequence_index)?
-                } else {
-                    cache.read_sequence(cache_layer, sequence_index)?
-                };
-                let mut recurrent = GatedDeltaNetState {
-                    convolution: cached.convolution().clone(),
-                    recurrent: cached.matrix().clone(),
-                };
-                let token_count = normalized.dims()[1];
+                self.delta_step(normalized, cache_layer, layout, tensors, writes, delta)?
+            }
+        };
+        finish_residual(self, residual, mixed)
+    }
+
+    /// Runs the DeltaNet mixer over the batch and records its new states.
+    ///
+    /// Padding slots are masked, so they neither update the matrix nor enter
+    /// the convolution history, and inactive rows keep their state.
+    fn delta_step(
+        &self,
+        normalized: Tensor<B, 3>,
+        cache_layer: usize,
+        layout: &CompactBatch<B>,
+        tensors: &TensorDecodeState<B>,
+        writes: &mut TensorStepWrites<B>,
+        delta: DeltaStep,
+    ) -> Result<Tensor<B, 3>> {
+        let module = self
+            .linear_attn
+            .as_ref()
+            .ok_or_else(|| Error::Checkpoint("Qwen linear layer has no DeltaNet module".into()))?;
+        let read = tensors
+            .main()
+            .recurrent(RECURRENT_GROUP)?
+            .read_working_batch(cache_layer)?;
+        let mut state = GatedDeltaNetState {
+            convolution: read.convolution().clone(),
+            recurrent: read.matrix().clone(),
+        };
+        let mask = layout.token_mask();
+        match delta {
+            DeltaStep::Terminal(mode) => {
                 let mixed =
-                    delta.forward_with_state(normalized, None, &mut recurrent, delta_mode)?;
-                let hidden = finish_residual(self, residual, mixed)?;
-                pending.recurrent.push(PendingRecurrentWrite {
+                    module.forward_with_state(normalized, mask.as_ref(), &mut state, mode)?;
+                writes.push_recurrent_batch(
+                    RECURRENT_GROUP,
                     cache_layer,
-                    sequence: sequence_index,
-                    token_count,
-                    matrix: recurrent.recurrent,
-                    convolution: recurrent.convolution,
-                });
-                Ok(hidden)
+                    state.recurrent,
+                    state.convolution,
+                );
+                Ok(mixed)
+            }
+            DeltaStep::Snapshots => {
+                let (mixed, snapshots) =
+                    module.forward_with_snapshots(normalized, mask.as_ref(), &mut state)?;
+                // Row b's tokens are slots 0..n_b, so its snapshots are too.
+                for (row, &count) in layout.counts().iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    writes.push_recurrent_row_snapshots(
+                        RECURRENT_GROUP,
+                        cache_layer,
+                        row,
+                        snapshots
+                            .recurrent
+                            .clone()
+                            .narrow(0, row, 1)
+                            .narrow(1, 0, count),
+                        snapshots
+                            .convolution
+                            .clone()
+                            .narrow(0, row, 1)
+                            .narrow(1, 0, count),
+                    );
+                }
+                Ok(mixed)
             }
         }
     }
@@ -1007,6 +1134,11 @@ fn finish_residual<B: Backend>(
 }
 
 /// Builds the model-layer mapping and homogeneous cache specifications.
+///
+/// Full-attention groups stage speculative proposals in place: full storage
+/// never evicts, so a proposal can sit in its final slot and every layer reads
+/// history plus proposals through one view. Only the DeltaNet group allocates
+/// separate per-token snapshot buffers.
 fn cache_layout<B: Backend>(
     model: &Qwen3_5ForCausalLm<B>,
     staging_capacity: usize,
@@ -1016,37 +1148,34 @@ fn cache_layout<B: Backend>(
             "editable Qwen recipe backbones use stateless execution; cached family decoding requires Qwen3_5ForCausalLm::init with an unchanged family configuration".into(),
         ));
     }
-    let mut full_layers = 0usize;
-    let mut delta_layers = 0usize;
-    let schedule = model
+    let layer_types: Vec<Qwen3_5LayerType> = model
         .model
         .layers
         .iter()
-        .map(|layer| match layer.layer_type {
-            Qwen3_5LayerType::LinearAttention => {
-                let slot = Qwen3_5LayerCache::DeltaNet(delta_layers);
-                delta_layers += 1;
-                slot
-            }
-            Qwen3_5LayerType::FullAttention => {
-                let slot = Qwen3_5LayerCache::FullAttention(full_layers);
-                full_layers += 1;
-                slot
-            }
-        })
+        .map(|layer| layer.layer_type)
         .collect();
+    let schedule = cache_schedule(&layer_types);
+    let full_layers = schedule
+        .iter()
+        .filter(|slot| matches!(slot, Qwen3_5LayerCache::FullAttention(_)))
+        .count();
+    let delta_layers = schedule.len() - full_layers;
     let activation_dtype = model.model.embed_tokens.weight.val().dtype();
-    let native_kv = (full_layers > 0)
-        .then(|| {
-            NativeKvCacheSpec::new(
-                full_layers,
-                model.config().num_key_value_heads,
-                model.config().head_dim,
-                KvCacheStorage::Full,
-                activation_dtype,
-            )
-            .map(|spec| spec.with_staging_capacity(staging_capacity))
+    let attention_spec = |layers: usize| {
+        NativeKvCacheSpec::new(
+            layers,
+            model.config().num_key_value_heads,
+            model.config().head_dim,
+            KvCacheStorage::Full,
+            activation_dtype,
+        )
+        .map(|spec| {
+            spec.with_staging_capacity(staging_capacity)
+                .with_in_place_staging()
         })
+    };
+    let native_kv = (full_layers > 0)
+        .then(|| attention_spec(full_layers))
         .transpose()?;
     let recurrent = if delta_layers == 0 {
         None
@@ -1089,16 +1218,7 @@ fn cache_layout<B: Backend>(
     let mtp_native_kv = model
         .mtp
         .as_ref()
-        .map(|mtp| {
-            NativeKvCacheSpec::new(
-                mtp.layers.len(),
-                model.config().num_key_value_heads,
-                model.config().head_dim,
-                KvCacheStorage::Full,
-                activation_dtype,
-            )
-            .map(|spec| spec.with_staging_capacity(staging_capacity))
-        })
+        .map(|mtp| attention_spec(mtp.layers.len()))
         .transpose()?;
     Ok(Qwen3_5CacheLayout {
         schedule,
@@ -1109,298 +1229,27 @@ fn cache_layout<B: Backend>(
     })
 }
 
-/// Deferred native-KV append produced by one successful attention layer.
-struct PendingNativeKvWrite<B: Backend> {
-    /// Dense layer slot within the native-KV group.
-    cache_layer: usize,
-    /// Independent batch row receiving the suffix.
-    sequence: usize,
-    /// Absolute logical cursor where the new suffix begins.
-    start: usize,
-    /// New rotated keys shaped `[1, kv_heads, suffix, head_dim]`.
-    keys: Tensor<B, 4>,
-    /// New values with the same native-head axes as the keys.
-    values: Tensor<B, 4>,
-}
-
-/// Publishes one complete MTP-layer KV suffix and advances only its cursor.
-fn commit_mtp_write<B: Backend>(
-    state: &mut TensorDecodeState<B>,
-    write: PendingNativeKvWrite<B>,
-    token_count: usize,
-) -> Result<()> {
-    let PendingNativeKvWrite {
-        cache_layer,
-        sequence,
-        start,
-        keys,
-        values,
-    } = write;
-    let working = state
-        .mtp_working_lengths()
-        .and_then(|lengths| lengths.get(sequence).copied())
-        .ok_or_else(|| Error::Cache("Qwen MTP metadata is not enabled".into()))?;
-    if start != working || keys.dims()[2] != token_count || values.dims()[2] != token_count {
-        return Err(Error::Cache(
-            "Qwen MTP cache write does not cover its complete logical suffix".into(),
-        ));
-    }
-    if state.has_active_transaction() {
-        state
-            .mtp_mut()
-            .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?
-            .native_kv_mut(NATIVE_KV_GROUP)?
-            .stage_sequence(cache_layer, sequence, keys, values)?;
-        state.advance_mtp(&[token_count])?;
-        return Ok(());
-    }
-
-    let bank = state
-        .mtp()
-        .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?;
-    let cache = bank.native_kv(NATIVE_KV_GROUP)?;
-    let write = cache.prepare_sequence_write(cache_layer, sequence, start, keys, values)?;
-    let writes = bank.prepare_direct_writes(Some((NATIVE_KV_GROUP, vec![write])), None)?;
-    state.advance_mtp(&[token_count])?;
-    state
-        .mtp_mut()
-        .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?
-        .apply_prepared_direct_writes(writes);
-    Ok(())
-}
-
-/// Deferred terminal-state replacement produced by one DeltaNet layer.
-struct PendingRecurrentWrite<B: Backend> {
-    /// Dense DeltaNet layer slot within the recurrent group.
-    cache_layer: usize,
-    /// Independent batch row whose terminal state will be replaced.
-    sequence: usize,
-    /// Number of semantic tokens consumed to produce this terminal state.
-    token_count: usize,
-    /// Terminal association matrix with batch, value-head, key, and value axes.
-    matrix: Tensor<B, 4>,
-    /// Terminal causal-convolution history with batch, channel, and time axes.
-    convolution: Tensor<B, 3>,
-}
-
-/// Scratch cache updates for one complete public prefill or decode operation.
+/// Maps each layer to a dense slot of its cache family, in schedule order.
 ///
-/// Model computation may return recoverable errors after some earlier layers
-/// have succeeded. Holding their outputs here keeps the committed cache exactly
-/// unchanged until every layer and batch row has completed. The final commit is
-/// a two-phase operation: every tensor write is prepared first, then logical
-/// lengths advance and opaque write capabilities are applied without a further
-/// fallible branch.
-struct PendingQwenCacheWrites<B: Backend> {
-    /// Unpublished per-row full-attention suffixes for this operation.
-    native_kv: Vec<PendingNativeKvWrite<B>>,
-    /// Unpublished per-row DeltaNet terminal states for this operation.
-    recurrent: Vec<PendingRecurrentWrite<B>>,
-}
-
-impl<B: Backend> PendingQwenCacheWrites<B> {
-    /// Creates an empty operation-local write set.
-    fn new() -> Self {
-        Self {
-            native_kv: Vec::new(),
-            recurrent: Vec::new(),
-        }
-    }
-
-    /// Validates, atomically publishes metadata, and applies every cache write.
-    ///
-    /// For each active row `b` and physical layer slot `l`, exactly one update
-    /// must exist at the old cursor `L_b` and contain `N_b` new tokens. This
-    /// coverage invariant prevents an apparently successful call from advancing
-    /// metadata when one layer's physical state was omitted or duplicated.
-    fn commit(
-        self,
-        state: &mut TensorDecodeState<B>,
-        layout: &Qwen3_5CacheLayout,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        self.validate_coverage(state, layout, token_counts)?;
-        if state.has_active_transaction() {
-            // Speculative verification advances one target token at a time.
-            // That restriction is mathematically necessary for DeltaNet: its
-            // recurrence is not invertible, so every accepted prefix requires
-            // the post-token state snapshot at that exact boundary.
-            if layout.recurrent.is_some() && token_counts.iter().any(|&count| count > 1) {
-                return Err(Error::Cache(
-                    "transactional Qwen DeltaNet decode accepts at most one token per row and call"
-                        .into(),
-                ));
+/// The `k`th DeltaNet layer gets recurrent slot `k` and the `k`th
+/// full-attention layer native-KV slot `k`, so each family's slots are exactly
+/// `0..count` (proved for the integer core in `verus/qwen.rs`).
+fn cache_schedule(layer_types: &[Qwen3_5LayerType]) -> Vec<Qwen3_5LayerCache> {
+    let mut full_layers = 0usize;
+    let mut delta_layers = 0usize;
+    layer_types
+        .iter()
+        .map(|layer_type| match layer_type {
+            Qwen3_5LayerType::LinearAttention => {
+                delta_layers += 1;
+                Qwen3_5LayerCache::DeltaNet(delta_layers - 1)
             }
-            let PendingQwenCacheWrites {
-                native_kv,
-                recurrent,
-            } = self;
-            if !native_kv.is_empty() {
-                let cache = state.main_mut().native_kv_mut(NATIVE_KV_GROUP)?;
-                for write in native_kv {
-                    cache.stage_sequence(
-                        write.cache_layer,
-                        write.sequence,
-                        write.keys,
-                        write.values,
-                    )?;
-                }
+            Qwen3_5LayerType::FullAttention => {
+                full_layers += 1;
+                Qwen3_5LayerCache::FullAttention(full_layers - 1)
             }
-            if !recurrent.is_empty() {
-                let cache = state.main_mut().recurrent_mut(RECURRENT_GROUP)?;
-                for write in recurrent {
-                    cache.stage_sequence_snapshots(
-                        write.cache_layer,
-                        write.sequence,
-                        write.matrix.unsqueeze_dim::<5>(1),
-                        write.convolution.unsqueeze_dim::<4>(1),
-                    )?;
-                }
-            }
-            state.advance(token_counts)?;
-            return Ok(());
-        }
-        let bank = state.main();
-        let native_kv = if self.native_kv.is_empty() {
-            None
-        } else {
-            let cache = bank.native_kv(NATIVE_KV_GROUP)?;
-            let writes = self
-                .native_kv
-                .into_iter()
-                .map(|write| {
-                    cache.prepare_sequence_write(
-                        write.cache_layer,
-                        write.sequence,
-                        write.start,
-                        write.keys,
-                        write.values,
-                    )
-                })
-                .collect::<core::result::Result<Vec<_>, _>>()?;
-            Some((NATIVE_KV_GROUP, writes))
-        };
-        let recurrent = if self.recurrent.is_empty() {
-            None
-        } else {
-            let cache = bank.recurrent(RECURRENT_GROUP)?;
-            let writes = self
-                .recurrent
-                .into_iter()
-                .map(|write| {
-                    cache.prepare_sequence_state(
-                        write.cache_layer,
-                        write.sequence,
-                        write.matrix,
-                        write.convolution,
-                    )
-                })
-                .collect::<core::result::Result<Vec<_>, _>>()?;
-            Some((RECURRENT_GROUP, writes))
-        };
-        let writes = bank.prepare_direct_writes(native_kv, recurrent)?;
-
-        // `advance` is the final recoverable step and is itself atomic across
-        // rows. Once it succeeds, applying the opaque bank capability contains
-        // only tensor assignments, so callers can never observe half-published
-        // Result-level state.
-        state.advance(token_counts)?;
-        state.main_mut().apply_prepared_direct_writes(writes);
-        Ok(())
-    }
-
-    /// Checks exact active-row/layer coverage before any tensor is consumed.
-    fn validate_coverage(
-        &self,
-        state: &TensorDecodeState<B>,
-        layout: &Qwen3_5CacheLayout,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        let batch = state.batch_size();
-        if token_counts.len() != batch {
-            return Err(Error::Cache(format!(
-                "Qwen pending writes describe {} rows for batch {batch}",
-                token_counts.len()
-            )));
-        }
-        let active_rows = token_counts.iter().filter(|&&count| count > 0).count();
-        let full_layers = layout.native_kv.map_or(0, NativeKvCacheSpec::layers);
-        let recurrent_layers = layout.recurrent.map_or(0, RecurrentStateSpec::layers);
-        let expected_native = full_layers.checked_mul(active_rows).ok_or_else(|| {
-            Error::configuration("qwen.cache_commit", "native write count overflows usize")
-        })?;
-        let expected_recurrent = recurrent_layers.checked_mul(active_rows).ok_or_else(|| {
-            Error::configuration("qwen.cache_commit", "recurrent write count overflows usize")
-        })?;
-        if self.native_kv.len() != expected_native || self.recurrent.len() != expected_recurrent {
-            return Err(Error::Cache(format!(
-                "Qwen pending cache coverage mismatch: native {}/{expected_native}, recurrent {}/{expected_recurrent}",
-                self.native_kv.len(),
-                self.recurrent.len()
-            )));
-        }
-
-        let mut native_seen = BTreeSet::new();
-        for write in &self.native_kv {
-            let count = token_counts.get(write.sequence).copied().ok_or_else(|| {
-                Error::Cache(format!(
-                    "Qwen native write references batch row {} outside {batch}",
-                    write.sequence
-                ))
-            })?;
-            if count == 0
-                || write.cache_layer >= full_layers
-                || write.start != state.working_lengths()[write.sequence]
-                || write.keys.dims()[2] != count
-                || write.values.dims()[2] != count
-                || !native_seen.insert((write.cache_layer, write.sequence))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid or duplicate Qwen native write for layer {}, row {}",
-                    write.cache_layer, write.sequence
-                )));
-            }
-        }
-        let mut recurrent_seen = BTreeSet::new();
-        for write in &self.recurrent {
-            let count = token_counts.get(write.sequence).copied().ok_or_else(|| {
-                Error::Cache(format!(
-                    "Qwen recurrent write references batch row {} outside {batch}",
-                    write.sequence
-                ))
-            })?;
-            if count == 0
-                || write.cache_layer >= recurrent_layers
-                || write.token_count != count
-                || !recurrent_seen.insert((write.cache_layer, write.sequence))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid or duplicate Qwen recurrent write for layer {}, row {}",
-                    write.cache_layer, write.sequence
-                )));
-            }
-        }
-        for (sequence, &token_count) in token_counts.iter().enumerate() {
-            if token_count == 0 {
-                continue;
-            }
-            for layer in 0..full_layers {
-                if !native_seen.contains(&(layer, sequence)) {
-                    return Err(Error::Cache(format!(
-                        "missing Qwen native write for layer {layer}, row {sequence}"
-                    )));
-                }
-            }
-            for layer in 0..recurrent_layers {
-                if !recurrent_seen.contains(&(layer, sequence)) {
-                    return Err(Error::Cache(format!(
-                        "missing Qwen recurrent write for layer {layer}, row {sequence}"
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
+        })
+        .collect()
 }
 
 /// Validates devices, shapes, positions, masks, and all capacity transitions.
@@ -1408,7 +1257,7 @@ impl<B: Backend> PendingQwenCacheWrites<B> {
 /// The shared preparation reads the mask, token IDs, and explicit positions in
 /// one transfer against the working cursors (speculative transactions append
 /// beyond committed lengths); this wrapper adds the model-device and
-/// dynamic-NTK guards.
+/// context-dependent RoPE guards.
 fn prepare_stateful_input<B: Backend>(
     model: &Qwen3_5ForCausalLm<B>,
     input: &CausalLmInput<B>,
@@ -1440,47 +1289,6 @@ fn prepare_stateful_input<B: Backend>(
     Ok(rows)
 }
 
-/// Builds the explicit cached causal mask `excluded(q, k) = k > baseline + q`.
-fn cached_causal_mask<B: Backend>(
-    baseline: usize,
-    query_sequence: usize,
-    heads: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let key_sequence = baseline.checked_add(query_sequence).ok_or_else(|| {
-        Error::configuration("qwen.attention_mask", "key sequence length overflows usize")
-    })?;
-    let query_start = i64::try_from(baseline)
-        .map_err(|_| Error::configuration("qwen.attention_mask", "query offset exceeds i64"))?;
-    let query_end = i64::try_from(key_sequence)
-        .map_err(|_| Error::configuration("qwen.attention_mask", "key length exceeds i64"))?;
-    let key_end = query_end;
-    let query = Tensor::<B, 1, Int>::arange(query_start..query_end, device)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..key_end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([1, heads, query_sequence, key_sequence]);
-    Ok(key.greater(query))
-}
-
-/// Creates the defined output for a decode row containing zero valid tokens.
-///
-/// No layer is evaluated and no cache update is recorded. Returning zero hidden
-/// states preserves the rectangular batch shape; Qwen's bias-free vocabulary
-/// projection consequently also produces exact zero logits for this inactive
-/// row.
-fn empty_hidden_row<B: Backend>(
-    model: &Qwen3_5ForCausalLm<B>,
-    sequence: usize,
-    device: &B::Device,
-) -> Tensor<B, 3> {
-    Tensor::zeros(
-        [1, sequence, model.config().hidden_size],
-        (device, model.model.embed_tokens.weight.val().dtype()),
-    )
-}
-
 /// Rejects an evaluated rotary context that keys already in the cache cannot follow.
 ///
 /// Context-dependent policies (dynamic NTK and LongRoPE) change their
@@ -1488,8 +1296,14 @@ fn empty_hidden_row<B: Backend>(
 /// [`RopeScaling::cached_context_limit`](crate::position::RopeScaling::cached_context_limit).
 /// Cached keys were rotated with the earlier frequencies, so extending the
 /// cache past that limit would silently mix two rotary bases; re-rotating the
-/// history is not implemented. Static policies have no limit.
-fn ensure_cacheable_rotary_context(rope: RopeConfig, context: usize, family: &str) -> Result<()> {
+/// history is not implemented. Static policies have no limit. Below the
+/// limit the frequencies do not depend on the context, which lets one call
+/// rotate every row with the tables of its largest context.
+pub(crate) fn ensure_cacheable_rotary_context(
+    rope: RopeConfig,
+    context: usize,
+    family: &str,
+) -> Result<()> {
     match rope.scaling().cached_context_limit() {
         Some(limit) if context > limit => Err(Error::BackendCapability(format!(
             "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
@@ -1501,3 +1315,7 @@ fn ensure_cacheable_rotary_context(rope: RopeConfig, context: usize, family: &st
 #[cfg(test)]
 #[path = "decode_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "per_row_tests.rs"]
+mod per_row_tests;

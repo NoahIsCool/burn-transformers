@@ -402,6 +402,73 @@ impl<B: Backend> GatedDeltaNetState<B> {
     }
 }
 
+/// Per-token states of one [`GatedDeltaNet::forward_with_snapshots`] call.
+#[derive(Clone, Debug)]
+pub struct GatedDeltaNetSnapshots<B: Backend> {
+    /// FP32 association matrices after every column,
+    /// `[batch, sequence, value_heads, key_head_dim, value_head_dim]`.
+    pub recurrent: Tensor<B, 5>,
+    /// Convolution histories after every column, `[batch, sequence, channels, kernel - 1]`.
+    pub convolution: Tensor<B, 4>,
+}
+
+/// Delta-rule algorithm selected for one mixer call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleKernel {
+    /// Prompt processing: chunked, or the recurrence when it is cheaper.
+    Prefill,
+    /// The token-by-token recurrence.
+    Recurrent,
+    /// The recurrence, keeping the state after every token.
+    Snapshots,
+}
+
+/// Results of the mixer's depthwise causal convolution.
+struct CausalConvolution<B: Backend> {
+    /// Convolved projections `[batch, channels, sequence]`, zero at padding.
+    output: Tensor<B, 3>,
+    /// Next history: the last `kernel - 1` columns of `[history | valid tokens]`.
+    history: Tensor<B, 3>,
+    /// Timeline `[history | valid tokens | padding]` the convolution read,
+    /// `[batch, channels, kernel - 1 + sequence]` (just the tokens for kernel one).
+    joined: Tensor<B, 3>,
+}
+
+/// Returns the convolution history after every input column.
+///
+/// In `joined = [history | valid tokens | padding]`, the history after column
+/// `t` is the `width` columns ending just after the row's `v_t`-th valid
+/// token, where `v_t` counts the valid columns among `0..=t`; it therefore
+/// starts at `joined` column `v_t`. The result is
+/// `[batch, sequence, channels, width]`, gathered with one index tensor.
+fn convolution_snapshots<B: Backend>(
+    joined: Tensor<B, 3>,
+    token_mask: Option<Tensor<B, 2, Bool>>,
+    width: usize,
+) -> Tensor<B, 4> {
+    let [batch, channels, timeline] = joined.dims();
+    let sequence = timeline - width;
+    let device = joined.device();
+    if width == 0 {
+        return Tensor::zeros([batch, sequence, channels, 0], (&device, joined.dtype()));
+    }
+    // v_t: valid columns among 0..=t, `[batch, sequence]`.
+    let valid_through = match token_mask {
+        Some(mask) => mask.int().cumsum(1),
+        None => Tensor::<B, 1, Int>::arange(1..sequence as i64 + 1, &device)
+            .reshape([1, sequence])
+            .expand([batch, sequence]),
+    };
+    let offsets = Tensor::<B, 1, Int>::arange(0..width as i64, &device).reshape([1, 1, width]);
+    let index = (valid_through.reshape([batch, sequence, 1]) + offsets)
+        .reshape([batch, sequence, 1, width])
+        .expand([batch, sequence, channels, width]);
+    joined
+        .reshape([batch, 1, channels, timeline])
+        .expand([batch, sequence, channels, timeline])
+        .gather(3, index)
+}
+
 /// Qwen checkpoint-compatible projected Gated DeltaNet mixer.
 #[derive(Module, Debug)]
 pub struct GatedDeltaNet<B: Backend> {
@@ -476,6 +543,50 @@ impl<B: Backend> GatedDeltaNet<B> {
         state: &mut GatedDeltaNetState<B>,
         mode: DeltaNetMode,
     ) -> Result<Tensor<B, 3>> {
+        let kernel = match mode {
+            DeltaNetMode::Recurrent => RuleKernel::Recurrent,
+            DeltaNetMode::ChunkedPrefill => RuleKernel::Prefill,
+        };
+        let (output, _) = self.mix(hidden, token_mask, state, kernel)?;
+        Ok(output)
+    }
+
+    /// Evaluates a segment like [`Self::forward_with_state`] and also returns the state after every token.
+    ///
+    /// Snapshot `t` is the state after input column `t`: the FP32 association
+    /// matrix and the convolution history `[history | valid tokens]` truncated
+    /// to its last `kernel - 1` columns. A padded column leaves both unchanged,
+    /// so its snapshot repeats the previous one. Speculative verification feeds
+    /// several proposed tokens in one call and later keeps only an accepted
+    /// prefix; because the recurrence cannot be rewound, the cache retains
+    /// these snapshots and selects the one at the accepted boundary. The rule
+    /// runs as the exact token-by-token recurrence. `state` receives the final
+    /// state, which equals the last snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::forward_with_state`].
+    pub fn forward_with_snapshots(
+        &self,
+        hidden: Tensor<B, 3>,
+        token_mask: Option<&TokenMask<B>>,
+        state: &mut GatedDeltaNetState<B>,
+    ) -> Result<(Tensor<B, 3>, GatedDeltaNetSnapshots<B>)> {
+        let (output, snapshots) = self.mix(hidden, token_mask, state, RuleKernel::Snapshots)?;
+        let snapshots = snapshots.ok_or_else(|| {
+            Error::configuration("delta_net.snapshots", "snapshot kernel returned no states")
+        })?;
+        Ok((output, snapshots))
+    }
+
+    /// Shared mixer body: projections, causal convolution, delta rule, gated norm, output.
+    fn mix(
+        &self,
+        hidden: Tensor<B, 3>,
+        token_mask: Option<&TokenMask<B>>,
+        state: &mut GatedDeltaNetState<B>,
+        kernel: RuleKernel,
+    ) -> Result<(Tensor<B, 3>, Option<GatedDeltaNetSnapshots<B>>)> {
         let [batch, sequence, hidden_size] = hidden.dims();
         let expected_hidden = self.hidden_size;
         if batch == 0 || sequence == 0 || hidden_size != expected_hidden {
@@ -499,12 +610,17 @@ impl<B: Backend> GatedDeltaNet<B> {
         let masked_hidden = mask_hidden(hidden, token_mask);
         let projected =
             operations::linear(masked_hidden.clone(), &self.in_proj_qkv)?.swap_dims(1, 2);
-        let (convolved, convolution_state) = self.causal_convolution(
-            projected,
-            state.convolution.clone(),
-            token_mask.map(|mask| mask.as_tensor().clone()),
-        );
-        let mixed = activation::silu(convolved).swap_dims(1, 2);
+        let mask = token_mask.map(|mask| mask.as_tensor().clone());
+        let convolution =
+            self.causal_convolution(projected, state.convolution.clone(), mask.clone());
+        let convolution_snapshots = (kernel == RuleKernel::Snapshots).then(|| {
+            convolution_snapshots(
+                convolution.joined.clone(),
+                mask.clone(),
+                self.convolution_kernel - 1,
+            )
+        });
+        let mixed = activation::silu(convolution.output).swap_dims(1, 2);
         let key_width = self.key_heads * self.key_head_dim;
         let value_width = self.value_heads * self.value_head_dim;
         let query = mixed.clone().narrow(2, 0, key_width).reshape([
@@ -555,24 +671,42 @@ impl<B: Backend> GatedDeltaNet<B> {
             log_decay,
             beta,
             initial_state: Some(state.recurrent.clone()),
-            token_mask: token_mask.map(|mask| mask.as_tensor().clone()),
+            token_mask: mask,
         };
         let state_elements = self.value_heads * self.key_head_dim * self.value_head_dim;
-        let rule_output = match mode {
-            DeltaNetMode::ChunkedPrefill if !prefers_recurrence(sequence, state_elements) => {
-                chunked_gated_delta_rule(rule_input, self.rule_config)?
+        let (values, final_state, snapshots) = match kernel {
+            RuleKernel::Prefill if !prefers_recurrence(sequence, state_elements) => {
+                let output = chunked_gated_delta_rule(rule_input, self.rule_config)?;
+                (output.values, output.final_state, None)
             }
-            DeltaNetMode::Recurrent | DeltaNetMode::ChunkedPrefill => {
-                recurrent_gated_delta_rule(rule_input, self.rule_config)?
+            RuleKernel::Prefill | RuleKernel::Recurrent => {
+                let output = recurrent_gated_delta_rule(rule_input, self.rule_config)?;
+                (output.values, output.final_state, None)
+            }
+            RuleKernel::Snapshots => {
+                let output =
+                    recurrent_gated_delta_rule_with_snapshots(rule_input, self.rule_config)?;
+                let [rows, tokens, heads, key_dim, value_dim] = output.states.dims();
+                let final_state = output
+                    .states
+                    .clone()
+                    .narrow(1, tokens - 1, 1)
+                    .reshape([rows, heads, key_dim, value_dim]);
+                let snapshots = convolution_snapshots.map(|convolution| GatedDeltaNetSnapshots {
+                    recurrent: output.states,
+                    convolution,
+                });
+                (output.values, final_state, snapshots)
             }
         };
-        let gated = gated_delta_norm(rule_output.values, z, &self.norm);
-        state.convolution = convolution_state;
-        state.recurrent = rule_output.final_state;
-        operations::linear(
+        let gated = gated_delta_norm(values, z, &self.norm);
+        state.convolution = convolution.history;
+        state.recurrent = final_state;
+        let output = operations::linear(
             gated.reshape([batch, sequence, value_width]),
             &self.out_proj,
-        )
+        )?;
+        Ok((output, snapshots))
     }
 
     /// Reconstructs the allocation topology without inspecting parameter values.
@@ -605,7 +739,7 @@ impl<B: Backend> GatedDeltaNet<B> {
         projected: Tensor<B, 3>,
         history: Tensor<B, 3>,
         token_mask: Option<Tensor<B, 2, Bool>>,
-    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+    ) -> CausalConvolution<B> {
         let [batch, channels, sequence] = projected.dims();
         let history_width = self.convolution_kernel - 1;
         let convolve = |input: Tensor<B, 3>| {
@@ -623,7 +757,11 @@ impl<B: Backend> GatedDeltaNet<B> {
                 [batch, channels, 0],
                 (&projected.device(), projected.dtype()),
             );
-            return (convolve(projected), empty);
+            return CausalConvolution {
+                output: convolve(projected.clone()),
+                history: empty,
+                joined: projected,
+            };
         }
         // Recurrent matrices intentionally accumulate in FP32, but convolution
         // history follows the projection dtype. Casting here also makes a state
@@ -631,14 +769,19 @@ impl<B: Backend> GatedDeltaNet<B> {
         let history = history.cast(projected.dtype());
         let Some(mask) = token_mask else {
             let joined = Tensor::cat(vec![history, projected], 2);
-            let next_history = joined.clone().narrow(2, sequence, history_width);
-            return (convolve(joined), next_history);
+            return CausalConvolution {
+                output: convolve(joined.clone()),
+                history: joined.clone().narrow(2, sequence, history_width),
+                joined,
+            };
         };
         let compaction = TokenCompaction::new(mask);
         let joined = Tensor::cat(vec![history, compaction.compact(projected, channels)], 2);
-        let next_history = compaction.history(joined.clone(), channels, history_width);
-        let convolved = compaction.restore(convolve(joined), channels);
-        (convolved, next_history)
+        CausalConvolution {
+            output: compaction.restore(convolve(joined.clone()), channels),
+            history: compaction.history(joined.clone(), channels, history_width),
+            joined,
+        }
     }
 
     /// Ensures external state axes match this layer before backend dispatch.
