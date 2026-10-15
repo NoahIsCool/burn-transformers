@@ -15,7 +15,7 @@ use burn::{
 use thiserror::Error;
 
 use crate::{
-    checkpoint::{ParameterInstallError, TensorSink, install_float_parameter},
+    checkpoint::{PackedLayoutPolicy, ParameterInstallError, TensorSink, install_packed_parameter},
     normalization::RmsNorm,
 };
 
@@ -418,16 +418,25 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter.
+///
+/// Float data is installed as is. Packed (QFloat) data stays packed when the
+/// backend reproduces the artifact's blocks exactly through the parameter's
+/// load mapper (for example Metal with column-major linear layouts);
+/// otherwise its exact dequantized values are installed instead of a
+/// requantized approximation, so a model's numerics never depend on the
+/// backend's packed layout support.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), Qwen3_5LoadError> {
-    install_float_parameter(parameter, data).map_err(|source| Qwen3_5LoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| Qwen3_5LoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

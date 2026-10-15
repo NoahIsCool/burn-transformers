@@ -218,6 +218,8 @@ fn qfloat_qwen_graph_matches_its_full_precision_reference() {
         ..WeightQuantizationConfig::default()
     };
     let mut packed_count = 0;
+    // Dequantized artifacts `[out, in]` of two checked projections.
+    let mut artifacts = std::collections::BTreeMap::new();
 
     for expected in contract.expected_tensors() {
         let shape = expected
@@ -240,8 +242,10 @@ fn qfloat_qwen_graph_matches_its_full_precision_reference() {
         let packed_data = match classify_weight_for_quantization(&expected.name, &shape) {
             QuantizationEligibility::Eligible => {
                 packed_count += 1;
-                quantize_tensor_data(&source, quantization)
-                    .unwrap_or_else(|error| panic!("quantize {}: {error}", expected.name))
+                let quantized = quantize_tensor_data(&source, quantization)
+                    .unwrap_or_else(|error| panic!("quantize {}: {error}", expected.name));
+                artifacts.insert(expected.name.clone(), quantized.dequantize_f32().unwrap());
+                quantized
                     .into_burn_qfloat_data()
                     .unwrap_or_else(|error| panic!("adapt {}: {error}", expected.name))
             }
@@ -252,21 +256,27 @@ fn qfloat_qwen_graph_matches_its_full_precision_reference() {
             .unwrap_or_else(|error| panic!("packed {}: {error}", expected.name));
     }
     assert_eq!(packed_count, 16);
-    assert!(matches!(
-        packed.model.layers[1]
-            .self_attn
-            .as_ref()
-            .unwrap()
-            .q_proj
-            .weight
-            .val()
-            .dtype(),
-        burn::tensor::DType::QFloat(_)
-    ));
-    assert!(matches!(
-        packed.lm_head.as_ref().unwrap().weight.val().dtype(),
-        burn::tensor::DType::QFloat(_)
-    ));
+    // Packed overrides install the artifact exactly: as QFloat where the
+    // backend keeps the column layout's blocks (Metal), as the exact
+    // dequantized values otherwise (Flex), never a requantized approximation.
+    for (name, weight) in [
+        (
+            "model.layers.1.self_attn.q_proj.weight",
+            packed.model.layers[1]
+                .self_attn
+                .as_ref()
+                .unwrap()
+                .q_proj
+                .weight
+                .val(),
+        ),
+        (
+            "lm_head.weight",
+            packed.lm_head.as_ref().unwrap().weight.val(),
+        ),
+    ] {
+        assert_exact_artifact(weight, &artifacts[name]);
+    }
 
     let input = CausalLmInput {
         token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
@@ -323,4 +333,25 @@ fn qfloat_qwen_graph_matches_its_full_precision_reference() {
     let right_norm = actual.iter().map(|value| value * value).sum::<f32>().sqrt();
     let cosine = dot / (left_norm * right_norm);
     assert!(cosine >= 0.995, "Q8 cosine similarity was {cosine}");
+}
+
+/// Asserts a column-layout `[in, out]` linear weight holds exactly the dequantized `[out, in]` artifact.
+fn assert_exact_artifact(weight: Tensor<TestBackend, 2>, artifact: &TensorData) {
+    let installed = match weight.dtype() {
+        burn::tensor::DType::QFloat(_) => weight.dequantize(),
+        _ => weight,
+    };
+    let [inputs, outputs] = installed.dims();
+    let values = installed.into_data().to_vec::<f32>().unwrap();
+    let expected = artifact.to_vec::<f32>().unwrap();
+    assert_eq!(artifact.shape.to_vec(), vec![outputs, inputs]);
+    for input in 0..inputs {
+        for output in 0..outputs {
+            assert_eq!(
+                values[input * outputs + output],
+                expected[output * inputs + input],
+                "weight[{input}, {output}]"
+            );
+        }
+    }
 }
