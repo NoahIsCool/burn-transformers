@@ -27,8 +27,14 @@
 //!    step's own keys as a second segment, and record them in the step;
 //! 3. one exclusion plane per group and step (key positions are shared by
 //!    the group's layers) applies causality `j <= p`, the window
-//!    `p - W < j`, and key validity, by replacement; invalid cached values
-//!    are zeroed so stale non-finite bytes cannot leak (`0 · NaN`);
+//!    `p - W < j`, and key validity, by replacement. When a full read has
+//!    no invalid key and the block no padding slot, every row's queries are
+//!    the last `Q` keys, so the plane is exactly bottom-right causality,
+//!    which the attention call applies itself (for one-token decode: no
+//!    mask at all). An excluded key gets
+//!    probability exactly zero, which is harmless unless its value is
+//!    non-finite (`0 · NaN = NaN`); see "Clean tails" for when invalid
+//!    values are zeroed;
 //! 4. after the forward succeeds, the step is published atomically: lengths
 //!    advance and ring writes land, or nothing changes. A failure leaves the
 //!    committed state untouched (write-ahead slots beyond the lengths are
@@ -39,6 +45,22 @@
 //! no transaction can begin on it; speculative decoding rolls back with
 //! [`truncate`](crate::DecodeState::truncate) instead (ring groups only
 //! within their window).
+//!
+//! # Clean tails
+//!
+//! Invalid keys in a full-storage read are the slots at or beyond each row's
+//! end. The state tracks whether every such slot holds zero (a *clean
+//! tail*): true after allocation and `reset` (which zero every tensor),
+//! preserved by published steps (they fill exactly the slots they commit),
+//! by `reorder` (rows move with their lengths), and by truncation to zero
+//! (which zeroes the row). Truncating a row to a shorter non-zero length, or
+//! a step that fails after writing ahead, leaves the row's earlier bytes
+//! beyond its end, possibly non-finite (an overflowed F16 draft, say), so
+//! the flag clears and full layers zero invalid values before attending.
+//! While tails are clean, that masked copy of every layer's values is
+//! skipped; it was a third of a ragged decode step on Flex. Ring slots
+//! cycle through a row's own older tokens, so ring layers always zero
+//! invalid values.
 //!
 //! # Positions
 //!
@@ -199,6 +221,8 @@ pub struct LlamaDecodeState<B: Backend> {
     tensors: TensorDecodeState<B>,
     /// Group assignment the tensors were allocated for.
     layout: CacheLayout,
+    /// Whether every full-storage slot at or beyond a row's length is zero.
+    clean_tail: bool,
 }
 
 impl<B: Backend> LlamaDecodeState<B> {
@@ -222,7 +246,11 @@ impl<B: Backend> LlamaDecodeState<B> {
         }
         let layout = CacheLayout::plan(architecture, capacity, model.model.activation_dtype())?;
         let tensors = layout.allocate(config, batch_size, device)?;
-        Ok(Self { tensors, layout })
+        Ok(Self {
+            tensors,
+            layout,
+            clean_tail: true,
+        })
     }
 
     /// Borrows the generic cache state for diagnostics and lifecycle integration.
@@ -281,9 +309,11 @@ impl<B: Backend> ArchitectureDecodeState<B> for LlamaDecodeState<B> {
         self.tensors.lengths()
     }
 
-    /// Clears every row and cache group.
+    /// Clears every row and zeroes every cache group, restoring clean tails.
     fn reset(&mut self) -> Result<()> {
-        self.tensors.reset().map_err(Into::into)
+        self.tensors.reset()?;
+        self.clean_tail = true;
+        Ok(())
     }
 
     /// Reorders or duplicates rows across every group atomically.
@@ -292,8 +322,19 @@ impl<B: Backend> ArchitectureDecodeState<B> for LlamaDecodeState<B> {
     }
 
     /// Rolls rows back to shorter lengths (ring groups only within their window).
+    ///
+    /// A row shortened to a non-zero length keeps its later bytes beyond the
+    /// new end, so tails are no longer known to be clean.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
-        self.tensors.truncate(lengths).map_err(Into::into)
+        let leaves_bytes = self
+            .tensors
+            .lengths()
+            .iter()
+            .zip(lengths)
+            .any(|(&from, &to)| to != 0 && to < from);
+        self.tensors.truncate(lengths)?;
+        self.clean_tail &= !leaves_bytes;
+        Ok(())
     }
 
     /// Returns the device holding the cache.
@@ -318,6 +359,10 @@ struct CachedKeys<'s, B: Backend> {
     query_positions: Tensor<B, 2, Int>,
     /// Query heads `H`, the exclusion plane's head extent.
     heads: usize,
+    /// Whether every block slot holds a new token (no padding slot).
+    dense_block: bool,
+    /// Whether invalid full-storage slots are known to hold zero.
+    clean_tail: bool,
     /// Read plan of the full group through the step's write-ahead.
     full_plan: Option<KvBatchReadPlan<B>>,
     /// Read plan of the ring group's committed history.
@@ -329,7 +374,11 @@ struct CachedKeys<'s, B: Backend> {
 }
 
 impl<'s, B: Backend> CachedKeys<'s, B> {
-    /// Starts a step appending `layout`'s block to `state`.
+    /// Starts a step appending `block` to `state`.
+    ///
+    /// Clears the state's clean-tail flag for the step's duration: from the
+    /// first write-ahead until publication, a failure would abandon bytes
+    /// beyond the lengths. [`Self::finish`] restores it.
     fn new(
         state: &'s mut LlamaDecodeState<B>,
         block: &StepLayout,
@@ -337,7 +386,10 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
         query_positions: Tensor<B, 2, Int>,
         heads: usize,
     ) -> Result<Self> {
-        let LlamaDecodeState { tensors, layout } = state;
+        let clean_tail = core::mem::replace(&mut state.clean_tail, false);
+        let LlamaDecodeState {
+            tensors, layout, ..
+        } = state;
         let step = tensors
             .step(block.counts())?
             .with_alignment(TokenAlignment::Columns(block.columns().to_vec()));
@@ -356,6 +408,8 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
             angles,
             query_positions,
             heads,
+            dense_block: block.is_dense(),
+            clean_tail,
             full_plan,
             ring_plan,
             full_mask: None,
@@ -421,28 +475,35 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
             .ok_or_else(|| Error::Cache("Llama-family sliding KV read returned no keys".into()))
     }
 
-    /// Returns the group's shared exclusion plane, building it on first use.
-    fn exclusions(
+    /// Returns the group's exclusions and whether the attention call adds causality.
+    ///
+    /// A full-storage read is chronological; with every key valid and no
+    /// padding slot, bottom-right causality alone is exact. Otherwise the
+    /// group's shared plane is built on first use and reused by its layers.
+    fn visibility(
         &mut self,
         ring: bool,
         segment: &KvBatchSegment<B>,
-    ) -> Result<Tensor<B, 4, Bool>> {
+    ) -> Result<(Option<Tensor<B, 4, Bool>>, bool)> {
+        if !ring && self.dense_block && segment.key_valid().is_none() {
+            return Ok((None, true));
+        }
         let (cached, window) = if ring {
             (&mut self.ring_mask, self.layout.window)
         } else {
             (&mut self.full_mask, None)
         };
         if let Some(mask) = cached {
-            return Ok(mask.clone());
+            return Ok((Some(mask.clone()), false));
         }
         let mask = segment.exclusion_mask(&self.query_positions, self.heads, window)?;
         *cached = Some(mask.clone());
-        Ok(mask)
+        Ok((Some(mask), false))
     }
 
-    /// Ends the borrow of the state and returns the step for publication.
-    fn into_step(self) -> TensorStepWrites<B> {
-        self.step
+    /// Ends the borrow of the state, returning the step and the tail flag to restore.
+    fn finish(self) -> (TensorStepWrites<B>, bool) {
+        (self.step, self.clean_tail)
     }
 }
 
@@ -470,10 +531,14 @@ impl<B: Backend> LayerKeys<B> for CachedKeys<'_, B> {
             CacheSlot::Full(slot) => (self.full_segment(slot, &projection)?, false),
             CacheSlot::Ring(slot) => (self.ring_segment(slot, &projection)?, true),
         };
-        let mask = self.exclusions(ring, &segment)?;
+        let (mask, causal) = self.visibility(ring, &segment)?;
         projection.key = segment.keys().clone();
-        projection.value = segment.masked_values();
-        attention.attend_with_hooks(projection, Some(mask), None, false, points, hooks)
+        projection.value = if ring || !self.clean_tail {
+            segment.masked_values()
+        } else {
+            segment.values().clone()
+        };
+        attention.attend_with_hooks(projection, mask, None, causal, points, hooks)
     }
 }
 
@@ -526,13 +591,14 @@ impl<B: Backend> LlamaForCausalLm<B> {
             }
             hidden = layer.forward(hidden, index, &mut keys, &mut Hooks::new())?;
         }
-        let step = keys.into_step();
+        let (step, clean_tail) = keys.finish();
         if options.hidden_states {
             block_states.push(hidden.clone());
         }
         let hidden = self.model.norm.forward(hidden);
         let output = self.cached_output(&layout, &rows, options, hidden, block_states)?;
         state.tensors.publish_step(step)?;
+        state.clean_tail = clean_tail;
         Ok(output)
     }
 

@@ -417,6 +417,89 @@ fn ring_rows_reorder_but_reject_unsafe_rewinds() {
     assert_eq!(cache.lengths(), [7, 7]);
 }
 
+/// Clean tails hold after allocation, steps, reorders, resets, and truncation to zero.
+#[test]
+fn clean_tails_follow_the_lifecycle() {
+    let model = tiny_model(LlamaVariant::Qwen3, 14);
+    let mut cache = state(&model, 2, 8);
+    assert!(cache.clean_tail);
+    let prompt = ints([[1, 2, 3, 4], [5, 6, 7, 8]]);
+    let options = ForwardOptions::default();
+    model
+        .prefill(input(prompt.clone(), None, None), &mut cache, &options)
+        .unwrap();
+    cache.reorder(&[1, 0]).unwrap();
+    cache.truncate(&[0, 4]).unwrap();
+    assert!(
+        cache.clean_tail,
+        "steps, reorders, and truncation to zero keep tails clean"
+    );
+    model
+        .prefill(input(ints([[9], [10]]), None, None), &mut cache, &options)
+        .unwrap();
+    cache.truncate(&[1, 2]).unwrap();
+    assert!(
+        !cache.clean_tail,
+        "a shortened row keeps bytes beyond its end"
+    );
+    let _ = decode_step(&model, &mut cache, ints([[11], [12]]));
+    assert!(!cache.clean_tail, "later steps do not clean old bytes");
+    cache.reset().unwrap();
+    assert!(cache.clean_tail);
+}
+
+/// Non-finite bytes left beyond a truncated row never reach attention outputs.
+///
+/// Flex's fused attention happens to ignore excluded values even when they
+/// are NaN, so on Flex this checks the outcome rather than isolating the
+/// zeroing; backends whose kernels compute `0 · NaN` rely on it.
+#[test]
+fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
+    let model = tiny_model(LlamaVariant::Qwen3, 15);
+    let options = ForwardOptions::default();
+    let mut cache = state(&model, 2, 8);
+    model
+        .prefill(
+            input(
+                ints([[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]]),
+                None,
+                None,
+            ),
+            &mut cache,
+            &options,
+        )
+        .unwrap();
+    cache.truncate(&[2, 5]).unwrap();
+    // Simulate a rejected draft that overflowed: poison row 0 beyond its end.
+    let nan = Tensor::<B, 4>::full([1, 2, 4, 4], f32::NAN, &Default::default());
+    for layer in 0..3 {
+        cache
+            .tensors
+            .main_mut()
+            .native_kv_mut(0)
+            .unwrap()
+            .write_sequence(layer, 0, 2, nan.clone(), nan.clone())
+            .unwrap();
+    }
+    let poisoned = decode_step(&model, &mut cache, ints([[13], [14]]));
+
+    let mut fresh = state(&model, 2, 8);
+    model
+        .prefill(
+            input(
+                ints([[0, 0, 0, 1, 2], [7, 8, 9, 10, 11]]),
+                Some(mask([[false, false, false, true, true], [true; 5]])),
+                None,
+            ),
+            &mut fresh,
+            &options,
+        )
+        .unwrap();
+    let expected = decode_step(&model, &mut fresh, ints([[13], [14]]));
+    assert!(host(poisoned.clone()).iter().all(|value| value.is_finite()));
+    assert_close(poisoned, expected, TOLERANCE, "masked stale bytes");
+}
+
 /// Requested hidden states return to the caller's columns with zeros at padding.
 #[test]
 fn cached_hidden_states_and_selections_match_the_stateless_pass() {
@@ -624,20 +707,27 @@ fn context_dependent_rope_stops_at_the_original_context() {
     assert_eq!(cache.lengths(), [4]);
 }
 
-/// Measures batched decoding against row-by-row decoding on Flex.
+/// Measures batched prefill and decode against row-by-row execution on Flex.
 ///
-/// Run in release mode: `cargo test --release --lib
-/// models::llama::model::decode::tests::batched_decode_speedup -- --ignored --nocapture`.
+/// Eight rows run as one batch and as eight batch-one states, both with
+/// ragged left-padded prompts (48 down to 34 tokens) and with uniform
+/// 48-token prompts. Repetitions are interleaved and each phase reports its
+/// best of seven runs, which suppresses interference from other processes
+/// on a shared host. Run in release mode: `cargo test --release --lib
+/// models::llama::model::decode::tests::batched_decode_speedup -- --ignored
+/// --nocapture`.
 #[test]
 #[ignore = "timing benchmark; run explicitly in release mode"]
 fn batched_decode_speedup_over_row_by_row() {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     /// Batch rows.
     const ROWS: usize = 8;
     /// Padded prompt width.
     const PROMPT: usize = 48;
     /// Decode steps after the prompt.
     const STEPS: usize = 32;
+    /// Interleaved repetitions per configuration.
+    const REPETITIONS: usize = 7;
     let config = LlamaFamilyConfig {
         vocab_size: 2048,
         hidden_size: 256,
@@ -654,10 +744,6 @@ fn batched_decode_speedup_over_row_by_row() {
     let prompt: Vec<i64> = (0..ROWS * PROMPT)
         .map(|index| (index * 37 % 2000) as i64)
         .collect();
-    // Ragged prompts: row r has PROMPT - 2r valid tokens, left-padded.
-    let valid: Vec<bool> = (0..ROWS * PROMPT)
-        .map(|index| index % PROMPT >= 2 * (index / PROMPT))
-        .collect();
     let options = ForwardOptions::default();
     let step_tokens = |rows: usize, step: usize| {
         Tensor::<B, 2, Int>::from_data(
@@ -665,46 +751,84 @@ fn batched_decode_speedup_over_row_by_row() {
             &device,
         )
     };
-
-    let started = Instant::now();
-    let mut batched = state(&model, ROWS, PROMPT + STEPS);
-    let prompt_tensor =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(prompt.clone(), [ROWS, PROMPT]), &device);
-    let prompt_mask = TokenMask::new(bool_tensor_from_values::<B, 2>(
-        valid.clone(),
-        [ROWS, PROMPT],
-        &device,
-    ));
-    model
-        .prefill(
-            input(prompt_tensor, Some(prompt_mask), None),
-            &mut batched,
-            &options,
-        )
-        .unwrap();
-    for step in 0..STEPS {
-        let _ = host(decode_step(&model, &mut batched, step_tokens(ROWS, step)));
-    }
-    let batched_time = started.elapsed();
-
-    let started = Instant::now();
-    for row in 0..ROWS {
-        let kept: Vec<i64> = (0..PROMPT)
-            .filter(|&column| valid[row * PROMPT + column])
-            .map(|column| prompt[row * PROMPT + column])
-            .collect();
-        let mut single = state(&model, 1, PROMPT + STEPS);
-        let tokens = Tensor::<B, 1, Int>::from_ints(kept.as_slice(), &device).unsqueeze_dim(0);
-        model
-            .prefill(input(tokens, None, None), &mut single, &options)
-            .unwrap();
+    // Row r keeps its last PROMPT - 2r tokens when ragged, every token otherwise.
+    let validity = |ragged: bool| -> Vec<bool> {
+        (0..ROWS * PROMPT)
+            .map(|index| !ragged || index % PROMPT >= 2 * (index / PROMPT))
+            .collect()
+    };
+    // Returns (prefill, decode) wall time of one batched run.
+    let batched_run = |valid: &[bool]| {
+        let mut batched = state(&model, ROWS, PROMPT + STEPS);
+        let tokens = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(prompt.clone(), [ROWS, PROMPT]),
+            &device,
+        );
+        let mask = TokenMask::new(bool_tensor_from_values::<B, 2>(
+            valid.to_vec(),
+            [ROWS, PROMPT],
+            &device,
+        ));
+        let started = Instant::now();
+        let logits = model
+            .prefill(input(tokens, Some(mask), None), &mut batched, &options)
+            .unwrap()
+            .logits;
+        let _ = host(logits);
+        let prefill = started.elapsed();
+        let started = Instant::now();
         for step in 0..STEPS {
-            let _ = host(decode_step(&model, &mut single, step_tokens(1, step)));
+            let _ = host(decode_step(&model, &mut batched, step_tokens(ROWS, step)));
         }
+        (prefill, started.elapsed())
+    };
+    // Returns (prefill, decode) wall time of eight batch-one runs.
+    let row_run = |valid: &[bool]| {
+        let (mut prefill, mut decode) = (Duration::ZERO, Duration::ZERO);
+        for row in 0..ROWS {
+            let kept: Vec<i64> = (0..PROMPT)
+                .filter(|&column| valid[row * PROMPT + column])
+                .map(|column| prompt[row * PROMPT + column])
+                .collect();
+            let mut single = state(&model, 1, PROMPT + STEPS);
+            let tokens = Tensor::<B, 1, Int>::from_ints(kept.as_slice(), &device).unsqueeze_dim(0);
+            let started = Instant::now();
+            let logits = model
+                .prefill(input(tokens, None, None), &mut single, &options)
+                .unwrap()
+                .logits;
+            let _ = host(logits);
+            prefill += started.elapsed();
+            let started = Instant::now();
+            for step in 0..STEPS {
+                let _ = host(decode_step(&model, &mut single, step_tokens(1, step)));
+            }
+            decode += started.elapsed();
+        }
+        (prefill, decode)
+    };
+    let best = |runs: &[(Duration, Duration)]| {
+        let prefill = runs.iter().map(|run| run.0).min().unwrap();
+        let decode = runs.iter().map(|run| run.1).min().unwrap();
+        (prefill, decode)
+    };
+    let ratio = |rows: Duration, batch: Duration| rows.as_secs_f64() / batch.as_secs_f64();
+    for ragged in [true, false] {
+        let valid = validity(ragged);
+        let (mut batched_runs, mut row_runs) = (Vec::new(), Vec::new());
+        let _ = (batched_run(&valid), row_run(&valid));
+        for _ in 0..REPETITIONS {
+            batched_runs.push(batched_run(&valid));
+            row_runs.push(row_run(&valid));
+        }
+        let (batched_prefill, batched_decode) = best(&batched_runs);
+        let (row_prefill, row_decode) = best(&row_runs);
+        eprintln!(
+            "{} prompts, {ROWS} rows: prefill batched {batched_prefill:?} vs row-by-row {row_prefill:?} ({:.2}x); {STEPS} decode steps batched {batched_decode:?} ({:?}/step) vs row-by-row {row_decode:?} ({:.2}x)",
+            if ragged { "ragged" } else { "uniform" },
+            ratio(row_prefill, batched_prefill),
+            batched_decode / STEPS as u32,
+            ratio(row_decode, batched_decode),
+        );
     }
-    let row_time = started.elapsed();
-    eprintln!(
-        "{ROWS} ragged rows, {PROMPT}-column prompts, {STEPS} decode steps: batched {batched_time:?}, row-by-row {row_time:?}, speedup {:.2}x",
-        row_time.as_secs_f64() / batched_time.as_secs_f64()
-    );
 }
