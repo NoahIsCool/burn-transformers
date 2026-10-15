@@ -15,10 +15,14 @@
 //! blocks are numbered exactly `0..count` in schedule order, so attention
 //! and Mamba-2 blocks address distinct allocated layers of their own caches),
 //! the sliding-window activity test, uniform-history detection, the
-//! context-limit check, and the Mamba-2 convolution width. The planning
-//! file reuses the shared strictly-increasing check, so the shared planning
-//! module is included at its crate path. See `verus/README.md` for the
-//! method, toolchain, and command.
+//! context-limit check, and the Mamba-2 convolution width. It also verifies
+//! `src/models/nemotron_h/model/cycle.rs`: every append of a speculative
+//! cycle (target suffix, MTP pairs, MTP positions, staging reservation) is
+//! accepted exactly when `start + count <= limit`, each rejection names its
+//! cause, and the shifted alignment `L_target = L_mtp + 1` is checked
+//! exactly. The planning file reuses the shared strictly-increasing check, so
+//! the shared planning module is included at its crate path. See
+//! `verus/README.md` for the method, toolchain, and command.
 //!
 //! Burn tensor programs driven by these plans (index selects, cache steps,
 //! and attention masks) remain covered by the Rust tests in
@@ -42,3 +46,6 @@ pub mod models {
 
 #[path = "../src/models/nemotron_h/model/plan.rs"]
 pub mod plan;
+
+#[path = "../src/models/nemotron_h/model/cycle.rs"]
+pub mod cycle;

@@ -21,7 +21,8 @@
 //!   a right-padded compact batch (`batch` realizes, and `plan` plans and
 //!   verifies, its index maps);
 //! - `mtp` and `speculative`: the shifted MTP stage and lossless speculation
-//!   that verifies a whole draft in one target pass;
+//!   that verifies a whole draft in one target pass (`cycle` verifies their
+//!   extent and alignment checks);
 //! - `hooks`: activation points, [`HookedModel`](crate::architecture::HookedModel),
 //!   and [`StagedModel`](crate::architecture::StagedModel) for experiments;
 //! - `mamba2`: the family's names for the shared [`crate::mamba2`] mixer.
@@ -56,6 +57,7 @@ use crate::models::shared::{
 };
 
 mod batch;
+mod cycle;
 mod decode;
 mod hooks;
 pub mod mamba2;

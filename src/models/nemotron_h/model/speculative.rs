@@ -69,7 +69,10 @@ use crate::{
 };
 
 use super::{
-    NemotronHDecodeState, NemotronHForCausalLm, mtp::DraftPairs, plan::verification_tokens,
+    NemotronHDecodeState, NemotronHForCausalLm,
+    cycle::{ExtentError, bounded_end, shifted_alignment},
+    mtp::DraftPairs,
+    plan::verification_tokens,
 };
 
 /// XOR seed domain separating MTP proposal sampling from target sampling.
@@ -580,7 +583,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         let mtp = state.tensor_state().mtp_lengths().ok_or_else(|| {
             Error::Cache("Nemotron-H speculative state has no independent MTP cursor".into())
         })?;
-        if target.len() != 1 || mtp.len() != 1 || mtp[0].checked_add(1) != Some(target[0]) {
+        if !shifted_alignment(target, mtp) {
             return Err(Error::Cache(format!(
                 "Nemotron-H speculative alignment requires target = MTP + 1, found target={target:?}, MTP={mtp:?}"
             )));
@@ -592,16 +595,16 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
                 format!("{} tokens", history_before_lead.len()),
             ));
         }
-        let requested = target[0].checked_add(required_staging).ok_or_else(|| {
-            Error::Generation("Nemotron-H speculative target length overflows usize".into())
-        })?;
-        if requested > state.tensor_state().capacity() {
-            return Err(Error::Generation(format!(
+        match bounded_end(target[0], required_staging, state.tensor_state().capacity()) {
+            Ok(_) => Ok(()),
+            Err(ExtentError::Overflow) => Err(Error::Generation(
+                "Nemotron-H speculative target length overflows usize".into(),
+            )),
+            Err(ExtentError::Exceeds(requested)) => Err(Error::Generation(format!(
                 "Nemotron-H speculative suffix reaches {requested}, exceeding cache capacity {}",
                 state.tensor_state().capacity()
-            )));
+            ))),
         }
-        Ok(())
     }
 
     /// Returns whether a token terminates ordinary generation.

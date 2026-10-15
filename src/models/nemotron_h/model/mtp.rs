@@ -46,6 +46,7 @@ use crate::{
 use super::{
     INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm, NemotronHNextTokenHead,
     batch::CompactBatch,
+    cycle::{ExtentError, bounded_end},
     decode::{KV_GROUP, Retain, StatefulPhase, prepare_stateful_input},
     plan::active_window,
 };
@@ -143,15 +144,20 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 "Nemotron-H model has no configured next-token prediction stage".into(),
             ));
         }
-        let staging_capacity = max_draft_tokens.checked_add(1).ok_or_else(|| {
-            Error::Generation("Nemotron-H MTP staging capacity overflows usize".into())
-        })?;
-        if staging_capacity > config.capacity() {
-            return Err(Error::Generation(format!(
-                "Nemotron-H MTP needs staging capacity {staging_capacity}, exceeding cache capacity {}",
-                config.capacity()
-            )));
-        }
+        let staging_capacity = match bounded_end(max_draft_tokens, 1, config.capacity()) {
+            Ok(staging_capacity) => staging_capacity,
+            Err(ExtentError::Overflow) => {
+                return Err(Error::Generation(
+                    "Nemotron-H MTP staging capacity overflows usize".into(),
+                ));
+            }
+            Err(ExtentError::Exceeds(staging_capacity)) => {
+                return Err(Error::Generation(format!(
+                    "Nemotron-H MTP needs staging capacity {staging_capacity}, exceeding cache capacity {}",
+                    config.capacity()
+                )));
+            }
+        };
         NemotronHDecodeState::new_with_staging(self, config, batch_size, staging_capacity, device)
     }
 
@@ -504,19 +510,28 @@ fn mtp_attention<B: Backend>(
     state: &mut NemotronHDecodeState<B>,
 ) -> Result<Tensor<B, 3>> {
     let queries = projection.query.dims()[2];
-    let end = mtp_working_length(state)?
-        .checked_add(keys.dims()[2])
-        .ok_or_else(|| Error::Generation("Nemotron-H MTP position overflows usize".into()))?;
-    if end > state.tensors.capacity() {
-        return Err(
-            TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                sequence: 0,
-                requested: end,
-                capacity: state.tensors.capacity(),
-            })
-            .into(),
-        );
-    }
+    let end = match bounded_end(
+        mtp_working_length(state)?,
+        keys.dims()[2],
+        state.tensors.capacity(),
+    ) {
+        Ok(end) => end,
+        Err(ExtentError::Overflow) => {
+            return Err(Error::Generation(
+                "Nemotron-H MTP position overflows usize".into(),
+            ));
+        }
+        Err(ExtentError::Exceeds(end)) => {
+            return Err(
+                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
+                    sequence: 0,
+                    requested: end,
+                    capacity: state.tensors.capacity(),
+                })
+                .into(),
+            );
+        }
+    };
     let plan = state.tensors.kv_read_plan_through(step, KV_GROUP)?;
     state
         .tensors
@@ -606,19 +621,22 @@ fn validate_mtp_positions<B: Backend>(
     maximum: usize,
     device: &B::Device,
 ) -> Result<()> {
-    let end = baseline.checked_add(sequence).ok_or_else(|| {
-        Error::configuration(
-            "nemotron_h.mtp.position_ids",
-            "position range overflows usize",
-        )
-    })?;
-    if end > maximum {
-        return Err(Error::shape(
-            "nemotron_h.mtp.position_ids",
-            format!("positions below {maximum}"),
-            format!("range {baseline}..{end}"),
-        ));
-    }
+    let end = match bounded_end(baseline, sequence, maximum) {
+        Ok(end) => end,
+        Err(ExtentError::Overflow) => {
+            return Err(Error::configuration(
+                "nemotron_h.mtp.position_ids",
+                "position range overflows usize",
+            ));
+        }
+        Err(ExtentError::Exceeds(end)) => {
+            return Err(Error::shape(
+                "nemotron_h.mtp.position_ids",
+                format!("positions below {maximum}"),
+                format!("range {baseline}..{end}"),
+            ));
+        }
+    };
     let Some(positions) = positions else {
         return Ok(());
     };
