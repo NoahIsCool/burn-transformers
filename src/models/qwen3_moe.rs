@@ -34,9 +34,10 @@ pub use model::{
 };
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
-    positive_finite, probability, token_ids,
+    ConfigError, ModelConfig, PartialRotary, RopeContext, RopeParameters, TokenIds, Validate,
+    divisible, model_type, nonzero, positive_finite, probability, token_ids,
 };
+use crate::position::RopeConfig;
 
 /// Serialized topology for Qwen3 MoE models such as Qwen3-30B-A3B.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +158,30 @@ impl Qwen3MoeConfig {
             && !self.mlp_only_layers.contains(&layer_index)
             && self.num_experts > 0
             && (layer_index + 1).is_multiple_of(self.decoder_sparse_step)
+    }
+
+    /// Translates the serialized RoPE metadata into the executable rotary configuration.
+    ///
+    /// Qwen3-MoE rotates whole heads, so a partial factor other than one is
+    /// rejected as an unused field. Resolution and strictness follow the shared
+    /// [`RopeParameters::to_rope_config`] translator: the nested
+    /// `rope_parameters` are authoritative, the legacy top-level `rope_theta`
+    /// is a fallback, and a disagreement between the two is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error at `qwen3_moe.rope.<field>` (or
+    /// `qwen3_moe.head_dim`) for a missing, out-of-range, conflicting, or
+    /// unused RoPE field.
+    pub fn rope_config(&self) -> crate::Result<RopeConfig> {
+        self.rope_parameters
+            .clone()
+            .unwrap_or_default()
+            .to_rope_config(
+                &RopeContext::new("qwen3_moe", self.head_dim, self.max_position_embeddings)
+                    .with_rope_theta(self.rope_theta)
+                    .with_partial_rotary(PartialRotary::FullHeadOnly),
+            )
     }
 }
 

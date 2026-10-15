@@ -41,7 +41,7 @@ use crate::{
 
 use super::{
     Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5DecoderLayer, Qwen3_5LayerType,
-    Qwen3_5TextConfig, Qwen3_5TextModel, model::qwen_rope_config,
+    Qwen3_5TextConfig, Qwen3_5TextModel,
 };
 use crate::models::config::ModelConfig;
 
@@ -205,7 +205,7 @@ impl Qwen3_5BackboneRecipe {
         config.mtp_num_hidden_layers = 0;
         let layer_rope = configurations
             .iter()
-            .map(qwen_rope_config)
+            .map(Qwen3_5TextConfig::rope_config)
             .collect::<Result<Vec<_>>>()?;
         let layers = configurations
             .iter()
@@ -452,7 +452,7 @@ impl Qwen3_5BackboneRecipe {
             }
             let config = layer.config(&self.config);
             ArchitectureConfig::validate(&config)?;
-            qwen_rope_config(&config)?;
+            config.rope_config()?;
             configurations.push(config);
         }
         Ok(configurations)

@@ -31,19 +31,13 @@ use crate::{
     intervention::{Hooks, Layer, PointInfo, Stack},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{
-        DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
-        rotary_angles,
-    },
+    position::{RopeConfig, apply_rotary, rotary_angles},
 };
 
 use super::{Qwen3_5LayerType, Qwen3_5TextConfig};
-use crate::models::{
-    config::RopeType,
-    shared::{
-        DeferredChecks, InputContract, InputNames, ValidatedInput, check_nonempty_mask,
-        ensure_same_device, select_hidden, validate_input,
-    },
+use crate::models::shared::{
+    DeferredChecks, InputContract, InputNames, ValidatedInput, check_nonempty_mask,
+    ensure_same_device, select_hidden, validate_input,
 };
 
 mod decode;
@@ -363,7 +357,7 @@ impl<B: Backend> Qwen3_5TextModel<B> {
     /// Initializes lazy parameters for the exact configured hybrid schedule.
     pub fn init(config: Qwen3_5TextConfig, device: &B::Device) -> Result<Self> {
         ArchitectureConfig::validate(&config)?;
-        let rope = qwen_rope_config(&config)?;
+        let rope = config.rope_config()?;
         let layers = config
             .resolved_layer_types()
             .into_iter()
@@ -983,59 +977,6 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             }
         }
     }
-}
-
-/// Translates Hugging Face RoPE metadata to the shared validated implementation.
-pub(super) fn qwen_rope_config(config: &Qwen3_5TextConfig) -> Result<RopeConfig> {
-    let parameters = config.rope_parameters.clone().unwrap_or_default();
-    let theta = parameters
-        .rope_theta
-        .or(config.rope_theta)
-        .unwrap_or(10_000.0);
-    let partial = parameters
-        .partial_rotary_factor
-        .or(config.partial_rotary_factor)
-        .unwrap_or(1.0);
-    let scaling = match parameters.rope_type {
-        RopeType::Default => RopeScaling::None,
-        RopeType::Linear => LinearRopeScaling::new(parameters.factor.unwrap_or(1.0))
-            .map(RopeScaling::from)
-            .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?,
-        RopeType::Dynamic => DynamicNtkScaling::new(
-            parameters.factor.unwrap_or(1.0),
-            parameters
-                .original_max_position_embeddings
-                .unwrap_or(config.max_position_embeddings),
-        )
-        .map(RopeScaling::from)
-        .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?,
-        RopeType::Yarn => {
-            let mut yarn = YarnConfig::new(
-                parameters.factor.unwrap_or(1.0),
-                parameters
-                    .original_max_position_embeddings
-                    .unwrap_or(config.max_position_embeddings),
-            )
-            .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?;
-            if let Some(factor) = parameters.attention_factor {
-                yarn = yarn
-                    .with_attention_factor(factor)
-                    .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?;
-            }
-            yarn = yarn
-                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
-                .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?;
-            RopeScaling::Yarn(yarn)
-        }
-        unsupported => {
-            return Err(Error::configuration(
-                "qwen3_5.rope_type",
-                format!("{unsupported:?} is not implemented for the Qwen text runtime"),
-            ));
-        }
-    };
-    RopeConfig::from_partial_factor(config.head_dim, partial, theta, scaling)
-        .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))
 }
 
 /// Check public latent boundaries before mixed-dtype operations reach the backend.

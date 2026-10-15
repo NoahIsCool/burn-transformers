@@ -265,12 +265,15 @@ fn mixed_projection_config(rope_type: RopeType) -> Qwen3MoeConfig {
         mlp_only_layers: vec![0],
         attention_bias: true,
         max_position_embeddings: 32,
-        rope_theta: Some(10_000.0),
+        // The nested theta is authoritative; a disagreeing legacy top-level
+        // theta would be rejected by the shared translator.
+        rope_theta: None,
         rope_parameters: Some(RopeParameters {
             rope_type,
             rope_theta: Some(100.0),
             factor: Some(2.0),
-            original_max_position_embeddings: Some(8),
+            // Linear RoPE reads no original context, so only YaRN carries one.
+            original_max_position_embeddings: (rope_type == RopeType::Yarn).then_some(8),
             attention_factor: (rope_type == RopeType::Yarn).then_some(1.25),
             beta_fast: (rope_type == RopeType::Yarn).then_some(4.0),
             beta_slow: (rope_type == RopeType::Yarn).then_some(1.0),
@@ -501,7 +504,7 @@ fn mixed_projections_scaled_positions_match_scalar_oracles() {
     for rope_type in [RopeType::Linear, RopeType::Yarn] {
         let model = mixed_projection_model(rope_type);
         let rope = model.model.rope;
-        assert_eq!(rope.theta(), 100.0); // Nested checkpoint metadata wins over the legacy 10,000.
+        assert_eq!(rope.theta(), 100.0); // The nested checkpoint theta is used.
         assert_eq!((rope.head_dimension(), rope.rotary_dimension()), (4, 4));
         let (frequencies, amplitude) = match rope.scaling() {
             RopeScaling::Linear(linear) => {

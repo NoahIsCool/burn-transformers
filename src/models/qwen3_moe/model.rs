@@ -41,16 +41,12 @@ use crate::{
     },
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{
-        DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
-        rotary_angles,
-    },
+    position::{RopeConfig, apply_rotary, rotary_angles},
 };
 
 use super::Qwen3MoeConfig;
-use crate::models::{
-    config::RopeType,
-    shared::{InputContract, InputNames, ensure_same_device, select_hidden, validate_input},
+use crate::models::shared::{
+    InputContract, InputNames, ensure_same_device, select_hidden, validate_input,
 };
 
 mod decode;
@@ -204,7 +200,7 @@ impl<B: Backend> Qwen3MoeModel<B> {
                     .into(),
             ));
         }
-        let rope = qwen_rope_config(&config)?;
+        let rope = config.rope_config()?;
         let layers = (0..config.num_hidden_layers)
             .map(|index| Qwen3MoeDecoderLayer::init(&config, index, device))
             .collect::<Result<Vec<_>>>()?;
@@ -420,55 +416,6 @@ impl Qwen3MoeConfig {
             .then_some(self.sliding_window)
             .flatten()
     }
-}
-
-/// Converts serialized RoPE metadata into the shared validated representation.
-fn qwen_rope_config(config: &Qwen3MoeConfig) -> Result<RopeConfig> {
-    let parameters = config.rope_parameters.clone().unwrap_or_default();
-    let theta = parameters
-        .rope_theta
-        .or(config.rope_theta)
-        .unwrap_or(10_000.0);
-    let scaling = match parameters.rope_type {
-        RopeType::Default => RopeScaling::None,
-        RopeType::Linear => LinearRopeScaling::new(parameters.factor.unwrap_or(1.0))
-            .map(RopeScaling::from)
-            .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?,
-        RopeType::Dynamic => DynamicNtkScaling::new(
-            parameters.factor.unwrap_or(1.0),
-            parameters
-                .original_max_position_embeddings
-                .unwrap_or(config.max_position_embeddings),
-        )
-        .map(RopeScaling::from)
-        .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?,
-        RopeType::Yarn => {
-            let mut yarn = YarnConfig::new(
-                parameters.factor.unwrap_or(1.0),
-                parameters
-                    .original_max_position_embeddings
-                    .unwrap_or(config.max_position_embeddings),
-            )
-            .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?;
-            if let Some(factor) = parameters.attention_factor {
-                yarn = yarn
-                    .with_attention_factor(factor)
-                    .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?;
-            }
-            yarn = yarn
-                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
-                .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?;
-            RopeScaling::Yarn(yarn)
-        }
-        unsupported => {
-            return Err(Error::configuration(
-                "qwen3_moe.rope_type",
-                format!("{unsupported:?} is not implemented for Qwen3 MoE"),
-            ));
-        }
-    };
-    RopeConfig::new(config.head_dim, config.head_dim, theta, scaling)
-        .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))
 }
 
 /// Computes the pinned Transformers 5.2 Qwen3-MoE stack-wide balance objective.

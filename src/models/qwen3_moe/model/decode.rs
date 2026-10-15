@@ -22,11 +22,11 @@ use crate::{
     cache::{CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState},
     models::shared::{
         EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
-        ensure_static_rotary_context, implicit_position_ids, prepare_stateful_rows,
-        select_hidden_with_last_columns, validate_logits_selection,
+        implicit_position_ids, prepare_stateful_rows, select_hidden_with_last_columns,
+        validate_logits_selection,
     },
     moe::SparseMoeOutput,
-    position::{RotaryAngles, apply_rotary, rotary_angles},
+    position::{RopeConfig, RotaryAngles, apply_rotary, rotary_angles},
 };
 
 use super::{
@@ -680,7 +680,7 @@ fn prepare_stateful_input<B: Backend>(
         },
     )?;
     for (_, context) in rows.active_contexts() {
-        ensure_static_rotary_context(model.model.rope.scaling(), context, "Qwen3 MoE")?;
+        ensure_cacheable_rotary_context(model.model.rope, context, "Qwen3 MoE")?;
     }
     Ok(rows)
 }
@@ -723,6 +723,23 @@ fn empty_hidden_row<B: Backend>(
         [1, sequence, model.config().hidden_size],
         (device, model.model.embed_tokens.weight.val().dtype()),
     )
+}
+
+/// Rejects an evaluated rotary context that keys already in the cache cannot follow.
+///
+/// Context-dependent policies (dynamic NTK and LongRoPE) change their
+/// frequencies once the evaluated context passes
+/// [`RopeScaling::cached_context_limit`](crate::position::RopeScaling::cached_context_limit).
+/// Cached keys were rotated with the earlier frequencies, so extending the
+/// cache past that limit would silently mix two rotary bases; re-rotating the
+/// history is not implemented. Static policies have no limit.
+fn ensure_cacheable_rotary_context(rope: RopeConfig, context: usize, family: &str) -> Result<()> {
+    match rope.scaling().cached_context_limit() {
+        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
+            "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Derives the homogeneous native-KV cache specification from model weights.

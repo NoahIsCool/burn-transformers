@@ -276,18 +276,25 @@ fn stateful_delta_net_rejects_unit_convolution_kernel() {
     assert!(matches!(error, Error::Configuration { .. }));
 }
 
-/// Context-dependent dynamic NTK cannot silently reuse stale rotated keys.
+/// A context-dependent rotary policy cannot silently reuse stale rotated keys.
+///
+/// LongRoPE switches from its short to its long frequency table once the
+/// evaluated context exceeds the original training context `L = 2`; keys
+/// cached under the short table would then disagree with new queries, so a
+/// three-token prefill must fail before any cache mutation.
 #[test]
-fn dynamic_ntk_extension_is_rejected_before_cache_mutation() {
+fn context_dependent_rope_extension_is_rejected_before_cache_mutation() {
     let device = Default::default();
     let mut config = tiny_config();
     config.rope_parameters = Some(RopeParameters {
-        rope_type: RopeType::Dynamic,
+        rope_type: RopeType::LongRope,
         factor: Some(2.0),
         original_max_position_embeddings: Some(2),
+        short_factor: Some(vec![1.0, 1.0]),
+        long_factor: Some(vec![1.5, 2.0]),
         ..Default::default()
     });
-    let model = Qwen3_5ForCausalLm::init(config, &device).expect("dynamic-NTK model");
+    let model = Qwen3_5ForCausalLm::init(config, &device).expect("LongRoPE model");
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 4).expect("cache config"), 1, &device)
         .expect("decode state");
@@ -301,10 +308,67 @@ fn dynamic_ntk_extension_is_rejected_before_cache_mutation() {
             &mut state,
             &ForwardOptions::default(),
         )
-        .expect_err("dynamic cache extension must fail");
+        .expect_err("a context beyond the original LongRoPE window must fail");
 
     assert!(matches!(error, Error::BackendCapability(_)));
     assert_eq!(state.lengths(), &[0]);
+}
+
+/// Dynamic NTK scales against `max_position_embeddings`, which bounds the cache.
+///
+/// Under the Transformers rule the trained context of dynamic NTK is
+/// `max_position_embeddings`, and neither the cache capacity nor explicit
+/// positions may exceed it, so cached decoding never leaves the unscaled
+/// regime and must reproduce the stateless forward.
+#[test]
+fn dynamic_ntk_cached_decode_matches_stateless_within_trained_context() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.rope_parameters = Some(RopeParameters {
+        rope_type: RopeType::Dynamic,
+        factor: Some(2.0),
+        ..Default::default()
+    });
+    TestBackend::seed(&device, 211);
+    let model = Qwen3_5ForCausalLm::init(config, &device).expect("dynamic-NTK model");
+    let tokens = [[1, 2, 3, 4]];
+    let reference = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints(tokens, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &diagnostic_options(),
+        )
+        .expect("stateless dynamic-NTK forward");
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).expect("cache config"), 1, &device)
+        .expect("decode state");
+    let prefill = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .expect("cached dynamic-NTK prefill");
+    assert_close(prefill.logits, reference.logits.clone().narrow(1, 0, 3));
+    let decode = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .expect("cached dynamic-NTK decode");
+    assert_close(decode.logits, reference.logits.narrow(1, 3, 1));
 }
 
 /// Invalid explicit positions and logit selections fail before state changes.
