@@ -505,13 +505,18 @@ proptest! {
     ///
     /// For scalar operands (where the bounded operators delegate to, or
     /// replicate, the engine) results and failures must agree: the rewrite
-    /// preserves precedence, associativity, and evaluation order.
+    /// preserves precedence, associativity, and evaluation order. The only
+    /// exception is the guard's documented refusal of a variable named `not`
+    /// used as an operand.
     #[test]
     fn guarded_expressions_match_minijinja(expression in scalar_expression()) {
         let source = format!("{{{{ {expression} }}}}|{{% set y = {expression} %}}{{{{ y }}}}");
         let context = json!({"x": 3, "s": "q"});
         let guarded = render_template(&source, &context, Some(0));
         let plain = render_unguarded(&source, &context);
+        // The one documented refusal: MiniJinja reads `not` after a binary
+        // operator as a variable, which the guard cannot rewrite faithfully.
+        prop_assume!(!matches!(&guarded, Err(error) if error.to_string().contains("variable named `not`")));
         match (&guarded, &plain) {
             (Ok(guarded), Ok(plain)) => prop_assert_eq!(guarded, plain, "{}", source),
             (Err(_), Err(_)) => {}

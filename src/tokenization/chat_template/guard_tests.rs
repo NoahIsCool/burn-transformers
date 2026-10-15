@@ -188,6 +188,10 @@ fn unreadable_tags_with_guarded_operators_are_refused() {
         "{{ f(a, k=1, 2 ~ 3) b }}",
         "{{ x.1.5 + 1 }}",
         "{{ a ! b + c }}",
+        // `not` in operand position is a variable to MiniJinja but would be the
+        // operator once the operand is re-read inside filter arguments.
+        "{{ 0 * not (0) }}",
+        "{{ 1 + not.x * 3 }}",
     ] {
         let error = guard_operators(source).expect_err(source);
         assert!(error.to_string().contains("cannot be bounded"), "{error}");

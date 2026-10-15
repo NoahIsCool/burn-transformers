@@ -49,7 +49,10 @@
 //!
 //! A tag the parser cannot read is kept verbatim when it contains no `+`,
 //! `~`, or `*` token: MiniJinja then rejects the syntax itself or runs no
-//! guarded operator. A tag that does contain one is refused with a
+//! guarded operator. The same applies to a variable named `not` used as an
+//! operand (`x * not(y)`): MiniJinja reads it as a name there, but a
+//! rewritten operand is re-read inside filter arguments, where `not` would
+//! become the operator, so such a tag is refused rather than changed. A tag that does contain one is refused with a
 //! [`GuardError`], so syntax this parser does not understand can never carry
 //! an unbounded operator past the guard. An unknown statement keyword is kept
 //! verbatim either way, because MiniJinja rejects it while parsing, before
@@ -1103,6 +1106,13 @@ impl<'a> Parser<'a> {
         self.position += 1;
         let start = token.start;
         match (token.kind, token.text) {
+            // MiniJinja reads `not` in operand position (`x * not(y)`) as a
+            // variable, but a rewritten operand is re-read inside filter
+            // arguments or parentheses, where `not` is the operator; such a
+            // tag cannot be rewritten faithfully.
+            (Kind::Name, "not") => Err(Refusal::Syntax(
+                "a variable named `not` cannot be an operand of a bounded operator".to_owned(),
+            )),
             (Kind::Name, text) => {
                 let mut fragment = self.verbatim(start, token.end, true);
                 fragment.name = !CONSTANTS.contains(&text);
