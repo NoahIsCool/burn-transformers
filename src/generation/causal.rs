@@ -30,7 +30,7 @@ use super::bookkeeping::{prefill_chunk_end, row_span};
 use super::metadata::{self, extract_last_logits};
 use super::{
     FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenHistory,
-    probability_accumulation_dtype,
+    upcast_half_precision,
 };
 
 /// Label used for model-logit shape errors raised by this coordinator.
@@ -206,19 +206,14 @@ where
 
 /// Extracts one step's `[batch, vocabulary]` logits and promotes half precision to F32.
 ///
-/// Hugging Face upcasts next-token logits to F32 before any processor runs;
-/// doing the same keeps bias, penalties, and warpers free of F16/BF16
-/// rounding (for example a 1.05 repetition penalty on a logit near 20). The
-/// `[batch, vocabulary]` cast is negligible next to a model step; F32 and F64
-/// logits are unchanged.
+/// See [`upcast_half_precision`] for why processing runs in at least F32.
 fn step_logits<B: Backend>(
     logits: Tensor<B, 3>,
     batch: usize,
     vocabulary_size: usize,
 ) -> Result<Tensor<B, 2>> {
     let logits = extract_last_logits(logits, batch, vocabulary_size, MODEL_LOGITS)?;
-    let dtype = probability_accumulation_dtype(logits.dtype());
-    Ok(logits.cast(dtype))
+    Ok(upcast_half_precision(logits))
 }
 
 /// Rows that emitted a token in one step, and rows that remain active after it.

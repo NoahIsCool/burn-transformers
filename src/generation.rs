@@ -33,8 +33,10 @@
 //!
 //! Greedy decoding therefore ignores temperature and truncation, as in Hugging
 //! Face, and its reported log probabilities come from the penalized,
-//! untruncated distribution. Steps 1 and 2 commute with step 3 because `-inf`
-//! is a fixed point of every penalty.
+//! untruncated distribution. Step 2 commutes with step 3 because `-inf` is a
+//! fixed point of every penalty. Step 1 does not (`(z + b) / r != z / r + b`);
+//! bias comes before penalties because Hugging Face (`SequenceBias` before
+//! `RepetitionPenalty`) and vLLM apply it in that order.
 //!
 //! Temperature sampling draws from `p(i) = exp(z_i / T) / sum_j exp(z_j / T)`.
 //! Top-k keeps exactly the `k` greatest scores. Nucleus (top-p) keeps the
@@ -43,12 +45,26 @@
 //! `p_i >= min_p * max_j p_j`, evaluated as `z_i >= max_j z_j + ln(min_p)`
 //! without a sort. Rejected scores become negative infinity.
 //!
+//! # Entry points
+//!
+//! - [`LogitsProcessor::process_with_history`] reads a [`TokenHistory`] kept
+//!   across steps; [`generate_causal`] uses it.
+//! - [`LogitsProcessor::process_with_prompt_lengths`] rebuilds that history
+//!   from host token rows with an explicit prompt boundary and promotes
+//!   half-precision logits like [`generate_causal`], so it reproduces the
+//!   coordinator's processing exactly (speculative decoders use this form).
+//! - [`LogitsProcessor::process`] and [`LogitsProcessor::process_with_mask`]
+//!   keep their original meaning: every supplied history token counts as
+//!   generated, and the logits dtype is kept.
+//!
 //! # Precision
 //!
 //! Bias, constraints, penalties, and warpers keep the input runtime dtype,
 //! which need not equal the backend's default float type. Probability sums and
 //! returned log probabilities promote F16/BF16 to F32 (Hugging Face upcasts
-//! logits to F32 for the same reason); native F64 stays F64. Flex32 requests
+//! logits to F32 for the same reason); native F64 stays F64. The coordinators
+//! and [`LogitsProcessor::process_with_prompt_lengths`] additionally promote
+//! half-precision logits before any processing ([`upcast_half_precision`]). Flex32 requests
 //! F32 arithmetic, but a backend may keep its F32 storage alias. Sampling with
 //! active top-k or top-p on Flex32 fails contextually because Burn 0.21's
 //! fallback sort cannot read that storage tag.
@@ -399,10 +415,17 @@ impl<B: Backend> LogitsProcessor<B> {
     /// Processes `[batch, vocabulary]` logits using optional token history.
     ///
     /// History has shape `[batch, prior_sequence]`. Every supplied token counts
-    /// as a previously *generated* token: it is repetition-, presence-, and
-    /// frequency-penalized, forms n-grams, and counts toward
-    /// `min_new_tokens`. Callers that distinguish prompt from output should
-    /// keep a [`TokenHistory`] and call [`Self::process_with_history`].
+    /// as a previously *generated* token: it is repetition-penalized, forms
+    /// n-grams, is counted by presence and frequency whatever
+    /// [`GenerationConfig::additive_penalty_scope`] says, and counts toward
+    /// `min_new_tokens`. A history that includes the prompt therefore matches
+    /// [`generate_causal`] only with [`PenaltyScope::PromptAndGenerated`] and
+    /// `min_new_tokens == 0`: once it holds `min_new_tokens` prompt tokens,
+    /// EOS is no longer suppressed. Logits keep their runtime dtype.
+    ///
+    /// To reproduce [`generate_causal`] exactly, pass the prompt boundary with
+    /// [`Self::process_with_prompt_lengths`] or keep a [`TokenHistory`] for
+    /// [`Self::process_with_history`].
     pub fn process(
         &self,
         logits: Tensor<B, 2>,
@@ -444,6 +467,39 @@ impl<B: Backend> LogitsProcessor<B> {
             }
         };
         self.process_with_history(logits, &history)
+    }
+
+    /// Processes one step exactly as [`generate_causal`] does, from host token rows.
+    ///
+    /// `histories[b]` holds row `b`'s prompt followed by the tokens generated
+    /// so far, and `prompt_lengths[b]` is where its prompt ends. Prompt tokens
+    /// count for the repetition penalty and n-grams; under the default
+    /// [`PenaltyScope::Generated`] only the generated part is counted by
+    /// presence and frequency, and only it counts toward `min_new_tokens`.
+    /// F16/BF16 logits are promoted to F32 first (see
+    /// [`upcast_half_precision`]), so the result is F32 for half-precision
+    /// input.
+    ///
+    /// This is the stateless entry point for decoders that keep token rows
+    /// on the host and may discard a suffix, such as speculative decoders
+    /// rolling back rejected drafts. Each call uploads the rows once and runs
+    /// at most one scatter per tracked count view; nothing is read back. A
+    /// loop that only appends tokens should keep a [`TokenHistory`] instead.
+    pub fn process_with_prompt_lengths(
+        &self,
+        logits: Tensor<B, 2>,
+        histories: &[&[u32]],
+        prompt_lengths: &[usize],
+    ) -> Result<Tensor<B, 2>> {
+        self.validate_logits_shape(&logits)?;
+        let history = TokenHistory::from_token_rows(
+            &self.config,
+            self.vocabulary_size,
+            histories,
+            prompt_lengths,
+            &logits.device(),
+        )?;
+        self.process_with_history(upcast_half_precision(logits), &history)
     }
 
     /// Processes logits using incrementally maintained per-row history.
@@ -522,7 +578,9 @@ impl<B: Backend> LogitsProcessor<B> {
     /// Log probabilities describe the distribution actually used: after bias,
     /// constraints, and penalties for both strategies, plus temperature and
     /// truncation when sampling. Greedy log probabilities therefore match
-    /// Hugging Face `compute_transition_scores` for `do_sample=False`.
+    /// Hugging Face `compute_transition_scores` for `do_sample=False` with
+    /// `normalize_logits=True` (its greedy `scores` are processed logits, not
+    /// log probabilities).
     pub fn process_and_select_with_log_probs(
         &self,
         logits: Tensor<B, 2>,
@@ -710,6 +768,19 @@ fn probability_accumulation_dtype(dtype: DType) -> DType {
         DType::F16 | DType::BF16 | DType::Flex32 => DType::F32,
         _ => dtype,
     }
+}
+
+/// Promotes half-precision logits to F32 and leaves F32 and F64 unchanged.
+///
+/// Hugging Face upcasts next-token logits to F32 before any processor runs,
+/// and [`generate_causal`] does the same: bias, penalties, and warpers are
+/// then free of F16/BF16 rounding (for example a 1.05 repetition penalty on a
+/// logit near 20, where F16 spacing is 0.016). The Flex32 compute tag also
+/// maps to F32 storage. Casting one `[batch, vocabulary]` step is negligible
+/// next to a model forward pass.
+pub fn upcast_half_precision<B: Backend, const D: usize>(logits: Tensor<B, D>) -> Tensor<B, D> {
+    let dtype = probability_accumulation_dtype(logits.dtype());
+    logits.cast(dtype)
 }
 
 /// Creates a float tensor from F64 host values in the requested runtime dtype.

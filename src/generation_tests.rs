@@ -1029,6 +1029,107 @@ fn processors_reject_incompatible_token_histories() {
     );
 }
 
+/// The prompt boundary decides which tokens count as generated; the legacy path counts all.
+///
+/// With a four-token prompt and `min_new_tokens = 3`, the prompt-aware path
+/// still suppresses EOS before the first generated token, whereas the
+/// stateless `process` path treats the prompt as output and does not. The
+/// same split applies to presence and frequency under the default scope.
+#[test]
+fn prompt_lengths_separate_prompt_from_generated_tokens() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        max_new_tokens: 4,
+        min_new_tokens: 3,
+        eos_token_ids: vec![0],
+        presence_penalty: 1.0,
+        ..Default::default()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config, 4, &device).unwrap();
+    let logits = || Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0, 4.0]], &device);
+    let history: &[u32] = &[1, 2, 3, 1];
+
+    let aware = host_values(
+        processor
+            .process_with_prompt_lengths(logits(), &[history], &[4])
+            .unwrap(),
+    );
+    assert_eq!(aware, [f64::NEG_INFINITY, 2.0, 3.0, 4.0]);
+    // Generated tokens 3 and 1: EOS stays suppressed, and presence counts
+    // only those two, not prompt token 2.
+    let aware = host_values(
+        processor
+            .process_with_prompt_lengths(logits(), &[history], &[2])
+            .unwrap(),
+    );
+    assert_eq!(aware, [f64::NEG_INFINITY, 1.0, 3.0, 3.0]);
+
+    let legacy_history = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 1]], &device);
+    let legacy = host_values(processor.process(logits(), Some(legacy_history)).unwrap());
+    assert_eq!(legacy, [1.0, 1.0, 2.0, 3.0]);
+}
+
+/// The prompt-aware path promotes half-precision logits and validates its inputs.
+#[test]
+fn prompt_length_processing_promotes_half_logits_and_checks_inputs() {
+    let device = Default::default();
+    let processor = LogitsProcessor::<TestBackend>::new(
+        GenerationConfig {
+            repetition_penalty: 1.05,
+            ..Default::default()
+        },
+        3,
+        &device,
+    )
+    .unwrap();
+    // 20.0 / 1.05 = 19.047..., which F16 would round to 19.046875.
+    let half = Tensor::<TestBackend, 2>::from_floats([[20.0, 1.0, -2.0]], &device).cast(DType::F16);
+    let processed = processor
+        .process_with_prompt_lengths(half.clone(), &[&[0]], &[1])
+        .unwrap();
+    assert_eq!(processed.dtype(), DType::F32);
+    let values = host_values(processed);
+    assert!(
+        (values[0] - f64::from(20.0_f32 / 1.05_f32)).abs() < 1e-6,
+        "{values:?}"
+    );
+    assert_eq!(&values[1..], [1.0, -2.0]);
+    let legacy = processor
+        .process(
+            half,
+            Some(Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device)),
+        )
+        .unwrap();
+    assert_eq!(legacy.dtype(), DType::F16);
+
+    let logits = || Tensor::<TestBackend, 2>::zeros([1, 3], &device);
+    let wide = Tensor::<TestBackend, 2>::zeros([1, 4], &device);
+    assert!(
+        processor
+            .process_with_prompt_lengths(wide, &[&[0]], &[1])
+            .unwrap_err()
+            .to_string()
+            .contains("generation.logits")
+    );
+    assert!(
+        processor
+            .process_with_prompt_lengths(logits(), &[&[0], &[1]], &[1, 1])
+            .unwrap_err()
+            .to_string()
+            .contains("generation.token_history")
+    );
+    assert!(
+        processor
+            .process_with_prompt_lengths(logits(), &[&[3]], &[0])
+            .is_err()
+    );
+    assert!(
+        processor
+            .process_with_prompt_lengths(logits(), &[&[1]], &[2])
+            .is_err()
+    );
+}
+
 /// Older serialized configurations load with neutral defaults for the newer controls.
 #[test]
 fn configuration_serde_defaults_and_round_trips_new_controls() {
@@ -1200,6 +1301,26 @@ proptest::proptest! {
         for (actual, expected) in actual.iter().zip(&expected) {
             proptest::prop_assert!((actual - expected).abs() < 1e-4, "{actual} vs {expected}");
         }
+
+        // Host rows with the prompt boundary reproduce the incremental path bit for bit.
+        let row = prompt_ids
+            .iter()
+            .zip(&prompt_valid)
+            .filter(|&(_, &valid)| valid)
+            .map(|(&token, _)| token as u32)
+            .chain(generated.iter().copied())
+            .collect::<Vec<_>>();
+        let prompt_length = prompt_valid.iter().filter(|&&valid| valid).count();
+        let from_rows = host_values(
+            processor
+                .process_with_prompt_lengths(
+                    Tensor::from_data(TensorData::new(logits.clone(), [1, vocabulary]), &device),
+                    &[&row],
+                    &[prompt_length],
+                )
+                .unwrap(),
+        );
+        proptest::prop_assert_eq!(&from_rows, &actual);
 
         // The stateless history path counts every supplied token as generated.
         let mut combined_ids = prompt_ids.clone();

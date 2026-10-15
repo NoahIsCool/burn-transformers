@@ -154,6 +154,9 @@ impl NgramIndex {
 /// it to [`super::LogitsProcessor::process_with_history`] each step, and call
 /// [`TokenHistory::record`] with the tokens each row emitted. Prompt tokens
 /// count for the repetition penalty and n-grams but not as generated tokens.
+/// Callers that hold whole token rows on the host (for example speculative
+/// decoders that roll drafts back) can rebuild the same state in one call
+/// with [`TokenHistory::from_token_rows`].
 #[derive(Debug, Clone)]
 pub struct TokenHistory<B: Backend> {
     /// Exclusive upper bound of every recorded token ID.
@@ -200,6 +203,51 @@ impl<B: Backend> TokenHistory<B> {
             None,
             false,
         )
+    }
+
+    /// Creates history from host token rows with an explicit prompt boundary.
+    ///
+    /// Row `b` holds `rows[b]`: its first `prompt_lengths[b]` tokens are the
+    /// prompt and the remainder was generated. The result equals
+    /// [`Self::from_prompt`] on the prompt followed by one [`Self::record`]
+    /// per generated token, built with at most one scatter per tracked view
+    /// and no device read. Rows may have different lengths; every token must
+    /// lie inside the vocabulary.
+    pub fn from_token_rows(
+        config: &GenerationConfig,
+        vocabulary_size: usize,
+        rows: &[&[u32]],
+        prompt_lengths: &[usize],
+        device: &B::Device,
+    ) -> Result<Self> {
+        let batch = rows.len();
+        if batch == 0 || prompt_lengths.len() != batch {
+            return Err(Error::shape(
+                "generation.history_rows",
+                "nonzero rows with one prompt length each",
+                format!("{batch} rows and {} prompt lengths", prompt_lengths.len()),
+            ));
+        }
+        let mut history = Self::new_unfilled(config, vocabulary_size, batch, device);
+        let mut width = 0;
+        for (row, (&tokens, &prompt_length)) in rows.iter().zip(prompt_lengths).enumerate() {
+            let generated = tokens.len().checked_sub(prompt_length).ok_or_else(|| {
+                Error::Generation(format!(
+                    "history row {row} has {} tokens, fewer than its prompt length {prompt_length}",
+                    tokens.len()
+                ))
+            })?;
+            for (column, &token) in tokens.iter().enumerate() {
+                checked_history_token(i64::from(token), vocabulary_size, row, column)?;
+                if history.ngram_size > 0 {
+                    history.ngrams[row].push(token, history.ngram_size);
+                }
+            }
+            history.generated_lengths[row] = generated;
+            width = width.max(tokens.len());
+        }
+        history.counts = row_counts(config, vocabulary_size, rows, prompt_lengths, width, device)?;
+        Ok(history)
     }
 
     /// Creates prompt history when the caller already holds the host mask values.
@@ -426,7 +474,7 @@ impl<B: Backend> TokenHistory<B> {
 
     /// Returns each row's generated length as far as the configuration tracks it.
     ///
-    /// Histories built from a prompt or by [`Self::record`]
+    /// Histories built from a prompt, from token rows, or by [`Self::record`]
     /// always count exactly; the stateless `history` tensor path counts only
     /// when `min_new_tokens` needs it.
     pub(super) fn generated_lengths(&self) -> &[usize] {
@@ -536,6 +584,50 @@ fn observed_counts<B: Backend>(
             .map(|zeros| scatter_add(zeros, indices, increments));
     }
     counts
+}
+
+/// Counts host token rows with one padded `[batch, width]` upload per tracked view.
+///
+/// Padding slots (beyond a row's length) and, for the generated view, prompt
+/// slots carry a zero increment at token zero, so they change nothing.
+fn row_counts<B: Backend>(
+    config: &GenerationConfig,
+    vocabulary_size: usize,
+    rows: &[&[u32]],
+    prompt_lengths: &[usize],
+    width: usize,
+    device: &B::Device,
+) -> Result<TokenCounts<B>> {
+    let batch = rows.len();
+    let mut counts = TokenCounts::zeros(config, batch, vocabulary_size, device);
+    if width == 0 || !counts.is_tracking() {
+        return Ok(counts);
+    }
+    let elements = metadata::rectangle_size(batch, width, "history rows")?;
+    let mut ids = metadata::vec_with_capacity::<i64>(elements, "history row IDs")?;
+    let mut observed = metadata::vec_with_capacity::<i64>(elements, "history row increments")?;
+    let mut generated = metadata::vec_with_capacity::<i64>(elements, "generated increments")?;
+    for (&tokens, &prompt_length) in rows.iter().zip(prompt_lengths) {
+        for column in 0..width {
+            let token = tokens.get(column).copied();
+            ids.push(token.map_or(0, i64::from));
+            observed.push(i64::from(token.is_some()));
+            generated.push(i64::from(token.is_some() && column >= prompt_length));
+        }
+    }
+    let upload = |values: Vec<i64>| {
+        Tensor::<B, 2, Int>::from_data(TensorData::new(values, [batch, width]), device)
+    };
+    let ids = upload(ids);
+    counts.all = counts
+        .all
+        .take()
+        .map(|zeros| scatter_add(zeros, ids.clone(), upload(observed)));
+    counts.generated = counts
+        .generated
+        .take()
+        .map(|zeros| scatter_add(zeros, ids, upload(generated)));
+    Ok(counts)
 }
 
 /// Converts one valid history value to a token ID inside the vocabulary.

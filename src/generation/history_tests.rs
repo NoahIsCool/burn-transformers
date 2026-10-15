@@ -242,6 +242,186 @@ fn cloned_histories_update_independently() {
     assert_eq!(branch.generated_lengths(), [2]);
 }
 
+/// Host token rows with a prompt boundary equal a prompt history plus recorded tokens.
+#[test]
+fn token_rows_match_prompt_history_with_recorded_tokens() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        repetition_penalty: 1.2,
+        frequency_penalty: 0.3,
+        no_repeat_ngram_size: 2,
+        min_new_tokens: 3,
+        max_new_tokens: 4,
+        ..Default::default()
+    };
+    // Ragged rows: [prompt | generated] = [1 2 1 | 2 1] and [3 | ] and [ | 3 3].
+    let rows: [&[u32]; 3] = [&[1, 2, 1, 2, 1], &[3], &[3, 3]];
+    let prompt_lengths = [3, 1, 0];
+    let from_rows =
+        TokenHistory::<TestBackend>::from_token_rows(&config, 4, &rows, &prompt_lengths, &device)
+            .unwrap();
+
+    let prompt =
+        Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 1], [3, 0, 0], [0, 0, 0]], &device);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [
+            [true, true, true],
+            [true, false, false],
+            [false, false, false],
+        ]
+        .into(),
+        &device,
+    ));
+    let mut recorded = TokenHistory::from_prompt(&config, 4, prompt, Some(mask)).unwrap();
+    recorded.record(&[2, 0, 3], &[true, false, true]).unwrap();
+    recorded.record(&[1, 0, 3], &[true, false, true]).unwrap();
+
+    for view in [CountView::All, CountView::Generated] {
+        assert_eq!(
+            counts(&from_rows, view),
+            counts(&recorded, view),
+            "{view:?}"
+        );
+    }
+    assert_eq!(
+        counts(&from_rows, CountView::Generated),
+        [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2]
+    );
+    assert_eq!(from_rows.generated_lengths(), [2, 0, 2]);
+    assert_eq!(from_rows.generated_lengths(), recorded.generated_lengths());
+    for row in 0..3 {
+        assert_eq!(
+            from_rows.banned_tokens(row),
+            recorded.banned_tokens(row),
+            "row {row}"
+        );
+    }
+    assert_eq!(from_rows.banned_tokens(0), [2]);
+    assert_eq!(from_rows.banned_tokens(2), [3]);
+}
+
+/// Rows without any token and configurations without state are handled cheaply.
+#[test]
+fn token_rows_without_tokens_or_controls_keep_minimal_state() {
+    let device = Default::default();
+    let empty: [&[u32]; 2] = [&[], &[]];
+    let history =
+        TokenHistory::<TestBackend>::from_token_rows(&penalized(), 3, &empty, &[0, 0], &device)
+            .unwrap();
+    assert_eq!(counts(&history, CountView::All), [0; 6]);
+    assert_eq!(history.generated_lengths(), [0, 0]);
+    let plain = TokenHistory::<TestBackend>::from_token_rows(
+        &GenerationConfig::default(),
+        3,
+        &[&[2, 1]],
+        &[1],
+        &device,
+    )
+    .unwrap();
+    assert!(plain.counts(CountView::All).is_err());
+    assert_eq!(plain.generated_lengths(), [1]);
+}
+
+/// Malformed host rows fail with context before any device work.
+#[test]
+fn token_rows_reject_malformed_input() {
+    let device = Default::default();
+    let config = penalized();
+    let build = |rows: &[&[u32]], lengths: &[usize]| {
+        TokenHistory::<TestBackend>::from_token_rows(&config, 4, rows, lengths, &device)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(build(&[], &[]).contains("generation.history_rows"));
+    assert!(build(&[&[1]], &[0, 0]).contains("generation.history_rows"));
+    assert!(build(&[&[1]], &[2]).contains("fewer than its prompt length 2"));
+    let error = build(&[&[1], &[0, 4]], &[0, 1]);
+    assert!(error.contains("token 4 at row 1, column 1"), "{error}");
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+
+    /// Host rows reproduce prompt history plus per-step records for random ragged batches.
+    #[test]
+    fn token_rows_equal_incremental_history(
+        rows in proptest::collection::vec(
+            (proptest::collection::vec(0_u32..5, 0..5), proptest::collection::vec(0_u32..5, 0..4)),
+            1..4,
+        ),
+        repetition in proptest::bool::ANY,
+        prompt_scope in proptest::bool::ANY,
+        ngram in 0_usize..4,
+    ) {
+        let device = Default::default();
+        let vocabulary = 5;
+        let config = GenerationConfig {
+            repetition_penalty: if repetition { 1.5 } else { 1.0 },
+            presence_penalty: 0.25,
+            additive_penalty_scope: if prompt_scope {
+                PenaltyScope::PromptAndGenerated
+            } else {
+                PenaltyScope::Generated
+            },
+            no_repeat_ngram_size: ngram,
+            ..Default::default()
+        };
+        let batch = rows.len();
+        let prompt_width = rows.iter().map(|(prompt, _)| prompt.len()).max().unwrap();
+        let mut prompt_ids = Vec::new();
+        let mut prompt_valid = Vec::new();
+        for (prompt, _) in &rows {
+            for column in 0..prompt_width {
+                prompt_ids.push(prompt.get(column).map_or(0, |&token| token as i32));
+                prompt_valid.push(column < prompt.len());
+            }
+        }
+        let mut incremental = TokenHistory::<TestBackend>::from_prompt(
+            &config,
+            vocabulary,
+            Tensor::from_data(TensorData::new(prompt_ids, [batch, prompt_width]), &device),
+            Some(TokenMask::new(Tensor::from_data(
+                TensorData::new(prompt_valid, [batch, prompt_width]),
+                &device,
+            ))),
+        )
+        .unwrap();
+        let steps = rows.iter().map(|(_, generated)| generated.len()).max().unwrap();
+        for step in 0..steps {
+            let tokens = rows.iter().map(|(_, generated)| generated.get(step).copied().unwrap_or(0)).collect::<Vec<_>>();
+            let active = rows.iter().map(|(_, generated)| step < generated.len()).collect::<Vec<_>>();
+            incremental.record(&tokens, &active).unwrap();
+        }
+        let joined = rows
+            .iter()
+            .map(|(prompt, generated)| prompt.iter().chain(generated).copied().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let slices = joined.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let prompt_lengths = rows.iter().map(|(prompt, _)| prompt.len()).collect::<Vec<_>>();
+        let from_rows = TokenHistory::<TestBackend>::from_token_rows(
+            &config,
+            vocabulary,
+            &slices,
+            &prompt_lengths,
+            &device,
+        )
+        .unwrap();
+        for view in [CountView::All, CountView::Generated] {
+            proptest::prop_assert_eq!(
+                from_rows.counts(view).is_ok(),
+                incremental.counts(view).is_ok()
+            );
+            if from_rows.counts(view).is_ok() {
+                proptest::prop_assert_eq!(counts(&from_rows, view), counts(&incremental, view));
+            }
+        }
+        proptest::prop_assert_eq!(from_rows.generated_lengths(), incremental.generated_lengths());
+        for row in 0..batch {
+            proptest::prop_assert_eq!(from_rows.banned_tokens(row), incremental.banned_tokens(row));
+        }
+    }
+}
+
 /// Times per-step count updates against the previous clone-and-scatter of both views.
 ///
 /// The previous update scattered into `counts.clone()` for both views, which

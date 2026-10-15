@@ -1895,3 +1895,114 @@ fn half_precision_logits_are_processed_in_f32() {
     }
     assert_eq!(outputs[0], outputs[1]);
 }
+
+/// Replaying a coordinator run through the prompt-aware stateless path reproduces it exactly.
+///
+/// This is the processing a speculative decoder applies to its target model:
+/// it holds prompt-plus-output rows on the host and rebuilds history every
+/// step with [`crate::LogitsProcessor::process_with_prompt_lengths`]. With
+/// F16 model logits, default-scope presence/frequency, `min_new_tokens`
+/// shorter than the prompt, n-gram bans, bias, and both strategies, every
+/// token and log probability must equal the coordinator's bit for bit.
+#[test]
+fn prompt_length_processing_replays_generate_causal_exactly() {
+    use crate::{CausalLanguageModel, DecodeInput, ForwardOptions, LogitsProcessor};
+
+    let (inner, device) = tiny_model();
+    let model = HalfLogitsModel {
+        inner,
+        keep_half: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    };
+    let prompt = [1_u32, 2, 3, 4];
+    let request = |generation: GenerationConfig| CausalGenerationRequest {
+        prompt: CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4]], &device),
+            token_mask: None,
+            position_ids: None,
+        },
+        cache: CacheConfig::new(1, 12).expect("test cache config"),
+        generation,
+        prefill_chunk_size: None,
+        vocabulary_size: 32,
+    };
+    let penalized = GenerationConfig {
+        max_new_tokens: 6,
+        repetition_penalty: 1.3,
+        presence_penalty: 0.4,
+        frequency_penalty: 0.2,
+        no_repeat_ngram_size: 2,
+        logit_bias: [(5, 0.5)].into(),
+        temperature: 0.8,
+        top_k: Some(12),
+        min_p: Some(0.02),
+        seed: 11,
+        ..Default::default()
+    };
+    // EOS is the token greedy decoding would emit first, so `min_new_tokens`
+    // (3, below the 4-token prompt) visibly defers it.
+    let baseline = generate_causal(&model, request(penalized.clone())).expect("baseline");
+    let eos = baseline.sequences[0].token_ids[0];
+
+    for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+        let generation = GenerationConfig {
+            strategy,
+            min_new_tokens: 3,
+            eos_token_ids: vec![eos],
+            ..penalized.clone()
+        };
+        let output = generate_causal(&model, request(generation.clone())).expect("generation");
+        let sequence = &output.sequences[0];
+        assert!(sequence.token_ids.len() >= 3, "{strategy:?}: {sequence:?}");
+        assert!(!sequence.token_ids[..3].contains(&eos), "{strategy:?}");
+
+        let processor = LogitsProcessor::<TestBackend>::new(generation, 32, &device).unwrap();
+        let options = ForwardOptions::default();
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 12).unwrap(), 1, &device)
+            .unwrap();
+        let mut logits = model
+            .prefill(
+                request(GenerationConfig::default()).prompt,
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .squeeze_dim::<2>(1);
+        let mut history = prompt.to_vec();
+        for (step, (&expected, &expected_score)) in sequence
+            .token_ids
+            .iter()
+            .zip(&sequence.log_probabilities)
+            .enumerate()
+        {
+            let processed = processor
+                .process_with_prompt_lengths(logits, &[&history], &[prompt.len()])
+                .unwrap();
+            let selection = processor.select_with_log_probs(processed).unwrap();
+            let token = metadata::tensor_i64_values(selection.token_ids, "token").unwrap()[0];
+            let score =
+                metadata::tensor_f64_values(selection.log_probabilities, "score").unwrap()[0];
+            assert_eq!(token, i64::from(expected), "{strategy:?} step {step}");
+            assert_eq!(
+                score.to_bits(),
+                expected_score.to_bits(),
+                "{strategy:?} step {step}"
+            );
+            history.push(expected);
+            logits = model
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::from_ints([[token as i32]], &device),
+                        position_ids: None,
+                        token_mask: None,
+                    },
+                    &mut state,
+                    &options,
+                )
+                .unwrap()
+                .logits
+                .squeeze_dim::<2>(1);
+        }
+    }
+}
