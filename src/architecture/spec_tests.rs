@@ -731,10 +731,250 @@ fn seq2seq_with_a_narrower_cross_attention_width_builds_and_runs() {
     assert_eq!(output.decoder.logits.dims(), [1, 1, 128]);
 }
 
+/// Builds a position encoding's runtime object directly, mirroring the modular models.
+///
+/// RoPE goes through `YarnConfig`/`RopeConfig` over `head_dim` channels and
+/// T5 relative bias through `T5RelativePositionBiasConfig::init` with one
+/// table column per head. No spec validation is consulted.
+#[cfg(feature = "flex")]
+fn build_position_directly(
+    position: &PositionEncodingSpec,
+    head_dim: usize,
+    heads: usize,
+) -> Result<()> {
+    let rope_error = |error: RopeConfigError| Error::configuration("rope", error.to_string());
+    match *position {
+        PositionEncodingSpec::None => Ok(()),
+        PositionEncodingSpec::Rope {
+            theta,
+            rotary_dim,
+            scaling,
+        } => {
+            let scaling = match scaling {
+                RopeScaling::None => RuntimeRopeScaling::None,
+                RopeScaling::Yarn {
+                    factor,
+                    original_max_positions,
+                    attention_factor,
+                    beta_slow,
+                    beta_fast,
+                } => {
+                    let mut yarn = YarnConfig::new(factor, original_max_positions)
+                        .and_then(|yarn| yarn.with_betas(beta_fast, beta_slow))
+                        .map_err(rope_error)?;
+                    if let Some(attention_factor) = attention_factor {
+                        yarn = yarn
+                            .with_attention_factor(attention_factor)
+                            .map_err(rope_error)?;
+                    }
+                    RuntimeRopeScaling::Yarn(yarn)
+                }
+            };
+            RopeConfig::new(head_dim, rotary_dim, theta, scaling)
+                .map(drop)
+                .map_err(rope_error)
+        }
+        PositionEncodingSpec::T5RelativeBias {
+            buckets,
+            max_distance,
+            bidirectional,
+        } => crate::position::T5RelativePositionBiasConfig::new(
+            heads,
+            buckets,
+            max_distance,
+            bidirectional,
+        )
+        .init::<burn::backend::Flex>(&Default::default())
+        .map(drop),
+    }
+}
+
+/// Builds the runtime modules a mixer spec describes at `hidden_size`, bypassing spec validation.
+///
+/// Mirrors the modular models' construction (grouped-query attention with a
+/// sigmoid gate and unit T5 score scale, MLA with RoPE over its rotary
+/// sub-head, Gated DeltaNet with an explicit kernel) using only the
+/// components' own `init`, which validates and allocates.
+#[cfg(feature = "flex")]
+fn build_mixer_directly(mixer: &MixerSpec, hidden_size: usize) -> Result<()> {
+    type F = burn::backend::Flex;
+    let device = Default::default();
+    match mixer {
+        MixerSpec::Attention(spec) => {
+            let mut config = GroupedQueryAttentionConfig::new(
+                hidden_size,
+                spec.query_heads,
+                spec.key_value_heads,
+                spec.head_dim,
+            );
+            config.query_key_norm_epsilon = spec.query_key_norm.then_some(1e-6);
+            if spec.output_gate {
+                config.output_gate = AttentionOutputGate::Sigmoid;
+            }
+            if matches!(spec.position, PositionEncodingSpec::T5RelativeBias { .. }) {
+                config.scale = Some(1.0);
+            }
+            config.init::<F>(&device)?;
+            build_position_directly(&spec.position, spec.head_dim, spec.query_heads)
+        }
+        MixerSpec::Mla(spec) => {
+            MultiLatentAttentionConfig::new(
+                hidden_size,
+                spec.query_heads,
+                spec.content_head_dim,
+                spec.rotary_head_dim,
+                spec.value_head_dim,
+                spec.key_value_lora_rank,
+                spec.query_lora_rank,
+            )
+            .init::<F>(&device)?;
+            build_position_directly(&spec.position, spec.rotary_head_dim, spec.query_heads)
+        }
+        MixerSpec::DeltaNet {
+            key_heads,
+            value_heads,
+            key_head_dim,
+            value_head_dim,
+            convolution_kernel,
+        } => {
+            let mut config = GatedDeltaNetConfig::new(
+                hidden_size,
+                *key_heads,
+                *value_heads,
+                *key_head_dim,
+                *value_head_dim,
+            );
+            config.convolution_kernel = *convolution_kernel;
+            config.init::<F>(&device).map(drop)
+        }
+        other => panic!("no direct construction for unsampled mixer {other:?}"),
+    }
+}
+
 #[cfg(feature = "flex")]
 proptest::proptest! {
-    /// A layer spec validates exactly when the modular layer it describes can be built.
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2048))]
+
+    /// Spec validation accepts exactly the mixers whose components build directly.
     ///
+    /// The oracle never calls spec validation, so this catches both drift
+    /// directions: an over-strict spec check (rejecting a mixer every
+    /// component accepts, as the old T5 `max_distance` and YaRN factor-one
+    /// rules did) and an under-strict one (accepting a mixer some component
+    /// rejects). Sampled at the stack's real width of 8 over grouped-query
+    /// attention with RoPE, YaRN, or T5 bias; MLA with RoPE or T5 bias; and
+    /// Gated DeltaNet. Each dimension is drawn from a short list that mixes
+    /// valid values with zero, odd, oversized, and boundary values, so both
+    /// outcomes are common.
+    #[test]
+    fn mixer_validation_agrees_with_direct_component_construction(
+        kind in 0usize..4,
+        heads in proptest::prop_oneof![1 => proptest::strategy::Just(0usize), 6 => 1usize..5],
+        grouping in 0usize..4,
+        head_dim_choice in 0usize..6,
+        rotary_choice in 0usize..5,
+        theta_choice in 0usize..4,
+        yarn_choice in 0usize..3,
+        bucket_choice in 0usize..6,
+        distance_choice in 0usize..6,
+        bidirectional in proptest::bool::ANY,
+        flags in 0usize..4,
+        kernel_choice in 0usize..3,
+    ) {
+        // Grouping: equal heads, one shared head, none, or a non-divisor.
+        let paired = [heads, 1, 0, heads + 1][grouping];
+        let head_dim = [2, 4, 6, 8, 3, 0][head_dim_choice];
+        let rotary = |width: usize| [width, width / 2, 0, width + 2, 1][rotary_choice];
+        let theta = [10_000.0, 10_000.0, 1.0, 0.5][theta_choice];
+        let scaling = match yarn_choice {
+            0 => RopeScaling::None,
+            choice => RopeScaling::Yarn {
+                // Factor one is the boundary the spec once rejected.
+                factor: [1.0, 2.0][choice - 1],
+                original_max_positions: 16,
+                attention_factor: None,
+                beta_slow: 1.0,
+                beta_fast: 32.0,
+            },
+        };
+        let position = |width: usize| {
+            if flags & 1 == 0 {
+                PositionEncodingSpec::Rope { theta, rotary_dim: rotary(width), scaling }
+            } else {
+                PositionEncodingSpec::T5RelativeBias {
+                    buckets: [32, 8, 4, 3, 2, 0][bucket_choice],
+                    max_distance: [128, 8, 4, 2, 1, 0][distance_choice],
+                    bidirectional,
+                }
+            }
+        };
+        let mixer = match kind {
+            0 => MixerSpec::Attention(AttentionSpec {
+                query_heads: heads,
+                key_value_heads: paired,
+                head_dim,
+                query_key_norm: flags & 2 != 0,
+                output_gate: flags & 2 != 0,
+                position: position(head_dim),
+            }),
+            1 => MixerSpec::Attention(AttentionSpec {
+                query_heads: heads,
+                key_value_heads: paired,
+                head_dim,
+                query_key_norm: false,
+                output_gate: false,
+                position: PositionEncodingSpec::None,
+            }),
+            2 => {
+                // The rotary sub-head is rotated; content channels never are.
+                let rotary_head_dim = [2, 4, 3, 0][grouping];
+                MixerSpec::Mla(MlaSpec {
+                    query_heads: heads,
+                    content_head_dim: head_dim,
+                    rotary_head_dim,
+                    value_head_dim: head_dim,
+                    key_value_lora_rank: 2,
+                    query_lora_rank: (flags & 2 != 0).then_some(rotary_choice),
+                    position: position(rotary_head_dim),
+                })
+            }
+            _ => MixerSpec::DeltaNet {
+                key_heads: heads,
+                // Value heads must be a positive multiple of key heads.
+                value_heads: [heads, 2 * heads, 0, heads + 1][grouping],
+                key_head_dim: head_dim,
+                value_head_dim: rotary(head_dim),
+                convolution_kernel: [4, 1, 0][kernel_choice],
+            },
+        };
+        let mut layer = dense_layer();
+        layer.mixer = mixer.clone();
+        let spec = DecoderSpec {
+            hidden_size: 8,
+            layers: vec![layer],
+            ..decoder()
+        };
+        let validated = spec.validate();
+        let built = build_mixer_directly(&mixer, spec.hidden_size);
+        proptest::prop_assert_eq!(
+            validated.is_ok(),
+            built.is_ok(),
+            "mixer {:?}\nvalidate: {:?}\ndirect: {:?}",
+            mixer,
+            validated.err(),
+            built.err()
+        );
+    }
+}
+
+#[cfg(feature = "flex")]
+proptest::proptest! {
+    /// A layer that validates can be built by the modular models.
+    ///
+    /// `ModularLayer::init` runs `validate` first, so only this direction is
+    /// informative: it catches initialization-time requirements that
+    /// validation misses. Over-strict validation is caught by
+    /// `mixer_validation_agrees_with_direct_component_construction`.
     /// Covers RoPE (plain and YaRN), T5 buckets in both directions, and MLA,
     /// across zero, odd, oversized, and boundary dimensions.
     #[test]

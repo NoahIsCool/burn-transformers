@@ -9,10 +9,13 @@
 //!
 //! Position encodings are validated by constructing the shared runtime objects
 //! they describe ([`RopeConfig`], [`YarnConfig`], [`T5RelativePositionBuckets`])
-//! and mapping their errors to spec field paths. A spec that validates therefore
-//! builds the same objects at initialization; the spec cannot drift from the
-//! components it configures. [`PositionEncodingSpec::rope_config`] and
-//! [`PositionEncodingSpec::t5_buckets`] expose those objects to consumers.
+//! and mapping their errors to spec field paths; mixers are validated by their
+//! components' own configuration checks at the stack's width. Validation thus
+//! applies exactly the components' rules, and a property test checks it against
+//! direct construction of each component in both directions.
+//! [`PositionEncodingSpec::rope_config`] and [`PositionEncodingSpec::t5_buckets`]
+//! expose those objects to consumers. (The modular models still build RoPE
+//! through their own copy of this mapping until they adopt these accessors.)
 //!
 //! `validate` checks that a spec is well formed. A few well-formed variants
 //! ([`ResidualTopology::Gated`], [`MixerSpec::Mamba2`]) are describable but not
