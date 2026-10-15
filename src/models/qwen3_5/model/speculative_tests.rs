@@ -802,16 +802,23 @@ fn greedy_speculation_reproduces_plain_greedy_decoding() {
 fn committed_mtp_history_comes_from_target_hidden_states() {
     let device = Default::default();
     let prompt = [2, 0, 3, 1];
-    let model = random_hybrid_model(29, &device);
-    let mut state = model
-        .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
-        .unwrap();
     let config = Qwen3_5SpeculativeConfig {
         max_draft_tokens: 3,
         ..Default::default()
     };
-    let run = speculative_greedy(&model, &prompt, 12, config, &mut state);
-    assert!(run.accepted > 0, "the comparison needs accepted drafts");
+    // Burn's backend seed is process-global and parameters initialize
+    // lazily, so concurrent tests can change the weights; try models until
+    // one accepts a draft, which the comparison needs.
+    let (model, state, run) = (0..16)
+        .find_map(|seed| {
+            let model = random_hybrid_model(100 + seed, &device);
+            let mut state = model
+                .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
+                .unwrap();
+            let run = speculative_greedy(&model, &prompt, 12, config.clone(), &mut state);
+            (run.accepted > 0).then_some((model, state, run))
+        })
+        .expect("some random model accepts a draft");
     let committed = state.tensor_state().lengths()[0];
     let mut sequence = prompt.to_vec();
     sequence.extend(&run.tokens[..committed - prompt.len()]);
