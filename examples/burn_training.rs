@@ -12,6 +12,12 @@
 //! Burn's Learner owns batching, Adam updates, and checkpointing. The reload check
 //! preserves training-module layout metadata before conversion to evaluation.
 //! This fixed-length experiment needs no padding mask or decode cache.
+//!
+//! The backbone starts from the crate's recommended from-scratch policy,
+//! `ModularCausalLm::scaled_init_policy`: `N(0, 0.02^2)` embeddings and
+//! projections, with residual-writing projections scaled by `1/sqrt(2 * layers)`.
+//! The Learner logs every per-epoch metric under the output directory; the
+//! terminal shows only the held-out result.
 
 use burn::{
     backend::{Autodiff, Flex},
@@ -29,7 +35,11 @@ use burn::{
     },
     train::{
         ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep,
-        metric::{AccuracyMetric, LossMetric},
+        metric::{AccuracyMetric, LossMetric, MetricDefinition},
+        renderer::{
+            EvaluationName, EvaluationProgress, MetricState, MetricsRenderer,
+            MetricsRendererEvaluation, MetricsRendererTraining, ProgressType, TrainingProgress,
+        },
     },
 };
 use transformers::{
@@ -65,8 +75,11 @@ struct Experiment<B: Backend> {
 impl<B: Backend> Experiment<B> {
     /// Register the fixed backbone, adapter, 0.1 dropout, and binary readout in one Burn module.
     fn init(device: &B::Device) -> Self {
+        let spec = recipe();
+        let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
         Self {
-            backbone: ModularCausalLm::init(recipe(), device).expect("valid fixed recipe"),
+            backbone: ModularCausalLm::init_with(spec, &policy, device)
+                .expect("valid fixed recipe"),
             adapter: LinearConfig::new(8, 8).init(device),
             // Regularization is explicit in the experiment. Burn disables
             // this Dropout when `.valid()` converts to the inner backend.
@@ -159,6 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .metric_train_numeric(AccuracyMetric::<Cpu>::new())
         .metric_valid_numeric(AccuracyMetric::<Cpu>::new())
         .with_file_checkpointer(NamedMpkFileRecorder::<FullPrecisionSettings>::new())
+        .renderer(QuietRenderer)
         .launch(learner)
         .model;
     let final_metrics = evaluate(&learned);
@@ -209,6 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "initial_loss": initial.0, "final_loss": final_metrics.0,
         "initial_accuracy": initial.1, "final_accuracy": final_metrics.1,
         "native_burn_learner": true, "dropout": 0.1,
+        "initialization": "ModularCausalLm::scaled_init_policy(std = 0.02)",
         "evaluation_repeat_error": evaluation_repeat_error,
         "checkpoint_reload_error": checkpoint_reload_error,
         "claim": "training integration on a symbolic fixture, not natural-language sentiment quality"
@@ -218,6 +233,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_vec_pretty(&report)?,
     )?;
     Ok(())
+}
+
+// Without burn-train's optional `tui` dashboard, Burn's default renderer prints
+// a debug line for every iteration. Metrics still reach the experiment logs.
+/// Learner renderer that keeps progress off the terminal.
+struct QuietRenderer;
+
+impl MetricsRendererTraining for QuietRenderer {
+    /// Ignores a training metric update; the Learner's file logger records it.
+    fn update_train(&mut self, _state: MetricState) {}
+    /// Ignores a validation metric update; the Learner's file logger records it.
+    fn update_valid(&mut self, _state: MetricState) {}
+    /// Draws no per-iteration training progress.
+    fn render_train(&mut self, _item: TrainingProgress, _indicators: Vec<ProgressType>) {}
+    /// Draws no per-iteration validation progress.
+    fn render_valid(&mut self, _item: TrainingProgress, _indicators: Vec<ProgressType>) {}
+}
+
+impl MetricsRendererEvaluation for QuietRenderer {
+    /// Ignores a test metric update; this example runs no separate test phase.
+    fn update_test(&mut self, _name: EvaluationName, _state: MetricState) {}
+    /// Draws no test progress.
+    fn render_test(&mut self, _item: EvaluationProgress, _indicators: Vec<ProgressType>) {}
+}
+
+impl MetricsRenderer for QuietRenderer {
+    /// Nothing is drawn, so there is nothing to keep open.
+    fn manual_close(&mut self) {}
+    /// Needs no metric layout because nothing is drawn.
+    fn register_metric(&mut self, _definition: MetricDefinition) {}
 }
 
 /// One symbolic sequence and its first-token classification target.
