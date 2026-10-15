@@ -316,6 +316,29 @@ fn inactive_rows_decode_to_zeros_without_state_change() {
     assert!(host(idle.logits).iter().all(|&value| value == 0.0));
     assert_eq!(idle.hidden_states.len(), 3 + 2);
     assert_eq!(idle.routers.len(), 3);
+    // Every logits selection keeps its shape; unrequested outputs stay empty.
+    for (logits, selected) in [
+        (LogitsSelection::All, 1),
+        (LogitsSelection::Positions(vec![0, 0]), 2),
+    ] {
+        let idle = model
+            .decode(
+                DecodeInput {
+                    token_ids: ints([[0], [0]]),
+                    token_mask: Some(mask([[false], [false]])),
+                    position_ids: None,
+                },
+                &mut cache,
+                &ForwardOptions {
+                    logits,
+                    ..ForwardOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idle.logits.dims(), [2, selected, VOCABULARY]);
+        assert!(idle.hidden_states.is_empty() && idle.routers.is_empty());
+    }
+    assert_eq!(cache.lengths(), [4, 3]);
     // Prefill refuses empty rows.
     assert!(
         model

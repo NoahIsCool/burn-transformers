@@ -530,6 +530,69 @@ fn staged_execution_matches_the_stateless_pass() {
     assert_eq!(model.stack(), Stack::Decoder);
 }
 
+/// Staged ranges and edited states are validated before any layer runs.
+///
+/// Every refusal names its configuration path, so callers can tell a
+/// malformed state (dtype, cross-attention, an override for a missing
+/// layer, an evaluated context beyond the trained one) from a bad range.
+#[test]
+fn staged_misuse_is_rejected() {
+    use crate::intervention::Layer;
+
+    let model = tiny_model(24);
+    let state = model.embed(input(ints([[1, 2, 3]]), None, None)).unwrap();
+    let refusal = |state: crate::experiment::HiddenState<B>, range, path: &str| {
+        let error = model.run_layers(state, range).unwrap_err();
+        assert!(error.to_string().contains(path), "{path}: {error}");
+    };
+    assert!(
+        model.run_layers(state.clone(), 1..2).is_err(),
+        "skipped layer"
+    );
+    assert!(
+        model.run_layers(state.clone(), 0..4).is_err(),
+        "past the stack"
+    );
+    let normalized = model.normalize(state.clone()).unwrap();
+    assert!(
+        model.run_layers(normalized, 0..1).is_err(),
+        "after the norm"
+    );
+
+    let mut wide = state.clone();
+    wide.hidden = wide.hidden.cast(burn::tensor::DType::F64);
+    refusal(wide, 0..1, "gpt_oss.execution.hidden");
+    let mut crossed = state.clone();
+    crossed.context = crossed
+        .context
+        .with_cross_attention(AttentionPolicy::bidirectional());
+    refusal(crossed, 0..1, "gpt_oss.execution.cross_attention");
+    for layer in [Layer::decoder(3), Layer::encoder(0)] {
+        let mut overridden = state.clone();
+        overridden.context = overridden
+            .context
+            .with_layer_attention(layer, AttentionPolicy::causal());
+        refusal(overridden, 0..1, "gpt_oss.execution.layer_attention");
+    }
+    let mut stretched = state.clone();
+    stretched.context.evaluated_context = model.architecture().max_position_embeddings + 1;
+    refusal(stretched, 0..1, "gpt_oss.execution.evaluated_context");
+
+    // The trait's hooked forward is the inherent one.
+    let options = ForwardOptions::default();
+    let through_trait = HookedModel::forward_with_hooks(
+        &model,
+        input(ints([[1, 2, 3]]), None, None),
+        &options,
+        &mut crate::intervention::Hooks::new(),
+    )
+    .unwrap();
+    let direct = model
+        .forward(input(ints([[1, 2, 3]]), None, None), &options)
+        .unwrap();
+    assert_close(through_trait.logits, direct.logits, 0.0, "trait delegation");
+}
+
 /// An attention policy replaces a layer's rule in staged execution.
 #[test]
 fn staged_attention_policies_override_connectivity() {
