@@ -225,6 +225,160 @@ fn ragged_decode_steps_equal_row_by_row_decoding() {
     }
 }
 
+/// Uploads a `[rows, columns]` integer matrix given as equally long row slices.
+fn int_matrix(rows: &[&[i64]]) -> Tensor<B, 2, Int> {
+    let columns = rows[0].len();
+    assert!(rows.iter().all(|row| row.len() == columns), "ragged matrix");
+    Tensor::from_data(
+        TensorData::new(rows.concat(), [rows.len(), columns]),
+        &Default::default(),
+    )
+}
+
+/// Uploads a `[rows, columns]` validity matrix given as equally long row slices.
+fn mask_matrix(rows: &[&[bool]]) -> TokenMask<B> {
+    let indicators: Vec<Vec<i64>> = rows
+        .iter()
+        .map(|row| row.iter().map(|&valid| i64::from(valid)).collect())
+        .collect();
+    let indicators: Vec<&[i64]> = indicators.iter().map(Vec::as_slice).collect();
+    TokenMask::new(int_matrix(&indicators).equal_elem(1))
+}
+
+/// One ragged prefill of a chunked run over three rows.
+struct Chunk {
+    /// `[rows][columns]` token IDs; padding slots hold 0.
+    tokens: &'static [&'static [i64]],
+    /// `[rows][columns]` validity of `tokens`.
+    valid: &'static [&'static [bool]],
+    /// Committed row lengths after the chunk.
+    lengths: [usize; 3],
+}
+
+/// The three ragged prefills of the chunked run (see the test below).
+const CHUNKS: [Chunk; 3] = [
+    Chunk {
+        tokens: &[&[3, 17, 8, 25, 11], &[0, 0, 12, 5, 30], &[9, 0, 21, 14, 0]],
+        valid: &[
+            &[true; 5],
+            &[false, false, true, true, true],
+            &[true, false, true, true, false],
+        ],
+        lengths: [5, 3, 3],
+    },
+    Chunk {
+        tokens: &[&[0, 0, 4, 29], &[6, 19, 2, 10], &[7, 23, 16, 0]],
+        valid: &[
+            &[false, false, true, true],
+            &[true; 4],
+            &[true, true, true, false],
+        ],
+        lengths: [7, 7, 6],
+    },
+    Chunk {
+        tokens: &[&[12, 0, 3], &[5, 26, 0], &[14, 2, 9]],
+        valid: &[&[true, false, true], &[true, true, false], &[true; 3]],
+        lengths: [9, 9, 9],
+    },
+];
+
+/// The unpadded three-token block decoded after [`CHUNKS`].
+const VERIFIED: Chunk = Chunk {
+    tokens: &[&[13, 22, 5], &[18, 3, 27], &[24, 15, 20]],
+    valid: &[&[true; 3], &[true; 3], &[true; 3]],
+    lengths: [12, 12, 12],
+};
+
+/// Four chunks through one state equal the stateless pass of each row's kept tokens.
+///
+/// Every chunk after the first is a multi-token step on a non-empty state,
+/// as in chunked prefill or speculative verification:
+///
+/// 1. a ragged prefill of five columns on an empty state, with left and
+///    interior padding, compacted by a gather (lengths become `[5, 3, 3]`);
+/// 2. a prefill of four columns with only left and right padding, so the
+///    block is a slice in which row 0 starts at slot `c_0 = 2`, over rows of
+///    different lengths; row 1 appends four tokens, more than the window of
+///    3, so its ring layers wrap and attend over their history plus a fresh
+///    segment longer than the window (lengths become `[7, 7, 6]`);
+/// 3. a prefill with interior padding over rows of different non-zero
+///    lengths, a gathered block with `L_b > 0` (lengths become `[9, 9, 9]`);
+/// 4. a three-token `decode` without padding on equal lengths, a dense
+///    block over a full read with no invalid key, which takes the
+///    causal-only shortcut with more keys (12) than queries (3).
+///
+/// Valid columns must match the stateless logits of the row's kept tokens
+/// at the same ordinal; padded columns must be exact zeros.
+#[test]
+fn chunked_steps_on_non_empty_states_match_the_stateless_forward_for_every_variant() {
+    for variant in LlamaVariant::ALL {
+        let model = tiny_model(variant, 19);
+        let mut cache = state(&model, 3, 16);
+        let mut steps = Vec::new();
+        for chunk in &CHUNKS {
+            let logits = model
+                .prefill(
+                    input(
+                        int_matrix(chunk.tokens),
+                        Some(mask_matrix(chunk.valid)),
+                        None,
+                    ),
+                    &mut cache,
+                    &all_logits(),
+                )
+                .unwrap()
+                .logits;
+            assert_eq!(cache.lengths(), chunk.lengths, "{variant:?}");
+            steps.push((logits, chunk));
+        }
+        let logits = model
+            .decode(
+                DecodeInput {
+                    token_ids: int_matrix(VERIFIED.tokens),
+                    position_ids: None,
+                    token_mask: None,
+                },
+                &mut cache,
+                &all_logits(),
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(cache.lengths(), VERIFIED.lengths, "{variant:?}");
+        steps.push((logits, &VERIFIED));
+
+        for row in 0..3 {
+            let kept: Vec<i64> = steps
+                .iter()
+                .flat_map(|(_, chunk)| {
+                    chunk.tokens[row]
+                        .iter()
+                        .zip(chunk.valid[row])
+                        .filter_map(|(&token, &keep)| keep.then_some(token))
+                })
+                .collect();
+            let stateless = model
+                .forward(input(int_matrix(&[&kept]), None, None), &all_logits())
+                .unwrap()
+                .logits;
+            let mut ordinal = 0;
+            for (step, (logits, chunk)) in steps.iter().enumerate() {
+                for (column, &keep) in chunk.valid[row].iter().enumerate() {
+                    let cached = logits.clone().narrow(0, row, 1).narrow(1, column, 1);
+                    if keep {
+                        let context = format!("{variant:?} step {step} row {row} column {column}");
+                        let reference = stateless.clone().narrow(1, ordinal, 1);
+                        assert_close(cached, reference, TOLERANCE, &context);
+                        ordinal += 1;
+                    } else {
+                        assert!(host(cached).iter().all(|&value| value == 0.0));
+                    }
+                }
+            }
+            assert_eq!(ordinal, kept.len());
+        }
+    }
+}
+
 /// A finished row is a no-op with zero logits while its peers advance.
 #[test]
 fn inactive_decode_rows_return_zeros_and_keep_their_length() {
@@ -448,16 +602,13 @@ fn clean_tails_follow_the_lifecycle() {
     assert!(cache.clean_tail);
 }
 
-/// Non-finite bytes left beyond a truncated row never reach attention outputs.
+/// Returns a two-row state whose row 0 holds NaN keys and values beyond its end.
 ///
-/// Flex's fused attention happens to ignore excluded values even when they
-/// are NaN, so on Flex this checks the outcome rather than isolating the
-/// zeroing; backends whose kernels compute `0 · NaN` rely on it.
-#[test]
-fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
-    let model = tiny_model(LlamaVariant::Qwen3, 15);
-    let options = ForwardOptions::default();
-    let mut cache = state(&model, 2, 8);
+/// Both rows prefill six tokens; truncation to `[2, 5]` keeps row 0's slots
+/// `2..6` as stale bytes, which are then overwritten with NaN in every
+/// full-storage layer, as a rejected and overflowed draft could leave them.
+fn poisoned_state(model: &LlamaForCausalLm<B>) -> LlamaDecodeState<B> {
+    let mut cache = state(model, 2, 8);
     model
         .prefill(
             input(
@@ -466,13 +617,12 @@ fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
                 None,
             ),
             &mut cache,
-            &options,
+            &ForwardOptions::default(),
         )
         .unwrap();
     cache.truncate(&[2, 5]).unwrap();
-    // Simulate a rejected draft that overflowed: poison row 0 beyond its end.
     let nan = Tensor::<B, 4>::full([1, 2, 4, 4], f32::NAN, &Default::default());
-    for layer in 0..3 {
+    for layer in 0..model.architecture().num_layers() {
         cache
             .tensors
             .main_mut()
@@ -481,6 +631,22 @@ fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
             .write_sequence(layer, 0, 2, nan.clone(), nan.clone())
             .unwrap();
     }
+    cache
+}
+
+/// Non-finite bytes left beyond a truncated row never reach attention outputs.
+///
+/// An excluded key receives probability exactly zero, but `0 · NaN = NaN`,
+/// so only zeroing its value keeps the row finite. The second half forces
+/// the clean-tail flag over the same poisoned state, which skips that
+/// zeroing, and checks that the poison then does reach the logits: the
+/// first half is therefore sensitive to the masking, on Flex's fused kernel
+/// as on any other.
+#[test]
+fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
+    let model = tiny_model(LlamaVariant::Qwen3, 15);
+    let mut cache = poisoned_state(&model);
+    assert!(!cache.clean_tail, "a shortened row clears the flag");
     let poisoned = decode_step(&model, &mut cache, ints([[13], [14]]));
 
     let mut fresh = state(&model, 2, 8);
@@ -492,12 +658,22 @@ fn stale_non_finite_bytes_beyond_a_truncated_row_are_masked() {
                 None,
             ),
             &mut fresh,
-            &options,
+            &ForwardOptions::default(),
         )
         .unwrap();
     let expected = decode_step(&model, &mut fresh, ints([[13], [14]]));
     assert!(host(poisoned.clone()).iter().all(|value| value.is_finite()));
     assert_close(poisoned, expected, TOLERANCE, "masked stale bytes");
+
+    let mut unmasked = poisoned_state(&model);
+    unmasked.clean_tail = true;
+    let leaked = decode_step(&model, &mut unmasked, ints([[13], [14]]));
+    assert!(
+        host(leaked.narrow(0, 0, 1))
+            .iter()
+            .any(|value| !value.is_finite()),
+        "without value zeroing the poison must reach row 0's logits"
+    );
 }
 
 /// Requested hidden states return to the caller's columns with zeros at padding.
