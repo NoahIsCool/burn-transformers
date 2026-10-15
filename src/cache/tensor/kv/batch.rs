@@ -955,6 +955,9 @@ fn concatenate<B: Backend>(segments: &[KvBatchSegment<B>]) -> KvBatchSegment<B> 
                     .iter()
                     .map(|segment| {
                         segment.valid.clone().unwrap_or_else(|| {
+                            // An implicit all-valid mask becomes explicit:
+                            // `0 == 0` builds an all-true Bool tensor on the
+                            // device without uploading host data.
                             let [batch, keys] = segment.positions.dims();
                             Tensor::<B, 2, Int>::zeros([batch, keys], &segment.positions.device())
                                 .equal_elem(0)

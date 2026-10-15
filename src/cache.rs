@@ -1,4 +1,4 @@
-//! Decode-cache metadata and ring-buffer planning.
+//! Decode-cache metadata, verified planning, and tensor-backed storage.
 //!
 //! Autoregressive inference separates a *logical* token position from the
 //! physical slot holding its key/value state. Logical sequence lengths grow
@@ -15,6 +15,18 @@
 //! [`plan_staged_ring_transaction`] therefore models the safe policy of keeping
 //! proposals in separate linear storage and copying only the accepted prefix
 //! into the committed ring.
+//!
+//! # Module map
+//!
+//! * [`SequenceLengths`] holds committed and working lengths; its arithmetic
+//!   is the Verus-verified ledger in `lengths.rs`, shared with
+//!   [`TensorDecodeState`], so both report committed lengths from `lengths()`.
+//! * `retention.rs` (rewind safety, speculative working windows, ring slot
+//!   positions), `ring.rs` (ring write/read plans), and `rows.rs` (batched row
+//!   runs) are pure integer planners verified in place by `verus/cache.rs`.
+//! * [`tensor`] owns the Burn tensors: key/value and latent groups
+//!   ([`NativeKvCache`]), recurrent state ([`RecurrentStateCache`]), banks,
+//!   and the decode state with its step write sets ([`TensorStepWrites`]).
 
 mod config;
 mod lengths;
@@ -36,7 +48,7 @@ pub use state::{DecodeState, DecodeStateError, LengthTransition, SequenceLengths
 pub use tensor::{
     KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, KvCacheReadSegment,
     KvCacheStorage, NativeKvCache, NativeKvCacheSpec, RecurrentBatchStateRead, RecurrentStateCache,
-    RecurrentStateRead, RecurrentStateSpec, TensorCacheBank, TensorCacheError, TensorCacheMark,
-    TensorCacheResult, TensorDecodeState,
+    RecurrentStateRead, RecurrentStateSpec, StepBank, TensorCacheBank, TensorCacheError,
+    TensorCacheMark, TensorCacheResult, TensorDecodeState, TensorStepWrites, TokenAlignment,
 };
 pub use transaction::{CacheMark, TransactionError, TransactionalCache};
