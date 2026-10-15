@@ -80,6 +80,10 @@ tracing = "=0.1.44"
 # Examples not listed here need only the default features.
 
 [[example]]
+name = "activation_patching"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
 name = "activation_workbench"
 required-features = ["std", "flex"]
 
