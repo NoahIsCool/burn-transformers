@@ -1306,3 +1306,106 @@ proptest::proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Timing benchmark (run explicitly in release mode)
+// ---------------------------------------------------------------------------
+
+/// The previous penalty implementation, kept as a timing and parity reference.
+///
+/// Every call validated the history with two blocking scalar reads, built a
+/// `[batch, history, vocabulary]` one-hot, and summed it over the history.
+fn one_hot_reference_penalties(
+    logits: Tensor<TestBackend, 2>,
+    history: Tensor<TestBackend, 2, Int>,
+    vocabulary: usize,
+    repetition: f64,
+    presence: f64,
+) -> Tensor<TestBackend, 2> {
+    let minimum = history.clone().min().into_scalar();
+    let maximum = history.clone().max().into_scalar();
+    assert!(minimum >= 0 && (maximum as usize) < vocabulary);
+    let observed = history
+        .one_hot::<3>(vocabulary)
+        .sum_dim(1)
+        .squeeze_dim::<2>(1)
+        .greater_elem(0);
+    let penalized = logits.clone().div_scalar(repetition).mask_where(
+        logits.clone().lower_elem(0.0),
+        logits.clone().mul_scalar(repetition),
+    );
+    let logits = logits.mask_where(observed.clone(), penalized);
+    logits - observed.float().mul_scalar(presence)
+}
+
+/// Times one-hot penalties against incremental history over a growing decode history.
+///
+/// Run with `cargo test --release --lib penalty_history_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run in release mode with --ignored --nocapture"]
+fn penalty_history_timing() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let vocabulary = 32_000;
+    let prompt_length = 1_024;
+    let steps = 16;
+    let config = GenerationConfig {
+        repetition_penalty: 1.1,
+        presence_penalty: 0.5,
+        additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+        ..Default::default()
+    };
+    let processor =
+        LogitsProcessor::<TestBackend>::new(config.clone(), vocabulary, &device).unwrap();
+    let prompt = (0..prompt_length)
+        .map(|index| ((index * 7_919) % vocabulary) as i64)
+        .collect::<Vec<_>>();
+    let generated = (0..steps)
+        .map(|index| ((index * 104_729) % vocabulary) as u32)
+        .collect::<Vec<_>>();
+    let logits = Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(pseudo_normal_logits(vocabulary, 2.0, 3), [1, vocabulary]),
+        &device,
+    );
+
+    let started = Instant::now();
+    let mut history_ids = prompt.clone();
+    let mut reference = None;
+    for &token in &generated {
+        let history = Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(history_ids.clone(), [1, history_ids.len()]),
+            &device,
+        );
+        let processed = one_hot_reference_penalties(logits.clone(), history, vocabulary, 1.1, 0.5);
+        reference = Some(host_values(processed));
+        history_ids.push(i64::from(token));
+    }
+    let one_hot = started.elapsed();
+
+    let started = Instant::now();
+    let mut history = super::TokenHistory::from_prompt(
+        &config,
+        vocabulary,
+        Tensor::from_data(TensorData::new(prompt, [1, prompt_length]), &device),
+        None,
+    )
+    .unwrap();
+    let mut incremental = None;
+    for &token in &generated {
+        let processed = processor
+            .process_with_history(logits.clone(), &history)
+            .unwrap();
+        incremental = Some(host_values(processed));
+        history.record(&[token], &[true]).unwrap();
+    }
+    let counts = started.elapsed();
+
+    assert_eq!(reference, incremental);
+    println!(
+        "penalties over {steps} steps, prompt {prompt_length}, vocabulary {vocabulary}: one-hot {:.2} ms/step, incremental {:.2} ms/step ({:.1}x)",
+        one_hot.as_secs_f64() * 1e3 / steps as f64,
+        counts.as_secs_f64() * 1e3 / steps as f64,
+        one_hot.as_secs_f64() / counts.as_secs_f64()
+    );
+}

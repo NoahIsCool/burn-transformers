@@ -1964,3 +1964,64 @@ proptest::proptest! {
         );
     }
 }
+
+/// Times the bounded-heap frontier against sorting every beam-vocabulary pair.
+///
+/// Run with `cargo test --release --lib beam_frontier_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run in release mode with --ignored --nocapture"]
+fn beam_frontier_timing() {
+    use std::time::Instant;
+
+    let beams = 8;
+    for vocabulary in [32_128, 250_112] {
+        let capacity = 2 * beams;
+        let active = (0..beams)
+            .map(|slot| {
+                let mut parent = scored_hypothesis(&[1], -(slot as f64) * 0.1, slot);
+                parent.finish_reason = None;
+                Some(parent)
+            })
+            .collect::<Vec<_>>();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let probabilities = (0..beams * vocabulary)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                -((state >> 11) as f64) / (1_u64 << 53) as f64 * 20.0
+            })
+            .collect::<Vec<_>>();
+        let repetitions = 5;
+        let started = Instant::now();
+        let mut heap = Vec::new();
+        for _ in 0..repetitions {
+            heap = super::candidates_for_source(
+                0,
+                beams,
+                vocabulary,
+                capacity,
+                &active,
+                &probabilities,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|candidate| (candidate.parent_global, candidate.token_id))
+            .collect::<Vec<_>>();
+        }
+        let bounded = started.elapsed();
+        let started = Instant::now();
+        let mut sorted = Vec::new();
+        for _ in 0..repetitions {
+            sorted = reference_candidates(0, beams, vocabulary, capacity, &active, &probabilities);
+        }
+        let full = started.elapsed();
+        assert_eq!(heap, sorted);
+        println!(
+            "beam frontier, {beams} beams x {vocabulary} tokens: full sort {:.2} ms, bounded heap {:.2} ms ({:.1}x)",
+            full.as_secs_f64() * 1e3 / repetitions as f64,
+            bounded.as_secs_f64() * 1e3 / repetitions as f64,
+            full.as_secs_f64() / bounded.as_secs_f64()
+        );
+    }
+}
