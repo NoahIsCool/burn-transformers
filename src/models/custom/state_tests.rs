@@ -10,7 +10,7 @@ use crate::{
         FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
         ResidualTopology, Seq2SeqSpec,
     },
-    models::shared::{CompactRow, implicit_position_ids},
+    models::shared::{implicit_position_ids, rows::CompactRow},
 };
 
 /// CPU integer backend used to ensure invalid requests fail before tensor allocation.
