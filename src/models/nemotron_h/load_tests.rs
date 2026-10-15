@@ -82,7 +82,8 @@ fn write_checkpoint(
             }
             TensorOperation::Alias { .. }
             | TensorOperation::Split { .. }
-            | TensorOperation::Concatenate { .. } => None,
+            | TensorOperation::Concatenate { .. }
+            | TensorOperation::DequantizeMxfp4 { .. } => None,
         })
         .collect::<Vec<_>>();
     mutate(&mut tensors);

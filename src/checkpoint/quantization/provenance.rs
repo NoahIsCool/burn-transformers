@@ -617,6 +617,7 @@ fn hash_tensor(hasher: &mut Sha256, tensor: &PlannedTensor) {
             hasher.update([4]);
             hash_str(hasher, source_target);
         }
+        PlannedTransform::DequantizeMxfp4 => hasher.update([5]),
     }
     hash_shape(hasher, &tensor.shape);
     hash_str(hasher, tensor.dtype.as_str());

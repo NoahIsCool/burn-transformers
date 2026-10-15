@@ -21,6 +21,7 @@ mod dtype;
 mod error;
 mod layout;
 mod mapping;
+mod mxfp4;
 mod options;
 pub mod quantization;
 mod report;
