@@ -1993,8 +1993,49 @@ fn sampling_defaults_follow_hugging_face_generation() {
             .unwrap_or_else(|error| panic!("{json}: {error}"));
         assert_eq!((config.top_k, config.top_p), (top_k, top_p), "{json}");
     }
+    // Python's `json` writes NaN as a bare literal, which is not JSON: the file
+    // fails to parse before any sampling setting is interpreted.
     std::fs::write(&path, br#"{"do_sample": true, "top_p": NaN}"#).unwrap();
-    assert!(normalize_generation_defaults(root.path(), None, None, 8, None).is_err());
+    let error = normalize_generation_defaults(root.path(), None, None, 8, None).unwrap_err();
+    assert!(matches!(error, Error::Json { .. }), "{error}");
+}
+
+/// A NaN `top_p` is kept so validation rejects it, rather than silently disabling nucleus sampling.
+///
+/// JSON cannot spell NaN, so the parsed configuration is built directly; this
+/// exercises the `top_p < 1` filter in `apply_local_generation_config`.
+#[test]
+fn nan_top_p_is_rejected_instead_of_disabling_nucleus_sampling() {
+    let applied = |top_p: f64| {
+        let local = LocalGenerationConfig {
+            do_sample: Some(true),
+            top_p: Some(top_p),
+            ..LocalGenerationConfig::default()
+        };
+        let mut config = GenerationConfig::default();
+        apply_local_generation_config(&mut config, &local, 64).unwrap();
+        config
+    };
+    let config = applied(f64::NAN);
+    assert!(config.top_p.is_some_and(f64::is_nan));
+    let error = config.validate(64).unwrap_err();
+    assert!(
+        error.to_string().contains("top_p must be finite"),
+        "{error}"
+    );
+    // Values at or above one disable nucleus filtering, as Hugging Face's
+    // warper condition `top_p < 1.0` does.
+    for top_p in [1.0, 1.5, f64::INFINITY] {
+        let config = applied(top_p);
+        assert_eq!(config.top_p, None, "{top_p}");
+        config.validate(64).unwrap();
+    }
+    // Non-positive values are kept so validation rejects them, as Hugging Face's warper does.
+    for top_p in [0.0, -0.5, f64::NEG_INFINITY] {
+        let config = applied(top_p);
+        assert_eq!(config.top_p, Some(top_p));
+        assert!(config.validate(64).is_err(), "{top_p}");
+    }
 }
 
 /// Behavior-changing settings without an equivalent are reported, neutral ones are not.
