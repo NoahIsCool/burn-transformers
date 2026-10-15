@@ -2,7 +2,7 @@
 
 use burn::{
     backend::Flex,
-    tensor::{Tensor, TensorData},
+    tensor::{DType, Tensor, TensorData, activation::softmax},
 };
 use proptest::prelude::*;
 
@@ -19,7 +19,9 @@ type TestBackend = Flex<f32, i32>;
 ///
 /// Kept verbatim (state-incrementing SplitMix64, accept, residual, inverse
 /// CDF) so the shared verifier can be shown to reproduce every decision bit
-/// for bit, which keeps the families' seeded outputs unchanged on adoption.
+/// for bit. Together with [`family_normalized_probabilities`] this keeps the
+/// families' seeded F32 outputs unchanged on adoption; half-precision logits
+/// change intentionally (see [`normalized_probabilities`]).
 struct FamilyReference {
     /// Wrapping SplitMix64 state.
     state: u64,
@@ -230,6 +232,48 @@ fn normalized_probabilities_validate_logits() {
     );
 }
 
+/// The probability conversion exactly as Qwen3.5 and Nemotron-H implemented it.
+///
+/// Softmax in the logits' own dtype, read back through an F32 host buffer,
+/// then renormalized in F64. Input validation is omitted: both versions
+/// reject the same malformed rows before this point.
+fn family_normalized_probabilities(logits: Tensor<TestBackend, 2>) -> Vec<f64> {
+    let probabilities = softmax(logits, 1)
+        .into_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("F32 probabilities");
+    let mut probabilities = probabilities.into_iter().map(f64::from).collect::<Vec<_>>();
+    let total = probabilities.iter().sum::<f64>();
+    probabilities.iter_mut().for_each(|value| *value /= total);
+    probabilities
+}
+
+/// Bit patterns of a probability vector, for exact comparisons that treat `-0.0` and `0.0` apart.
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+/// Half-precision logits are normalized in F32, which deliberately differs from the old F16 softmax.
+#[test]
+fn half_precision_probabilities_use_an_f32_softmax() {
+    let device = Default::default();
+    let logits =
+        Tensor::<TestBackend, 2>::from_floats([[0.0, 0.1, 0.2, f32::NEG_INFINITY]], &device);
+    let half = logits.cast(DType::F16);
+    let shared = normalized_probabilities(half.clone()).unwrap();
+    // Exactly the F32 softmax of the F16-rounded logits.
+    assert_eq!(
+        bits(&shared),
+        bits(&family_normalized_probabilities(
+            half.clone().cast(DType::F32)
+        ))
+    );
+    // The families' F16 softmax rounds each probability to F16 first.
+    assert_ne!(bits(&shared), bits(&family_normalized_probabilities(half)));
+    assert_eq!(shared[3], 0.0);
+}
+
 /// Prompt lookup prefers longer n-grams and returns nothing without a match.
 #[test]
 fn prompt_lookup_prefers_the_longest_matching_ngram() {
@@ -269,6 +313,28 @@ proptest! {
             };
             prop_assert_eq!(shared.verify(proposal, &target, &draft).unwrap(), expected);
         }
+    }
+
+    /// F32 probability vectors are bit-identical to the families' previous conversion.
+    #[test]
+    fn f32_probabilities_match_family_conversion(
+        logits in proptest::collection::vec(-30.0_f32..30.0, 1..48),
+        masked in proptest::collection::vec(proptest::bool::ANY, 48),
+    ) {
+        let device = Default::default();
+        let vocabulary = logits.len();
+        let mut logits = logits;
+        // Keep token 0 finite so the row stays normalizable.
+        for (logit, &is_masked) in logits.iter_mut().zip(&masked).skip(1) {
+            if is_masked {
+                *logit = f32::NEG_INFINITY;
+            }
+        }
+        let tensor = || {
+            Tensor::<TestBackend, 2>::from_data(TensorData::new(logits.clone(), [1, vocabulary]), &device)
+        };
+        let shared = normalized_probabilities(tensor()).unwrap();
+        prop_assert_eq!(bits(&shared), bits(&family_normalized_probabilities(tensor())));
     }
 
     /// Residual corrections only land where the target exceeds the draft.

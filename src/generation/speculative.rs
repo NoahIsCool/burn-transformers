@@ -204,6 +204,14 @@ fn check_distributions(proposal: u32, target: &[f64], draft: &[f64]) -> Result<(
 /// Uses the same backend softmax that [`super::LogitsProcessor`] samples from,
 /// in at least F32, and renormalizes in F64 so the vector sums to one up to
 /// rounding. Rows with NaN, `+inf`, or no finite logit are rejected.
+///
+/// For F32 logits the result is bit-identical to the conversion Qwen3.5 and
+/// Nemotron-H used before this module existed (a softmax in the logit dtype
+/// read through F32), so their seeded F32 runs are unchanged on adoption.
+/// Two cases change on purpose. F16/BF16 logits are promoted to F32 before
+/// the softmax instead of normalizing in half precision, matching Hugging
+/// Face, which upcasts logits to F32. F64 probabilities are no longer
+/// rounded through F32.
 pub fn normalized_probabilities<B: Backend>(logits: Tensor<B, 2>) -> Result<Vec<f64>> {
     let [batch, vocabulary] = logits.dims();
     if batch != 1 || vocabulary == 0 {
