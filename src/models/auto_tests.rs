@@ -1227,6 +1227,7 @@ fn automatic_config_discriminators_validate_and_match_runtime_registries() {
             AutoCausalConfig::NemotronH,
             AutoCausalConfig::Qwen3_5,
             AutoCausalConfig::Qwen3Moe,
+            AutoCausalConfig::GptOss,
             AutoCausalConfig::Llama,
         ]
     );
@@ -1389,6 +1390,10 @@ fn registry_entries_agree_with_family_schemas_and_views() {
         (
             AutoCausalConfig::Qwen3Moe,
             <Qwen3MoeConfig as ModelConfig>::MODEL_TYPES,
+        ),
+        (
+            AutoCausalConfig::GptOss,
+            <crate::models::gpt_oss::GptOssConfig as ModelConfig>::MODEL_TYPES,
         ),
         (
             AutoCausalConfig::Llama,

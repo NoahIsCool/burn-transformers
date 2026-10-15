@@ -47,6 +47,7 @@ use crate::{
 
 use super::{
     deepseek_v2::{DeepseekV2Config, DeepseekV2DecodeState, DeepseekV2ForCausalLm},
+    gpt_oss::{GptOssConfig, GptOssDecodeState, GptOssForCausalLm},
     llama::{LlamaDecodeState, LlamaFamilyConfig, LlamaForCausalLm},
     muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerTextConfig},
     nemotron_h::{NemotronHConfig, NemotronHDecodeState, NemotronHForCausalLm},
@@ -420,6 +421,13 @@ causal_registry! {
         config: Qwen3MoeConfig,
         state: Qwen3MoeDecodeState,
     },
+    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    GptOss {
+        model_type: "gpt_oss",
+        model: GptOssForCausalLm,
+        config: GptOssConfig,
+        state: GptOssDecodeState,
+    },
     /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
     Llama {
         model_type: "llama",
@@ -451,7 +459,7 @@ fn foreign_causal_state_error() -> Error {
 impl<B: Backend> AutoCausalLm<B> {
     /// Lists the stateless activation points supported by the selected model.
     ///
-    /// Qwen3.5/Qwen3.8 and the Llama family currently support interventions.
+    /// Qwen3.5/Qwen3.8, the Llama family, and gpt-oss currently support interventions.
     /// Other registered causal families return a capability error rather than
     /// an empty, misleading catalog.
     /// Loaded checkpoints expose this method through `loaded.model()`.
@@ -459,13 +467,14 @@ impl<B: Backend> AutoCausalLm<B> {
         match self {
             Self::Qwen3_5(model) => Ok(model.activation_points()),
             Self::Llama(model) => Ok(model.activation_points()),
+            Self::GptOss(model) => Ok(model.activation_points()),
             _ => Err(self.unsupported_hooks_error()),
         }
     }
 
     /// Observes or changes activations during the selected model's stateless forward.
     ///
-    /// Qwen3.5/Qwen3.8 and the Llama family delegate to their concrete
+    /// Qwen3.5/Qwen3.8, the Llama family, and gpt-oss delegate to their concrete
     /// intervention implementations. Other families fail before callbacks or model computation, including when
     /// the collection is empty. Use [`Self::forward`] for ordinary execution.
     /// Failed calls invalidate captures left from earlier runs of these hooks.
@@ -478,6 +487,7 @@ impl<B: Backend> AutoCausalLm<B> {
         match self {
             Self::Qwen3_5(model) => model.forward_with_hooks(input, options, hooks),
             Self::Llama(model) => model.forward_with_hooks(input, options, hooks),
+            Self::GptOss(model) => model.forward_with_hooks(input, options, hooks),
             _ => hooks
                 .run(Vec::new(), |_| Err(self.unsupported_hooks_error()))
                 // Add family context even when preflight rejects a named point.
@@ -488,7 +498,7 @@ impl<B: Backend> AutoCausalLm<B> {
     /// Names the selected family when its stateless intervention capability is unavailable.
     fn unsupported_hooks_error(&self) -> Error {
         Error::BackendCapability(format!(
-            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8 and the Llama family",
+            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8, the Llama family, and gpt-oss",
             self.config().model_type()
         ))
     }

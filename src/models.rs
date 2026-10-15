@@ -11,6 +11,7 @@ pub mod custom;
 pub mod deepseek_v2;
 pub mod gpt2;
 pub mod gpt_neox;
+pub mod gpt_oss;
 pub mod llama;
 pub mod muse_glimmer;
 pub mod nemotron_h;
