@@ -35,7 +35,9 @@
 //! overflows or underflows, that every successful transition preserves the
 //! invariant above, that each result equals the documented formula, and that
 //! each function rejects *exactly* the inputs violating its rule (soundness
-//! and completeness). Error payloads are diagnostic and covered by unit tests.
+//! and completeness). Every rejection also carries the proved diagnostic: the
+//! first offending row with its exact operands, or the transaction state that
+//! forbids the transition.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -178,6 +180,7 @@ fn zero_lengths(count: usize) -> Vec<usize> {
 /// This is the single advance rule shared by committed prefill/decode and by a
 /// transaction's working cursor. Validation completes for every row before the
 /// new vector is returned, so a ragged batch can never be partially advanced.
+/// A rejection names the first row whose sum overflows or exceeds `capacity`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
@@ -189,6 +192,30 @@ fn zero_lengths(count: usize) -> Vec<usize> {
             &&& forall|i: int| 0 <= i < lengths.len() ==>
                 #[trigger] next[i] == lengths[i] + counts[i]
             &&& within_capacity(next@, capacity)
+        },
+        result matches Err(violation) ==> match violation {
+            LengthViolation::CountMismatch { expected, actual } =>
+                counts.len() != lengths.len() && expected == lengths.len()
+                    && actual == counts.len(),
+            LengthViolation::Overflow { sequence, length, additional } => {
+                &&& counts.len() == lengths.len()
+                &&& sequence < lengths.len()
+                &&& length == lengths[sequence as int]
+                &&& additional == counts[sequence as int]
+                &&& length + additional > usize::MAX
+                &&& forall|i: int| 0 <= i < sequence ==>
+                    (#[trigger] lengths[i]) + counts[i] <= capacity
+            },
+            LengthViolation::CapacityExceeded { sequence, requested, capacity: limit } => {
+                &&& counts.len() == lengths.len()
+                &&& sequence < lengths.len()
+                &&& requested == lengths[sequence as int] + counts[sequence as int]
+                &&& requested > capacity
+                &&& limit == capacity
+                &&& forall|i: int| 0 <= i < sequence ==>
+                    (#[trigger] lengths[i]) + counts[i] <= capacity
+            },
+            _ => false,
         },
 ))]
 pub(crate) fn advanced_lengths(
@@ -243,13 +270,28 @@ pub(crate) fn advanced_lengths(
 /// Checks that every requested length is no longer than its current length.
 ///
 /// A rewind may only shorten rows; physical caches separately decide whether
-/// the shortened prefix is still reconstructible (see `retention.rs`).
+/// the shortened prefix is still reconstructible (see `retention.rs`). A
+/// rejection names the first row that would grow.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
         result.is_ok() == (requested.len() == current.len()
             && forall|i: int| 0 <= i < current.len() ==>
                 #[trigger] requested[i] <= current[i]),
+        result matches Err(violation) ==> match violation {
+            LengthViolation::CountMismatch { expected, actual } =>
+                requested.len() != current.len() && expected == current.len()
+                    && actual == requested.len(),
+            LengthViolation::Extension { sequence, current: from, requested: to } => {
+                &&& requested.len() == current.len()
+                &&& sequence < current.len()
+                &&& from == current[sequence as int]
+                &&& to == requested[sequence as int]
+                &&& to > from
+                &&& forall|i: int| 0 <= i < sequence ==> #[trigger] requested[i] <= current[i]
+            },
+            _ => false,
+        },
 ))]
 pub(crate) fn validate_rewind(
     current: &[usize],
@@ -320,7 +362,8 @@ pub(crate) fn proposal_lengths(baseline: &[usize], working: &[usize]) -> Vec<usi
 ///
 /// Accepting `a_i` requires `a_i <= working[i] - baseline[i]`; the result then
 /// lies in `[baseline[i], working[i]]`, so it inherits the capacity bound of
-/// the working cursor and the addition cannot overflow.
+/// the working cursor and the addition cannot overflow. A rejection names the
+/// first row that accepts more than it proposed.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     requires
@@ -336,6 +379,21 @@ pub(crate) fn proposal_lengths(baseline: &[usize], working: &[usize]) -> Vec<usi
                 &&& #[trigger] committed[i] == baseline[i] + accepted[i]
                 &&& baseline[i] <= committed[i] <= working[i]
             }
+        },
+        result matches Err(violation) ==> match violation {
+            LengthViolation::CountMismatch { expected, actual } =>
+                accepted.len() != baseline.len() && expected == baseline.len()
+                    && actual == accepted.len(),
+            LengthViolation::PrefixExceedsProposal { sequence, accepted: taken, proposed } => {
+                &&& accepted.len() == baseline.len()
+                &&& sequence < baseline.len()
+                &&& taken == accepted[sequence as int]
+                &&& proposed == working[sequence as int] - baseline[sequence as int]
+                &&& taken > proposed
+                &&& forall|i: int| 0 <= i < sequence ==>
+                    #[trigger] accepted[i] <= working[i] - baseline[i]
+            },
+            _ => false,
         },
 ))]
 pub(crate) fn committed_prefix_lengths(
@@ -382,7 +440,8 @@ pub(crate) fn committed_prefix_lengths(
 /// Gathers `lengths[indices[i]]` for every output row.
 ///
 /// Duplicate indices are valid and implement beam expansion; the number of
-/// rows never changes, so tensor shapes stay fixed.
+/// rows never changes, so tensor shapes stay fixed. A rejection names the
+/// first output row whose source lies outside the batch.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
@@ -393,6 +452,20 @@ pub(crate) fn committed_prefix_lengths(
             &&& reordered.len() == lengths.len()
             &&& forall|i: int| 0 <= i < indices.len() ==>
                 #[trigger] reordered[i] == lengths[indices[i] as int]
+        },
+        result matches Err(violation) ==> match violation {
+            LengthViolation::CountMismatch { expected, actual } =>
+                indices.len() != lengths.len() && expected == lengths.len()
+                    && actual == indices.len(),
+            LengthViolation::SourceOutOfBounds { sequence, source, sequence_count } => {
+                &&& indices.len() == lengths.len()
+                &&& sequence < indices.len()
+                &&& source == indices[sequence as int]
+                &&& source >= lengths.len()
+                &&& sequence_count == lengths.len()
+                &&& forall|i: int| 0 <= i < sequence ==> #[trigger] indices[i] < lengths.len()
+            },
+            _ => false,
         },
 ))]
 pub(crate) fn reordered_lengths(
@@ -522,6 +595,16 @@ fn empty_ledger(capacity: usize, sequence_count: usize) -> LengthLedger {
             &&& ledger.capacity_view() == capacity
             &&& ledger.committed_view() == lengths@
         },
+        result matches Err(violation) ==> match violation {
+            LengthViolation::CapacityExceeded { sequence, requested, capacity: limit } => {
+                &&& sequence < lengths.len()
+                &&& requested == lengths[sequence as int]
+                &&& requested > capacity
+                &&& limit == capacity
+                &&& forall|i: int| 0 <= i < sequence ==> #[trigger] lengths[i] <= capacity
+            },
+            _ => false,
+        },
 ))]
 fn ledger_from_lengths(
     capacity: usize,
@@ -613,6 +696,8 @@ impl LengthLedger {
             self.well_formed(),
         ensures
             result.is_ok() == !self.active(),
+            self.active() ==> result == Err::<Self, LengthViolation>(
+                LengthViolation::TransactionActive),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& next.active()
@@ -642,6 +727,8 @@ impl LengthLedger {
                 && accepted.len() == self.committed_view().len()
                 && forall|i: int| 0 <= i < accepted.len() ==>
                     #[trigger] accepted[i] <= self.cursor_view()[i] - self.committed_view()[i]),
+            !self.active() ==> result == Err::<Self, LengthViolation>(
+                LengthViolation::TransactionInactive),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -674,6 +761,8 @@ impl LengthLedger {
             self.well_formed(),
         ensures
             result.is_ok() == self.active(),
+            !self.active() ==> result == Err::<Self, LengthViolation>(
+                LengthViolation::TransactionInactive),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -702,6 +791,8 @@ impl LengthLedger {
                 && requested.len() == self.committed_view().len()
                 && forall|i: int| 0 <= i < requested.len() ==>
                     #[trigger] requested[i] <= self.committed_view()[i]),
+            self.active() ==> result == Err::<Self, LengthViolation>(
+                LengthViolation::TransactionActive),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -731,6 +822,8 @@ impl LengthLedger {
                 && indices.len() == self.committed_view().len()
                 && forall|i: int| 0 <= i < indices.len() ==>
                     #[trigger] indices[i] < self.committed_view().len()),
+            self.active() ==> result == Err::<Self, LengthViolation>(
+                LengthViolation::TransactionActive),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -760,6 +853,8 @@ impl LengthLedger {
             self.well_formed(),
         ensures
             result.is_ok() == !self.active(),
+            self.active() ==> result == Err::<Self, LengthViolation>(
+                LengthViolation::TransactionActive),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -796,8 +891,25 @@ impl LengthLedger {
     }
 
     /// Returns each row's proposal length `working - committed` (all zero outside a transaction).
+    ///
+    /// Verified: entry `i` is exactly `cursor_i - committed_i`, which cannot
+    /// underflow because the ledger invariant brackets the working cursor.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(proposals =>
+        requires
+            self.well_formed(),
+        ensures
+            proposals.len() == self.committed_view().len(),
+            forall|i: int| 0 <= i < proposals.len() ==>
+                #[trigger] proposals[i] == self.cursor_view()[i] - self.committed_view()[i],
+            !self.active() ==> forall|i: int| 0 <= i < proposals.len() ==>
+                #[trigger] proposals[i] == 0,
+    ))]
     pub(crate) fn proposals(&self) -> Vec<usize> {
-        proposal_lengths(&self.committed, self.working())
+        match &self.working {
+            Some(working) => proposal_lengths(&self.committed, working),
+            None => proposal_lengths(&self.committed, &self.committed),
+        }
     }
 }
 
