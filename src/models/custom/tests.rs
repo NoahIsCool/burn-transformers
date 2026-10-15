@@ -26,6 +26,10 @@ use super::{ModularCausalLm, ModularSeq2SeqLm, pass::StackPass, test_support::*}
 /// Sparse decode diagnostics and transactional failure contract tests.
 mod state_contracts;
 
+#[path = "family_parity_tests.rs"]
+/// Modular graphs configured like family blocks reproduce the family outputs.
+mod family_parity;
+
 /// Builds a fully initialized single-layer full/sliding attention graph for parity tests.
 fn deterministic_attention_model(
     window: Option<usize>,
