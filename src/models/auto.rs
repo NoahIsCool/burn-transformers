@@ -47,6 +47,7 @@ use crate::{
 
 use super::{
     deepseek_v2::{DeepseekV2Config, DeepseekV2DecodeState, DeepseekV2ForCausalLm},
+    llama::{LlamaDecodeState, LlamaFamilyConfig, LlamaForCausalLm},
     muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerTextConfig},
     nemotron_h::{NemotronHConfig, NemotronHDecodeState, NemotronHForCausalLm},
     qwen3_5::{Qwen3_5DecodeState, Qwen3_5ForCausalLm, Qwen3_5TextConfig},
@@ -69,8 +70,9 @@ pub use load::AutoLoadOptions;
 /// Defines the causal registry from one list of executable families.
 ///
 /// Each entry gives the enum variant, its documentation, the checkpoint
-/// `model_type`, and the family's model, configuration, and decode-state
-/// types. The expansion defines [`AutoCausalConfig`], [`AutoCausalConfigRef`],
+/// `model_type`, optional `aliases` (further `model_type` values executed by
+/// the same family, such as `mistral` for the Llama family), and the family's
+/// model, configuration, and decode-state types. The expansion defines [`AutoCausalConfig`], [`AutoCausalConfigRef`],
 /// [`AutoCausalDecodeState`], and [`AutoCausalLm`] with one variant per entry,
 /// together with every method whose body is a per-family `match`.
 macro_rules! causal_registry {
@@ -78,6 +80,7 @@ macro_rules! causal_registry {
         $(#[$family_doc:meta])*
         $variant:ident {
             model_type: $model_type:literal,
+            $(aliases: [$($alias:literal),+ $(,)?],)?
             model: $model:ident,
             config: $config:ident,
             state: $state:ident $(,)?
@@ -100,25 +103,28 @@ macro_rules! causal_registry {
             /// Every registered causal family, in registry order.
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
-            /// Returns the exact checkpoint `model_type` discriminator.
+            /// Returns the family's primary checkpoint `model_type` discriminator.
+            ///
+            /// A family registered under aliases reports its primary type; the
+            /// exact checkpoint value is in its concrete configuration.
             pub const fn model_type(self) -> &'static str {
                 match self {
                     $(Self::$variant => $model_type,)+
                 }
             }
 
-            /// Returns the family registered for a checkpoint `model_type`, if any.
+            /// Returns the family registered for a checkpoint `model_type` or alias, if any.
             pub fn from_model_type(model_type: &str) -> Option<Self> {
                 match model_type {
-                    $($model_type => Some(Self::$variant),)+
+                    $($model_type $($(| $alias)+)? => Some(Self::$variant),)+
                     _ => None,
                 }
             }
         }
 
         impl ArchitectureConfig for AutoCausalConfig {
-            /// Checkpoint discriminators accepted by the causal configuration registry.
-            const MODEL_TYPES: &'static [&'static str] = &[$($model_type),+];
+            /// Checkpoint discriminators (primary types and aliases) accepted by the registry.
+            const MODEL_TYPES: &'static [&'static str] = &[$($model_type, $($($alias,)+)?)+];
 
             /// Registry discriminators are constructed only for executable families.
             fn validate(&self) -> Result<()> {
@@ -147,7 +153,9 @@ macro_rules! causal_registry {
                 }
             }
 
-            /// Returns the exact checkpoint `model_type` discriminator.
+            /// Returns the family's primary checkpoint `model_type` discriminator.
+            ///
+            /// See [`AutoCausalConfig::model_type`] for families with aliases.
             pub fn model_type(self) -> &'static str {
                 self.family().model_type()
             }
@@ -249,14 +257,15 @@ macro_rules! causal_registry {
         }
 
         impl<B: Backend> AutoCausalLm<B> {
-            /// Checkpoint model types currently accepted by this executable registry.
-            pub const MODEL_TYPES: &'static [&'static str] = &[$($model_type),+];
+            /// Checkpoint model types (primary types and aliases) accepted by this executable registry.
+            pub const MODEL_TYPES: &'static [&'static str] =
+                <AutoCausalConfig as ArchitectureConfig>::MODEL_TYPES;
 
             /// Parses a direct or wrapped configuration and initializes its lazy graph.
             pub fn from_config_json(json: &str, device: &B::Device) -> Result<Self> {
                 match detect_model_type(json)?.as_str() {
                     $(
-                        $model_type => {
+                        $model_type $($(| $alias)+)? => {
                             let config = parse_family_config::<$config>(json, "auto_causal.config")?;
                             $model::init(config, device).map(Self::$variant)
                         }
@@ -355,7 +364,7 @@ macro_rules! causal_registry {
             ) -> Result<LoadedModel<Self>> {
                 match model_type {
                     $(
-                        $model_type => load::load_causal_family::<B, $model<B>>(
+                        $model_type $($(| $alias)+)? => load::load_causal_family::<B, $model<B>>(
                             root, json, model_type, options, device,
                         ),
                     )+
@@ -411,6 +420,14 @@ causal_registry! {
         config: Qwen3MoeConfig,
         state: Qwen3MoeDecodeState,
     },
+    /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
+    Llama {
+        model_type: "llama",
+        aliases: ["mistral", "qwen2", "qwen3", "smollm3", "olmo2"],
+        model: LlamaForCausalLm,
+        config: LlamaFamilyConfig,
+        state: LlamaDecodeState,
+    },
 }
 
 /// Parses one family's configuration, keeping the registry's error context.
@@ -434,20 +451,22 @@ fn foreign_causal_state_error() -> Error {
 impl<B: Backend> AutoCausalLm<B> {
     /// Lists the stateless activation points supported by the selected model.
     ///
-    /// Qwen3.5/Qwen3.8 currently supports interventions. Other registered causal
-    /// families return a capability error rather than an empty, misleading catalog.
+    /// Qwen3.5/Qwen3.8 and the Llama family currently support interventions.
+    /// Other registered causal families return a capability error rather than
+    /// an empty, misleading catalog.
     /// Loaded checkpoints expose this method through `loaded.model()`.
     pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
         match self {
             Self::Qwen3_5(model) => Ok(model.activation_points()),
+            Self::Llama(model) => Ok(model.activation_points()),
             _ => Err(self.unsupported_hooks_error()),
         }
     }
 
     /// Observes or changes activations during the selected model's stateless forward.
     ///
-    /// Qwen3.5/Qwen3.8 delegates to its concrete intervention implementation.
-    /// Other families fail before callbacks or model computation, including when
+    /// Qwen3.5/Qwen3.8 and the Llama family delegate to their concrete
+    /// intervention implementations. Other families fail before callbacks or model computation, including when
     /// the collection is empty. Use [`Self::forward`] for ordinary execution.
     /// Failed calls invalidate captures left from earlier runs of these hooks.
     pub fn forward_with_hooks(
@@ -458,6 +477,7 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<CausalLmOutput<B>> {
         match self {
             Self::Qwen3_5(model) => model.forward_with_hooks(input, options, hooks),
+            Self::Llama(model) => model.forward_with_hooks(input, options, hooks),
             _ => hooks
                 .run(Vec::new(), |_| Err(self.unsupported_hooks_error()))
                 // Add family context even when preflight rejects a named point.
@@ -468,7 +488,7 @@ impl<B: Backend> AutoCausalLm<B> {
     /// Names the selected family when its stateless intervention capability is unavailable.
     fn unsupported_hooks_error(&self) -> Error {
         Error::BackendCapability(format!(
-            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8",
+            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8 and the Llama family",
             self.config().model_type()
         ))
     }

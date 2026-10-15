@@ -1227,6 +1227,7 @@ fn automatic_config_discriminators_validate_and_match_runtime_registries() {
             AutoCausalConfig::NemotronH,
             AutoCausalConfig::Qwen3_5,
             AutoCausalConfig::Qwen3Moe,
+            AutoCausalConfig::Llama,
         ]
     );
     for config in AutoCausalConfig::ALL {
@@ -1235,20 +1236,31 @@ fn automatic_config_discriminators_validate_and_match_runtime_registries() {
             AutoCausalConfig::from_model_type(config.model_type()),
             Some(*config)
         );
+        assert!(AutoCausalConfig::MODEL_TYPES.contains(&config.model_type()));
     }
+    // Primary types and aliases each resolve to exactly one family.
+    for model_type in AutoCausalConfig::MODEL_TYPES {
+        assert!(
+            AutoCausalConfig::from_model_type(model_type).is_some(),
+            "{model_type}"
+        );
+    }
+    for alias in ["mistral", "qwen2", "qwen3", "smollm3", "olmo2"] {
+        assert_eq!(
+            AutoCausalConfig::from_model_type(alias),
+            Some(AutoCausalConfig::Llama)
+        );
+    }
+    assert_eq!(AutoCausalConfig::from_model_type("gemma2"), None);
+    let mut unique = AutoCausalConfig::MODEL_TYPES.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
     assert_eq!(
-        AutoCausalConfig::ALL
-            .iter()
-            .map(|config| config.model_type())
-            .collect::<Vec<_>>(),
-        AutoCausalConfig::MODEL_TYPES
+        unique.len(),
+        AutoCausalConfig::MODEL_TYPES.len(),
+        "every registered model_type is listed once"
     );
-    assert_eq!(AutoCausalConfig::from_model_type("llama"), None);
     AutoSeq2SeqConfig::T5.validate().unwrap();
-    assert_eq!(
-        AutoCausalConfig::MODEL_TYPES,
-        AutoCausalLm::<TestBackend>::MODEL_TYPES
-    );
     assert_eq!(
         AutoSeq2SeqConfig::MODEL_TYPES,
         AutoSeq2SeqLm::<TestBackend>::MODEL_TYPES
@@ -1378,10 +1390,25 @@ fn registry_entries_agree_with_family_schemas_and_views() {
             AutoCausalConfig::Qwen3Moe,
             <Qwen3MoeConfig as ModelConfig>::MODEL_TYPES,
         ),
+        (
+            AutoCausalConfig::Llama,
+            <crate::models::llama::LlamaFamilyConfig as ModelConfig>::MODEL_TYPES,
+        ),
     ];
     assert_eq!(entries.len(), AutoCausalConfig::ALL.len());
     for (family, schema_types) in entries {
         assert!(schema_types.contains(&family.model_type()), "{family:?}");
+        // The registry routes exactly the types the family's schema accepts:
+        // an alias missing from the registry would make a variant unreachable.
+        let mut routed: Vec<&str> = AutoCausalConfig::MODEL_TYPES
+            .iter()
+            .copied()
+            .filter(|model_type| AutoCausalConfig::from_model_type(model_type) == Some(family))
+            .collect();
+        let mut accepted = schema_types.to_vec();
+        routed.sort_unstable();
+        accepted.sort_unstable();
+        assert_eq!(routed, accepted, "{family:?}");
     }
     for (json, family) in [
         (

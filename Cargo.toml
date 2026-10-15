@@ -99,6 +99,10 @@ required-features = ["std", "flex", "autodiff"]
 name = "train_qwen_adapter"
 required-features = ["std", "flex", "autodiff"]
 
+[[example]]
+name = "llama_generate"
+required-features = ["std", "flex", "tokenizers"]
+
 # Checkpoint integrity is part of ordinary local loading, and acceptance gates
 # hash tens of gigabytes. Keep SHA-256 optimized even when the surrounding
 # executable uses a debuggable development or test profile.
