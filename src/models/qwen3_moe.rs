@@ -29,8 +29,8 @@ pub mod model;
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
 pub use model::{
-    Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel,
-    qwen3_moe_load_balancing_loss,
+    Qwen3MoeBackboneOutput, Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm,
+    Qwen3MoeModel, qwen3_moe_load_balancing_loss, router_logits_point, router_weights_point,
 };
 
 use super::config::{
