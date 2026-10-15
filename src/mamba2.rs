@@ -75,7 +75,7 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, architecture::TokenMask, operations};
+use crate::{Error, Result, architecture::TokenMask, delta_net::softplus, operations};
 
 /// Closed interval `[lower, upper]` for discretization steps; `upper = None` is `+inf`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -750,14 +750,16 @@ impl<B: Backend> Mamba2<B> {
 
 /// Applies the learned discretization bias, the positive-step transform, and the clamp.
 ///
-/// The reference adds `dt_bias`, evaluates softplus, and clamps while `dt`
-/// still has the fused projection's dtype. Burn's generic softplus is a
-/// literal `log(1 + exp(x))` and can round small F16 results to zero, so the
-/// transform runs in F32 *after* the bias addition has rounded and the result
-/// returns to the projection dtype immediately, reproducing PyTorch's
-/// reduced-precision softplus kernel. Only the scan promotes the stored result
-/// to F32. Multiplying by the validity mask in the same dtype gives invalid
-/// semantic tokens `dt = 0`, an identity transition.
+/// The reference adds `dt_bias` and evaluates `softplus` while `dt` still has
+/// the fused projection's dtype; PyTorch's reduced-precision softplus kernel
+/// computes `x > 20 ? x : log1p(exp(x))` in F32 and rounds once. This
+/// function reproduces that graph exactly: the bias addition rounds in the
+/// projection dtype, the thresholded softplus (shared with Gated DeltaNet)
+/// runs in F32, and the result returns to the projection dtype immediately.
+/// Burn's own `softplus`, `log(exp(x) + 1)`, would overflow above `x = 88.7`
+/// and round small F16 results to zero. Only the scan promotes the stored
+/// result to F32. Multiplying by the validity mask in the same dtype gives
+/// invalid semantic tokens `dt = 0`, an identity transition.
 fn discretization_steps<B: Backend>(
     dt: Tensor<B, 3>,
     bias: Tensor<B, 1>,
@@ -767,8 +769,7 @@ fn discretization_steps<B: Backend>(
     let dtype = dt.dtype();
     let heads = dt.dims()[2];
     let biased = dt + bias.cast(dtype).reshape([1, 1, heads]);
-    let biased = biased.cast(DType::F32);
-    let mut dt = (biased.clone().clamp_min(0.0) + (-biased.abs()).exp().log1p()).cast(dtype);
+    let mut dt = softplus(biased.cast(DType::F32)).cast(dtype);
     if let Some(limits) = limits {
         dt = dt.clamp_min(limits.lower);
         if let Some(upper) = limits.upper {

@@ -983,6 +983,11 @@ fn nemotron_rms_norm<B: Backend>(
 }
 
 /// Builds one exact Mamba2 component config from the family schema.
+///
+/// The discretization clamp follows the pinned Transformers revision
+/// (`cfa309cfa34b5497a32fd50af49aa97aac94c054`), whose chunk scan clamps to
+/// `(time_step_min, inf)` and whose single-step update is unclamped. The
+/// declared `time_step_limit` is compatibility metadata there and is ignored.
 fn mamba_config(config: &NemotronHConfig) -> NemotronMamba2Config {
     NemotronMamba2Config {
         hidden_size: config.hidden_size,
@@ -992,10 +997,9 @@ fn mamba_config(config: &NemotronHConfig) -> NemotronMamba2Config {
         groups: config.n_groups,
         convolution_kernel: config.conv_kernel,
         chunk_size: config.chunk_size,
-        time_step_clamp: TimeStepClamp::chunked_only(TimeStepLimits {
-            lower: config.time_step_min,
-            upper: config.time_step_limit.get(1).copied().flatten(),
-        }),
+        time_step_clamp: TimeStepClamp::chunked_only(TimeStepLimits::at_least(
+            config.time_step_min,
+        )),
         normalization_epsilon: config.layer_norm_epsilon,
         projection_bias: config.use_bias,
         convolution_bias: config.use_conv_bias,

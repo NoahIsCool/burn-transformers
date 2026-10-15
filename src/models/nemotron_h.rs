@@ -180,13 +180,22 @@ pub struct NemotronHConfig {
     /// Legacy expansion hint retained for checkpoint compatibility.
     #[serde(alias = "mamba_expand")]
     pub expand: usize,
-    /// Minimum learned discretization step.
+    /// Lower end of the `dt_bias` initialization range, and the runtime clamp of prefill.
+    ///
+    /// The pinned Transformers graph clamps chunked-prefill steps to
+    /// `[time_step_min, +inf)` and leaves recurrent decode steps unclamped.
     #[serde(alias = "mamba_dt_min")]
     pub time_step_min: f64,
-    /// Maximum learned discretization step.
+    /// Upper end of the `dt_bias` initialization range only; never a runtime clamp.
     #[serde(alias = "mamba_dt_max")]
     pub time_step_max: f64,
-    /// Runtime clamp `[lower, upper]`; `None` denotes positive infinity.
+    /// Runtime clamp `[lower, upper]` declared by NVIDIA's remote code; `None` is `+inf`.
+    ///
+    /// Retained and validated as compatibility metadata. The Transformers
+    /// graph this crate executes ignores it (see [`Self::time_step_min`]);
+    /// NVIDIA's Nemotron Nano remote code instead clamps both paths to it,
+    /// which [`crate::mamba2::TimeStepClamp::both`] expresses for custom
+    /// compositions. No shipped checkpoint sets a finite upper bound.
     #[serde(alias = "mamba_dt_limit")]
     pub time_step_limit: Vec<Option<f64>>,
     /// Small positive floor used while initializing discretization steps.

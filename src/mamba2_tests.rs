@@ -644,3 +644,61 @@ fn recurrent_storage_dtype_round_trips_across_a_segment() {
         .is_err()
     );
 }
+
+/// F32 discretization uses PyTorch's thresholded `softplus` graph exactly.
+///
+/// PyTorch evaluates `x > 20 ? x : log1p(exp(x))`. The former stable identity
+/// `max(x, 0) + log1p(exp(-|x|))` is equal in exact arithmetic but rounds
+/// differently for positive `x`; the sweep both pins the reference graph bit
+/// for bit and proves the two differ somewhere on this backend, so the test
+/// would fail for the old formula.
+#[test]
+fn discretization_softplus_matches_the_reference_graph() {
+    let device = Default::default();
+    let inputs = (0..2_048)
+        .map(|index| -30.0 + index as f32 * 0.029_3)
+        .collect::<Vec<_>>();
+    let count = inputs.len();
+    let raw = Tensor::<TestBackend, 3>::from_data(
+        TensorData::new(inputs.clone(), [1, count, 1]),
+        &device,
+    );
+    let valid = Tensor::<TestBackend, 2, Bool>::ones([1, count], &device);
+    let actual = discretization_steps(raw.clone(), Tensor::zeros([1], &device), None, valid)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let reference = raw
+        .clone()
+        .exp()
+        .log1p()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let identity = (raw.clone().clamp_min(0.0) + (-raw.abs()).exp().log1p())
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    for ((&input, &actual), &reference) in inputs.iter().zip(&actual).zip(&reference) {
+        let expected = if input > 20.0 { input } else { reference };
+        assert_eq!(actual.to_bits(), expected.to_bits(), "softplus({input})");
+    }
+    assert!(
+        actual
+            .iter()
+            .zip(&identity)
+            .any(|(actual, identity)| actual.to_bits() != identity.to_bits()),
+        "the sweep no longer distinguishes the reference graph from the stable identity"
+    );
+    // Large arguments stay finite instead of overflowing `exp`.
+    let large = discretization_steps(
+        Tensor::<TestBackend, 3>::from_floats([[[100.0], [1.0e30]]], &device),
+        Tensor::zeros([1], &device),
+        None,
+        Tensor::ones([1, 2], &device),
+    )
+    .into_data()
+    .to_vec::<f32>()
+    .unwrap();
+    assert_eq!(large, [100.0, 1.0e30]);
+}

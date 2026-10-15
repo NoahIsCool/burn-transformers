@@ -840,3 +840,39 @@ fn load_balancing_loss_is_differentiable() {
             .any(|value| value.abs() > 1e-6)
     );
 }
+
+/// Discretization clamps follow the pinned Transformers graph, not `time_step_limit`.
+///
+/// A finite declared upper bound below `time_step_min` used to pass family
+/// validation and then fail mixer initialization; the runtime now ignores
+/// the compatibility bound exactly as the reference does.
+#[test]
+fn mamba_dt_clamp_follows_the_pinned_reference() {
+    let device = Default::default();
+    let mut config = tiny_config(false);
+    config.time_step_limit = vec![Some(0.0), Some(0.0005)];
+    let mamba = mamba_config(&config);
+    assert_eq!(
+        mamba.time_step_clamp,
+        TimeStepClamp::chunked_only(TimeStepLimits::at_least(config.time_step_min))
+    );
+    assert_eq!(
+        mamba
+            .time_step_clamp
+            .for_mode(NemotronMamba2Mode::Recurrent),
+        None
+    );
+    let model = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    assert!(
+        model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .is_ok()
+    );
+}
