@@ -285,6 +285,7 @@ fn decoded(
     row: usize,
     column: usize,
 ) -> f32 {
+    /// FP4 E2M1 values by code: sign bit 3, then the eight magnitudes.
     const FP4: [f32; 16] = [
         0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
     ];

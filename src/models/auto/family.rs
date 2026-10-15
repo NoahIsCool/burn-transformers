@@ -423,6 +423,7 @@ impl<B: Backend> CausalFamily<B> for LlamaForCausalLm<B> {
 }
 
 impl<B: Backend> CausalFamily<B> for GptOssForCausalLm<B> {
+    /// The parsed `gpt_oss` configuration.
     type Config = GptOssConfig;
 
     /// Reads gpt-oss's vocabulary and token fields.

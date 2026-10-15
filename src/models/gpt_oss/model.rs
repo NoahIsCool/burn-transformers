@@ -13,8 +13,8 @@
 //! E_j(u) = down_j((clamp(up_j u, ±7) + 1) · g · σ(1.702 g)),   g = min(gate_j u, 7)
 //! ```
 //!
-//! [`GptOssDecoderLayer::forward`] is the only implementation of that
-//! equation. The stateless pass, the hooked pass, staged execution, and the
+//! The decoder layer's crate-private `forward` is the only implementation
+//! of that equation. The stateless pass, the hooked pass, staged execution, and the
 //! batched cached step differ only in where attention finds its keys, which
 //! the private `LayerKeys` trait abstracts: the `sequence` submodule attends
 //! over the input's own tokens with causal/sliding/padding masks, and the
