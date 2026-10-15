@@ -85,6 +85,24 @@ pub enum Error {
         String,
     ),
 
+    /// An activation hook, edit callback, or model constraint failed while a
+    /// model was executing inside a hook scope.
+    ///
+    /// Registration mistakes found before execution (unknown points, impossible
+    /// axes) remain [`Error::Configuration`]. The message includes the cause's
+    /// text; `cause` keeps the original error for matching. It is deliberately
+    /// not exposed through [`std::error::Error::source`], so chain printers do
+    /// not repeat it.
+    #[error("intervention at {point} failed: {reason}")]
+    Intervention {
+        /// Semantic activation point, such as `decoder.layers.3.mlp.activation`.
+        point: String,
+        /// What failed at that point, including the cause's message when present.
+        reason: String,
+        /// Original error returned by a user callback or model constraint.
+        cause: Option<Box<Error>>,
+    },
+
     /// No compiled architecture matches a checkpoint model type.
     #[error("unsupported architecture: {0}")]
     UnsupportedArchitecture(
@@ -132,6 +150,31 @@ impl Error {
             tensor: tensor.into(),
             expected: expected.into(),
             actual: actual.into(),
+        }
+    }
+
+    /// Constructs a runtime intervention failure at a semantic activation point.
+    pub fn intervention(point: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Intervention {
+            point: point.into(),
+            reason: reason.into(),
+            cause: None,
+        }
+    }
+
+    /// Constructs an intervention failure that wraps the error a callback returned.
+    ///
+    /// The cause's message is appended to `reason` so the failure reads fully
+    /// on one line; the cause itself stays available for matching.
+    pub fn intervention_caused_by(
+        point: impl Into<String>,
+        reason: impl Into<String>,
+        cause: Error,
+    ) -> Self {
+        Self::Intervention {
+            point: point.into(),
+            reason: format!("{}: {cause}", reason.into()),
+            cause: Some(Box::new(cause)),
         }
     }
 

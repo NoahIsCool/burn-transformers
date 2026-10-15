@@ -411,3 +411,168 @@ fn sliced_edits_and_captures_preserve_the_requested_gradient_policy() {
     let detached_loss = hooks.get(&detached).unwrap().sum();
     assert!(input.grad(&detached_loss.backward()).is_none());
 }
+
+// Observers, typed failures, and catalog-driven access.
+
+/// Observers neither invoke the point constraint nor alter values, and see edits in order.
+#[test]
+fn observers_skip_constraints_and_see_earlier_edits() {
+    use std::cell::Cell;
+    let point = Layer::decoder(0).mlp_output();
+    let constraint_calls = Cell::new(0);
+    let before = Cell::new(f32::NAN);
+    let after = Cell::new(f32::NAN);
+    let mut hooks = Hooks::<B>::new();
+    hooks.observe(point.token(1), |tensor| {
+        before.set(tensor.sum().into_scalar())
+    });
+    let output = hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply_constrained(
+                point.clone(),
+                Tensor::<B, 3>::ones([1, 2, 2], &Default::default()),
+                |tensor| {
+                    constraint_calls.set(constraint_calls.get() + 1);
+                    Ok(tensor)
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        constraint_calls.get(),
+        0,
+        "observers must not trigger constraints"
+    );
+    assert_eq!(before.get(), 2.0);
+    assert_eq!(values(output), vec![1.0; 4]);
+
+    // An edit runs the constraint once; an observer after it sees the edited value.
+    hooks.edit(point.token(1), |tensor| tensor * 3.0);
+    hooks.observe(point.token(1), |tensor| {
+        after.set(tensor.sum().into_scalar())
+    });
+    hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply_constrained(
+                point.clone(),
+                Tensor::<B, 3>::ones([1, 2, 2], &Default::default()),
+                |tensor| {
+                    constraint_calls.set(constraint_calls.get() + 1);
+                    Ok(tensor)
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(constraint_calls.get(), 1);
+    assert_eq!(before.get(), 2.0);
+    assert_eq!(after.get(), 6.0);
+}
+
+/// Runtime hook failures are intervention errors carrying the callback's original error.
+#[test]
+fn runtime_failures_are_intervention_errors_with_matchable_causes() {
+    let point = Layer::encoder(4).mlp_output();
+    let mut hooks = Hooks::<B>::new();
+    hooks.try_edit(&point, |_| {
+        Err(crate::Error::shape("adapter", "[1, 1, 2]", "[1, 1, 3]"))
+    });
+    let error = hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply(point.clone(), Tensor::ones([1, 1, 2], &Default::default()))
+        })
+        .unwrap_err();
+    match &error {
+        crate::Error::Intervention {
+            point: name,
+            reason,
+            cause: Some(cause),
+        } => {
+            assert_eq!(name, "encoder.layers.4.mlp.output");
+            assert!(
+                reason.contains("edit callback returned an error"),
+                "{reason}"
+            );
+            assert!(
+                matches!(cause.as_ref(), crate::Error::Shape { tensor, .. } if tensor == "adapter")
+            );
+        }
+        other => panic!("expected an intervention error, got {other:?}"),
+    }
+
+    let mut bounds = Hooks::<B>::new();
+    bounds.capture(point.token(5));
+    let error = bounds
+        .run(vec![point.info()], |hooks| {
+            hooks.apply(point.clone(), Tensor::ones([1, 2, 2], &Default::default()))
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Intervention { cause: None, reason, .. } if reason.contains("outside extent")),
+        "{error:?}"
+    );
+
+    // Registration mistakes are still configuration errors, raised before computation.
+    let mut empty = Hooks::<B>::new();
+    empty.capture(point.channels(1..1));
+    let error = empty
+        .run(vec![point.info()], |_| -> crate::Result<()> {
+            panic!("must reject the empty range before execution")
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { reason, .. } if reason.contains("empty Channel selection")),
+        "{error:?}"
+    );
+}
+
+/// Catalog entries convert back to typed points only at their declared rank.
+#[test]
+fn discovered_points_convert_back_to_typed_points() {
+    let pattern = Layer::decoder(2).self_attention().pattern();
+    let info = pattern.info();
+    assert_eq!(info.rank(), 4);
+    assert_eq!(Point::<4>::try_from(info.clone()).unwrap(), pattern);
+    let error = Point::<3>::try_from(info).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("decoder.layers.2.attention.pattern"),
+        "{message}"
+    );
+    assert!(message.contains("rank 4"), "{message}");
+}
+
+/// Dynamic captures read any rank, reject foreign collections, and restore typed tensors.
+#[test]
+fn dynamic_captures_cover_every_rank_and_restore_typed_tensors() {
+    let hidden = Layer::decoder(0).residual_post();
+    let pattern = Layer::decoder(0).self_attention().pattern();
+    let points = vec![hidden.info(), pattern.info()];
+    let mut hooks = Hooks::<B>::new();
+    let handles = points
+        .iter()
+        .map(|point| hooks.capture_dynamic(point.clone()))
+        .collect::<Vec<_>>();
+    assert!(
+        hooks.get_dynamic(&handles[0]).is_err(),
+        "nothing has run yet"
+    );
+    hooks
+        .run(points, |hooks| {
+            let device = Default::default();
+            hooks.apply(hidden.clone(), Tensor::ones([1, 2, 3], &device))?;
+            hooks.apply(pattern.clone(), Tensor::zeros([1, 2, 2, 2], &device))
+        })
+        .unwrap();
+    let hidden_activation = hooks.get_dynamic(&handles[0]).unwrap();
+    assert_eq!(handles[0].point(), &hidden.info());
+    assert_eq!(hidden_activation.shape, [1, 2, 3]);
+    assert!(hidden_activation.clone().into_tensor::<4>().is_err());
+    assert_eq!(
+        values(hidden_activation.into_tensor::<3>().unwrap()),
+        vec![1.0; 6]
+    );
+    assert_eq!(hooks.get_dynamic(&handles[1]).unwrap().shape, [1, 2, 2, 2]);
+
+    let other = Hooks::<B>::new();
+    assert!(other.get_dynamic(&handles[0]).is_err());
+}

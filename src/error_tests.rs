@@ -21,3 +21,35 @@ fn shape_error_is_contextual() {
         "shape mismatch for query: expected [B, S, H], found [2, 8]"
     );
 }
+
+/// Intervention errors name the point, include the cause's text, and keep the cause matchable.
+#[test]
+fn intervention_error_keeps_point_reason_and_matchable_cause() {
+    let plain = Error::intervention("decoder.layers.0.mlp.output", "selection out of range");
+    assert_eq!(
+        plain.to_string(),
+        "intervention at decoder.layers.0.mlp.output failed: selection out of range"
+    );
+    let caused = Error::intervention_caused_by(
+        "encoder.layers.4.mlp.output",
+        "edit callback returned an error",
+        Error::shape("adapter", "[1, 2]", "[1, 3]"),
+    );
+    assert_eq!(
+        caused.to_string(),
+        "intervention at encoder.layers.4.mlp.output failed: edit callback returned an error: shape mismatch for adapter: expected [1, 2], found [1, 3]"
+    );
+    match &caused {
+        Error::Intervention {
+            point,
+            cause: Some(cause),
+            ..
+        } => {
+            assert_eq!(point, "encoder.layers.4.mlp.output");
+            assert!(matches!(cause.as_ref(), Error::Shape { tensor, .. } if tensor == "adapter"));
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+    // The cause is printed once: it is not also reported as an error source.
+    assert!(std::error::Error::source(&caused).is_none());
+}
