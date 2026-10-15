@@ -379,8 +379,11 @@ impl MaskGeometry {
 enum PositionRule {
     /// No connectivity exclusion.
     Unrestricted,
-    /// Exclude `key + window <= query`, with `1 <= window < K`.
-    Window(i64),
+    /// Exclude `key + window <= query`.
+    Window(
+        /// Visible positions per query, `1 <= window < K`.
+        i64,
+    ),
     /// Exclude links whose `floor((position + phase) / width)` differ.
     Chunk {
         /// Frame width, `1 <= width <= K`.

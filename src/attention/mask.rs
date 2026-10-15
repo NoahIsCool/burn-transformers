@@ -234,29 +234,8 @@ pub(crate) fn audit_plane(shape: [usize; 4]) {
 
 /// Test-only per-thread record of the largest materialized exclusion plane.
 #[cfg(test)]
-pub(crate) mod plane_audit {
-    use core::cell::Cell;
-
-    std::thread_local! {
-        /// Elements in the largest plane recorded on this thread since the last reset.
-        static LARGEST: Cell<usize> = const { Cell::new(0) };
-    }
-
-    /// Records one materialized plane of `elements` elements.
-    pub(crate) fn record(elements: usize) {
-        LARGEST.with(|largest| largest.set(largest.get().max(elements)));
-    }
-
-    /// Clears the record before a measured operation.
-    pub(crate) fn reset() {
-        LARGEST.with(|largest| largest.set(0));
-    }
-
-    /// Elements in the largest plane recorded since the last reset.
-    pub(crate) fn largest() -> usize {
-        LARGEST.with(Cell::get)
-    }
-}
+#[path = "mask_audit.rs"]
+pub(crate) mod plane_audit;
 
 #[cfg(test)]
 #[path = "mask_tests.rs"]
