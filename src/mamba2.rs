@@ -38,8 +38,23 @@
 //! L[t,s] = exp(sum_{u=s+1..t} dt_u A)   (zero for s > t)
 //! ```
 //!
-//! a masked semiseparable matrix product, and only the terminal state crosses
-//! chunk boundaries. The quadratic temporaries are bounded by `chunk_size²`.
+//! a masked semiseparable matrix product. Like the reference SSD algorithm,
+//! the scan evaluates many chunks at once: intra-chunk outputs and per-chunk
+//! states for a whole block of chunks, then the chunk-entry states through one
+//! segmented decay product. `C · Bᵀ` is formed once per *group* and broadcast
+//! over the group's heads, so `B` and `C` are never copied per head. A block
+//! holds at most `2^24` F32 elements per `[batch, heads, chunks, T, T]` score
+//! plane (64 MiB) and only the terminal state crosses block boundaries, so
+//! prefill memory is independent of the prompt length.
+//!
+//! # Batched rows
+//!
+//! [`Mamba2::forward_rows`] advances a right-padded batch whose rows differ in
+//! length and mode in one pass per mode: padding is an identity transition
+//! (`dt = 0`, zero inputs) and each row's convolution history is taken at its
+//! own end. [`Mamba2::forward_rows_with_snapshots`] additionally returns the
+//! state after every token, which lets a speculative verifier evaluate all
+//! drafted tokens in one pass and commit any accepted prefix.
 //!
 //! # Precision
 //!
@@ -583,6 +598,154 @@ impl<B: Backend> Mamba2<B> {
         state: &Mamba2State<B>,
         mode: Mamba2Mode,
     ) -> Result<(Tensor<B, 3>, Mamba2State<B>)> {
+        let [batch, sequence, _] = self.validate_hidden(&hidden)?;
+        let valid = match token_mask {
+            Some(mask) => {
+                if mask.as_tensor().dims() != [batch, sequence] {
+                    return Err(Error::shape(
+                        "mamba2.token_mask",
+                        format!("[{batch}, {sequence}]"),
+                        format!("{:?}", mask.as_tensor().dims()),
+                    ));
+                }
+                if mask.as_tensor().device() != hidden.device() {
+                    return Err(Error::BackendCapability(
+                        "Mamba-2 input and token mask must share a device".into(),
+                    ));
+                }
+                Some(mask.as_tensor().clone())
+            }
+            None => None,
+        };
+        let run = self.run(
+            hidden,
+            valid,
+            state,
+            mode,
+            &ConvolutionTail::Physical,
+            false,
+        )?;
+        Ok((run.output, run.state))
+    }
+
+    /// Advances right-padded rows that may differ in length and execution mode.
+    ///
+    /// Row `b` of `hidden` holds `rows[b].tokens` valid tokens in its first
+    /// columns; later columns are padding that neither advances the state nor
+    /// reaches the convolution history, whose last `K - 1` inputs are taken at
+    /// each row's own end. A row with zero tokens keeps its state exactly and
+    /// its outputs are unspecified. Rows are grouped by mode and each group
+    /// runs as one batch, so an ordinary decode step (every row recurrent) or
+    /// prefill (every row chunked) is a single mixer pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns a shape error when `rows` does not describe every batch row or
+    /// claims more tokens than `hidden` has columns, and the errors of
+    /// [`Self::forward_with_state`].
+    pub fn forward_rows(
+        &self,
+        hidden: Tensor<B, 3>,
+        rows: &[Mamba2Row],
+        state: &Mamba2State<B>,
+    ) -> Result<(Tensor<B, 3>, Mamba2State<B>)> {
+        let [batch, sequence, _] = self.validate_hidden(&hidden)?;
+        let counts = rows.iter().map(|row| row.tokens).collect::<Vec<_>>();
+        validate_row_counts(&counts, batch, sequence)?;
+        let groups = mode_groups(rows);
+        let device = hidden.device();
+        if let [(mode, _)] = groups.as_slice() {
+            let valid = right_padded_validity::<B>(&counts, sequence, &device);
+            let run = self.run(
+                hidden,
+                valid,
+                state,
+                *mode,
+                &ConvolutionTail::RowEnds(counts),
+                false,
+            )?;
+            return Ok((run.output, run.state));
+        }
+        let mut outputs = Vec::with_capacity(groups.len());
+        let mut matrices = Vec::with_capacity(groups.len());
+        let mut convolutions = Vec::with_capacity(groups.len());
+        let mut order = Vec::with_capacity(batch);
+        for (mode, members) in groups {
+            let selector = row_selector::<B>(&members, &device)?;
+            let group_counts = members.iter().map(|&row| counts[row]).collect::<Vec<_>>();
+            let group_state = Mamba2State {
+                recurrent: state.recurrent.clone().select(0, selector.clone()),
+                convolution: state.convolution.clone().select(0, selector.clone()),
+            };
+            let run = self.run(
+                hidden.clone().select(0, selector),
+                right_padded_validity::<B>(&group_counts, sequence, &device),
+                &group_state,
+                mode,
+                &ConvolutionTail::RowEnds(group_counts),
+                false,
+            )?;
+            outputs.push(run.output);
+            matrices.push(run.state.recurrent);
+            convolutions.push(run.state.convolution);
+            order.extend(members);
+        }
+        // `order[i]` is the batch row at concatenated position `i`; invert it.
+        let mut inverse = vec![0; batch];
+        for (position, &row) in order.iter().enumerate() {
+            inverse[row] = position;
+        }
+        let restore = row_selector::<B>(&inverse, &device)?;
+        Ok((
+            Tensor::cat(outputs, 0).select(0, restore.clone()),
+            Mamba2State {
+                recurrent: Tensor::cat(matrices, 0).select(0, restore.clone()),
+                convolution: Tensor::cat(convolutions, 0).select(0, restore),
+            },
+        ))
+    }
+
+    /// Advances right-padded rows token by token and returns the state after every token.
+    ///
+    /// This is the recurrent update applied to `token_counts[b]` tokens of row
+    /// `b`, exactly as that many single-token decode calls would apply it
+    /// (including rounding through a reduced-precision state dtype). Snapshot
+    /// `t` of a row is its state after token `t`, which lets a speculative
+    /// verifier commit any accepted prefix of one batched pass. Snapshots at
+    /// or beyond a row's token count are unspecified.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::forward_rows`].
+    pub fn forward_rows_with_snapshots(
+        &self,
+        hidden: Tensor<B, 3>,
+        token_counts: &[usize],
+        state: &Mamba2State<B>,
+    ) -> Result<(Tensor<B, 3>, Mamba2Snapshots<B>)> {
+        let [batch, sequence, _] = self.validate_hidden(&hidden)?;
+        validate_row_counts(token_counts, batch, sequence)?;
+        let valid = right_padded_validity::<B>(token_counts, sequence, &hidden.device());
+        let run = self.run(
+            hidden,
+            valid,
+            state,
+            Mamba2Mode::Recurrent,
+            &ConvolutionTail::RowEnds(token_counts.to_vec()),
+            true,
+        )?;
+        let snapshots = run.snapshots.ok_or_else(|| {
+            Error::shape(
+                "mamba2.snapshots",
+                "per-token recurrent states",
+                "no recorded snapshots",
+            )
+        })?;
+        Ok((run.output, snapshots))
+    }
+
+    /// Checks the `[batch>0, sequence>0, hidden_size]` input extent.
+    fn validate_hidden(&self, hidden: &Tensor<B, 3>) -> Result<[usize; 3]> {
         let [batch, sequence, width] = hidden.dims();
         if batch == 0 || sequence == 0 || width != self.hidden_size {
             return Err(Error::shape(
@@ -591,35 +754,41 @@ impl<B: Backend> Mamba2<B> {
                 format!("[{batch}, {sequence}, {width}]"),
             ));
         }
-        if let Some(mask) = token_mask
-            && mask.as_tensor().dims() != [batch, sequence]
-        {
-            return Err(Error::shape(
-                "mamba2.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-        let hidden_device = hidden.device();
-        if token_mask.is_some_and(|mask| mask.as_tensor().device() != hidden_device) {
-            return Err(Error::BackendCapability(
-                "Mamba-2 input and token mask must share a device".into(),
-            ));
-        }
-        let hidden_dtype = hidden.dtype();
-        let recurrent_dtype = state.recurrent.dtype();
-        self.validate_state(state, batch, hidden_dtype, &hidden_device)?;
+        Ok([batch, sequence, width])
+    }
 
-        let valid = token_mask.map_or_else(
-            || Tensor::<B, 2, Bool>::ones([batch, sequence], &hidden.device()),
-            |mask| mask.as_tensor().clone(),
-        );
-        let masked = hidden
-            * valid
+    /// Shared core of every entry point: projection, convolution, scan, norm, and output.
+    ///
+    /// `valid` is the `[batch, sequence]` semantic mask (`None` = all valid).
+    /// `tail` chooses which `K - 1` convolution inputs become the next history,
+    /// and `snapshots` (recurrent mode only) records the state after every token.
+    fn run(
+        &self,
+        hidden: Tensor<B, 3>,
+        valid: Option<Tensor<B, 2, Bool>>,
+        state: &Mamba2State<B>,
+        mode: Mamba2Mode,
+        tail: &ConvolutionTail,
+        snapshots: bool,
+    ) -> Result<ScanRun<B>> {
+        let [batch, sequence, _] = hidden.dims();
+        let hidden_dtype = hidden.dtype();
+        let device = hidden.device();
+        let recurrent_dtype = state.recurrent.dtype();
+        self.validate_state(state, batch, hidden_dtype, &device)?;
+        // A `[batch, sequence, 1]` multiplier in the activation dtype, or none.
+        let validity = valid.as_ref().map(|valid| {
+            valid
                 .clone()
                 .float()
                 .unsqueeze_dim::<3>(2)
-                .cast(hidden_dtype);
+                .cast(hidden_dtype)
+        });
+
+        let masked = match &validity {
+            Some(validity) => hidden * validity.clone(),
+            None => hidden,
+        };
         let projected = operations::linear(masked, &self.in_proj)?;
         let intermediate = self.num_heads * self.head_dim;
         let gate = projected.clone().narrow(2, 0, intermediate);
@@ -629,6 +798,7 @@ impl<B: Backend> Mamba2<B> {
             .swap_dims(1, 2);
         let dt = projected.narrow(2, intermediate + self.convolution_channels, self.num_heads);
 
+        // `joined` is `[batch, channels, (K - 1) + sequence]`: history, then inputs.
         let history = state.convolution.clone().cast(xbc.dtype());
         let joined = Tensor::cat(vec![history, xbc], 2);
         let convolved = conv1d(
@@ -637,13 +807,11 @@ impl<B: Backend> Mamba2<B> {
             self.conv1d.bias.as_ref().map(|bias| bias.val()),
             ConvOptions::new([1], [0], [1], self.conv1d.groups),
         );
-        let next_convolution = joined.narrow(2, sequence, self.convolution_kernel - 1);
-        let convolved = activation::silu(convolved).swap_dims(1, 2)
-            * valid
-                .clone()
-                .float()
-                .unsqueeze_dim::<3>(2)
-                .cast(hidden_dtype);
+        let convolved = activation::silu(convolved).swap_dims(1, 2);
+        let convolved = match &validity {
+            Some(validity) => convolved * validity.clone(),
+            None => convolved,
+        };
         let group_state_width = self.groups * self.state_size;
         let x = convolved.clone().narrow(2, 0, intermediate).reshape([
             batch,
@@ -658,8 +826,6 @@ impl<B: Backend> Mamba2<B> {
         let c = convolved
             .narrow(2, intermediate + group_state_width, group_state_width)
             .reshape([batch, sequence, self.groups, self.state_size]);
-        let b = repeat_groups(b, self.num_heads);
-        let c = repeat_groups(c, self.num_heads);
 
         let dt = discretization_steps(
             dt,
@@ -668,37 +834,50 @@ impl<B: Backend> Mamba2<B> {
             valid,
         );
         let a = -self.a_log.val().cast(DType::F32).exp();
-        let (scan, recurrent) = match mode {
+        let (scan, recurrent, matrices) = match mode {
             Mamba2Mode::Recurrent => recurrent_scan(
-                x.clone(),
+                x,
                 b,
                 c,
                 dt,
                 a,
                 self.d.val(),
                 state.recurrent.clone(),
-            ),
-            Mamba2Mode::ChunkedPrefill => chunked_scan(
-                x.clone(),
-                b,
-                c,
-                dt,
-                a,
-                self.d.val().cast(DType::F32),
-                state.recurrent.clone().cast(DType::F32),
-                self.chunk_size,
-            ),
-        }?;
+                snapshots,
+            )?,
+            Mamba2Mode::ChunkedPrefill => {
+                let (scan, recurrent) = chunked_scan(
+                    x,
+                    b,
+                    c,
+                    dt,
+                    a,
+                    self.d.val().cast(DType::F32),
+                    state.recurrent.clone().cast(DType::F32),
+                    self.chunk_size,
+                )?;
+                (scan, recurrent, None)
+            }
+        };
         let scan = scan.reshape([batch, sequence, intermediate]);
         let normalized = self.norm.forward(scan, gate)?;
         let output = operations::linear(normalized.cast(hidden_dtype), &self.out_proj)?;
-        Ok((
+        let width = self.convolution_kernel - 1;
+        let snapshots = match matrices {
+            Some(recurrent) => Some(Mamba2Snapshots {
+                recurrent,
+                convolution: convolution_windows(joined.clone(), sequence, width)?,
+            }),
+            None => None,
+        };
+        Ok(ScanRun {
             output,
-            Mamba2State {
+            state: Mamba2State {
                 recurrent: recurrent.cast(recurrent_dtype),
-                convolution: next_convolution,
+                convolution: tail.select(joined, sequence, width)?,
             },
-        ))
+            snapshots,
+        })
     }
 
     /// Checks external matrix and convolution geometry, dtypes, and devices before tensor math.
@@ -748,6 +927,172 @@ impl<B: Backend> Mamba2<B> {
     }
 }
 
+/// One right-padded batch row of [`Mamba2::forward_rows`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mamba2Row {
+    /// Number of valid tokens at the start of the row; zero leaves its state unchanged.
+    pub tokens: usize,
+    /// Execution mode of the row's segment.
+    pub mode: Mamba2Mode,
+}
+
+/// The state of every row after each token of a recurrent segment.
+#[derive(Clone, Debug)]
+pub struct Mamba2Snapshots<B: Backend> {
+    /// Matrices `[batch, tokens, heads, head_dim, state_size]` in the state dtype.
+    pub recurrent: Tensor<B, 5>,
+    /// Convolution histories `[batch, tokens, channels, K - 1]`.
+    pub convolution: Tensor<B, 4>,
+}
+
+/// Output, terminal state, and optional per-token snapshots of one mixer pass.
+struct ScanRun<B: Backend> {
+    /// Mixer output `[batch, sequence, hidden_size]`.
+    output: Tensor<B, 3>,
+    /// Terminal state after every row's segment.
+    state: Mamba2State<B>,
+    /// States after every token, when requested in recurrent mode.
+    snapshots: Option<Mamba2Snapshots<B>>,
+}
+
+/// Which `K - 1` convolution inputs become the next history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConvolutionTail {
+    /// The last `K - 1` physical columns, whatever the mask says.
+    Physical,
+    /// Columns `count_b .. count_b + K - 1` of `[history, inputs]`: each row's own end.
+    RowEnds(
+        /// Valid tokens per row, all at the start of the row.
+        Vec<usize>,
+    ),
+}
+
+impl ConvolutionTail {
+    /// Selects `[batch, channels, width]` history from `joined = [history, inputs]`.
+    fn select<B: Backend>(
+        &self,
+        joined: Tensor<B, 3>,
+        sequence: usize,
+        width: usize,
+    ) -> Result<Tensor<B, 3>> {
+        let counts = match self {
+            Self::RowEnds(counts) if counts.iter().any(|&count| count != sequence) => counts,
+            // Every row ends at the last column: the physical tail is the row tail.
+            Self::Physical | Self::RowEnds(_) => {
+                return Ok(joined.narrow(2, sequence, width));
+            }
+        };
+        let [batch, channels, _] = joined.dims();
+        let mut starts = Vec::with_capacity(batch * width);
+        for &count in counts {
+            for offset in 0..width {
+                starts.push(signed_index(count + offset)?);
+            }
+        }
+        let index = Tensor::<B, 3, Int>::from_data(
+            TensorData::new(starts, [batch, 1, width]),
+            &joined.device(),
+        )
+        .expand([batch, channels, width]);
+        Ok(joined.gather(2, index))
+    }
+}
+
+/// Returns `[batch, tokens, channels, width]` convolution histories after every token.
+///
+/// The history after token `t` is columns `t + 1 .. t + 1 + width` of
+/// `joined = [history, inputs]`; one `select` gathers all of them.
+fn convolution_windows<B: Backend>(
+    joined: Tensor<B, 3>,
+    sequence: usize,
+    width: usize,
+) -> Result<Tensor<B, 4>> {
+    let [batch, channels, _] = joined.dims();
+    let mut columns = Vec::with_capacity(sequence * width);
+    for token in 0..sequence {
+        for offset in 0..width {
+            columns.push(signed_index(token + 1 + offset)?);
+        }
+    }
+    let index = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(columns, [sequence * width]),
+        &joined.device(),
+    );
+    Ok(joined
+        .select(2, index)
+        .reshape([batch, channels, sequence, width])
+        .swap_dims(1, 2))
+}
+
+/// Converts a host index to Burn's signed index representation.
+fn signed_index(index: usize) -> Result<i64> {
+    i64::try_from(index)
+        .map_err(|_| Error::configuration("mamba2.index", "index exceeds the signed index range"))
+}
+
+/// Uploads batch-row indices as a `[rows]` selector.
+fn row_selector<B: Backend>(rows: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
+    let values = rows
+        .iter()
+        .map(|&row| signed_index(row))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Tensor::from_data(
+        TensorData::new(values, [rows.len()]),
+        device,
+    ))
+}
+
+/// Checks one token count per row, none above the padded width.
+fn validate_row_counts(counts: &[usize], batch: usize, sequence: usize) -> Result<()> {
+    if counts.len() != batch || counts.iter().any(|&count| count > sequence) {
+        return Err(Error::shape(
+            "mamba2.rows",
+            format!("{batch} token counts of at most {sequence}"),
+            format!("{counts:?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Builds the `[batch, sequence]` validity of right-padded rows, or `None` when all are full.
+fn right_padded_validity<B: Backend>(
+    counts: &[usize],
+    sequence: usize,
+    device: &B::Device,
+) -> Option<Tensor<B, 2, Bool>> {
+    if counts.iter().all(|&count| count == sequence) {
+        return None;
+    }
+    let flags = counts
+        .iter()
+        .flat_map(|&count| (0..sequence).map(move |column| column < count))
+        .collect::<Vec<_>>();
+    Some(Tensor::from_data(
+        TensorData::new(flags, [counts.len(), sequence]),
+        device,
+    ))
+}
+
+/// Partitions rows by execution mode, in first-appearance order of the modes.
+///
+/// Inactive rows (zero tokens) are identity transitions under either mode, so
+/// they join the first active row's group instead of forcing a second pass.
+fn mode_groups(rows: &[Mamba2Row]) -> Vec<(Mamba2Mode, Vec<usize>)> {
+    let fallback = rows
+        .iter()
+        .find(|row| row.tokens > 0)
+        .map_or(Mamba2Mode::ChunkedPrefill, |row| row.mode);
+    let mut groups: Vec<(Mamba2Mode, Vec<usize>)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let mode = if row.tokens > 0 { row.mode } else { fallback };
+        match groups.iter_mut().find(|(group, _)| *group == mode) {
+            Some((_, members)) => members.push(index),
+            None => groups.push((mode, vec![index])),
+        }
+    }
+    groups
+}
+
 /// Applies the learned discretization bias, the positive-step transform, and the clamp.
 ///
 /// The reference adds `dt_bias` and evaluates `softplus` while `dt` still has
@@ -764,7 +1109,7 @@ fn discretization_steps<B: Backend>(
     dt: Tensor<B, 3>,
     bias: Tensor<B, 1>,
     limits: Option<TimeStepLimits>,
-    valid: Tensor<B, 2, Bool>,
+    valid: Option<Tensor<B, 2, Bool>>,
 ) -> Tensor<B, 3> {
     let dtype = dt.dtype();
     let heads = dt.dims()[2];
@@ -776,32 +1121,43 @@ fn discretization_steps<B: Backend>(
             dt = dt.clamp_max(upper);
         }
     }
-    dt * valid.float().unsqueeze_dim::<3>(2).cast(dtype)
+    match valid {
+        Some(valid) => dt * valid.float().unsqueeze_dim::<3>(2).cast(dtype),
+        None => dt,
+    }
 }
 
-/// Repeats each `B/C` group across its contiguous state-space heads.
-fn repeat_groups<B: Backend>(tensor: Tensor<B, 4>, heads: usize) -> Tensor<B, 4> {
-    let [batch, sequence, groups, state] = tensor.dims();
-    let repeats = heads / groups;
-    if repeats == 1 {
-        return tensor;
+/// Expands one token's group-shared `B` or `C` `[batch, groups, state]` to every head.
+///
+/// Heads of a group are contiguous, so this is a broadcast followed by a
+/// reshape to `[batch, heads, state]`; it materializes only one token.
+fn heads_from_groups<B: Backend>(grouped: Tensor<B, 3>, heads: usize) -> Tensor<B, 3> {
+    let [batch, groups, state] = grouped.dims();
+    if groups == heads {
+        return grouped;
     }
-    tensor
-        .unsqueeze_dim::<5>(3)
-        .expand([batch, sequence, groups, repeats, state])
-        .reshape([batch, sequence, heads, state])
+    grouped
+        .unsqueeze_dim::<4>(2)
+        .expand([batch, groups, heads / groups, state])
+        .reshape([batch, heads, state])
 }
 
 /// Executes the reference single-token selective-state update for every token.
 ///
-/// Inputs are `x [b, t, h, p]`, `b/c [b, t, h, n]`, `dt [b, t, h]`, F32
-/// `a [h]`, `d [h]`, and state `[b, h, p, n]`. The decay and the accumulated
-/// state are F32. The input-dependent update is formed as `(dt * B) * x` in the
-/// activation dtype, matching the reference's two rounding points, before
-/// promotion into the state addition. For the output, the new F32 state is
-/// rounded to `C`'s dtype before contraction and the `D * x` skip is also
-/// evaluated there. When the state dtype is F16/BF16, every iteration rounds
-/// through it, so a multi-token call equals repeated single-token calls.
+/// Inputs are `x [b, t, h, p]`, group-shared `b/c [b, t, g, n]`, `dt [b, t, h]`,
+/// F32 `a [h]`, `d [h]`, and state `[b, h, p, n]`. The decay and the
+/// accumulated state are F32. The input-dependent update is formed as
+/// `(dt * B) * x` in the activation dtype, matching the reference's two
+/// rounding points, before promotion into the state addition. For the output,
+/// the new F32 state is rounded to `C`'s dtype before contraction and the
+/// `D * x` skip is also evaluated there. When the state dtype is F16/BF16,
+/// every iteration rounds through it, so a multi-token call equals repeated
+/// single-token calls. With `collect`, the rounded state after every token is
+/// returned as `[b, t, h, p, n]` snapshots.
+///
+/// Decode is one token, so the group-to-head expansion of `B` and `C` costs
+/// one `[b, h, n]` copy per token and keeps the reference contraction layout.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn recurrent_scan<B: Backend>(
     x: Tensor<B, 4>,
     b: Tensor<B, 4>,
@@ -810,24 +1166,26 @@ pub(crate) fn recurrent_scan<B: Backend>(
     a: Tensor<B, 1>,
     d: Tensor<B, 1>,
     state: Tensor<B, 4>,
-) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
+    collect: bool,
+) -> Result<(Tensor<B, 4>, Tensor<B, 4>, Option<Tensor<B, 5>>)> {
     let [batch, sequence, heads, head_dim] = x.dims();
     let state_size = b.dims()[3];
     let activation_dtype = x.dtype();
     let state_dtype = state.dtype();
     let mut state = state.cast(DType::F32);
     let mut outputs = Vec::with_capacity(sequence);
+    let mut snapshots = Vec::with_capacity(if collect { sequence } else { 0 });
     let a = a.reshape([1, heads]);
     let d = d.cast(activation_dtype).reshape([1, heads, 1]);
     for token in 0..sequence {
         let x_t = x.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
-        let b_t = b.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
-        let c_t = c.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
+        let b_t = heads_from_groups(b.clone().narrow(1, token, 1).squeeze_dim::<3>(1), heads);
+        let c_t = heads_from_groups(c.clone().narrow(1, token, 1).squeeze_dim::<3>(1), heads);
         let dt_t = dt.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
         let decay = (dt_t.clone().cast(DType::F32) * a.clone())
             .exp()
             .reshape([batch, heads, 1, 1]);
-        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.clone().unsqueeze_dim::<4>(2);
+        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.unsqueeze_dim::<4>(2);
         let update = discretized_b * x_t.clone().unsqueeze_dim::<4>(3);
         let next_state = state * decay + update.cast(DType::F32);
 
@@ -845,7 +1203,11 @@ pub(crate) fn recurrent_scan<B: Backend>(
 
         // `copy_(ssm_states.to(state.dtype))` in the reference makes reduced
         // cache precision observable on the next recurrent token.
-        state = next_state.cast(state_dtype).cast(DType::F32);
+        let stored = next_state.cast(state_dtype);
+        if collect {
+            snapshots.push(stored.clone().unsqueeze_dim::<5>(1));
+        }
+        state = stored.cast(DType::F32);
     }
     if state.dims() != [batch, heads, head_dim, state_size] {
         return Err(Error::shape(
@@ -854,10 +1216,29 @@ pub(crate) fn recurrent_scan<B: Backend>(
             format!("{:?}", state.dims()),
         ));
     }
-    Ok((Tensor::cat(outputs, 1), state.cast(state_dtype)))
+    Ok((
+        Tensor::cat(outputs, 1),
+        state.cast(state_dtype),
+        collect.then(|| Tensor::cat(snapshots, 1)),
+    ))
 }
 
-/// Executes bounded semiseparable chunks and carries only the terminal state.
+/// Largest number of score-plane elements one vectorized block of chunks may hold.
+///
+/// A block of `c` chunks of width `l` materializes `[batch, heads, c, l, l]`
+/// F32 transition and weighted-kernel planes. `2^24` elements (64 MiB per
+/// plane) admits 16 chunks of 128 tokens for 64 heads at batch one, which
+/// replaces 16 sequential chunk iterations of about 40 kernels each by one
+/// batched pass, while keeping prefill memory independent of prompt length.
+pub(crate) const SCAN_BLOCK_ELEMENTS: usize = 1 << 24;
+
+/// Executes the SSD scan over blocks of chunks, carrying only terminal state between blocks.
+///
+/// Inputs are `x [b, t, h, p]`, group-shared `b/c [b, t, g, n]`, `dt [b, t, h]`,
+/// F32 `a [h]`, F32 `d [h]`, and the F32 initial state `[b, h, p, n]`.
+/// Returns F32 outputs `[b, t, h, p]` and the F32 terminal state. Chunk
+/// boundaries are at multiples of `chunk_size` from the segment start, as in
+/// the reference; see [`scan_block`] for the per-block algebra.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chunked_scan<B: Backend>(
     x: Tensor<B, 4>,
@@ -866,121 +1247,237 @@ pub(crate) fn chunked_scan<B: Backend>(
     dt: Tensor<B, 3>,
     a: Tensor<B, 1>,
     d: Tensor<B, 1>,
-    mut state: Tensor<B, 4>,
+    state: Tensor<B, 4>,
     chunk_size: usize,
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
-    let sequence = x.dims()[1];
-    let mut chunks = Vec::with_capacity(sequence.div_ceil(chunk_size));
-    for start in (0..sequence).step_by(chunk_size) {
-        let width = (sequence - start).min(chunk_size);
-        let (output, next) = scan_chunk(
-            x.clone().narrow(1, start, width),
-            b.clone().narrow(1, start, width),
-            c.clone().narrow(1, start, width),
-            dt.clone().narrow(1, start, width),
-            a.clone(),
-            d.clone(),
-            state,
-        )?;
-        chunks.push(output);
-        state = next;
-    }
-    Ok((Tensor::cat(chunks, 1), state))
+    chunked_scan_with_budget(x, b, c, dt, a, d, state, chunk_size, SCAN_BLOCK_ELEMENTS)
 }
 
-/// Evaluates one dense lower-triangular semiseparable scan block.
+/// [`chunked_scan`] with an explicit per-block score-plane budget.
 #[allow(clippy::too_many_arguments)]
-fn scan_chunk<B: Backend>(
+pub(crate) fn chunked_scan_with_budget<B: Backend>(
     x: Tensor<B, 4>,
     b: Tensor<B, 4>,
     c: Tensor<B, 4>,
     dt: Tensor<B, 3>,
     a: Tensor<B, 1>,
     d: Tensor<B, 1>,
-    initial: Tensor<B, 4>,
+    mut state: Tensor<B, 4>,
+    chunk_size: usize,
+    budget: usize,
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
-    let [batch, width, heads, head_dim] = x.dims();
-    let state_size = b.dims()[3];
-    if width == 0 {
+    let [batch, sequence, heads, head_dim] = x.dims();
+    let [_, _, groups, state_size] = b.dims();
+    if sequence == 0 || chunk_size == 0 || groups == 0 || !heads.is_multiple_of(groups) {
         return Err(Error::configuration(
             "mamba2.chunk",
-            "chunk width must be non-zero",
+            "the scan needs tokens, a non-zero chunk width, and groups dividing the heads",
         ));
     }
-    let x = x.cast(DType::F32);
-    let b = b.cast(DType::F32);
-    let c = c.cast(DType::F32);
-    let dt = dt.cast(DType::F32);
-    let log_decay = dt.clone() * a.reshape([1, 1, heads]);
-    let cumulative = log_decay.clone().cumsum(1);
-
-    // L[t,s] = exp(sum_{u=s+1..t} log_decay[u]) for s <= t.
-    let transitions = stable_decay_transitions(log_decay.clone());
-    // Batched C @ B^T forms the semiseparable content kernel without
-    // materializing `[batch, target, source, heads, state_size]`.
-    let content_kernel = c
-        .clone()
-        .permute([0, 2, 1, 3])
-        .matmul(b.clone().permute([0, 2, 3, 1]))
-        .permute([0, 2, 3, 1]);
-    let input = x.clone() * dt.clone().unsqueeze_dim::<4>(3);
-    // Kernel @ input likewise avoids a `[target, source, head_dim]` product.
-    let within = (content_kernel * transitions)
-        .permute([0, 3, 1, 2])
-        .matmul(input.clone().permute([0, 2, 1, 3]))
-        .permute([0, 2, 1, 3]);
-    // Initial-state contribution is one state-matrix/C batched contraction.
-    let from_initial = initial
-        .clone()
-        .matmul(c.clone().permute([0, 2, 3, 1]))
-        .permute([0, 3, 1, 2])
-        * cumulative.clone().exp().unsqueeze_dim::<4>(3);
-    let output = within + from_initial + x * d.reshape([1, 1, heads, 1]);
-
-    let terminal = cumulative
-        .clone()
-        .narrow(1, width - 1, 1)
-        .reshape([batch, heads]);
-    let terminal_initial = initial * terminal.clone().exp().reshape([batch, heads, 1, 1]);
-    let contribution_decay = (terminal.reshape([batch, 1, heads]) - cumulative).exp();
-    // Sum weighted x_t outer B_t as `[D,T] @ [T,N]`, avoiding `[T,D,N]`.
-    let terminal_updates = (input * contribution_decay.unsqueeze_dim::<4>(3))
-        .permute([0, 2, 3, 1])
-        .matmul(b.permute([0, 2, 1, 3]));
-    if terminal_updates.dims() != [batch, heads, head_dim, state_size] {
-        return Err(Error::shape(
-            "mamba2.chunk_terminal",
-            format!("[{batch}, {heads}, {head_dim}, {state_size}]"),
-            format!("{:?}", terminal_updates.dims()),
-        ));
+    let device = x.device();
+    // Head-major F32 operands, permuted once for the whole segment.
+    let x = x.cast(DType::F32).swap_dims(1, 2);
+    let dt = dt.cast(DType::F32).swap_dims(1, 2);
+    let b = b.cast(DType::F32).swap_dims(1, 2);
+    let c = c.cast(DType::F32).swap_dims(1, 2);
+    let a = a.reshape([1, heads, 1, 1]);
+    let d = d.reshape([1, heads, 1, 1]);
+    let chunks = sequence.div_ceil(chunk_size);
+    let plane = batch
+        .saturating_mul(heads)
+        .saturating_mul(chunk_size)
+        .saturating_mul(chunk_size)
+        .max(1);
+    let block_chunks = (budget / plane).clamp(1, chunks);
+    let masks = SegmentMasks::new(chunk_size, &device);
+    let mut outputs = Vec::with_capacity(chunks.div_ceil(block_chunks));
+    let mut first_chunk = 0;
+    while first_chunk < chunks {
+        let count = block_chunks.min(chunks - first_chunk);
+        let start = first_chunk * chunk_size;
+        let width = (count * chunk_size).min(sequence - start);
+        let padding = count * chunk_size - width;
+        let operands = BlockOperands {
+            x: pad_time(x.clone().narrow(2, start, width), padding)
+                .reshape([batch, heads, count, chunk_size, head_dim]),
+            dt: pad_time(
+                dt.clone().narrow(2, start, width).unsqueeze_dim::<4>(3),
+                padding,
+            )
+            .reshape([batch, heads, count, chunk_size]),
+            b: pad_time(b.clone().narrow(2, start, width), padding)
+                .reshape([batch, groups, count, chunk_size, state_size]),
+            c: pad_time(c.clone().narrow(2, start, width), padding)
+                .reshape([batch, groups, count, chunk_size, state_size]),
+        };
+        let x_block = operands.x.clone();
+        let (output, next) = scan_block(operands, a.clone(), state, &masks)?;
+        let output = (output + x_block * d.clone().unsqueeze_dim::<5>(4))
+            .reshape([batch, heads, count * chunk_size, head_dim])
+            .narrow(2, 0, width);
+        outputs.push(output);
+        state = next;
+        first_chunk += count;
     }
-    Ok((output, terminal_initial + terminal_updates))
+    Ok((Tensor::cat(outputs, 2).swap_dims(1, 2), state))
 }
 
-/// Builds lower-triangular chunk transitions without subtracting large prefixes.
+/// Appends `padding` zero steps along the time axis (dimension 2) of a head- or group-major tensor.
 ///
-/// For target `t` and source `s`, the value is `exp(sum(log_decay[s+1..=t]))`
-/// when `s <= t` and zero otherwise. A difference of two cumulative sums loses
-/// every local decay after a very large earlier one; the segmented sum used
-/// here is the stable formulation of the reference SSD algorithm.
-pub(crate) fn stable_decay_transitions<B: Backend>(log_decay: Tensor<B, 3>) -> Tensor<B, 4> {
-    let [batch, width, heads] = log_decay.dims();
-    let device = log_decay.device();
-    let target = Tensor::<B, 1, Int>::arange(0..width as i64, &device)
-        .reshape([1, width, 1, 1])
-        .expand([batch, width, width, heads]);
-    let source = Tensor::<B, 1, Int>::arange(0..width as i64, &device)
-        .reshape([1, 1, width, 1])
-        .expand([batch, width, width, heads]);
-    let strict_lower = source.clone().lower(target.clone());
-    let segment_terms = log_decay
-        .unsqueeze_dim::<4>(2)
-        .expand([batch, width, width, heads])
-        .mask_fill(strict_lower.bool_not(), 0.0);
-    segment_terms
-        .cumsum(1)
-        .mask_fill(source.greater(target), f32::NEG_INFINITY)
-        .exp()
+/// Zero `x`, `B`, `C`, and `dt` are exact identity transitions: they leave the
+/// state unchanged and their outputs are discarded.
+fn pad_time<B: Backend>(tensor: Tensor<B, 4>, padding: usize) -> Tensor<B, 4> {
+    if padding == 0 {
+        return tensor;
+    }
+    let [batch, heads, _, width] = tensor.dims();
+    let zeros = Tensor::zeros(
+        [batch, heads, padding, width],
+        (&tensor.device(), tensor.dtype()),
+    );
+    Tensor::cat(vec![tensor, zeros], 2)
+}
+
+/// One block of `c` whole chunks of width `l`, head- or group-major, in F32.
+struct BlockOperands<B: Backend> {
+    /// Values `[b, h, c, l, p]`.
+    x: Tensor<B, 5>,
+    /// Discretization steps `[b, h, c, l]`.
+    dt: Tensor<B, 4>,
+    /// Group-shared input projections `[b, g, c, l, n]`.
+    b: Tensor<B, 5>,
+    /// Group-shared output projections `[b, g, c, l, n]`.
+    c: Tensor<B, 5>,
+}
+
+/// Evaluates every chunk of a block at once and returns `(outputs, terminal_state)`.
+///
+/// With `ld = dt A`, within-chunk cumulative decays `cum`, and chunk totals
+/// `D_k = cum_k[l - 1]`, the algorithm (Mamba-2's SSD "minimal" form) is:
+///
+/// 1. intra-chunk outputs `Y_diag = ((C Bᵀ) ⊙ L) (dt x)` with the stable
+///    segmented transitions `L[t,s] = exp(sum_{s<u<=t} ld[u])`; `C Bᵀ` is
+///    computed once per *group* and broadcast over its heads;
+/// 2. each chunk's state from zero, `S_k = sum_t exp(D_k - cum_t) dt_t x_t B_tᵀ`;
+/// 3. the chunk-entry states `S_in(k) = exp(D_{k-1}) S_in(k-1) + S_{k-1}`
+///    for all `k` at once, as one `[c+1, c+1]` segmented-decay matrix
+///    (the same stable segment sum over `[0, D_0, …, D_{c-1}]`) applied to
+///    `[S_0, S_1, …]` with the block's initial state prepended;
+/// 4. the carried-state outputs `Y_off[t] = exp(cum_t) C_t · S_in(k)`.
+///
+/// `B` and `C` stay group-shared throughout: the state contractions broadcast
+/// them across the heads of their group instead of copying them per head.
+fn scan_block<B: Backend>(
+    operands: BlockOperands<B>,
+    a: Tensor<B, 4>,
+    initial: Tensor<B, 4>,
+    masks: &SegmentMasks<B>,
+) -> Result<(Tensor<B, 5>, Tensor<B, 4>)> {
+    let BlockOperands { x, dt, b, c } = operands;
+    let [batch, heads, chunks, width, head_dim] = x.dims();
+    let [_, groups, _, _, state_size] = b.dims();
+    let per_group = heads / groups;
+    let log_decay = dt.clone() * a;
+    let cumulative = log_decay.clone().cumsum(3);
+    let transitions = masks.transitions(log_decay);
+    // C_t · B_s for every target/source pair, once per group: [b, g, c, l, l].
+    let content = c.clone().matmul(b.clone().swap_dims(3, 4));
+    let weighted = (transitions.reshape([batch, groups, per_group, chunks, width, width])
+        * content.unsqueeze_dim::<6>(2))
+    .reshape([batch, heads, chunks, width, width]);
+    let input = x * dt.unsqueeze_dim::<5>(4);
+    let diagonal = weighted.matmul(input.clone());
+
+    // Chunk-local states from zero: [b, h, c, p, n].
+    let totals = cumulative.clone().narrow(3, width - 1, 1);
+    let to_end = (totals.clone() - cumulative.clone()).exp();
+    let local = (input * to_end.unsqueeze_dim::<5>(4))
+        .reshape([batch, groups, per_group, chunks, width, head_dim])
+        .swap_dims(4, 5)
+        .matmul(b.unsqueeze_dim::<6>(2))
+        .reshape([batch, heads, chunks, head_dim * state_size]);
+
+    // Chunk-entry states from the segmented chunk decays: [b, h, c + 1, p * n].
+    let chunk_decay = Tensor::cat(
+        vec![
+            Tensor::zeros([batch, heads, 1], (&totals.device(), DType::F32)),
+            totals.reshape([batch, heads, chunks]),
+        ],
+        2,
+    )
+    .reshape([batch, heads, 1, chunks + 1]);
+    let carry = SegmentMasks::new(chunks + 1, &chunk_decay.device())
+        .transitions(chunk_decay)
+        .reshape([batch, heads, chunks + 1, chunks + 1]);
+    let states = carry.matmul(Tensor::cat(
+        vec![
+            initial.reshape([batch, heads, 1, head_dim * state_size]),
+            local,
+        ],
+        2,
+    ));
+    let terminal = states
+        .clone()
+        .narrow(2, chunks, 1)
+        .reshape([batch, heads, head_dim, state_size]);
+    let entry = states
+        .narrow(2, 0, chunks)
+        .reshape([batch, groups, per_group, chunks, head_dim, state_size]);
+
+    // Outputs carried from each chunk's entry state: [b, h, c, l, p].
+    let off_diagonal = entry
+        .matmul(c.swap_dims(3, 4).unsqueeze_dim::<6>(2))
+        .reshape([batch, heads, chunks, head_dim, width])
+        .swap_dims(3, 4)
+        * cumulative.exp().unsqueeze_dim::<5>(4);
+    Ok((diagonal + off_diagonal, terminal))
+}
+
+/// Triangular masks for stable segmented sums over one chunk width, built once per scan.
+pub(crate) struct SegmentMasks<B: Backend> {
+    /// `[1, 1, 1, w, w]`, true where source `s >= u` term row: terms outside `s < u`.
+    outside_segment: Tensor<B, 5, Bool>,
+    /// `[1, 1, 1, w, w]`, true where source `s > t` target: future sources.
+    future: Tensor<B, 5, Bool>,
+    /// Width `w`.
+    width: usize,
+}
+
+impl<B: Backend> SegmentMasks<B> {
+    /// Builds both masks for width `width` on `device`.
+    pub(crate) fn new(width: usize, device: &B::Device) -> Self {
+        let rows =
+            Tensor::<B, 1, Int>::arange(0..width as i64, device).reshape([1, 1, 1, width, 1]);
+        let columns =
+            Tensor::<B, 1, Int>::arange(0..width as i64, device).reshape([1, 1, 1, 1, width]);
+        let shape = [1, 1, 1, width, width];
+        Self {
+            outside_segment: columns
+                .clone()
+                .expand(shape)
+                .greater_equal(rows.clone().expand(shape)),
+            future: columns.expand(shape).greater(rows.expand(shape)),
+            width,
+        }
+    }
+
+    /// Returns `[b, h, c, w, w]` transitions `exp(sum_{s<u<=t} ld[u])`, zero for `s > t`.
+    ///
+    /// A difference of two cumulative sums would lose every local decay after
+    /// a very large earlier one; the masked cumulative sum of the per-step
+    /// terms is the stable formulation of the reference SSD algorithm.
+    pub(crate) fn transitions(&self, log_decay: Tensor<B, 4>) -> Tensor<B, 5> {
+        let [batch, heads, chunks, width] = log_decay.dims();
+        debug_assert_eq!(width, self.width, "segment masks built for another width");
+        let shape = [batch, heads, chunks, width, width];
+        log_decay
+            .unsqueeze_dim::<5>(4)
+            .expand(shape)
+            .mask_fill(self.outside_segment.clone().expand(shape), 0.0)
+            .cumsum(3)
+            .mask_fill(self.future.clone().expand(shape), f32::NEG_INFINITY)
+            .exp()
+    }
 }
 
 #[cfg(test)]

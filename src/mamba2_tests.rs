@@ -139,7 +139,7 @@ fn recurrent_scan_matches_scalar_golden_values() {
     let a = Tensor::<TestBackend, 1>::from_floats([-1.0], &device);
     let d = Tensor::<TestBackend, 1>::from_floats([0.5], &device);
     let initial = Tensor::<TestBackend, 4>::from_floats([[[[2.0]]]], &device);
-    let (output, terminal) = recurrent_scan(x, b, c, dt, a, d, initial).unwrap();
+    let (output, terminal, _) = recurrent_scan(x, b, c, dt, a, d, initial, false).unwrap();
     output.into_data().assert_approx_eq::<f32>(
         &TensorData::from([[[[16.548_374]], [[5.792_34]]]]),
         Tolerance::absolute(1e-5),
@@ -154,16 +154,15 @@ fn recurrent_scan_matches_scalar_golden_values() {
 #[test]
 fn chunk_transition_sum_avoids_prefix_cancellation() {
     let device = Default::default();
-    let transitions = stable_decay_transitions(Tensor::<TestBackend, 3>::from_floats(
-        [[[-100_000_000.0], [-1.0], [-2.0]]],
-        &device,
-    ));
+    let transitions = SegmentMasks::new(3, &device).transitions(
+        Tensor::<TestBackend, 4>::from_floats([[[[-100_000_000.0, -1.0, -2.0]]]], &device),
+    );
     transitions.into_data().assert_approx_eq::<f32>(
-        &TensorData::from([[
-            [[1.0], [0.0], [0.0]],
-            [[(-1.0_f32).exp()], [1.0], [0.0]],
-            [[(-3.0_f32).exp()], [(-2.0_f32).exp()], [1.0]],
-        ]]),
+        &TensorData::from([[[[
+            [1.0, 0.0, 0.0],
+            [(-1.0_f32).exp(), 1.0, 0.0],
+            [(-3.0_f32).exp(), (-2.0_f32).exp(), 1.0],
+        ]]]]),
         Tolerance::absolute(1e-6),
     );
 }
@@ -283,7 +282,7 @@ fn discretization_rounds_before_fp32_scan_math() {
     let raw = Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::F16);
     let bias = Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::F16);
     let valid = Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
-    let actual = discretization_steps(raw.clone(), bias.clone(), None, valid);
+    let actual = discretization_steps(raw.clone(), bias.clone(), None, Some(valid));
     assert_eq!(actual.dtype(), DType::F16);
     let actual_bits = actual
         .into_data()
@@ -317,13 +316,13 @@ fn discretization_rounds_before_fp32_scan_math() {
         raw.clone(),
         bias.clone(),
         clamp.for_mode(Mamba2Mode::Recurrent),
-        all_valid(),
+        Some(all_valid()),
     );
     let chunked = discretization_steps(
         raw,
         bias,
         clamp.for_mode(Mamba2Mode::ChunkedPrefill),
-        all_valid(),
+        Some(all_valid()),
     );
     assert_eq!(
         recurrent
@@ -344,7 +343,7 @@ fn discretization_rounds_before_fp32_scan_math() {
         Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::BF16),
         Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::BF16),
         None,
-        all_valid(),
+        Some(all_valid()),
     );
     let bf16_bits = bf16_dt
         .into_data()
@@ -379,7 +378,7 @@ fn recurrent_scan_matches_pinned_f16_operation_order() {
         &device,
     );
 
-    let (output, terminal) = recurrent_scan(x, b, c, dt, a, d, initial).unwrap();
+    let (output, terminal, _) = recurrent_scan(x, b, c, dt, a, d, initial, false).unwrap();
     assert_eq!(output.dtype(), DType::F16);
     let bits = output
         .into_data()
@@ -412,7 +411,7 @@ fn recurrent_and_chunked_scans_preserve_reference_output_dtypes() {
     let d = Tensor::<TestBackend, 1>::from_floats([0.4], &device).cast(DType::F16);
     let initial = Tensor::<TestBackend, 4>::from_floats([[[[0.25], [-0.5]]]], &device);
 
-    let (recurrent, recurrent_state) = recurrent_scan(
+    let (recurrent, recurrent_state, _) = recurrent_scan(
         x.clone(),
         b.clone(),
         c.clone(),
@@ -420,6 +419,7 @@ fn recurrent_and_chunked_scans_preserve_reference_output_dtypes() {
         a.clone(),
         d.clone(),
         initial.clone(),
+        false,
     )
     .unwrap();
     let (chunked, chunked_state) =
@@ -439,7 +439,7 @@ fn recurrent_and_chunked_scans_preserve_reference_output_dtypes() {
     let bf16_dt = Tensor::<TestBackend, 3>::ones([1, 1, 1], (&device, DType::BF16));
     let bf16_d = Tensor::<TestBackend, 1>::ones([1], (&device, DType::BF16));
     let bf16_initial = Tensor::<TestBackend, 4>::zeros([1, 1, 1, 1], &device);
-    let (bf16_recurrent, _) = recurrent_scan(
+    let (bf16_recurrent, _, _) = recurrent_scan(
         bf16_x.clone(),
         bf16_b.clone(),
         bf16_c.clone(),
@@ -447,6 +447,7 @@ fn recurrent_and_chunked_scans_preserve_reference_output_dtypes() {
         Tensor::from_floats([-1.0], &device),
         bf16_d.clone(),
         bf16_initial.clone(),
+        false,
     )
     .unwrap();
     let (bf16_chunked, _) = chunked_scan(
@@ -482,7 +483,7 @@ fn f16_recurrent_cache_matches_repeated_single_token_updates() {
     let initial =
         Tensor::<TestBackend, 4>::from_floats([[[[0.33], [-0.27]]]], &device).cast(DType::F16);
 
-    let (combined_output, combined_state) = recurrent_scan(
+    let (combined_output, combined_state, _) = recurrent_scan(
         x.clone(),
         b.clone(),
         c.clone(),
@@ -490,9 +491,10 @@ fn f16_recurrent_cache_matches_repeated_single_token_updates() {
         a.clone(),
         d.clone(),
         initial.clone(),
+        false,
     )
     .unwrap();
-    let (first_output, first_state) = recurrent_scan(
+    let (first_output, first_state, _) = recurrent_scan(
         x.clone().narrow(1, 0, 1),
         b.clone().narrow(1, 0, 1),
         c.clone().narrow(1, 0, 1),
@@ -500,9 +502,10 @@ fn f16_recurrent_cache_matches_repeated_single_token_updates() {
         a.clone(),
         d.clone(),
         initial,
+        false,
     )
     .unwrap();
-    let (second_output, repeated_state) = recurrent_scan(
+    let (second_output, repeated_state, _) = recurrent_scan(
         x.narrow(1, 1, 1),
         b.narrow(1, 1, 1),
         c.narrow(1, 1, 1),
@@ -510,6 +513,7 @@ fn f16_recurrent_cache_matches_repeated_single_token_updates() {
         a,
         d,
         first_state,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -532,12 +536,12 @@ fn semantic_mask_prevents_padding_decay() {
         Tensor::zeros([1, 1, 1], &device),
         Tensor::ones([1], &device),
         Some(TimeStepLimits::at_least(0.001)),
-        valid,
+        Some(valid),
     );
     assert_eq!(dt.to_data(), TensorData::zeros::<f32, _>([1, 1, 1]));
 
     let initial = Tensor::<TestBackend, 4>::from_floats([[[[3.25]]]], &device);
-    let (_, terminal) = recurrent_scan(
+    let (_, terminal, _) = recurrent_scan(
         Tensor::zeros([1, 1, 1, 1], &device),
         Tensor::zeros([1, 1, 1, 1], &device),
         Tensor::zeros([1, 1, 1, 1], &device),
@@ -545,6 +549,7 @@ fn semantic_mask_prevents_padding_decay() {
         Tensor::from_floats([-7.0], &device),
         Tensor::ones([1], &device),
         initial.clone(),
+        false,
     )
     .unwrap();
     assert_eq!(terminal.to_data(), initial.to_data());
@@ -664,7 +669,7 @@ fn discretization_softplus_matches_the_reference_graph() {
         &device,
     );
     let valid = Tensor::<TestBackend, 2, Bool>::ones([1, count], &device);
-    let actual = discretization_steps(raw.clone(), Tensor::zeros([1], &device), None, valid)
+    let actual = discretization_steps(raw.clone(), Tensor::zeros([1], &device), None, Some(valid))
         .into_data()
         .to_vec::<f32>()
         .unwrap();
@@ -695,7 +700,7 @@ fn discretization_softplus_matches_the_reference_graph() {
         Tensor::<TestBackend, 3>::from_floats([[[100.0], [1.0e30]]], &device),
         Tensor::zeros([1], &device),
         None,
-        Tensor::ones([1, 2], &device),
+        Some(Tensor::ones([1, 2], &device)),
     )
     .into_data()
     .to_vec::<f32>()
@@ -728,4 +733,570 @@ fn one_token_clamp_differs_between_modes() {
         .unwrap();
     let ratio = norm(chunked) / norm(recurrent);
     assert!(ratio > 100.0 && ratio < 200.0, "{ratio}");
+}
+
+/// Deterministic `[batch, tokens, width]` values with varied signs and magnitudes.
+fn waves(shape: [usize; 3], salt: f32, scale: f32) -> Tensor<TestBackend, 3> {
+    let count = shape.iter().product();
+    let values = (0..count)
+        .map(|index| ((index as f32 + salt) * 0.611).sin() * scale)
+        .collect::<Vec<_>>();
+    Tensor::from_data(TensorData::new(values, shape), &Default::default())
+}
+
+/// Deterministic four-dimensional values for direct scan fixtures.
+fn waves4(shape: [usize; 4], salt: f32, scale: f32) -> Tensor<TestBackend, 4> {
+    let count = shape.iter().product();
+    let values = (0..count)
+        .map(|index| ((index as f32 + salt) * 0.437).cos() * scale)
+        .collect::<Vec<_>>();
+    Tensor::from_data(TensorData::new(values, shape), &Default::default())
+}
+
+/// The former per-head, chunk-sequential SSD scan (test oracle only).
+///
+/// It repeats `B/C` to every head and processes one chunk per iteration,
+/// exactly as the mixer did before the grouped block-vectorized scan.
+#[allow(clippy::too_many_arguments)]
+fn legacy_chunked_scan(
+    x: Tensor<TestBackend, 4>,
+    b: Tensor<TestBackend, 4>,
+    c: Tensor<TestBackend, 4>,
+    dt: Tensor<TestBackend, 3>,
+    a: Tensor<TestBackend, 1>,
+    d: Tensor<TestBackend, 1>,
+    mut state: Tensor<TestBackend, 4>,
+    chunk_size: usize,
+) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>) {
+    let [batch, sequence, heads, _] = x.dims();
+    let b = repeat(b, heads);
+    let c = repeat(c, heads);
+    let mut chunks = Vec::new();
+    for start in (0..sequence).step_by(chunk_size) {
+        let width = (sequence - start).min(chunk_size);
+        let x = x.clone().narrow(1, start, width).cast(DType::F32);
+        let b = b.clone().narrow(1, start, width).cast(DType::F32);
+        let c = c.clone().narrow(1, start, width).cast(DType::F32);
+        let dt = dt.clone().narrow(1, start, width).cast(DType::F32);
+        let log_decay = dt.clone() * a.clone().reshape([1, 1, heads]);
+        let cumulative = log_decay.clone().cumsum(1);
+        let transitions = SegmentMasks::new(width, &x.device())
+            .transitions(log_decay.swap_dims(1, 2).unsqueeze_dim::<4>(2))
+            .reshape([batch, heads, width, width])
+            .permute([0, 2, 3, 1]);
+        let kernel = c
+            .clone()
+            .permute([0, 2, 1, 3])
+            .matmul(b.clone().permute([0, 2, 3, 1]))
+            .permute([0, 2, 3, 1]);
+        let input = x.clone() * dt.unsqueeze_dim::<4>(3);
+        let within = (kernel * transitions)
+            .permute([0, 3, 1, 2])
+            .matmul(input.clone().permute([0, 2, 1, 3]))
+            .permute([0, 2, 1, 3]);
+        let from_initial = state
+            .clone()
+            .matmul(c.permute([0, 2, 3, 1]))
+            .permute([0, 3, 1, 2])
+            * cumulative.clone().exp().unsqueeze_dim::<4>(3);
+        chunks.push(within + from_initial + x * d.clone().reshape([1, 1, heads, 1]));
+        let terminal = cumulative
+            .clone()
+            .narrow(1, width - 1, 1)
+            .reshape([batch, heads]);
+        let decay = (terminal.clone().reshape([batch, 1, heads]) - cumulative).exp();
+        let updates = (input * decay.unsqueeze_dim::<4>(3))
+            .permute([0, 2, 3, 1])
+            .matmul(b.permute([0, 2, 1, 3]));
+        state = state * terminal.exp().reshape([batch, heads, 1, 1]) + updates;
+    }
+    (Tensor::cat(chunks, 1), state)
+}
+
+/// Repeats `[b, t, g, n]` group values to `[b, t, h, n]` heads (test oracle only).
+fn repeat(tensor: Tensor<TestBackend, 4>, heads: usize) -> Tensor<TestBackend, 4> {
+    let [batch, sequence, groups, state] = tensor.dims();
+    tensor
+        .unsqueeze_dim::<5>(3)
+        .expand([batch, sequence, groups, heads / groups, state])
+        .reshape([batch, sequence, heads, state])
+}
+
+/// Direct scan operands `(x, b, c, dt, a, d, initial)` for a grouped fixture.
+#[allow(clippy::type_complexity)]
+fn scan_operands(
+    batch: usize,
+    sequence: usize,
+    heads: usize,
+    groups: usize,
+) -> (
+    Tensor<TestBackend, 4>,
+    Tensor<TestBackend, 4>,
+    Tensor<TestBackend, 4>,
+    Tensor<TestBackend, 3>,
+    Tensor<TestBackend, 1>,
+    Tensor<TestBackend, 1>,
+    Tensor<TestBackend, 4>,
+) {
+    let device = Default::default();
+    let (head_dim, state) = (2, 3);
+    let dt = waves([batch, sequence, heads], 3.0, 0.4).abs() + 0.05;
+    let a = Tensor::<TestBackend, 1>::from_data(
+        TensorData::new(
+            (0..heads)
+                .map(|head| -0.3 - 0.4 * head as f32)
+                .collect::<Vec<_>>(),
+            [heads],
+        ),
+        &device,
+    );
+    let d = Tensor::<TestBackend, 1>::from_data(
+        TensorData::new(
+            (0..heads)
+                .map(|head| 0.5 + 0.1 * head as f32)
+                .collect::<Vec<_>>(),
+            [heads],
+        ),
+        &device,
+    );
+    (
+        waves4([batch, sequence, heads, head_dim], 1.0, 0.9),
+        waves4([batch, sequence, groups, state], 7.0, 0.8),
+        waves4([batch, sequence, groups, state], 11.0, 0.7),
+        dt,
+        a,
+        d,
+        waves4([batch, heads, head_dim, state], 5.0, 0.3),
+    )
+}
+
+/// Grouped block scans equal the former per-head sequential scan and the recurrence.
+///
+/// Budgets force one chunk per block, two chunks per block with a ragged
+/// final block, and the whole segment in one block; groups are shared by two
+/// heads, so the per-group content kernel and broadcast state contractions
+/// are exercised.
+#[test]
+fn grouped_block_scan_matches_sequential_and_recurrent_oracles() {
+    let (x, b, c, dt, a, d, initial) = scan_operands(2, 11, 4, 2);
+    let (legacy, legacy_state) = legacy_chunked_scan(
+        x.clone(),
+        b.clone(),
+        c.clone(),
+        dt.clone(),
+        a.clone(),
+        d.clone(),
+        initial.clone(),
+        3,
+    );
+    let (recurrent, recurrent_state, _) = recurrent_scan(
+        x.clone(),
+        b.clone(),
+        c.clone(),
+        dt.clone(),
+        a.clone(),
+        d.clone(),
+        initial.clone(),
+        false,
+    )
+    .unwrap();
+    for budget in [1, 2 * 2 * 4 * 9, usize::MAX] {
+        let (output, state) = chunked_scan_with_budget(
+            x.clone(),
+            b.clone(),
+            c.clone(),
+            dt.clone(),
+            a.clone(),
+            d.clone(),
+            initial.clone(),
+            3,
+            budget,
+        )
+        .unwrap();
+        for expected in [&legacy, &recurrent] {
+            output
+                .clone()
+                .into_data()
+                .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(2e-5));
+        }
+        for expected in [&legacy_state, &recurrent_state] {
+            state
+                .clone()
+                .into_data()
+                .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(2e-5));
+        }
+    }
+}
+
+/// A single-chunk prompt keeps the former scan's arithmetic for its outputs.
+#[test]
+fn single_chunk_outputs_match_the_former_scan_closely() {
+    let (x, b, c, dt, a, d, initial) = scan_operands(1, 4, 4, 2);
+    let (legacy, _) = legacy_chunked_scan(
+        x.clone(),
+        b.clone(),
+        c.clone(),
+        dt.clone(),
+        a.clone(),
+        d.clone(),
+        initial.clone(),
+        8,
+    );
+    let (output, _) = chunked_scan(x, b, c, dt, a, d, initial, 8).unwrap();
+    output
+        .into_data()
+        .assert_approx_eq::<f32>(&legacy.into_data(), Tolerance::absolute(1e-6));
+}
+
+/// Ragged right-padded rows equal independent compact runs; empty rows keep state exactly.
+#[test]
+fn ragged_rows_match_independent_compact_runs() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let hidden = waves([3, 5, 8], 2.0, 0.6);
+    let mut state = Mamba2State::zeros(&config(), 3, DType::F32, &device).unwrap();
+    state.recurrent = waves4([3, 4, 2, 3], 9.0, 0.2);
+    state.convolution = waves([3, 20, 2], 4.0, 0.3);
+    let counts = [5, 2, 0];
+    let rows = counts.map(|tokens| Mamba2Row {
+        tokens,
+        mode: Mamba2Mode::ChunkedPrefill,
+    });
+    let (output, next) = mixer.forward_rows(hidden.clone(), &rows, &state).unwrap();
+    for (row, &count) in counts.iter().enumerate() {
+        let row_state = Mamba2State {
+            recurrent: state.recurrent.clone().narrow(0, row, 1),
+            convolution: state.convolution.clone().narrow(0, row, 1),
+        };
+        let row_matrix = next.recurrent.clone().narrow(0, row, 1);
+        let row_convolution = next.convolution.clone().narrow(0, row, 1);
+        if count == 0 {
+            assert_eq!(row_matrix.into_data(), row_state.recurrent.into_data());
+            assert_eq!(
+                row_convolution.into_data(),
+                row_state.convolution.into_data()
+            );
+            continue;
+        }
+        let (expected, expected_state) = mixer
+            .forward_with_state(
+                hidden.clone().narrow(0, row, 1).narrow(1, 0, count),
+                None,
+                &row_state,
+                Mamba2Mode::ChunkedPrefill,
+            )
+            .unwrap();
+        output
+            .clone()
+            .narrow(0, row, 1)
+            .narrow(1, 0, count)
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
+        row_matrix.into_data().assert_approx_eq::<f32>(
+            &expected_state.recurrent.into_data(),
+            Tolerance::absolute(2e-6),
+        );
+        row_convolution.into_data().assert_approx_eq::<f32>(
+            &expected_state.convolution.into_data(),
+            Tolerance::absolute(1e-6),
+        );
+    }
+}
+
+/// Rows in different modes run as separate groups and return in batch order.
+#[test]
+fn mixed_mode_rows_match_per_row_execution() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let hidden = waves([3, 3, 8], 6.0, 0.5);
+    let mut state = Mamba2State::zeros(&config(), 3, DType::F32, &device).unwrap();
+    state.recurrent = waves4([3, 4, 2, 3], 1.0, 0.25);
+    state.convolution = waves([3, 20, 2], 8.0, 0.2);
+    let rows = [
+        Mamba2Row {
+            tokens: 1,
+            mode: Mamba2Mode::Recurrent,
+        },
+        Mamba2Row {
+            tokens: 3,
+            mode: Mamba2Mode::ChunkedPrefill,
+        },
+        Mamba2Row {
+            tokens: 1,
+            mode: Mamba2Mode::Recurrent,
+        },
+    ];
+    assert_eq!(
+        mode_groups(&rows),
+        vec![
+            (Mamba2Mode::Recurrent, vec![0, 2]),
+            (Mamba2Mode::ChunkedPrefill, vec![1]),
+        ]
+    );
+    let (output, next) = mixer.forward_rows(hidden.clone(), &rows, &state).unwrap();
+    for (row, plan) in rows.iter().enumerate() {
+        let row_state = Mamba2State {
+            recurrent: state.recurrent.clone().narrow(0, row, 1),
+            convolution: state.convolution.clone().narrow(0, row, 1),
+        };
+        let (expected, expected_state) = mixer
+            .forward_with_state(
+                hidden.clone().narrow(0, row, 1).narrow(1, 0, plan.tokens),
+                None,
+                &row_state,
+                plan.mode,
+            )
+            .unwrap();
+        output
+            .clone()
+            .narrow(0, row, 1)
+            .narrow(1, 0, plan.tokens)
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
+        next.recurrent
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &expected_state.recurrent.into_data(),
+                Tolerance::absolute(2e-6),
+            );
+        next.convolution
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &expected_state.convolution.into_data(),
+                Tolerance::absolute(1e-6),
+            );
+    }
+    // Inactive rows never split the batch into a second group.
+    let idle = [
+        Mamba2Row {
+            tokens: 0,
+            mode: Mamba2Mode::ChunkedPrefill,
+        },
+        Mamba2Row {
+            tokens: 1,
+            mode: Mamba2Mode::Recurrent,
+        },
+    ];
+    assert_eq!(
+        mode_groups(&idle),
+        vec![(Mamba2Mode::Recurrent, vec![0, 1])]
+    );
+}
+
+/// Snapshot `t` equals the state after `t + 1` single-token decode calls.
+///
+/// The scan itself is the same recurrence; only the batched projections
+/// (`[2, 4]` tokens here against one) may round differently, so values agree
+/// to F32 rounding and, for an F16 state, to one F16 ULP.
+#[test]
+fn snapshots_equal_repeated_single_token_updates() {
+    let device = Default::default();
+    for (state_dtype, tolerance) in [(DType::F32, 2e-6), (DType::F16, 5e-4)] {
+        let mixer = config().init::<TestBackend>(&device).unwrap();
+        let hidden = waves([2, 4, 8], 3.0, 0.7);
+        let mut state =
+            Mamba2State::zeros_with_dtypes(&config(), 2, state_dtype, DType::F32, &device).unwrap();
+        state.recurrent = waves4([2, 4, 2, 3], 2.0, 0.3).cast(state_dtype);
+        state.convolution = waves([2, 20, 2], 5.0, 0.4);
+        let counts = [4, 2];
+        let (output, snapshots) = mixer
+            .forward_rows_with_snapshots(hidden.clone(), &counts, &state)
+            .unwrap();
+        assert_eq!(snapshots.recurrent.dims(), [2, 4, 4, 2, 3]);
+        assert_eq!(snapshots.convolution.dims(), [2, 4, 20, 2]);
+        assert_eq!(snapshots.recurrent.dtype(), state_dtype);
+        let close = |actual: TensorData, expected: TensorData| {
+            actual.convert::<f32>().assert_approx_eq::<f32>(
+                &expected.convert::<f32>(),
+                Tolerance::absolute(tolerance),
+            );
+        };
+        for (row, &count) in counts.iter().enumerate() {
+            let mut current = Mamba2State {
+                recurrent: state.recurrent.clone().narrow(0, row, 1),
+                convolution: state.convolution.clone().narrow(0, row, 1),
+            };
+            for token in 0..count {
+                let (expected, next) = mixer
+                    .forward_with_state(
+                        hidden.clone().narrow(0, row, 1).narrow(1, token, 1),
+                        None,
+                        &current,
+                        Mamba2Mode::Recurrent,
+                    )
+                    .unwrap();
+                close(
+                    output
+                        .clone()
+                        .narrow(0, row, 1)
+                        .narrow(1, token, 1)
+                        .into_data(),
+                    expected.into_data(),
+                );
+                close(
+                    snapshots
+                        .recurrent
+                        .clone()
+                        .narrow(0, row, 1)
+                        .narrow(1, token, 1)
+                        .reshape([1, 4, 2, 3])
+                        .into_data(),
+                    next.recurrent.clone().into_data(),
+                );
+                close(
+                    snapshots
+                        .convolution
+                        .clone()
+                        .narrow(0, row, 1)
+                        .narrow(1, token, 1)
+                        .reshape([1, 20, 2])
+                        .into_data(),
+                    next.convolution.clone().into_data(),
+                );
+                current = next;
+            }
+        }
+    }
+}
+
+/// Row plans must describe every row and fit the padded width.
+#[test]
+fn invalid_row_plans_are_rejected() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let state = Mamba2State::zeros(&config(), 2, DType::F32, &device).unwrap();
+    let hidden = waves([2, 3, 8], 1.0, 0.5);
+    let row = |tokens| Mamba2Row {
+        tokens,
+        mode: Mamba2Mode::ChunkedPrefill,
+    };
+    assert!(
+        mixer
+            .forward_rows(hidden.clone(), &[row(3)], &state)
+            .is_err()
+    );
+    assert!(
+        mixer
+            .forward_rows(hidden.clone(), &[row(3), row(4)], &state)
+            .is_err()
+    );
+    assert!(
+        mixer
+            .forward_rows_with_snapshots(hidden, &[1, 4], &state)
+            .is_err()
+    );
+}
+
+/// The block scan stays differentiable: gradients reach the input projection.
+#[cfg(feature = "autodiff")]
+#[test]
+fn chunked_prefill_is_differentiable() {
+    use burn::backend::Autodiff;
+
+    /// Autodiff wrapper used to check gradient flow through the block scan.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let mixer = config().init::<AdBackend>(&device).unwrap();
+    let hidden = Tensor::<AdBackend, 3>::from_data(waves([1, 5, 8], 2.0, 0.6).into_data(), &device);
+    let loss = mixer
+        .forward(hidden, None, Mamba2Mode::ChunkedPrefill)
+        .unwrap()
+        .sum();
+    let gradients = loss.backward();
+    assert!(mixer.in_proj.weight.grad(&gradients).is_some());
+    assert!(mixer.a_log.grad(&gradients).is_some());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+
+    /// Every chunk width, block budget, grouping, and length agrees with the recurrence.
+    #[test]
+    fn block_scan_matches_recurrence_for_any_partition(
+        sequence in 1usize..14,
+        chunk_size in 1usize..6,
+        grouping in 0usize..3,
+        budget in 1usize..400,
+    ) {
+        let (heads, groups) = [(2, 1), (4, 2), (4, 4)][grouping];
+        let (x, b, c, dt, a, d, initial) = scan_operands(1, sequence, heads, groups);
+        let (expected, expected_state, _) = recurrent_scan(
+            x.clone(), b.clone(), c.clone(), dt.clone(), a.clone(), d.clone(), initial.clone(), false,
+        ).unwrap();
+        let (actual, state) = chunked_scan_with_budget(
+            x, b, c, dt, a, d, initial, chunk_size, budget,
+        ).unwrap();
+        let actual = actual.into_data().to_vec::<f32>().unwrap();
+        let expected = expected.into_data().to_vec::<f32>().unwrap();
+        for (actual, expected) in actual.iter().zip(&expected) {
+            proptest::prop_assert!((actual - expected).abs() <= 3e-5, "{} != {}", actual, expected);
+        }
+        let state = state.into_data().to_vec::<f32>().unwrap();
+        let expected_state = expected_state.into_data().to_vec::<f32>().unwrap();
+        for (actual, expected) in state.iter().zip(&expected_state) {
+            proptest::prop_assert!((actual - expected).abs() <= 3e-5, "{} != {}", actual, expected);
+        }
+    }
+}
+
+/// Release-mode timing of the grouped block scan against the former sequential scan.
+///
+/// Run with `cargo test --release --lib mamba2::tests::block_scan_timing --
+/// --ignored --nocapture`. Shapes follow a scaled-down Lightning layer
+/// (8 heads per group, 128-token chunks).
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn block_scan_timing() {
+    use std::time::Instant;
+    let device = Default::default();
+    let (batch, sequence, heads, groups, head_dim, state, chunk) = (1, 2048, 16, 2, 64, 128, 128);
+    let x = waves4([batch, sequence, heads, head_dim], 1.0, 0.5);
+    let b = waves4([batch, sequence, groups, state], 2.0, 0.5);
+    let c = waves4([batch, sequence, groups, state], 3.0, 0.5);
+    let dt = waves([batch, sequence, heads], 4.0, 0.05).abs() + 0.001;
+    let a = Tensor::<TestBackend, 1>::ones([heads], &device) * -0.5;
+    let d = Tensor::<TestBackend, 1>::ones([heads], &device);
+    let initial = Tensor::<TestBackend, 4>::zeros([batch, heads, head_dim, state], &device);
+    let time = |label: &str, run: &dyn Fn() -> Tensor<TestBackend, 4>| {
+        let _ = run().into_data();
+        let started = Instant::now();
+        for _ in 0..3 {
+            let _ = run().into_data();
+        }
+        let seconds = started.elapsed().as_secs_f64() / 3.0;
+        eprintln!("mamba2 scan timing: {label}: {:.1} ms", seconds * 1e3);
+        seconds
+    };
+    let legacy = time("former per-head sequential scan", &|| {
+        legacy_chunked_scan(
+            x.clone(),
+            b.clone(),
+            c.clone(),
+            dt.clone(),
+            a.clone(),
+            d.clone(),
+            initial.clone(),
+            chunk,
+        )
+        .0
+    });
+    let blocked = time("grouped block scan", &|| {
+        chunked_scan(
+            x.clone(),
+            b.clone(),
+            c.clone(),
+            dt.clone(),
+            a.clone(),
+            d.clone(),
+            initial.clone(),
+            chunk,
+        )
+        .unwrap()
+        .0
+    });
+    eprintln!("mamba2 scan timing: speedup {:.2}x", legacy / blocked);
 }
