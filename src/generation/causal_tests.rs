@@ -1788,3 +1788,110 @@ fn min_new_tokens_defer_end_of_sequence_in_generation() {
     assert!(tokens.len() >= 2, "{tokens:?}");
     assert!(!tokens[..2].contains(&first), "{tokens:?}");
 }
+
+/// Wraps the tiny model and rounds every output logit to F16.
+///
+/// With `keep_half`, logits leave the model as F16 tensors; otherwise the
+/// same F16-rounded values are returned as F32. A coordinator that promotes
+/// half-precision logits before processing treats both identically.
+#[derive(burn::module::Module, Debug)]
+struct HalfLogitsModel<B: Backend> {
+    /// Real Qwen graph and cache.
+    inner: Qwen3_5ForCausalLm<B>,
+    /// Whether the returned logits keep the F16 storage dtype; shared so one
+    /// lazily initialized weight set serves both runs.
+    #[module(skip)]
+    keep_half: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<B: Backend> HalfLogitsModel<B> {
+    /// Rounds logits to F16 and optionally restores the F32 dtype.
+    fn round(&self, mut output: crate::CausalLmOutput<B>) -> crate::CausalLmOutput<B> {
+        let half = output.logits.cast(burn::tensor::DType::F16);
+        output.logits = if self.keep_half.load(std::sync::atomic::Ordering::Relaxed) {
+            half
+        } else {
+            half.cast(burn::tensor::DType::F32)
+        };
+        output
+    }
+}
+
+impl<B: Backend> crate::CausalLanguageModel<B> for HalfLogitsModel<B> {
+    /// Configuration of the wrapped Qwen graph.
+    type Config = Qwen3_5TextConfig;
+    /// Unmodified external decode state of the wrapped Qwen model.
+    type State = <Qwen3_5ForCausalLm<B> as crate::CausalLanguageModel<B>>::State;
+
+    /// Rounds stateless logits like the cached paths.
+    fn forward(
+        &self,
+        input: CausalLmInput<B>,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<B>> {
+        Ok(self.round(self.inner.forward(input, options)?))
+    }
+
+    /// Allocates the real cache.
+    fn new_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> crate::Result<Self::State> {
+        self.inner.new_decode_state(config, batch_size, device)
+    }
+
+    /// Rounds prefill logits.
+    fn prefill(
+        &self,
+        input: CausalLmInput<B>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<B>> {
+        Ok(self.round(self.inner.prefill(input, state, options)?))
+    }
+
+    /// Rounds decode logits.
+    fn decode(
+        &self,
+        input: crate::DecodeInput<B>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<B>> {
+        Ok(self.round(self.inner.decode(input, state, options)?))
+    }
+}
+
+/// Half-precision model logits are processed in F32, exactly like F16-rounded F32 logits.
+#[test]
+fn half_precision_logits_are_processed_in_f32() {
+    let generation = GenerationConfig {
+        max_new_tokens: 4,
+        repetition_penalty: 1.05,
+        frequency_penalty: 0.3,
+        strategy: SamplingStrategy::Sample,
+        temperature: 0.9,
+        top_p: Some(0.95),
+        seed: 5,
+        ..Default::default()
+    };
+    // One model instance for both runs: parameters initialize lazily from
+    // the process-global backend seed, so clones or separate fixtures could
+    // hold different weights.
+    let (inner, device) = tiny_model();
+    let model = HalfLogitsModel {
+        inner,
+        keep_half: Default::default(),
+    };
+    let mut outputs = Vec::new();
+    for keep_half in [true, false] {
+        model
+            .keep_half
+            .store(keep_half, std::sync::atomic::Ordering::Relaxed);
+        outputs.push(
+            generate_causal(&model, request(&device, generation.clone())).expect("generation"),
+        );
+    }
+    assert_eq!(outputs[0], outputs[1]);
+}

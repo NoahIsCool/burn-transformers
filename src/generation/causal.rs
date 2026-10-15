@@ -10,7 +10,8 @@
 //! Each decode step costs one device-to-host synchronization: the selected
 //! IDs and their log probabilities are read back together. Penalty state is a
 //! [`TokenHistory`] updated with the new `[batch]` IDs, so no history tensor
-//! grows and no vocabulary-sized data leaves the device.
+//! grows and no vocabulary-sized data leaves the device. Like Hugging Face,
+//! the coordinator promotes F16/BF16 logits to F32 before any processing.
 //!
 //! Batched rows may have different prompt and completion lengths. Every mask in
 //! this module follows the crate-wide `true == valid` rule. Once a row reaches
@@ -27,7 +28,10 @@ use crate::{
 
 use super::bookkeeping::{prefill_chunk_end, row_span};
 use super::metadata::{self, extract_last_logits};
-use super::{FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenHistory};
+use super::{
+    FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenHistory,
+    probability_accumulation_dtype,
+};
 
 /// Label used for model-logit shape errors raised by this coordinator.
 const MODEL_LOGITS: &str = "generation.model_logits";
@@ -151,7 +155,7 @@ where
         request.prefill_chunk_size,
         vocabulary_size,
     )?;
-    let mut logits = extract_last_logits(prompt_logits, batch, vocabulary_size, MODEL_LOGITS)?;
+    let mut logits = step_logits(prompt_logits, batch, vocabulary_size)?;
 
     loop {
         let processed = processor.process_with_history(logits, &history)?;
@@ -192,12 +196,29 @@ where
             advance_positions(positions, &rows.still_active)?;
         }
         logits = neutralize_inactive_logits(
-            extract_last_logits(output.logits, batch, vocabulary_size, MODEL_LOGITS)?,
+            step_logits(output.logits, batch, vocabulary_size)?,
             &rows.still_active,
         )?;
     }
 
     finish_output(tracker, prompt_lengths, log_probabilities)
+}
+
+/// Extracts one step's `[batch, vocabulary]` logits and promotes half precision to F32.
+///
+/// Hugging Face upcasts next-token logits to F32 before any processor runs;
+/// doing the same keeps bias, penalties, and warpers free of F16/BF16
+/// rounding (for example a 1.05 repetition penalty on a logit near 20). The
+/// `[batch, vocabulary]` cast is negligible next to a model step; F32 and F64
+/// logits are unchanged.
+fn step_logits<B: Backend>(
+    logits: Tensor<B, 3>,
+    batch: usize,
+    vocabulary_size: usize,
+) -> Result<Tensor<B, 2>> {
+    let logits = extract_last_logits(logits, batch, vocabulary_size, MODEL_LOGITS)?;
+    let dtype = probability_accumulation_dtype(logits.dtype());
+    Ok(logits.cast(dtype))
 }
 
 /// Rows that emitted a token in one step, and rows that remain active after it.
