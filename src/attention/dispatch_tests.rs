@@ -828,3 +828,60 @@ fn grouped_decode_attention_benchmark() {
         );
     }
 }
+
+/// Autotuned Metal kernels keep bottom-right causal alignment for a cached suffix.
+///
+/// CubeCL flash kernels align `is_causal` top-left, so this guards the
+/// explicit-mask dispatch for `Q < K`. Long keys make the autotuner consider
+/// flash candidates. Run serially on a Metal host with
+/// `cargo test --release --features attention-kernel-tracing --lib
+/// attention::dispatch::tests::metal_causal_suffix_matches_eager_reference
+/// -- --ignored --exact --nocapture --test-threads=1`.
+#[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+#[test]
+#[ignore = "requires a Metal-capable macOS host and serialized attention autotuning"]
+fn metal_causal_suffix_matches_eager_reference() {
+    use burn::backend::Metal;
+    use burn::tensor::Distribution;
+    /// Autotuned Metal backend with F32 activations.
+    type Gpu = Metal<f32, i32>;
+    let device = Default::default();
+    let (queries, keys, query_heads, key_value_heads, head_dim) = (64, 4097, 4, 2, 64);
+    let random =
+        |shape: [usize; 4]| Tensor::<Gpu, 4>::random(shape, Distribution::Default, &device);
+    let query = random([1, query_heads, queries, head_dim]);
+    let key = random([1, key_value_heads, keys, head_dim]);
+    let value = random([1, key_value_heads, keys, head_dim]);
+    let options = AttentionModuleOptions {
+        is_causal: true,
+        ..Default::default()
+    };
+    let run = |precision| {
+        let output = grouped_query_attention(
+            query.clone(),
+            key.clone(),
+            value.clone(),
+            None,
+            None,
+            options,
+            precision,
+        )
+        .unwrap();
+        <Gpu as burn::tensor::backend::Backend>::sync(&device)
+            .expect("synchronize Metal attention");
+        output.into_data().to_vec::<f32>().unwrap()
+    };
+    // Warm the autotuner before the compared call.
+    let _ = run(AttentionPrecisionMode::BackendDefault);
+    let native = run(AttentionPrecisionMode::BackendDefault);
+    let eager = run(AttentionPrecisionMode::EagerFp32Softmax);
+    let maximum = native
+        .iter()
+        .zip(&eager)
+        .map(|(native, eager)| (native - eager).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        maximum < 1e-3,
+        "native and eager causal suffixes differ by {maximum}"
+    );
+}

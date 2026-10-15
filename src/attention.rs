@@ -37,6 +37,7 @@ mod connectivity;
 mod dispatch;
 mod mask;
 mod plan;
+mod widths;
 
 use core::ops::Range;
 
@@ -60,6 +61,7 @@ use mask::padding_plane;
 pub(crate) use mask::{bottom_right_causal_mask, union_exclusions};
 
 use plan::{ChunkLimits, ChunkPlanError, plan_query_chunks, query_chunk_range};
+use widths::{ProjectionWidths, WidthError, projection_widths};
 
 use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
@@ -531,45 +533,7 @@ impl GroupedQueryAttentionConfig {
 
     /// Validates projection sizes, GQA grouping, and numerical options.
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_size == 0
-            || self.query_heads == 0
-            || self.key_value_heads == 0
-            || self.head_dim == 0
-        {
-            return Err(Error::configuration(
-                "attention",
-                "hidden_size, query_heads, key_value_heads, and head_dim must be non-zero",
-            ));
-        }
-        if !self.query_heads.is_multiple_of(self.key_value_heads) {
-            return Err(Error::configuration(
-                "attention.key_value_heads",
-                "must divide query_heads exactly",
-            ));
-        }
-        let query_width = self.query_heads.checked_mul(self.head_dim);
-        let key_value_width = self.key_value_heads.checked_mul(self.head_dim);
-        let query_output_width = query_width.and_then(|width| {
-            if self.output_gate == AttentionOutputGate::None {
-                Some(width)
-            } else {
-                width.checked_mul(2)
-            }
-        });
-        // Validate the complete matrix products, not just per-head widths:
-        // lazy Burn parameters otherwise defer overflowing shapes until use.
-        if query_output_width
-            .and_then(|width| self.hidden_size.checked_mul(width))
-            .is_none()
-            || key_value_width
-                .and_then(|width| self.hidden_size.checked_mul(width))
-                .is_none()
-        {
-            return Err(Error::configuration(
-                "attention",
-                "projected head or matrix dimensions overflow usize",
-            ));
-        }
+        self.projection_widths()?;
         if self
             .query_key_norm_epsilon
             .is_some_and(|epsilon| !epsilon.is_finite() || epsilon <= 0.0)
@@ -609,26 +573,44 @@ impl GroupedQueryAttentionConfig {
         Ok(())
     }
 
+    /// Returns the verified projection widths, or why they are not representable.
+    ///
+    /// Success implies `key_value_heads` divides `query_heads` and that every
+    /// projection matrix's element count fits in `usize` (checked with Verus).
+    fn projection_widths(&self) -> Result<ProjectionWidths> {
+        projection_widths(
+            self.hidden_size,
+            self.query_heads,
+            self.key_value_heads,
+            self.head_dim,
+            self.output_gate != AttentionOutputGate::None,
+        )
+        .map_err(|error| match error {
+            WidthError::EmptyAxis => Error::configuration(
+                "attention",
+                "hidden_size, query_heads, key_value_heads, and head_dim must be non-zero",
+            ),
+            WidthError::UngroupedHeads => Error::configuration(
+                "attention.key_value_heads",
+                "must divide query_heads exactly",
+            ),
+            WidthError::Overflow => Error::configuration(
+                "attention",
+                "projected head or matrix dimensions overflow usize",
+            ),
+        })
+    }
+
     /// Initializes checkpoint-native `[out, in]` projections, optional Q/K norms, and sinks.
     ///
     /// Sink logits start at zero, i.e. one extra unit of softmax mass per row.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<GroupedQueryAttention<B>> {
         self.validate()?;
-        let query_width = self
-            .query_heads
-            .checked_mul(self.head_dim)
-            .ok_or_else(|| Error::configuration("attention", "query width overflows usize"))?;
-        let key_value_width = self
-            .key_value_heads
-            .checked_mul(self.head_dim)
-            .ok_or_else(|| Error::configuration("attention", "key/value width overflows usize"))?;
-        let query_output_width = if self.output_gate == AttentionOutputGate::None {
-            query_width
-        } else {
-            query_width.checked_mul(2).ok_or_else(|| {
-                Error::configuration("attention", "gated query width overflows usize")
-            })?
-        };
+        let ProjectionWidths {
+            query_width,
+            key_value_width,
+            query_output_width,
+        } = self.projection_widths()?;
         let bias = self.effective_projection_bias();
         let linear = |input, output, bias| {
             operations::init_linear(
