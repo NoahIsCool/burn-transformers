@@ -68,6 +68,7 @@ therefore verify independently and can be extended in parallel.
 | `generation.rs` | `src/generation/bookkeeping.rs` | Stop matching and finish precedence, prefill chunking, beam-row group preservation, the beam frontier, position preflights, speculative accepted-prefix arithmetic, and prompt-lookup drafting. |
 | `models.rs` | `src/models/shared/plan.rs` | Padded-row compaction and scatter plans restore the rectangular layout; logits selection, implicit cached positions, rotary extents, value ranges, and per-row cache appends are exact and bounded. |
 | `moe.rs` | `src/moe/assignment.rs` | The expert counting sort partitions every routed assignment by expert in stable order; memory-bounded dispatch blocks are maximal runs of whole experts. |
+| `perf.rs` | `src/checkpoint/runtime/tiles.rs` | The multi-threaded tiled transpose splits columns into whole-block bands that cover every column exactly once, never use more threads than requested, and never index past the matrix; ceiling division is overflow-free. |
 | `position.rs` | `src/position/{index_plan,t5,ids}.rs` | MRoPE axis selection, T5 displacement tables and bucket indices, and batched position IDs are in bounds and exact. |
 | `tokenization.rs` | `src/tokenization/{layout,calendar}.rs` | Truncation budgets reserve exactly the template width; padding splits and masks are exact; calendar arithmetic for `strftime_now` is correct. |
 

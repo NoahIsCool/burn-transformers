@@ -19,6 +19,7 @@ mod packed_install;
 mod rounding;
 mod source;
 mod storage_order;
+mod tiles;
 mod transform;
 
 use std::{
