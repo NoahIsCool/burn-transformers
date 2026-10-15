@@ -78,3 +78,38 @@ fn auxiliary_second_row_rewind_failure_preserves_both_banks() {
         }
     }
 }
+
+/// Batch-size-free constructors match the explicit ones.
+#[test]
+fn config_only_constructors_derive_the_batch_size() {
+    let config = CacheConfig::new(3, 5).expect("valid config");
+    let state = TensorDecodeState::<TestBackend>::with_config(config, &Default::default());
+    assert_eq!(state.batch_size(), 3);
+    assert_eq!(state.lengths(), &[0, 0, 0]);
+    let bank = TensorCacheBank::<TestBackend>::with_config(config, &Default::default());
+    assert_eq!(bank.batch_size(), 3);
+    assert_eq!(bank.config(), config);
+}
+
+/// The public metadata view reflects the tensor transaction instead of hiding it.
+#[test]
+fn metadata_view_reports_the_tensor_transaction() {
+    let config = CacheConfig::new(2, 8).expect("valid config");
+    let mut state = TensorDecodeState::<TestBackend>::with_config(config, &Default::default());
+    let spec = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::Full, DType::F32)
+        .expect("geometry")
+        .with_staging_capacity(2);
+    state.main_mut().add_native_kv(spec).expect("cache");
+    state.advance(&[3, 1]).expect("prefill");
+    let mark = state.begin_transaction().expect("transaction");
+    assert!(state.metadata().has_active_transaction());
+    assert_eq!(mark.baseline_lengths(), &[3, 1]);
+    assert_eq!(mark.mtp_baseline_lengths(), None);
+    state.advance(&[1, 2]).expect("proposal");
+    assert_eq!(state.metadata().lengths(), &[3, 1]);
+    assert_eq!(state.metadata().working_lengths(), &[4, 3]);
+    assert_eq!(state.working_lengths(), &[4, 3]);
+    state.rollback(mark).expect("rollback");
+    assert!(!state.metadata().has_active_transaction());
+    assert_eq!(state.working_lengths(), &[3, 1]);
+}

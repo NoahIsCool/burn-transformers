@@ -4,9 +4,9 @@ use super::*;
 use crate::cache::{CacheConfig, DecodeStateError};
 
 /// Builds a two-row transaction fixture from explicit baseline lengths.
-fn state(lengths: [usize; 2]) -> DecodeState {
+fn state(lengths: [usize; 2]) -> SequenceLengths {
     let config = CacheConfig::new(2, 32).expect("valid config");
-    DecodeState::from_lengths(config, lengths.to_vec()).expect("valid state")
+    SequenceLengths::from_lengths(config, lengths.to_vec()).expect("valid state")
 }
 
 /// Restores every baseline length after speculative appends are rolled back.
@@ -75,7 +75,7 @@ fn invalid_commit_is_atomic_and_can_be_rolled_back() {
     let mark = state.mark().expect("starts transaction");
     let rollback_mark = mark.clone();
     state.advance_all(&[2, 4]).expect("speculative append");
-    let speculative = state.lengths().to_vec();
+    let speculative = state.working_lengths().to_vec();
 
     assert_eq!(
         state.commit_prefix_per_sequence(mark, &[1, 5]),
@@ -87,7 +87,8 @@ fn invalid_commit_is_atomic_and_can_be_rolled_back() {
             }
         ))
     );
-    assert_eq!(state.lengths(), speculative);
+    assert_eq!(state.working_lengths(), speculative);
+    assert_eq!(state.lengths(), &[3, 7]);
     assert!(state.has_active_transaction());
     state
         .rollback(rollback_mark)

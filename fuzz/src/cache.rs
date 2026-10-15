@@ -2,7 +2,7 @@
 
 use std::num::NonZeroUsize;
 use transformers::cache::{
-    CacheConfig, CacheMark, DecodeState, TransactionalCache, plan_ring_write,
+    CacheConfig, CacheMark, SequenceLengths, TransactionalCache, plan_ring_write,
     plan_staged_ring_transaction,
 };
 
@@ -39,7 +39,7 @@ pub fn exercise(input: &[u8]) {
     let mut bytes = crate::Bytes::new(input);
     let batch = usize::from(bytes.byte() % 4) + 1;
     let capacity = usize::from(bytes.byte() % 32) + 1;
-    let mut state = DecodeState::new(CacheConfig::new(batch, capacity).unwrap());
+    let mut state = SequenceLengths::new(CacheConfig::new(batch, capacity).unwrap());
     let mut expected = vec![0_usize; batch];
     let mut active: Option<(CacheMark, Vec<usize>)> = None;
     let mut stale: Option<CacheMark> = None;
@@ -167,7 +167,11 @@ pub fn exercise(input: &[u8]) {
                 false
             }
         };
-        assert_eq!(state.lengths(), expected);
+        // `expected` follows the working cursor; committed lengths stay at the
+        // transaction baseline until a commit.
+        assert_eq!(state.working_lengths(), expected);
+        let committed = active.as_ref().map_or(&expected, |(_, baseline)| baseline);
+        assert_eq!(state.lengths(), committed.as_slice());
         assert_eq!(state.has_active_transaction(), active.is_some());
         assert!(expected.iter().all(|&length| length <= capacity));
         if !success {

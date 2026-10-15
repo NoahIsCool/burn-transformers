@@ -80,10 +80,18 @@ impl CacheConfig {
         self.sliding_window
     }
 
-    /// Returns the number of physical time slots needed per cache tensor.
+    /// Returns the window width when one is configured, else the logical capacity.
     ///
-    /// Global layers allocate the full logical capacity. Local layers need
-    /// only the sliding-window width when using ring-buffer storage.
+    /// This is the slot count of a *standard sliding ring* under this config.
+    /// It is not the allocation of every group: full storage allocates the
+    /// whole capacity even when a window is configured, a mirrored ring
+    /// allocates twice its window, and a group may carry its own window. Use
+    /// [`NativeKvCacheSpec::committed_time_slots`] for the exact extent.
+    ///
+    /// [`NativeKvCacheSpec::committed_time_slots`]: super::NativeKvCacheSpec::committed_time_slots
+    #[deprecated(
+        note = "ambiguous across storage modes; use NativeKvCacheSpec::committed_time_slots"
+    )]
     #[must_use]
     pub const fn physical_capacity(self) -> usize {
         match self.sliding_window {

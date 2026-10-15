@@ -17,6 +17,8 @@
 //! into the committed ring.
 
 mod config;
+mod lengths;
+mod retention;
 mod ring;
 mod state;
 pub mod tensor;
@@ -29,7 +31,7 @@ pub use ring::{
     plan_mirrored_ring_write, plan_ring_read, plan_ring_write, plan_staged_ring_transaction,
     sliding_window_range,
 };
-pub use state::{DecodeState, DecodeStateError, LengthTransition};
+pub use state::{DecodeState, DecodeStateError, LengthTransition, SequenceLengths};
 pub use tensor::{
     KvCacheRead, KvCacheReadSegment, KvCacheStorage, NativeKvCache, NativeKvCacheSpec,
     RecurrentBatchStateRead, RecurrentStateCache, RecurrentStateRead, RecurrentStateSpec,

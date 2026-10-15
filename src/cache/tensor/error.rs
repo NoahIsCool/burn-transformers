@@ -55,6 +55,19 @@ pub enum TensorCacheError {
         storage: &'static str,
     },
 
+    /// A group-specific sliding window is incompatible with its storage or capacity.
+    #[error("invalid {storage} sliding window {window} for logical capacity {capacity}: {reason}")]
+    InvalidSlidingWindow {
+        /// Human-readable storage mode.
+        storage: &'static str,
+        /// Requested group window.
+        window: usize,
+        /// Logical capacity of the owning bank.
+        capacity: usize,
+        /// Violated rule.
+        reason: &'static str,
+    },
+
     /// Doubling a mirrored ring width overflowed `usize`.
     #[error("mirrored ring width 2 * {window} overflows usize")]
     MirroredCapacityOverflow {

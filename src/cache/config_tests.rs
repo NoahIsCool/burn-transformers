@@ -28,6 +28,7 @@ fn validates_sliding_window() {
 
 /// Distinguishes absolute context capacity from retained physical slots.
 #[test]
+#[allow(deprecated)] // Keeps the deprecated standard-ring helper's contract covered.
 fn reports_logical_and_physical_capacity() {
     let global = CacheConfig::new(3, 128).expect("valid config");
     assert_eq!(global.sequence_count(), 3);

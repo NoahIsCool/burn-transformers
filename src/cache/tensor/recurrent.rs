@@ -11,9 +11,10 @@ use core::num::NonZeroUsize;
 
 use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
+use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
 
-use super::kv::{selection_tensor, validate_batch, validate_reorder_indices};
+use super::kv::validate_batch;
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
@@ -974,21 +975,23 @@ impl<B: Backend> RecurrentStateCache<B> {
     }
 
     /// Rejects every non-zero intermediate recurrent rewind.
+    ///
+    /// The decode state has already rejected extensions. A terminal state can
+    /// only stay unchanged or restart from zero (the Verus-verified
+    /// `first_inexact_recurrent_rewind`).
     pub(crate) fn validate_truncate(
         &self,
         current: &[usize],
         requested: &[usize],
     ) -> TensorCacheResult<()> {
-        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
-            if to < from && to != 0 {
-                return Err(TensorCacheError::UnsafeRecurrentTruncate {
-                    sequence,
-                    current: from,
-                    requested: to,
-                });
-            }
+        match first_inexact_recurrent_rewind(current, requested) {
+            None => Ok(()),
+            Some(sequence) => Err(TensorCacheError::UnsafeRecurrentTruncate {
+                sequence,
+                current: current[sequence],
+                requested: requested[sequence],
+            }),
         }
-        Ok(())
     }
 
     /// Restores the exact initial state for rows truncated to zero.
@@ -1130,30 +1133,25 @@ impl<B: Backend> RecurrentStateCache<B> {
         self.staging_active = false;
     }
 
-    /// Reorders or duplicates every recurrent batch row.
-    pub(crate) fn reorder(&mut self, indices: &[usize]) -> TensorCacheResult<()> {
-        if self.staging_active {
-            return Err(TensorCacheError::TransactionActive {
-                operation: "reorder recurrent state",
-            });
-        }
-        validate_reorder_indices(indices, self.config.sequence_count())?;
-        let selection = selection_tensor::<B>(indices, &self.device)?;
+    /// Reorders or duplicates the committed recurrent batch rows.
+    ///
+    /// `selection` holds source rows already validated by the decode state.
+    /// Outside a transaction the snapshot tensors are unreachable scratch
+    /// space (every staged length is zero), so only committed state moves;
+    /// gathering `[batch, proposal, ...]` snapshots would cost `1 + S` times
+    /// the committed state for no observable effect.
+    pub(crate) fn reorder_rows(&mut self, selection: &Tensor<B, 1, Int>) {
+        debug_assert!(!self.staging_active);
+        debug_assert!(
+            self.staged_lengths
+                .iter()
+                .flatten()
+                .all(|&length| length == 0)
+        );
         for state in &mut self.layers {
-            select_batch_4(&mut state.matrix, &selection);
-            select_batch_3(&mut state.convolution, &selection);
-            if let Some(tensor) = &mut state.staged_matrix {
-                select_batch_5(tensor, &selection);
-            }
-            if let Some(tensor) = &mut state.staged_convolution {
-                select_batch_4(tensor, &selection);
-            }
+            select_batch_4(&mut state.matrix, selection);
+            select_batch_3(&mut state.convolution, selection);
         }
-        for lengths in &mut self.staged_lengths {
-            let old = lengths.clone();
-            *lengths = indices.iter().map(|&index| old[index]).collect();
-        }
-        Ok(())
     }
 
     /// Returns a checked immutable layer reference.
@@ -1496,11 +1494,6 @@ fn select_batch_3<B: Backend>(tensor: &mut Tensor<B, 3>, indices: &Tensor<B, 1, 
 
 /// Applies a batch gather to a rank-four state tensor.
 fn select_batch_4<B: Backend>(tensor: &mut Tensor<B, 4>, indices: &Tensor<B, 1, Int>) {
-    tensor.inplace(|value| value.select(0, indices.clone()));
-}
-
-/// Applies a batch gather to a rank-five state tensor.
-fn select_batch_5<B: Backend>(tensor: &mut Tensor<B, 5>, indices: &Tensor<B, 1, Int>) {
     tensor.inplace(|value| value.select(0, indices.clone()));
 }
 
