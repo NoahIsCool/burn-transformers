@@ -61,7 +61,10 @@ use super::{
 };
 use crate::models::qwen3_5::{
     Qwen3_5LayerType, Qwen3_5TextConfig,
-    plan::{self, shifted_mtp_length},
+    plan::{
+        self, StagingFault, call_rotary_context, first_staging_overflow, first_token_at_or_above,
+        shifted_mtp_lengths, staging_requirement,
+    },
 };
 
 /// Single native-KV group within either the target or MTP cache bank.
@@ -384,11 +387,8 @@ impl<B: Backend> ArchitectureDecodeState<B> for Qwen3_5DecodeState<B> {
                 .into(),
             );
         }
-        let mtp_lengths = lengths
-            .iter()
-            .zip(current_mtp)
-            .map(|(&target, &mtp)| shifted_mtp_length(target, mtp))
-            .collect::<Vec<_>>();
+        // Verified: row `b` keeps exactly `min(mtp_b, target_b - 1)` entries.
+        let mtp_lengths = shifted_mtp_lengths(lengths, current_mtp);
         self.tensors
             .truncate_prefixes(lengths, &mtp_lengths)
             .map_err(Into::into)
@@ -490,15 +490,21 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                     .into(),
             ));
         }
-        let staging = max_draft_tokens
-            .checked_add(1)
-            .ok_or_else(|| Error::Generation("Qwen MTP staging capacity overflows usize".into()))?;
-        if staging > config.capacity() {
-            return Err(Error::Generation(format!(
-                "Qwen MTP needs staging capacity {staging}, exceeding cache capacity {}",
-                config.capacity()
-            )));
-        }
+        // Verified: the staging capacity is exactly `K + 1` and fits the cache.
+        let staging = match staging_requirement(max_draft_tokens, config.capacity()) {
+            Ok(staging) => staging,
+            Err(StagingFault::Overflow) => {
+                return Err(Error::Generation(
+                    "Qwen MTP staging capacity overflows usize".into(),
+                ));
+            }
+            Err(StagingFault::ExceedsAvailable { required }) => {
+                return Err(Error::Generation(format!(
+                    "Qwen MTP needs staging capacity {required}, exceeding cache capacity {}",
+                    config.capacity()
+                )));
+            }
+        };
         Qwen3_5DecodeState::new_with_staging(self, config, batch_size, staging, device)
     }
 
@@ -542,11 +548,11 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         state: &mut Qwen3_5DecodeState<B>,
     ) -> Result<Qwen3_5MtpPrediction<B>> {
         let vocabulary = self.config().vocab_size;
-        if let Some(&token) = tokens.iter().find(|&&token| token as usize >= vocabulary) {
+        if let Some(index) = first_token_at_or_above(tokens, vocabulary) {
             return Err(Error::shape(
                 INPUT_NAMES.token_ids,
                 format!("token values in 0..{vocabulary}"),
-                token.to_string(),
+                tokens[index].to_string(),
             ));
         }
         let values = tokens.iter().copied().map(i64::from).collect::<Vec<_>>();
@@ -818,12 +824,9 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             None => layout.cache_positions().clone(),
         };
         // Every active context is within the cacheable range, where rotary
-        // frequencies do not depend on the context, so the largest serves all rows.
-        let context = rows
-            .active_contexts()
-            .map(|(_, context)| context)
-            .max()
-            .unwrap_or(1);
+        // frequencies do not depend on the context, so the largest serves all
+        // rows (verified: the maximum active context, or one).
+        let context = call_rotary_context(&rows.token_counts, &rows.evaluated_contexts);
         let pass = self.model.run_cached(
             tokens,
             positions,
@@ -1140,12 +1143,7 @@ fn cache_layout<B: Backend>(
         .iter()
         .map(|layer| layer.layer_type)
         .collect();
-    let schedule = cache_schedule(&layer_types);
-    let full_layers = schedule
-        .iter()
-        .filter(|slot| matches!(slot, Qwen3_5LayerCache::FullAttention(_)))
-        .count();
-    let delta_layers = schedule.len() - full_layers;
+    let (schedule, full_layers, delta_layers) = cache_schedule(&layer_types);
     let activation_dtype = model.model.embed_tokens.weight.val().dtype();
     let attention_spec = |layers: usize| {
         NativeKvCacheSpec::new(
@@ -1217,17 +1215,18 @@ fn cache_layout<B: Backend>(
 
 /// Maps each layer to a dense slot of its cache family, in schedule order.
 ///
+/// Returns the schedule and the full-attention and DeltaNet layer counts.
 /// The `k`th DeltaNet layer gets recurrent slot `k` and the `k`th
 /// full-attention layer native-KV slot `k`, so each family's slots are exactly
 /// `0..count` (the integer core, [`plan::cache_slots`], is verified in
-/// `verus/qwen.rs`).
-fn cache_schedule(layer_types: &[Qwen3_5LayerType]) -> Vec<Qwen3_5LayerCache> {
+/// `verus/qwen.rs`, including that the counts are exactly the family sizes).
+fn cache_schedule(layer_types: &[Qwen3_5LayerType]) -> (Vec<Qwen3_5LayerCache>, usize, usize) {
     let full_attention = layer_types
         .iter()
         .map(|layer_type| *layer_type == Qwen3_5LayerType::FullAttention)
         .collect::<Vec<_>>();
     let slots = plan::cache_slots(&full_attention);
-    full_attention
+    let schedule = full_attention
         .iter()
         .zip(slots.slots)
         .map(|(&full, slot)| {
@@ -1237,7 +1236,8 @@ fn cache_schedule(layer_types: &[Qwen3_5LayerType]) -> Vec<Qwen3_5LayerCache> {
                 Qwen3_5LayerCache::DeltaNet(slot)
             }
         })
-        .collect()
+        .collect();
+    (schedule, slots.full, slots.recurrent)
 }
 
 /// Rejects a transactional call that would stage more tokens than a row can hold.
@@ -1254,20 +1254,19 @@ fn ensure_staging_room<B: Backend>(
     if !tensors.has_active_transaction() {
         return Ok(());
     }
-    for ((&committed, &working), &count) in tensors
-        .lengths()
-        .iter()
-        .zip(tensors.working_lengths())
-        .zip(token_counts)
-    {
-        let requested = (working - committed).saturating_add(count);
-        if requested > staging_capacity {
-            return Err(TensorCacheError::StagingCapacityExceeded {
-                requested,
-                capacity: staging_capacity,
-            }
-            .into());
+    // Verified: the first row whose saturating request `(W_b - C_b) + n_b`
+    // exceeds the capacity; the cache ledger keeps `C_b <= W_b`.
+    if let Some((_, requested)) = first_staging_overflow(
+        tensors.lengths(),
+        tensors.working_lengths(),
+        token_counts,
+        staging_capacity,
+    ) {
+        return Err(TensorCacheError::StagingCapacityExceeded {
+            requested,
+            capacity: staging_capacity,
         }
+        .into());
     }
     Ok(())
 }

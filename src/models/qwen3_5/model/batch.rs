@@ -44,7 +44,13 @@ use crate::{
     },
 };
 
-use crate::models::{qwen3_5::plan::compact_row_plan, shared::select_hidden_with_last_columns};
+use crate::models::{
+    qwen3_5::plan::{
+        all_equal, columns_below, compact_row_plan, prefix_rows, row_counts, signed_index,
+        slot_positions, slot_validity, strictly_increasing, widest,
+    },
+    shared::select_hidden_with_last_columns,
+};
 
 /// Compact right-padded layout of one stateful call, built once per call.
 #[derive(Debug, Clone)]
@@ -96,18 +102,18 @@ impl<B: Backend> CompactBatch<B> {
                 format!("{} working lengths", starts.len()),
             ));
         }
-        if valid_columns
-            .iter()
-            .any(|columns| columns.iter().any(|&column| column >= sequence))
-        {
+        // The host plan below is verified in `verus/qwen.rs`: each helper
+        // returns exactly the predicate, count, width, flag, or position its
+        // documentation states.
+        if !columns_below(valid_columns, sequence) {
             return Err(Error::shape(
                 "compact_batch.valid_columns",
                 format!("columns below {sequence}"),
                 format!("{valid_columns:?}"),
             ));
         }
-        let counts: Vec<usize> = valid_columns.iter().map(Vec::len).collect();
-        let width = counts.iter().copied().max().unwrap_or(0);
+        let counts = row_counts(valid_columns);
+        let width = widest(&counts);
         if width == 0 {
             return Err(Error::shape(
                 "compact_batch.token_counts",
@@ -115,12 +121,7 @@ impl<B: Backend> CompactBatch<B> {
                 "only fully masked rows",
             ));
         }
-        let prefix = valid_columns.iter().all(|columns| {
-            columns
-                .iter()
-                .enumerate()
-                .all(|(slot, &column)| slot == column)
-        });
+        let prefix = prefix_rows(valid_columns);
         let index = |values: Vec<i64>, columns: usize| {
             Tensor::<B, 2, Int>::from_data(TensorData::new(values, [batch, columns]), device)
         };
@@ -130,44 +131,35 @@ impl<B: Backend> CompactBatch<B> {
             let mut sources = Vec::with_capacity(batch * width);
             let mut slots = Vec::with_capacity(batch * sequence);
             for columns in valid_columns {
-                if !columns.windows(2).all(|pair| pair[0] < pair[1]) {
+                if !strictly_increasing(columns) {
                     return Err(Error::shape(
                         "compact_batch.valid_columns",
                         "strictly increasing columns",
                         format!("{columns:?}"),
                     ));
                 }
-                // Verified in `verus/qwen.rs`: slot k reads column c_k,
-                // padding slots read a valid column of their row (column 0
-                // for an inactive row), and restoring maps c_k back to k and
-                // every other column to the zero slot `width`.
+                // The checks above establish the plan's preconditions: slot k
+                // reads column c_k, padding slots read a valid column of
+                // their row (column 0 for an inactive row), and restoring
+                // maps c_k back to k and every other column to the zero slot
+                // `width`.
                 let plan = compact_row_plan(columns, sequence, width);
-                sources.extend(plan.sources.into_iter().map(signed));
-                slots.extend(plan.slots.into_iter().map(signed));
+                sources.extend(plan.sources.into_iter().map(signed_index));
+                slots.extend(plan.slots.into_iter().map(signed_index));
             }
             (Some(index(sources, width)), Some(index(slots, sequence)))
         };
-        let valid = counts.iter().any(|&count| count < width).then(|| {
-            let flags = counts
-                .iter()
-                .flat_map(|&count| (0..width).map(move |slot| slot < count))
-                .collect::<Vec<_>>();
-            Tensor::<B, 2, Bool>::from_data(TensorData::new(flags, [batch, width]), device)
+        let valid = slot_validity(&counts, width).map(|rows| {
+            Tensor::<B, 2, Bool>::from_data(TensorData::new(rows.concat(), [batch, width]), device)
         });
-        let mut positions = Vec::with_capacity(batch * width);
-        for &start in starts {
-            for slot in 0..width {
-                let position = start
-                    .checked_add(slot)
-                    .and_then(|value| i64::try_from(value).ok());
-                positions.push(position.ok_or_else(|| {
-                    Error::configuration(
-                        "compact_batch.cache_positions",
-                        "a cache position exceeds the signed index range",
-                    )
-                })?);
-            }
-        }
+        let positions = slot_positions(starts, width)
+            .ok_or_else(|| {
+                Error::configuration(
+                    "compact_batch.cache_positions",
+                    "a cache position exceeds the signed index range",
+                )
+            })?
+            .concat();
         Ok(Self {
             sequence,
             width,
@@ -190,7 +182,7 @@ impl<B: Backend> CompactBatch<B> {
     /// Then every cached key is valid for every row and causality is exactly
     /// the bottom-right rule, so attention needs no explicit mask.
     pub(crate) fn is_uniform(&self) -> bool {
-        self.valid.is_none() && self.starts.windows(2).all(|pair| pair[0] == pair[1])
+        self.valid.is_none() && all_equal(&self.starts)
     }
 
     /// Returns the `[B, N]` cache position `W_b + i` of every slot.
@@ -286,7 +278,7 @@ impl<B: Backend> CompactBatch<B> {
         let slots = self
             .counts
             .iter()
-            .map(|&count| signed(count.saturating_sub(1)))
+            .map(|&count| signed_index(count.saturating_sub(1)))
             .collect::<Vec<_>>();
         let slots = Tensor::<B, 2, Int>::from_data(TensorData::new(slots, [batch, 1]), &device)
             .reshape([batch, 1, 1])
@@ -448,11 +440,6 @@ pub(crate) fn ensure_cacheable_rotary_context(
         ))),
         _ => Ok(()),
     }
-}
-
-/// Converts a host index to `i64`; indices come from in-memory vectors, so they fit.
-fn signed(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

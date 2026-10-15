@@ -263,10 +263,14 @@ impl Qwen3_5TextConfig {
     /// Returns the number of channels produced by a full-attention Q projection.
     ///
     /// Output-gated Qwen packs an equally sized gate beside Q, hence the factor of
-    /// two. For Qwen3.8-27B this is `24 * 256 * 2 = 12_288` channels.
+    /// two. For Qwen3.8-27B this is `24 * 256 * 2 = 12_288` channels. The
+    /// product is [`plan::gated_query_width`], verified in `verus/qwen.rs`.
     pub fn query_projection_width(&self) -> usize {
-        let gate_factor = if self.attn_output_gate { 2 } else { 1 };
-        self.num_attention_heads * self.head_dim * gate_factor
+        plan::gated_query_width(
+            self.num_attention_heads,
+            self.head_dim,
+            self.attn_output_gate,
+        )
     }
 }
 

@@ -57,6 +57,9 @@ use crate::{
 };
 
 use super::{Qwen3_5DecodeState, Qwen3_5ForCausalLm, decode::StatefulPhase};
+use crate::models::qwen3_5::plan::{
+    CycleFault, StagingFault, first_token_at_or_above, speculative_cycle_plan, staging_requirement,
+};
 
 /// XOR domain separating the draft sampling stream from target token sampling.
 const DRAFT_SEED_DOMAIN: u64 = 0x4452_4146_545f_5157;
@@ -539,10 +542,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
             ));
         }
         check_prompt_length(history_before_lead, prompt_length)?;
-        if history_before_lead
-            .iter()
-            .any(|&token| token as usize >= model.config().vocab_size)
-        {
+        if first_token_at_or_above(history_before_lead, model.config().vocab_size).is_some() {
             return Err(Error::shape(
                 "qwen.speculative.history",
                 format!("token values in 0..{}", model.config().vocab_size),
@@ -563,42 +563,52 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
                 format!("{:?}", hidden.dims()),
             ));
         }
-        let required_staging = self.config.max_draft_tokens.checked_add(1).ok_or_else(|| {
-            Error::Generation("Qwen MTP proposal capacity overflows usize".into())
-        })?;
-        if state.staging_capacity() < required_staging {
-            return Err(Error::Generation(format!(
-                "decode state staging capacity {} is below required {}",
-                state.staging_capacity(),
-                required_staging
-            )));
-        }
+        // Verified: the cycle stages exactly `K + 1` tokens, within the state's staging.
+        let required_staging =
+            match staging_requirement(self.config.max_draft_tokens, state.staging_capacity()) {
+                Ok(required) => required,
+                Err(StagingFault::Overflow) => {
+                    return Err(Error::Generation(
+                        "Qwen MTP proposal capacity overflows usize".into(),
+                    ));
+                }
+                Err(StagingFault::ExceedsAvailable { required }) => {
+                    return Err(Error::Generation(format!(
+                        "decode state staging capacity {} is below required {required}",
+                        state.staging_capacity()
+                    )));
+                }
+            };
         let target = state.tensor_state().lengths();
         let mtp = state.tensor_state().mtp_lengths().ok_or_else(|| {
             Error::Cache("Qwen speculative state has no independent MTP cursor".into())
         })?;
-        if target.len() != 1 || mtp.len() != 1 || mtp[0].checked_add(1) != Some(target[0]) {
-            return Err(Error::Cache(format!(
+        // Verified: batch one with `target = MTP + 1`, a history matching the
+        // target cursor, and a staged suffix that ends within the capacity.
+        let capacity = state.tensor_state().capacity();
+        match speculative_cycle_plan(
+            target,
+            mtp,
+            history_before_lead.len(),
+            required_staging,
+            capacity,
+        ) {
+            Ok(_) => Ok(()),
+            Err(CycleFault::Misaligned) => Err(Error::Cache(format!(
                 "Qwen speculative cache alignment requires target = MTP + 1, found target={target:?}, MTP={mtp:?}"
-            )));
-        }
-        if history_before_lead.len() != target[0] {
-            return Err(Error::shape(
+            ))),
+            Err(CycleFault::HistoryMismatch { expected }) => Err(Error::shape(
                 "qwen.speculative.history",
-                format!("{} tokens matching the target-cache cursor", target[0]),
+                format!("{expected} tokens matching the target-cache cursor"),
                 format!("{} tokens", history_before_lead.len()),
-            ));
+            )),
+            Err(CycleFault::Overflow) => Err(Error::Generation(
+                "target speculative length overflows usize".into(),
+            )),
+            Err(CycleFault::ExceedsCapacity { requested }) => Err(Error::Generation(format!(
+                "speculative target suffix reaches {requested}, exceeding cache capacity {capacity}"
+            ))),
         }
-        let requested = target[0]
-            .checked_add(required_staging)
-            .ok_or_else(|| Error::Generation("target speculative length overflows usize".into()))?;
-        if requested > state.tensor_state().capacity() {
-            return Err(Error::Generation(format!(
-                "speculative target suffix reaches {requested}, exceeding cache capacity {}",
-                state.tensor_state().capacity()
-            )));
-        }
-        Ok(())
     }
 
     /// Returns whether a token terminates ordinary generation.
