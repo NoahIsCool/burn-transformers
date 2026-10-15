@@ -2,10 +2,11 @@
 //!
 //! A stateful call supplies a `[batch, S]` rectangle whose row `b` has valid
 //! columns `c_{b,0} < … < c_{b,n_b-1}` (`n_b = 0` marks an inactive decode
-//! row). The batched decoder evaluates a right-aligned `[batch, Q]` block with
+//! row). The batched decoder evaluates a left-aligned `[batch, Q]` block with
 //! `Q = max_b n_b`: slot `(b, i)` holds row `b`'s `i`-th valid token for
-//! `i < n_b` and padding otherwise, so every row's new tokens occupy columns
-//! `0..n_b`, exactly the layout the cache's batched append expects.
+//! `i < n_b` and padding for `n_b <= i < Q`, so every row's new tokens occupy
+//! columns `0..n_b` with padding after them, exactly the layout the cache's
+//! batched append expects (slot `i` is written to cache position `L_b + i`).
 //!
 //! Packing and unpacking are gathers over flattened row-major indices:
 //!

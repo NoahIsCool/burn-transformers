@@ -11,9 +11,10 @@
 //!
 //! A call appends `n_b` valid tokens to row `b`, whose committed length is
 //! `L_b` (`n_b = 0` marks a finished row during decode). The valid tokens of
-//! every row are packed right-aligned into one `[batch, Q]` block,
-//! `Q = max_b n_b` (see [`super::packing`]), and the whole block runs through
-//! the shared block graph once:
+//! every row are packed left-aligned into one `[batch, Q]` block,
+//! `Q = max_b n_b`: row `b`'s new tokens fill slots `0..n_b` in order and
+//! padding fills slots `n_b..Q` (see [`super::packing`]). The whole block runs
+//! through the shared block graph once:
 //!
 //! - each layer writes its new keys and values *ahead* into cache slots
 //!   `[L_b, L_b + n_b)` and attends over the zero-copy view of slots

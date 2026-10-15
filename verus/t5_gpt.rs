@@ -5,7 +5,8 @@
 //! stateful decoding:
 //!
 //! - `compaction_sources`: the flat gather that packs every row's valid tokens
-//!   right-aligned into a `[batch, Q]` block never overflows, has exactly
+//!   left-aligned into a `[batch, Q]` block (row `b`'s tokens in slots
+//!   `0..n_b`, padding after them) never overflows, has exactly
 //!   `batch * Q` entries, and addresses only elements of the `[batch, S]`
 //!   input.
 //! - `scatter_sources`: the flat gather that restores the `[batch, S]` layout
