@@ -14,6 +14,17 @@
 //! Parameters never own generation state. [`NemotronHDecodeState`] combines a
 //! native KV bank for attention blocks and recurrent matrix/convolution banks for
 //! Mamba2 blocks. Stateless paths stay differentiable for training v2.
+//!
+//! # Submodules
+//!
+//! - `decode`: batched stateful prefill/decode, one model pass per call over
+//!   a right-padded compact batch (`batch` realizes, and `plan` plans and
+//!   verifies, its index maps);
+//! - `mtp` and `speculative`: the shifted MTP stage and lossless speculation
+//!   that verifies a whole draft in one target pass;
+//! - `hooks`: activation points, [`HookedModel`](crate::architecture::HookedModel),
+//!   and [`StagedModel`](crate::architecture::StagedModel) for experiments;
+//! - `mamba2`: the family's names for the shared [`crate::mamba2`] mixer.
 
 use burn::{
     module::{Module, Param},

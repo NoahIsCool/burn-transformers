@@ -33,14 +33,13 @@
 //!
 //! # Atomicity
 //!
-//! Every cache update of a call is recorded in one
-//! [`TensorStepWrites`](crate::cache::TensorStepWrites) and published only
-//! after the whole forward pass and its outputs succeed. A failed call
-//! therefore leaves every length and every *readable* cache position
-//! unchanged; only slots beyond the committed lengths may hold the abandoned
-//! write-ahead keys, which no read can reach and the next write overwrites.
-//! Fully masked decode rows are exact no-ops; fully masked prefill rows are
-//! rejected.
+//! Every cache update of a call is recorded in one [`TensorStepWrites`] and
+//! published only after the whole forward pass and its outputs succeed. A
+//! failed call therefore leaves every length and every *readable* cache
+//! position unchanged; only slots beyond the committed lengths may hold the
+//! abandoned write-ahead keys, which no read can reach and the next write
+//! overwrites. Fully masked decode rows are exact no-ops; fully masked
+//! prefill rows are rejected.
 //!
 //! # Speculative transactions
 //!
