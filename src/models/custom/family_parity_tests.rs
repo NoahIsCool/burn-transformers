@@ -392,9 +392,11 @@ fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
 
 /// Serialized Hugging Face RoPE metadata of one scaled Qwen3-MoE fixture.
 ///
-/// Every case doubles the context. Linear and dynamic NTK use an original
-/// context of 8, which the explicit-position inputs (reaching position 19)
-/// exceed, so the context-dependent dynamic-NTK base grows. YaRN is static
+/// Every case doubles the context. Following Transformers 5.2, linear RoPE
+/// reads no original context and dynamic NTK scales against the family's
+/// `max_position_embeddings`. Qwen3-MoE rejects positions at or beyond that
+/// bound, so its dynamic-NTK base never grows: the case pins that the modular
+/// translation agrees, and the negative controls skip it. YaRN is static
 /// and uses an original context of 64: its correction range is then the
 /// fractional pair interval `[0.41, 1.01]`, truncated to `[0, 2]`, so the ramp
 /// blends pair 1 halfway between extrapolated and interpolated frequencies.
@@ -403,7 +405,7 @@ fn qwen3_moe_rope_parameters(rope_type: RopeType) -> RopeParameters {
     RopeParameters {
         rope_type,
         factor: Some(2.0),
-        original_max_position_embeddings: Some(if yarn { 64 } else { 8 }),
+        original_max_position_embeddings: yarn.then_some(64),
         attention_factor: yarn.then_some(1.25),
         beta_fast: yarn.then_some(4.0),
         beta_slow: yarn.then_some(1.0),
@@ -434,7 +436,7 @@ fn qwen3_moe_scaled_cases() -> [(RopeType, RopeScaling); 3] {
             RopeType::Dynamic,
             RopeScaling::DynamicNtk {
                 factor: 2.0,
-                original_max_positions: 8,
+                original_max_positions: QWEN3_MOE_MAX_POSITIONS,
             },
         ),
         (RopeType::Yarn, qwen3_moe_yarn(Some(1.25), true)),
@@ -457,15 +459,18 @@ fn qwen3_moe_rope_scaling_matches_the_family() {
 
 /// Negative controls: unscaled or near-miss modular RoPE is far outside the parity tolerance.
 ///
-/// Each scaled family is compared with an unscaled twin and with the
-/// near-misses a translation could plausibly make: a wrong linear factor, a
-/// dynamic-NTK original context too long to ever trigger within the inputs,
-/// untruncated YaRN correction bounds, and YaRN's default amplitude instead
-/// of the serialized one. Each must exceed [`DETECTABLE_GAP`], which proves
-/// [`qwen3_moe_rope_scaling_matches_the_family`] can detect it.
+/// Each statically scaled family is compared with an unscaled twin and with
+/// the near-misses a translation could plausibly make: a wrong linear factor,
+/// untruncated YaRN correction bounds, and YaRN's default amplitude instead of
+/// the serialized one. Each must exceed [`DETECTABLE_GAP`], which proves
+/// [`qwen3_moe_rope_scaling_matches_the_family`] can detect it. Dynamic NTK is
+/// excluded: within Qwen3-MoE's position bound it equals the unscaled model.
 #[test]
 fn qwen3_moe_rope_parity_detects_wrong_scaling() {
     for (rope_type, _) in qwen3_moe_scaled_cases() {
+        if rope_type == RopeType::Dynamic {
+            continue;
+        }
         let (family, custom) = qwen3_moe_pair(
             Some(qwen3_moe_rope_parameters(rope_type)),
             RopeScaling::None,
@@ -481,14 +486,6 @@ fn qwen3_moe_rope_parity_detects_wrong_scaling() {
             RopeType::Linear,
             RopeScaling::Linear { factor: 1.5 },
             "linear factor 1.5 instead of 2",
-        ),
-        (
-            RopeType::Dynamic,
-            RopeScaling::DynamicNtk {
-                factor: 2.0,
-                original_max_positions: 32,
-            },
-            "dynamic NTK original context 32 instead of 8",
         ),
         (
             RopeType::Yarn,
