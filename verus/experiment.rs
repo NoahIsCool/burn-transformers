@@ -1,4 +1,4 @@
-//! Verus harness for the experiment interface's pure index and bounds logic.
+//! Verus harness for the experiment and architecture interfaces' pure integer logic.
 //!
 //! Verifies, in place, the specifications attached to:
 //!
@@ -19,6 +19,15 @@
 //!   order. Each pairwise-reduction level partitions the row into added left
 //!   and right blocks plus the carried odd middle column (every column is read
 //!   exactly once), and the whole reduction takes exactly `ceil(log2 w)` levels.
+//! - `src/architecture/constraints.rs`: the integer rules of specification
+//!   validation. Head layouts are classified in precedence order (zero
+//!   dimension, then indivisible groups), and a valid layout maps every head
+//!   to an in-range group of exactly `heads / groups` members; Mamba2 group
+//!   sizes, routed-expert selection counts, MLA query-key width overflow (and
+//!   its saturating builder width), cross-attention projection sizes, and
+//!   stack dimensions are decided exactly. Group-preserving decode-state
+//!   reorders report the first row leaving its group, and an accepted reorder
+//!   of a full batch reads only in-bounds rows.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor slicing,
 //! edits, device readbacks, the conversion from semantic axes to dimensions,
@@ -34,3 +43,6 @@ pub mod selection;
 
 #[path = "../src/experiment/bounds.rs"]
 pub mod bounds;
+
+#[path = "../src/architecture/constraints.rs"]
+pub mod constraints;

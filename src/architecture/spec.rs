@@ -49,6 +49,11 @@
 //! yet executable by the modular models, whose `init` rejects them with a
 //! capability error before allocating parameters.
 
+use super::constraints::{
+    ExpertCheck, HeadCheck, MlaCheck, StackCheck, attention_heads, cross_projection_fits,
+    delta_net_heads, expert_counts, mamba2_dimensions, mla_dimensions, mla_qk_head_dim,
+    stack_dimensions,
+};
 use crate::{
     Error, Result,
     attention::{
@@ -660,17 +665,20 @@ impl AttentionSpec {
         options: &AttentionOptions,
         norm: NormalizationSpec,
     ) -> Result<()> {
-        if self.query_heads == 0 || self.key_value_heads == 0 || self.head_dim == 0 {
-            return Err(Error::configuration(
-                field,
-                "query_heads, key_value_heads, and head_dim must be non-zero",
-            ));
-        }
-        if !self.query_heads.is_multiple_of(self.key_value_heads) {
-            return Err(Error::configuration(
-                format!("{field}.key_value_heads"),
-                "must divide query_heads exactly",
-            ));
+        match attention_heads(self.query_heads, self.key_value_heads, self.head_dim) {
+            HeadCheck::ZeroDimension => {
+                return Err(Error::configuration(
+                    field,
+                    "query_heads, key_value_heads, and head_dim must be non-zero",
+                ));
+            }
+            HeadCheck::IndivisibleGroups => {
+                return Err(Error::configuration(
+                    format!("{field}.key_value_heads"),
+                    "must divide query_heads exactly",
+                ));
+            }
+            HeadCheck::Valid => {}
         }
         options.validate_against(self, &format!("{field}.options"))?;
         self.grouped_query_config(hidden_size, options, norm)
@@ -788,11 +796,7 @@ impl CrossAttentionSpec {
     /// [`Seq2SeqSpec`] stores the options in a sibling field, so its errors
     /// name `cross_attention_options.*` rather than `cross_attention.options.*`.
     fn validate_fields(&self, field: &str, options_field: &str, hidden_size: usize) -> Result<()> {
-        let projection_elements = self
-            .heads
-            .checked_mul(self.head_dim)
-            .and_then(|inner| inner.checked_mul(hidden_size));
-        if self.heads == 0 || self.head_dim == 0 || projection_elements.is_none() {
+        if !cross_projection_fits(self.heads, self.head_dim, hidden_size) {
             return Err(Error::configuration(
                 field,
                 "heads and head_dim must be non-zero, and hidden_size * heads * head_dim must fit in usize",
@@ -860,7 +864,7 @@ impl MlaSpec {
         config.rms_norm_epsilon = latent_norm_epsilon;
         // Validation rejects an overflowing sum first; saturation keeps this
         // builder total for unvalidated specs.
-        let qk_head_dim = self.content_head_dim.saturating_add(self.rotary_head_dim);
+        let qk_head_dim = mla_qk_head_dim(self.content_head_dim, self.rotary_head_dim);
         config.softmax_scale = self.score_scale.latent_scale(qk_head_dim);
         config
     }
@@ -872,27 +876,27 @@ impl MlaSpec {
         hidden_size: usize,
         norm: NormalizationSpec,
     ) -> Result<()> {
-        if self.query_heads == 0
-            || self.content_head_dim == 0
-            || self.rotary_head_dim == 0
-            || self.value_head_dim == 0
-            || self.key_value_lora_rank == 0
-            || self.query_lora_rank == Some(0)
-        {
-            return Err(Error::configuration(
-                field,
-                "MLA dimensions must be non-zero",
-            ));
-        }
-        if self
-            .content_head_dim
-            .checked_add(self.rotary_head_dim)
-            .is_none()
-        {
-            return Err(Error::configuration(
-                format!("{field}.head_dim"),
-                "MLA content and rotary dimensions overflow usize",
-            ));
+        match mla_dimensions(
+            self.query_heads,
+            self.content_head_dim,
+            self.rotary_head_dim,
+            self.value_head_dim,
+            self.key_value_lora_rank,
+            self.query_lora_rank,
+        ) {
+            MlaCheck::ZeroDimension => {
+                return Err(Error::configuration(
+                    field,
+                    "MLA dimensions must be non-zero",
+                ));
+            }
+            MlaCheck::HeadDimOverflow => {
+                return Err(Error::configuration(
+                    format!("{field}.head_dim"),
+                    "MLA content and rotary dimensions overflow usize",
+                ));
+            }
+            MlaCheck::Valid => {}
         }
         self.score_scale.validate(&format!("{field}.score_scale"))?;
         self.connectivity.validate().map_err(|error| {
@@ -1191,35 +1195,39 @@ impl MixerSpec {
                 value_head_dim,
                 convolution_kernel,
             } => {
-                if *key_heads == 0
-                    || *value_heads == 0
-                    || *key_head_dim == 0
-                    || *value_head_dim == 0
-                    || *convolution_kernel == 0
-                {
-                    return Err(Error::configuration(
-                        field,
-                        "DeltaNet dimensions must be non-zero",
-                    ));
-                }
-                if !value_heads.is_multiple_of(*key_heads) {
-                    return Err(Error::configuration(
-                        format!("{field}.value_heads"),
-                        "must be an integer multiple of key_heads",
-                    ));
+                match delta_net_heads(
+                    *key_heads,
+                    *value_heads,
+                    *key_head_dim,
+                    *value_head_dim,
+                    *convolution_kernel,
+                ) {
+                    HeadCheck::ZeroDimension => {
+                        return Err(Error::configuration(
+                            field,
+                            "DeltaNet dimensions must be non-zero",
+                        ));
+                    }
+                    HeadCheck::IndivisibleGroups => {
+                        return Err(Error::configuration(
+                            format!("{field}.value_heads"),
+                            "must be an integer multiple of key_heads",
+                        ));
+                    }
+                    HeadCheck::Valid => {}
                 }
                 self.delta_net_config(hidden_size, norm.epsilon())
                     .map_or(Ok(()), |config| config.validate())
                     .map_err(|error| nested(field, error))
             }
             Self::Mamba2(spec) => {
-                if spec.heads == 0
-                    || spec.head_dim == 0
-                    || spec.state_dim == 0
-                    || spec.convolution_kernel == 0
-                    || spec.group_size == 0
-                    || !spec.heads.is_multiple_of(spec.group_size)
-                {
+                if !mamba2_dimensions(
+                    spec.heads,
+                    spec.head_dim,
+                    spec.state_dim,
+                    spec.convolution_kernel,
+                    spec.group_size,
+                ) {
                     return Err(Error::configuration(
                         field,
                         "Mamba2 dimensions must be non-zero and group_size must divide heads",
@@ -1399,17 +1407,24 @@ impl FeedForwardSpec {
                     .map_err(|error| nested(field, error))
             }
             Self::MixtureOfExperts(spec) => {
-                if spec.routed_experts == 0 || spec.expert_intermediate_size == 0 {
-                    return Err(Error::configuration(
-                        field,
-                        "routed_experts and expert_intermediate_size must be non-zero",
-                    ));
-                }
-                if spec.experts_per_token == 0 || spec.experts_per_token > spec.routed_experts {
-                    return Err(Error::configuration(
-                        format!("{field}.experts_per_token"),
-                        "must be in 1..=routed_experts",
-                    ));
+                match expert_counts(
+                    spec.routed_experts,
+                    spec.experts_per_token,
+                    spec.expert_intermediate_size,
+                ) {
+                    ExpertCheck::Empty => {
+                        return Err(Error::configuration(
+                            field,
+                            "routed_experts and expert_intermediate_size must be non-zero",
+                        ));
+                    }
+                    ExpertCheck::SelectionOutOfRange => {
+                        return Err(Error::configuration(
+                            format!("{field}.experts_per_token"),
+                            "must be in 1..=routed_experts",
+                        ));
+                    }
+                    ExpertCheck::Valid => {}
                 }
                 if !spec.routed_scale.is_finite() || spec.routed_scale <= 0.0 {
                     return Err(Error::configuration(
@@ -1524,20 +1539,20 @@ pub struct DecoderSpec {
 impl DecoderSpec {
     /// Validates global dimensions and every layer specification.
     pub fn validate(&self) -> Result<()> {
-        if self.vocabulary_size == 0 {
-            return Err(Error::configuration("vocabulary_size", "must be non-zero"));
-        }
-        if self.hidden_size == 0 {
-            return Err(Error::configuration("hidden_size", "must be non-zero"));
-        }
-        if self.layers.is_empty() {
-            return Err(Error::configuration("layers", "must not be empty"));
-        }
-        if self.max_position_embeddings == 0 {
-            return Err(Error::configuration(
-                "max_position_embeddings",
-                "must be non-zero",
-            ));
+        let failure = match stack_dimensions(
+            self.vocabulary_size,
+            self.hidden_size,
+            self.layers.len(),
+            self.max_position_embeddings,
+        ) {
+            StackCheck::ZeroVocabulary => Some(("vocabulary_size", "must be non-zero")),
+            StackCheck::ZeroHidden => Some(("hidden_size", "must be non-zero")),
+            StackCheck::NoLayers => Some(("layers", "must not be empty")),
+            StackCheck::ZeroPositions => Some(("max_position_embeddings", "must be non-zero")),
+            StackCheck::Valid => None,
+        };
+        if let Some((field, reason)) = failure {
+            return Err(Error::configuration(field, reason));
         }
         self.final_norm.validate("final_norm")?;
         for (index, layer) in self.layers.iter().enumerate() {

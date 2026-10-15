@@ -26,6 +26,7 @@ use core::ops::Range;
 
 use burn::{module::Module, tensor::backend::Backend};
 
+use super::constraints::{GroupReorder, group_reorder};
 use crate::{
     Result,
     architecture::types::*,
@@ -76,7 +77,9 @@ pub trait DecodeState<B: Backend>: Send + core::fmt::Debug {
     /// instead of gathering it; mutable history is reordered as by
     /// [`Self::reorder`].
     ///
-    /// The default checks the grouping and delegates to [`Self::reorder`].
+    /// The default checks the grouping with a Verus-verified core, which also
+    /// proves that a group-preserving reorder of a full batch reads only
+    /// in-bounds rows, and delegates to [`Self::reorder`].
     ///
     /// # Errors
     ///
@@ -85,21 +88,16 @@ pub trait DecodeState<B: Backend>: Send + core::fmt::Debug {
     /// errors of [`Self::reorder`]. Nothing changes on error.
     fn reorder_within_groups(&mut self, indices: &[usize], group_size: usize) -> Result<()> {
         let batch = self.batch_size();
-        if group_size == 0 || !batch.is_multiple_of(group_size) {
-            return Err(crate::Error::Cache(format!(
+        match group_reorder(indices, group_size, batch) {
+            GroupReorder::InvalidGroupSize => Err(crate::Error::Cache(format!(
                 "group-preserving reorder needs a group size dividing batch {batch}, found {group_size}"
-            )));
+            ))),
+            GroupReorder::LeavesGroup { row } => Err(crate::Error::Cache(format!(
+                "reorder index {} for row {row} leaves its group of {group_size} rows",
+                indices[row]
+            ))),
+            GroupReorder::Preserved => self.reorder(indices),
         }
-        if let Some((row, &source)) = indices
-            .iter()
-            .enumerate()
-            .find(|&(row, &source)| source / group_size != row / group_size)
-        {
-            return Err(crate::Error::Cache(format!(
-                "reorder index {source} for row {row} leaves its group of {group_size} rows"
-            )));
-        }
-        self.reorder(indices)
     }
 
     /// Rolls each sequence back to a previously computed logical length.
