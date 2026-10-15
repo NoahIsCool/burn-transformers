@@ -5303,6 +5303,7 @@ version = "0.0.0"
 dependencies = [
  "burn",
  "libfuzzer-sys",
+ "safetensors 0.7.0",
  "serde",
  "serde_json",
  "tempfile",

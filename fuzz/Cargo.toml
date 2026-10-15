@@ -14,6 +14,8 @@ transformers = { path = "..", default-features = false, features = ["std", "flex
 burn = { version = "=0.21.0", default-features = false, features = ["std", "flex"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Official parser used as a differential oracle; the runtime crate pins the same release.
+safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }
 tempfile = "=3.27.0"
 
 [[bin]]
@@ -75,6 +77,13 @@ bench = false
 [[bin]]
 name = "rope_parameters"
 path = "fuzz_targets/rope_parameters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "safetensors_headers"
+path = "fuzz_targets/safetensors_headers.rs"
 test = false
 doc = false
 bench = false

@@ -22,6 +22,7 @@ pub mod generation;
 pub mod logits_processing;
 pub mod masks;
 pub mod rope_parameters;
+pub mod safetensors_headers;
 
 /// Maximum bytes consumed from any one fuzzer input.
 pub const MAX_INPUT_BYTES: usize = 4096;
