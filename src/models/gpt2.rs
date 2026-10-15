@@ -186,11 +186,14 @@ impl Gpt2Config {
     ///
     /// Following Hugging Face `GPT2PreTrainedModel._init_weights`: token and
     /// position embeddings and every Conv1D projection draw
-    /// `N(0, initializer_range^2)`, biases are zero, LayerNorm scales are one
-    /// and shifts zero, and the two projections that write into the residual
-    /// stream (attention `o_proj`, HF `attn.c_proj`, and MLP `down_proj`, HF
-    /// `mlp.c_proj`) use `initializer_range / sqrt(2 * n_layer)` so the
-    /// residual variance at initialization does not grow with depth. With the
+    /// `N(0, initializer_range^2)`, biases are zero, and LayerNorm scales are
+    /// one and shifts zero. Following the GPT-2 paper (and Transformers 4.x),
+    /// the two projections that write into the residual stream (attention
+    /// `o_proj`, HF `attn.c_proj`, and MLP `down_proj`, HF `mlp.c_proj`) use
+    /// `initializer_range / sqrt(2 * n_layer)`, so the residual variance at
+    /// initialization does not grow with depth. (The pinned Transformers 5
+    /// revision compares full parameter paths with `"c_proj.weight"`, which
+    /// no nested GPT-2 parameter matches, so it no longer scales them.) With the
     /// tied readout `LN(z) E^T`, `N(0, 0.02^2)` embeddings keep the initial
     /// logits near `0.02 * sqrt(n_embd)` (about 0.55 for GPT-2 small) instead
     /// of `sqrt(n_embd)` (about 28) for Burn's `N(0, 1)` default.
