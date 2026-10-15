@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 mod checkpoint;
 mod load;
 pub mod model;
+mod routing;
 
 pub use checkpoint::{
     NemotronHCheckpointContract, NemotronHCheckpointOptions, NemotronHCheckpointProvenance,
@@ -563,28 +564,34 @@ impl Validate for NemotronHConfig {
                 "n_group",
                 self.n_group,
             )?;
-            if self.n_routed_experts / self.n_group < 2 {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "n_group",
-                    "each router group must contain at least two experts for top-2 group scoring",
-                ));
-            }
-            let eligible_experts = (self.n_routed_experts / self.n_group)
-                .checked_mul(self.topk_group)
-                .ok_or_else(|| {
-                    ConfigError::new(
+            match routing::routing_groups(
+                self.n_routed_experts,
+                self.n_group,
+                self.topk_group,
+                self.num_experts_per_tok,
+            ) {
+                Ok(_) => {}
+                Err(routing::RoutingError::SmallGroups) => {
+                    return Err(ConfigError::new(
+                        FAMILY,
+                        "n_group",
+                        "each router group must contain at least two experts for top-2 group scoring",
+                    ));
+                }
+                Err(routing::RoutingError::EligibleOverflow) => {
+                    return Err(ConfigError::new(
                         FAMILY,
                         "topk_group",
                         "eligible expert count overflows usize",
-                    )
-                })?;
-            if self.topk_group > self.n_group || self.num_experts_per_tok > eligible_experts {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "num_experts_per_tok",
-                    "routing groups do not contain enough eligible experts",
-                ));
+                    ));
+                }
+                Err(routing::RoutingError::Insufficient) => {
+                    return Err(ConfigError::new(
+                        FAMILY,
+                        "num_experts_per_tok",
+                        "routing groups do not contain enough eligible experts",
+                    ));
+                }
             }
             positive_finite(FAMILY, "routed_scaling_factor", self.routed_scaling_factor)?;
         }

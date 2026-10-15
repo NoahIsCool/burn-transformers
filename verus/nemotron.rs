@@ -20,7 +20,11 @@
 //! cycle (target suffix, MTP pairs, MTP positions, staging reservation) is
 //! accepted exactly when `start + count <= limit`, each rejection names its
 //! cause, and the shifted alignment `L_target = L_mtp + 1` is checked
-//! exactly. The planning file reuses the shared strictly-increasing check, so
+//! exactly. Finally it verifies `src/models/nemotron_h/routing.rs`: the
+//! configuration's group-limited routing check accepts exactly the feasible
+//! configurations, reports the eligible expert count, never divides by zero,
+//! and (for evenly divided experts) never lets a token request more experts
+//! than exist. The planning file reuses the shared strictly-increasing check, so
 //! the shared planning module is included at its crate path. See
 //! `verus/README.md` for the method, toolchain, and command.
 //!
@@ -49,3 +53,6 @@ pub mod plan;
 
 #[path = "../src/models/nemotron_h/model/cycle.rs"]
 pub mod cycle;
+
+#[path = "../src/models/nemotron_h/routing.rs"]
+pub mod routing;
