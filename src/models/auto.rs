@@ -35,7 +35,9 @@ use super::{
     qwen3_moe::{Qwen3MoeConfig, Qwen3MoeDecodeState, Qwen3MoeForCausalLm},
     t5::{T5Config, T5DecodeState, T5ForConditionalGeneration},
 };
-use crate::models::config::ModelConfig;
+use crate::models::config::{
+    ConfigError, ConfigLoadError, ModelConfig, Validate, parse_text_config,
+};
 
 /// Local artifact loading and generation-default normalization for registry models.
 mod load;
@@ -880,15 +882,38 @@ impl<B: Backend> From<T5ForConditionalGeneration<B>> for AutoSeq2SeqLm<B> {
     }
 }
 
+/// Text configuration selected exactly as a family parser would select it.
+///
+/// Parsing goes through [`parse_text_config`], the path every family
+/// `from_json_str` takes, so wrapper selection (`text_config`,
+/// `language_config`, `llm_config`) and normalization of NVIDIA's legacy bare
+/// `Infinity` literal cannot drift between family detection and family
+/// parsing.
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+struct SelectedTextConfig(
+    /// The selected nested or direct configuration object.
+    serde_json::Value,
+);
+
+impl Validate for SelectedTextConfig {
+    /// Detection checks only the discriminator, after selection.
+    fn validate(&self) -> core::result::Result<(), ConfigError> {
+        Ok(())
+    }
+}
+
 /// Extracts the architecture discriminator from direct or text-wrapped JSON.
 pub(super) fn detect_model_type(json: &str) -> Result<String> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
-        Error::configuration("auto.config_json", format!("invalid JSON: {error}"))
-    })?;
-    let candidate = ["text_config", "language_config", "llm_config"]
-        .iter()
-        .find_map(|key| value.get(*key).filter(|nested| !nested.is_null()))
-        .unwrap_or(&value);
+    let SelectedTextConfig(candidate) =
+        parse_text_config::<SelectedTextConfig>(json).map_err(|error| match error {
+            ConfigLoadError::Json(error) => {
+                Error::configuration("auto.config_json", format!("invalid JSON: {error}"))
+            }
+            ConfigLoadError::Validation(error) => {
+                Error::configuration("auto.config_json", error.to_string())
+            }
+        })?;
     candidate
         .get("model_type")
         .and_then(serde_json::Value::as_str)

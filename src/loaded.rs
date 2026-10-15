@@ -7,9 +7,13 @@
 //! revision while executing another model. The bundle performs no network I/O;
 //! [`ModelSourceMetadata`] canonicalizes an already-present local directory.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     Error, GenerationConfig, Result,
@@ -182,6 +186,8 @@ pub struct LoadedModelParts<M> {
     pub execution_stats: Option<ExecutionStats>,
     /// Burnpack preflight, decode, and provenance counters of a quantized load.
     pub quantized_load_audit: Option<QuantizedLoadAudit>,
+    /// Checkpoint generation settings that change Hugging Face generation but were not applied.
+    pub unsupported_generation_settings: BTreeMap<String, Value>,
 }
 
 impl<M> From<LoadedModel<M>> for LoadedModelParts<M> {
@@ -208,6 +214,8 @@ pub struct LoadedModel<M> {
     execution_stats: Option<ExecutionStats>,
     /// Additional Burnpack validation and provenance work when applicable.
     quantized_load_audit: Option<QuantizedLoadAudit>,
+    /// `generation_config.json` settings with no equivalent in [`GenerationConfig`].
+    unsupported_generation_settings: BTreeMap<String, Value>,
 }
 
 impl<M> LoadedModel<M> {
@@ -353,7 +361,23 @@ impl<M> LoadedModel<M> {
             load_report,
             execution_stats,
             quantized_load_audit,
+            unsupported_generation_settings: BTreeMap::new(),
         })
+    }
+
+    /// Records checkpoint generation settings that this crate could not apply.
+    ///
+    /// Automatic loaders call this with the behavior-changing keys of
+    /// `generation_config.json` (beam search, `min_p`, `max_length`, ...) whose
+    /// values differ from Hugging Face's neutral defaults, so callers can see
+    /// where generation may diverge from the reference implementation.
+    #[must_use]
+    pub fn with_unsupported_generation_settings(
+        mut self,
+        settings: BTreeMap<String, Value>,
+    ) -> Self {
+        self.unsupported_generation_settings = settings;
+        self
     }
 
     /// Returns the executable Burn module.
@@ -403,6 +427,15 @@ impl<M> LoadedModel<M> {
         self.quantized_load_audit.as_ref()
     }
 
+    /// Returns checkpoint generation settings that were present but not applied.
+    ///
+    /// Keys are `generation_config.json` field names such as `num_beams` or
+    /// `min_p`; an empty map means every behavior-changing setting the
+    /// checkpoint declared is honored by [`Self::generation_defaults`].
+    pub fn unsupported_generation_settings(&self) -> &BTreeMap<String, Value> {
+        &self.unsupported_generation_settings
+    }
+
     /// Consumes the bundle and returns the executable module.
     pub fn into_model(self) -> M {
         self.model
@@ -418,6 +451,7 @@ impl<M> LoadedModel<M> {
             load_report: self.load_report,
             execution_stats: self.execution_stats,
             quantized_load_audit: self.quantized_load_audit,
+            unsupported_generation_settings: self.unsupported_generation_settings,
         }
     }
 

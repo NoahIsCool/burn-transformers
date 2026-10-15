@@ -1122,7 +1122,13 @@ fn named_parts_expose_every_component_by_name() {
     let source = ModelSourceMetadata::local(directory.path(), "t5").expect("valid source");
     let loaded = LoadedModel::new(7_u8, None, Default::default(), source, LoadReport::new(), 8)
         .expect("empty strict bundle");
+    assert!(loaded.unsupported_generation_settings().is_empty());
+    let settings =
+        std::collections::BTreeMap::from([("num_beams".to_owned(), serde_json::json!(4))]);
+    let loaded = loaded.with_unsupported_generation_settings(settings.clone());
+    assert_eq!(loaded.unsupported_generation_settings(), &settings);
     let parts = LoadedModelParts::from(loaded);
     assert_eq!(parts.model, 7);
     assert!(parts.execution_stats.is_none());
+    assert_eq!(parts.unsupported_generation_settings, settings);
 }

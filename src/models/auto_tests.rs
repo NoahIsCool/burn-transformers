@@ -1302,3 +1302,36 @@ fn all_registry_parsers_preserve_configuration_error_context() {
         Error::UnsupportedArchitecture(reason) if reason == "seq2seq model_type `qwen3_moe` is not executable; supported values: t5")
     );
 }
+
+/// Detection accepts NVIDIA's legacy `Infinity` literal exactly as the family parser does (AUTO-1).
+#[test]
+fn detection_accepts_the_legacy_nemotron_infinity_literal() {
+    let fixture = include_str!("../../tests/fixtures/nemotron_h_8b.json");
+    assert!(fixture.contains("Infinity"));
+    assert_eq!(detect_model_type(fixture).unwrap(), "nemotron_h");
+
+    let json = serde_json::to_string(&tiny_nemotron()).unwrap();
+    let legacy = json.replace(
+        "\"time_step_limit\":[0.0,null]",
+        "\"time_step_limit\":[0.0,Infinity]",
+    );
+    assert_ne!(legacy, json, "tiny config must contain the unbounded limit");
+    let model = AutoCausalLm::<TestBackend>::from_config_json(&legacy, &Default::default())
+        .expect("legacy literal must reach the Nemotron-H parser");
+    assert!(matches!(model, AutoCausalLm::NemotronH(_)));
+
+    // Quoted text is never rewritten, and wrapped configs are normalized too.
+    assert_eq!(
+        detect_model_type(r#"{"model_type":"Infinity","limit":Infinity}"#).unwrap(),
+        "Infinity"
+    );
+    assert_eq!(
+        detect_model_type(r#"{"text_config":{"model_type":"nemotron_h","limit":[0,Infinity]}}"#)
+            .unwrap(),
+        "nemotron_h"
+    );
+    assert!(
+        matches!(detect_model_type("{\"model_type\":-Infinity}").unwrap_err(),
+        Error::Configuration { field, .. } if field == "auto.config_json")
+    );
+}

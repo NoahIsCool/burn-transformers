@@ -10,15 +10,25 @@
 //! validated before tensor installation. Explicit generation defaults take precedence
 //! over local generation metadata, which overrides model token IDs. EOS IDs are
 //! sorted and deduplicated; padding identifies at most one in-vocabulary token.
+//!
+//! `generation_config.json` follows the pinned Hugging Face `GenerationConfig`
+//! semantics (transformers `cfa309cf`): with `do_sample`, an unset `top_k`
+//! means Hugging Face's default of 50 (clamped to the vocabulary, as its top-k
+//! warper does), `top_k: 0` disables top-k, and `top_p >= 1` disables nucleus
+//! filtering. Behavior-changing settings without an equivalent here (beam
+//! search, `min_p`, `max_length`, ...) are recorded on the [`LoadedModel`]
+//! rather than silently dropped.
 //! Floating casts, packed layouts, aliases, and tensor shapes remain the responsibility
 //! of the selected architecture contract and shared checkpoint planner.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::{
     Error, GenerationConfig, LoadedModel, ModelSourceMetadata, ModelTokenizer, Result,
@@ -59,6 +69,8 @@ const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Causal families whose packed installation path has an acceptance contract.
 const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["muse_glimmer_text", "qwen3_5_text", "qwen3_moe"];
+/// Hugging Face's `top_k` when sampling without an explicit value (`_get_default_generation_params`).
+const HUGGING_FACE_DEFAULT_TOP_K: usize = 50;
 
 // User policy and family-specific strict loading.
 
@@ -129,7 +141,7 @@ impl<B: Backend> AutoCausalLm<B> {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
                 let vocabulary_size = config.vocab_size;
-                let generation = normalize_generation_defaults(
+                let generation = resolve_generation_defaults(
                     &root,
                     config.eos_token_id.as_ref(),
                     config.pad_token_id.as_ref(),
@@ -166,7 +178,7 @@ impl<B: Backend> AutoCausalLm<B> {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
                 let vocabulary_size = config.vocab_size;
-                let generation = normalize_generation_defaults(
+                let generation = resolve_generation_defaults(
                     &root,
                     config.eos_token_id.as_ref(),
                     config.pad_token_id.as_ref(),
@@ -206,7 +218,7 @@ impl<B: Backend> AutoCausalLm<B> {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
                 let vocabulary_size = config.vocab_size;
-                let generation = normalize_generation_defaults(
+                let generation = resolve_generation_defaults(
                     &root,
                     config.eos_token_id.as_ref(),
                     config.pad_token_id.as_ref(),
@@ -250,7 +262,7 @@ impl<B: Backend> AutoCausalLm<B> {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
                 let vocabulary_size = config.vocab_size;
-                let generation = normalize_generation_defaults(
+                let generation = resolve_generation_defaults(
                     &root,
                     config.eos_token_id.as_ref(),
                     config.pad_token_id.as_ref(),
@@ -297,7 +309,7 @@ impl<B: Backend> AutoCausalLm<B> {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
                 let vocabulary_size = config.vocab_size;
-                let generation = normalize_generation_defaults(
+                let generation = resolve_generation_defaults(
                     &root,
                     config.eos_token_id.as_ref(),
                     config.pad_token_id.as_ref(),
@@ -357,15 +369,15 @@ impl CausalExecutionOutcome {
         self,
         model: M,
         tokenizer: Option<ModelTokenizer>,
-        generation_defaults: GenerationConfig,
+        generation: ResolvedGenerationDefaults,
         source: ModelSourceMetadata,
         vocabulary_size: usize,
     ) -> Result<LoadedModel<M>> {
-        match self {
+        let loaded = match self {
             Self::FullPrecision(outcome) => LoadedModel::new_with_execution_stats(
                 model,
                 tokenizer,
-                generation_defaults,
+                generation.config,
                 source,
                 outcome.report,
                 outcome.stats,
@@ -374,12 +386,13 @@ impl CausalExecutionOutcome {
             Self::Quantized(outcome) => LoadedModel::new_with_quantized_execution(
                 model,
                 tokenizer,
-                generation_defaults,
+                generation.config,
                 source,
                 outcome,
                 vocabulary_size,
             ),
-        }
+        }?;
+        Ok(loaded.with_unsupported_generation_settings(generation.unsupported))
     }
 }
 
@@ -440,7 +453,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         let config = T5Config::from_json_str(&json)
             .map_err(|error| Error::configuration("auto_seq2seq.config", error.to_string()))?;
         let vocabulary_size = config.vocab_size;
-        let generation = normalize_generation_defaults(
+        let generation = resolve_generation_defaults(
             &root,
             config.eos_token_id.as_ref(),
             config.pad_token_id.as_ref(),
@@ -456,12 +469,13 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         LoadedModel::new_with_execution_stats(
             Self::T5(model),
             tokenizer,
-            generation,
+            generation.config,
             source,
             outcome.report,
             outcome.stats,
             vocabulary_size,
         )
+        .map(|loaded| loaded.with_unsupported_generation_settings(generation.unsupported))
     }
 }
 
@@ -580,7 +594,17 @@ fn load_optional_tokenizer(_root: &Path, _enabled: bool) -> Result<Option<ModelT
     Ok(None)
 }
 
-/// Normalizes model tokens and optional Hugging Face generation metadata.
+/// Generation defaults resolved for one load, plus checkpoint settings left unapplied.
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedGenerationDefaults {
+    /// Validated defaults used to initialize generation requests.
+    config: GenerationConfig,
+    /// Behavior-changing `generation_config.json` settings with no equivalent here.
+    unsupported: BTreeMap<String, Value>,
+}
+
+/// Resolves generation defaults, discarding the unsupported-settings report (tests only).
+#[cfg(test)]
 fn normalize_generation_defaults(
     root: &Path,
     model_eos: Option<&TokenIds>,
@@ -588,9 +612,27 @@ fn normalize_generation_defaults(
     vocabulary_size: usize,
     explicit: Option<&GenerationConfig>,
 ) -> Result<GenerationConfig> {
+    resolve_generation_defaults(root, model_eos, model_pad, vocabulary_size, explicit)
+        .map(|resolved| resolved.config)
+}
+
+/// Resolves generation defaults and reports the checkpoint settings left unapplied.
+///
+/// Precedence: an explicit configuration wins outright (and reads no file);
+/// otherwise `generation_config.json` overrides the model config's token IDs.
+fn resolve_generation_defaults(
+    root: &Path,
+    model_eos: Option<&TokenIds>,
+    model_pad: Option<&TokenIds>,
+    vocabulary_size: usize,
+    explicit: Option<&GenerationConfig>,
+) -> Result<ResolvedGenerationDefaults> {
     if let Some(explicit) = explicit {
         explicit.validate(vocabulary_size)?;
-        return Ok(explicit.clone());
+        return Ok(ResolvedGenerationDefaults {
+            config: explicit.clone(),
+            unsupported: BTreeMap::new(),
+        });
     }
 
     let mut config = GenerationConfig {
@@ -598,44 +640,74 @@ fn normalize_generation_defaults(
         pad_token_id: normalize_pad_token(model_pad, vocabulary_size)?,
         ..GenerationConfig::default()
     };
+    let mut unsupported = BTreeMap::new();
     if let Some(local) = read_generation_config(root)? {
-        if let Some(max_new_tokens) = local.max_new_tokens {
-            config.max_new_tokens = max_new_tokens;
-        }
-        if local.do_sample.unwrap_or(false) {
-            config.strategy = SamplingStrategy::Sample;
-            if let Some(temperature) = local.temperature {
-                config.temperature = temperature;
-            }
-            config.top_k = local.top_k.filter(|top_k| *top_k != 0);
-            config.top_p = local.top_p;
-        }
-        if let Some(penalty) = local.repetition_penalty {
-            config.repetition_penalty = penalty;
-        }
-        if let Some(penalty) = local.presence_penalty {
-            config.presence_penalty = penalty;
-        }
-        if let Some(seed) = local.seed {
-            config.seed = seed;
-        }
-        if local.eos_token_id.is_some() {
-            config.eos_token_ids = normalize_token_list(
-                local.eos_token_id.as_ref(),
-                vocabulary_size,
-                "generation_config.eos_token_id",
-            )?;
-        }
-        if local.pad_token_id.is_some() {
-            config.pad_token_id = normalize_pad_token_named(
-                local.pad_token_id.as_ref(),
-                vocabulary_size,
-                "generation_config.pad_token_id",
-            )?;
-        }
+        apply_local_generation_config(&mut config, &local, vocabulary_size)?;
+        unsupported = local.unsupported_settings();
     }
     config.validate(vocabulary_size)?;
-    Ok(config)
+    Ok(ResolvedGenerationDefaults {
+        config,
+        unsupported,
+    })
+}
+
+/// Applies one parsed `generation_config.json` with Hugging Face semantics.
+fn apply_local_generation_config(
+    config: &mut GenerationConfig,
+    local: &LocalGenerationConfig,
+    vocabulary_size: usize,
+) -> Result<()> {
+    if let Some(max_new_tokens) = local.max_new_tokens {
+        config.max_new_tokens = max_new_tokens;
+    }
+    if local.do_sample.unwrap_or(false) {
+        config.strategy = SamplingStrategy::Sample;
+        if let Some(temperature) = local.temperature {
+            config.temperature = temperature;
+        }
+        config.top_k = sampling_top_k(local.top_k, vocabulary_size);
+        // Hugging Face adds its nucleus warper only for `top_p < 1`. NaN is kept
+        // so validation rejects it instead of silently disabling the filter.
+        config.top_p = local.top_p.filter(|top_p| top_p.is_nan() || *top_p < 1.0);
+    }
+    if let Some(penalty) = local.repetition_penalty {
+        config.repetition_penalty = penalty;
+    }
+    if let Some(penalty) = local.presence_penalty {
+        config.presence_penalty = penalty;
+    }
+    if let Some(seed) = local.seed {
+        config.seed = seed;
+    }
+    if local.eos_token_id.is_some() {
+        config.eos_token_ids = normalize_token_list(
+            local.eos_token_id.as_ref(),
+            vocabulary_size,
+            "generation_config.eos_token_id",
+        )?;
+    }
+    if local.pad_token_id.is_some() {
+        config.pad_token_id = normalize_pad_token_named(
+            local.pad_token_id.as_ref(),
+            vocabulary_size,
+            "generation_config.pad_token_id",
+        )?;
+    }
+    Ok(())
+}
+
+/// Resolves the sampling `top_k` exactly as Hugging Face's generation does.
+///
+/// An unset value takes Hugging Face's default of 50, zero disables top-k
+/// filtering, and every value is clamped to the vocabulary, as its top-k
+/// warper computes `min(top_k, vocabulary_size)`.
+fn sampling_top_k(top_k: Option<usize>, vocabulary_size: usize) -> Option<usize> {
+    match top_k {
+        Some(0) => None,
+        Some(top_k) => Some(top_k.min(vocabulary_size)),
+        None => Some(HUGGING_FACE_DEFAULT_TOP_K.min(vocabulary_size)),
+    }
 }
 
 /// Supported, architecture-independent subset of `generation_config.json`.
@@ -662,6 +734,103 @@ struct LocalGenerationConfig {
     eos_token_id: Option<TokenIds>,
     /// Optional scalar or singleton list identifying the vocabulary padding token.
     pad_token_id: Option<TokenIds>,
+    /// Every other key, kept so behavior-changing settings can be reported.
+    #[serde(flatten)]
+    other: BTreeMap<String, Value>,
+}
+
+/// Value of a Hugging Face generation setting that leaves generation unchanged.
+#[derive(Debug, Clone, Copy)]
+enum NeutralSetting {
+    /// `null`, or an empty list (no banned, suppressed, or biased tokens).
+    Absent,
+    /// This number disables the feature, such as `num_beams: 1`.
+    Number(f64),
+    /// This boolean disables the feature.
+    Flag(bool),
+    /// Any present value differs from this crate's semantics (`max_length`).
+    Never,
+}
+
+/// Behavior-changing Hugging Face settings that [`GenerationConfig`] cannot express.
+///
+/// Each entry is `(key, neutral value, applies only when sampling)`; neutral
+/// values come from Hugging Face's `_get_default_generation_params` and
+/// `GenerationConfig` defaults. `max_length` caps prompt plus continuation in
+/// Hugging Face, whereas this crate bounds new tokens only.
+const UNSUPPORTED_GENERATION_SETTINGS: &[(&str, NeutralSetting, bool)] = &[
+    ("bad_words_ids", NeutralSetting::Absent, false),
+    ("begin_suppress_tokens", NeutralSetting::Absent, false),
+    ("diversity_penalty", NeutralSetting::Number(0.0), false),
+    ("dola_layers", NeutralSetting::Absent, false),
+    (
+        "encoder_no_repeat_ngram_size",
+        NeutralSetting::Number(0.0),
+        false,
+    ),
+    (
+        "encoder_repetition_penalty",
+        NeutralSetting::Number(1.0),
+        false,
+    ),
+    ("epsilon_cutoff", NeutralSetting::Number(0.0), true),
+    ("eta_cutoff", NeutralSetting::Number(0.0), true),
+    (
+        "exponential_decay_length_penalty",
+        NeutralSetting::Absent,
+        false,
+    ),
+    ("forced_bos_token_id", NeutralSetting::Absent, false),
+    ("forced_eos_token_id", NeutralSetting::Absent, false),
+    ("guidance_scale", NeutralSetting::Absent, false),
+    ("length_penalty", NeutralSetting::Number(1.0), false),
+    ("max_length", NeutralSetting::Never, false),
+    ("max_time", NeutralSetting::Absent, false),
+    ("min_length", NeutralSetting::Number(0.0), false),
+    ("min_new_tokens", NeutralSetting::Absent, false),
+    ("min_p", NeutralSetting::Absent, true),
+    ("no_repeat_ngram_size", NeutralSetting::Number(0.0), false),
+    ("num_beam_groups", NeutralSetting::Number(1.0), false),
+    ("num_beams", NeutralSetting::Number(1.0), false),
+    ("num_return_sequences", NeutralSetting::Number(1.0), false),
+    ("penalty_alpha", NeutralSetting::Absent, false),
+    ("renormalize_logits", NeutralSetting::Flag(false), false),
+    ("sequence_bias", NeutralSetting::Absent, false),
+    ("stop_strings", NeutralSetting::Absent, false),
+    ("suppress_tokens", NeutralSetting::Absent, false),
+    ("top_h", NeutralSetting::Absent, true),
+    ("typical_p", NeutralSetting::Number(1.0), true),
+    ("watermarking_config", NeutralSetting::Absent, false),
+];
+
+impl NeutralSetting {
+    /// Returns whether `value` leaves Hugging Face generation unchanged.
+    fn matches(self, value: &Value) -> bool {
+        match self {
+            Self::Absent => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
+            Self::Number(neutral) => value.is_null() || value.as_f64() == Some(neutral),
+            Self::Flag(neutral) => value.is_null() || value.as_bool() == Some(neutral),
+            Self::Never => value.is_null(),
+        }
+    }
+}
+
+impl LocalGenerationConfig {
+    /// Lists declared settings that would change Hugging Face generation but are not applied.
+    ///
+    /// Sampling-only warpers are reported only when `do_sample` is set,
+    /// because Hugging Face ignores them under greedy decoding too.
+    fn unsupported_settings(&self) -> BTreeMap<String, Value> {
+        let sampling = self.do_sample.unwrap_or(false);
+        UNSUPPORTED_GENERATION_SETTINGS
+            .iter()
+            .filter(|(_, _, sampling_only)| sampling || !sampling_only)
+            .filter_map(|(key, neutral, _)| {
+                let value = self.other.get(*key)?;
+                (!neutral.matches(value)).then(|| ((*key).to_owned(), value.clone()))
+            })
+            .collect()
+    }
 }
 
 /// Reads optional bounded generation metadata without accepting escaping symlinks.
