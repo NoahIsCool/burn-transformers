@@ -40,7 +40,7 @@ mod plan;
 use core::ops::Range;
 
 use burn::{
-    module::Module,
+    module::{Initializer, Module, Param},
     nn::{Linear, LinearConfig, LinearLayout},
     tensor::{
         Bool, DType, Tensor,
@@ -399,6 +399,14 @@ pub struct GroupedQueryAttentionConfig {
     /// Numerical operation graph used for score and softmax evaluation.
     #[serde(default)]
     pub precision_mode: AttentionPrecisionMode,
+    /// Whether each query head learns an attention-sink logit (gpt-oss, StreamingLLM).
+    ///
+    /// The sink is an extra softmax column per head that is dropped after
+    /// normalization, so attention rows sum to `1 - p_sink` and a row whose
+    /// keys are all excluded yields zero context. Backend-default dispatch
+    /// rejects sinks combined with a softcap, which would also cap the sink.
+    #[serde(default)]
+    pub attention_sinks: bool,
 }
 
 impl GroupedQueryAttentionConfig {
@@ -421,12 +429,19 @@ impl GroupedQueryAttentionConfig {
             scale: None,
             softcap: None,
             precision_mode: AttentionPrecisionMode::BackendDefault,
+            attention_sinks: false,
         }
     }
 
     /// Selects an explicit score/softmax operation graph.
     pub fn with_precision_mode(mut self, precision_mode: AttentionPrecisionMode) -> Self {
         self.precision_mode = precision_mode;
+        self
+    }
+
+    /// Enables or disables learned per-head attention-sink logits.
+    pub fn with_attention_sinks(mut self, attention_sinks: bool) -> Self {
+        self.attention_sinks = attention_sinks;
         self
     }
 
@@ -498,10 +513,21 @@ impl GroupedQueryAttentionConfig {
                 "must be finite and greater than zero when present",
             ));
         }
+        if self.attention_sinks
+            && self.softcap.is_some()
+            && self.precision_mode == AttentionPrecisionMode::BackendDefault
+        {
+            return Err(Error::configuration(
+                "attention.attention_sinks",
+                "backend-default dispatch cannot combine sinks with a softcap; select EagerFp32Softmax",
+            ));
+        }
         Ok(())
     }
 
-    /// Initializes checkpoint-native `[out, in]` projections and optional Q/K norms.
+    /// Initializes checkpoint-native `[out, in]` projections, optional Q/K norms, and sinks.
+    ///
+    /// Sink logits start at zero, i.e. one extra unit of softmax mass per row.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<GroupedQueryAttention<B>> {
         self.validate()?;
         let query_width = self
@@ -540,6 +566,9 @@ impl GroupedQueryAttentionConfig {
             ),
             None => (None, None),
         };
+        let sinks = self
+            .attention_sinks
+            .then(|| Initializer::Zeros.init([self.query_heads], device));
         Ok(GroupedQueryAttention {
             q_proj: linear(self.hidden_size, query_output_width),
             k_proj: linear(self.hidden_size, key_value_width),
@@ -555,6 +584,7 @@ impl GroupedQueryAttentionConfig {
             scale: self.scale,
             softcap: self.softcap,
             precision_mode: self.precision_mode,
+            sinks,
         })
     }
 }
@@ -603,6 +633,8 @@ pub struct GroupedQueryAttention<B: Backend> {
     pub softcap: Option<f64>,
     /// Numerical operation graph used for score and softmax evaluation.
     pub precision_mode: AttentionPrecisionMode,
+    /// Optional learned sink logit per query head, `[query_heads]`, in the activation dtype.
+    pub sinks: Option<Param<Tensor<B, 1>>>,
 }
 
 impl<B: Backend> GroupedQueryAttention<B> {
@@ -714,7 +746,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 value,
                 mask,
                 bias,
-                sinks: None,
+                sinks: self.sink_logits(),
             },
             causal,
         )?;
@@ -733,9 +765,10 @@ impl<B: Backend> GroupedQueryAttention<B> {
     /// because backend-native kernels do not expose a portable intermediate
     /// arithmetic graph. Scores are scaled and softcapped, before exclusion
     /// masks and additive bias, as `[batch, query_head, query_token, key_token]`.
-    /// Patterns follow softmax and the cast back to the query dtype. Selecting
-    /// either point materializes the full quadratic score plane; callers must
-    /// provision memory for it.
+    /// Patterns follow softmax and the cast back to the query dtype. With
+    /// attention sinks the pattern excludes the dropped sink column, so its rows
+    /// sum to `1 - p_sink`. Selecting either point materializes the full
+    /// quadratic score plane; callers must provision memory for it.
     ///
     /// Pattern edits need not remain normalized or positive, allowing direct
     /// ablation and other experiments. Excluded links are zeroed again after
@@ -846,7 +879,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
             value,
             mask,
             bias,
-            sinks: None,
+            sinks: self.sink_logits(),
         };
         let context = if materialize {
             self.materialized_context(operands, causal, points, hooks, transform)?
@@ -918,6 +951,11 @@ impl<B: Backend> GroupedQueryAttention<B> {
             apply_output_gate(context, gate, self.output_gate)?,
             &self.o_proj,
         )
+    }
+
+    /// Returns the learned sink logits, if this module has them.
+    fn sink_logits(&self) -> Option<Tensor<B, 1>> {
+        self.sinks.as_ref().map(Param::val)
     }
 
     /// Returns Burn attention options for this module and causal flag.
@@ -1161,6 +1199,17 @@ fn validate_projection<B: Backend>(
     }
     if let Some(bias) = bias {
         validate_type("attention.bias", bias.dtype(), &bias.device())?;
+    }
+    if let Some(sinks) = &attention.sinks {
+        let sinks = sinks.val();
+        if sinks.dims() != [attention.query_heads] {
+            return Err(Error::shape(
+                "attention.sinks",
+                format!("[{}]", attention.query_heads),
+                format!("{:?}", sinks.dims()),
+            ));
+        }
+        validate_type("attention.sinks", sinks.dtype(), &sinks.device())?;
     }
     let output_weight = attention.o_proj.weight.val();
     if output_weight.device() != device

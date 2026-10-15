@@ -733,3 +733,205 @@ fn sliding_window_key_ranges_cover_each_chunk() {
     assert_eq!(sliding_window_key_range(4, 3, 0..2, 2), None);
     assert_eq!(sliding_window_key_range(4, 8, 2..2, 2), None);
 }
+
+/// Sinks are opt-in, default off in serialized configs, and initialize one zero logit per query head.
+#[test]
+fn attention_sinks_are_opt_in_per_query_head_parameters() {
+    let device = Default::default();
+    let config = GroupedQueryAttentionConfig::new(8, 4, 2, 2);
+    let mut json = serde_json::to_value(&config).unwrap();
+    json.as_object_mut().unwrap().remove("attention_sinks");
+    let restored: GroupedQueryAttentionConfig = serde_json::from_value(json).unwrap();
+    assert!(!restored.attention_sinks);
+    assert!(config.init::<Flex>(&device).unwrap().sinks.is_none());
+    let module = config
+        .with_attention_sinks(true)
+        .init::<Flex>(&device)
+        .unwrap();
+    let sinks = module.sinks.as_ref().unwrap().val();
+    assert_eq!(sinks.dims(), [4]);
+    assert_eq!(sinks.into_data().to_vec::<f32>().unwrap(), [0.0; 4]);
+}
+
+/// Backend-default sinks cannot be soft-capped, while the eager graph supports it.
+#[test]
+fn backend_default_sinks_reject_softcap_at_configuration() {
+    let mut config = GroupedQueryAttentionConfig::new(8, 2, 1, 4).with_attention_sinks(true);
+    config.softcap = Some(30.0);
+    assert!(matches!(config.validate(),
+        Err(crate::Error::Configuration { field, .. }) if field == "attention.attention_sinks"));
+    config
+        .with_precision_mode(AttentionPrecisionMode::EagerFp32Softmax)
+        .validate()
+        .unwrap();
+}
+
+/// Builds a GQA module with sinks and a deterministic projection for sink tests.
+fn sink_module(
+    precision: AttentionPrecisionMode,
+    sinks: [f32; 4],
+) -> (
+    super::GroupedQueryAttention<Flex>,
+    AttentionProjection<Flex>,
+) {
+    use burn::{module::Param, tensor::TensorData};
+
+    let device = Default::default();
+    let mut module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .with_attention_sinks(true)
+        .with_precision_mode(precision)
+        .init::<Flex>(&device)
+        .unwrap();
+    module.sinks = Some(Param::from_tensor(Tensor::from_floats(sinks, &device)));
+    module.o_proj.weight = Param::from_tensor(Tensor::eye(8, &device));
+    let tensor = |shape: [usize; 4], seed: usize| {
+        let count = shape.iter().product::<usize>();
+        let values = (0..count)
+            .map(|index| ((index * 5 + seed) % 11) as f32 * 0.2 - 1.0)
+            .collect::<Vec<_>>();
+        Tensor::<Flex, 4>::from_data(TensorData::new(values, shape), &device)
+    };
+    let projection = AttentionProjection {
+        query: tensor([2, 4, 3, 2], 1),
+        key: tensor([2, 2, 5, 2], 2),
+        value: tensor([2, 2, 5, 2], 3),
+        gate: None,
+    };
+    (module, projection)
+}
+
+/// Native and eager sinks agree, and a vanishing sink recovers ordinary attention.
+#[test]
+fn module_sinks_agree_across_graphs_and_vanish_when_very_negative() {
+    use burn::tensor::Tolerance;
+
+    let sinks = [0.3, -0.7, 1.1, 0.0];
+    let (native, projection) = sink_module(AttentionPrecisionMode::BackendDefault, sinks);
+    let (eager, _) = sink_module(AttentionPrecisionMode::EagerFp32Softmax, sinks);
+    let mut eager = eager;
+    eager.o_proj = native.o_proj.clone();
+    for causal in [false, true] {
+        let expected = eager
+            .attend(projection.clone(), None, None, causal)
+            .unwrap();
+        native
+            .attend(projection.clone(), None, None, causal)
+            .unwrap()
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
+    }
+    let (mut vanishing, _) = sink_module(AttentionPrecisionMode::BackendDefault, [-60.0; 4]);
+    let with_sinks = vanishing
+        .attend(projection.clone(), None, None, true)
+        .unwrap();
+    vanishing.sinks = None;
+    let without_sinks = vanishing.attend(projection, None, None, true).unwrap();
+    with_sinks
+        .into_data()
+        .assert_approx_eq::<f32>(&without_sinks.into_data(), Tolerance::rel_abs(1e-6, 1e-6));
+}
+
+/// Pattern rows exclude the sink column, and fully excluded rows have zero context.
+#[test]
+fn sink_patterns_sum_below_one_and_fully_excluded_rows_are_zero() {
+    use crate::intervention::{Hooks, Layer};
+
+    let (module, mut projection) =
+        sink_module(AttentionPrecisionMode::EagerFp32Softmax, [2.0_f32.ln(); 4]);
+    // Zero queries give equal scores, so with 5 keys p_key = 1 / (5 + 2).
+    projection.query = projection.query.zeros_like();
+    let device = Default::default();
+    let mut excluded = vec![false; 2 * 4 * 3 * 5];
+    excluded[..5].fill(true);
+    let mask = Tensor::<Flex, 4, Bool>::from_data(
+        burn::tensor::TensorData::new(excluded, [2, 4, 3, 5]),
+        &device,
+    );
+    let points = Layer::decoder(0).self_attention();
+    let mut hooks = Hooks::new();
+    let pattern = hooks.capture(points.pattern());
+    let context = hooks.capture(points.head_context());
+    hooks
+        .run(points.all(), |hooks| {
+            module.attend_with_hooks(projection, Some(mask), None, false, points, hooks)
+        })
+        .unwrap();
+    let pattern = hooks
+        .get(&pattern)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(pattern[..5].iter().all(|value| *value == 0.0));
+    for value in &pattern[5..] {
+        assert!((value - 1.0 / 7.0).abs() < 1e-6, "{value}");
+    }
+    let context = hooks
+        .get(&context)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(&context[..2], &[0.0, 0.0]);
+}
+
+/// Sink parameters must match the query-head count, dtype, and device.
+#[test]
+fn malformed_sinks_fail_projection_validation() {
+    use burn::{module::Param, tensor::DType};
+
+    let device = Default::default();
+    let (mut module, projection) = sink_module(AttentionPrecisionMode::BackendDefault, [0.0; 4]);
+    module.sinks = Some(Param::from_tensor(Tensor::zeros([3], &device)));
+    let error = module
+        .attend(projection.clone(), None, None, false)
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.sinks"));
+    module.sinks = Some(Param::from_tensor(
+        Tensor::<Flex, 1>::zeros([4], &device).cast(DType::F64),
+    ));
+    let error = module.attend(projection, None, None, false).unwrap_err();
+    assert!(error.to_string().contains("attention.sinks"));
+}
+
+/// Sink logits receive gradients through both operation graphs.
+#[cfg(feature = "autodiff")]
+#[test]
+fn attention_sinks_are_trainable() {
+    use burn::backend::Autodiff;
+    /// Differentiable CPU backend for the sink-gradient smoke test.
+    type Ad = Autodiff<Flex>;
+    let device = Default::default();
+    for precision in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+            .with_attention_sinks(true)
+            .with_precision_mode(precision)
+            .init::<Ad>(&device)
+            .unwrap();
+        let output = module
+            .forward_without_position_encoding(
+                Tensor::<Ad, 3>::ones([1, 3, 4], &device),
+                None,
+                true,
+            )
+            .unwrap();
+        let gradients = output.sum().backward();
+        let sink_gradient = module
+            .sinks
+            .as_ref()
+            .unwrap()
+            .grad(&gradients)
+            .expect("sink logits receive gradients");
+        assert!(
+            sink_gradient
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+}
