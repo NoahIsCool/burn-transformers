@@ -401,7 +401,16 @@ def git_generator_identity() -> dict[str, Any]:
 
     script = Path(__file__).resolve(strict=True)
     crate = script.parents[1]
-    repository = crate.parents[1]
+    # The crate is a standalone repository; ask Git for the checkout root so the
+    # identity also works from linked worktrees and nested checkouts.
+    repository = Path(
+        subprocess.run(
+            ["git", "-C", str(crate), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    ).resolve(strict=True)
     relative = script.relative_to(repository)
     subprocess.run(
         ["git", "ls-files", "--error-unmatch", str(relative)],
