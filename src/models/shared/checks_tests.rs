@@ -12,7 +12,7 @@ fn passing_checks_report_ranges_counts_and_context() {
     let positions = ints([[0, 1], [5, 2]]);
     let mut checks = DeferredChecks::new();
     let token_range = checks.values_below(&tokens, 4, "t.input_ids", "token");
-    let counts = checks.row_counts(&mask([[true, false], [true, true]]), "t.mask", true);
+    let counts = checks.row_counts(&mask([[true, false], [true, true]]), "t.mask");
     let position_range = checks.values_below(&positions, 8, "t.position_ids", "position");
     let readout = checks.run("test").expect("valid values");
     assert_eq!(readout.range(token_range), (0, 3));
@@ -33,7 +33,7 @@ fn failing_checks_report_in_registration_order() {
 
     let mut checks = DeferredChecks::new();
     checks.values_below(&tokens, 4, "t.input_ids", "token");
-    checks.row_counts(&empty, "t.mask", true);
+    checks.row_counts(&empty, "t.mask");
     checks.values_below(&positions, 8, "t.position_ids", "position");
     assert_same_error(
         checks.run("test").unwrap_err(),
@@ -45,7 +45,7 @@ fn failing_checks_report_in_registration_order() {
     );
 
     let mut checks = DeferredChecks::new();
-    checks.row_counts(&empty, "t.mask", true);
+    checks.row_counts(&empty, "t.mask");
     checks.values_below(&tokens, 4, "t.input_ids", "token");
     assert_same_error(
         checks.run("test").unwrap_err(),
@@ -66,14 +66,6 @@ fn failing_checks_report_in_registration_order() {
             "observed range -1..=0",
         ),
     );
-}
-
-/// Recording row counts without the requirement accepts fully masked rows.
-#[test]
-fn optional_row_counts_accept_empty_rows() {
-    let mut checks = DeferredChecks::<TestBackend>::new();
-    let counts = checks.row_counts(&mask([[false, false], [true, false]]), "t.mask", false);
-    assert_eq!(checks.run("test").unwrap().min_row_count(counts), 0);
 }
 
 /// A negative or unrepresentable maximum has no context extent.

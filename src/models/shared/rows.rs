@@ -30,9 +30,18 @@ use crate::{
 
 use super::{
     checks::{ensure_grid, ensure_nonempty, ensure_same_device, range_error, read_int_tensors},
-    input::{EmptyRows, InputNames},
+    input::InputNames,
     plan::{self, AppendError, ScatterLayout},
 };
+
+/// Policy for rows that contain no valid token in a stateful call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyRows {
+    /// Reject fully masked rows, whose attention softmax would have no key.
+    Reject,
+    /// Accept fully masked rows (finished sequences during decoding).
+    Permit,
+}
 
 /// Contract for one stateful (prefill or decode) entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,14 +282,7 @@ impl HostInput {
         if let Some(positions) = &input.position_ids {
             tensors.push(flat(positions.clone()));
         }
-        let expected = elements * tensors.len();
         let mut values = read_int_tensors(tensors, label)?;
-        if values.len() != expected {
-            return Err(Error::BackendCapability(format!(
-                "{label} readback returned {} values, expected {expected}",
-                values.len()
-            )));
-        }
         // Split in reverse registration order: positions, tokens, then mask.
         let positions = input
             .position_ids
@@ -311,13 +313,18 @@ impl HostInput {
 
     /// Lists every row's valid columns, treating an absent mask as all valid.
     pub(crate) fn valid_indices(&self, batch: usize, sequence: usize) -> Vec<Vec<usize>> {
-        match &self.mask {
-            Some(mask) => mask
-                .chunks_exact(sequence)
-                .map(plan::valid_columns)
-                .collect(),
-            None => vec![(0..sequence).collect::<Vec<_>>(); batch],
-        }
+        valid_rows(self.mask.as_deref(), batch, sequence)
+    }
+}
+
+/// Lists each row's valid columns from row-major flags; `None` means all valid.
+fn valid_rows(mask: Option<&[bool]>, batch: usize, sequence: usize) -> Vec<Vec<usize>> {
+    match mask {
+        Some(mask) => mask
+            .chunks_exact(sequence)
+            .map(plan::valid_columns)
+            .collect(),
+        None => vec![(0..sequence).collect::<Vec<_>>(); batch],
     }
 }
 
@@ -339,26 +346,15 @@ pub(crate) fn read_valid_columns<B: Backend>(
     name: &str,
 ) -> Result<Vec<Vec<usize>>> {
     let Some(mask) = mask else {
-        return Ok(vec![(0..sequence).collect::<Vec<_>>(); batch]);
+        return Ok(valid_rows(None, batch, sequence));
     };
     ensure_grid(mask.as_tensor().dims(), batch, sequence, name)?;
     let flat = mask.as_tensor().clone().int().reshape([batch * sequence]);
-    let values = read_int_tensors(vec![flat], name)?;
-    if values.len() != batch * sequence {
-        return Err(Error::BackendCapability(format!(
-            "{name} readback returned {} values, expected {}",
-            values.len(),
-            batch * sequence
-        )));
-    }
-    let valid = values
+    let flags = read_int_tensors(vec![flat], name)?
         .into_iter()
         .map(|value| value != 0)
         .collect::<Vec<_>>();
-    Ok(valid
-        .chunks_exact(sequence)
-        .map(plan::valid_columns)
-        .collect())
+    Ok(valid_rows(Some(&flags), batch, sequence))
 }
 
 /// Converts a planning failure into the shared cache-metadata error.

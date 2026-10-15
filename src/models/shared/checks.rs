@@ -97,24 +97,16 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
         RangeId(slot)
     }
 
-    /// Records the smallest number of valid tokens in any mask row.
+    /// Requires every mask row to contain a valid token and records the smallest count.
     ///
-    /// When `require_token` is set, a fully masked row fails with
-    /// `Shape { tensor: name, expected: "at least one valid token in every row",
-    /// actual: "a fully masked row" }`.
-    pub(crate) fn row_counts(
-        &mut self,
-        mask: &TokenMask<B>,
-        name: &'a str,
-        require_token: bool,
-    ) -> RowCountId {
+    /// A fully masked row fails with `Shape { tensor: name, expected: "at least
+    /// one valid token in every row", actual: "a fully masked row" }`.
+    pub(crate) fn row_counts(&mut self, mask: &TokenMask<B>, name: &'a str) -> RowCountId {
         let slot = self.reductions.len();
         // Σ_t m[b, t] is row b's valid-token count; its minimum detects empty rows.
         self.reductions
             .push(mask.as_tensor().clone().int().sum_dim(1).min());
-        if require_token {
-            self.checks.push(Check::NonEmptyRows { name, slot });
-        }
+        self.checks.push(Check::NonEmptyRows { name, slot });
         RowCountId(slot)
     }
 
@@ -125,15 +117,9 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
     /// Returns the first failing predicate's error, or
     /// [`Error::BackendCapability`] when the backend cannot read the values.
     pub(crate) fn run(self, label: &str) -> Result<Readout> {
-        let expected = self.reductions.len();
-        let values = read_int_tensors(self.reductions, label)?;
-        if values.len() != expected {
-            return Err(Error::BackendCapability(format!(
-                "{label} readback returned {} values, expected {expected}",
-                values.len()
-            )));
-        }
-        let readout = Readout { values };
+        let readout = Readout {
+            values: read_int_tensors(self.reductions, label)?,
+        };
         for check in &self.checks {
             readout.evaluate(check)?;
         }
@@ -228,11 +214,13 @@ pub(crate) fn range_error(
 ///
 /// Tensors sharing one integer dtype are concatenated as-is; mixed dtypes are
 /// first widened to `i64`, which is lossless for every Burn integer dtype the
-/// crate produces. An empty list performs no backend work.
+/// crate produces. An empty list performs no backend work. The result holds
+/// exactly one value per input element.
 ///
 /// # Errors
 ///
-/// Returns [`Error::BackendCapability`] when the backend cannot read the data.
+/// Returns [`Error::BackendCapability`] when the backend cannot read the data
+/// or returns a different number of values.
 pub(crate) fn read_int_tensors<B: Backend>(
     tensors: Vec<Tensor<B, 1, Int>>,
     label: &str,
@@ -240,6 +228,7 @@ pub(crate) fn read_int_tensors<B: Backend>(
     let Some(first) = tensors.first() else {
         return Ok(Vec::new());
     };
+    let expected = tensors.iter().map(|tensor| tensor.dims()[0]).sum::<usize>();
     let dtype = first.dtype();
     let uniform = tensors.iter().all(|tensor| tensor.dtype() == dtype);
     let tensors = if uniform {
@@ -253,7 +242,14 @@ pub(crate) fn read_int_tensors<B: Backend>(
     let data = Tensor::cat(tensors, 0).try_into_data().map_err(|error| {
         Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
     })?;
-    Ok(data.iter::<i64>().collect())
+    let values = data.iter::<i64>().collect::<Vec<_>>();
+    if values.len() != expected {
+        return Err(Error::BackendCapability(format!(
+            "{label} readback returned {} values, expected {expected}",
+            values.len()
+        )));
+    }
+    Ok(values)
 }
 
 /// Rejects a tensor that lives on a different device than its owner.

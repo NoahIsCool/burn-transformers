@@ -7,8 +7,9 @@
 //!
 //! * a non-empty grid and that every tensor lives on the model's device,
 //! * that the mask and positions share the `[B, S]` grid,
-//! * token values `0 <= x < V`, at least one valid token per row (unless the
-//!   contract permits empty rows), and positions `0 <= p < P_max`,
+//! * token values `0 <= x < V`, at least one valid token per row (a fully
+//!   masked row would leave its attention softmax without a key), and
+//!   positions `0 <= p < P_max`,
 //!
 //! with all value checks sharing one device-to-host readback (see
 //! [`DeferredChecks`]). Size and device errors are reported before value
@@ -71,20 +72,11 @@ pub(crate) enum PaddedPositions {
     ZeroFill,
 }
 
-/// Policy for rows that contain no valid token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EmptyRows {
-    /// Reject fully masked rows, whose attention softmax would have no key.
-    Reject,
-    /// Accept fully masked rows (finished sequences during decoding).
-    Permit,
-}
-
 /// Complete stateless input contract of one family entry point.
 ///
 /// Construct with [`InputContract::new`] and refine the defaults (no position
-/// bound, valid-token ordinals, kept padded positions, rejected empty rows)
-/// with the builder methods.
+/// bound, valid-token ordinals, kept padded positions) with the builder
+/// methods. Fully masked rows are always rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InputContract<'a> {
     /// Tensor names reported in errors.
@@ -99,8 +91,6 @@ pub(crate) struct InputContract<'a> {
     pub(crate) implicit_positions: ImplicitPositions,
     /// Treatment of explicit positions at padded columns.
     pub(crate) padded_positions: PaddedPositions,
-    /// Policy for fully masked rows.
-    pub(crate) empty_rows: EmptyRows,
 }
 
 impl<'a> InputContract<'a> {
@@ -113,7 +103,6 @@ impl<'a> InputContract<'a> {
             position_limit: None,
             implicit_positions: ImplicitPositions::ValidTokenOrdinals,
             padded_positions: PaddedPositions::Keep,
-            empty_rows: EmptyRows::Reject,
         }
     }
 
@@ -169,7 +158,7 @@ impl<B: Backend> ValidatedInput<B> {
 /// # Errors
 ///
 /// Returns [`Error::Shape`] for empty or mismatched extents, out-of-range
-/// tokens or positions, and rejected empty rows; [`Error::BackendCapability`]
+/// tokens or positions, and fully masked rows; [`Error::BackendCapability`]
 /// for device mismatches or failed readback.
 pub(crate) fn validate_input<B: Backend>(
     input: &CausalLmInput<B>,
@@ -195,13 +184,10 @@ pub(crate) fn validate_input<B: Backend>(
         names.token_ids,
         "token",
     );
-    let row_counts = input.token_mask.as_ref().map(|mask| {
-        checks.row_counts(
-            mask,
-            names.token_mask,
-            contract.empty_rows == EmptyRows::Reject,
-        )
-    });
+    let row_counts = input
+        .token_mask
+        .as_ref()
+        .map(|mask| checks.row_counts(mask, names.token_mask));
     let position_range =
         positions
             .as_ref()
@@ -363,7 +349,7 @@ pub(crate) fn check_nonempty_mask<'a, B: Backend>(
 ) -> Result<()> {
     if let Some(mask) = mask {
         ensure_grid(mask.as_tensor().dims(), batch, sequence, name)?;
-        checks.row_counts(mask, name, true);
+        checks.row_counts(mask, name);
     }
     Ok(())
 }
