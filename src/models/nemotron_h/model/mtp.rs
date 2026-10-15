@@ -263,6 +263,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         state: &mut NemotronHDecodeState<B>,
     ) -> Result<NemotronHMtpPrediction<B>> {
         let head = self.validate_mtp_pairs(&next_token_ids, &target_or_mtp_hidden, state)?;
+        validate_token_values(
+            &next_token_ids,
+            self.config().vocab_size,
+            INPUT_NAMES.token_ids,
+        )?;
         let sequence = next_token_ids.dims()[1];
         validate_mtp_positions(
             position_ids,
@@ -339,6 +344,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         }
         // Validate every prompt token, including one that forms no pair.
         self.validate_mtp_pairs(&prompt_token_ids, &target_final_hidden_states, state)?;
+        validate_token_values(
+            &prompt_token_ids,
+            self.config().vocab_size,
+            INPUT_NAMES.token_ids,
+        )?;
         if state.tensors.lengths() != [sequence] {
             return Err(Error::Cache(format!(
                 "Nemotron-H target cache length must equal MTP prompt length {sequence}, found {:?}",
@@ -364,7 +374,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
     ///
     /// The step is committed outside a transaction and staged inside one. A
     /// speculative cycle uses this to keep exactly the verified pairs, built
-    /// from target hidden states.
+    /// from target hidden states. Callers guarantee in-vocabulary token IDs.
     pub(super) fn append_mtp_pairs(
         &self,
         next_token_ids: Tensor<B, 2, Int>,
@@ -402,6 +412,13 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         drafts: &mut DraftPairs<B>,
         state: &mut NemotronHDecodeState<B>,
     ) -> Result<NemotronHMtpPrediction<B>> {
+        if token as usize >= self.config().vocab_size {
+            return Err(Error::shape(
+                INPUT_NAMES.token_ids,
+                format!("a token in 0..{}", self.config().vocab_size),
+                token.to_string(),
+            ));
+        }
         let token_ids = Tensor::<B, 2, Int>::from_data(
             TensorData::new(vec![i64::from(token)], [1, 1]),
             state.tensors.device(),
@@ -422,7 +439,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         })
     }
 
-    /// Validates batch-one shifted pairs and returns the MTP head.
+    /// Validates the geometry and devices of batch-one shifted pairs and returns the MTP head.
+    ///
+    /// Token *values* are checked by the public entry points, whose IDs come
+    /// from callers; internal callers build their IDs from host tokens that
+    /// are already known to lie in the vocabulary, so they skip the readback.
     fn validate_mtp_pairs(
         &self,
         next_token_ids: &Tensor<B, 2, Int>,
@@ -460,11 +481,6 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             "parameters",
             &head.eh_proj.weight.val().device(),
             state.tensors.device(),
-        )?;
-        validate_token_values(
-            next_token_ids,
-            self.config().vocab_size,
-            INPUT_NAMES.token_ids,
         )?;
         Ok(head)
     }
