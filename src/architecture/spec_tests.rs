@@ -869,6 +869,7 @@ fn build_position_directly(
 /// validates and allocates. Connectivity is checked by its own validator.
 #[cfg(feature = "flex")]
 fn build_mixer_directly(mixer: &MixerSpec, hidden_size: usize) -> Result<()> {
+    /// Deterministic CPU backend used only to allocate the probe modules.
     type F = burn::backend::Flex;
     let device = Default::default();
     let grouped = |spec: &AttentionSpec, options: &AttentionOptions| -> Result<()> {

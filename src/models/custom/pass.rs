@@ -83,9 +83,15 @@ enum Overrides<'a, B: Backend> {
     /// No overrides: every block uses its structural defaults.
     Structural,
     /// One self-attention policy for every block (for example bidirectional execution).
-    SelfAttention(AttentionPolicy<B>),
+    SelfAttention(
+        /// Policy replacing every block's structural connectivity and causality.
+        AttentionPolicy<B>,
+    ),
     /// Per-layer and default overrides of a staged execution context.
-    Context(&'a ExecutionContext<B>),
+    Context(
+        /// Validated context whose policies and bias override the structural defaults.
+        &'a ExecutionContext<B>,
+    ),
 }
 
 /// Exclusions, additive bias, and causality resolved for one attention call.

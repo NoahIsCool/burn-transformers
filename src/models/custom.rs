@@ -54,27 +54,16 @@
 //! (`N(0, std^2)` with GPT-2 depth scaling); learned T5 biases start from the reference
 //! `N(0, 1/hidden_size)`.
 
-/// Decoder-only assembly, staged residual execution, and language-model readout.
 mod causal;
-/// Model-level validation, output assembly, and readout helpers.
 mod common;
-/// Gated, ungated, clamped, and routed feed-forward branches.
 mod feed_forward;
-/// Spec-derived random initialization policies.
 mod init;
-/// One heterogeneous residual block and its single execution path.
 mod layer;
-/// Grouped-query, latent, and differential attention and Gated DeltaNet mixers.
 mod mixer;
-/// Normalization operators and their placement around one residual branch.
 mod norm;
-/// Shared inputs and memoized tables of one stack execution.
 mod pass;
-/// Pure, Verus-verified index planning.
 mod plan;
-/// Encoder-decoder assembly with explicit cross-attention and staged execution.
 mod seq2seq;
-/// External fixed-capacity token histories used by reference decoding.
 mod state;
 
 pub use causal::ModularCausalLm;

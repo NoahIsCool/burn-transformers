@@ -280,7 +280,9 @@ proptest::proptest! {
         cuts in proptest::collection::vec(0usize..3, 3),
         permutation in proptest::collection::vec(0usize..3, 3),
     ) {
+        /// Number of independent history rows in the generated scenario.
         const BATCH: usize = 3;
+        /// Per-row history capacity; small enough that some appends overflow.
         const CAPACITY: usize = 14;
         let mut model_spec = spec();
         model_spec.vocabulary_size = 64;
