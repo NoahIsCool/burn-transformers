@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 
 pub use rope::{
     DEFAULT_ROPE_THETA, DynamicNtkContext, MropeHandling, PartialRotary, RopeContext,
-    RopeParameterSet, RopeParametersByLayerType, UnusedRopeFields, YarnMscaleConvention,
-    yarn_mscale,
+    RopeParameterSet, RopeParametersByLayerType, SoftmaxMscale, UnusedRopeFields,
+    YarnMscaleConvention, yarn_mscale,
 };
 
 /// A topology error associated with one checkpoint field.
@@ -515,14 +515,26 @@ impl RopeParameters {
         positive_finite(architecture, "rope_theta", theta)?;
 
         let factor = self.partial_rotary_factor.unwrap_or(1.0);
-        if !(factor.is_finite() && 0.0 < factor && factor <= 1.0) {
+        let proportional = self.rope_type == RopeType::Proportional;
+        if proportional {
+            // Proportional RoPE reads the factor as the fraction of pairs that
+            // keep a nonzero frequency; zero (every pair unrotated) is valid,
+            // as in Transformers 5.8.0 and `ProportionalRopeScaling`.
+            if !(factor.is_finite() && (0.0..=1.0).contains(&factor)) {
+                return Err(ConfigError::new(
+                    architecture,
+                    "partial_rotary_factor",
+                    "must be finite and in [0, 1] for proportional RoPE",
+                ));
+            }
+        } else if !(factor.is_finite() && 0.0 < factor && factor <= 1.0) {
             return Err(ConfigError::new(
                 architecture,
                 "partial_rotary_factor",
                 "must be finite and in (0, 1]",
             ));
         }
-        let rotary_width = if self.rope_type == RopeType::Proportional {
+        let rotary_width = if proportional {
             // Proportional RoPE rotates the whole head in split-half pairs and
             // reads the factor only as the fraction of leading pairs that keep
             // a nonzero frequency, `floor(factor * head_dim / 2)`, so the
@@ -541,7 +553,7 @@ impl RopeParameters {
             if (rotary_width - rounded_rotary_width).abs() > 1e-9 || rotary_width < 2.0 {
                 return Err(ConfigError::new(
                     architecture,
-                    "partial_rotary_factor",
+                    rotary_width_field(rotary_width, head_dim),
                     "head_dim * factor must be an integer of at least two channels",
                 ));
             }
@@ -550,7 +562,7 @@ impl RopeParameters {
         if !rotary_width.is_multiple_of(2) {
             return Err(ConfigError::new(
                 architecture,
-                "partial_rotary_factor",
+                rotary_width_field(rotary_width as f64, head_dim),
                 "RoPE rotates channel pairs, so the effective width must be even",
             ));
         }
@@ -658,6 +670,20 @@ impl RopeParameters {
             }
         }
         Ok(())
+    }
+}
+
+/// Names the field to repair when the rotary width `head_dim * partial_rotary_factor` is invalid.
+///
+/// `rotary_width` is the exact product. A whole-head rotation (the product
+/// equals `head_dim`, so the factor is one) is repaired through `head_dim`,
+/// matching the shared translator's mapping of `RopeConfigError`; anything
+/// else, including a non-integral product, through `partial_rotary_factor`.
+fn rotary_width_field(rotary_width: f64, head_dim: usize) -> &'static str {
+    if rotary_width == head_dim as f64 {
+        "head_dim"
+    } else {
+        "partial_rotary_factor"
     }
 }
 

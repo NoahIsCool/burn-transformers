@@ -84,6 +84,7 @@ fn context_builder_records_every_option() {
     assert_eq!(base.original_max_position_embeddings, None);
     assert_eq!(base.partial_rotary, PartialRotary::Prefix);
     assert_eq!(base.mscale_convention, YarnMscaleConvention::HuggingFace);
+    assert_eq!(base.softmax_mscale, SoftmaxMscale::Unscaled);
     assert_eq!(
         base.dynamic_ntk_context,
         DynamicNtkContext::MaxPositionEmbeddings
@@ -99,6 +100,7 @@ fn context_builder_records_every_option() {
         .with_original_max_position_embeddings(Some(64))
         .with_partial_rotary(PartialRotary::FullHeadOnly)
         .with_yarn_mscale_convention(YarnMscaleConvention::DeepSeekReference)
+        .with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared)
         .with_dynamic_ntk_context(DynamicNtkContext::OriginalMaxPositionEmbeddings)
         .with_mrope(MropeHandling::TextPositions)
         .with_unused_fields(UnusedRopeFields::Ignore);
@@ -112,6 +114,7 @@ fn context_builder_records_every_option() {
         full.mscale_convention,
         YarnMscaleConvention::DeepSeekReference
     );
+    assert_eq!(full.softmax_mscale, SoftmaxMscale::MscaleAllDimSquared);
     assert_eq!(
         full.dynamic_ntk_context,
         DynamicNtkContext::OriginalMaxPositionEmbeddings
@@ -222,8 +225,9 @@ fn parameter_sets_round_trip_through_serialization() {
     );
     layers.insert("sliding_attention".to_owned(), RopeParameters::default());
     for set in [
+        RopeParameterSet::default(),
         RopeParameterSet::from(params(r#"{"rope_type": "linear", "factor": 2.0}"#)),
-        RopeParameterSet::from(RopeParametersByLayerType::new(layers)),
+        RopeParameterSet::from(RopeParametersByLayerType::new(layers).unwrap()),
     ] {
         let value = serde_json::to_value(&set).unwrap();
         assert_eq!(
@@ -231,6 +235,31 @@ fn parameter_sets_round_trip_through_serialization() {
             set
         );
     }
+}
+
+/// An empty per-layer mapping is unrepresentable, because `{}` means uniform default RoPE.
+#[test]
+fn empty_per_layer_mappings_are_rejected() {
+    let error = RopeParametersByLayerType::new(std::collections::BTreeMap::new()).unwrap_err();
+    assert_eq!(field(&error), "rope_parameters");
+    assert!(
+        error.to_string().contains("uniform default RoPE"),
+        "{error}"
+    );
+    let parsed = serde_json::from_str::<RopeParametersByLayerType>("{}")
+        .unwrap_err()
+        .to_string();
+    assert!(parsed.contains("at least one layer type"), "{parsed}");
+    let one: RopeParametersByLayerType =
+        serde_json::from_str(r#"{"full_attention": {"rope_type": "default"}}"#).unwrap();
+    assert_eq!(
+        one.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        ["full_attention"]
+    );
+    assert_eq!(
+        serde_json::from_str::<RopeParameterSet>("{}").unwrap(),
+        RopeParameterSet::default()
+    );
 }
 
 /// Per-layer mappings must cover exactly the layer types the schedule uses.
@@ -530,9 +559,12 @@ fn dynamic_ntk_selects_its_trained_context() {
         &legacy,
         "test.rope.original_max_position_embeddings",
     );
+    // A two-channel whole head is too narrow for dynamic NTK; the head is at fault.
+    rejects(&plain, &RopeContext::new("test", 2, MAX), "test.head_dim");
+    // The same width as a strict prefix is the partial factor's fault.
     rejects(
         &plain,
-        &RopeContext::new("test", 2, MAX),
+        &RopeContext::new("test", 8, MAX).with_partial_rotary_factor(Some(0.25)),
         "test.rope.partial_rotary_factor",
     );
 }
@@ -568,6 +600,13 @@ fn yarn_resolves_factor_context_betas_and_truncation() {
         &conflicting,
         &phi,
         "test.rope.original_max_position_embeddings",
+    );
+    // Agreeing nested and top-level values are one source.
+    let agreeing =
+        params(r#"{"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32}"#);
+    assert_eq!(
+        yarn_of(agreeing.to_rope_config(&phi).unwrap()).original_max_position_embeddings(),
+        32
     );
     // Transformers gives the top-level attribute priority (Phi-3 exception).
     let lenient = conflicting
@@ -635,6 +674,73 @@ fn per_layer_yarn_truncate_follows_the_reference_reader() {
     assert!(yarn_of(explicit_true).truncate());
 }
 
+/// Per-layer mappings never read a top-level original context, as in Transformers 5.2.
+#[test]
+fn per_layer_original_context_ignores_the_top_level_value() {
+    let layered: RopeParameterSet = serde_json::from_str(
+        r#"{"full_attention": {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32},
+            "sliding_attention": {"rope_type": "yarn", "factor": 4.0}}"#,
+    )
+    .unwrap();
+    let original = |layer_type: &str, context: RopeContext| {
+        yarn_of(layered.to_rope_config(layer_type, &context).unwrap())
+            .original_max_position_embeddings()
+    };
+    // Without a top-level value: nested, else `max_position_embeddings`.
+    assert_eq!(original("full_attention", context()), 32);
+    assert_eq!(original("sliding_attention", context()), MAX);
+    // A top-level value equal to the layer's resolved context changes nothing.
+    assert_eq!(
+        original(
+            "full_attention",
+            context().with_original_max_position_embeddings(Some(32))
+        ),
+        32
+    );
+    assert_eq!(
+        original(
+            "sliding_attention",
+            context().with_original_max_position_embeddings(Some(MAX))
+        ),
+        MAX
+    );
+    // A differing top-level value is unused: strictly an error, leniently ignored.
+    let top_level = context().with_original_max_position_embeddings(Some(64));
+    for (layer_type, resolved) in [("full_attention", 32), ("sliding_attention", MAX)] {
+        let error = layered
+            .to_rope_config(layer_type, &top_level)
+            .expect_err(layer_type);
+        assert_eq!(
+            field(&error),
+            format!("test.rope.{layer_type}.original_max_position_embeddings")
+        );
+        assert!(error.to_string().contains("per-layer-type"), "{error}");
+        assert_eq!(
+            original(
+                layer_type,
+                top_level.with_unused_fields(UnusedRopeFields::Ignore)
+            ),
+            resolved,
+            "Transformers keeps the layer's own context"
+        );
+    }
+    // A flat mapping still gives the top-level value priority (Phi-3 exception).
+    let flat = params(r#"{"rope_type": "yarn", "factor": 4.0}"#);
+    assert_eq!(
+        yarn_of(flat.to_rope_config(&top_level).unwrap()).original_max_position_embeddings(),
+        64
+    );
+    // An explicit zero is rejected before the sources are compared.
+    let zero: RopeParameterSet = serde_json::from_str(
+        r#"{"full_attention": {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 0}}"#,
+    )
+    .unwrap();
+    let error = zero
+        .to_rope_config("full_attention", &top_level)
+        .unwrap_err();
+    assert!(error.to_string().contains("nonzero"), "{error}");
+}
+
 /// Expected YaRN amplitude outcome for one convention.
 #[derive(Debug, Clone, Copy)]
 enum Amplitude {
@@ -644,88 +750,107 @@ enum Amplitude {
     Unused(&'static str, f64),
 }
 
-/// One amplitude case: `(attention_factor, mscale, mscale_all_dim, Hugging Face, DeepSeek)`.
-type AmplitudeCase = (Option<f64>, Option<f64>, Option<f64>, Amplitude, Amplitude);
+/// One amplitude case: `(attention_factor, mscale, mscale_all_dim, expectations)`.
+///
+/// The expectations are, in order, the Hugging Face convention with an
+/// unscaled softmax, the Hugging Face convention with the `mscale_all_dim`
+/// softmax correction, and the DeepSeek convention (whose amplitude reads
+/// `mscale_all_dim` itself, so the softmax setting cannot change it).
+type AmplitudeCase = (Option<f64>, Option<f64>, Option<f64>, [Amplitude; 3]);
 
 /// Each convention resolves `attention_factor`, `mscale`, and `mscale_all_dim` as documented.
 #[test]
 fn yarn_amplitude_follows_each_mscale_convention() {
+    use Amplitude::{Unused, Value};
     let factor: f64 = 16.0;
     let m = |multiplier: f64| yarn_mscale(factor, multiplier);
     let default = m(1.0);
-    let cases: [AmplitudeCase; 10] = [
-        (
-            None,
-            None,
-            None,
-            Amplitude::Value(default),
-            Amplitude::Value(default),
-        ),
-        (
-            Some(1.5),
-            None,
-            None,
-            Amplitude::Value(1.5),
-            Amplitude::Value(1.5),
-        ),
-        (
-            None,
-            Some(1.0),
-            Some(0.8),
-            Amplitude::Value(m(1.0) / m(0.8)),
-            Amplitude::Value(m(1.0) / m(0.8)),
-        ),
+    let cases: [AmplitudeCase; 11] = [
+        (None, None, None, [Value(default); 3]),
+        (Some(1.5), None, None, [Value(1.5); 3]),
+        (None, Some(1.0), Some(0.8), [Value(m(1.0) / m(0.8)); 3]),
         (
             None,
             None,
             Some(0.8),
-            Amplitude::Value(default),
-            Amplitude::Value(m(1.0) / m(0.8)),
+            [
+                Unused("mscale_all_dim", default),
+                Value(default),
+                Value(m(1.0) / m(0.8)),
+            ],
+        ),
+        (
+            None,
+            None,
+            Some(0.0),
+            [
+                Unused("mscale_all_dim", default),
+                Value(default),
+                Value(default),
+            ],
         ),
         (
             None,
             Some(0.7),
             None,
-            Amplitude::Unused("mscale", default),
-            Amplitude::Value(m(0.7)),
+            [
+                Unused("mscale", default),
+                Unused("mscale", default),
+                Value(m(0.7)),
+            ],
         ),
         (
             None,
             Some(0.0),
             Some(0.8),
-            Amplitude::Unused("mscale", default),
-            Amplitude::Value(1.0 / m(0.8)),
+            [
+                Unused("mscale", default),
+                Unused("mscale", default),
+                Value(1.0 / m(0.8)),
+            ],
         ),
         (
             None,
             Some(1.0),
             Some(0.0),
-            Amplitude::Unused("mscale", default),
-            Amplitude::Value(m(1.0)),
+            [
+                Unused("mscale", default),
+                Unused("mscale", default),
+                Value(m(1.0)),
+            ],
         ),
         (
             Some(1.5),
             Some(1.0),
             Some(1.0),
-            Amplitude::Unused("mscale", 1.5),
-            Amplitude::Unused("attention_factor", 1.0),
+            [
+                Unused("mscale", 1.5),
+                Unused("mscale", 1.5),
+                Unused("attention_factor", 1.0),
+            ],
         ),
         (
             Some(1.5),
             None,
             Some(1.0),
-            Amplitude::Value(1.5),
-            Amplitude::Unused("attention_factor", 1.0),
+            [
+                Unused("mscale_all_dim", 1.5),
+                Value(1.5),
+                Unused("attention_factor", 1.0),
+            ],
         ),
         (
             Some(1.5),
             Some(0.5),
             None,
-            Amplitude::Unused("mscale", 1.5),
-            Amplitude::Unused("attention_factor", m(0.5)),
+            [
+                Unused("mscale", 1.5),
+                Unused("mscale", 1.5),
+                Unused("attention_factor", m(0.5)),
+            ],
         ),
     ];
-    for (attention_factor, mscale, mscale_all_dim, hugging_face, deepseek) in cases {
+    for (attention_factor, mscale, mscale_all_dim, [unscaled, squared, deepseek]) in cases {
         let rope = RopeParameters {
             rope_type: RopeType::Yarn,
             factor: Some(factor),
@@ -735,20 +860,41 @@ fn yarn_amplitude_follows_each_mscale_convention() {
             mscale_all_dim,
             ..RopeParameters::default()
         };
-        for (convention, expected) in [
-            (YarnMscaleConvention::HuggingFace, hugging_face),
-            (YarnMscaleConvention::DeepSeekReference, deepseek),
+        for (convention, softmax, expected) in [
+            (
+                YarnMscaleConvention::HuggingFace,
+                SoftmaxMscale::Unscaled,
+                unscaled,
+            ),
+            (
+                YarnMscaleConvention::HuggingFace,
+                SoftmaxMscale::MscaleAllDimSquared,
+                squared,
+            ),
+            (
+                YarnMscaleConvention::DeepSeekReference,
+                SoftmaxMscale::Unscaled,
+                deepseek,
+            ),
+            (
+                YarnMscaleConvention::DeepSeekReference,
+                SoftmaxMscale::MscaleAllDimSquared,
+                deepseek,
+            ),
         ] {
-            let strict = context().with_yarn_mscale_convention(convention);
-            let label =
-                format!("{convention:?} {attention_factor:?} {mscale:?} {mscale_all_dim:?}");
+            let strict = context()
+                .with_yarn_mscale_convention(convention)
+                .with_softmax_mscale(softmax);
+            let label = format!(
+                "{convention:?} {softmax:?} {attention_factor:?} {mscale:?} {mscale_all_dim:?}"
+            );
             let value = match expected {
-                Amplitude::Value(value) => {
+                Value(value) => {
                     let strict_config = rope.to_rope_config(&strict).expect(&label);
                     assert_eq!(yarn_of(strict_config).attention_factor(), value, "{label}");
                     value
                 }
-                Amplitude::Unused(unused, value) => {
+                Unused(unused, value) => {
                     let error = rope.to_rope_config(&strict).expect_err(&label);
                     assert_eq!(field(&error), format!("test.rope.{unused}"), "{label}");
                     value
@@ -787,29 +933,145 @@ fn yarn_mscale_matches_the_reference_definition() {
     assert_eq!(yarn_mscale(40.0, 0.707), 1.0 + 0.1 * 0.707 * 40.0_f64.ln());
 }
 
-/// DeepSeek's softmax multiplier applies only to YaRN with a nonzero `mscale_all_dim`.
+/// The softmax multiplier follows the declared convention for every scaled algorithm.
+///
+/// Expected values follow DeepSeek's reference (`softmax_scale` whenever
+/// `rope_scaling` is set) and Transformers 5.2 `deepseek_v3` (`scaling`
+/// whenever `rope_type != "default"`): a linear config with
+/// `mscale_all_dim = 1` and factor 4 gives `(1 + 0.1 ln 4)^2 = 1.29648`.
 #[test]
-fn softmax_scale_multiplier_applies_only_to_yarn_with_mscale_all_dim() {
-    let multiplier = |json: &str| params(json).yarn_softmax_scale_multiplier(&context());
-    assert_eq!(multiplier("{}").unwrap(), 1.0);
+fn softmax_scale_multiplier_follows_the_declared_convention() {
+    let squared = context().with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared);
+    let multiplier =
+        |json: &str, context: &RopeContext| params(json).softmax_scale_multiplier(context);
+    let linear = r#"{"rope_type": "linear", "factor": 4.0, "mscale_all_dim": 1.0}"#;
+    // An unscaled softmax never applies the correction.
+    assert_eq!(multiplier(linear, &context()).unwrap(), 1.0);
+    let probe = multiplier(linear, &squared).unwrap();
+    assert_eq!(probe, yarn_mscale(4.0, 1.0).powi(2));
+    assert!((probe - 1.296_476_992_780_706_3).abs() < 1e-15, "{probe}");
+    for json in [
+        r#"{"rope_type": "dynamic", "factor": 4.0, "mscale_all_dim": 1.0}"#,
+        r#"{"rope_type": "yarn", "factor": 4.0, "mscale_all_dim": 1.0}"#,
+        r#"{"rope_type": "llama3", "factor": 4.0, "mscale_all_dim": 1.0}"#,
+    ] {
+        assert_eq!(multiplier(json, &squared).unwrap(), probe, "{json}");
+    }
     assert_eq!(
-        multiplier(r#"{"rope_type": "linear", "factor": 4.0, "mscale_all_dim": 1.0}"#).unwrap(),
-        1.0
-    );
-    assert_eq!(
-        multiplier(r#"{"rope_type": "yarn", "factor": 4.0}"#).unwrap(),
-        1.0
-    );
-    assert_eq!(
-        multiplier(r#"{"rope_type": "yarn", "factor": 4.0, "mscale_all_dim": 0.0}"#).unwrap(),
-        1.0
-    );
-    assert_eq!(
-        multiplier(r#"{"rope_type": "yarn", "factor": 40.0, "mscale_all_dim": 0.707}"#).unwrap(),
+        multiplier(
+            r#"{"rope_type": "yarn", "factor": 40.0, "mscale_all_dim": 0.707}"#,
+            &squared
+        )
+        .unwrap(),
         yarn_mscale(40.0, 0.707).powi(2)
     );
-    let error = multiplier(r#"{"rope_type": "yarn", "mscale_all_dim": 1.0}"#).unwrap_err();
-    assert_eq!(field(&error), "test.rope.factor");
+    // Default RoPE, an absent or zero `mscale_all_dim`, and a unit factor give one.
+    for json in [
+        "{}",
+        r#"{"mscale_all_dim": 1.0}"#,
+        r#"{"rope_type": "yarn", "factor": 4.0}"#,
+        r#"{"rope_type": "yarn", "factor": 4.0, "mscale_all_dim": 0.0}"#,
+        r#"{"rope_type": "linear", "factor": 1.0, "mscale_all_dim": 1.0}"#,
+    ] {
+        assert_eq!(multiplier(json, &squared).unwrap(), 1.0, "{json}");
+    }
+    // The correction needs a usable factor and a positive m(f, mscale_all_dim).
+    for (json, expected) in [
+        (
+            r#"{"rope_type": "longrope", "mscale_all_dim": 1.0}"#,
+            "test.rope.factor",
+        ),
+        (
+            r#"{"rope_type": "linear", "factor": 0.5, "mscale_all_dim": 1.0}"#,
+            "test.rope.factor",
+        ),
+        (
+            r#"{"rope_type": "yarn", "factor": 4.0, "mscale_all_dim": -100.0}"#,
+            "test.rope.mscale_all_dim",
+        ),
+    ] {
+        let error = multiplier(json, &squared).unwrap_err();
+        assert_eq!(field(&error), expected, "{json}: {error}");
+    }
+    let nan = RopeParameters {
+        rope_type: RopeType::Yarn,
+        factor: Some(f64::NAN),
+        mscale_all_dim: Some(1.0),
+        ..RopeParameters::default()
+    };
+    assert_eq!(
+        field(&nan.softmax_scale_multiplier(&squared).unwrap_err()),
+        "test.rope.factor"
+    );
+    // A non-finite multiplier gives a non-finite correction.
+    let non_finite = RopeParameters {
+        rope_type: RopeType::Linear,
+        factor: Some(4.0),
+        mscale_all_dim: Some(f64::INFINITY),
+        ..RopeParameters::default()
+    };
+    let error = non_finite.softmax_scale_multiplier(&squared).unwrap_err();
+    assert_eq!(field(&error), "test.rope.mscale_all_dim");
+    assert!(error.to_string().contains("finite and positive"), "{error}");
+}
+
+/// Translation validates the declared softmax correction and accepts what it reads.
+#[test]
+fn declared_softmax_correction_is_validated_during_translation() {
+    let squared = context().with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared);
+    // `mscale_all_dim` is read by every scaled algorithm and changes no table.
+    for rope_type in ROPE_TYPES {
+        let mut rope = minimal(rope_type);
+        let label = format!("{rope_type:?}");
+        if rope_type == RopeType::Default {
+            rope.mscale_all_dim = Some(1.0);
+            let error = rejects(&rope, &squared, "test.rope.mscale_all_dim");
+            assert!(error.to_string().contains("is not read by"), "{error}");
+            continue;
+        }
+        // The correction needs an explicit factor even where RoPE defaults it.
+        rope.factor.get_or_insert(2.0);
+        let reference = rope.to_rope_config(&squared).unwrap();
+        rope.mscale_all_dim = Some(1.0);
+        // The tables are unchanged; for YaRN, the Hugging Face amplitude
+        // ignores a lone `mscale_all_dim`.
+        assert_eq!(
+            rope.to_rope_config(&squared).expect(&label),
+            reference,
+            "{label}"
+        );
+        assert_eq!(
+            rope.softmax_scale_multiplier(&squared).unwrap(),
+            yarn_mscale(2.0, 1.0).powi(2),
+            "{label}"
+        );
+    }
+    // An invalid correction fails translation itself, also in a per-layer scope.
+    let invalid = params(r#"{"rope_type": "linear", "factor": 4.0, "mscale_all_dim": -100.0}"#);
+    rejects(&invalid, &squared, "test.rope.mscale_all_dim");
+    let mut layers = std::collections::BTreeMap::new();
+    layers.insert("full_attention".to_owned(), invalid.clone());
+    let layered = RopeParameterSet::from(RopeParametersByLayerType::new(layers).unwrap());
+    rejects_layer(
+        &layered,
+        "full_attention",
+        &squared,
+        "test.rope.full_attention.mscale_all_dim",
+    );
+    let missing_factor = params(
+        r#"{"rope_type": "longrope", "short_factor": [1, 1, 1, 1, 1, 1, 1, 1], "long_factor": [2, 2, 2, 2, 2, 2, 2, 2], "mscale_all_dim": 1.0}"#,
+    );
+    let error = rejects(&missing_factor, &squared, "test.rope.factor");
+    assert!(error.to_string().contains("softmax correction"), "{error}");
+    // Without the declaration the unread value is reported instead.
+    rejects(&invalid, &context(), "test.rope.mscale_all_dim");
+    assert!(
+        invalid
+            .to_rope_config(&context())
+            .unwrap_err()
+            .to_string()
+            .contains("is not read by linear RoPE")
+    );
 }
 
 /// LongRoPE needs both tables, defaults its factor, and honours an explicit amplitude.
@@ -1040,9 +1302,25 @@ fn every_unread_field_is_rejected_or_ignored_by_policy() {
             set_field(&mut rope, algorithm_field);
             assert!(algorithm_field.is_present(&rope));
             let label = format!("{rope_type:?} {}", algorithm_field.name());
-            if algorithm_field.is_read_by(rope_type) {
-                // `mscale` alone is unused under the Hugging Face convention.
-                if algorithm_field != AlgorithmField::Mscale {
+            if algorithm_field.is_read_by(rope_type, SoftmaxMscale::Unscaled) {
+                if matches!(
+                    algorithm_field,
+                    AlgorithmField::Mscale | AlgorithmField::MscaleAllDim
+                ) {
+                    // Alone, either key is unused by the Hugging Face amplitude.
+                    let error = rope.to_rope_config(&context()).expect_err(&label);
+                    assert_eq!(
+                        field(&error),
+                        format!("test.rope.{}", algorithm_field.name()),
+                        "{label}"
+                    );
+                    assert!(error.to_string().contains("only together"), "{error}");
+                    assert_eq!(
+                        rope.to_rope_config(&lenient).expect(&label),
+                        reference,
+                        "{label}"
+                    );
+                } else {
                     rope.to_rope_config(&context()).expect(&label);
                 }
             } else {
@@ -1064,6 +1342,49 @@ fn every_unread_field_is_rejected_or_ignored_by_policy() {
     }
     // 12 fields x 7 algorithms minus the 21 (algorithm, field) pairs that are read.
     assert_eq!(rejected, 63);
+}
+
+/// An odd whole-head width is reported at `head_dim`, an odd strict prefix at the partial factor.
+#[test]
+fn odd_rotary_widths_name_the_field_to_repair() {
+    let odd = RopeContext::new("test", 15, MAX);
+    rejects(&RopeParameters::default(), &odd, "test.head_dim");
+    rejects(
+        &RopeParameters::default(),
+        &odd.with_partial_rotary(PartialRotary::FullHeadOnly),
+        "test.head_dim",
+    );
+    rejects(
+        &params(r#"{"rope_type": "proportional", "partial_rotary_factor": 0.5}"#),
+        &odd,
+        "test.head_dim",
+    );
+    rejects(
+        &params(r#"{"partial_rotary_factor": 0.5}"#),
+        &RopeContext::new("test", 30, MAX),
+        "test.rope.partial_rotary_factor",
+    );
+    // `validate_for` names the same fields.
+    let validated = |rope: RopeParameters, head_dim| {
+        rope.validate_for("test", head_dim, MAX, None)
+            .unwrap_err()
+            .field
+    };
+    assert_eq!(validated(RopeParameters::default(), 15), "head_dim");
+    assert_eq!(validated(RopeParameters::default(), 1), "head_dim");
+    assert_eq!(
+        validated(params(r#"{"partial_rotary_factor": 0.5}"#), 30),
+        "partial_rotary_factor"
+    );
+    assert_eq!(
+        validated(params(r#"{"partial_rotary_factor": 0.9}"#), 3),
+        "partial_rotary_factor"
+    );
+    rejects(
+        &RopeParameters::default(),
+        &RopeContext::new("test", 1, MAX),
+        "test.head_dim",
+    );
 }
 
 /// Multimodal sections are rejected unless the caller declares it consumes them.
@@ -1112,6 +1433,18 @@ fn construction_errors_map_to_repairable_fields() {
                 rotary_dimension: 3,
             },
             partial,
+        ),
+        (
+            RopeConfigError::OddRotaryDimension {
+                rotary_dimension: HEAD,
+            },
+            "test.head_dim",
+        ),
+        (
+            RopeConfigError::DynamicNtkDimensionTooSmall {
+                rotary_dimension: HEAD,
+            },
+            "test.head_dim",
         ),
         (
             RopeConfigError::InvalidPartialRotaryFactor { factor: 2.0 },
@@ -1230,6 +1563,27 @@ fn construction_errors_map_to_repairable_fields() {
 
 // ---------------------------------------------------------------------------
 // Parity with the private family translators.
+//
+// The recommended family contexts below follow each family's reference
+// (Transformers 5.2, or DeepSeek's `modeling_deepseek.py`). They equal the
+// frozen private translators on every pinned checkpoint and on the families'
+// own test configs, except for these intended behavior changes, each
+// asserted below:
+//
+// * A required `factor` that is absent is an error (it defaulted to one).
+// * Dynamic NTK scales against `max_position_embeddings`, so a nested
+//   `original_max_position_embeddings` that differs from it is an unused
+//   field; `DynamicNtkContext::OriginalMaxPositionEmbeddings` restores the
+//   legacy rule exactly.
+// * Qwen and Muse YaRN read `mscale`/`mscale_all_dim` with the Hugging Face
+//   rule (the ratio when both are nonzero; otherwise the keys are unused)
+//   and honor `truncate: false`; the private translators ignored all three.
+// * DeepSeek rejects `attention_factor` beside a `mscale` key (it was
+//   dropped) and applies the softmax correction to every scaled algorithm,
+//   as the reference does (it was YaRN-only).
+// * Unused fields and disagreeing sources are errors (`Ignore` restores the
+//   Transformers resolution), and LongRoPE, Llama 3, and proportional RoPE
+//   are translated instead of rejected.
 // ---------------------------------------------------------------------------
 
 mod frozen {
@@ -1486,43 +1840,50 @@ mod frozen {
     }
 }
 
-/// Qwen3.5 context reproducing `qwen3_5::model::qwen_rope_config`.
+/// Recommended Qwen3.5 context: the Transformers rules with text-only M-RoPE.
 fn qwen3_5_context(config: &Qwen3_5TextConfig) -> RopeContext {
     RopeContext::new("qwen3_5", config.head_dim, config.max_position_embeddings)
         .with_rope_theta(config.rope_theta)
         .with_partial_rotary_factor(config.partial_rotary_factor)
         .with_mrope(MropeHandling::TextPositions)
-        .with_dynamic_ntk_context(DynamicNtkContext::OriginalMaxPositionEmbeddings)
+}
+
+/// Shared replacement for `qwen3_5::model::qwen_rope_config` under `context`.
+fn shared_qwen3_5_with(config: &Qwen3_5TextConfig, context: &RopeContext) -> Result<RopeConfig> {
+    config
+        .rope_parameters
+        .clone()
+        .unwrap_or_default()
+        .to_rope_config(context)
 }
 
 /// Shared replacement for `qwen3_5::model::qwen_rope_config`.
 fn shared_qwen3_5(config: &Qwen3_5TextConfig) -> Result<RopeConfig> {
-    config
-        .rope_parameters
-        .clone()
-        .unwrap_or_default()
-        .to_rope_config(&qwen3_5_context(config))
+    shared_qwen3_5_with(config, &qwen3_5_context(config))
 }
 
-/// Qwen3-MoE context reproducing `qwen3_moe::model::qwen_rope_config`.
+/// Recommended Qwen3-MoE context: the Transformers rules for whole heads.
 fn qwen3_moe_context(config: &Qwen3MoeConfig) -> RopeContext {
     RopeContext::new("qwen3_moe", config.head_dim, config.max_position_embeddings)
         .with_rope_theta(config.rope_theta)
         .with_partial_rotary(PartialRotary::FullHeadOnly)
-        .with_dynamic_ntk_context(DynamicNtkContext::OriginalMaxPositionEmbeddings)
-        .with_unused_fields(UnusedRopeFields::Ignore)
 }
 
-/// Shared replacement for `qwen3_moe::model::qwen_rope_config`.
-fn shared_qwen3_moe(config: &Qwen3MoeConfig) -> Result<RopeConfig> {
+/// Shared replacement for `qwen3_moe::model::qwen_rope_config` under `context`.
+fn shared_qwen3_moe_with(config: &Qwen3MoeConfig, context: &RopeContext) -> Result<RopeConfig> {
     config
         .rope_parameters
         .clone()
         .unwrap_or_default()
-        .to_rope_config(&qwen3_moe_context(config))
+        .to_rope_config(context)
 }
 
-/// DeepSeek-V2 context reproducing `deepseek_v2::model::deepseek_rope_config`.
+/// Shared replacement for `qwen3_moe::model::qwen_rope_config`.
+fn shared_qwen3_moe(config: &Qwen3MoeConfig) -> Result<RopeConfig> {
+    shared_qwen3_moe_with(config, &qwen3_moe_context(config))
+}
+
+/// Recommended DeepSeek-V2 context: the reference amplitude and softmax correction.
 fn deepseek_context(config: &DeepseekV2Config) -> RopeContext {
     RopeContext::new(
         "deepseek_v2",
@@ -1532,16 +1893,21 @@ fn deepseek_context(config: &DeepseekV2Config) -> RopeContext {
     .with_rope_theta(Some(config.rope_theta))
     .with_partial_rotary(PartialRotary::FullHeadOnly)
     .with_yarn_mscale_convention(YarnMscaleConvention::DeepSeekReference)
-    .with_dynamic_ntk_context(DynamicNtkContext::OriginalMaxPositionEmbeddings)
+    .with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared)
 }
 
-/// Shared replacement for `deepseek_v2::model::deepseek_rope_config`.
-fn shared_deepseek_v2(config: &DeepseekV2Config) -> Result<RopeConfig> {
+/// Shared replacement for `deepseek_v2::model::deepseek_rope_config` under `context`.
+fn shared_deepseek_v2_with(config: &DeepseekV2Config, context: &RopeContext) -> Result<RopeConfig> {
     config
         .rope_scaling
         .clone()
         .unwrap_or_default()
-        .to_rope_config(&deepseek_context(config))
+        .to_rope_config(context)
+}
+
+/// Shared replacement for `deepseek_v2::model::deepseek_rope_config`.
+fn shared_deepseek_v2(config: &DeepseekV2Config) -> Result<RopeConfig> {
+    shared_deepseek_v2_with(config, &deepseek_context(config))
 }
 
 /// Shared replacement for `deepseek_v2::model::deepseek_attention_scale`.
@@ -1550,26 +1916,41 @@ fn shared_deepseek_attention_scale(config: &DeepseekV2Config) -> Result<f64> {
         .rope_scaling
         .clone()
         .unwrap_or_default()
-        .yarn_softmax_scale_multiplier(&deepseek_context(config))?;
+        .softmax_scale_multiplier(&deepseek_context(config))?;
     Ok((config.qk_head_dim() as f64).sqrt().recip() * multiplier)
 }
 
-/// Shared replacement for `muse_glimmer::model::muse_rope_config`.
-fn shared_muse_glimmer(config: &MuseGlimmerTextConfig, theta: f64) -> Result<RopeConfig> {
+/// Recommended Muse Glimmer context for one rotary layer of base `theta`.
+fn muse_context(config: &MuseGlimmerTextConfig, theta: f64) -> RopeContext {
+    RopeContext::new(
+        "muse_glimmer",
+        config.head_dim,
+        config.max_position_embeddings,
+    )
+    .with_layer_rope_theta(theta)
+    .with_partial_rotary(PartialRotary::FullHeadOnly)
+}
+
+/// Shared replacement for `muse_glimmer::model::muse_rope_config` under `context`.
+fn shared_muse_glimmer_with(
+    config: &MuseGlimmerTextConfig,
+    context: &RopeContext,
+) -> Result<RopeConfig> {
     config
         .rope_parameters
         .clone()
         .unwrap_or_default()
-        .to_rope_config(
-            &RopeContext::new(
-                "muse_glimmer",
-                config.head_dim,
-                config.max_position_embeddings,
-            )
-            .with_layer_rope_theta(theta)
-            .with_partial_rotary(PartialRotary::FullHeadOnly)
-            .with_dynamic_ntk_context(DynamicNtkContext::OriginalMaxPositionEmbeddings),
-        )
+        .to_rope_config(context)
+}
+
+/// Shared replacement for `muse_glimmer::model::muse_rope_config`.
+fn shared_muse_glimmer(config: &MuseGlimmerTextConfig, theta: f64) -> Result<RopeConfig> {
+    shared_muse_glimmer_with(config, &muse_context(config, theta))
+}
+
+/// Adds the legacy dynamic-NTK rule that reproduces the private translators exactly.
+fn legacy_dynamic(context: RopeContext) -> RopeContext {
+    context.with_dynamic_ntk_context(DynamicNtkContext::OriginalMaxPositionEmbeddings)
 }
 
 /// Pinned checkpoint fixtures translate identically through both paths.
@@ -1590,17 +1971,6 @@ fn shared_translator_reproduces_private_translators_on_pinned_fixtures() {
             .unwrap();
     assert_eq!(
         shared_qwen3_moe(&config).unwrap(),
-        frozen::qwen3_moe(&config).unwrap()
-    );
-    // The pinned Qwen3-MoE checkpoint also passes the strict policy.
-    let strict = qwen3_moe_context(&config).with_unused_fields(UnusedRopeFields::Reject);
-    assert_eq!(
-        config
-            .rope_parameters
-            .clone()
-            .unwrap_or_default()
-            .to_rope_config(&strict)
-            .unwrap(),
         frozen::qwen3_moe(&config).unwrap()
     );
     for json in [
@@ -1639,7 +2009,7 @@ fn shared_translator_reproduces_private_translators_on_pinned_fixtures() {
 /// The synthetic configurations used by the families' own tests translate identically.
 #[test]
 fn shared_translator_reproduces_private_translators_on_family_test_configs() {
-    // qwen3_5 model/recipe/intervention/decode tests, plus the decode test's dynamic NTK.
+    // qwen3_5 model/recipe/intervention/decode tests.
     let qwen_tiny = |max_position_embeddings| Qwen3_5TextConfig {
         head_dim: 4,
         max_position_embeddings,
@@ -1647,7 +2017,16 @@ fn shared_translator_reproduces_private_translators_on_family_test_configs() {
         rope_theta: Some(10_000.0),
         ..Qwen3_5TextConfig::default()
     };
-    let mut qwen_configs = vec![Qwen3_5TextConfig::default(), qwen_tiny(64), qwen_tiny(32)];
+    for config in [Qwen3_5TextConfig::default(), qwen_tiny(64), qwen_tiny(32)] {
+        assert_eq!(
+            shared_qwen3_5(&config).unwrap(),
+            frozen::qwen3_5(&config).unwrap()
+        );
+    }
+    // The decode test's dynamic NTK keeps a nested trained context of two
+    // positions below max_position_embeddings = 64. Transformers scales
+    // against 64, so the recommended context reports the unread value; the
+    // legacy rule reproduces the private translator's limit of two.
     let mut dynamic = qwen_tiny(64);
     dynamic.rope_parameters = Some(RopeParameters {
         rope_type: RopeType::Dynamic,
@@ -1655,21 +2034,20 @@ fn shared_translator_reproduces_private_translators_on_family_test_configs() {
         original_max_position_embeddings: Some(2),
         ..RopeParameters::default()
     });
-    qwen_configs.push(dynamic.clone());
-    for config in &qwen_configs {
-        assert_eq!(
-            shared_qwen3_5(config).unwrap(),
-            frozen::qwen3_5(config).unwrap()
-        );
-    }
-    // The decode test relies on the legacy trained context of two positions.
+    let error = shared_qwen3_5(&dynamic).unwrap_err();
     assert_eq!(
-        shared_qwen3_5(&dynamic)
-            .unwrap()
-            .scaling()
-            .cached_context_limit(),
-        Some(2)
+        field(&error),
+        "qwen3_5.rope.original_max_position_embeddings"
     );
+    let legacy = shared_qwen3_5_with(&dynamic, &legacy_dynamic(qwen3_5_context(&dynamic))).unwrap();
+    assert_eq!(legacy, frozen::qwen3_5(&dynamic).unwrap());
+    assert_eq!(legacy.scaling().cached_context_limit(), Some(2));
+    let transformers = shared_qwen3_5_with(
+        &dynamic,
+        &qwen3_5_context(&dynamic).with_unused_fields(UnusedRopeFields::Ignore),
+    )
+    .unwrap();
+    assert_eq!(transformers.scaling().cached_context_limit(), Some(64));
 
     // qwen3_moe model/checkpoint/load tests and the mixed-projection fixtures.
     let moe = |head_dim, max_position_embeddings, rope_theta| Qwen3MoeConfig {
@@ -1678,12 +2056,17 @@ fn shared_translator_reproduces_private_translators_on_family_test_configs() {
         rope_theta,
         ..Qwen3MoeConfig::default()
     };
-    let mut moe_configs = vec![
+    for config in [
         Qwen3MoeConfig::default(),
         moe(4, 32, Some(1_000_000.0)),
         moe(2, 16, Some(10_000.0)),
         moe(4, 32, Some(10_000.0)),
-    ];
+    ] {
+        assert_eq!(
+            shared_qwen3_moe(&config).unwrap(),
+            frozen::qwen3_moe(&config).unwrap()
+        );
+    }
     for rope_type in [RopeType::Linear, RopeType::Yarn] {
         let mut mixed = moe(4, 32, Some(10_000.0));
         mixed.rope_parameters = Some(RopeParameters {
@@ -1696,28 +2079,20 @@ fn shared_translator_reproduces_private_translators_on_family_test_configs() {
             beta_slow: (rope_type == RopeType::Yarn).then_some(1.0),
             ..RopeParameters::default()
         });
-        // Strictly, the linear fixture's unread original context and the
-        // nested theta overriding the top-level one are rejected; the exact
-        // reproduction therefore needs `UnusedRopeFields::Ignore`.
-        let strict = qwen3_moe_context(&mixed).with_unused_fields(UnusedRopeFields::Reject);
-        let error = mixed
-            .rope_parameters
-            .clone()
-            .unwrap()
-            .to_rope_config(&strict)
-            .unwrap_err();
+        // The linear fixture's unread original context and the nested theta
+        // overriding the top-level one are rejected; `Ignore` resolves them
+        // as Transformers does, which is also what the private translator did.
+        let error = shared_qwen3_moe(&mixed).unwrap_err();
         let expected = if rope_type == RopeType::Linear {
             "qwen3_moe.rope.original_max_position_embeddings"
         } else {
             "qwen3_moe.rope.rope_theta"
         };
         assert_eq!(field(&error), expected);
-        moe_configs.push(mixed);
-    }
-    for config in &moe_configs {
+        let lenient = qwen3_moe_context(&mixed).with_unused_fields(UnusedRopeFields::Ignore);
         assert_eq!(
-            shared_qwen3_moe(config).unwrap(),
-            frozen::qwen3_moe(config).unwrap()
+            shared_qwen3_moe_with(&mixed, &lenient).unwrap(),
+            frozen::qwen3_moe(&mixed).unwrap()
         );
     }
 
@@ -1789,8 +2164,81 @@ fn shared_translator_extends_private_translators_to_every_algorithm() {
     }
 }
 
-/// Strategy for a family-compatible scaling setup: `(type, factor, original, theta)`.
-fn scaled_parameters() -> impl Strategy<Value = (RopeType, f64, usize, f64)> {
+/// The documented YaRN divergences, at the reviewer's probe values.
+///
+/// With factor 4, `mscale = 1` and `mscale_all_dim = 0.5`, Transformers 5.2's
+/// `_compute_yarn_parameters` gives `m(4, 1) / m(4, 0.5) = 1.0648`, while the
+/// private translators kept `m(4, 1) = 1.1386`; `truncate: false` is now
+/// honored and a missing `factor` is reported.
+#[test]
+fn shared_translator_documents_its_yarn_divergences() {
+    let config = |rope: RopeParameters| Qwen3MoeConfig {
+        head_dim: HEAD,
+        max_position_embeddings: MAX,
+        rope_theta: None,
+        rope_parameters: Some(rope),
+        ..Qwen3MoeConfig::default()
+    };
+    let ratio = config(RopeParameters {
+        rope_type: RopeType::Yarn,
+        factor: Some(4.0),
+        mscale: Some(1.0),
+        mscale_all_dim: Some(0.5),
+        ..RopeParameters::default()
+    });
+    let shared = yarn_of(shared_qwen3_moe(&ratio).unwrap()).attention_factor();
+    let frozen = yarn_of(frozen::qwen3_moe(&ratio).unwrap()).attention_factor();
+    assert_eq!(shared, yarn_mscale(4.0, 1.0) / yarn_mscale(4.0, 0.5));
+    assert!((shared - 1.064_822).abs() < 1e-6, "{shared}");
+    assert!((frozen - 1.138_629).abs() < 1e-6, "{frozen}");
+
+    let untruncated = config(RopeParameters {
+        rope_type: RopeType::Yarn,
+        factor: Some(4.0),
+        truncate: Some(false),
+        ..RopeParameters::default()
+    });
+    assert!(!yarn_of(shared_qwen3_moe(&untruncated).unwrap()).truncate());
+    assert!(yarn_of(frozen::qwen3_moe(&untruncated).unwrap()).truncate());
+
+    let missing = config(RopeParameters {
+        rope_type: RopeType::Linear,
+        ..RopeParameters::default()
+    });
+    assert_eq!(
+        field(&shared_qwen3_moe(&missing).unwrap_err()),
+        "qwen3_moe.rope.factor"
+    );
+    assert!(frozen::qwen3_moe(&missing).is_ok());
+
+    // DeepSeek's reference applies the softmax correction to linear RoPE too.
+    let linear = DeepseekV2Config {
+        rope_scaling: Some(RopeParameters {
+            rope_type: RopeType::Linear,
+            factor: Some(4.0),
+            mscale_all_dim: Some(1.0),
+            ..RopeParameters::default()
+        }),
+        ..DeepseekV2Config::default()
+    };
+    let base = (linear.qk_head_dim() as f64).sqrt().recip();
+    assert_eq!(
+        shared_deepseek_attention_scale(&linear).unwrap(),
+        base * yarn_mscale(4.0, 1.0).powi(2)
+    );
+    assert_eq!(frozen::deepseek_attention_scale(&linear).unwrap(), base);
+    assert_eq!(
+        shared_deepseek_v2(&linear).unwrap(),
+        frozen::deepseek_v2(&linear).unwrap()
+    );
+}
+
+/// Strategy for a family scaling setup: `(type, factor, nested original, theta)`.
+///
+/// `factor` is sometimes absent, and the nested original context often equals
+/// the families' `max_position_embeddings` (256), so both the success and the
+/// documented-divergence paths are exercised.
+fn scaled_parameters() -> impl Strategy<Value = (RopeType, Option<f64>, usize, f64)> {
     (
         prop_oneof![
             Just(RopeType::Default),
@@ -1798,127 +2246,318 @@ fn scaled_parameters() -> impl Strategy<Value = (RopeType, f64, usize, f64)> {
             Just(RopeType::Dynamic),
             Just(RopeType::Yarn),
         ],
-        1.0f64..64.0,
-        1usize..=256,
+        prop_oneof![1 => Just(None), 6 => (1.0f64..64.0).prop_map(Some)],
+        prop_oneof![Just(FAMILY_MAX), 1usize..=FAMILY_MAX],
         1.5f64..1.0e7,
     )
 }
 
-/// Builds parameters carrying only the fields `rope_type` reads.
-///
-/// `yarn_extras` is `(attention_factor, beta_fast, beta_slow)`, kept for YaRN only.
+/// `max_position_embeddings` of the property-test family configs.
+const FAMILY_MAX: usize = 256;
+
+/// YaRN-only extras of a generated family config.
+#[derive(Debug, Clone, Copy, Default)]
+struct YarnExtras {
+    /// `attention_factor`.
+    attention_factor: Option<f64>,
+    /// `beta_fast`.
+    beta_fast: Option<f64>,
+    /// `beta_slow`.
+    beta_slow: Option<f64>,
+    /// `mscale`.
+    mscale: Option<f64>,
+    /// `mscale_all_dim`.
+    mscale_all_dim: Option<f64>,
+    /// `truncate`.
+    truncate: Option<bool>,
+}
+
+/// Strategy for [`YarnExtras`] with valid betas and occasionally zero `mscale` keys.
+fn yarn_extras() -> impl Strategy<Value = YarnExtras> {
+    let mscale = || proptest::option::of(prop_oneof![1 => Just(0.0), 4 => 0.01f64..2.0]);
+    (
+        proptest::option::of(0.5f64..2.0),
+        proptest::option::of(8.0f64..64.0),
+        proptest::option::of(0.5f64..4.0),
+        mscale(),
+        mscale(),
+        proptest::option::of(any::<bool>()),
+    )
+        .prop_map(
+            |(attention_factor, beta_fast, beta_slow, mscale, mscale_all_dim, truncate)| {
+                YarnExtras {
+                    attention_factor,
+                    beta_fast,
+                    beta_slow,
+                    mscale,
+                    mscale_all_dim,
+                    truncate,
+                }
+            },
+        )
+}
+
+/// Builds parameters carrying only the fields `rope_type` reads; YaRN keeps `extras`.
 fn family_parameters(
     rope_type: RopeType,
-    factor: f64,
+    factor: Option<f64>,
     original: usize,
     theta: f64,
-    yarn_extras: (Option<f64>, Option<f64>, Option<f64>),
+    extras: YarnExtras,
 ) -> RopeParameters {
-    let (attention_factor, beta_fast, beta_slow) = yarn_extras;
     let yarn = rope_type == RopeType::Yarn;
+    let keep = |value: Option<f64>| value.filter(|_| yarn);
     RopeParameters {
         rope_type,
         rope_theta: Some(theta),
-        factor: (rope_type != RopeType::Default).then_some(factor),
+        factor: factor.filter(|_| rope_type != RopeType::Default),
         original_max_position_embeddings: matches!(rope_type, RopeType::Dynamic | RopeType::Yarn)
             .then_some(original),
-        attention_factor: attention_factor.filter(|_| yarn),
-        beta_fast: beta_fast.filter(|_| yarn),
-        beta_slow: beta_slow.filter(|_| yarn),
+        attention_factor: keep(extras.attention_factor),
+        beta_fast: keep(extras.beta_fast),
+        beta_slow: keep(extras.beta_slow),
+        mscale: keep(extras.mscale),
+        mscale_all_dim: keep(extras.mscale_all_dim),
+        truncate: extras.truncate.filter(|_| yarn),
         ..RopeParameters::default()
     }
 }
 
+/// What a recommended strict family context yields relative to its frozen translator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a test-only prediction built once per property case and compared by value"
+)]
+enum FamilyOutcome {
+    /// Exactly the frozen translator's configuration.
+    Frozen,
+    /// A configuration error at `<family>.rope.<field>`.
+    Error(&'static str),
+    /// The Transformers result, which differs from the frozen YaRN translation
+    /// in its amplitude, its truncation, or both.
+    Transformers(RopeConfig),
+}
+
+/// Predicts the Qwen/Muse recommended-context outcome from the documented rules.
+///
+/// `head_dim` is the whole rotated head and `theta` the resolved base.
+fn qwen_family_outcome(rope: &RopeParameters, head_dim: usize, theta: f64) -> FamilyOutcome {
+    if rope.rope_type != RopeType::Default && rope.factor.is_none() {
+        return FamilyOutcome::Error("factor");
+    }
+    if rope.rope_type == RopeType::Dynamic
+        && rope.original_max_position_embeddings != Some(FAMILY_MAX)
+    {
+        return FamilyOutcome::Error("original_max_position_embeddings");
+    }
+    if rope.rope_type != RopeType::Yarn {
+        return FamilyOutcome::Frozen;
+    }
+    let factor = rope.factor.expect("checked above");
+    // The Hugging Face amplitude rule with an unscaled softmax, in the
+    // translator's check order: an explicit amplitude wins and makes both
+    // `mscale` keys unused; otherwise only a pair of nonzero keys is read.
+    let nonzero = |value: Option<f64>| value.is_some_and(|value| value != 0.0);
+    let amplitude = if let Some(attention_factor) = rope.attention_factor {
+        if rope.mscale.is_some() {
+            return FamilyOutcome::Error("mscale");
+        }
+        if rope.mscale_all_dim.is_some() {
+            return FamilyOutcome::Error("mscale_all_dim");
+        }
+        Some(attention_factor)
+    } else if nonzero(rope.mscale) && nonzero(rope.mscale_all_dim) {
+        let ratio = |mscale: Option<f64>| yarn_mscale(factor, mscale.expect("nonzero"));
+        Some(ratio(rope.mscale) / ratio(rope.mscale_all_dim))
+    } else if rope.mscale.is_some() {
+        return FamilyOutcome::Error("mscale");
+    } else if rope.mscale_all_dim.is_some() {
+        return FamilyOutcome::Error("mscale_all_dim");
+    } else {
+        None
+    };
+    let ratio = rope.attention_factor.is_none() && amplitude.is_some();
+    let untruncated = rope.truncate == Some(false);
+    if !ratio && !untruncated {
+        return FamilyOutcome::Frozen;
+    }
+    let original = rope.original_max_position_embeddings.unwrap_or(FAMILY_MAX);
+    let mut yarn = YarnConfig::new(factor, original).unwrap();
+    if let Some(amplitude) = amplitude {
+        yarn = yarn.with_attention_factor(amplitude).unwrap();
+    }
+    let yarn = yarn
+        .with_beta_overrides(rope.beta_fast, rope.beta_slow)
+        .unwrap()
+        .with_truncate(!untruncated);
+    FamilyOutcome::Transformers(RopeConfig::new(head_dim, head_dim, theta, yarn.into()).unwrap())
+}
+
+/// Checks one family translation against its predicted outcome and the frozen oracle.
+///
+/// `legacy` translates with [`legacy_dynamic`] added to the family context.
+fn check_family_outcome(
+    family: &str,
+    expected: FamilyOutcome,
+    shared: Result<RopeConfig>,
+    legacy: Result<RopeConfig>,
+    frozen: RopeConfig,
+) -> std::result::Result<(), TestCaseError> {
+    match expected {
+        FamilyOutcome::Frozen => prop_assert_eq!(shared.unwrap(), frozen, "{}", family),
+        FamilyOutcome::Error(expected_field) => {
+            let error = shared.unwrap_err();
+            prop_assert_eq!(field(&error), format!("{family}.rope.{expected_field}"));
+            if expected_field == "original_max_position_embeddings" {
+                // The legacy dynamic-NTK rule reproduces the frozen result exactly.
+                prop_assert_eq!(legacy.unwrap(), frozen, "{}", family);
+            }
+        }
+        FamilyOutcome::Transformers(transformers) => {
+            prop_assert_eq!(shared.unwrap(), transformers, "{}", family);
+        }
+    }
+    Ok(())
+}
+
 proptest! {
-    /// Qwen, Qwen-MoE, and Muse adoption calls equal the frozen translators.
+    /// Qwen, Qwen-MoE, and Muse recommended contexts follow the documented rules.
+    ///
+    /// Outside the documented divergences they equal the frozen translators;
+    /// inside, they equal the Transformers result or report the field.
     #[test]
     fn family_contexts_reproduce_frozen_translators(
         (rope_type, factor, original, theta) in scaled_parameters(),
         head_pairs in 2usize..=64,
-        attention_factor in proptest::option::of(0.5f64..2.0),
-        beta_fast in proptest::option::of(8.0f64..64.0),
-        beta_slow in proptest::option::of(0.5f64..4.0),
+        extras in yarn_extras(),
     ) {
         let head_dim = 2 * head_pairs;
-        let parameters = family_parameters(
-            rope_type,
-            factor,
-            original,
-            theta,
-            (attention_factor, beta_fast, beta_slow),
-        );
+        let parameters = family_parameters(rope_type, factor, original, theta, extras);
+        let expected = qwen_family_outcome(&parameters, head_dim, theta);
+
         let qwen = Qwen3_5TextConfig {
             head_dim,
-            max_position_embeddings: 256,
+            max_position_embeddings: FAMILY_MAX,
             rope_parameters: Some(parameters.clone()),
             partial_rotary_factor: None,
             ..Qwen3_5TextConfig::default()
         };
-        prop_assert_eq!(shared_qwen3_5(&qwen).unwrap(), frozen::qwen3_5(&qwen).unwrap());
+        check_family_outcome(
+            "qwen3_5",
+            expected,
+            shared_qwen3_5(&qwen),
+            shared_qwen3_5_with(&qwen, &legacy_dynamic(qwen3_5_context(&qwen))),
+            frozen::qwen3_5(&qwen).unwrap(),
+        )?;
         let moe = Qwen3MoeConfig {
             head_dim,
-            max_position_embeddings: 256,
+            max_position_embeddings: FAMILY_MAX,
+            rope_theta: Some(theta),
             rope_parameters: Some(parameters.clone()),
             ..Qwen3MoeConfig::default()
         };
-        prop_assert_eq!(shared_qwen3_moe(&moe).unwrap(), frozen::qwen3_moe(&moe).unwrap());
+        check_family_outcome(
+            "qwen3_moe",
+            expected,
+            shared_qwen3_moe(&moe),
+            shared_qwen3_moe_with(&moe, &legacy_dynamic(qwen3_moe_context(&moe))),
+            frozen::qwen3_moe(&moe).unwrap(),
+        )?;
         let muse = MuseGlimmerTextConfig {
             head_dim,
-            max_position_embeddings: 256,
+            max_position_embeddings: FAMILY_MAX,
             rope_parameters: Some(parameters),
             ..MuseGlimmerTextConfig::default()
         };
-        prop_assert_eq!(
-            shared_muse_glimmer(&muse, theta).unwrap(),
-            frozen::muse_glimmer(&muse, theta).unwrap()
-        );
+        check_family_outcome(
+            "muse_glimmer",
+            expected,
+            shared_muse_glimmer(&muse, theta),
+            shared_muse_glimmer_with(&muse, &legacy_dynamic(muse_context(&muse, theta))),
+            frozen::muse_glimmer(&muse, theta).unwrap(),
+        )?;
     }
 
-    /// The DeepSeek adoption call equals the frozen translator and attention scale.
+    /// The recommended DeepSeek context follows the reference and the documented changes.
     #[test]
     fn deepseek_context_reproduces_frozen_translator(
         (rope_type, factor, original, theta) in scaled_parameters(),
         head_pairs in 2usize..=64,
-        mscale in proptest::option::of(0.0f64..2.0),
-        mscale_all_dim in proptest::option::of(0.0f64..2.0),
-        attention_factor in proptest::option::of(0.5f64..2.0),
+        extras in yarn_extras(),
     ) {
-        let mut parameters =
-            family_parameters(rope_type, factor, original, theta, (None, None, None));
-        if rope_type == RopeType::Yarn {
-            parameters.mscale = mscale;
-            parameters.mscale_all_dim = mscale_all_dim;
-            parameters.attention_factor = attention_factor;
+        let mut parameters = family_parameters(rope_type, factor, original, theta, extras);
+        // The reference's softmax correction reads `mscale_all_dim` for linear
+        // and dynamic RoPE too.
+        if matches!(rope_type, RopeType::Linear | RopeType::Dynamic) {
+            parameters.mscale_all_dim = extras.mscale_all_dim;
         }
         let config = DeepseekV2Config {
             qk_rope_head_dim: 2 * head_pairs,
-            max_position_embeddings: 256,
+            max_position_embeddings: FAMILY_MAX,
             rope_theta: theta,
             rope_scaling: Some(parameters.clone()),
             ..DeepseekV2Config::default()
         };
         let frozen = frozen::deepseek_v2(&config).unwrap();
-        let ambiguous = parameters.attention_factor.is_some()
-            && (parameters.mscale.is_some() || parameters.mscale_all_dim.is_some());
-        match shared_deepseek_v2(&config) {
-            Ok(shared) => {
-                prop_assert!(!ambiguous);
-                prop_assert_eq!(shared, frozen);
-            }
-            Err(error) => {
-                // The private translator silently dropped attention_factor here.
-                prop_assert!(ambiguous, "{}", error);
-                prop_assert_eq!(field(&error), "deepseek_v2.rope.attention_factor");
-                let lenient = deepseek_context(&config).with_unused_fields(UnusedRopeFields::Ignore);
-                prop_assert_eq!(parameters.to_rope_config(&lenient).unwrap(), frozen);
-            }
+        let shared = shared_deepseek_v2(&config);
+        let has_mscale = parameters.mscale.is_some() || parameters.mscale_all_dim.is_some();
+        if rope_type != RopeType::Default && parameters.factor.is_none() {
+            let error = shared.unwrap_err();
+            prop_assert_eq!(field(&error), "deepseek_v2.rope.factor");
+            return Ok(());
         }
-        prop_assert_eq!(
-            shared_deepseek_attention_scale(&config).unwrap(),
-            frozen::deepseek_attention_scale(&config).unwrap()
-        );
+        if rope_type == RopeType::Dynamic && original != FAMILY_MAX {
+            let error = shared.unwrap_err();
+            prop_assert_eq!(field(&error), "deepseek_v2.rope.original_max_position_embeddings");
+            let legacy = shared_deepseek_v2_with(&config, &legacy_dynamic(deepseek_context(&config)));
+            prop_assert_eq!(legacy.unwrap(), frozen);
+            return Ok(());
+        }
+        if rope_type == RopeType::Yarn && parameters.attention_factor.is_some() && has_mscale {
+            // The private translator silently dropped attention_factor here.
+            let error = shared.unwrap_err();
+            prop_assert_eq!(field(&error), "deepseek_v2.rope.attention_factor");
+            let lenient = deepseek_context(&config).with_unused_fields(UnusedRopeFields::Ignore);
+            let lenient = parameters.to_rope_config(&lenient).unwrap();
+            prop_assert_eq!(
+                lenient,
+                RopeConfig::new(
+                    frozen.head_dimension(),
+                    frozen.rotary_dimension(),
+                    frozen.theta(),
+                    yarn_of(frozen)
+                        .with_truncate(parameters.truncate.unwrap_or(true))
+                        .into(),
+                )
+                .unwrap()
+            );
+            return Ok(());
+        }
+        let shared = shared.unwrap();
+        if rope_type == RopeType::Yarn {
+            let truncate = parameters.truncate.unwrap_or(true);
+            prop_assert_eq!(yarn_of(shared).truncate(), truncate);
+            prop_assert_eq!(yarn_of(shared).with_truncate(true), yarn_of(frozen));
+        } else {
+            prop_assert_eq!(shared, frozen);
+        }
+        let base = (config.qk_head_dim() as f64).sqrt().recip();
+        let expected = match (parameters.mscale_all_dim, parameters.factor) {
+            (Some(all), Some(factor)) if all != 0.0 && rope_type != RopeType::Default => {
+                base * yarn_mscale(factor, all).powi(2)
+            }
+            _ => base,
+        };
+        prop_assert_eq!(shared_deepseek_attention_scale(&config).unwrap(), expected);
+        if rope_type == RopeType::Yarn {
+            // YaRN was already corrected by the private translator.
+            prop_assert_eq!(expected, frozen::deepseek_attention_scale(&config).unwrap());
+        }
     }
+}
 
+proptest! {
     /// Both mscale conventions agree whenever both keys are nonzero and no amplitude is given.
     #[test]
     fn mscale_conventions_agree_on_released_deepseek_shapes(

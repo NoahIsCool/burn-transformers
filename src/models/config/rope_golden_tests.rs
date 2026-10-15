@@ -8,11 +8,15 @@
 //! evaluates [`RotaryFrequencies`] at the recorded context, and requires a
 //! relative frequency error of at most `1e-6` (the reference evaluates in F32,
 //! this crate in F64 rounded once to F32) and an amplitude error of `1e-12`.
+//! DeepSeek cases that declare the softmax correction also record the
+//! multiplier Transformers' `DeepseekV3Attention` applies to `1/sqrt(d_qk)`,
+//! compared with [`RopeParameters::softmax_scale_multiplier`] to `1e-12`.
 //!
 //! Coverage: default, legacy linear with top-level theta, dynamic NTK inside
 //! and beyond its context (including a partial rotary width), YaRN defaults,
 //! betas with an explicit `attention_factor`, the `mscale` ratio, untruncated
-//! partial YaRN, DeepSeek-V2-Lite under both mscale conventions, LongRoPE
+//! partial YaRN, DeepSeek-V2-Lite under both mscale conventions (with the
+//! softmax correction, including a linear `deepseek_v3` case), LongRoPE
 //! short/long tables (nested and Phi-3 top-level original context), Phi-3
 //! top-level partial RoPE, Llama 3 bands, the pinned Qwen3.5-0.8B and
 //! Qwen3-30B-A3B fixtures, the tiny goldens `llama3`, `gemma3-text` (both
@@ -47,6 +51,8 @@
 //! from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 //! from transformers.models.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config
 //! from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2RotaryEmbedding
+//! from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
+//! from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3Attention, DeepseekV3RotaryEmbedding
 //! from transformers.models.gemma3.modeling_gemma3 import Gemma3RotaryEmbedding
 //! from transformers.models.gpt_oss.modeling_gpt_oss import GptOssRotaryEmbedding
 //! from transformers.models.llama.configuration_llama import LlamaConfig
@@ -74,19 +80,21 @@
 //! cases = []
 //!
 //!
-//! def record(name, reference, rope_parameters, context, evaluated_context, inv_freq, attention, layer_type=None):
-//!     cases.append(
-//!         {
-//!             "name": name,
-//!             "reference": reference,
-//!             "rope_parameters": rope_parameters,
-//!             "layer_type": layer_type,
-//!             "context": context,
-//!             "evaluated_context": evaluated_context,
-//!             "inv_freq": [float(v) for v in inv_freq.tolist()],
-//!             "attention_scaling": float(attention),
-//!         }
-//!     )
+//! def record(name, reference, rope_parameters, context, evaluated_context, inv_freq, attention, layer_type=None,
+//!            softmax_scale_multiplier=None):
+//!     case = {
+//!         "name": name,
+//!         "reference": reference,
+//!         "rope_parameters": rope_parameters,
+//!         "layer_type": layer_type,
+//!         "context": context,
+//!         "evaluated_context": evaluated_context,
+//!         "inv_freq": [float(v) for v in inv_freq.tolist()],
+//!         "attention_scaling": float(attention),
+//!     }
+//!     if softmax_scale_multiplier is not None:
+//!         case["softmax_scale_multiplier"] = float(softmax_scale_multiplier)
+//!     cases.append(case)
 //!
 //!
 //! def llama(params=None, **kwargs):
@@ -160,12 +168,30 @@
 //!                "5.2 DeepseekV2RotaryEmbedding on tests/fixtures/deepseek_v2_lite.json")
 //!
 //!
+//! # The softmax correction m(f, mscale_all_dim)^2 that 5.2 DeepseekV3Attention applies for every
+//! # non-default rope_type (DeepSeek's reference softmax_scale formula), read back as
+//! # scaling / qk_head_dim**-0.5 from a tiny config.
+//! def deepseek_v3(params, max_pos):
+//!     return DeepseekV3Config(hidden_size=64, num_attention_heads=4, num_key_value_heads=4, q_lora_rank=None,
+//!                             kv_lora_rank=16, qk_rope_head_dim=8, qk_nope_head_dim=8, v_head_dim=8,
+//!                             max_position_embeddings=max_pos, num_hidden_layers=1, rope_parameters=copy.deepcopy(params))
+//!
+//!
+//! def softmax_multiplier(params, max_pos):
+//!     attention = DeepseekV3Attention(deepseek_v3(params, max_pos), layer_idx=0)
+//!     return attention.scaling / attention.qk_head_dim ** -0.5
+//!
+//!
+//! softmax_context = {**deepseek_context, "softmax_mscale": "mscale_all_dim_squared"}
+//!
 //! # Hugging Face reads mscale_all_dim alone only for the attention softmax scale;
 //! # the rotary amplitude falls back to get_mscale(factor).
 //! params = {k: v for k, v in fixture["rope_scaling"].items() if k != "mscale"}
 //! c = DeepseekV2Config.from_dict({**copy.deepcopy(fixture), "rope_scaling": copy.deepcopy(params)})
-//! from_embedding("deepseek_hugging_face_mscale_all_dim_only", params, c, DeepseekV2RotaryEmbedding(c), deepseek_context, 1,
-//!                "5.2 DeepseekV2RotaryEmbedding without mscale")
+//! e = DeepseekV2RotaryEmbedding(c)
+//! record("deepseek_hugging_face_mscale_all_dim_only", "5.2 DeepseekV2RotaryEmbedding without mscale; softmax from DeepseekV3Attention",
+//!        params, softmax_context, 1, e.inv_freq, e.attention_scaling,
+//!        softmax_scale_multiplier=softmax_multiplier(params, fixture["max_position_embeddings"]))
 //!
 //!
 //! def deepseek_mscale(scale, multiplier):
@@ -183,8 +209,17 @@
 //!     hf = DeepseekV2Config.from_dict({**copy.deepcopy(fixture), "rope_scaling": copy.deepcopy(params)})
 //!     inv, _ = ROPE_INIT_FUNCTIONS["yarn"](hf, "cpu")
 //!     amplitude = deepseek_mscale(params["factor"], params.get("mscale", 1)) / deepseek_mscale(params["factor"], params.get("mscale_all_dim", 0))
-//!     record(name, "5.2 yarn frequencies with the DeepSeek reference mscale ratio", params,
-//!            {**deepseek_context, "mscale_convention": "deep_seek_reference"}, 1, inv, amplitude)
+//!     record(name, "5.2 yarn frequencies with the DeepSeek reference mscale ratio; softmax from DeepseekV3Attention", params,
+//!            {**softmax_context, "mscale_convention": "deep_seek_reference"}, 1, inv, amplitude,
+//!            softmax_scale_multiplier=softmax_multiplier(params, fixture["max_position_embeddings"]))
+//!
+//! # The reference applies the softmax correction to linear RoPE as well.
+//! p = {"rope_type": "linear", "factor": 4.0, "mscale_all_dim": 1.0, "rope_theta": 10000.0}
+//! c = deepseek_v3(p, 4096)
+//! e = DeepseekV3RotaryEmbedding(c)
+//! record("deepseek_v3_linear_softmax_correction", "5.2 DeepseekV3RotaryEmbedding and DeepseekV3Attention", p,
+//!        ctx(8, 4096, softmax_mscale="mscale_all_dim_squared"), 1, e.inv_freq, e.attention_scaling,
+//!        softmax_scale_multiplier=softmax_multiplier(p, 4096))
 //!
 //! # LongRoPE: nested original/factor/attention, and Phi-3's top-level original.
 //! short = [1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0]
@@ -262,7 +297,9 @@
 
 use serde::Deserialize;
 
-use super::{MropeHandling, RopeContext, RopeParameterSet, RopeType, YarnMscaleConvention};
+use super::{
+    MropeHandling, RopeContext, RopeParameterSet, RopeType, SoftmaxMscale, YarnMscaleConvention,
+};
 use crate::position::RotaryFrequencies;
 
 /// Largest accepted relative inverse-frequency error against the F32 reference.
@@ -300,6 +337,9 @@ struct GoldenCase {
     inv_freq: Vec<f64>,
     /// Reference cosine/sine amplitude.
     attention_scaling: f64,
+    /// Reference softmax-scale multiplier, for cases declaring the correction.
+    #[serde(default)]
+    softmax_scale_multiplier: Option<f64>,
 }
 
 /// Surrounding config fields and conventions of one golden case.
@@ -324,6 +364,9 @@ struct GoldenContext {
     /// `text_positions` accepts multimodal section metadata.
     #[serde(default)]
     mrope: Option<String>,
+    /// `mscale_all_dim_squared` declares DeepSeek's softmax correction.
+    #[serde(default)]
+    softmax_mscale: Option<String>,
 }
 
 impl GoldenContext {
@@ -339,11 +382,17 @@ impl GoldenContext {
             Some("text_positions") => MropeHandling::TextPositions,
             Some(other) => panic!("unknown mrope handling {other}"),
         };
+        let softmax = match self.softmax_mscale.as_deref() {
+            None => SoftmaxMscale::Unscaled,
+            Some("mscale_all_dim_squared") => SoftmaxMscale::MscaleAllDimSquared,
+            Some(other) => panic!("unknown softmax mscale {other}"),
+        };
         RopeContext::new("golden", self.head_dim, self.max_position_embeddings)
             .with_rope_theta(self.rope_theta)
             .with_partial_rotary_factor(self.partial_rotary_factor)
             .with_original_max_position_embeddings(self.original_max_position_embeddings)
             .with_yarn_mscale_convention(convention)
+            .with_softmax_mscale(softmax)
             .with_mrope(mrope)
     }
 }
@@ -393,6 +442,7 @@ fn translated_configs_match_transformers_frequencies_and_amplitude() {
     assert_eq!(file.transformers, "5.2.0");
     assert_eq!(file.torch, "2.10.0");
     let mut worst = 0.0_f64;
+    let mut softmax_cases = 0;
     for case in &file.cases {
         let context = case.context.rope_context();
         let set = case.rope_parameters.clone().unwrap_or_default();
@@ -433,7 +483,27 @@ fn translated_configs_match_transformers_frequencies_and_amplitude() {
             frequencies.amplitude(),
             case.attention_scaling
         );
+        let parameters = set.parameters_for(layer_type).expect("layer parameters");
+        let multiplier = parameters
+            .softmax_scale_multiplier(&context)
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        match case.softmax_scale_multiplier {
+            Some(expected) => {
+                softmax_cases += 1;
+                assert!(
+                    ((multiplier - expected) / expected).abs() <= AMPLITUDE_TOLERANCE,
+                    "{} softmax multiplier: {multiplier} vs {expected}",
+                    case.name
+                );
+            }
+            // Cases without the declaration keep the plain softmax scale.
+            None => assert_eq!(multiplier, 1.0, "{}", case.name),
+        }
     }
+    assert!(
+        softmax_cases >= 5,
+        "softmax-correction cases: {softmax_cases}"
+    );
     assert!(
         worst <= FREQUENCY_TOLERANCE,
         "worst relative error {worst:e}"

@@ -296,7 +296,7 @@
   },
   {
    "name": "deepseek_hugging_face_mscale_all_dim_only",
-   "reference": "5.2 DeepseekV2RotaryEmbedding without mscale",
+   "reference": "5.2 DeepseekV2RotaryEmbedding without mscale; softmax from DeepseekV3Attention",
    "rope_parameters": {
     "type": "yarn",
     "factor": 40,
@@ -309,7 +309,8 @@
    "context": {
     "head_dim": 64,
     "max_position_embeddings": 163840,
-    "rope_theta": 10000.0
+    "rope_theta": 10000.0,
+    "softmax_mscale": "mscale_all_dim_squared"
    },
    "evaluated_context": 1,
    "inv_freq": [
@@ -346,11 +347,12 @@
     4.445698323252145e-06,
     3.3338035336782923e-06
    ],
-   "attention_scaling": 1.3688879454113936
+   "attention_scaling": 1.3688879454113936,
+   "softmax_scale_multiplier": 1.5896261651208736
   },
   {
    "name": "deepseek_v2_lite_reference",
-   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio",
+   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio; softmax from DeepseekV3Attention",
    "rope_parameters": {
     "type": "yarn",
     "factor": 40,
@@ -365,6 +367,7 @@
     "head_dim": 64,
     "max_position_embeddings": 163840,
     "rope_theta": 10000.0,
+    "softmax_mscale": "mscale_all_dim_squared",
     "mscale_convention": "deep_seek_reference"
    },
    "evaluated_context": 1,
@@ -402,11 +405,12 @@
     4.445698323252145e-06,
     3.3338035336782923e-06
    ],
-   "attention_scaling": 1.0
+   "attention_scaling": 1.0,
+   "softmax_scale_multiplier": 1.5896261651208736
   },
   {
    "name": "deepseek_reference_mscale_only",
-   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio",
+   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio; softmax from DeepseekV3Attention",
    "rope_parameters": {
     "type": "yarn",
     "factor": 40,
@@ -420,6 +424,7 @@
     "head_dim": 64,
     "max_position_embeddings": 163840,
     "rope_theta": 10000.0,
+    "softmax_mscale": "mscale_all_dim_squared",
     "mscale_convention": "deep_seek_reference"
    },
    "evaluated_context": 1,
@@ -457,11 +462,12 @@
     4.445698323252145e-06,
     3.3338035336782923e-06
    ],
-   "attention_scaling": 1.2608037774058554
+   "attention_scaling": 1.2608037774058554,
+   "softmax_scale_multiplier": 1.0
   },
   {
    "name": "deepseek_reference_mscale_all_dim_only",
-   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio",
+   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio; softmax from DeepseekV3Attention",
    "rope_parameters": {
     "type": "yarn",
     "factor": 40,
@@ -475,6 +481,7 @@
     "head_dim": 64,
     "max_position_embeddings": 163840,
     "rope_theta": 10000.0,
+    "softmax_mscale": "mscale_all_dim_squared",
     "mscale_convention": "deep_seek_reference"
    },
    "evaluated_context": 1,
@@ -512,7 +519,33 @@
     4.445698323252145e-06,
     3.3338035336782923e-06
    ],
-   "attention_scaling": 1.0857263992561355
+   "attention_scaling": 1.0857263992561355,
+   "softmax_scale_multiplier": 1.5896261651208736
+  },
+  {
+   "name": "deepseek_v3_linear_softmax_correction",
+   "reference": "5.2 DeepseekV3RotaryEmbedding and DeepseekV3Attention",
+   "rope_parameters": {
+    "rope_type": "linear",
+    "factor": 4.0,
+    "mscale_all_dim": 1.0,
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 8,
+    "max_position_embeddings": 4096,
+    "softmax_mscale": "mscale_all_dim_squared"
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    0.25,
+    0.02500000037252903,
+    0.0024999999441206455,
+    0.0002500000118743628
+   ],
+   "attention_scaling": 1.0,
+   "softmax_scale_multiplier": 1.2964769927807063
   },
   {
    "name": "llama_longrope_short_table",

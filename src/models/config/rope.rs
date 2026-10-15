@@ -48,15 +48,26 @@
 //!
 //! * **Hugging Face** (`_compute_yarn_parameters`): an explicit
 //!   `attention_factor` wins; otherwise `m(f, mscale) / m(f, mscale_all_dim)`
-//!   when both are present and nonzero; otherwise `m(f, 1)`.
+//!   when both are present and nonzero; otherwise `m(f, 1)`. A key this rule
+//!   leaves unread is an unused field, except a `mscale_all_dim` read by the
+//!   family's softmax correction (below).
 //! * **DeepSeek reference** (`modeling_deepseek.py`): `m(f, mscale) /
 //!   m(f, mscale_all_dim)` with defaults `mscale = 1`, `mscale_all_dim = 0`
 //!   whenever either key is present; `attention_factor` only when neither is.
 //!
 //! Both agree when both keys are present and nonzero, which covers every
 //! released DeepSeek checkpoint (`mscale = mscale_all_dim` gives `a = 1`).
-//! `mscale_all_dim` additionally scales DeepSeek's attention logits by
-//! `m(f, mscale_all_dim)^2`; see [`RopeParameters::yarn_softmax_scale_multiplier`].
+//!
+//! ## Softmax correction
+//!
+//! DeepSeek's reference attention (`modeling_deepseek.py`) and Transformers'
+//! `deepseek_v3` also multiply the softmax scale `1/sqrt(d_qk)` by
+//! `m(f, mscale_all_dim)^2` for *every* non-default `rope_type`, not only
+//! YaRN. A family declares this with [`SoftmaxMscale::MscaleAllDimSquared`]
+//! and obtains the multiplier from [`RopeParameters::softmax_scale_multiplier`];
+//! `mscale_all_dim` is then read for every scaled algorithm. Under the default
+//! [`SoftmaxMscale::Unscaled`] (every other Transformers family, including
+//! 5.2's `deepseek_v2`), only the YaRN amplitude can read it.
 //!
 //! # Source precedence
 //!
@@ -67,10 +78,16 @@
 //! | --- | --- | --- |
 //! | theta | layer override, nested `rope_theta`, top-level `rope_theta`, default | nested (`setdefault`) |
 //! | partial factor | nested, top-level, 1 | top-level (`standardize_rope_params`) |
-//! | original context | nested, top-level, `max_position_embeddings` | top-level (Phi-3 exception) |
+//! | original context, flat mapping | nested, top-level, `max_position_embeddings` | top-level (Phi-3 exception) |
+//! | original context, per-layer-type mapping | nested, `max_position_embeddings` | nested; the top-level value is never read |
 //!
-//! Dynamic NTK uses `max_position_embeddings` as `L` in Transformers; see
-//! [`DynamicNtkContext`] for the crate's earlier alternative.
+//! The last row follows `standardize_rope_params`, whose per-layer branch only
+//! `setdefault`s `max_position_embeddings`; a top-level value that would change
+//! a layer's context is therefore an unused field.
+//!
+//! Dynamic NTK uses `max_position_embeddings` as `L` in Transformers and in
+//! DeepSeek's reference; see [`DynamicNtkContext`] for the crate's earlier,
+//! legacy-only alternative.
 //!
 //! # Strictness
 //!
@@ -80,7 +97,10 @@
 //! disappears silently. Values Transformers coerces are rejected too: a zero
 //! YaRN `beta_fast`/`beta_slow` (read as its default through Python `or`) or a
 //! required `factor` that is absent. Unknown JSON keys are dropped earlier by
-//! the serde schema and are not visible here.
+//! the serde schema and are not visible here. Every [`RopeParameters`] field
+//! is classified by an exhaustive destructuring, so adding a field fails to
+//! compile until it is either resolved for every algorithm or listed as an
+//! algorithm-specific field.
 //!
 //! All arithmetic is host `f64`; the position module rounds frequencies to
 //! `f32` once. Formulas follow Transformers 5.2.0 `modeling_rope_utils.py`
@@ -128,7 +148,9 @@ pub fn yarn_mscale(scale: f64, multiplier: f64) -> f64 {
 pub enum YarnMscaleConvention {
     /// Transformers `_compute_yarn_parameters`: explicit `attention_factor`,
     /// else `m(f, mscale) / m(f, mscale_all_dim)` when both are nonzero, else
-    /// `m(f, 1)`. A `mscale` this rule would not read is an unused field.
+    /// `m(f, 1)`. A `mscale` this rule would not read is an unused field, and
+    /// so is a `mscale_all_dim` that neither this rule nor a declared
+    /// [`SoftmaxMscale::MscaleAllDimSquared`] correction reads.
     #[default]
     HuggingFace,
     /// DeepSeek's reference `DeepseekV2YarnRotaryEmbedding`:
@@ -138,18 +160,43 @@ pub enum YarnMscaleConvention {
     DeepSeekReference,
 }
 
+/// Whether the family's attention multiplies its softmax scale by `m(f, mscale_all_dim)^2`.
+///
+/// This is an attention-side convention, but it decides whether
+/// `mscale_all_dim` is a read field, so the translator needs it to keep the
+/// unused-field policy exact. See the module's softmax-correction section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoftmaxMscale {
+    /// The softmax scale is the plain `1/sqrt(d_qk)`, as in every Transformers
+    /// family except `deepseek_v3` (5.2's `deepseek_v2` included).
+    /// `mscale_all_dim` is then read only where the YaRN amplitude reads it, and
+    /// [`RopeParameters::softmax_scale_multiplier`] is always one.
+    #[default]
+    Unscaled,
+    /// DeepSeek's reference attention and Transformers' `deepseek_v3`: for
+    /// every non-default `rope_type` with a nonzero `mscale_all_dim`, the
+    /// softmax scale is multiplied by `m(f, mscale_all_dim)^2`. The translator
+    /// then treats `mscale_all_dim` as read by every scaled algorithm and
+    /// validates the multiplier, which requires an explicit `factor`.
+    MscaleAllDimSquared,
+}
+
 /// Which trained context `L` dynamic NTK compares the evaluated context against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DynamicNtkContext {
-    /// Transformers 5.2: `L = max_position_embeddings`. Transformers ignores a
-    /// supplied `original_max_position_embeddings` for dynamic NTK, so one that
-    /// differs from `max_position_embeddings` is an unused field.
+    /// Transformers 5.2 and DeepSeek's reference: `L = max_position_embeddings`.
+    /// Both ignore a supplied `original_max_position_embeddings` for dynamic
+    /// NTK, so one that differs from `max_position_embeddings` is an unused field.
     #[default]
     MaxPositionEmbeddings,
-    /// `L = original_max_position_embeddings`, falling back to
+    /// Legacy only: `L = original_max_position_embeddings`, falling back to
     /// `max_position_embeddings`. This reproduces the crate's private family
     /// translators before this module (Qwen3.5, Qwen3-MoE, DeepSeek-V2,
-    /// Muse Glimmer); it is not the Transformers rule.
+    /// Muse Glimmer), but none of those families' references uses it: the
+    /// Transformers `qwen3_5`, `qwen3_moe`, and `muse_glimmer` rotary
+    /// embeddings and DeepSeek's `DeepseekV2DynamicNTKScalingRotaryEmbedding`
+    /// all scale against `max_position_embeddings`. Select it only to
+    /// reproduce results recorded with those translators.
     OriginalMaxPositionEmbeddings,
 }
 
@@ -220,6 +267,8 @@ pub struct RopeContext {
     partial_rotary: PartialRotary,
     /// YaRN amplitude convention.
     mscale_convention: YarnMscaleConvention,
+    /// Whether the family's softmax scale reads `mscale_all_dim`.
+    softmax_mscale: SoftmaxMscale,
     /// Trained-context rule for dynamic NTK.
     dynamic_ntk_context: DynamicNtkContext,
     /// Whether multimodal section metadata is consumed by the caller.
@@ -233,7 +282,7 @@ impl RopeContext {
     ///
     /// Defaults: no top-level theta/partial/original values, default theta
     /// [`DEFAULT_ROPE_THETA`], [`PartialRotary::Prefix`],
-    /// [`YarnMscaleConvention::HuggingFace`],
+    /// [`YarnMscaleConvention::HuggingFace`], [`SoftmaxMscale::Unscaled`],
     /// [`DynamicNtkContext::MaxPositionEmbeddings`], [`MropeHandling::Reject`],
     /// and [`UnusedRopeFields::Reject`].
     #[must_use]
@@ -253,6 +302,7 @@ impl RopeContext {
             original_max_position_embeddings: None,
             partial_rotary: PartialRotary::Prefix,
             mscale_convention: YarnMscaleConvention::HuggingFace,
+            softmax_mscale: SoftmaxMscale::Unscaled,
             dynamic_ntk_context: DynamicNtkContext::MaxPositionEmbeddings,
             mrope: MropeHandling::Reject,
             unused_fields: UnusedRopeFields::Reject,
@@ -313,6 +363,17 @@ impl RopeContext {
     #[must_use]
     pub const fn with_yarn_mscale_convention(mut self, convention: YarnMscaleConvention) -> Self {
         self.mscale_convention = convention;
+        self
+    }
+
+    /// Declares whether the family's softmax scale applies `m(f, mscale_all_dim)^2`.
+    ///
+    /// The family must then multiply its softmax scale by
+    /// [`RopeParameters::softmax_scale_multiplier`]; translation validates
+    /// that multiplier so it cannot fail later.
+    #[must_use]
+    pub const fn with_softmax_mscale(mut self, softmax_mscale: SoftmaxMscale) -> Self {
+        self.softmax_mscale = softmax_mscale;
         self
     }
 
@@ -404,9 +465,20 @@ impl Scope<'_> {
     }
 
     /// Maps a validated-construction failure to the field a caller can repair.
+    ///
+    /// A width constraint on a rotary dimension equal to the whole head (no
+    /// partial factor, a whole-head family, or proportional RoPE) is reported
+    /// at `head_dim`, matching [`RopeParameters::validate_for`]; on a strict
+    /// prefix it is reported at `partial_rotary_factor`.
     fn rope_error(&self, error: RopeConfigError) -> Error {
         let field = match error {
             RopeConfigError::ZeroHeadDimension => {
+                return self.context_error("head_dim", error.to_string());
+            }
+            RopeConfigError::OddRotaryDimension { rotary_dimension }
+            | RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension }
+                if rotary_dimension == self.context.head_dim =>
+            {
                 return self.context_error("head_dim", error.to_string());
             }
             RopeConfigError::ZeroRotaryDimension
@@ -505,26 +577,59 @@ impl AlgorithmField {
 
     /// Returns whether the field is present in `parameters`.
     fn is_present(self, parameters: &RopeParameters) -> bool {
+        // Destructure without `..`: a new `RopeParameters` field is a compile
+        // error here until it is classified, so it cannot bypass the
+        // unused-field check by accident.
+        let RopeParameters {
+            // Resolved for every algorithm by `translate`.
+            rope_type: _,
+            rope_theta: _,
+            partial_rotary_factor: _,
+            // Governed by `MropeHandling` in `translate`.
+            mrope_section: _,
+            mrope_interleaved: _,
+            // Algorithm-specific fields, one `AlgorithmField` each.
+            factor,
+            original_max_position_embeddings,
+            attention_factor,
+            beta_fast,
+            beta_slow,
+            mscale,
+            mscale_all_dim,
+            truncate,
+            short_factor,
+            long_factor,
+            low_freq_factor,
+            high_freq_factor,
+        } = parameters;
         match self {
-            Self::Factor => parameters.factor.is_some(),
-            Self::OriginalMaxPositionEmbeddings => {
-                parameters.original_max_position_embeddings.is_some()
-            }
-            Self::AttentionFactor => parameters.attention_factor.is_some(),
-            Self::BetaFast => parameters.beta_fast.is_some(),
-            Self::BetaSlow => parameters.beta_slow.is_some(),
-            Self::Mscale => parameters.mscale.is_some(),
-            Self::MscaleAllDim => parameters.mscale_all_dim.is_some(),
-            Self::Truncate => parameters.truncate.is_some(),
-            Self::ShortFactor => parameters.short_factor.is_some(),
-            Self::LongFactor => parameters.long_factor.is_some(),
-            Self::LowFreqFactor => parameters.low_freq_factor.is_some(),
-            Self::HighFreqFactor => parameters.high_freq_factor.is_some(),
+            Self::Factor => factor.is_some(),
+            Self::OriginalMaxPositionEmbeddings => original_max_position_embeddings.is_some(),
+            Self::AttentionFactor => attention_factor.is_some(),
+            Self::BetaFast => beta_fast.is_some(),
+            Self::BetaSlow => beta_slow.is_some(),
+            Self::Mscale => mscale.is_some(),
+            Self::MscaleAllDim => mscale_all_dim.is_some(),
+            Self::Truncate => truncate.is_some(),
+            Self::ShortFactor => short_factor.is_some(),
+            Self::LongFactor => long_factor.is_some(),
+            Self::LowFreqFactor => low_freq_factor.is_some(),
+            Self::HighFreqFactor => high_freq_factor.is_some(),
         }
     }
 
-    /// Returns whether `rope_type` reads this field (Transformers' required and optional keys).
-    const fn is_read_by(self, rope_type: RopeType) -> bool {
+    /// Returns whether `rope_type` may read this field (Transformers' required and optional keys).
+    ///
+    /// `softmax` adds `mscale_all_dim` to every scaled algorithm when the
+    /// family's softmax scale reads it. YaRN's `mscale`/`mscale_all_dim` are
+    /// read only in some combinations; `yarn_amplitude` rejects the others.
+    const fn is_read_by(self, rope_type: RopeType, softmax: SoftmaxMscale) -> bool {
+        if matches!(self, Self::MscaleAllDim)
+            && matches!(softmax, SoftmaxMscale::MscaleAllDimSquared)
+            && !matches!(rope_type, RopeType::Default)
+        {
+            return true;
+        }
         match rope_type {
             RopeType::Default => false,
             RopeType::Linear | RopeType::Proportional => matches!(self, Self::Factor),
@@ -602,8 +707,10 @@ impl RopeParameters {
     /// Returns [`Error::Configuration`] at `architecture.rope.<field>` (or the
     /// top-level `architecture.head_dim`/`max_position_embeddings`) when a
     /// required field is missing, a value is out of range, two sources
-    /// disagree, or a parsed field is unused under
-    /// [`UnusedRopeFields::Reject`].
+    /// disagree, a parsed field is unused under [`UnusedRopeFields::Reject`],
+    /// or the softmax correction declared by
+    /// [`SoftmaxMscale::MscaleAllDimSquared`] is invalid (see
+    /// [`Self::softmax_scale_multiplier`]).
     pub fn to_rope_config(&self, context: &RopeContext) -> Result<RopeConfig> {
         translate(
             self,
@@ -615,32 +722,72 @@ impl RopeParameters {
         )
     }
 
-    /// Returns DeepSeek's multiplier for the attention softmax scale `1/sqrt(d_qk)`.
+    /// Returns the multiplier the family applies to its softmax scale `1/sqrt(d_qk)`.
     ///
-    /// DeepSeek's reference attention (and Transformers' `deepseek_v3`) scales
-    /// logits by `m(f, mscale_all_dim)^2` when YaRN is selected and
-    /// `mscale_all_dim` is nonzero, compensating the amplitude ratio applied to
-    /// the rotary sub-head; otherwise the multiplier is one. Transformers 5.2's
-    /// `deepseek_v2` omits this term, so families must choose deliberately.
+    /// Under [`SoftmaxMscale::MscaleAllDimSquared`] this is
+    /// `m(f, mscale_all_dim)^2` for every non-default `rope_type` with a
+    /// nonzero `mscale_all_dim`, exactly as DeepSeek's reference attention
+    /// (`softmax_scale` whenever `rope_scaling` is set) and Transformers'
+    /// `deepseek_v3` (`scaling` whenever `rope_type != "default"`) compute it;
+    /// it compensates the amplitude ratio applied to the rotary sub-head. In
+    /// every other case, including [`SoftmaxMscale::Unscaled`], it is one, so a
+    /// family may call it unconditionally and let its context decide.
     ///
     /// # Errors
     ///
-    /// Returns a configuration error when the term applies but `factor` is
-    /// missing.
-    pub fn yarn_softmax_scale_multiplier(&self, context: &RopeContext) -> Result<f64> {
-        match self.mscale_all_dim {
-            Some(multiplier) if self.rope_type == RopeType::Yarn && multiplier != 0.0 => {
-                let scope = Scope {
-                    context,
-                    prefix: "rope".to_owned(),
-                    per_layer_type: false,
-                };
-                let factor = scope.required(self.factor, "factor", RopeType::Yarn)?;
-                Ok(yarn_mscale(factor, multiplier).powi(2))
-            }
-            _ => Ok(1.0),
-        }
+    /// Returns a configuration error at `architecture.rope.factor` when the
+    /// term applies but `factor` is missing or not finite and at least one, and
+    /// at `architecture.rope.mscale_all_dim` when `m(f, mscale_all_dim)` is
+    /// not finite and positive.
+    pub fn softmax_scale_multiplier(&self, context: &RopeContext) -> Result<f64> {
+        softmax_scale_multiplier(
+            self,
+            &Scope {
+                context,
+                prefix: "rope".to_owned(),
+                per_layer_type: false,
+            },
+        )
     }
+}
+
+/// Computes [`RopeParameters::softmax_scale_multiplier`] with errors at `scope`.
+fn softmax_scale_multiplier(parameters: &RopeParameters, scope: &Scope<'_>) -> Result<f64> {
+    if scope.context.softmax_mscale == SoftmaxMscale::Unscaled
+        || parameters.rope_type == RopeType::Default
+    {
+        return Ok(1.0);
+    }
+    // The references test `if mscale_all_dim:`, so an absent or zero value
+    // leaves the softmax scale unchanged.
+    let Some(multiplier) = parameters.mscale_all_dim.filter(|value| *value != 0.0) else {
+        return Ok(1.0);
+    };
+    let factor = parameters.factor.ok_or_else(|| {
+        scope.error(
+            "factor",
+            "is required by the softmax correction m(factor, mscale_all_dim)^2",
+        )
+    })?;
+    if !(factor.is_finite() && factor >= 1.0) {
+        return Err(scope.error(
+            "factor",
+            format!(
+                "is {factor}, but the softmax correction needs a finite factor of at least one"
+            ),
+        ));
+    }
+    let correction = yarn_mscale(factor, multiplier);
+    if !(correction.is_finite() && correction > 0.0) {
+        return Err(scope.error(
+            "mscale_all_dim",
+            format!(
+                "gives the softmax correction m(factor, mscale_all_dim) = {correction}, which must be finite and positive"
+            ),
+        ));
+    }
+    // `powi(2)` keeps the private DeepSeek translator's exact operation.
+    Ok(correction.powi(2))
 }
 
 /// Resolves every source and builds the validated configuration.
@@ -654,7 +801,7 @@ fn translate(parameters: &RopeParameters, scope: &Scope<'_>) -> Result<RopeConfi
     }
     let rope_type = parameters.rope_type;
     for field in AlgorithmField::ALL {
-        if field.is_present(parameters) && !field.is_read_by(rope_type) {
+        if field.is_present(parameters) && !field.is_read_by(rope_type, context.softmax_mscale) {
             scope.unused(
                 field.name(),
                 &format!("is not read by {} RoPE", rope_type.as_str()),
@@ -697,13 +844,35 @@ fn translate(parameters: &RopeParameters, scope: &Scope<'_>) -> Result<RopeConfi
     // Only algorithms with a trained context read the original length, so its
     // sources are resolved (and checked for agreement) on demand.
     let original_or_max = || -> Result<usize> {
-        let original = resolve_duplicate(
-            scope,
-            "original_max_position_embeddings",
-            parameters.original_max_position_embeddings,
-            context.original_max_position_embeddings,
-            false,
-        )?;
+        if parameters.original_max_position_embeddings == Some(0) {
+            return Err(scope.error("original_max_position_embeddings", "must be nonzero"));
+        }
+        let original = if scope.per_layer_type {
+            // `standardize_rope_params` (per-layer branch) only `setdefault`s
+            // `max_position_embeddings`; the top-level value is never read.
+            let resolved = parameters
+                .original_max_position_embeddings
+                .unwrap_or(context.max_position_embeddings);
+            if let Some(top_level) = context.original_max_position_embeddings
+                && top_level != resolved
+            {
+                scope.unused(
+                    "original_max_position_embeddings",
+                    &format!(
+                        "top-level value {top_level} is not read for a per-layer-type mapping, whose layer uses {resolved} (Transformers 5.2 standardize_rope_params)"
+                    ),
+                )?;
+            }
+            Some(resolved)
+        } else {
+            resolve_duplicate(
+                scope,
+                "original_max_position_embeddings",
+                parameters.original_max_position_embeddings,
+                context.original_max_position_embeddings,
+                false,
+            )?
+        };
         match original {
             Some(0) => Err(scope.error("original_max_position_embeddings", "must be nonzero")),
             original => Ok(original.unwrap_or(context.max_position_embeddings)),
@@ -806,8 +975,12 @@ fn translate(parameters: &RopeParameters, scope: &Scope<'_>) -> Result<RopeConfi
                 .into()
         }
     };
-    RopeConfig::new(context.head_dim, rotary_dimension, theta, scaling)
-        .map_err(|error| scope.rope_error(error))
+    let config = RopeConfig::new(context.head_dim, rotary_dimension, theta, scaling)
+        .map_err(|error| scope.rope_error(error))?;
+    // Validate the family's softmax correction now, so a family that applies
+    // it cannot fail after translation succeeded.
+    softmax_scale_multiplier(parameters, scope)?;
+    Ok(config)
 }
 
 /// Builds YaRN scaling: factor, original context, amplitude, betas, and truncation.
@@ -860,10 +1033,26 @@ fn yarn_amplitude(
     };
     match scope.context.mscale_convention {
         YarnMscaleConvention::HuggingFace => {
+            // `mscale_all_dim` the amplitude does not read is still read by a
+            // softmax correction the family declared.
+            let unread_all_dim = |reason: &str| -> Result<()> {
+                if parameters.mscale_all_dim.is_some()
+                    && scope.context.softmax_mscale == SoftmaxMscale::Unscaled
+                {
+                    scope.unused(
+                        "mscale_all_dim",
+                        &format!(
+                            "{reason}, and this family's softmax scale does not read it (see SoftmaxMscale and YarnMscaleConvention::DeepSeekReference)"
+                        ),
+                    )?;
+                }
+                Ok(())
+            };
             if let Some(attention_factor) = parameters.attention_factor {
                 if parameters.mscale.is_some() {
                     scope.unused("mscale", "is overridden by attention_factor")?;
                 }
+                unread_all_dim("is overridden by attention_factor in the YaRN amplitude")?;
                 return Ok(Some((attention_factor, "attention_factor")));
             }
             match (parameters.mscale, parameters.mscale_all_dim) {
@@ -875,9 +1064,16 @@ fn yarn_amplitude(
                         "mscale",
                         "is read by the Hugging Face YaRN amplitude only together with a nonzero mscale_all_dim (see YarnMscaleConvention::DeepSeekReference)",
                     )?;
+                    // Reached only under `Ignore`, where an unread
+                    // `mscale_all_dim` is ignored as well.
                     Ok(None)
                 }
-                (None, _) => Ok(None),
+                (None, _) => {
+                    unread_all_dim(
+                        "is read by the Hugging Face YaRN amplitude only together with a nonzero mscale",
+                    )?;
+                    Ok(None)
+                }
             }
         }
         YarnMscaleConvention::DeepSeekReference => {
@@ -912,18 +1108,32 @@ fn yarn_amplitude(
 /// Transformers 5.x stores `{"sliding_attention": {...}, "full_attention":
 /// {...}}` when layer types use different bases or algorithms. Each value is a
 /// complete [`RopeParameters`] object; entries are kept in key order.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+///
+/// The mapping is never empty: an empty JSON object is uniform default RoPE
+/// (see [`RopeParameterSet`]), so an empty per-layer mapping could not
+/// survive a serialization round trip.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct RopeParametersByLayerType(
-    /// Parameters for each serialized layer-type name.
+    /// Parameters for each serialized layer-type name; never empty.
     BTreeMap<String, RopeParameters>,
 );
 
+/// Reason an empty per-layer-type mapping is rejected.
+const EMPTY_LAYER_MAPPING: &str = "a per-layer-type mapping needs at least one layer type; an empty object is uniform default RoPE";
+
 impl RopeParametersByLayerType {
-    /// Wraps an explicit layer-type map.
-    #[must_use]
-    pub const fn new(parameters: BTreeMap<String, RopeParameters>) -> Self {
-        Self(parameters)
+    /// Wraps an explicit, non-empty layer-type map.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error at `rope_parameters` when `parameters`
+    /// is empty, because `{}` deserializes as uniform default RoPE.
+    pub fn new(parameters: BTreeMap<String, RopeParameters>) -> Result<Self> {
+        if parameters.is_empty() {
+            return Err(Error::configuration("rope_parameters", EMPTY_LAYER_MAPPING));
+        }
+        Ok(Self(parameters))
     }
 
     /// Returns the parameters for one layer type, if present.
@@ -946,9 +1156,11 @@ impl RopeParametersByLayerType {
     /// # Errors
     ///
     /// Returns a configuration error when the layer type has no entry or the
-    /// entry fails [`RopeParameters::to_rope_config`]. A per-layer YaRN entry
-    /// with `truncate: false` is an unused field, because Transformers 5.2
-    /// reads `truncate` only from a flat mapping.
+    /// entry fails [`RopeParameters::to_rope_config`]. Two Transformers 5.2
+    /// quirks of per-layer mappings are unused fields: a YaRN entry with
+    /// `truncate: false` (only a flat mapping's `truncate` is read), and a
+    /// top-level `original_max_position_embeddings` that differs from the
+    /// layer's own value or `max_position_embeddings` (never read here).
     pub fn to_rope_config(&self, layer_type: &str, context: &RopeContext) -> Result<RopeConfig> {
         let parameters = self.get(layer_type).ok_or_else(|| {
             Error::configuration(
@@ -967,6 +1179,17 @@ impl RopeParametersByLayerType {
                 per_layer_type: true,
             },
         )
+    }
+}
+
+impl<'de> Deserialize<'de> for RopeParametersByLayerType {
+    /// Reads a layer-type map, rejecting an empty one (see the type documentation).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let parameters = BTreeMap::<String, RopeParameters>::deserialize(deserializer)?;
+        if parameters.is_empty() {
+            return Err(D::Error::custom(EMPTY_LAYER_MAPPING));
+        }
+        Ok(Self(parameters))
     }
 }
 

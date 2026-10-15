@@ -404,6 +404,82 @@ fn validated_proportional_parameters_translate() {
     assert_eq!(config.rotary_dimension(), 16);
 }
 
+/// `validate_for` and the shared translator accept exactly the same proportional configs.
+///
+/// Both follow Transformers 5.8.0, which reads `partial_rotary_factor` as a
+/// pair fraction in `[0, 1]` (zero leaves every pair unrotated), defaults
+/// `factor` to one, and needs an even head width. Only acceptance is
+/// compared: the validators check fields in different orders.
+#[test]
+fn proportional_validators_accept_the_same_configs() {
+    let fractions = [
+        None,
+        Some(-0.1),
+        Some(0.0),
+        Some(0.25),
+        Some(0.3),
+        Some(0.6),
+        Some(1.0),
+        Some(1.5),
+        Some(f64::NAN),
+        Some(f64::INFINITY),
+    ];
+    let factors = [None, Some(0.5), Some(1.0), Some(2.0), Some(f64::NAN)];
+    let thetas = [None, Some(-1.0), Some(10_000.0)];
+    let (mut accepted, mut rejected) = (0, 0);
+    for head_dim in [1, 7, 8, 16] {
+        for fraction in fractions {
+            for factor in factors {
+                for theta in thetas {
+                    let rope = RopeParameters {
+                        rope_type: RopeType::Proportional,
+                        partial_rotary_factor: fraction,
+                        factor,
+                        rope_theta: theta,
+                        ..RopeParameters::default()
+                    };
+                    let validated = rope.validate_for("test", head_dim, 128, None);
+                    let translated = rope.to_rope_config(&RopeContext::new("test", head_dim, 128));
+                    assert_eq!(
+                        validated.is_ok(),
+                        translated.is_ok(),
+                        "head {head_dim}, fraction {fraction:?}, factor {factor:?}, theta {theta:?}: {validated:?} vs {translated:?}"
+                    );
+                    if validated.is_ok() {
+                        accepted += 1;
+                    } else {
+                        rejected += 1;
+                    }
+                }
+            }
+        }
+    }
+    // Even heads x {None, 0, 0.25, 0.3, 0.6, 1} x {None, 1, 2} x {None, 1e4}.
+    assert_eq!(accepted, 2 * 6 * 3 * 2);
+    assert_eq!(accepted + rejected, 4 * 10 * 5 * 3);
+
+    // A zero fraction is all-NoPE in both validators.
+    let nope = RopeParameters {
+        rope_type: RopeType::Proportional,
+        partial_rotary_factor: Some(0.0),
+        ..RopeParameters::default()
+    };
+    nope.validate_for("test", 16, 128, None).unwrap();
+    let config = nope
+        .to_rope_config(&RopeContext::new("test", 16, 128))
+        .unwrap();
+    assert_eq!(config.scaling().amplitude(), 1.0);
+    // Other algorithms still need a nonzero rotated prefix.
+    let error = RopeParameters {
+        partial_rotary_factor: Some(0.0),
+        ..RopeParameters::default()
+    }
+    .validate_for("test", 16, 128, None)
+    .unwrap_err();
+    assert_eq!(error.field, "partial_rotary_factor");
+    assert!(error.reason.contains("(0, 1]"), "{error}");
+}
+
 /// Every `validate_for` rejection names the field that violates its invariant.
 #[test]
 fn rope_validation_rejections_name_their_fields() {
@@ -460,12 +536,47 @@ fn rope_validation_rejections_name_their_fields() {
     );
     let too_long = RopeParameters {
         original_max_position_embeddings: Some(256),
-        ..llama3
+        ..llama3.clone()
     };
     assert_eq!(
         field_of(too_long, 8),
         "rope.original_max_position_embeddings"
     );
+    let zero_original = RopeParameters {
+        original_max_position_embeddings: Some(0),
+        ..llama3
+    };
+    assert_eq!(
+        field_of(zero_original, 8),
+        "rope.original_max_position_embeddings"
+    );
+    // A rotated prefix needs a finite factor in (0, 1].
+    for invalid in [f64::NAN, f64::INFINITY, 1.5, -0.25] {
+        let rope = RopeParameters {
+            partial_rotary_factor: Some(invalid),
+            ..RopeParameters::default()
+        };
+        assert_eq!(field_of(rope, 8), "partial_rotary_factor", "{invalid}");
+    }
+    // LongRoPE tables need one positive finite factor per rotated pair.
+    let tables = |short_factor: Vec<f64>| RopeParameters {
+        rope_type: RopeType::LongRope,
+        original_max_position_embeddings: Some(64),
+        short_factor: Some(short_factor),
+        long_factor: Some(vec![1.0; 4]),
+        ..RopeParameters::default()
+    };
+    tables(vec![1.0; 4])
+        .validate_for("test", 8, 128, None)
+        .unwrap();
+    for short_factor in [
+        vec![1.0; 3],
+        vec![1.0, 1.0, f64::NAN, 1.0],
+        vec![1.0, 0.0, 1.0, 1.0],
+    ] {
+        let label = format!("{short_factor:?}");
+        assert_eq!(field_of(tables(short_factor), 8), "short_factor", "{label}");
+    }
 }
 
 /// Shared scalar validators reject out-of-range values with field-specific messages.
@@ -476,6 +587,12 @@ fn scalar_validators_reject_out_of_range_values() {
         "must be finite and in [0, 1]"
     );
     probability("test", "dropout", 0.0).unwrap();
+    for invalid in [f64::NAN, f64::INFINITY, -0.1] {
+        assert!(
+            probability("test", "dropout", invalid).is_err(),
+            "{invalid}"
+        );
+    }
     let error = divisible("test", "heads", 6, "groups", 4).unwrap_err();
     assert_eq!(
         (error.field, error.reason.as_str()),
