@@ -28,6 +28,7 @@ use crate::{
     models::{
         config::{ConfigError, ModelConfig, TokenIds},
         deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
+        llama::{LlamaCheckpointOptions, LlamaFamilyConfig, LlamaForCausalLm},
         muse_glimmer::{
             MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerForCausalLm,
             MuseGlimmerTextConfig,
@@ -374,6 +375,45 @@ impl<B: Backend> CausalFamily<B> for Qwen3MoeForCausalLm<B> {
     /// Initializes the graph from the unchanged configuration.
     fn init_for_load(
         config: Qwen3MoeConfig,
+        _options: &AutoLoadOptions,
+        device: &B::Device,
+    ) -> Result<Self> {
+        Self::init(config, device)
+    }
+}
+
+impl<B: Backend> CausalFamily<B> for LlamaForCausalLm<B> {
+    /// One schema for every Llama-family `model_type`.
+    type Config = LlamaFamilyConfig;
+
+    /// Reads the Llama family's vocabulary and token fields.
+    fn token_metadata(config: &LlamaFamilyConfig) -> TokenMetadata<'_> {
+        TokenMetadata::of(
+            config.vocab_size,
+            &config.eos_token_id,
+            &config.pad_token_id,
+        )
+    }
+
+    /// Plans the single text namespace every Llama-family reference publishes.
+    fn plan_checkpoint(
+        config: &LlamaFamilyConfig,
+        root: &Path,
+        options: &AutoLoadOptions,
+    ) -> Result<PlannedCheckpoint> {
+        let manifest = discover(root, options)?;
+        let contract = config
+            .checkpoint_contract(LlamaCheckpointOptions::default())
+            .map_err(contract_error)?;
+        let plan = contract
+            .build_load_plan(&manifest, &options.checkpoint)
+            .map_err(checkpoint_error)?;
+        Ok(PlannedCheckpoint { manifest, plan })
+    }
+
+    /// Initializes the graph from the unchanged configuration.
+    fn init_for_load(
+        config: LlamaFamilyConfig,
         _options: &AutoLoadOptions,
         device: &B::Device,
     ) -> Result<Self> {

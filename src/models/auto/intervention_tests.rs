@@ -67,6 +67,41 @@ fn automatic_t5_exposes_both_stacks_and_preserves_identity_outputs() {
     assert_eq!(hooks.get(&captured_decoder).unwrap().dims(), [2, 1, 16]);
 }
 
+/// Llama-family registry hooks expose the family catalog and preserve identity outputs.
+#[test]
+fn automatic_llama_exposes_points_and_preserves_identity_outputs() {
+    use crate::models::llama::{LlamaFamilyConfig, LlamaForCausalLm, LlamaVariant};
+    let device = Default::default();
+    let config = LlamaFamilyConfig {
+        vocab_size: 32,
+        hidden_size: 16,
+        intermediate_size: 24,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 4,
+        max_position_embeddings: 32,
+        eos_token_id: None,
+        pad_token_id: None,
+        bos_token_id: None,
+        ..LlamaFamilyConfig::new(LlamaVariant::Qwen3)
+    };
+    let model = AutoCausalLm::from(LlamaForCausalLm::<TestBackend>::init(config, &device).unwrap());
+    let point = Layer::decoder(1).mlp_activation();
+    assert!(model.activation_points().unwrap().contains(&point.info()));
+    let input = registry_tokens([[1, 2, 3], [4, 5, 6]], &device);
+    let options = ForwardOptions::default();
+    let expected = model.forward(input.clone(), &options).unwrap();
+    let mut hooks = Hooks::new();
+    let captured = hooks.capture(point.clone().token(1));
+    hooks.edit(point, |tensor| tensor);
+    let actual = model
+        .forward_with_hooks(input, &options, &mut hooks)
+        .unwrap();
+    assert_registry_logits(actual.logits, expected.logits);
+    assert_eq!(hooks.get(&captured).unwrap().dims(), [2, 1, 24]);
+}
+
 /// Unsupported MoE hooks return family-specific capability errors and clear captures before any callback.
 #[test]
 fn unsupported_automatic_hooks_fail_before_callbacks_and_clear_stale_captures() {

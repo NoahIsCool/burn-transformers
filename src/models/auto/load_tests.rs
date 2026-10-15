@@ -2120,6 +2120,49 @@ fn automatic_loads_attach_unsupported_generation_settings() {
     );
 }
 
+/// Every Llama-family `model_type` loads strictly through the one registry entry.
+#[test]
+fn llama_family_aliases_load_through_one_registry_entry() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_goldens");
+    for (case, model_type) in [
+        ("llama3", "llama"),
+        ("mistral-sliding", "mistral"),
+        ("qwen2", "qwen2"),
+        ("qwen3", "qwen3"),
+        ("smollm3", "smollm3"),
+        ("olmo2", "olmo2"),
+    ] {
+        let loaded = AutoCausalLm::<TestBackend>::load_local(
+            fixtures.join(case),
+            &fixture_options("fixture/tiny-goldens", case),
+            &Default::default(),
+        )
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(loaded.source().model_type(), model_type);
+        assert!(loaded.load_report().is_strictly_valid(), "{case}");
+        let model = loaded.model();
+        assert_eq!(model.family(), AutoCausalConfig::Llama);
+        assert_eq!(model.config().model_type(), "llama");
+        let crate::models::AutoCausalConfigRef::Llama(config) = model.config() else {
+            panic!("{case}: wrong registry variant");
+        };
+        assert_eq!(config.model_type, model_type);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &Default::default())
+            .unwrap();
+        let input = CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3, 4]], &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        };
+        let logits = model
+            .prefill(input, &mut state, &ForwardOptions::default())
+            .unwrap()
+            .logits;
+        assert_eq!(logits.dims(), [1, 1, 96]);
+    }
+}
+
 proptest::proptest! {
     /// The sampling top-k is disabled exactly by zero and otherwise lies in `1..=vocabulary`.
     #[test]
