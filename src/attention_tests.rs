@@ -935,3 +935,102 @@ fn attention_sinks_are_trainable() {
         );
     }
 }
+
+/// Independent bias flags allocate exactly the requested projection biases.
+#[test]
+fn projection_bias_flags_are_independent() {
+    use super::ProjectionBias;
+
+    let device = Default::default();
+    let has_bias = |config: GroupedQueryAttentionConfig| {
+        let module = config.init::<Flex>(&device).unwrap();
+        [
+            module.q_proj.bias.is_some(),
+            module.k_proj.bias.is_some(),
+            module.v_proj.bias.is_some(),
+            module.o_proj.bias.is_some(),
+        ]
+    };
+    let base = GroupedQueryAttentionConfig::new(8, 4, 2, 2);
+    assert_eq!(has_bias(base.clone()), [false; 4]);
+    let mut uniform = base.clone();
+    uniform.bias = true;
+    assert_eq!(has_bias(uniform.clone()), [true; 4]);
+    // Qwen2-style biased Q/K/V with an unbiased output projection.
+    let qwen2 = uniform.with_projection_bias(ProjectionBias::query_key_value_only());
+    assert_eq!(has_bias(qwen2.clone()), [true, true, true, false]);
+    assert_eq!(
+        qwen2.effective_projection_bias(),
+        ProjectionBias::query_key_value_only()
+    );
+    let output_only = base.with_projection_bias(ProjectionBias {
+        output: true,
+        ..ProjectionBias::uniform(false)
+    });
+    assert_eq!(has_bias(output_only), [false, false, false, true]);
+    // Older serialized configs without the field keep the uniform `bias` meaning.
+    let mut json = serde_json::to_value(&qwen2).unwrap();
+    json.as_object_mut().unwrap().remove("projection_bias");
+    let legacy: GroupedQueryAttentionConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        legacy.effective_projection_bias(),
+        ProjectionBias::uniform(true)
+    );
+    let round_trip: GroupedQueryAttentionConfig =
+        serde_json::from_str(&serde_json::to_string(&qwen2).unwrap()).unwrap();
+    assert_eq!(round_trip, qwen2);
+}
+
+/// Full-width Q/K norms normalize every projected channel of a token before the head split.
+#[test]
+fn full_width_query_key_norm_reduces_over_all_heads() {
+    use super::QueryKeyNormScope;
+    use burn::{module::Param, tensor::Tolerance};
+
+    let device = Default::default();
+    for gate in [AttentionOutputGate::None, AttentionOutputGate::Sigmoid] {
+        let mut config = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+            .with_query_key_norm(1e-6, QueryKeyNormScope::FullWidth);
+        config.output_gate = gate;
+        let mut module = config.init::<Flex>(&device).unwrap();
+        assert_eq!(module.query_norm.as_ref().unwrap().weight.dims(), [4]);
+        assert_eq!(module.key_norm.as_ref().unwrap().weight.dims(), [2]);
+        let query_width = if gate == AttentionOutputGate::None {
+            4
+        } else {
+            8
+        };
+        // Identity-like projections: query channels are [1, 2, 3, 4], keys [1, 2].
+        let mut query_weight = vec![0.0_f32; 4 * query_width];
+        for channel in 0..4 {
+            // Gated projections interleave [query_0, gate_0, query_1, gate_1] per head.
+            let column = if gate == AttentionOutputGate::None {
+                channel
+            } else {
+                (channel / 2) * 4 + channel % 2
+            };
+            query_weight[channel * query_width + column] = 1.0;
+        }
+        module.q_proj.weight = Param::from_tensor(Tensor::from_data(
+            burn::tensor::TensorData::new(query_weight, [4, query_width]),
+            &device,
+        ));
+        module.k_proj.weight = Param::from_tensor(Tensor::from_floats(
+            [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0]],
+            &device,
+        ));
+        let projection = module
+            .project_self(Tensor::from_floats([[[1.0, 2.0, 3.0, 4.0]]], &device))
+            .unwrap();
+        let rms = (30.0_f32 / 4.0 + 1e-6).sqrt();
+        projection.query.into_data().assert_approx_eq::<f32>(
+            &burn::tensor::TensorData::from([[[[1.0 / rms, 2.0 / rms]], [[3.0 / rms, 4.0 / rms]]]]),
+            Tolerance::absolute(1e-6),
+        );
+        let key_rms = (5.0_f32 / 2.0 + 1e-6).sqrt();
+        projection.key.into_data().assert_approx_eq::<f32>(
+            &burn::tensor::TensorData::from([[[[1.0 / key_rms, 2.0 / key_rms]]]]),
+            Tolerance::absolute(1e-6),
+        );
+    }
+}

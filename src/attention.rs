@@ -79,6 +79,58 @@ pub enum AttentionOutputGate {
     Silu,
 }
 
+/// Which of the four attention projections carry an additive bias.
+///
+/// Most checkpoints bias all four or none; Qwen2/2.5 and GLM-4.5 bias only the
+/// query, key, and value projections.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectionBias {
+    /// Whether the query (and fused gate) projection has a bias.
+    pub query: bool,
+    /// Whether the key projection has a bias.
+    pub key: bool,
+    /// Whether the value projection has a bias.
+    pub value: bool,
+    /// Whether the output projection has a bias.
+    pub output: bool,
+}
+
+impl ProjectionBias {
+    /// Biases all four projections, or none of them.
+    #[must_use]
+    pub const fn uniform(enabled: bool) -> Self {
+        Self {
+            query: enabled,
+            key: enabled,
+            value: enabled,
+            output: enabled,
+        }
+    }
+
+    /// Biases the query, key, and value projections but not the output projection.
+    #[must_use]
+    pub const fn query_key_value_only() -> Self {
+        Self {
+            query: true,
+            key: true,
+            value: true,
+            output: false,
+        }
+    }
+}
+
+/// Channels over which optional Q/K RMS normalization computes its statistic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryKeyNormScope {
+    /// One `head_dim`-wide norm applied to every head separately (Qwen3, Gemma 3).
+    #[default]
+    PerHead,
+    /// One norm over all projected query (or key) channels before the head
+    /// split, with `heads * head_dim` learned scales (OLMo 2/3).
+    FullWidth,
+}
+
 /// Numerical operation graph used to evaluate attention probabilities.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -385,9 +437,17 @@ pub struct GroupedQueryAttentionConfig {
     /// Query/key/value width per head.
     pub head_dim: usize,
     /// Whether all projection layers include additive biases.
+    ///
+    /// [`Self::projection_bias`], when present, overrides this per projection.
     pub bias: bool,
-    /// Optional Q/K per-head RMS normalization epsilon.
+    /// Optional per-projection bias flags overriding [`Self::bias`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_bias: Option<ProjectionBias>,
+    /// Optional Q/K RMS normalization epsilon.
     pub query_key_norm_epsilon: Option<f64>,
+    /// Channels normalized by the optional Q/K RMS norm.
+    #[serde(default)]
+    pub query_key_norm_scope: QueryKeyNormScope,
     /// Whether Q/K norm checkpoints store `scale - 1` instead of `scale`.
     pub query_key_norm_zero_centered: bool,
     /// Optional multiplicative output-gate convention.
@@ -423,7 +483,9 @@ impl GroupedQueryAttentionConfig {
             key_value_heads,
             head_dim,
             bias: false,
+            projection_bias: None,
             query_key_norm_epsilon: None,
+            query_key_norm_scope: QueryKeyNormScope::PerHead,
             query_key_norm_zero_centered: false,
             output_gate: AttentionOutputGate::None,
             scale: None,
@@ -436,6 +498,26 @@ impl GroupedQueryAttentionConfig {
     /// Selects an explicit score/softmax operation graph.
     pub fn with_precision_mode(mut self, precision_mode: AttentionPrecisionMode) -> Self {
         self.precision_mode = precision_mode;
+        self
+    }
+
+    /// Selects the bias flag of each projection independently.
+    pub fn with_projection_bias(mut self, projection_bias: ProjectionBias) -> Self {
+        self.projection_bias = Some(projection_bias);
+        self
+    }
+
+    /// Returns the bias flags actually used: [`Self::projection_bias`] or uniform [`Self::bias`].
+    #[must_use]
+    pub fn effective_projection_bias(&self) -> ProjectionBias {
+        self.projection_bias
+            .unwrap_or(ProjectionBias::uniform(self.bias))
+    }
+
+    /// Enables Q/K RMS normalization with `epsilon` over the chosen channels.
+    pub fn with_query_key_norm(mut self, epsilon: f64, scope: QueryKeyNormScope) -> Self {
+        self.query_key_norm_epsilon = Some(epsilon);
+        self.query_key_norm_scope = scope;
         self
     }
 
@@ -545,24 +627,29 @@ impl GroupedQueryAttentionConfig {
                 Error::configuration("attention", "gated query width overflows usize")
             })?
         };
-        let linear = |input, output| {
+        let bias = self.effective_projection_bias();
+        let linear = |input, output, bias| {
             operations::init_linear(
                 &LinearConfig::new(input, output)
-                    .with_bias(self.bias)
+                    .with_bias(bias)
                     .with_layout(LinearLayout::Col),
                 device,
             )
         };
-        let query_key_norm = |epsilon| {
-            RmsNormConfig::new(self.head_dim)
+        let query_key_norm = |epsilon, width| {
+            RmsNormConfig::new(width)
                 .with_epsilon(epsilon)
                 .with_zero_centered(self.query_key_norm_zero_centered)
                 .init(device)
         };
+        let (query_norm_width, key_norm_width) = match self.query_key_norm_scope {
+            QueryKeyNormScope::PerHead => (self.head_dim, self.head_dim),
+            QueryKeyNormScope::FullWidth => (query_width, key_value_width),
+        };
         let (query_norm, key_norm) = match self.query_key_norm_epsilon {
             Some(epsilon) => (
-                Some(query_key_norm(epsilon)?),
-                Some(query_key_norm(epsilon)?),
+                Some(query_key_norm(epsilon, query_norm_width)?),
+                Some(query_key_norm(epsilon, key_norm_width)?),
             ),
             None => (None, None),
         };
@@ -570,12 +657,13 @@ impl GroupedQueryAttentionConfig {
             .attention_sinks
             .then(|| Initializer::Zeros.init([self.query_heads], device));
         Ok(GroupedQueryAttention {
-            q_proj: linear(self.hidden_size, query_output_width),
-            k_proj: linear(self.hidden_size, key_value_width),
-            v_proj: linear(self.hidden_size, key_value_width),
-            o_proj: linear(query_width, self.hidden_size),
+            q_proj: linear(self.hidden_size, query_output_width, bias.query),
+            k_proj: linear(self.hidden_size, key_value_width, bias.key),
+            v_proj: linear(self.hidden_size, key_value_width, bias.value),
+            o_proj: linear(query_width, self.hidden_size, bias.output),
             query_norm,
             key_norm,
+            query_key_norm_scope: self.query_key_norm_scope,
             hidden_size: self.hidden_size,
             query_heads: self.query_heads,
             key_value_heads: self.key_value_heads,
@@ -613,10 +701,12 @@ pub struct GroupedQueryAttention<B: Backend> {
     pub v_proj: Linear<B>,
     /// Projection from concatenated query-head outputs to the residual stream.
     pub o_proj: Linear<B>,
-    /// Optional per-query-head normalization.
+    /// Optional query normalization (per head or full width, see `query_key_norm_scope`).
     pub query_norm: Option<RmsNorm<B>>,
-    /// Optional per-key-head normalization.
+    /// Optional key normalization (per head or full width, see `query_key_norm_scope`).
     pub key_norm: Option<RmsNorm<B>>,
+    /// Channels over which the optional Q/K norms compute their statistic.
+    pub query_key_norm_scope: QueryKeyNormScope,
     /// Input/output width of the residual stream.
     pub hidden_size: usize,
     /// Number of query heads.
@@ -669,9 +759,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
         let projected_query = operations::linear(query_hidden, &self.q_proj)?;
         let (query, gate) = if self.output_gate == AttentionOutputGate::None {
             (
-                projected_query
-                    .reshape([batch, query_sequence, self.query_heads, self.head_dim])
-                    .swap_dims(1, 2),
+                projected_query.reshape([batch, query_sequence, self.query_heads, self.head_dim]),
                 None,
             )
         } else {
@@ -684,10 +772,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 self.head_dim * 2,
             ]);
             (
-                projected_query
-                    .clone()
-                    .narrow(3, 0, self.head_dim)
-                    .swap_dims(1, 2),
+                projected_query.clone().narrow(3, 0, self.head_dim),
                 Some(
                     projected_query
                         .narrow(3, self.head_dim, self.head_dim)
@@ -695,26 +780,39 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 ),
             )
         };
-        let key = operations::linear(key_value_hidden.clone(), &self.k_proj)?
-            .reshape([batch, key_sequence, self.key_value_heads, self.head_dim])
-            .swap_dims(1, 2);
+        let key = operations::linear(key_value_hidden.clone(), &self.k_proj)?.reshape([
+            batch,
+            key_sequence,
+            self.key_value_heads,
+            self.head_dim,
+        ]);
         let value = operations::linear(key_value_hidden, &self.v_proj)?
             .reshape([batch, key_sequence, self.key_value_heads, self.head_dim])
             .swap_dims(1, 2);
-        let query = self
-            .query_norm
-            .as_ref()
-            .map_or(query.clone(), |norm| norm.forward(query));
-        let key = self
-            .key_norm
-            .as_ref()
-            .map_or(key.clone(), |norm| norm.forward(key));
+        let query = self.normalize_heads(query, self.query_norm.as_ref());
+        let key = self.normalize_heads(key, self.key_norm.as_ref());
         Ok(AttentionProjection {
             query,
             key,
             value,
             gate,
         })
+    }
+
+    /// Applies an optional Q/K norm and moves heads first: `[b, s, h, d] -> [b, h, s, d]`.
+    ///
+    /// Per-head norms reduce over `d`; full-width norms reduce over all `h * d`
+    /// projected channels of a token before the head split.
+    fn normalize_heads(&self, tensor: Tensor<B, 4>, norm: Option<&RmsNorm<B>>) -> Tensor<B, 4> {
+        let [batch, sequence, heads, width] = tensor.dims();
+        match (norm, self.query_key_norm_scope) {
+            (None, _) => tensor.swap_dims(1, 2),
+            (Some(norm), QueryKeyNormScope::PerHead) => norm.forward(tensor.swap_dims(1, 2)),
+            (Some(norm), QueryKeyNormScope::FullWidth) => norm
+                .forward(tensor.reshape([batch, sequence, heads * width]))
+                .reshape([batch, sequence, heads, width])
+                .swap_dims(1, 2),
+        }
     }
 
     /// Dispatches projected attention after the caller applies positional transforms.

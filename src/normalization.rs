@@ -9,6 +9,10 @@
 //! `x / sqrt(m)`, `x * pow(m, -0.5)`, and `x * reciprocal(sqrt(m))` are
 //! algebraically equal, their floating-point operation graphs can round
 //! differently. The root mode therefore belongs to checkpoint compatibility.
+//!
+//! [`scale_free_rms_norm`] is the same normalization without a learned scale,
+//! `y = x / sqrt(mean(x^2) + epsilon)`, used by weightless Q/K/V norms (Llama 4
+//! L2 Q/K norm, Gemma value norm, Muse scale-free norms).
 
 use burn::{
     module::{Initializer, Module, Param},
@@ -153,23 +157,51 @@ impl<B: Backend> RmsNorm<B> {
     /// architectures that round the normalized activation first.
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let dtype = input.dtype();
-        let input = input.cast(DType::F32);
-        let mean_square = input.clone().square().mean_dim(D - 1) + self.epsilon;
         let scale = if self.zero_centered {
             self.weight.val().cast(DType::F32) + 1.0
         } else {
             self.weight.val().cast(DType::F32)
         };
-        let normalized = match self.root_mode {
-            RmsNormRootMode::DivideBySqrt => input / mean_square.sqrt(),
-            RmsNormRootMode::MultiplyByPower => input * mean_square.powf_scalar(-0.5),
-            RmsNormRootMode::MultiplyByReciprocalSqrt => input * mean_square.sqrt().recip(),
-        };
+        let normalized = normalize_f32(input.cast(DType::F32), self.epsilon, self.root_mode);
         if self.round_before_scale {
             normalized.cast(dtype) * scale.cast(dtype).unsqueeze()
         } else {
             (normalized * scale.unsqueeze()).cast(dtype)
         }
+    }
+}
+
+/// Normalizes the last axis to unit RMS without a learned scale.
+///
+/// Computes `x / sqrt(mean(x^2) + epsilon)` in F32 with the selected root
+/// graph and restores the input dtype, exactly as [`RmsNorm::forward`] does
+/// before its learned scale. `epsilon` must be finite and positive.
+pub fn scale_free_rms_norm<B: Backend, const D: usize>(
+    input: Tensor<B, D>,
+    epsilon: f64,
+    root_mode: RmsNormRootMode,
+) -> Result<Tensor<B, D>> {
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(Error::configuration(
+            "rms_norm.epsilon",
+            "must be finite and greater than zero",
+        ));
+    }
+    let dtype = input.dtype();
+    Ok(normalize_f32(input.cast(DType::F32), epsilon, root_mode).cast(dtype))
+}
+
+/// Divides an F32 tensor by its last-axis RMS using the selected root graph.
+fn normalize_f32<B: Backend, const D: usize>(
+    input: Tensor<B, D>,
+    epsilon: f64,
+    root_mode: RmsNormRootMode,
+) -> Tensor<B, D> {
+    let mean_square = input.clone().square().mean_dim(D - 1) + epsilon;
+    match root_mode {
+        RmsNormRootMode::DivideBySqrt => input / mean_square.sqrt(),
+        RmsNormRootMode::MultiplyByPower => input * mean_square.powf_scalar(-0.5),
+        RmsNormRootMode::MultiplyByReciprocalSqrt => input * mean_square.sqrt().recip(),
     }
 }
 
