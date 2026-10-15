@@ -1526,6 +1526,80 @@ fn muse_glimmer_tool_prompt_matches_hugging_face() {
     );
 }
 
+/// Builds a tool call whose arguments and schema hold booleans, null, a float, and a list.
+///
+/// These values reach official templates through `| string`, which must print
+/// Python's `True`/`None`. Dictionaries are key-sorted (see [`tool_use_conversation`]).
+#[cfg(feature = "chat-templates")]
+fn typed_tool_conversation() -> (Vec<ChatMessage>, ChatTemplateOptions) {
+    let arguments = serde_json::json!({
+        "count": 3, "flag": true, "items": [1, 2], "name": "x", "none_val": null, "ratio": 1.5
+    });
+    let messages = vec![
+        ChatMessage::text("user", "do it"),
+        ChatMessage::text("assistant", "").with_tool_calls(serde_json::json!([{
+            "function": {"arguments": arguments, "name": "f"},
+            "type": "function"
+        }])),
+        ChatMessage::text("tool", "ok"),
+    ];
+    let options = ChatTemplateOptions {
+        add_generation_prompt: true,
+        tools: Some(serde_json::json!([{
+            "function": {
+                "description": "d",
+                "name": "f",
+                "parameters": {
+                    "properties": {"flag": {
+                        "default": false, "description": "a flag", "nullable": true, "type": "boolean"
+                    }},
+                    "required": ["flag"],
+                    "type": "object"
+                }
+            },
+            "type": "function"
+        }])),
+        ..ChatTemplateOptions::default()
+    };
+    (messages, options)
+}
+
+/// Qwen3.5 prints typed tool arguments as Python does (`True`, `None`, `1.5`, `[1, 2]`).
+///
+/// Golden from transformers 5.2.0 `apply_chat_template` with the pinned
+/// Qwen3.5-0.8B tokenizer (revision 2fc06364715b967f1860aea9cf38778875588b17).
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "requires TRANSFORMERS_QWEN35_DIR with the pinned Qwen3.5 tokenizer"]
+fn qwen35_typed_tool_arguments_match_hugging_face() {
+    let tokenizer = pinned_tokenizer("TRANSFORMERS_QWEN35_DIR");
+    let (messages, options) = typed_tool_conversation();
+    let expected = "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"function\": {\"description\": \"d\", \"name\": \"f\", \"parameters\": {\"properties\": {\"flag\": {\"default\": false, \"description\": \"a flag\", \"nullable\": true, \"type\": \"boolean\"}}, \"required\": [\"flag\"], \"type\": \"object\"}}, \"type\": \"function\"}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\ndo it<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=f>\n<parameter=count>\n3\n</parameter>\n<parameter=flag>\nTrue\n</parameter>\n<parameter=items>\n[1, 2]\n</parameter>\n<parameter=name>\nx\n</parameter>\n<parameter=none_val>\nNone\n</parameter>\n<parameter=ratio>\n1.5\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    assert_eq!(
+        tokenizer.render_chat(&messages, &options).unwrap(),
+        expected
+    );
+}
+
+/// Nemotron 3.5 prints typed schema fields and arguments as Python does.
+///
+/// Its `render_extra_keys` macro emits `<default>False</default>` and
+/// `<nullable>True</nullable>`. Golden from transformers 5.2.0
+/// `apply_chat_template` with the pinned Nemotron 3.5 Lightning tokenizer
+/// (revision a9904d24bcc1d289a1950fa9d2b978c47cf903b9).
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "requires TRANSFORMERS_NEMOTRON_H_DIR with the pinned Nemotron-H tokenizer"]
+fn nemotron_typed_tool_schema_and_arguments_match_hugging_face() {
+    let tokenizer = pinned_tokenizer("TRANSFORMERS_NEMOTRON_H_DIR");
+    let (messages, options) = typed_tool_conversation();
+    let expected = "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>f</name>\n<description>d</description>\n<parameters>\n<parameter>\n<name>flag</name>\n<type>boolean</type>\n<description>a flag</description>\n<default>False</default>\n<nullable>True</nullable>\n</parameter>\n<required>[\"flag\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\ndo it<|im_end|>\n<|im_start|>assistant\n<think></think>\n<tool_call>\n<function=f>\n<parameter=count>\n3\n</parameter>\n<parameter=flag>\nTrue\n</parameter>\n<parameter=items>\n[1, 2]\n</parameter>\n<parameter=name>\nx\n</parameter>\n<parameter=none_val>\nNone\n</parameter>\n<parameter=ratio>\n1.5\n</parameter>\n</function>\n</tool_call>\n<|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>\n";
+    assert_eq!(
+        tokenizer.render_chat(&messages, &options).unwrap(),
+        expected
+    );
+}
+
 /// Writes a byte-level BPE tokenizer with one token per byte and no merges.
 ///
 /// Every multi-byte UTF-8 character therefore spans several tokens, the

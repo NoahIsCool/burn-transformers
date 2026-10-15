@@ -8,18 +8,42 @@
 //! - [`python_method`]: the `str` and `dict` methods templates call, such as
 //!   `content.split()`, `name.startswith(("a", "b"))`, and `props.items()`.
 //! - [`python_formatter`]: `{{ value }}` output as Python's `str()` would print
-//!   it, so booleans render as `True`/`False`, `none` as `None`, floats in
-//!   `repr` form, and containers as `['a', 1]` / `{'k': 'v'}`.
+//!   it ([`python_str`]), so booleans render as `True`/`False`, `none` as
+//!   `None`, floats in `repr` form, and containers as `['a', 1]` / `{'k': 'v'}`.
+//! - [`string`], [`join`], [`safe`], and [`trim`]: Jinja2's filters that turn
+//!   values into text, with Python's `str()` instead of MiniJinja's spelling,
+//!   so `true | string` is `True` as official tool templates expect.
+//! - [`round`]: Jinja2's `round(value, precision, method)` with Python's
+//!   ties-to-even rounding and the `ceil`/`floor` methods.
 //! - [`tojson`]: the filter Hugging Face installs in place of Jinja's own,
 //!   `json.dumps(x, ensure_ascii=False, indent=None, separators=None,
 //!   sort_keys=False)`. Unlike MiniJinja's built-in filter it neither
 //!   HTML-escapes `<>&'` nor compacts separators, so tool schemas tokenize
 //!   exactly as in Python.
+//! - [`is_iterable`] and [`is_sequence`]: Jinja2's type tests with Python's
+//!   answers for `None`, strings, and dictionaries.
 //!
-//! Map key order follows the order MiniJinja exposes. With the crate's current
-//! `serde_json`/`minijinja` features, maps are key-sorted before they reach a
-//! template; Python preserves insertion order. Enabling both crates'
-//! `preserve_order` features makes the order match without changing this code.
+//! [`install`] registers all of them.
+//!
+//! # Remaining differences from Python
+//!
+//! - **Map key order.** Maps reach templates key-sorted: with the crate's
+//!   current `serde_json` and `minijinja` features, JSON objects are sorted
+//!   maps, while Python preserves insertion order. Iteration, printing, and
+//!   `tojson` therefore list keys alphabetically. Enabling both crates'
+//!   `preserve_order` features makes the order match without changing this
+//!   code.
+//! - **`~` concatenation** converts operands with MiniJinja's spelling
+//!   (`'x' ~ true` is `xtrue`, Python gives `xTrue`); MiniJinja exposes no
+//!   hook for the operator. Official templates convert non-strings with
+//!   `| string` before concatenating, which is exact.
+//! - **`%` string formatting** (`'%s' % x`) is not supported and fails the render.
+//! - **Unicode classes are approximated**: `isdigit`/`isdecimal` accept ASCII
+//!   digits only, `title`/`capitalize` uppercase where Python title-cases
+//!   (they differ for digraphs such as `ǆ`), and `repr` escapes a fixed set of
+//!   non-printable characters instead of consulting Unicode categories.
+//! - Other text filters (`upper`, `replace`, `indent`, ...) convert non-string
+//!   input with MiniJinja's spelling.
 //!
 //! Recursive printing and serialization stop at [`MAX_NESTING`] levels:
 //! templates are untrusted programs and could otherwise build a structure deep
@@ -28,12 +52,30 @@
 use core::fmt::Write as _;
 
 use minijinja::{
-    Error, ErrorKind, Output, State, Value,
+    Environment, Error, ErrorKind, Output, State, Value,
     value::{Kwargs, ValueKind},
 };
 
 /// Deepest container nesting printed or serialized before failing.
 pub(crate) const MAX_NESTING: usize = 256;
+
+/// Installs every Python-compatibility callback, filter, and test in `environment`.
+///
+/// This is the single list of MiniJinja behaviors this module replaces: value
+/// printing, `str`/`dict` methods, the `tojson`, `string`, `safe`, `trim`,
+/// `join`, and `round` filters, and the `iterable` and `sequence` tests.
+pub(crate) fn install(environment: &mut Environment<'_>) {
+    environment.set_formatter(python_formatter);
+    environment.set_unknown_method_callback(python_method);
+    environment.add_filter("tojson", tojson);
+    environment.add_filter("string", string);
+    environment.add_filter("safe", safe);
+    environment.add_filter("trim", trim);
+    environment.add_filter("join", join);
+    environment.add_filter("round", round);
+    environment.add_test("iterable", is_iterable);
+    environment.add_test("sequence", is_sequence);
+}
 
 // Shared error constructors.
 
@@ -55,26 +97,31 @@ fn check_depth(depth: usize) -> Result<(), Error> {
 
 // Python `str()` / `repr()` printing.
 
-/// Writes `{{ value }}` exactly as Python's `str(value)` would.
-///
-/// Strings print raw, undefined values print nothing (Jinja2's lenient
-/// `Undefined`), and every other primitive or container uses Python `repr`.
+/// Writes `{{ value }}` exactly as Python's `str(value)` would; see [`python_str`].
 pub(crate) fn python_formatter(
     out: &mut Output<'_>,
     _state: &State<'_, '_>,
     value: &Value,
 ) -> Result<(), Error> {
+    out.write_str(&python_str(value)?).map_err(Error::from)
+}
+
+/// Converts a value to text exactly as Python's `str(value)` would.
+///
+/// Strings are returned raw, undefined values are empty (Jinja2's lenient
+/// `Undefined.__str__`), and every other primitive or container uses Python
+/// `repr`: `True`, `None`, `1.0`, `['a', 1]`, `{'k': None}`. Values with no
+/// Python counterpart, such as macros, keep MiniJinja's spelling.
+pub(crate) fn python_str(value: &Value) -> Result<String, Error> {
     match value.kind() {
-        ValueKind::Undefined => Ok(()),
-        ValueKind::String => out
-            .write_str(value.as_str().unwrap_or_default())
-            .map_err(Error::from),
+        ValueKind::Undefined => Ok(String::new()),
+        ValueKind::String => Ok(value.as_str().unwrap_or_default().to_owned()),
         ValueKind::None | ValueKind::Bool | ValueKind::Number | ValueKind::Seq | ValueKind::Map => {
             let mut text = String::new();
             python_repr(value, &mut text, 0)?;
-            out.write_str(&text).map_err(Error::from)
+            Ok(text)
         }
-        _ => write!(out, "{value}").map_err(Error::from),
+        _ => Ok(value.to_string()),
     }
 }
 
@@ -449,6 +496,345 @@ fn write_json_string(text: &str, ensure_ascii: bool, out: &mut String) {
     out.push('"');
 }
 
+// Jinja2 filters that convert values with Python's `str()`.
+//
+// MiniJinja's built-in versions of these filters convert non-strings with
+// Rust's `Display`, which spells booleans and null `true`/`none`. Official
+// tool-calling templates print tool arguments and schema fields through
+// `| string`, so those spellings would change prompt text (`True` vs `true`).
+
+/// Jinja2's `string` filter: `soft_str(value)`.
+///
+/// Strings, including safe strings, pass through unchanged; every other value
+/// becomes [`python_str`] text, so `true | string` is `True`.
+pub(crate) fn string(value: &Value) -> Result<Value, Error> {
+    if value.kind() == ValueKind::String {
+        return Ok(value.clone());
+    }
+    python_str(value).map(Value::from)
+}
+
+/// Jinja2's `safe` filter: `Markup(value)`, Python `str()` text marked safe.
+pub(crate) fn safe(value: &Value) -> Result<Value, Error> {
+    python_str(value).map(Value::from_safe_string)
+}
+
+/// Jinja2's `trim(value, chars=None)`: `str(value).strip(chars)`.
+///
+/// Without `chars`, Python's whitespace set is stripped (see
+/// [`is_python_whitespace`]).
+pub(crate) fn trim(value: &Value, characters: Option<Value>) -> Result<Value, Error> {
+    let characters = match &characters {
+        Some(set) if !set.is_none() => Some(
+            set.as_str()
+                .ok_or_else(|| invalid("trim() chars must be str or None"))?,
+        ),
+        _ => None,
+    };
+    let text = python_str(value)?;
+    Ok(Value::from(strip(&text, "strip", characters)))
+}
+
+/// Jinja2's `join(value, d='', attribute=None)` with Python `str()` items.
+///
+/// Each item (or its `attribute`, a dotted path such as `"function.name"`
+/// whose digit parts index lists) is converted with [`python_str`], so
+/// `[1, true, none] | join(',')` is `1,True,None`. An undefined value joins
+/// to `""`; `none` is rejected, as Python cannot iterate it.
+pub(crate) fn join(
+    value: &Value,
+    separator: Option<Value>,
+    attribute: Option<Value>,
+    kwargs: Kwargs,
+) -> Result<Value, Error> {
+    let separator = match separator {
+        Some(separator) => Some(separator),
+        None => kwargs.get::<Option<Value>>("d")?,
+    };
+    let attribute = match attribute {
+        Some(attribute) => Some(attribute),
+        None => kwargs.get::<Option<Value>>("attribute")?,
+    };
+    kwargs.assert_all_used()?;
+    let separator = match separator {
+        Some(separator) => python_str(&separator)?,
+        None => String::new(),
+    };
+    if value.is_undefined() {
+        return Ok(Value::from(""));
+    }
+    if value.is_none() {
+        return Err(invalid("join(): 'NoneType' object is not iterable"));
+    }
+    let items = value.try_iter().map_err(|_| {
+        invalid(format!(
+            "join(): cannot join value of type {}",
+            value.kind()
+        ))
+    })?;
+    let mut joined = String::new();
+    for (index, item) in items.enumerate() {
+        if index > 0 {
+            joined.push_str(&separator);
+        }
+        let item = match &attribute {
+            Some(path) if !path.is_none() => attribute_path(&item, path)?,
+            _ => item,
+        };
+        joined.push_str(&python_str(&item)?);
+    }
+    Ok(Value::from(joined))
+}
+
+/// Looks up Jinja2's `attribute=` argument: an integer index or a dotted path.
+///
+/// Path parts made of ASCII digits index by integer, as Jinja2's
+/// `make_attrgetter` does; missing keys yield `Undefined`.
+fn attribute_path(item: &Value, path: &Value) -> Result<Value, Error> {
+    let Some(path) = path.as_str() else {
+        return item.get_item(path);
+    };
+    let mut current = item.clone();
+    for part in path.split('.') {
+        let key = match part.parse::<i64>() {
+            Ok(index) if part.bytes().all(|byte| byte.is_ascii_digit()) => Value::from(index),
+            _ => Value::from(part),
+        };
+        current = current.get_item(&key)?;
+    }
+    Ok(current)
+}
+
+/// Jinja2's `round(value, precision=0, method='common')`.
+///
+/// `common` is Python's built-in `round`: integers stay integers (rounded to
+/// tens for negative `precision`), floats round half to even on their exact
+/// binary value, so `2.5 | round` is `2.0` and `2.675 | round(2)` is `2.67`.
+/// `ceil` and `floor` follow Jinja2's formula
+/// `math.ceil(value * 10**precision) / 10**precision` and always return a
+/// float. Booleans count as the integers 0 and 1, as in Python.
+pub(crate) fn round(
+    value: &Value,
+    precision: Option<Value>,
+    method: Option<Value>,
+    kwargs: Kwargs,
+) -> Result<Value, Error> {
+    let precision = match precision {
+        Some(precision) => Some(precision),
+        None => kwargs.get::<Option<Value>>("precision")?,
+    };
+    let method = match method {
+        Some(method) => Some(method),
+        None => kwargs.get::<Option<Value>>("method")?,
+    };
+    kwargs.assert_all_used()?;
+    let precision = match precision {
+        None => 0,
+        Some(precision) => integer_argument(&precision)
+            .and_then(|precision| i64::try_from(precision).ok())
+            .ok_or_else(|| invalid("round() precision must be an integer"))?,
+    };
+    let method = match &method {
+        None => "common",
+        Some(method) => method.as_str().unwrap_or_default(),
+    };
+    let number = RoundOperand::from_value(value)?;
+    match method {
+        "common" => number.round_common(precision),
+        "ceil" => number.round_directed(precision, f64::ceil),
+        "floor" => number.round_directed(precision, f64::floor),
+        _ => Err(invalid(
+            "round() method must be 'common', 'ceil' or 'floor'",
+        )),
+    }
+}
+
+/// Returns a template integer (or boolean, as 0/1) as `i128`.
+fn integer_argument(value: &Value) -> Option<i128> {
+    match value.kind() {
+        ValueKind::Bool => Some(i128::from(value.is_true())),
+        ValueKind::Number if value.is_integer() => i128::try_from(value.clone()).ok(),
+        _ => None,
+    }
+}
+
+/// A number accepted by [`round`], keeping Python's int/float distinction.
+enum RoundOperand {
+    /// An integer or boolean.
+    Integer(i128),
+    /// A floating-point number.
+    Float(f64),
+}
+
+impl RoundOperand {
+    /// Classifies a template value, rejecting non-numbers.
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        if let Some(integer) = integer_argument(value) {
+            return Ok(Self::Integer(integer));
+        }
+        match value.kind() {
+            ValueKind::Number => Ok(Self::Float(f64::try_from(value.clone())?)),
+            kind => Err(invalid(format!("round() requires a number, not {kind}"))),
+        }
+    }
+
+    /// Python's `round(value, precision)`.
+    fn round_common(self, precision: i64) -> Result<Value, Error> {
+        match self {
+            Self::Integer(integer) if precision >= 0 => Ok(Value::from(integer)),
+            Self::Integer(integer) => {
+                let places = u32::try_from(precision.unsigned_abs()).unwrap_or(u32::MAX);
+                round_integer_half_even(integer, places)
+                    .map(Value::from)
+                    .ok_or_else(|| invalid("round(): rounded integer is out of range"))
+            }
+            Self::Float(float) => round_float_half_even(float, precision).map(Value::from),
+        }
+    }
+
+    /// Jinja2's `ceil`/`floor` methods: `direction(value * 10**p) / 10**p`.
+    ///
+    /// The scale is `float(10**p)`, correctly rounded, which is exact for
+    /// `|p| <= 22`; Python divides by the exact integer `10**p`, so results
+    /// for larger positive `p` may differ in the last bit.
+    fn round_directed(self, precision: i64, direction: fn(f64) -> f64) -> Result<Value, Error> {
+        let value = match self {
+            // `ceil(n * 10**p) / 10**p` is exactly `n` for p >= 0; Python's
+            // true division then rounds it to the nearest float, as `as` does.
+            Self::Integer(integer) if precision >= 0 => return Ok(Value::from(integer as f64)),
+            Self::Integer(integer) => integer as f64,
+            Self::Float(float) => float,
+        };
+        // Correctly rounded `10^precision`; it under- or overflows beyond |precision| ~ 308.
+        let scale = format!("1e{precision}").parse::<f64>().unwrap_or(0.0);
+        if scale == 0.0 || !scale.is_finite() {
+            return Err(invalid(format!(
+                "round() precision {precision} is out of range for method ceil/floor"
+            )));
+        }
+        let scaled = direction(value * scale);
+        if !scaled.is_finite() {
+            return Err(invalid(
+                "round(): cannot convert a non-finite value to an integer",
+            ));
+        }
+        Ok(Value::from(scaled / scale))
+    }
+}
+
+/// Rounds an integer to a multiple of `10^places`, ties to the even multiple.
+///
+/// Returns `None` only when the rounded value overflows `i128`. A unit larger
+/// than any `i128` rounds every value to zero.
+fn round_integer_half_even(value: i128, places: u32) -> Option<i128> {
+    let Some(unit) = 10_i128.checked_pow(places) else {
+        return Some(0);
+    };
+    let remainder = value.rem_euclid(unit);
+    let below = value - remainder;
+    let round_up = match remainder.cmp(&(unit - remainder)) {
+        core::cmp::Ordering::Less => false,
+        core::cmp::Ordering::Greater => true,
+        core::cmp::Ordering::Equal => (below / unit) % 2 != 0,
+    };
+    if round_up {
+        below.checked_add(unit)
+    } else {
+        Some(below)
+    }
+}
+
+/// CPython's `round(float, ndigits)`: correctly rounded, ties to even.
+///
+/// CPython rounds the exact binary value through `dtoa`. For `ndigits >= 0`,
+/// Rust's fixed-precision formatting performs the same exact, ties-to-even
+/// rounding, and parsing the digits back is correctly rounded. Negative
+/// `ndigits` rounds to tens via [`round_float_to_tens`]. As in CPython,
+/// non-finite values and `ndigits > 323` return the value unchanged, and a
+/// result too large for `f64` is an error.
+fn round_float_half_even(value: f64, ndigits: i64) -> Result<f64, Error> {
+    /// CPython's `NDIGITS_MAX`: beyond this many places every double is unchanged.
+    const MAX_FRACTION_DIGITS: i64 = 323;
+    if !value.is_finite() || ndigits > MAX_FRACTION_DIGITS {
+        return Ok(value);
+    }
+    let rounded = match usize::try_from(ndigits) {
+        Ok(places) => format!("{value:.places$}")
+            .parse::<f64>()
+            .map_err(|error| invalid(format!("round(): {error}")))?,
+        Err(_) => {
+            let places = usize::try_from(ndigits.unsigned_abs()).unwrap_or(usize::MAX);
+            round_float_to_tens(value, places)
+        }
+    };
+    if rounded.is_finite() {
+        Ok(rounded)
+    } else {
+        Err(invalid("round(): rounded value too large to represent"))
+    }
+}
+
+/// Rounds a finite float to a multiple of `10^places` (`places >= 1`), ties to even.
+///
+/// The integer part's exact decimal expansion is split into kept digits and
+/// `places` dropped digits. The dropped part, plus any fractional part,
+/// decides the direction against half a unit (`5` followed by zeros); an
+/// exact tie rounds the kept digits to even. The sign is reapplied at the end,
+/// so negative values round symmetrically and may produce `-0.0`, as in Python.
+fn round_float_to_tens(value: f64, places: usize) -> f64 {
+    // Every finite double is below 10^309, so it rounds to zero at 310+ places.
+    if places > 309 {
+        return 0.0_f64.copysign(value);
+    }
+    let magnitude = value.abs();
+    let whole = magnitude.trunc();
+    // `{:.0}` prints an integral double's exact decimal expansion.
+    let digits = format!("{whole:.0}");
+    let split = digits.len().saturating_sub(places);
+    let (kept, dropped) = digits.split_at(split);
+    let dropped = format!("{dropped:0>places$}");
+    let half = format!("5{}", "0".repeat(places - 1));
+    // Equal-length digit strings compare like the numbers they spell.
+    let round_up = match dropped.as_str().cmp(half.as_str()) {
+        core::cmp::Ordering::Less => false,
+        core::cmp::Ordering::Greater => true,
+        core::cmp::Ordering::Equal => {
+            magnitude != whole || kept.bytes().last().is_some_and(|digit| digit % 2 == 1)
+        }
+    };
+    let mut kept = if kept.is_empty() {
+        "0".to_owned()
+    } else {
+        kept.to_owned()
+    };
+    if round_up {
+        increment_decimal(&mut kept);
+    }
+    // Parsing an exact decimal is correctly rounded; overflow yields infinity.
+    let rounded: f64 = format!("{kept}e{places}").parse().unwrap_or(f64::INFINITY);
+    rounded.copysign(value)
+}
+
+/// Adds one to a non-empty string of ASCII decimal digits.
+fn increment_decimal(digits: &mut String) {
+    let mut bytes = core::mem::take(digits).into_bytes();
+    let mut index = bytes.len();
+    loop {
+        if index == 0 {
+            bytes.insert(0, b'1');
+            break;
+        }
+        index -= 1;
+        if bytes[index] == b'9' {
+            bytes[index] = b'0';
+        } else {
+            bytes[index] += 1;
+            break;
+        }
+    }
+    *digits = String::from_utf8(bytes).expect("ASCII digits stay valid UTF-8");
+}
+
 // Jinja2 type tests whose answers depend on Python's object model.
 
 /// Jinja2's `iterable` test: whether Python's `iter(value)` succeeds.
@@ -696,13 +1082,22 @@ fn string_method(text: &str, method: &str, values: &[Value]) -> Result<Value, Er
 fn strip<'a>(text: &'a str, method: &str, characters: Option<&str>) -> &'a str {
     let in_set = |character: char| match characters {
         Some(set) => set.contains(character),
-        None => character.is_whitespace(),
+        None => is_python_whitespace(character),
     };
     match method {
         "lstrip" => text.trim_start_matches(in_set),
         "rstrip" => text.trim_end_matches(in_set),
         _ => text.trim_matches(in_set),
     }
+}
+
+/// Python's `str.isspace()` character class, used by `strip()` and `split()`.
+///
+/// CPython counts characters with bidirectional class `WS`, `B`, or `S`, or
+/// category `Zs`. That is Unicode `White_Space` (Rust's
+/// [`char::is_whitespace`]) plus the ASCII separators `\x1c` through `\x1f`.
+pub(crate) fn is_python_whitespace(character: char) -> bool {
+    character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character)
 }
 
 /// Implements `split`/`rsplit`, including Python's whitespace-run mode.
@@ -728,7 +1123,7 @@ fn split<'a>(
         }),
         None if from_right => {
             let mut parts = Vec::new();
-            let mut rest = text.trim_end();
+            let mut rest = text.trim_end_matches(is_python_whitespace);
             while !rest.is_empty() {
                 if limit.is_some_and(|limit| parts.len() == limit) {
                     parts.push(rest);
@@ -737,25 +1132,25 @@ fn split<'a>(
                 let start = rest
                     .char_indices()
                     .rev()
-                    .find(|(_, character)| character.is_whitespace())
+                    .find(|(_, character)| is_python_whitespace(*character))
                     .map_or(0, |(index, character)| index + character.len_utf8());
                 parts.push(&rest[start..]);
-                rest = rest[..start].trim_end();
+                rest = rest[..start].trim_end_matches(is_python_whitespace);
             }
             parts.reverse();
             Ok(parts)
         }
         None => {
             let mut parts = Vec::new();
-            let mut rest = text.trim_start();
+            let mut rest = text.trim_start_matches(is_python_whitespace);
             while !rest.is_empty() {
                 if limit.is_some_and(|limit| parts.len() == limit) {
                     parts.push(rest);
                     break;
                 }
-                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                let end = rest.find(is_python_whitespace).unwrap_or(rest.len());
                 parts.push(&rest[..end]);
-                rest = rest[end..].trim_start();
+                rest = rest[end..].trim_start_matches(is_python_whitespace);
             }
             Ok(parts)
         }
@@ -836,7 +1231,8 @@ fn change_case(text: &str, method: &str) -> String {
                     .collect()
             })
         }
-        // `title`: a letter after a cased letter is lowercased, otherwise uppercased.
+        // `title`: a character after a cased letter is lowercased, otherwise
+        // uppercased (Python title-cases it; they differ only for digraphs like `ǆ`).
         _ => {
             let mut previous_cased = false;
             let mut titled = String::with_capacity(text.len());
@@ -846,7 +1242,8 @@ fn change_case(text: &str, method: &str) -> String {
                 } else {
                     titled.extend(character.to_uppercase());
                 }
-                previous_cased = character.is_alphabetic();
+                // Python's `is_cased`: only letters with case (not CJK) reset the word.
+                previous_cased = character.is_lowercase() || character.is_uppercase();
             }
             titled
         }
@@ -866,7 +1263,7 @@ fn classify(text: &str, method: &str) -> bool {
         "isnumeric" => text.chars().all(char::is_numeric),
         "isalpha" => text.chars().all(char::is_alphabetic),
         "isalnum" => text.chars().all(char::is_alphanumeric),
-        "isspace" => text.chars().all(char::is_whitespace),
+        "isspace" => text.chars().all(is_python_whitespace),
         "islower" => has_cased && !text.chars().any(char::is_uppercase),
         _ => has_cased && !text.chars().any(char::is_lowercase),
     }

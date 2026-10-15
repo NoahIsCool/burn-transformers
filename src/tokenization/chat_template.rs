@@ -15,9 +15,18 @@
 //! | `{% generation %}` (assistant masks)      | rewritten to a transparent `{% if true %}`    |
 //! | `f(key=a if c else b)` keyword arguments  | rewritten to `f(key=(a if c else b))`         |
 //! | `is iterable` / `is sequence` tests       | Python's answers for `None`, `str`, and `dict` |
-//! | `tojson` = `json.dumps(...)`              | [`super::pycompat::tojson`]                   |
-//! | Python `str`/`dict` methods and printing  | [`super::pycompat`] callbacks                 |
+//! | `tojson` = `json.dumps(...)`              | `pycompat::tojson`                            |
+//! | `string`, `join`, `safe`, `trim` (`str()`) | `pycompat` filters printing `True`/`None`    |
+//! | `round` (ties to even, `ceil`/`floor`)    | `pycompat::round`                             |
+//! | Python `str`/`dict` methods and printing  | `pycompat` callbacks                          |
 //! | `strftime_now(format)` (host local time)  | UTC, or a caller-fixed instant                |
+//! | dict insertion order                      | **not matched**: keys arrive sorted           |
+//! | `'x' ~ value` with a bool or `None`       | **not matched**: prints `true`/`none`         |
+//! | `'%s' % value` string formatting          | **not supported**: rendering fails            |
+//!
+//! The unmatched rows, and smaller Unicode-class approximations, are
+//! described in the `pycompat` module documentation. Official templates
+//! convert values with `| string` before `~`, which is matched exactly.
 //!
 //! Templates are untrusted programs. The environment has no loader, so
 //! templates cannot include files; execution is metered by fuel, recursion is
@@ -55,11 +64,7 @@ pub(crate) fn render_template(
     environment.set_lstrip_blocks(true);
     environment.set_recursion_limit(CHAT_TEMPLATE_RECURSION_LIMIT);
     environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
-    environment.set_formatter(pycompat::python_formatter);
-    environment.set_unknown_method_callback(pycompat::python_method);
-    environment.add_filter("tojson", pycompat::tojson);
-    environment.add_test("iterable", pycompat::is_iterable);
-    environment.add_test("sequence", pycompat::is_sequence);
+    pycompat::install(&mut environment);
     environment.add_function("raise_exception", raise_exception);
     environment.add_function("strftime_now", move |format: &str| {
         strftime_now(format, fixed_time)

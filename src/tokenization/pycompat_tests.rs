@@ -14,9 +14,7 @@ use super::*;
 fn render(source: &str, context: serde_json::Value) -> Result<String, Error> {
     let mut environment = Environment::new();
     environment.set_undefined_behavior(UndefinedBehavior::Lenient);
-    environment.set_formatter(python_formatter);
-    environment.set_unknown_method_callback(python_method);
-    environment.add_filter("tojson", tojson);
+    install(&mut environment);
     environment.render_str(source, context)
 }
 
@@ -162,6 +160,134 @@ fn dict_methods_match_cpython() {
     );
 }
 
+/// `string`, `join`, `trim`, and `safe` convert values with Python's `str()`.
+///
+/// Official tool templates print arguments with `args_value | string` and
+/// schema fields with `json_dict[key] | string`; MiniJinja's built-ins would
+/// print `true`/`none` where Python prints `True`/`None`.
+#[test]
+fn string_filters_print_python_values() {
+    assert_eq!(
+        rendered(
+            "{{ true|string }}|{{ none|string }}|{{ 1.5|string }}|{{ [true, none, 'a']|string }}|{{ {'k': [1, none]}|string }}|{{ missing|string }}|{{ 'x'|string }}|{{ 3|string }}|{{ 1e16|string }}",
+            json!({}),
+        ),
+        "True|None|1.5|[True, None, 'a']|{'k': [1, None]}||x|3|1e+16"
+    );
+    assert_eq!(
+        rendered(
+            "{{ [1, true, none, 1.5, 'a', ['b']]|join(',') }}|{{ items|join('-', attribute='a') }}|{{ items|join(attribute='b.0') }}|{{ missing|join(',') }}|{{ 'ab'|join(1) }}|{{ [1,2]|join }}|{{ items|join(d='+', attribute='a') }}",
+            json!({"items": [{"a": 1, "b": [true]}, {"a": true, "b": [null]}]}),
+        ),
+        "1,True,None,1.5,a,['b']|1-True|TrueNone||a1b|12|1+True"
+    );
+    assert_eq!(
+        rendered(
+            "[{{ '  x \u{1c}'|trim }}]|[{{ 'xxhixx'|trim('x') }}]|[{{ true|trim }}]|[{{ none|trim }}]|[{{ missing|trim }}]|{{ true|safe }}|{{ none|safe }}",
+            json!({}),
+        ),
+        "[x]|[hi]|[True]|[None]|[]|True|None"
+    );
+    // A safe string stays safe through `string`, as Jinja2's `soft_str` keeps `Markup`.
+    let mut environment = Environment::new();
+    install(&mut environment);
+    let value = environment
+        .render_str("{{ ('<b>' | safe | string) is safe }}", ())
+        .unwrap();
+    assert_eq!(value, "True");
+}
+
+/// `round` follows Python: ties to even on the exact binary value, `ceil`/`floor` methods.
+#[test]
+fn round_matches_python() {
+    assert_eq!(
+        rendered(
+            "{{ 2.5|round }}|{{ 3.5|round }}|{{ -2.5|round }}|{{ 0.125|round(2) }}|{{ 2.675|round(2) }}|{{ 3|round }}|{{ 3|round(1, 'ceil') }}|{{ 2.25|round(1, 'floor') }}|{{ 1234.5|round(-2) }}|{{ 1250.0|round(-2) }}|{{ 1350|round(-2) }}|{{ 25|round(-1) }}|{{ -25|round(-1) }}|{{ 35|round(-1, 'floor') }}|{{ true|round }}|{{ 1e16|round }}|{{ 2.5|round(method='ceil') }}|{{ -0.4|round }}|{{ 0.5|round(precision=0) }}|{{ 7.0|round(-1, 'ceil') }}|{{ 155|round(-1, 'ceil') }}",
+            json!({}),
+        ),
+        "2.0|4.0|-2.0|0.12|2.67|3|3.0|2.2|1200.0|1200.0|1400|20|-20|30.0|1|1e+16|3.0|-0.0|0.0|10.0|160.0"
+    );
+    // CPython limits: huge `ndigits` keeps the value, huge negative `ndigits` gives a signed zero.
+    assert_eq!(
+        round_float_half_even(0.1, 400).unwrap().to_bits(),
+        0.1_f64.to_bits()
+    );
+    assert_eq!(
+        round_float_half_even(-12.0, -400).unwrap().to_bits(),
+        (-0.0_f64).to_bits()
+    );
+    assert!(round_float_half_even(f64::NAN, 0).unwrap().is_nan());
+    assert_eq!(
+        round_float_half_even(f64::INFINITY, -2).unwrap(),
+        f64::INFINITY
+    );
+    // Golden: CPython `round(sys.float_info.max, -303)`; at -304 and beyond it overflows.
+    assert_eq!(round_float_half_even(f64::MAX, -303).unwrap(), 1.797_69e308);
+    assert!(round_float_half_even(f64::MAX, -304).is_err());
+    assert_eq!(round_integer_half_even(i128::MAX, 39), Some(0));
+    assert_eq!(round_integer_half_even(i128::MAX, 1), None);
+}
+
+/// Invalid filter arguments fail inside the template with Python-style context.
+#[test]
+fn filters_reject_invalid_arguments() {
+    for (template, expected) in [
+        ("{{ 'x'|round }}", "requires a number"),
+        ("{{ 1.5|round(1, 'up') }}", "method must be"),
+        ("{{ 1.5|round(1.5) }}", "precision must be an integer"),
+        ("{{ 1.5|round(1, 'ceil', 3) }}", "too many arguments"),
+        ("{{ 1.5|round(digits=1) }}", "digits"),
+        (
+            "{{ 1.7976931348623157e308|round(-308) }}",
+            "too large to represent",
+        ),
+        ("{{ 1e300|round(400, 'ceil') }}", "out of range"),
+        ("{{ 1.0|round(-400, 'floor') }}", "out of range"),
+        ("{{ 1e300|round(10, 'ceil') }}", "non-finite"),
+        ("{{ none|join(',') }}", "not iterable"),
+        ("{{ 5|join(',') }}", "cannot join"),
+        ("{{ [1]|join(',', 'a', 'b') }}", "too many arguments"),
+        ("{{ [1]|join(sep=',') }}", "sep"),
+        ("{{ [{'a': {}}]|join(attribute='a.b.c') }}", "undefined"),
+        ("{{ 'x'|trim(1) }}", "chars must be str"),
+    ] {
+        let error = render(template, json!({})).unwrap_err();
+        assert!(
+            format!("{error:#}").to_lowercase().contains(expected),
+            "{template}: {error:#}"
+        );
+    }
+}
+
+/// `title()` resets words only after cased letters, and whitespace is Python's set.
+#[test]
+fn casing_and_whitespace_follow_python() {
+    assert_eq!(
+        rendered(
+            "{{ '中a'.title() }}|{{ 'hello wORLD'.title() }}|{{ '1st 2nd'.title() }}|{{ 'a\u{1c}b'.split() }}|{{ '\u{1f}x\u{1f}'.strip() }}|{{ '\u{1c}'.isspace() }}|{{ 'a\u{1c}b c'.rsplit(none, 1) }}",
+            json!({}),
+        ),
+        "中A|Hello World|1St 2Nd|['a', 'b']|x|True|['a\\x1cb', 'c']"
+    );
+}
+
+/// The whitespace class equals CPython 3.11's `str.isspace()` over every scalar value.
+#[test]
+fn python_whitespace_matches_cpython_exhaustively() {
+    // `[c for c in map(chr, range(0x110000)) if c.isspace()]` in CPython 3.11.
+    const CPYTHON: [u32; 29] = [
+        0x9, 0xa, 0xb, 0xc, 0xd, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001,
+        0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029,
+        0x202f, 0x205f, 0x3000,
+    ];
+    let ours = (0..=0x10_ffff_u32)
+        .filter_map(char::from_u32)
+        .filter(|character| is_python_whitespace(*character))
+        .map(u32::from)
+        .collect::<Vec<_>>();
+    assert_eq!(ours, CPYTHON);
+}
+
 /// Wrong arity, wrong argument types, and unknown methods fail inside the template.
 #[test]
 fn methods_reject_invalid_calls() {
@@ -223,6 +349,68 @@ proptest! {
             let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
             prop_assert_eq!(&parsed, &value);
         }
+    }
+
+    /// Integer rounding picks the nearer multiple of `10^places`, ties to the even multiple.
+    ///
+    /// The reference compares absolute distances to both neighbors instead of
+    /// the production remainder comparison.
+    #[test]
+    fn integer_rounding_matches_nearest_multiple(value in any::<i64>(), places in 1_u32..=18) {
+        let value = i128::from(value);
+        let unit = 10_i128.pow(places);
+        let below = value.div_euclid(unit) * unit;
+        let above = below + unit;
+        let expected = match (value - below).cmp(&(above - value)) {
+            core::cmp::Ordering::Less => below,
+            core::cmp::Ordering::Greater => above,
+            core::cmp::Ordering::Equal if (below / unit) % 2 == 0 => below,
+            core::cmp::Ordering::Equal => above,
+        };
+        prop_assert_eq!(round_integer_half_even(value, places), Some(expected));
+    }
+
+    /// Float rounding to tens agrees with exact rational arithmetic on half-integers.
+    ///
+    /// `m / 2` is exact in `f64` for `|m| < 2^53`, so the reference rounds the
+    /// rational `m / 2` to a multiple of `10^places` with integers alone.
+    #[test]
+    fn float_rounding_to_tens_matches_rational_reference(
+        doubled in -(1_i64 << 52)..(1_i64 << 52),
+        places in 1_usize..=12,
+    ) {
+        #[allow(clippy::cast_precision_loss)] // |doubled| < 2^52 is exact.
+        let value = doubled as f64 / 2.0;
+        let unit = 2 * 10_i128.pow(u32::try_from(places).unwrap()); // 10^places in halves
+        let numerator = i128::from(doubled);
+        let below = numerator.div_euclid(unit) * unit;
+        let above = below + unit;
+        let nearest = match (numerator - below).cmp(&(above - numerator)) {
+            core::cmp::Ordering::Less => below,
+            core::cmp::Ordering::Greater => above,
+            core::cmp::Ordering::Equal if (below / unit) % 2 == 0 => below,
+            core::cmp::Ordering::Equal => above,
+        };
+        #[allow(clippy::cast_precision_loss)] // Multiples below 2^53 are exact.
+        let expected = (nearest / 2) as f64;
+        let rounded = round_float_half_even(value, -i64::try_from(places).unwrap()).unwrap();
+        prop_assert_eq!(rounded, expected);
+        prop_assert_eq!(rounded.is_sign_negative(), value.is_sign_negative());
+    }
+
+    /// Rounding eighths to hundredths matches ties-to-even on the exact rational.
+    #[test]
+    fn float_rounding_to_hundredths_matches_rational_reference(eighths in -1_000_000_i64..1_000_000) {
+        #[allow(clippy::cast_precision_loss)] // Small integers are exact.
+        let value = eighths as f64 / 8.0;
+        // value * 100 = 25 * eighths / 2: round that half-integer to the even neighbor.
+        let doubled = 25 * eighths;
+        let floor = doubled.div_euclid(2);
+        let hundredths = if doubled.rem_euclid(2) == 0 || floor % 2 == 0 { floor } else { floor + 1 };
+        #[allow(clippy::cast_precision_loss)] // Small integers are exact.
+        let expected = hundredths as f64 / 100.0;
+        let rounded = round_float_half_even(value, 2).unwrap();
+        prop_assert_eq!(rounded.abs().to_bits(), expected.abs().to_bits());
     }
 
     /// Float repr always parses back to the identical `f64` and stays visibly a float.
