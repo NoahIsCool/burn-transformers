@@ -22,6 +22,13 @@
 //! * `src/cache/rows.rs`: grouping of batch rows into runs that share one
 //!   tensor assignment; runs are ordered, disjoint, carry their rows'
 //!   parameters, and cover exactly the rows with new tokens.
+//! * `src/cache/tensor/plan.rs`: integer planning shared by the tensor
+//!   caches. Allocation scalar counts are exact running products checked
+//!   against overflow, the portable `i32` element limit, and byte size;
+//!   append ends are exact and within capacity; the staged-commit scan
+//!   accepts exactly fully staged, in-proposal prefixes and names the first
+//!   failure; truncation clears exactly the rows reset from history; beam
+//!   sources and host index vectors are checked and converted exactly.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -36,3 +43,5 @@ pub mod retention;
 pub mod ring;
 #[path = "../src/cache/rows.rs"]
 pub mod rows;
+#[path = "../src/cache/tensor/plan.rs"]
+pub mod tensor_plan;

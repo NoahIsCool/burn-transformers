@@ -31,6 +31,10 @@ use crate::cache::{
     plan_staged_ring_transaction,
 };
 
+use super::plan::{
+    check_staged_commit, first_index_out_of_range, portable_indices, rows_cleared_by_truncate,
+    write_end,
+};
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
@@ -1069,9 +1073,15 @@ impl<B: Backend> NativeKvCache<B> {
     }
 
     /// Clears rows reset to zero after truncate validation succeeds.
+    ///
+    /// The verified `rows_cleared_by_truncate` selects exactly the rows that
+    /// held tokens and are truncated to zero.
     pub(crate) fn apply_truncate(&mut self, current: &[usize], requested: &[usize]) {
-        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
-            if from != 0 && to == 0 {
+        for (sequence, cleared) in rows_cleared_by_truncate(current, requested)
+            .into_iter()
+            .enumerate()
+        {
+            if cleared {
                 self.zero_sequence(sequence);
             }
         }
@@ -1144,27 +1154,10 @@ impl<B: Backend> NativeKvCache<B> {
             return Err(TensorCacheError::TransactionNotActive);
         }
         validate_commit_vector_lengths(self.config.sequence_count(), baseline, proposed, accepted)?;
-        for layer in 0..self.spec.layers() {
-            for sequence in 0..self.config.sequence_count() {
-                let actual = self.staged_lengths[layer][sequence];
-                if actual != proposed[sequence] {
-                    return Err(TensorCacheError::IncompleteStaging {
-                        kind: "native KV",
-                        layer,
-                        sequence,
-                        expected: proposed[sequence],
-                        actual,
-                    });
-                }
-                if accepted[sequence] > proposed[sequence] {
-                    return Err(TensorCacheError::AcceptedPrefixExceedsProposal {
-                        sequence,
-                        accepted: accepted[sequence],
-                        proposed: proposed[sequence],
-                    });
-                }
-            }
-        }
+        // Every layer holds one staged length per row, so the verified scan's
+        // precondition follows from the vector-length check above.
+        check_staged_commit(&self.staged_lengths, proposed, accepted)
+            .map_err(|violation| TensorCacheError::staged_commit("native KV", violation))?;
 
         if self.spec.in_place_staging() {
             // Accepted proposals already occupy their committed slots.
@@ -1484,20 +1477,10 @@ fn validate_sequence(sequence: usize, batch_size: usize) -> TensorCacheResult<()
     }
 }
 
-/// Checks absolute write arithmetic and logical capacity.
+/// Checks absolute write arithmetic and logical capacity (the verified `write_end`).
 fn validate_write_end(start: usize, tokens: usize, capacity: usize) -> TensorCacheResult<usize> {
-    let end = start
-        .checked_add(tokens)
-        .ok_or(TensorCacheError::WritePositionOverflow { start, tokens })?;
-    if end > capacity {
-        Err(TensorCacheError::WriteExceedsCapacity {
-            start,
-            end,
-            capacity,
-        })
-    } else {
-        Ok(end)
-    }
+    write_end(start, tokens, capacity)
+        .map_err(|violation| TensorCacheError::write_end(start, tokens, capacity, violation))
 }
 
 /// Checks shape, dtype, and device before invoking a backend assignment.
@@ -1651,10 +1634,13 @@ pub(crate) fn validate_reorder_indices(
             requested: indices.len(),
         });
     }
-    for &sequence in indices {
-        validate_sequence(sequence, batch_size)?;
+    match first_index_out_of_range(indices, batch_size) {
+        Some(position) => Err(TensorCacheError::SequenceOutOfBounds {
+            sequence: indices[position],
+            batch_size,
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Builds the device-local integer tensor used by Burn batch selection.
@@ -1662,12 +1648,10 @@ pub(crate) fn selection_tensor<B: Backend>(
     indices: &[usize],
     device: &B::Device,
 ) -> TensorCacheResult<Tensor<B, 1, Int>> {
-    let values: Vec<i32> = indices
-        .iter()
-        .map(|&index| {
-            i32::try_from(index).map_err(|_| TensorCacheError::BatchIndexOverflow { index })
-        })
-        .collect::<TensorCacheResult<_>>()?;
+    let values =
+        portable_indices(indices).map_err(|position| TensorCacheError::BatchIndexOverflow {
+            index: indices[position],
+        })?;
     Ok(Tensor::from_ints(
         TensorData::new(values, [indices.len()]),
         device,
