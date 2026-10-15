@@ -290,6 +290,23 @@ impl Layer {
         mlp_output => ("mlp.output", "Feed-forward output before residual addition."),
         residual_post => ("residual.post", "Residual after the complete block, before the next block or final normalization."),
     }
+    /// Input to this layer's sequence mixer; the same point as [`Self::attention_input`].
+    ///
+    /// Open compositions call this branch the *mixer* ([`crate::experiment::ResidualBlock`]'s
+    /// `mixer` field); checkpoint families call it *attention* even for recurrent mixers
+    /// such as DeltaNet. Both methods address the one emitted point
+    /// `<stack>.layers.<index>.attention.input`, `[batch, token, channel]`.
+    pub fn mixer_input(self) -> Point<3> {
+        self.attention_input()
+    }
+
+    /// Output of this layer's sequence mixer; the same point as [`Self::attention_output`].
+    ///
+    /// Emitted before the residual addition as `<stack>.layers.<index>.attention.output`.
+    pub fn mixer_output(self) -> Point<3> {
+        self.attention_output()
+    }
+
     /// Address projected self-attention tensors in this layer.
     pub const fn self_attention(self) -> AttentionPoints {
         AttentionPoints {

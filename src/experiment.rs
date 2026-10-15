@@ -25,7 +25,9 @@ use crate::{
 };
 
 mod block;
+mod rotary;
 pub use block::{ResidualBlock, WidthAdapter};
+pub use rotary::RotaryAttention;
 
 /// Attention connectivity and additive bias for a stateless operation.
 ///
