@@ -42,6 +42,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
+mod plan;
+use plan::{
+    RuleMatch, RuleSelection, StagedKey, TargetTie, first_fanned_out_path, select_rule, target_tie,
+};
+
 /// Explicit handling of a selected source whose dimensions differ from its target.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShapeChangePolicy {
@@ -592,54 +597,54 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
     /// Resolves one target using keep-initialized, exact, then prefix/matching precedence.
     ///
     /// Multiple fallback matches are rejected, so rule order cannot silently choose
-    /// between overlapping module prefixes.
+    /// between overlapping module prefixes. The precedence itself is the
+    /// Verus-verified [`select_rule`]; this method classifies each rule by path.
     fn select(&self, target: &str, sources: &BTreeSet<String>) -> Result<Option<(usize, String)>> {
-        if self
+        let kept = self
             .keep
             .iter()
-            .any(|prefix| under(target, prefix).is_some())
-        {
-            return Ok(None);
-        }
-        let exact = self
-            .rules
-            .iter()
-            .enumerate()
-            .find_map(|(index, rule)| match rule {
-                Rule::Copy {
-                    source,
-                    target: name,
-                }
-                | Rule::Transform {
-                    source,
-                    target: name,
-                    ..
-                } if name == target => Some((index, source.clone())),
-                _ => None,
-            });
-        if exact.is_some() {
-            return Ok(exact);
-        }
+            .any(|prefix| under(target, prefix).is_some());
         let matches = self
             .rules
             .iter()
-            .enumerate()
-            .filter_map(|(index, rule)| match rule {
-                Rule::Prefix {
-                    source,
-                    target: prefix,
-                } => under(target, prefix).map(|suffix| (index, format!("{source}{suffix}"))),
-                Rule::Matching if sources.contains(target) => Some((index, target.to_owned())),
-                _ => None,
+            .map(|rule| match rule {
+                Rule::Copy { target: name, .. } | Rule::Transform { target: name, .. }
+                    if name == target =>
+                {
+                    RuleMatch::Exact
+                }
+                Rule::Prefix { target: prefix, .. } if under(target, prefix).is_some() => {
+                    RuleMatch::Fallback
+                }
+                Rule::Matching if sources.contains(target) => RuleMatch::Fallback,
+                _ => RuleMatch::Unrelated,
             })
             .collect::<Vec<_>>();
-        if matches.len() > 1 {
-            return Err(Error::configuration(
+        match select_rule(kept, &matches) {
+            RuleSelection::Unselected => Ok(None),
+            RuleSelection::Overlapping => Err(Error::configuration(
                 target,
                 "overlapping transfer prefix rules; use one prefix or an exact override",
-            ));
+            )),
+            RuleSelection::Rule(index) => Ok(self
+                .rule_source(index, target)
+                .map(|source| (index, source))),
         }
-        Ok(matches.into_iter().next())
+    }
+
+    /// The source path that rule `index` supplies for `target`.
+    ///
+    /// `None` only for a prefix rule that does not cover `target`, which
+    /// [`select_rule`] never selects.
+    fn rule_source(&self, index: usize, target: &str) -> Option<String> {
+        match &self.rules[index] {
+            Rule::Copy { source, .. } | Rule::Transform { source, .. } => Some(source.clone()),
+            Rule::Prefix {
+                source,
+                target: prefix,
+            } => under(target, prefix).map(|suffix| format!("{source}{suffix}")),
+            Rule::Matching => Some(target.to_owned()),
+        }
     }
 }
 
@@ -890,7 +895,8 @@ type StagedEntry<'a, B> = (&'a String, &'a mut Staged<B>);
 ///
 /// A target tie group with no selected member keeps its identity and is reported
 /// as preserved. Under [`TiePolicy::Untie`], partially or fully selected groups are
-/// reported as untied; otherwise every member must be selected consistently.
+/// reported as untied; otherwise every member must be selected consistently. The
+/// classification is the Verus-verified [`target_tie`].
 fn validate_target_ties<B: Backend>(
     targets: &BTreeMap<String, Parameter<B>>,
     staged: &BTreeMap<String, Staged<B>>,
@@ -914,27 +920,30 @@ fn validate_target_ties<B: Backend>(
             .iter()
             .map(|(name, _)| (*name).clone())
             .collect::<Vec<_>>();
-        let Some(first) = group.iter().find_map(|(_, selected)| *selected) else {
-            report.preserved_ties.push(names);
-            continue;
-        };
-        if policy == TiePolicy::Untie {
-            report.untied.push(names);
-            continue;
-        }
-        if group.iter().any(|(_, selected)| {
-            selected.is_none_or(|value| {
-                value.origin != first.origin
-                    || value.transform != first.transform
-                    || value.trainable != first.trainable
+        // `ParamId` equality is equality of its `val()`, so the verified
+        // classification sees exactly the identities compared here.
+        let members = group
+            .iter()
+            .map(|(_, selected)| {
+                selected.map(|value| StagedKey {
+                    origin: value.origin.val(),
+                    transform: value.transform,
+                    trainable: value.trainable,
+                })
             })
-        }) {
-            return Err(Error::configuration(
-                "transfer.ties",
-                format!(
-                    "target aliases {names:?} require the same source and transformation; select TiePolicy::Untie to separate them"
-                ),
-            ));
+            .collect::<Vec<_>>();
+        match target_tie(&members, policy == TiePolicy::Untie) {
+            TargetTie::Untouched => report.preserved_ties.push(names),
+            TargetTie::Untied => report.untied.push(names),
+            TargetTie::Consistent => {}
+            TargetTie::Inconsistent => {
+                return Err(Error::configuration(
+                    "transfer.ties",
+                    format!(
+                        "target aliases {names:?} require the same source and transformation; select TiePolicy::Untie to separate them"
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -973,24 +982,35 @@ fn share_target_tie_classes<B: Backend>(
 /// Preserving the source tie would join every target in the group, including
 /// copies the plan requested as separate parameters. Each source path must
 /// therefore reach exactly one target tie class (one target, or one existing
-/// target tie group).
+/// target tie group); the verified [`first_fanned_out_path`] checks that the
+/// path-to-class map is a function.
 fn reject_fanned_out_source_tie<B: Backend>(
     targets: &BTreeMap<String, Parameter<B>>,
     group: &[StagedEntry<'_, B>],
     names: &[String],
 ) -> Result<()> {
-    let mut classes_per_path = BTreeMap::<&str, BTreeSet<ParamId>>::new();
-    for (name, value) in group {
-        classes_per_path
-            .entry(value.source.as_str())
-            .or_default()
-            .insert(targets[*name].id);
-    }
-    match classes_per_path
+    // Dense indices into the sorted distinct paths make the verified core
+    // report the lexicographically first fanned-out path.
+    let distinct = group
+        .iter()
+        .map(|(_, value)| value.source.as_str())
+        .collect::<BTreeSet<_>>()
         .into_iter()
-        .find(|(_, classes)| classes.len() > 1)
-    {
-        Some((path, _)) => Err(Error::configuration(
+        .collect::<Vec<_>>();
+    let paths = group
+        .iter()
+        .map(|(_, value)| {
+            distinct
+                .binary_search(&value.source.as_str())
+                .unwrap_or_else(|insertion| insertion)
+        })
+        .collect::<Vec<_>>();
+    let classes = group
+        .iter()
+        .map(|(name, _)| targets[*name].id.val())
+        .collect::<Vec<_>>();
+    match first_fanned_out_path(&paths, &classes, distinct.len()).map(|path| distinct[path]) {
+        Some(path) => Err(Error::configuration(
             "transfer.ties",
             format!(
                 "source `{path}` is copied to several independent targets but also shares its parameter identity with another source path; preserving that tie would join the copies in {names:?}. Select TiePolicy::Untie, or copy from one source alias only"
