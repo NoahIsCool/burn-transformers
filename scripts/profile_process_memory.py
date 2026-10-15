@@ -51,9 +51,17 @@ import tempfile
 import time
 
 
+# Reviewed SDK header identities. A header is accepted only when its exact bytes
+# match one of these digests; the V4 structure is then re-parsed below.
+# resource.h 1067178025... is the macOS 27.0 SDK revision: its rusage_info_v4
+# declaration (field order, RUSAGE_INFO_V4 = 4) was compared with the earlier
+# reviewed header on 2026-10-15 and is unchanged.
 HEADER_HASHES = {
-    "usr/include/sys/resource.h": "7d16930e6b75f11ba203238faa5580d31d48fcd4230f2b3f604aaa5fd7e86b58",
-    "usr/include/libproc.h": "246d87709fc6b9157ce5cf3c475656ac48e0e1ae8bbdc46cf45acd34294448cd",
+    "usr/include/sys/resource.h": (
+        "7d16930e6b75f11ba203238faa5580d31d48fcd4230f2b3f604aaa5fd7e86b58",
+        "1067178025c5fd88c9a1b8206a07c2695ef94dd471fe2783f06c512995382961",
+    ),
+    "usr/include/libproc.h": ("246d87709fc6b9157ce5cf3c475656ac48e0e1ae8bbdc46cf45acd34294448cd",),
 }
 # All 35 uint64 fields after the 16-byte executable UUID, in SDK declaration order.
 U64_FIELDS = (
@@ -96,7 +104,7 @@ def verify_sdk_headers(sdk: Path) -> dict:
         path = sdk / relative
         data = path.read_bytes()
         observed = hashlib.sha256(data).hexdigest()
-        if observed != expected:
+        if observed not in expected:
             raise ValueError(f"unreviewed SDK header: {path} SHA-256 {observed}")
         sources[relative] = {"sha256": observed, "bytes": len(data)}
     text = (sdk / "usr/include/sys/resource.h").read_text()
