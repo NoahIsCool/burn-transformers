@@ -718,8 +718,10 @@ fn every_registered_family_reaches_its_strict_loader() {
             &Default::default(),
         )
         .unwrap_err();
+        // Detection succeeded, so the error is the family parser's own JSON diagnostic.
         assert!(
-            matches!(&error, Error::Configuration { field, .. } if field == "auto_causal.config"),
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "config" && reason.starts_with("invalid model config JSON: ")),
             "{family:?}: {error}"
         );
     }
@@ -1120,13 +1122,13 @@ fn automatic_loads_preserve_family_config_error_context() {
         )
         .unwrap_err();
         assert!(matches!(error, Error::Configuration { field, reason }
-            if field == "auto_causal.config" && reason == format!("{family}.vocab_size: must be nonzero")));
+            if field == format!("{family}.vocab_size") && reason == "must be nonzero"));
     }
     write_auto_metadata(root.path(), &json!({"model_type": "t5", "vocab_size": 0}));
     assert!(
         matches!(AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
         &Default::default()).unwrap_err(), Error::Configuration { field, reason }
-        if field == "auto_seq2seq.config" && reason == "t5.vocab_size: must be nonzero")
+        if field == "t5.vocab_size" && reason == "must be nonzero")
     );
 }
 

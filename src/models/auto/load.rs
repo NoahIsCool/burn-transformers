@@ -48,10 +48,9 @@ use crate::{
 use super::{
     AutoCausalConfig, AutoCausalLm, AutoSeq2SeqLm, detect_model_type,
     family::{CausalFamily, PlannedCheckpoint},
-    parse_family_config,
 };
 use crate::models::{
-    config::TokenIds,
+    config::{ModelConfig, TokenIds},
     t5::{T5Config, T5ForConditionalGeneration},
 };
 use burn::tensor::backend::Backend;
@@ -158,7 +157,7 @@ where
     F: CausalFamily<B> + Into<AutoCausalLm<B>>,
     <F as TensorSink>::Error: core::fmt::Display,
 {
-    let config = parse_family_config::<F::Config>(json, "auto_causal.config")?;
+    let config = F::Config::from_json_str(json)?;
     let tokens = F::token_metadata(&config);
     let vocabulary_size = tokens.vocabulary_size;
     let generation = resolve_generation_defaults(
@@ -277,7 +276,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
             )));
         }
 
-        let config = parse_family_config::<T5Config>(&json, "auto_seq2seq.config")?;
+        let config = T5Config::from_json_str(&json)?;
         let vocabulary_size = config.vocab_size;
         let generation = resolve_generation_defaults(
             &root,

@@ -313,7 +313,7 @@ macro_rules! causal_registry {
                 match detect_model_type(json)?.as_str() {
                     $(
                         $model_type $($(| $alias)+)? => {
-                            let config = parse_family_config::<$config>(json, "auto_causal.config")?;
+                            let config = <$config as ModelConfig>::from_json_str(json)?;
                             $model::init(config, device).map(Self::$variant)
                         }
                     )+
@@ -604,11 +604,6 @@ causal_registry! {
     },
 }
 
-/// Parses one family's configuration, keeping the registry's error context.
-fn parse_family_config<C: ModelConfig>(json: &str, context: &str) -> Result<C> {
-    C::from_json_str(json).map_err(|error| Error::configuration(context, error.to_string()))
-}
-
 /// Reports a causal `model_type` with no executable registry entry.
 fn unsupported_causal_model_type(model_type: &str) -> Error {
     Error::UnsupportedArchitecture(format!(
@@ -858,7 +853,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
     pub fn from_config_json(json: &str, device: &B::Device) -> Result<Self> {
         match detect_model_type(json)?.as_str() {
             "t5" => {
-                let config = parse_family_config::<T5Config>(json, "auto_seq2seq.config")?;
+                let config = T5Config::from_json_str(json)?;
                 T5ForConditionalGeneration::init(config, device).map(Self::T5)
             }
             model_type => Err(Error::UnsupportedArchitecture(format!(
