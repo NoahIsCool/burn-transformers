@@ -123,19 +123,16 @@ impl AttentionExecutionPolicy {
     }
 
     /// Returns the configured maximum query rows before score-bound reduction.
+    ///
+    /// This is `min(max_query_tokens, query_sequence)` (verified with Verus);
+    /// every planned chunk holds at most this many rows.
     #[must_use]
     pub const fn maximum_query_tokens(self, query_sequence: usize) -> usize {
         match self {
             Self::Unbounded => query_sequence,
             Self::QueryChunked {
                 max_query_tokens, ..
-            } => {
-                if max_query_tokens < query_sequence {
-                    max_query_tokens
-                } else {
-                    query_sequence
-                }
-            }
+            } => plan::capped_query_rows(max_query_tokens, query_sequence),
         }
     }
 

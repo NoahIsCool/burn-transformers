@@ -158,6 +158,30 @@ fn sliding_window_ranges_reject_invalid_requests() {
     }
 }
 
+/// The row cap is the smaller of the row limit and the query length.
+#[test]
+fn capped_query_rows_take_the_smaller_extent() {
+    assert_eq!(capped_query_rows(4, 10), 4);
+    assert_eq!(capped_query_rows(10, 4), 4);
+    assert_eq!(capped_query_rows(7, 7), 7);
+    assert_eq!(capped_query_rows(0, 3), 0);
+    assert_eq!(capped_query_rows(usize::MAX, 3), 3);
+}
+
+/// Window key bounds are `min(cap + window - 1, K)`, saturating instead of wrapping.
+#[test]
+fn windowed_key_bounds_cover_chunk_windows_without_overflow() {
+    assert_eq!(windowed_key_bound(4, 3, 100), 6);
+    assert_eq!(windowed_key_bound(4, 3, 5), 5);
+    assert_eq!(windowed_key_bound(4, 1, 100), 4);
+    assert_eq!(windowed_key_bound(0, 1, 9), 0);
+    assert_eq!(windowed_key_bound(usize::MAX, 2, 17), 17);
+    assert_eq!(
+        windowed_key_bound(usize::MAX - 1, usize::MAX, usize::MAX),
+        usize::MAX
+    );
+}
+
 /// Checks a chunk frame against absolute chunk indices for every local position.
 fn assert_frame_preserves_chunks(chunk: usize, key_start: usize, span: usize) {
     let frame = chunk_frame(chunk, key_start, span);
@@ -225,6 +249,40 @@ proptest::proptest! {
         span in 1usize..=64,
     ) {
         assert_frame_preserves_chunks(chunk, key_start, span);
+    }
+
+    /// Every chunk of a window-bounded plan fits the key bound and re-plans as one call.
+    #[test]
+    fn window_bounded_chunks_replan_as_one_call(
+        batch in 1usize..=3,
+        heads in 1usize..=3,
+        query_sequence in 1usize..=24,
+        extra_keys in 0usize..=8,
+        window in 1usize..=10,
+        max_query_tokens in 1usize..=12,
+        max_score_elements in 1usize..=600,
+        bounded in proptest::bool::ANY,
+    ) {
+        let key_sequence = query_sequence + extra_keys;
+        let limits = bounded.then_some(ChunkLimits { max_query_tokens, max_score_elements });
+        let cap = limits.map_or(query_sequence, |limits| {
+            capped_query_rows(limits.max_query_tokens, query_sequence)
+        });
+        let key_bound = windowed_key_bound(cap, window, key_sequence);
+        proptest::prop_assert_eq!(key_bound, (cap + window - 1).min(key_sequence));
+        let Ok(plan) = plan_query_chunks(batch, heads, query_sequence, key_bound, limits) else {
+            return Ok(());
+        };
+        for (start, end) in ranges(plan, query_sequence) {
+            let (key_start, key_end) =
+                sliding_window_key_range(query_sequence, key_sequence, start, end, window)
+                    .expect("planned rows have a key range");
+            proptest::prop_assert!(key_end - key_start <= key_bound);
+            let replan = plan_query_chunks(batch, heads, end - start, key_end - key_start, limits)
+                .expect("a planned chunk re-plans");
+            proptest::prop_assert_eq!(replan.chunk_count, 1);
+            proptest::prop_assert_eq!(replan.query_chunk_size, end - start);
+        }
     }
 
     /// Successful plans partition the queries, respect both limits, and report the exact peak.

@@ -619,11 +619,15 @@ impl<B: Backend> GroupedQueryAttention<B> {
             }
             _ => None,
         };
+        // `ExclusionPlan::new` validated the window as non-zero. The verified
+        // bound covers every chunk's key slice, so `validate_chunk` below
+        // accepts each planned chunk (`plan::lemma_planned_chunk_fits_one_call`).
         let key_bound = window.map_or(key_sequence, |window| {
-            policy
-                .maximum_query_tokens(query_sequence)
-                .saturating_add(window - 1)
-                .min(key_sequence)
+            plan::windowed_key_bound(
+                policy.maximum_query_tokens(query_sequence),
+                window,
+                key_sequence,
+            )
         });
         let plan = policy.plan(batch, self.query_heads, query_sequence, key_bound)?;
         let chunked = plan.chunk_count() > 1;
