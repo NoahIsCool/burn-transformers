@@ -35,6 +35,10 @@ pub const BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT: u32 =
 /// [`BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT`] when it needs the newest
 /// architecture-aware format. Keeping this historical name equal to one avoids
 /// silently changing the meaning of existing downstream version checks.
+#[deprecated(
+    since = "0.1.0",
+    note = "ambiguous: equals v1 while writers emit v2; use BURNPACK_QUANTIZATION_FORMAT_VERSION_V1 or BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT"
+)]
 pub const BURNPACK_QUANTIZATION_FORMAT_VERSION: u32 = BURNPACK_QUANTIZATION_FORMAT_VERSION_V1;
 
 /// Byte order used by explicitly byte-encoded scalar fields.
@@ -234,6 +238,21 @@ impl QuantizedTensorMetadata {
         })
     }
 
+    /// Stable report label of the installed runtime form, Burn block-QFloat.
+    ///
+    /// Loading records `burn-qfloat-symmetric-{q8|q4}-g{G}-block-1xg`: one scale
+    /// per `[1, G]` block of an `[output, input]` matrix. Conversion records the
+    /// storage form of the same payload with
+    /// [`WeightQuantizationConfig::storage_label`].
+    #[must_use]
+    pub fn runtime_label(&self) -> String {
+        format!(
+            "burn-qfloat-symmetric-{}-g{}-block-1xg",
+            self.scheme.label(),
+            self.group_size.get()
+        )
+    }
+
     /// Validates all redundant counts and fixed layout discriminants.
     pub fn validate(&self) -> Result<()> {
         let expected_elements = checked_num_elements_u64(&self.shape)?;
@@ -418,6 +437,10 @@ impl BurnpackQuantizationManifest {
     /// Architecture-aware writers should use [`QuantizedBurnpackSession`](super::QuantizedBurnpackSession),
     /// whose checkpoint conversion path binds provenance and publishes v2.
     #[must_use]
+    #[deprecated(
+        since = "0.1.0",
+        note = "implicitly creates the legacy v1 form; call new_legacy_v1, or stage through QuantizedBurnpackSession for v2"
+    )]
     pub fn new() -> Self {
         Self::new_legacy_v1()
     }
@@ -554,11 +577,7 @@ fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
 
 /// Computes the logical element product, allowing reference scalars and empty axes.
 fn checked_num_elements_u64(shape: &[u64]) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |elements, &dimension| {
-        elements
-            .checked_mul(dimension)
-            .ok_or(QuantizationError::ShapeElementOverflow)
-    })
+    crate::checkpoint::layout::element_count(shape).ok_or(QuantizationError::ShapeElementOverflow)
 }
 
 /// Divides by a nonzero validated group/packing width without addition overflow.

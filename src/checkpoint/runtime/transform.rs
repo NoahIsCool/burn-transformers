@@ -10,13 +10,25 @@
 //! SafeTensors scalars are little-endian. Burn [`TensorData`] bytes use native
 //! scalar representation, so direct copies are byte-swapped on big-endian hosts.
 //! Floating-point casts decode the exact source scalar, round once to the target
-//! format, and write native-endian bits. Integer reinterpretation is forbidden.
+//! format with ties to even, and write native-endian bits. Integer
+//! reinterpretation is forbidden. The dtype pair is resolved once per tensor and
+//! the element loop runs in a monomorphic bulk kernel (see the `convert`
+//! module); outputs produced in order (identity casts and slices) are never
+//! zero-filled, while transposes and concatenations write into one zeroed
+//! allocation because their writes are not sequential.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use burn::tensor::{BoolStore, DType, TensorData, bf16, f16};
+use burn::tensor::{BoolStore, DType, TensorData};
 
-use super::{ExecutionStats, TensorSource};
+use super::{
+    ExecutionStats, TensorSource,
+    convert::{
+        ConvertInPlace, GatherIntervals, ScatterIntervals, TransposeInto, validate_cast,
+        with_scalar_conversion,
+    },
+};
+use crate::checkpoint::layout::{element_count, slice_block};
 use crate::checkpoint::{
     CheckpointEquivalenceRecord, CheckpointError, LoadPlan, PlannedSource, PlannedTensor,
     PlannedTensorEquivalence, PlannedTransform, Result, SourceTensor, TensorDType,
@@ -106,7 +118,7 @@ fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
     let _ = byte_len(&tensor.shape, tensor.dtype, &tensor.target)?;
     for source in &tensor.sources {
         validate_source_descriptor(source)?;
-        validate_conversion(source.dtype, tensor.dtype)?;
+        validate_cast(source.dtype, tensor.dtype)?;
     }
 
     match &tensor.transform {
@@ -333,25 +345,11 @@ fn validate_concatenation(tensor: &PlannedTensor, axis: usize) -> Result<()> {
 }
 
 /// Ensures loader staging for one operation fits the pass-one conservative bound.
+///
+/// The requirement is [`PlannedTensor::staging_bytes`], the same formula the
+/// planner exposes through [`LoadPlan::required_host_staging_bytes`].
 fn validate_memory_bound(tensor: &PlannedTensor, planned: u64) -> Result<()> {
-    let output = byte_len(&tensor.shape, tensor.dtype, &tensor.target)?;
-    let largest_source = tensor.sources.iter().try_fold(0_u64, |largest, source| {
-        byte_len(&source.shape, source.dtype, &source.name).map(|bytes| largest.max(bytes))
-    })?;
-    let required = if matches!(tensor.transform, PlannedTransform::Identity)
-        && tensor
-            .sources
-            .first()
-            .is_some_and(|source| identity_reuses_source_buffer(source.dtype, tensor.dtype))
-    {
-        largest_source
-    } else {
-        largest_source
-            .checked_add(output)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing runtime staging bound",
-            })?
-    };
+    let required = tensor.staging_bytes()?;
     if required > planned {
         return Err(CheckpointError::MemoryEstimateExceeded {
             tensor: tensor.target.clone(),
@@ -363,6 +361,10 @@ fn validate_memory_bound(tensor: &PlannedTensor, planned: u64) -> Result<()> {
 }
 
 /// Directly transfers a tensor, optionally casting its floating-point dtype.
+///
+/// Equal-width transfers (equal dtypes and BF16 <-> F16) convert the source
+/// allocation in place. Other casts gather the whole payload through one bulk
+/// kernel into a reserved, never zero-filled output.
 fn materialize_identity<S: TensorSource>(
     tensor: &PlannedTensor,
     source: &mut S,
@@ -371,52 +373,48 @@ fn materialize_identity<S: TensorSource>(
     let planned = exactly_one_source(tensor)?;
     let payload = read_verified(source, planned, stats)?;
     let (_, shape, source_dtype, mut bytes) = payload.into_parts();
-    if source_dtype == tensor.dtype {
-        normalize_little_endian(&mut bytes, source_dtype)?;
+    // Equal dtypes and BF16 <-> F16 keep the scalar width, including the
+    // BF16 -> F16 conversion that dominates F16 Metal model loading.
+    if source_dtype.converts_in_place_to(tensor.dtype) {
         observe_peak(stats, bytes.len(), 0, &tensor.target)?;
+        convert_in_place(&tensor.target, &mut bytes, source_dtype, tensor.dtype)?;
         return make_tensor_data(&tensor.target, tensor.dtype, &shape, bytes);
     }
 
-    // Burn 0.21 converts equal-width TensorData storage in place. A BF16 value
-    // is exactly representable as F32, so Burn's BF16 -> F32 -> F16 conversion
-    // performs the same single F16 rounding as the scalar reference path. This
-    // avoids allocating and zeroing a second multi-gigabyte buffer for the
-    // checkpoint conversion that dominates F16 Metal model loading.
-    if identity_reuses_source_buffer(source_dtype, tensor.dtype) {
-        normalize_little_endian(&mut bytes, source_dtype)?;
-        observe_peak(stats, bytes.len(), 0, &tensor.target)?;
-        let data = make_tensor_data(&tensor.target, source_dtype, &shape, bytes)?;
-        return Ok(data.convert_dtype(burn_dtype(tensor.dtype)?));
-    }
-
-    let mut output = allocate_tensor_bytes(&tensor.target, &tensor.shape, tensor.dtype)?;
-    observe_peak(stats, bytes.len(), output.len(), &tensor.target)?;
-    let elements = checked_elements(&shape, &tensor.target)?;
-    copy_elements(
-        &tensor.target,
-        &bytes,
+    let output_bytes = host_len(byte_len(&tensor.shape, tensor.dtype, &tensor.target)?)?;
+    observe_peak(stats, bytes.len(), output_bytes, &tensor.target)?;
+    let elements = host_len(checked_elements(&shape, &tensor.target)?)?;
+    let output = with_scalar_conversion(
         source_dtype,
-        0,
-        &mut output,
         tensor.dtype,
-        0,
-        elements,
-    )?;
+        GatherIntervals {
+            tensor: &tensor.target,
+            source: &bytes,
+            intervals: core::iter::once(0..elements),
+            elements,
+        },
+    )??;
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
 }
 
-/// Returns whether one identity operation can reuse its source allocation.
-///
-/// Equal dtypes are already a byte-preserving transfer. Burn 0.21 additionally
-/// guarantees an in-place `TensorData` conversion when source and target scalar
-/// widths match. The optimized cast is intentionally restricted to BF16 -> F16,
-/// the production Metal checkpoint path whose rounding semantics are covered
-/// exhaustively; every other dtype pair retains the generic reference transform.
-fn identity_reuses_source_buffer(source: TensorDType, target: TensorDType) -> bool {
-    source == target || matches!((source, target), (TensorDType::BF16, TensorDType::F16))
+/// Converts equal-width scalars in place; a no-op for equal dtypes on little-endian hosts.
+fn convert_in_place(
+    tensor: &str,
+    bytes: &mut [u8],
+    source: TensorDType,
+    target: TensorDType,
+) -> Result<()> {
+    if source == target && cfg!(target_endian = "little") {
+        // SafeTensors and this host share byte order: already native storage.
+        return Ok(());
+    }
+    with_scalar_conversion(source, target, ConvertInPlace { tensor, bytes })?
 }
 
 /// Transposes a row-major matrix while casting directly into its final buffer.
+///
+/// Every dtype pair, including equal dtypes, uses the same cache-tiled kernel;
+/// the conversion is chosen once for the whole matrix.
 fn materialize_transpose<S: TensorSource>(
     tensor: &PlannedTensor,
     source: &mut S,
@@ -425,165 +423,28 @@ fn materialize_transpose<S: TensorSource>(
     let planned = exactly_one_source(tensor)?;
     let payload = read_verified(source, planned, stats)?;
     let (_, shape, source_dtype, bytes) = payload.into_parts();
-    let rows = shape[0];
-    let columns = shape[1];
+    let [rows, columns] = shape.as_slice() else {
+        return invalid_plan(format!(
+            "transpose target `{}` requires a rank-two source",
+            tensor.target
+        ));
+    };
+    let rows = host_dimension(*rows, &tensor.target, "transpose row count")?;
+    let columns = host_dimension(*columns, &tensor.target, "transpose column count")?;
     let mut output = allocate_tensor_bytes(&tensor.target, &tensor.shape, tensor.dtype)?;
     observe_peak(stats, bytes.len(), output.len(), &tensor.target)?;
-
-    // SafeTensors and this host use the same scalar byte order, so an equal-dtype
-    // transpose is a pure permutation of fixed-width byte strings. The tiled path
-    // validates the complete layout once, then keeps a small source tile and the
-    // corresponding target row segments hot in cache. Casts retain the scalar
-    // reference loop below because they must round each value exactly once.
-    #[cfg(target_endian = "little")]
-    if source_dtype == tensor.dtype {
-        transpose_little_endian_bytes(
-            &tensor.target,
-            &bytes,
-            &mut output,
+    with_scalar_conversion(
+        source_dtype,
+        tensor.dtype,
+        TransposeInto {
+            tensor: &tensor.target,
+            source: &bytes,
+            target: &mut output,
             rows,
             columns,
-            source_dtype,
-        )?;
-        return make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output);
-    }
-
-    for row in 0..rows {
-        for column in 0..columns {
-            let source_index = row
-                .checked_mul(columns)
-                .and_then(|base| base.checked_add(column))
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing transpose source index",
-                })?;
-            let target_index = column
-                .checked_mul(rows)
-                .and_then(|base| base.checked_add(row))
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing transpose target index",
-                })?;
-            copy_elements(
-                &tensor.target,
-                &bytes,
-                source_dtype,
-                source_index,
-                &mut output,
-                tensor.dtype,
-                target_index,
-                1,
-            )?;
-        }
-    }
-    if source_dtype == tensor.dtype {
-        normalize_little_endian(&mut output, tensor.dtype)?;
-    }
+        },
+    )??;
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
-}
-
-/// Transposes equal-dtype little-endian scalars as opaque, fixed-width bytes.
-///
-/// A scalar at source coordinate `(r, c)` occupies byte interval
-/// `((r * columns + c) * width)..`; its destination begins at
-/// `((c * rows + r) * width)`. Blocking both axes bounds the active source and
-/// destination cache footprint without allocating a scratch tile. Selecting a
-/// constant-width worker also lets optimized builds reduce each scalar copy to
-/// one fixed-size load and store while preserving every floating-point bit
-/// pattern, including NaN payloads and signed zero.
-#[cfg(target_endian = "little")]
-fn transpose_little_endian_bytes(
-    tensor: &str,
-    source: &[u8],
-    target: &mut [u8],
-    rows: u64,
-    columns: u64,
-    dtype: TensorDType,
-) -> Result<()> {
-    let width =
-        usize::try_from(scalar_bytes(dtype)?).map_err(|_| CheckpointError::ArithmeticOverflow {
-            context: "converting transpose scalar width to usize",
-        })?;
-    let rows = usize::try_from(rows).map_err(|_| CheckpointError::InvalidTensorPayload {
-        tensor: tensor.to_owned(),
-        reason: "transpose row count does not fit in usize".into(),
-    })?;
-    let columns = usize::try_from(columns).map_err(|_| CheckpointError::InvalidTensorPayload {
-        tensor: tensor.to_owned(),
-        reason: "transpose column count does not fit in usize".into(),
-    })?;
-    let expected = rows
-        .checked_mul(columns)
-        .and_then(|elements| elements.checked_mul(width))
-        .ok_or(CheckpointError::ArithmeticOverflow {
-            context: "computing tiled transpose byte length",
-        })?;
-    if source.len() != expected || target.len() != expected {
-        return Err(payload_bounds(tensor));
-    }
-    if expected == 0 {
-        return Ok(());
-    }
-
-    match width {
-        1 => transpose_scalar_bytes::<1>(source, target, rows, columns),
-        2 => transpose_scalar_bytes::<2>(source, target, rows, columns),
-        4 => transpose_scalar_bytes::<4>(source, target, rows, columns),
-        8 => transpose_scalar_bytes::<8>(source, target, rows, columns),
-        _ => {
-            return Err(CheckpointError::InvalidTensorPayload {
-                tensor: tensor.to_owned(),
-                reason: format!("runtime scalar width {width} cannot be transposed"),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Applies one cache-tiled transpose for a compile-time scalar byte width.
-///
-/// The function is infallible after [`transpose_little_endian_bytes`] proves that
-/// both buffers contain exactly `rows * columns` complete scalars. It uses only
-/// disjoint mutable slices and adds no staging allocation, so the executor's
-/// source-plus-output peak-memory bound remains exact.
-#[cfg(target_endian = "little")]
-fn transpose_scalar_bytes<const WIDTH: usize>(
-    source: &[u8],
-    target: &mut [u8],
-    rows: usize,
-    columns: usize,
-) {
-    /// Maximum row/column tile edge in scalar elements, independent of byte width.
-    const TILE_EDGE: usize = 32;
-
-    let source_row_bytes = columns * WIDTH;
-    let target_row_bytes = rows * WIDTH;
-    let columns_per_tile = columns.min(TILE_EDGE);
-    let target_tile_bytes = target_row_bytes * columns_per_tile;
-
-    for (column_block, target_block) in target.chunks_mut(target_tile_bytes).enumerate() {
-        let column_start = column_block * columns_per_tile;
-        for row_start in (0..rows).step_by(TILE_EDGE) {
-            let row_end = row_start.saturating_add(TILE_EDGE).min(rows);
-            let source_start = row_start * source_row_bytes;
-            let source_end = row_end * source_row_bytes;
-            let source_rows = &source[source_start..source_end];
-            let target_start = row_start * WIDTH;
-            let target_end = row_end * WIDTH;
-
-            for (local_column, target_row) in
-                target_block.chunks_exact_mut(target_row_bytes).enumerate()
-            {
-                let source_column = (column_start + local_column) * WIDTH;
-                let target_scalars = &mut target_row[target_start..target_end];
-                for (source_row, target_scalar) in source_rows
-                    .chunks_exact(source_row_bytes)
-                    .zip(target_scalars.chunks_exact_mut(WIDTH))
-                {
-                    target_scalar
-                        .copy_from_slice(&source_row[source_column..source_column + WIDTH]);
-                }
-            }
-        }
-    }
 }
 
 /// Extracts a consecutive section along an arbitrary row-major axis.
@@ -623,6 +484,10 @@ pub(super) fn materialize_shared_slice(
 }
 
 /// Copies an arbitrary-axis slice from one already verified source payload.
+///
+/// The source is viewed as `[outer, axis, inner]`; outer row `o` contributes one
+/// contiguous block (see [`slice_block`]). Blocks arrive in output order, so the
+/// gather appends them to a reserved buffer without zero-filling it first.
 fn materialize_slice_payload(
     tensor: &PlannedTensor,
     axis: usize,
@@ -632,50 +497,42 @@ fn materialize_slice_payload(
     stats: &mut ExecutionStats,
 ) -> Result<TensorData> {
     let shape = payload.shape();
-    let source_dtype = payload.dtype();
-    let bytes = payload.bytes();
-    let outer = checked_elements(&shape[..axis], &tensor.target)?;
-    let inner = checked_elements(&shape[axis + 1..], &tensor.target)?;
-    let source_axis = shape[axis];
-    let block_elements = length
-        .checked_mul(inner)
-        .ok_or(CheckpointError::ArithmeticOverflow {
-            context: "computing slice block length",
-        })?;
-    let mut output = allocate_tensor_bytes(&tensor.target, &tensor.shape, tensor.dtype)?;
-    observe_peak(stats, bytes.len(), output.len(), &tensor.target)?;
-    for outer_index in 0..outer {
-        let source_element = outer_index
-            .checked_mul(source_axis)
-            .and_then(|base| base.checked_add(start))
-            .and_then(|base| base.checked_mul(inner))
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing slice source offset",
-            })?;
-        let target_element =
-            outer_index
-                .checked_mul(block_elements)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing slice target offset",
-                })?;
-        copy_elements(
-            &tensor.target,
-            bytes,
-            source_dtype,
-            source_element,
-            &mut output,
-            tensor.dtype,
-            target_element,
-            block_elements,
-        )?;
+    let axis_view = AxisView::new(shape, axis, &tensor.target)?;
+    let start = host_dimension(start, &tensor.target, "slice start")?;
+    let length = host_dimension(length, &tensor.target, "slice length")?;
+    if start
+        .checked_add(length)
+        .is_none_or(|end| end > axis_view.axis)
+    {
+        return invalid_plan(format!(
+            "slice target `{}` exceeds source axis {axis} of length {}",
+            tensor.target, axis_view.axis
+        ));
     }
-    if source_dtype == tensor.dtype {
-        normalize_little_endian(&mut output, tensor.dtype)?;
-    }
+    let elements = axis_view.elements_with_axis(length, &tensor.target)?;
+    let output_bytes = host_len(byte_len(&tensor.shape, tensor.dtype, &tensor.target)?)?;
+    observe_peak(stats, payload.byte_len(), output_bytes, &tensor.target)?;
+    let AxisView { outer, axis, inner } = axis_view;
+    let output = with_scalar_conversion(
+        payload.dtype(),
+        tensor.dtype,
+        GatherIntervals {
+            tensor: &tensor.target,
+            source: payload.bytes(),
+            intervals: (0..outer)
+                .map(|row| slice_block(row, outer, axis, inner, start, length).source),
+            elements,
+        },
+    )??;
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
 }
 
 /// Concatenates sources directly into one final row-major target allocation.
+///
+/// Sources are read one at a time, so the output is preallocated and each
+/// source's outer rows are scattered to their strided target blocks: a source
+/// with `a` rows along the axis, placed at offset `p` in a target of `T` rows,
+/// writes outer row `o` to elements `[(o * T + p) * inner, (o * T + p + a) * inner)`.
 fn materialize_concatenate<S: TensorSource>(
     tensor: &PlannedTensor,
     axis: usize,
@@ -684,58 +541,85 @@ fn materialize_concatenate<S: TensorSource>(
 ) -> Result<TensorData> {
     let mut output = allocate_tensor_bytes(&tensor.target, &tensor.shape, tensor.dtype)?;
     let output_len = output.len();
-    let outer = checked_elements(&tensor.shape[..axis], &tensor.target)?;
-    let inner = checked_elements(&tensor.shape[axis + 1..], &tensor.target)?;
-    let target_axis = tensor.shape[axis];
-    let source_dtype = tensor.sources[0].dtype;
-    let mut axis_offset = 0_u64;
+    let target_view = AxisView::new(&tensor.shape, axis, &tensor.target)?;
+    let mut axis_offset = 0_usize;
 
     for planned in &tensor.sources {
         let payload = read_verified(source, planned, stats)?;
-        let (_, shape, payload_dtype, bytes) = payload.into_parts();
-        observe_peak(stats, bytes.len(), output_len, &tensor.target)?;
-        let source_axis = shape[axis];
-        let block_elements =
-            source_axis
-                .checked_mul(inner)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing concatenation block length",
-                })?;
-        for outer_index in 0..outer {
-            let source_element = outer_index.checked_mul(block_elements).ok_or(
-                CheckpointError::ArithmeticOverflow {
-                    context: "computing concatenation source offset",
-                },
-            )?;
-            let target_element = outer_index
-                .checked_mul(target_axis)
-                .and_then(|base| base.checked_add(axis_offset))
-                .and_then(|base| base.checked_mul(inner))
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing concatenation target offset",
-                })?;
-            copy_elements(
-                &tensor.target,
-                &bytes,
-                payload_dtype,
-                source_element,
-                &mut output,
-                tensor.dtype,
-                target_element,
-                block_elements,
-            )?;
+        observe_peak(stats, payload.byte_len(), output_len, &tensor.target)?;
+        let source_axis = AxisView::new(payload.shape(), axis, &tensor.target)?.axis;
+        if axis_offset
+            .checked_add(source_axis)
+            .is_none_or(|end| end > target_view.axis)
+        {
+            return invalid_plan(format!(
+                "concatenation sources exceed target `{}` axis {axis}",
+                tensor.target
+            ));
         }
-        axis_offset =
-            axis_offset
-                .checked_add(source_axis)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "advancing concatenation axis offset",
-                })?;
-    }
-    if source_dtype == tensor.dtype {
-        normalize_little_endian(&mut output, tensor.dtype)?;
+        let AxisView { outer, axis, inner } = target_view;
+        // `slice_block` with exchanged roles: its `source` interval is this
+        // input's destination and its `target` interval is the input itself.
+        let blocks = (0..outer).map(|row| {
+            let block = slice_block(row, outer, axis, inner, axis_offset, source_axis);
+            (block.target, block.source)
+        });
+        with_scalar_conversion(
+            payload.dtype(),
+            tensor.dtype,
+            ScatterIntervals {
+                tensor: &tensor.target,
+                source: payload.bytes(),
+                target: &mut output,
+                blocks,
+            },
+        )??;
+        axis_offset += source_axis;
     }
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
+}
+
+/// A row-major shape viewed as `[outer, axis, inner]` around one axis.
+#[derive(Debug, Clone, Copy)]
+struct AxisView {
+    /// Product of the dimensions before the axis.
+    outer: usize,
+    /// Length of the axis itself.
+    axis: usize,
+    /// Product of the dimensions after the axis.
+    inner: usize,
+}
+
+impl AxisView {
+    /// Splits `shape` around `axis`, requiring `outer * axis * inner` to be host-addressable.
+    ///
+    /// These are exactly the preconditions of [`slice_block`]: every block
+    /// offset is then bounded by the element count and cannot overflow.
+    fn new(shape: &[u64], axis: usize, tensor: &str) -> Result<Self> {
+        let Some(&axis_len) = shape.get(axis) else {
+            return invalid_plan(format!(
+                "axis {axis} is out of bounds for `{tensor}` shape {shape:?}"
+            ));
+        };
+        let view = Self {
+            outer: host_len(checked_elements(&shape[..axis], tensor)?)?,
+            axis: host_dimension(axis_len, tensor, "axis length")?,
+            inner: host_len(checked_elements(&shape[axis + 1..], tensor)?)?,
+        };
+        let _ = view.elements_with_axis(view.axis, tensor)?;
+        Ok(view)
+    }
+
+    /// Returns `outer * axis_len * inner`, checking `outer * axis_len` separately.
+    fn elements_with_axis(self, axis_len: usize, tensor: &str) -> Result<usize> {
+        self.outer
+            .checked_mul(axis_len)
+            .and_then(|rows| rows.checked_mul(self.inner))
+            .ok_or_else(|| CheckpointError::InvalidTensorPayload {
+                tensor: tensor.to_owned(),
+                reason: "axis view element count does not fit in usize".into(),
+            })
+    }
 }
 
 /// Reads one payload and checks the source implementation's response.
@@ -790,140 +674,6 @@ fn validate_payload_descriptor(planned: &PlannedSource, payload: &SourceTensor) 
     Ok(())
 }
 
-/// Copies or numerically converts a contiguous scalar interval.
-#[allow(clippy::too_many_arguments)]
-fn copy_elements(
-    tensor: &str,
-    source: &[u8],
-    source_dtype: TensorDType,
-    source_element: u64,
-    target: &mut [u8],
-    target_dtype: TensorDType,
-    target_element: u64,
-    elements: u64,
-) -> Result<()> {
-    let source_width = scalar_bytes(source_dtype)?;
-    let target_width = scalar_bytes(target_dtype)?;
-    if source_dtype == target_dtype {
-        let source_range = byte_range(source_element, elements, source_width, tensor)?;
-        let target_range = byte_range(target_element, elements, target_width, tensor)?;
-        let source_bytes = source
-            .get(source_range)
-            .ok_or_else(|| payload_bounds(tensor))?;
-        let target_bytes = target
-            .get_mut(target_range)
-            .ok_or_else(|| payload_bounds(tensor))?;
-        if source_bytes.len() != target_bytes.len() {
-            return Err(payload_bounds(tensor));
-        }
-        target_bytes.copy_from_slice(source_bytes);
-        return Ok(());
-    }
-
-    validate_conversion(source_dtype, target_dtype)?;
-    for index in 0..elements {
-        let source_index =
-            source_element
-                .checked_add(index)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "advancing conversion source index",
-                })?;
-        let target_index =
-            target_element
-                .checked_add(index)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "advancing conversion target index",
-                })?;
-        let source_range = byte_range(source_index, 1, source_width, tensor)?;
-        let target_range = byte_range(target_index, 1, target_width, tensor)?;
-        let source_bytes = source
-            .get(source_range)
-            .ok_or_else(|| payload_bounds(tensor))?;
-        let target_bytes = target
-            .get_mut(target_range)
-            .ok_or_else(|| payload_bounds(tensor))?;
-        convert_float_scalar(
-            tensor,
-            source_dtype,
-            source_bytes,
-            target_dtype,
-            target_bytes,
-        )?;
-    }
-    Ok(())
-}
-
-/// Decodes one real scalar and encodes it in the target format.
-fn convert_float_scalar(
-    tensor: &str,
-    source_dtype: TensorDType,
-    source: &[u8],
-    target_dtype: TensorDType,
-    target: &mut [u8],
-) -> Result<()> {
-    let value = match source_dtype {
-        TensorDType::F16 => f16::from_bits(read_u16(tensor, source)?).to_f64(),
-        TensorDType::BF16 => bf16::from_bits(read_u16(tensor, source)?).to_f64(),
-        TensorDType::F32 => f32::from_bits(read_u32(tensor, source)?) as f64,
-        TensorDType::F64 => f64::from_bits(read_u64(tensor, source)?),
-        _ => {
-            return Err(CheckpointError::UnsupportedDTypeConversion {
-                source_dtype,
-                target_dtype,
-            });
-        }
-    };
-    match target_dtype {
-        TensorDType::F16 => {
-            copy_scalar_bytes(tensor, target, f16::from_f64(value).to_bits().to_ne_bytes())
-        }
-        TensorDType::BF16 => copy_scalar_bytes(
-            tensor,
-            target,
-            bf16::from_f64(value).to_bits().to_ne_bytes(),
-        ),
-        TensorDType::F32 => {
-            copy_scalar_bytes(tensor, target, (value as f32).to_bits().to_ne_bytes())
-        }
-        TensorDType::F64 => copy_scalar_bytes(tensor, target, value.to_bits().to_ne_bytes()),
-        _ => Err(CheckpointError::UnsupportedDTypeConversion {
-            source_dtype,
-            target_dtype,
-        }),
-    }
-}
-
-/// Copies one native-endian scalar from a fixed stack array into its output slot.
-fn copy_scalar_bytes<const N: usize>(
-    tensor: &str,
-    target: &mut [u8],
-    encoded: [u8; N],
-) -> Result<()> {
-    if target.len() != N {
-        return Err(payload_bounds(tensor));
-    }
-    target.copy_from_slice(&encoded);
-    Ok(())
-}
-
-/// Reads a little-endian sixteen-bit scalar without alignment assumptions.
-fn read_u16(tensor: &str, bytes: &[u8]) -> Result<u16> {
-    let array: [u8; 2] = bytes.try_into().map_err(|_| payload_bounds(tensor))?;
-    Ok(u16::from_le_bytes(array))
-}
-
-/// Reads a little-endian thirty-two-bit scalar without alignment assumptions.
-fn read_u32(tensor: &str, bytes: &[u8]) -> Result<u32> {
-    let array: [u8; 4] = bytes.try_into().map_err(|_| payload_bounds(tensor))?;
-    Ok(u32::from_le_bytes(array))
-}
-
-/// Reads a little-endian sixty-four-bit scalar without alignment assumptions.
-fn read_u64(tensor: &str, bytes: &[u8]) -> Result<u64> {
-    let array: [u8; 8] = bytes.try_into().map_err(|_| payload_bounds(tensor))?;
-    Ok(u64::from_le_bytes(array))
-}
-
 /// Converts a tensor dtype into Burn's unquantized runtime dtype.
 fn burn_dtype(dtype: TensorDType) -> Result<DType> {
     let dtype = match dtype {
@@ -953,27 +703,6 @@ fn burn_dtype(dtype: TensorDType) -> Result<DType> {
     Ok(dtype)
 }
 
-/// Rejects reinterpretation and permits casts only among conventional real floats.
-fn validate_conversion(source: TensorDType, target: TensorDType) -> Result<()> {
-    if source == target {
-        return burn_dtype(source).map(|_| ());
-    }
-    if matches!(
-        source,
-        TensorDType::F16 | TensorDType::BF16 | TensorDType::F32 | TensorDType::F64
-    ) && matches!(
-        target,
-        TensorDType::F16 | TensorDType::BF16 | TensorDType::F32 | TensorDType::F64
-    ) {
-        Ok(())
-    } else {
-        Err(CheckpointError::UnsupportedDTypeConversion {
-            source_dtype: source,
-            target_dtype: target,
-        })
-    }
-}
-
 /// Validates boolean values before Burn treats bytes as native `bool` storage.
 fn validate_bool_bytes(tensor: &str, dtype: TensorDType, bytes: &[u8]) -> Result<()> {
     if dtype == TensorDType::BOOL
@@ -987,27 +716,6 @@ fn validate_bool_bytes(tensor: &str, dtype: TensorDType, bytes: &[u8]) -> Result
             tensor: tensor.to_owned(),
             reason: format!("boolean element {index} has invalid byte value {value}"),
         });
-    }
-    Ok(())
-}
-
-/// Converts a complete little-endian direct-copy buffer to native endian.
-fn normalize_little_endian(bytes: &mut [u8], dtype: TensorDType) -> Result<()> {
-    let width = scalar_bytes(dtype)?;
-    let width = usize::try_from(width).map_err(|_| CheckpointError::ArithmeticOverflow {
-        context: "converting scalar width to usize",
-    })?;
-    if !bytes.len().is_multiple_of(width) {
-        return Err(CheckpointError::InvalidTensorPayload {
-            tensor: "<native-endian conversion>".into(),
-            reason: "payload is not a whole number of scalars".into(),
-        });
-    }
-    #[cfg(target_endian = "big")]
-    if width > 1 {
-        for scalar in bytes.chunks_exact_mut(width) {
-            scalar.reverse();
-        }
     }
     Ok(())
 }
@@ -1110,47 +818,26 @@ fn byte_len(shape: &[u64], dtype: TensorDType, tensor: &str) -> Result<u64> {
 
 /// Computes a shape product, treating rank zero as one scalar.
 fn checked_elements(shape: &[u64], tensor: &str) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |elements, dimension| {
-        elements
-            .checked_mul(*dimension)
-            .ok_or_else(|| CheckpointError::InvalidTensorPayload {
-                tensor: tensor.to_owned(),
-                reason: "shape element count overflows u64".into(),
-            })
+    element_count(shape).ok_or_else(|| CheckpointError::InvalidTensorPayload {
+        tensor: tensor.to_owned(),
+        reason: "shape element count overflows u64".into(),
     })
 }
 
-/// Returns the whole-byte scalar width supported by Burn.
-fn scalar_bytes(dtype: TensorDType) -> Result<u64> {
-    let _ = burn_dtype(dtype)?;
-    Ok(dtype.bits() / 8)
+/// Converts a validated byte or element count to a host index.
+fn host_len(value: u64) -> Result<usize> {
+    usize::try_from(value).map_err(|_| CheckpointError::AllocationFailed {
+        bytes: value,
+        context: "addressing a transformed tensor on this host",
+    })
 }
 
-/// Computes a checked byte range for a scalar interval.
-fn byte_range(
-    start: u64,
-    elements: u64,
-    width: u64,
-    tensor: &str,
-) -> Result<std::ops::Range<usize>> {
-    let start = start
-        .checked_mul(width)
-        .ok_or(CheckpointError::ArithmeticOverflow {
-            context: "computing scalar byte offset",
-        })?;
-    let length = elements
-        .checked_mul(width)
-        .ok_or(CheckpointError::ArithmeticOverflow {
-            context: "computing scalar byte length",
-        })?;
-    let end = start
-        .checked_add(length)
-        .ok_or(CheckpointError::ArithmeticOverflow {
-            context: "computing scalar byte range",
-        })?;
-    let start = usize::try_from(start).map_err(|_| payload_bounds(tensor))?;
-    let end = usize::try_from(end).map_err(|_| payload_bounds(tensor))?;
-    Ok(start..end)
+/// Converts one planned dimension or offset to a host index with context.
+fn host_dimension(value: u64, tensor: &str, what: &str) -> Result<usize> {
+    usize::try_from(value).map_err(|_| CheckpointError::InvalidTensorPayload {
+        tensor: tensor.to_owned(),
+        reason: format!("{what} {value} does not fit in usize"),
+    })
 }
 
 /// Creates a contextual out-of-bounds payload error.

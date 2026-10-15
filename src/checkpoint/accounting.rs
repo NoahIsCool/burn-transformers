@@ -314,13 +314,11 @@ fn validate_tensor_descriptor(
             expected.name, observed.dtype, observed.shape, expected.dtype, expected.shape
         ));
     }
-    let elements = expected.shape.iter().try_fold(1_u64, |total, dimension| {
-        total
-            .checked_mul(*dimension)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing pinned accounting tensor elements",
-            })
-    })?;
+    let elements = super::layout::element_count(&expected.shape).ok_or(
+        CheckpointError::ArithmeticOverflow {
+            context: "computing pinned accounting tensor elements",
+        },
+    )?;
     let expected_bytes = expected.dtype.storage_bytes(elements)?;
     if observed.byte_len != expected_bytes {
         return policy_mismatch(format!(

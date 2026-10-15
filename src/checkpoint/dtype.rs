@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-use super::{CheckpointError, Result};
+use super::{CheckpointError, Result, layout::StorageSizeError};
 
 /// A scalar dtype defined by the SafeTensors format.
 ///
@@ -93,25 +93,61 @@ impl TensorDType {
         )
     }
 
+    /// Returns whether the loader can numerically cast this dtype to another.
+    ///
+    /// Casts are implemented, and correctly rounded, only among the conventional
+    /// IEEE-style formats F16, BF16, F32, and F64. Microscaling and FP8 formats are
+    /// floating point ([`Self::is_float`]) but can only be loaded unchanged. The
+    /// planner and the executor share this predicate, so a plan never records a
+    /// conversion that execution would reject.
+    #[must_use]
+    pub const fn is_castable_float(self) -> bool {
+        matches!(self, Self::F16 | Self::BF16 | Self::F32 | Self::F64)
+    }
+
+    /// Returns whether loading `self` as `target` can overwrite the source buffer.
+    ///
+    /// Equal dtypes need at most an endianness swap, and BF16 <-> F16 casts keep
+    /// the 16-bit scalar width, so each slot can be converted where it is read.
+    /// The loader then stages only the source payload for such an operation.
+    #[must_use]
+    pub const fn converts_in_place_to(self, target: Self) -> bool {
+        // Discriminant comparison: derived `==` is not callable in a `const fn`.
+        self as u8 == target as u8
+            || (self.bits() == target.bits()
+                && self.is_castable_float()
+                && target.is_castable_float())
+    }
+
     /// Computes the exact byte length of a tensor with `elements` scalars.
     ///
     /// SafeTensors does not permit a trailing partial byte. For example, a tensor
     /// containing an odd number of four-bit values is malformed rather than being
     /// rounded up to the next byte.
     pub fn storage_bytes(self, elements: u64) -> Result<u64> {
-        let bits =
-            elements
-                .checked_mul(self.bits())
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing tensor storage bits",
-                })?;
-        if bits % 8 != 0 {
-            return Err(CheckpointError::MisalignedTensorStorage {
+        super::layout::storage_bytes(elements, self.bits()).map_err(|error| match error {
+            StorageSizeError::Overflow => CheckpointError::ArithmeticOverflow {
+                context: "computing tensor storage bits",
+            },
+            StorageSizeError::PartialByte => CheckpointError::MisalignedTensorStorage {
                 dtype: self,
                 elements,
-            });
-        }
-        Ok(bits / 8)
+            },
+        })
+    }
+
+    /// Computes the exact byte length of a tensor with the given dimensions.
+    ///
+    /// This composes the checked left-to-right shape product with
+    /// [`Self::storage_bytes`]; a rank-zero shape is one scalar, and a shape
+    /// whose running product overflows fails even if a later dimension is zero,
+    /// as in the pinned SafeTensors validator.
+    pub fn tensor_storage_bytes(self, shape: &[u64]) -> Result<u64> {
+        let elements =
+            super::layout::element_count(shape).ok_or(CheckpointError::ArithmeticOverflow {
+                context: "computing tensor element count",
+            })?;
+        self.storage_bytes(elements)
     }
 
     /// Returns the canonical SafeTensors spelling.

@@ -31,11 +31,15 @@ impl SymmetricQuantization {
     }
 
     /// Computes the packed bytes required for `elements` values.
+    ///
+    /// This is `n` for Q8 and `ceil(n / 2)` for Q4; the Verus-checked
+    /// `packing::packed_len` proves the formula never overflows.
     pub(crate) fn packed_bytes(self, elements: usize) -> Result<usize> {
-        match self {
-            Self::Q8 => Ok(elements),
-            Self::Q4 => Ok(elements / 2 + elements % 2),
-        }
+        let width = match self {
+            Self::Q8 => super::packing::CodeWidth::Byte,
+            Self::Q4 => super::packing::CodeWidth::Nibble,
+        };
+        Ok(super::packing::packed_len(width, elements))
     }
 }
 
@@ -51,6 +55,9 @@ pub struct QuantizationGroupSize(
 );
 
 impl QuantizationGroupSize {
+    /// Largest supported group size; bounds per-group stack buffers.
+    pub const MAX: usize = 128;
+
     /// Creates a supported group size.
     pub fn new(value: usize) -> Result<Self> {
         match value {
@@ -126,6 +133,36 @@ pub struct WeightQuantizationConfig {
     pub scheme: SymmetricQuantization,
     /// Number of contiguous source values sharing a scale.
     pub group_size: QuantizationGroupSize,
+}
+
+impl WeightQuantizationConfig {
+    /// Stable report label of the persisted storage format.
+    ///
+    /// Conversion records `symmetric-{q8|q4}-g{G}-flat-row-major`: contiguous
+    /// row-major groups of `G` values in the sidecar. Loading records the
+    /// runtime form of the same payload,
+    /// [`QuantizedTensorMetadata::runtime_label`](super::QuantizedTensorMetadata::runtime_label),
+    /// because the installed tensor is Burn block-QFloat; for aligned matrices
+    /// the two describe identical groups.
+    #[must_use]
+    pub fn storage_label(self) -> String {
+        format!(
+            "symmetric-{}-g{}-flat-row-major",
+            self.scheme.label(),
+            self.group_size.get()
+        )
+    }
+}
+
+impl SymmetricQuantization {
+    /// Lowercase precision spelling used in report labels: `q8` or `q4`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Q8 => "q8",
+            Self::Q4 => "q4",
+        }
+    }
 }
 
 impl Default for WeightQuantizationConfig {

@@ -23,7 +23,10 @@ pub struct MemoryEstimate {
     pub target_parameter_bytes: u64,
     /// Logical model bytes when tied aliases are counted independently.
     pub logical_model_bytes: u64,
-    /// Largest complete shard mapping/open-file window.
+    /// Largest complete shard file size.
+    ///
+    /// This is an artifact metric, not loader staging: the local source reads
+    /// one tensor interval at a time and never maps or buffers a whole shard.
     pub largest_shard_bytes: u64,
     /// Largest source tensor payload.
     pub largest_source_tensor_bytes: u64,
@@ -34,10 +37,14 @@ pub struct MemoryEstimate {
     pub largest_equivalence_pair_bytes: u64,
     /// Conservative pass-two host bound for transforms and equivalence preflight.
     ///
-    /// Memory mapping can make physical RSS lower than this value, while backend
-    /// transfer queues can make process-wide usage higher. The bound is the
-    /// greater of largest-shard-plus-output and the largest simultaneously held
-    /// physical alias/owner pair.
+    /// The bound is the greater of largest-shard-plus-largest-output and the
+    /// largest simultaneously held physical alias/owner pair. It deliberately
+    /// over-approximates the executor, which holds at most one source payload
+    /// plus one output (or only the source for in-place equal-width casts); the
+    /// slack leaves room for architecture-specific staging such as packed
+    /// overrides. [`crate::checkpoint::LoadPlan::required_host_staging_bytes`]
+    /// computes the tight per-operation figure. Backend transfer queues and
+    /// activations are excluded, so process-wide usage can be higher.
     pub peak_host_staging_bytes: u64,
 }
 
@@ -154,6 +161,27 @@ impl LoadReport {
     #[must_use]
     pub fn is_strictly_valid(&self) -> bool {
         self.missing.is_empty() && self.unexpected.is_empty()
+    }
+
+    /// Returns a planned report with every execution-progress category cleared.
+    ///
+    /// Execution starts from this state: `applied`, `quantized`, and
+    /// `equivalence_verified` record only work that actually completes, while the
+    /// planned categories are retained. The result is finalized.
+    #[must_use]
+    pub fn without_progress(&self) -> Self {
+        let mut report = self.clone();
+        report.applied.clear();
+        report.quantized.clear();
+        report.equivalence_verified.clear();
+        report.finalize();
+        report
+    }
+
+    /// Records quantized targets and restores deterministic ordering.
+    pub fn extend_quantized(&mut self, records: impl IntoIterator<Item = QuantizationRecord>) {
+        self.quantized.extend(records);
+        self.finalize();
     }
 
     /// Records a parameter after the runtime has applied it.

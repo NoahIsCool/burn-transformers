@@ -19,6 +19,7 @@ pub(crate) mod accounting;
 mod artifact;
 mod dtype;
 mod error;
+mod layout;
 mod mapping;
 mod options;
 pub mod quantization;
@@ -47,8 +48,9 @@ pub use report::{
 };
 pub use runtime::{
     ExecutionFailure, ExecutionFailureCause, ExecutionOutcome, ExecutionResult, ExecutionStats,
-    LocalShardSource, ParameterInstallError, SourceStats, SourceTensor, TensorSink, TensorSource,
-    execute_load_plan, execute_local_load_plan, install_float_parameter,
+    LocalShardSource, PackedInstall, PackedLayoutPolicy, ParameterInstallError, SourceStats,
+    SourceTensor, TensorSink, TensorSource, execute_load_plan, execute_local_load_plan,
+    install_float_parameter, install_packed_parameter, packed_layout_is_exact,
 };
 
 #[cfg(test)]

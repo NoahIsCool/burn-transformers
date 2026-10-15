@@ -84,11 +84,18 @@ impl Default for ArtifactLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum ArtifactSelection {
-    /// Prefer `model.safetensors.index.json`, then `model.safetensors`, and only
-    /// then fall back to an unambiguous nonstandard filename in the root.
+    /// Use whichever of `model.safetensors.index.json` and `model.safetensors`
+    /// exists, and only then fall back to an unambiguous nonstandard filename in
+    /// the root. When both standard artifacts exist, discovery reports
+    /// [`super::CheckpointError::AmbiguousArtifacts`] instead of guessing which
+    /// one describes the intended weights; select one with [`Self::Index`] or
+    /// [`Self::Single`].
     #[default]
     Auto,
     /// Load a specific checkpoint index, relative to the repository root.
+    ///
+    /// Shard names in its `weight_map` resolve relative to the index's own
+    /// directory, so a nested index finds its co-located shards.
     Index(
         /// Root-relative index path checked for containment during discovery.
         String,

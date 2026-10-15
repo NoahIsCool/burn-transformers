@@ -4,6 +4,7 @@ use std::{fs::File, io::Write, path::Path};
 
 use serde_json::{Map, Value, json};
 
+use super::super::SymmetricQuantization;
 use super::*;
 use crate::checkpoint::{
     ExpectedTensor, LoadOptions, MappingPlan, build_load_plan, discover_checkpoint,
@@ -482,9 +483,9 @@ fn checkpoint_failure_keeps_exact_partial_quantized_and_exclusion_reports() {
     assert!(!output.exists());
 }
 
-/// Binding limits fail only after both hash passes and retain excluded targets.
+/// A manifest limit the planned sidecar cannot meet fails before hashing or reading.
 #[test]
-fn provenance_binding_limit_preserves_complete_conversion_progress() {
+fn infeasible_manifest_limit_fails_before_any_source_read() {
     let root = tempfile::tempdir().unwrap();
     let (manifest, plan) = identity_fixture(root.path(), &["embed_tokens.weight"]);
     let output = root.path().join("bound-limit.bpk");
@@ -510,26 +511,57 @@ fn provenance_binding_limit_preserves_complete_conversion_progress() {
         })
     ));
     assert!(failure.failed_target.is_none());
-    assert_eq!(failure.report.applied, ["embed_tokens.weight"]);
-    assert!(failure.report.quantized.is_empty());
-    assert_eq!(
-        failure.excluded,
-        [QuantizationExclusionRecord {
-            target: "embed_tokens.weight".into(),
-            reason: QuantizationExclusion::Embedding
-        }]
-    );
-    assert_eq!(failure.execution.tensors_applied, 1);
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.excluded.is_empty());
+    assert_eq!(failure.execution.source_reads, 0);
     assert_eq!(failure.staging.tensor_count, 0);
-    for stats in [
-        failure.provenance.pre_execution.unwrap(),
-        failure.provenance.post_execution.unwrap(),
-    ] {
-        assert_eq!(stats.passes_completed, 1);
-        assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
-    }
+    assert!(failure.provenance.pre_execution.is_none());
+    assert!(failure.provenance.post_execution.is_none());
     assert!(!output.exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// Staged-payload and tensor-count limits are also checked against the whole plan.
+#[test]
+fn planned_payload_and_count_limits_fail_before_any_source_read() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(root.path(), &["a.weight", "b.weight"]);
+    for (kind, limits) in [
+        (
+            "staged payload",
+            BurnpackSessionLimits {
+                max_staged_bytes: 1,
+                ..BurnpackSessionLimits::default()
+            },
+        ),
+        (
+            "tensor count",
+            BurnpackSessionLimits {
+                max_tensors: 1,
+                ..BurnpackSessionLimits::default()
+            },
+        ),
+    ] {
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            root.path().join(format!("{kind}.bpk")),
+            QuantizedCheckpointOptions {
+                limits,
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&failure.cause,
+            CheckpointQuantizationFailureCause::Quantization(QuantizationError::SessionLimitExceeded { kind: actual, .. })
+            if *actual == kind),
+            "{kind}: {}",
+            failure.cause
+        );
+        assert_eq!(failure.execution.source_reads, 0);
+        assert!(failure.provenance.pre_execution.is_none());
+    }
 }
 
 /// Change diagnostics distinguish removed, added, modified, and plan-only state.
@@ -619,4 +651,98 @@ fn checkpoint_standards_finalize_limit_keeps_complete_audit_without_output() {
     }
     assert!(!output.exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// Writes one aligned and one group-unaligned projection with an identity plan.
+fn mixed_alignment_plan(root: &Path) -> (CheckpointManifest, LoadPlan) {
+    let tensors = [
+        FixtureTensor {
+            name: "model.layers.0.self_attn.k_proj.weight",
+            shape: vec![2, 64],
+            values: (0..128).map(|index| index as f32 / 8.0 - 8.0).collect(),
+        },
+        FixtureTensor {
+            name: "model.layers.0.self_attn.q_proj.weight",
+            shape: vec![4, 8],
+            values: (0..32).map(|index| index as f32 - 15.5).collect(),
+        },
+    ];
+    write_checkpoint(root, &tensors);
+    let manifest = discover_checkpoint(root, &LoadOptions::default()).unwrap();
+    let expected = tensors
+        .iter()
+        .map(|tensor| ExpectedTensor::new(tensor.name, tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    (manifest, plan)
+}
+
+/// Group-unaligned matrices follow the configured policy; the summary reports packability.
+#[test]
+fn unaligned_matrices_follow_the_configured_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = mixed_alignment_plan(root.path());
+    let unaligned = "model.layers.0.self_attn.q_proj.weight";
+    let options = |unaligned| QuantizedCheckpointOptions {
+        unaligned,
+        ..QuantizedCheckpointOptions::default()
+    };
+
+    let reference = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        root.path().join("reference.bpk"),
+        options(UnalignedMatrixPolicy::ReferenceOnly),
+    )
+    .unwrap();
+    assert_eq!(reference.artifact.tensor_count, 2);
+    assert_eq!(
+        reference.artifact.packed_execution,
+        super::super::PackedExecutionSupport::Unavailable
+    );
+
+    let excluded = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        root.path().join("excluded.bpk"),
+        options(UnalignedMatrixPolicy::Exclude),
+    )
+    .unwrap();
+    assert_eq!(excluded.artifact.tensor_count, 1);
+    assert_eq!(
+        excluded.artifact.packed_execution,
+        super::super::PackedExecutionSupport::BurnQFloatMatmul
+    );
+    assert_eq!(
+        excluded.excluded,
+        [QuantizationExclusionRecord {
+            target: unaligned.into(),
+            reason: QuantizationExclusion::GroupUnaligned,
+        }]
+    );
+    assert_eq!(excluded.report.applied.len(), 2);
+
+    let output = root.path().join("rejected.bpk");
+    let failure = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        options(UnalignedMatrixPolicy::Reject),
+    )
+    .unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some(unaligned));
+    assert!(matches!(
+        &failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(QuantizationError::BurnQFloatIncompatible { reason })
+        if reason.contains("group size 64")
+    ));
+    assert_eq!(failure.execution.source_reads, 0);
+    assert!(failure.provenance.pre_execution.is_none());
+    assert!(!output.exists());
 }
