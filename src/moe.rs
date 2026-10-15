@@ -1,24 +1,31 @@
 //! Sparse mixture-of-experts routing and dispatch.
 //!
-//! A router assigns probabilities to `E` experts and evaluates only the largest
-//! `K` assignments for each token. The output is
-//! `sum_{j in TopK(p)} w_j Expert_j(x)`, optionally followed by always-active
-//! shared experts. Router softmax is evaluated in FP32 because small ranking
-//! changes can switch an entire expert computation in lower precision.
+//! A router assigns scores to `E` experts and evaluates only `K` of them for
+//! each token. The output is `sum_{j in S} w_j Expert_j(x)`, optionally plus
+//! always-active shared experts `g(x) * sum_s Shared_s(x)` with an optional
+//! sigmoid gate `g`. The routing policy (softmax or sigmoid scores, ordering,
+//! group pruning, selection-only correction bias, renormalization, scale, and
+//! projection precision) lives in [`router`] and is shared by every family;
+//! the defaults reproduce Qwen/Mixtral softmax top-k routing.
 //!
-//! The portable dispatcher copies only the compact discrete top-k IDs once,
-//! groups their `(token, slot)` locations on the host, then uses Burn indexing
-//! to preserve differentiable expert inputs and mixture weights. It never
-//! evaluates an unselected expert. This is a correctness path; accelerator-
-//! specific grouped-GEMM dispatch can replace its grouping mechanics without
-//! altering routing or checkpoint parameters.
+//! Dispatch reads the compact `[tokens, K]` expert IDs to the host once (one
+//! synchronization, which also carries a per-token NaN flag), groups the
+//! flattened `(token, slot)` assignments by expert with a verified stable
+//! counting sort, and uploads that permutation once. It then gathers every
+//! routed input row and weight in a single `select`, evaluates each active
+//! expert on a contiguous slice, and accumulates all weighted contributions
+//! with one `select_assign`. The permutation is expert-major and token-major
+//! within an expert, so each token's contributions are summed in the same
+//! order as a per-expert loop and results are bit-identical to it. Unselected
+//! experts are never evaluated. Expert inputs and mixture weights remain
+//! differentiable tensors; only the discrete IDs leave the device.
 
 use burn::{
-    module::Module,
+    module::{Module, Param},
     nn::{Linear, LinearConfig, LinearLayout},
     tensor::{
-        DType, ElementConversion, IndexingUpdateOp, Int, Tensor, TensorData, activation::softmax,
-        backend::Backend,
+        Bool, DType, ElementConversion, FloatDType, IndexingUpdateOp, Int, Tensor, TensorData,
+        activation, backend::Backend,
     },
 };
 
@@ -27,6 +34,17 @@ use crate::{
     architecture::{Activation, TokenMask},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
     operations,
+};
+
+mod assignment;
+pub mod router;
+
+use assignment::{ExpertAssignmentPlan, InvalidExpertId, plan_expert_assignments};
+pub(crate) use router::deterministic_top_k;
+pub use router::{
+    ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
+    RenormalizationDenominator, RouteDecision, RouterConfig, RouterProjectionPrecision,
+    RouterScoring, RoutingPolicy, ScoringOrder, router_logits,
 };
 
 /// Rounding boundary for selected router weights in a sparse expert block.
@@ -68,6 +86,13 @@ pub struct SparseMoeConfig {
     pub weighting_precision: RoutedWeightingPrecision,
     /// Whether expert projections contain additive biases.
     pub expert_bias: bool,
+    /// Scoring, ordering, eligibility, bias, and precision policy of the router.
+    #[serde(default)]
+    pub routing: RoutingPolicy,
+    /// Whether a sigmoid gate `sigmoid(x w)` scales the summed shared experts
+    /// (Qwen3-Next / Qwen3.5-MoE `shared_expert_gate`).
+    #[serde(default)]
+    pub shared_expert_gate: bool,
 }
 
 impl SparseMoeConfig {
@@ -89,6 +114,20 @@ impl SparseMoeConfig {
             routed_scale: 1.0,
             weighting_precision: RoutedWeightingPrecision::Residual,
             expert_bias: false,
+            routing: RoutingPolicy::default(),
+            shared_expert_gate: false,
+        }
+    }
+
+    /// Returns the complete routing specification implied by this configuration.
+    #[must_use]
+    pub fn router_config(&self) -> RouterConfig {
+        RouterConfig {
+            experts: self.routed_experts,
+            experts_per_token: self.experts_per_token,
+            policy: self.routing,
+            renormalize_selected: self.renormalize_selected,
+            routed_scale: self.routed_scale,
         }
     }
 
@@ -125,7 +164,13 @@ impl SparseMoeConfig {
                 "must be finite and greater than zero",
             ));
         }
-        Ok(())
+        if self.shared_expert_gate && self.shared_experts == 0 {
+            return Err(Error::configuration(
+                "moe.shared_expert_gate",
+                "requires at least one shared expert to gate",
+            ));
+        }
+        self.router_config().validate()
     }
 
     /// Initializes the router and all expert parameter sets.
@@ -142,10 +187,24 @@ impl SparseMoeConfig {
             .collect::<Result<Vec<_>>>()?;
         let router = operations::init_linear(
             &LinearConfig::new(self.hidden_size, self.routed_experts)
-                .with_bias(false)
+                .with_bias(self.routing.router_bias)
                 .with_layout(LinearLayout::Col),
             device,
         );
+        // Like DeepSeek-V3 and Nemotron-H, the selection bias is an FP32
+        // buffer: it changes discrete choices but is not trained by gradients.
+        let correction_bias = self.routing.correction_bias.then(|| {
+            Param::from_tensor(Tensor::zeros([self.routed_experts], (device, DType::F32)))
+                .set_require_grad(false)
+        });
+        let shared_expert_gate = self.shared_expert_gate.then(|| {
+            operations::init_linear(
+                &LinearConfig::new(self.hidden_size, 1)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
+        });
         Ok(SparseMoe {
             router,
             routed,
@@ -155,6 +214,9 @@ impl SparseMoeConfig {
             routed_scale: self.routed_scale,
             weighting_precision: self.weighting_precision,
             hidden_size: self.hidden_size,
+            routing: self.routing,
+            correction_bias,
+            shared_expert_gate,
         })
     }
 }
@@ -202,16 +264,16 @@ pub(crate) struct RoutedExpertDispatch<B: Backend> {
 /// `index_add`. DeepSeek instead retains the weighted contributions and their
 /// complete sum in FP32 before one final cast at the routed-block boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RoutedExpertPrecision {
+pub(crate) struct RoutedExpertPrecision {
     /// Dtype used for the elementwise expert-output/router-weight product.
-    multiplication_dtype: DType,
+    pub(crate) multiplication_dtype: DType,
     /// Dtype of the destination and every contribution entering index-add.
-    accumulation_dtype: DType,
+    pub(crate) accumulation_dtype: DType,
 }
 
 impl RoutedExpertPrecision {
     /// Uses one dtype for multiplication and accumulation.
-    const fn uniform(dtype: DType) -> Self {
+    pub(crate) const fn uniform(dtype: DType) -> Self {
         Self {
             multiplication_dtype: dtype,
             accumulation_dtype: dtype,
@@ -219,7 +281,7 @@ impl RoutedExpertPrecision {
     }
 
     /// Keeps routing weights FP32 but rounds each contribution before summing.
-    const fn fp32_weights_round_each(accumulation_dtype: DType) -> Self {
+    pub(crate) const fn fp32_weights_round_each(accumulation_dtype: DType) -> Self {
         Self {
             multiplication_dtype: DType::F32,
             accumulation_dtype,
@@ -269,14 +331,41 @@ pub(crate) struct ExpertAssignmentGroup {
 ///
 /// Expert IDs are control-flow metadata rather than differentiable values, so
 /// copying this compact `tokens * top_k` tensor to the host does not sever the
-/// gradient graph for either residual states or selected router weights. The
-/// single transfer replaces one `argwhere` synchronization per expert. Within
-/// each expert, assignments retain token-major, slot-minor order, making
-/// grouping deterministic across backends even when router scores tie.
+/// gradient graph for either residual states or selected router weights.
+/// Within each expert, assignments retain token-major, slot-minor order,
+/// making grouping deterministic across backends even when router scores tie.
+/// [`dispatch_routed_experts`] uses the same plan without materializing one
+/// vector pair per expert.
 pub(crate) fn group_selected_experts<B: Backend>(
     selected_experts: Tensor<B, 2, Int>,
     routed_experts: usize,
 ) -> Result<Vec<ExpertAssignmentGroup>> {
+    let slots = selected_experts.dims()[1];
+    let plan = read_assignment_plan(selected_experts, None, routed_experts)?;
+    let mut groups = Vec::with_capacity(routed_experts);
+    for expert in 0..routed_experts {
+        let assignments = &plan.order[plan.offsets[expert]..plan.offsets[expert + 1]];
+        let mut group = ExpertAssignmentGroup::default();
+        for &assignment in assignments {
+            // `read_assignment_plan` checked that every index fits in i64.
+            group.token_indices.push((assignment / slots) as i64);
+            group.weight_indices.push(assignment as i64);
+        }
+        groups.push(group);
+    }
+    Ok(groups)
+}
+
+/// Reads `[tokens, K]` expert IDs (and optional NaN flags) in one transfer and plans dispatch.
+///
+/// The NaN flags, when present, are appended as an extra integer column so a
+/// single device-to-host copy carries both. A flagged token is reported as a
+/// contextual error rather than being dispatched with meaningless weights.
+fn read_assignment_plan<B: Backend>(
+    selected_experts: Tensor<B, 2, Int>,
+    non_finite_tokens: Option<Tensor<B, 1, Bool>>,
+    routed_experts: usize,
+) -> Result<ExpertAssignmentPlan> {
     let [tokens, slots] = selected_experts.dims();
     if routed_experts == 0 || tokens == 0 || slots == 0 {
         return Err(Error::shape(
@@ -285,14 +374,23 @@ pub(crate) fn group_selected_experts<B: Backend>(
             format!("shape=[{tokens}, {slots}], routed_experts={routed_experts}"),
         ));
     }
-    let assignments = tokens.checked_mul(slots).ok_or_else(|| {
-        Error::shape(
-            "moe.selected_experts",
-            "a tokens * top_k product representable by usize",
-            format!("{tokens} * {slots}"),
-        )
-    })?;
-    let values = selected_experts
+    let assignments = tokens
+        .checked_mul(slots)
+        .filter(|&count| i64::try_from(count).is_ok())
+        .ok_or_else(|| {
+            Error::shape(
+                "moe.selected_experts",
+                "a tokens * top_k product representable by the i64 index type",
+                format!("{tokens} * {slots}"),
+            )
+        })?;
+    let flagged = non_finite_tokens.is_some();
+    let columns = slots + usize::from(flagged);
+    let host = match non_finite_tokens {
+        Some(flags) => Tensor::cat(vec![selected_experts, flags.int().reshape([tokens, 1])], 1),
+        None => selected_experts,
+    };
+    let values = host
         .try_into_data()
         .map_err(|error| {
             Error::BackendCapability(format!(
@@ -305,46 +403,106 @@ pub(crate) fn group_selected_experts<B: Backend>(
                 "failed to decode selected expert IDs from backend: {error}"
             ))
         })?;
-    if values.len() != assignments {
+    if values.len() != tokens * columns {
         return Err(Error::shape(
             "moe.selected_experts",
             format!("{assignments} integer routing IDs"),
             format!("{} values", values.len()),
         ));
     }
-
-    let mut groups = (0..routed_experts)
-        .map(|_| ExpertAssignmentGroup::default())
-        .collect::<Vec<_>>();
-    for (weight_index, value) in values.into_iter().enumerate() {
-        let expert = value.elem::<i64>();
-        if expert < 0 || expert as usize >= routed_experts {
+    let mut ids = Vec::with_capacity(assignments);
+    for (token, row) in values.chunks_exact(columns).enumerate() {
+        if flagged && row[slots].elem::<i64>() != 0 {
             return Err(Error::shape(
-                "moe.selected_experts",
-                format!("expert IDs in 0..{routed_experts}"),
-                format!("expert ID {expert} at flattened assignment {weight_index}"),
+                "moe.router_scores",
+                "finite router scores for every token",
+                format!("NaN router score for flattened token {token}"),
             ));
         }
-        let token_index = weight_index / slots;
-        let token_index = i64::try_from(token_index).map_err(|_| {
-            Error::shape(
-                "moe.selected_experts",
-                "token indices representable by the backend i64 index type",
-                format!("token index {token_index}"),
-            )
-        })?;
-        let weight_index = i64::try_from(weight_index).map_err(|_| {
-            Error::shape(
-                "moe.selected_experts",
-                "assignment indices representable by the backend i64 index type",
-                format!("assignment index {weight_index}"),
-            )
-        })?;
-        let group = &mut groups[expert as usize];
-        group.token_indices.push(token_index);
-        group.weight_indices.push(weight_index);
+        ids.extend(row[..slots].iter().map(|value| value.elem::<i64>()));
     }
-    Ok(groups)
+    plan_expert_assignments(&ids, routed_experts).map_err(
+        |InvalidExpertId { assignment, expert }| {
+            Error::shape(
+                "moe.selected_experts",
+                format!("expert IDs in 0..{routed_experts}"),
+                format!("expert ID {expert} at flattened assignment {assignment}"),
+            )
+        },
+    )
+}
+
+/// Evaluates selected experts with one ID transfer, one gather, and one scatter-add.
+///
+/// `flat_input` is `[tokens, width]`, `flat_weights` and `selected_experts`
+/// are `[tokens, K]`, and `run_expert(e, rows)` evaluates expert `e` on its
+/// gathered `[assignments_e, width]` rows, returning `[assignments_e, out]`.
+/// Contributions `run_expert(e, x) * w` are formed with `precision` and
+/// accumulated in expert-major, token-major order, which matches a per-expert
+/// loop of `select_assign` calls bit for bit. A `[tokens]` NaN flag tensor can
+/// ride along with the ID transfer; any flagged token is a contextual error.
+pub(crate) fn dispatch_routed_experts<B, F>(
+    flat_input: Tensor<B, 2>,
+    flat_weights: Tensor<B, 2>,
+    selected_experts: Tensor<B, 2, Int>,
+    non_finite_tokens: Option<Tensor<B, 1, Bool>>,
+    routed_experts: usize,
+    precision: RoutedExpertPrecision,
+    mut run_expert: F,
+) -> Result<RoutedExpertDispatch<B>>
+where
+    B: Backend,
+    F: FnMut(usize, Tensor<B, 2>) -> Result<Tensor<B, 2>>,
+{
+    precision.validate()?;
+    let tokens = flat_input.dims()[0];
+    let slots = selected_experts.dims()[1];
+    let device = flat_input.device();
+    let plan = read_assignment_plan(selected_experts, non_finite_tokens, routed_experts)?;
+    let assignments = plan.order.len();
+    // One upload: the expert-major permutation of flattened assignments. Token
+    // rows follow on the device as `assignment / K`.
+    let order = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(
+            plan.order
+                .iter()
+                .map(|&index| index as i64)
+                .collect::<Vec<_>>(),
+            [assignments],
+        ),
+        &device,
+    );
+    let token_rows = order.clone().div_scalar(slots as i64);
+    let routed_inputs = flat_input.select(0, token_rows.clone());
+    let routed_weights = flat_weights
+        .reshape([assignments])
+        .select(0, order)
+        .unsqueeze_dim::<2>(1);
+
+    let mut expert_token_counts = Vec::with_capacity(routed_experts);
+    let mut contributions = Vec::new();
+    for expert in 0..routed_experts {
+        let start = plan.offsets[expert];
+        let count = plan.offsets[expert + 1] - start;
+        expert_token_counts.push(count);
+        if count == 0 {
+            continue;
+        }
+        let output = run_expert(expert, routed_inputs.clone().narrow(0, start, count))?;
+        let weights = routed_weights.clone().narrow(0, start, count);
+        contributions.push(weighted_expert_contribution(output, weights, precision));
+    }
+    let evaluated_experts = contributions.len();
+    let contributions = Tensor::cat(contributions, 0);
+    let width = contributions.dims()[1];
+    let hidden_state =
+        Tensor::<B, 2>::zeros([tokens, width], (&device, precision.accumulation_dtype))
+            .select_assign(0, token_rows, contributions, IndexingUpdateOp::Add);
+    Ok(RoutedExpertDispatch {
+        hidden_state,
+        expert_token_counts,
+        evaluated_experts,
+    })
 }
 
 impl<B: Backend> SparseMoeOutput<B> {
@@ -403,22 +561,7 @@ pub fn load_balancing_loss<B: Backend>(
             format!("{:?}", mask.as_tensor().dims()),
         ));
     }
-    let minimum = selected_experts
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate routed expert IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = selected_experts
-        .clone()
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate routed expert IDs: {error}"))
-        })?
-        .elem::<i64>();
+    let (minimum, maximum) = expert_id_range(selected_experts.clone())?;
     if minimum < 0 || maximum as usize >= experts {
         return Err(Error::shape(
             "moe.selected_experts",
@@ -433,11 +576,21 @@ pub fn load_balancing_loss<B: Backend>(
             format!("{batch} * {sequence}"),
         )
     })?;
-    let assignments = selected_experts.one_hot::<4>(experts).float();
-    let probabilities = softmax(router_logits.cast(DType::F32), 2);
+    // Indicators and masks are built directly in F32 so a reduced-precision
+    // device default cannot introduce a mixed-dtype product.
+    let assignments = if experts == 1 {
+        // Burn's one-hot needs two classes; with one expert every slot selects it.
+        Tensor::<B, 4>::ones(
+            [batch, sequence, selected, 1],
+            (&router_logits.device(), DType::F32),
+        )
+    } else {
+        selected_experts.one_hot::<4>(experts).cast(FloatDType::F32)
+    };
+    let probabilities = activation::softmax(router_logits.cast(DType::F32), 2);
     let (assignment_mean, probability_mean) = match token_mask {
         Some(mask) => {
-            let valid = mask.as_tensor().clone().float();
+            let valid = mask.as_tensor().clone().cast(FloatDType::F32);
             let denominator = valid.clone().sum().clamp_min(1.0);
             let assignment_mean = (assignments
                 * valid
@@ -464,10 +617,36 @@ pub fn load_balancing_loss<B: Backend>(
     Ok((assignment_mean * probability_mean.unsqueeze_dim::<3>(1)).sum() * experts as f64)
 }
 
+/// Reads the smallest and largest expert ID with one device-to-host transfer.
+///
+/// Concatenating both reductions before the read halves the synchronizations
+/// of two separate scalar reads.
+fn expert_id_range<B: Backend>(selected_experts: Tensor<B, 3, Int>) -> Result<(i64, i64)> {
+    let failure = |error: &dyn core::fmt::Display| {
+        Error::BackendCapability(format!("failed to validate routed expert IDs: {error}"))
+    };
+    let range = Tensor::cat(
+        vec![selected_experts.clone().min(), selected_experts.max()],
+        0,
+    )
+    .try_into_data()
+    .map_err(|error| failure(&error))?
+    .to_vec::<B::IntElem>()
+    .map_err(|error| failure(&format!("{error:?}")))?;
+    match range.as_slice() {
+        [minimum, maximum] => Ok((minimum.elem::<i64>(), maximum.elem::<i64>())),
+        other => Err(Error::BackendCapability(format!(
+            "expected two expert-ID bounds, read {} values",
+            other.len()
+        ))),
+    }
+}
+
 /// Trainable sparse MoE with independent routed and shared expert weights.
 #[derive(Module, Debug)]
 pub struct SparseMoe<B: Backend> {
-    /// Bias-free token-to-expert router.
+    /// Token-to-expert router projection `[hidden, experts]`, biased only when
+    /// the routing policy enables `router_bias`.
     pub router: Linear<B>,
     /// Experts invoked only when selected by top-k routing.
     pub routed: Vec<GatedFeedForward<B>>,
@@ -484,18 +663,37 @@ pub struct SparseMoe<B: Backend> {
     pub weighting_precision: RoutedWeightingPrecision,
     /// Residual-stream width used when flattening tokens.
     pub hidden_size: usize,
+    /// Scoring, ordering, eligibility, bias, and precision policy of the router.
+    #[module(skip)]
+    pub routing: RoutingPolicy,
+    /// Frozen FP32 `[experts]` bias added to scores for selection only.
+    pub correction_bias: Option<Param<Tensor<B, 1>>>,
+    /// Optional `[hidden, 1]` projection whose sigmoid scales the shared-expert sum.
+    pub shared_expert_gate: Option<Linear<B>>,
 }
 
 impl<B: Backend> SparseMoe<B> {
+    /// Returns the routing specification of this instantiated module.
+    #[must_use]
+    pub fn router_config(&self) -> RouterConfig {
+        RouterConfig {
+            experts: self.routed.len(),
+            experts_per_token: self.experts_per_token,
+            policy: self.routing,
+            renormalize_selected: self.renormalize_selected,
+            routed_scale: self.routed_scale,
+        }
+    }
+
     /// Evaluates and accumulates only the experts named by top-k assignments.
     ///
-    /// Discrete IDs are materialized once by [`group_selected_experts`]. Input
-    /// rows and mixture weights remain device tensors selected with the host-
-    /// constructed index lists, so gradients still flow through expert
-    /// parameters, selected router probabilities, and the residual input. The
-    /// caller chooses an accumulation dtype independently of expert execution,
-    /// allowing families such as DeepSeek to sum reduced-precision experts in
-    /// FP32 while Qwen retains its residual-stream convention.
+    /// Discrete IDs are materialized once and grouped by expert. Input rows and
+    /// mixture weights remain device tensors gathered with the uploaded
+    /// permutation, so gradients still flow through expert parameters, selected
+    /// router probabilities, and the residual input. The caller chooses an
+    /// accumulation dtype independently of expert execution, allowing families
+    /// such as DeepSeek to sum reduced-precision experts in FP32 while Qwen
+    /// retains its residual-stream convention.
     pub(crate) fn dispatch_selected_experts(
         &self,
         flat_input: Tensor<B, 2>,
@@ -507,16 +705,18 @@ impl<B: Backend> SparseMoe<B> {
             flat_input,
             flat_weights,
             selected_experts,
+            None,
             RoutedExpertPrecision::uniform(accumulation_dtype),
         )
     }
 
-    /// Dispatches selected experts with an explicit multiply/accumulate policy.
+    /// Validates dispatch shapes, then dispatches with an explicit multiply/accumulate policy.
     fn dispatch_selected_experts_with_precision(
         &self,
         flat_input: Tensor<B, 2>,
         flat_weights: Tensor<B, 2>,
         selected_experts: Tensor<B, 2, Int>,
+        non_finite_tokens: Option<Tensor<B, 1, Bool>>,
         precision: RoutedExpertPrecision,
     ) -> Result<RoutedExpertDispatch<B>> {
         let [tokens, hidden] = flat_input.dims();
@@ -565,51 +765,15 @@ impl<B: Backend> SparseMoe<B> {
                     .into(),
             ));
         }
-        let assignments = tokens.checked_mul(self.experts_per_token).ok_or_else(|| {
-            Error::shape(
-                "moe.dispatch.routes",
-                "a tokens * top_k product representable by usize",
-                format!("{tokens} * {}", self.experts_per_token),
-            )
-        })?;
-        let groups = group_selected_experts(selected_experts, self.routed.len())?;
-        let flat_weights = flat_weights.reshape([assignments]);
-        let mut hidden_state =
-            Tensor::<B, 2>::zeros([tokens, hidden], (&device, precision.accumulation_dtype));
-        let mut expert_token_counts = Vec::with_capacity(self.routed.len());
-        let mut evaluated_experts = 0;
-
-        for (expert, group) in self.routed.iter().zip(groups) {
-            let assignments = group.token_indices.len();
-            expert_token_counts.push(assignments);
-            if assignments == 0 {
-                continue;
-            }
-            evaluated_experts += 1;
-            let token_indices = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(group.token_indices, [assignments]),
-                &device,
-            );
-            let weight_indices = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(group.weight_indices, [assignments]),
-                &device,
-            );
-            let weights = flat_weights
-                .clone()
-                .select(0, weight_indices)
-                .unsqueeze_dim::<2>(1);
-            let expert_input = flat_input.clone().select(0, token_indices.clone());
-            let contribution =
-                weighted_expert_contribution(expert.forward(expert_input)?, weights, precision);
-            hidden_state =
-                hidden_state.select_assign(0, token_indices, contribution, IndexingUpdateOp::Add);
-        }
-
-        Ok(RoutedExpertDispatch {
-            hidden_state,
-            expert_token_counts,
-            evaluated_experts,
-        })
+        dispatch_routed_experts(
+            flat_input,
+            flat_weights,
+            selected_experts,
+            non_finite_tokens,
+            self.routed.len(),
+            precision,
+            |expert, rows| self.routed[expert].forward(rows),
+        )
     }
 
     /// Routes and dispatches `[batch, sequence, hidden]` states sparsely.
@@ -618,7 +782,8 @@ impl<B: Backend> SparseMoe<B> {
     ///
     /// Returns a contextual configuration or shape error before top-k/indexing
     /// kernels run when a manually assembled module violates its routing
-    /// invariants or the input is empty or has the wrong hidden width.
+    /// invariants or the input is empty or has the wrong hidden width, and a
+    /// shape error naming the token when router scores contain NaN.
     pub fn forward(&self, input: Tensor<B, 3>) -> Result<SparseMoeOutput<B>> {
         let [batch, sequence, hidden] = input.dims();
         if batch == 0 || sequence == 0 || hidden != self.hidden_size {
@@ -644,103 +809,65 @@ impl<B: Backend> SparseMoe<B> {
                 format!("{batch} * {sequence}"),
             )
         })?;
+        let residual_dtype = input.dtype();
         let flat_input = input.clone().reshape([tokens, hidden]);
-        let router_logits = operations::linear(input, &self.router)?;
-        // Routing ranks the softmax probabilities in FP32. Casting before top-k
-        // can collapse nearby scores in F16/BF16 and silently select a different
-        // expert. The explicit weighting policy below controls the later rounding
-        // boundary without changing this discrete selection invariant.
-        let probabilities = softmax(router_logits.clone().cast(DType::F32), 2);
-        let (selected_weights, selected_experts) =
-            deterministic_top_k(probabilities.clone(), self.experts_per_token);
-        let mut flat_weights = selected_weights
-            .clone()
-            .reshape([tokens, self.experts_per_token]);
-        if self.renormalize_selected {
-            let denominator = flat_weights.clone().sum_dim(1).clamp_min(f32::MIN_POSITIVE);
-            flat_weights = flat_weights / denominator;
-        }
-        flat_weights = flat_weights * self.routed_scale;
-        let precision = match self.weighting_precision {
-            RoutedWeightingPrecision::Residual => {
-                flat_weights = flat_weights.cast(flat_input.dtype());
-                RoutedExpertPrecision::uniform(flat_input.dtype())
-            }
-            RoutedWeightingPrecision::Fp32ThenResidual => {
-                RoutedExpertPrecision::fp32_weights_round_each(flat_input.dtype())
-            }
+        let router_logits = router_logits(input, &self.router, self.routing.projection)?;
+        // Routing ranks and normalizes in FP32: casting before top-k could
+        // collapse nearby scores in F16/BF16 and silently select a different
+        // expert. The weighting policy below controls the later rounding point.
+        let decision = self.router_config().route(
+            router_logits.clone().reshape([tokens, self.routed.len()]),
+            self.correction_bias.as_ref().map(Param::val),
+        )?;
+        let (flat_weights, precision) = match self.weighting_precision {
+            RoutedWeightingPrecision::Residual => (
+                decision.weights.cast(residual_dtype),
+                RoutedExpertPrecision::uniform(residual_dtype),
+            ),
+            RoutedWeightingPrecision::Fp32ThenResidual => (
+                decision.weights,
+                RoutedExpertPrecision::fp32_weights_round_each(residual_dtype),
+            ),
         };
-        let flat_experts = selected_experts
-            .clone()
-            .reshape([tokens, self.experts_per_token]);
         let dispatch = self.dispatch_selected_experts_with_precision(
             flat_input.clone(),
             flat_weights.clone(),
-            flat_experts,
+            decision.experts.clone(),
+            Some(decision.non_finite_tokens),
             precision,
         )?;
-
-        let mut shared_output =
-            Tensor::<B, 2>::zeros([tokens, hidden], (&flat_input.device(), flat_input.dtype()));
-        for expert in &self.shared {
-            shared_output = shared_output + expert.forward(flat_input.clone())?;
-        }
-        let selected_weights = flat_weights.reshape([batch, sequence, self.experts_per_token]);
+        let hidden_state = match self.shared_output(flat_input)? {
+            Some(shared) => dispatch.hidden_state + shared,
+            None => dispatch.hidden_state,
+        };
+        let k = self.experts_per_token;
         Ok(SparseMoeOutput {
-            hidden_state: (dispatch.hidden_state + shared_output)
-                .reshape([batch, sequence, hidden]),
+            hidden_state: hidden_state.reshape([batch, sequence, hidden]),
             router_logits,
-            selected_experts,
-            selected_weights,
+            selected_experts: decision.experts.reshape([batch, sequence, k]),
+            selected_weights: flat_weights.reshape([batch, sequence, k]),
             expert_token_counts: dispatch.expert_token_counts,
             evaluated_experts: dispatch.evaluated_experts,
         })
     }
-}
 
-/// Selects the largest `k` values with a backend-independent tie rule.
-///
-/// Burn's native top-k kernels intentionally leave equal-value ordering to the
-/// backend. Routing must instead be reproducible across Flex, WGPU, and CUDA,
-/// because changing one tied expert changes an entire matrix computation. Each
-/// iteration therefore finds the maximum value, resolves its equality set to
-/// the smallest expert index, gathers that probability, and masks precisely the
-/// chosen index. The complexity is `O(kE)` and does not allocate the `O(E^2)`
-/// pairwise-ranking tensor that a lexicographic sort would require.
-pub(crate) fn deterministic_top_k<B: Backend>(
-    probabilities: Tensor<B, 3>,
-    k: usize,
-) -> (Tensor<B, 3>, Tensor<B, 3, Int>) {
-    let [batch, sequence, experts] = probabilities.dims();
-    let device = probabilities.device();
-    let expert_ids = Tensor::<B, 1, Int>::arange(0..experts as i64, &device)
-        .reshape([1, 1, experts])
-        .expand([batch, sequence, experts]);
-    let mut remaining = probabilities.clone();
-    let mut selected_weights = Vec::with_capacity(k);
-    let mut selected_experts = Vec::with_capacity(k);
-
-    for _ in 0..k {
-        let maximum = remaining.clone().max_dim(2);
-        let tied = remaining.clone().equal(maximum);
-        let selected = expert_ids
-            .clone()
-            .mask_fill(tied.bool_not(), experts as i64)
-            .min_dim(2);
-        selected_weights.push(probabilities.clone().gather(2, selected.clone()));
-        selected_experts.push(selected.clone());
-        remaining = remaining.mask_fill(
-            expert_ids
-                .clone()
-                .equal(selected.expand([batch, sequence, experts])),
-            f32::NEG_INFINITY,
-        );
+    /// Sums the always-active shared experts and applies the optional sigmoid gate.
+    ///
+    /// Returns `None` without allocating when there are no shared experts.
+    fn shared_output(&self, flat_input: Tensor<B, 2>) -> Result<Option<Tensor<B, 2>>> {
+        let mut experts = self.shared.iter();
+        let Some(first) = experts.next() else {
+            return Ok(None);
+        };
+        let mut sum = first.forward(flat_input.clone())?;
+        for expert in experts {
+            sum = sum + expert.forward(flat_input.clone())?;
+        }
+        Ok(Some(match &self.shared_expert_gate {
+            Some(gate) => sum * activation::sigmoid(operations::linear(flat_input, gate)?),
+            None => sum,
+        }))
     }
-
-    (
-        Tensor::cat(selected_weights, 2),
-        Tensor::cat(selected_experts, 2),
-    )
 }
 
 #[cfg(test)]

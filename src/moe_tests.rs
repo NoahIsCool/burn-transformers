@@ -7,8 +7,9 @@ use burn::{
 };
 
 use super::{
-    RoutedExpertPrecision, RoutedWeightingPrecision, SparseMoe, SparseMoeConfig,
-    group_selected_experts, load_balancing_loss, weighted_expert_contribution,
+    ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore, RoutedExpertPrecision,
+    RoutedWeightingPrecision, RouterScoring, SparseMoe, SparseMoeConfig, group_selected_experts,
+    load_balancing_loss, weighted_expert_contribution,
 };
 
 /// Installs zero parameters without advancing Burn's process-wide test RNG.
@@ -594,5 +595,393 @@ proptest::proptest! {
             }
         }
         proptest::prop_assert!(visited.into_iter().all(|seen| seen));
+    }
+}
+
+/// Fills every parameter with a distinct smooth pattern so routing is non-trivial.
+fn patterned_module(
+    config: SparseMoeConfig,
+    device: &<Flex as BackendTypes>::Device,
+) -> SparseMoe<Flex> {
+    let mut module = config.init::<Flex>(device).expect("valid MoE");
+    let pattern = |shape: [usize; 2], seed: f32| {
+        let count = shape[0] * shape[1];
+        Param::from_tensor(
+            (Tensor::<Flex, 1, Int>::arange(0..count as i64, device)
+                .float()
+                .reshape(shape)
+                .mul_scalar(0.73)
+                .add_scalar(seed))
+            .sin()
+            .mul_scalar(0.8),
+        )
+    };
+    module.router.weight = pattern([config.hidden_size, config.routed_experts], 0.1);
+    for (index, expert) in module
+        .routed
+        .iter_mut()
+        .chain(module.shared.iter_mut())
+        .enumerate()
+    {
+        let seed = index as f32 * 1.7;
+        expert.gate_proj.weight = pattern([config.hidden_size, config.intermediate_size], seed);
+        expert.up_proj.weight = pattern([config.hidden_size, config.intermediate_size], seed + 0.5);
+        expert.down_proj.weight =
+            pattern([config.intermediate_size, config.hidden_size], seed + 0.9);
+    }
+    module
+}
+
+/// The pre-refactor dispatcher: one upload pair, select, and scatter-add per expert.
+fn legacy_dispatch(
+    module: &SparseMoe<Flex>,
+    flat_input: Tensor<Flex, 2>,
+    flat_weights: Tensor<Flex, 2>,
+    selected: Tensor<Flex, 2, Int>,
+    precision: RoutedExpertPrecision,
+) -> Tensor<Flex, 2> {
+    use burn::tensor::{IndexingUpdateOp, TensorData};
+    let [tokens, hidden] = flat_input.dims();
+    let device = flat_input.device();
+    let assignments = flat_weights.dims()[0] * flat_weights.dims()[1];
+    let groups = group_selected_experts(selected, module.routed.len()).unwrap();
+    let flat_weights = flat_weights.reshape([assignments]);
+    let mut state =
+        Tensor::<Flex, 2>::zeros([tokens, hidden], (&device, precision.accumulation_dtype));
+    for (expert, group) in module.routed.iter().zip(groups) {
+        let count = group.token_indices.len();
+        if count == 0 {
+            continue;
+        }
+        let tokens = Tensor::<Flex, 1, Int>::from_data(
+            TensorData::new(group.token_indices, [count]),
+            &device,
+        );
+        let weights = Tensor::<Flex, 1, Int>::from_data(
+            TensorData::new(group.weight_indices, [count]),
+            &device,
+        );
+        let weights = flat_weights
+            .clone()
+            .select(0, weights)
+            .unsqueeze_dim::<2>(1);
+        let output = expert
+            .forward(flat_input.clone().select(0, tokens.clone()))
+            .unwrap();
+        let contribution = weighted_expert_contribution(output, weights, precision);
+        state = state.select_assign(0, tokens, contribution, IndexingUpdateOp::Add);
+    }
+    state
+}
+
+/// Batched dispatch is bit-identical to the per-expert loop, including repeated experts and F16 sums.
+#[test]
+fn batched_dispatch_is_bit_identical_to_the_per_expert_loop() {
+    let device = Default::default();
+    let module = patterned_module(SparseMoeConfig::new(6, 5, 8, 3), &device);
+    let flat_input = (Tensor::<Flex, 1, Int>::arange(0..42, &device)
+        .float()
+        .reshape([7, 6])
+        .mul_scalar(0.41))
+    .cos();
+    // Token 1 repeats expert 1 in two slots; experts 4 and 7 receive nothing.
+    let selected = Tensor::<Flex, 2, Int>::from_ints(
+        [
+            [0, 2, 5],
+            [1, 1, 3],
+            [6, 0, 2],
+            [3, 5, 6],
+            [2, 2, 0],
+            [5, 3, 1],
+            [0, 1, 2],
+        ],
+        &device,
+    );
+    let weights = (Tensor::<Flex, 1, Int>::arange(0..21, &device)
+        .float()
+        .reshape([7, 3])
+        .mul_scalar(0.29))
+    .sin()
+    .abs();
+    for precision in [
+        RoutedExpertPrecision::uniform(DType::F32),
+        RoutedExpertPrecision::uniform(DType::F16),
+        RoutedExpertPrecision::fp32_weights_round_each(DType::F16),
+    ] {
+        let batched = module
+            .dispatch_selected_experts_with_precision(
+                flat_input.clone(),
+                weights.clone(),
+                selected.clone(),
+                None,
+                precision,
+            )
+            .unwrap();
+        assert_eq!(batched.expert_token_counts, [4, 4, 5, 3, 0, 3, 2, 0]);
+        assert_eq!(batched.evaluated_experts, 6);
+        let legacy = legacy_dispatch(
+            &module,
+            flat_input.clone(),
+            weights.clone(),
+            selected.clone(),
+            precision,
+        );
+        assert_eq!(
+            batched.hidden_state.into_data(),
+            legacy.into_data(),
+            "{precision:?}"
+        );
+    }
+}
+
+/// A NaN router score is a contextual error instead of an out-of-range gather.
+#[test]
+fn nan_router_scores_are_reported_with_the_token() {
+    let device = Default::default();
+    let mut module = deterministic_module(SparseMoeConfig::new(2, 2, 4, 2), &device);
+    module.router.weight = Param::from_tensor(Tensor::from_floats(
+        [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        &device,
+    ));
+    let input = Tensor::<Flex, 3>::from_floats([[[1.0, 2.0], [f32::NAN, 0.0]]], &device);
+    let error = module.forward(input).expect_err("NaN logits");
+    assert!(
+        matches!(&error, crate::Error::Shape { tensor, actual, .. }
+        if tensor == "moe.router_scores" && actual.contains("flattened token 1")),
+        "{error}"
+    );
+    let infinite = Tensor::<Flex, 3>::from_floats([[[f32::INFINITY, 0.0]]], &device);
+    let error = module
+        .forward(infinite)
+        .expect_err("softmax of +inf is NaN");
+    assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "moe.router_scores"));
+}
+
+/// Sigmoid group-limited routing selects with the frozen correction bias but mixes uncorrected scores.
+#[test]
+fn correction_bias_steers_selection_but_not_weights() {
+    let device = Default::default();
+    let mut config = SparseMoeConfig::new(2, 2, 4, 1);
+    config.renormalize_selected = false;
+    config.routing.scoring = RouterScoring::Sigmoid;
+    config.routing.correction_bias = true;
+    config.routing.selection = ExpertSelection::GroupLimited(GroupLimitedSelection {
+        groups: 2,
+        top_groups: 1,
+        group_score: GroupScore::TopTwoSum,
+        pruned_score: PrunedExpertScore::NegativeInfinity,
+    });
+    let mut module = deterministic_module(config.clone(), &device);
+    let bias = module.correction_bias.as_ref().expect("bias allocated");
+    assert_eq!(bias.dims(), [4]);
+    assert_eq!(bias.val().dtype(), DType::F32);
+    assert!(!bias.is_require_grad());
+    // Zero router weights give every expert the score sigmoid(0) = 0.5; the
+    // bias alone makes expert 3 (group 1) win.
+    module.correction_bias = Some(
+        Param::from_tensor(Tensor::from_floats([0.0, 0.1, 0.0, 0.3], &device))
+            .set_require_grad(false),
+    );
+    let output = module
+        .forward(Tensor::<Flex, 3>::ones([1, 2, 2], &device))
+        .unwrap();
+    assert_eq!(
+        output.selected_experts.into_data().to_vec::<i32>().unwrap(),
+        [3, 3]
+    );
+    assert_eq!(
+        output.selected_weights.into_data().to_vec::<f32>().unwrap(),
+        [0.5, 0.5]
+    );
+    let mut missing = config;
+    missing.routing.correction_bias = false;
+    let mut module = deterministic_module(missing, &device);
+    module.routing.correction_bias = true;
+    assert!(matches!(module.forward(Tensor::ones([1, 1, 2], &device)),
+        Err(crate::Error::Configuration { field, .. }) if field == "moe.router.correction_bias"));
+}
+
+/// The optional shared-expert gate multiplies the shared sum by `sigmoid(x w)`.
+#[test]
+fn shared_expert_gate_scales_the_shared_sum() {
+    let device = Default::default();
+    let mut config = SparseMoeConfig::new(1, 1, 2, 1);
+    config.shared_experts = 1;
+    config.shared_expert_gate = true;
+    config.activation = crate::architecture::Activation::Relu;
+    let mut module = deterministic_module(config.clone(), &device);
+    for expert in module.routed.iter_mut().chain(module.shared.iter_mut()) {
+        expert.gate_proj.weight = Param::from_tensor(Tensor::ones([1, 1], &device));
+        expert.up_proj.weight = Param::from_tensor(Tensor::ones([1, 1], &device));
+        expert.down_proj.weight = Param::from_tensor(Tensor::ones([1, 1], &device));
+    }
+    let gate = module.shared_expert_gate.as_mut().expect("gate allocated");
+    gate.weight = Param::from_tensor(Tensor::from_floats([[2.0]], &device));
+    let output = module
+        .forward(Tensor::<Flex, 3>::from_floats([[[3.0]]], &device))
+        .unwrap();
+    // Each expert computes ReLU(x) * x = 9; routed weight 1; shared gated by sigmoid(6).
+    let expected = 9.0 + 9.0 / (1.0 + (-6.0_f32).exp());
+    let actual = output.hidden_state.into_data().to_vec::<f32>().unwrap()[0];
+    assert!((actual - expected).abs() < 1e-5, "{actual} vs {expected}");
+
+    config.shared_experts = 0;
+    assert!(matches!(config.validate(),
+        Err(crate::Error::Configuration { field, .. }) if field == "moe.shared_expert_gate"));
+}
+
+/// Legacy serialized configurations default the new routing fields.
+#[test]
+fn routing_fields_are_backward_compatible() {
+    let config = SparseMoeConfig::new(4, 8, 3, 2);
+    let mut legacy = serde_json::to_value(&config).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("routing");
+    object.remove("shared_expert_gate");
+    let decoded: SparseMoeConfig = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded, config);
+    assert_eq!(
+        decoded.router_config().policy,
+        super::RoutingPolicy::default()
+    );
+}
+
+/// A single-expert bank needs no one-hot encoding and every slot counts as assigned.
+#[test]
+fn load_balancing_loss_supports_a_single_expert() {
+    let device = Default::default();
+    let loss = load_balancing_loss(
+        Tensor::<Flex, 3>::zeros([1, 3, 1], &device),
+        Tensor::<Flex, 3, Int>::zeros([1, 3, 1], &device),
+        None,
+    )
+    .unwrap()
+    .into_scalar();
+    assert!((loss - 1.0).abs() < 1e-6);
+}
+
+/// Marks the re-executed test binary that runs the half-precision child.
+const HALF_DEFAULT_CHILD: &str = "TRANSFORMERS_MOE_HALF_DEFAULT_CHILD";
+
+/// Routing and auxiliary losses stay explicit-F32 when the device default float is F16.
+///
+/// Burn's default dtype is process-global per device, so the check runs in a
+/// fresh child process of this test binary.
+#[test]
+fn routing_and_auxiliary_loss_survive_half_precision_default_dtype() {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "moe::tests::half_precision_default_child",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env(HALF_DEFAULT_CHILD, "1")
+        .output()
+        .expect("spawn child test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Child half of [`routing_and_auxiliary_loss_survive_half_precision_default_dtype`].
+#[test]
+#[ignore = "runs in a fresh process spawned by routing_and_auxiliary_loss_survive_half_precision_default_dtype"]
+fn half_precision_default_child() {
+    use crate::architecture::TokenMask;
+    use burn::tensor::Bool;
+    if std::env::var_os(HALF_DEFAULT_CHILD).is_none() {
+        return;
+    }
+    let device = Default::default();
+    burn::tensor::set_default_dtypes::<Flex>(&device, DType::F16, burn::tensor::IntDType::I32)
+        .expect("fresh process has no tensors yet");
+    let module = deterministic_module(SparseMoeConfig::new(4, 8, 3, 2), &device);
+    let output = module
+        .forward(Tensor::<Flex, 3>::ones([1, 2, 4], &device))
+        .expect("F16 residual stream routes");
+    assert_eq!(output.hidden_state.dtype(), DType::F16);
+    let mask = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        [[true, false]].into(),
+        &device,
+    ));
+    let loss = output
+        .load_balancing_loss(Some(&mask))
+        .expect("masked loss");
+    assert_eq!(loss.dtype(), DType::F32);
+    assert!(loss.into_scalar().is_finite());
+}
+
+/// Measures batched versus per-expert dispatch on prefill-sized routing problems.
+///
+/// Run with `cargo test --release --lib moe::tests::dispatch_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement; run explicitly in release mode"]
+fn dispatch_timing() {
+    let device = Default::default();
+    // (tokens, experts, top_k, hidden, intermediate): expert-bound and dispatch-bound shapes.
+    for (tokens, experts, top_k, hidden, intermediate) in
+        [(1024, 64, 8, 64, 32), (2048, 128, 8, 16, 4)]
+    {
+        let module = patterned_module(
+            SparseMoeConfig::new(hidden, intermediate, experts, top_k),
+            &device,
+        );
+        let flat_input = (Tensor::<Flex, 1, Int>::arange(0..(tokens * hidden) as i64, &device)
+            .float()
+            .reshape([tokens, hidden])
+            .mul_scalar(0.01))
+        .sin();
+        // Distinct experts per token keep the comparison faithful to router output.
+        let ids = (0..tokens)
+            .flat_map(|token| {
+                let first = (token * 13) % experts;
+                (0..top_k).map(move |slot| ((first + slot * 3) % experts) as i32)
+            })
+            .collect::<Vec<_>>();
+        let selected = Tensor::<Flex, 2, Int>::from_data(
+            burn::tensor::TensorData::new(ids, [tokens, top_k]),
+            &device,
+        );
+        let weights =
+            Tensor::<Flex, 2>::ones([tokens, top_k], &device).mul_scalar(1.0 / top_k as f32);
+        let precision = RoutedExpertPrecision::uniform(DType::F32);
+        let time = |run: &dyn Fn() -> Tensor<Flex, 2>| {
+            let _warm = run().into_data();
+            let start = std::time::Instant::now();
+            for _ in 0..5 {
+                let _ = run().into_data();
+            }
+            start.elapsed() / 5
+        };
+        let batched = time(&|| {
+            module
+                .dispatch_selected_experts_with_precision(
+                    flat_input.clone(),
+                    weights.clone(),
+                    selected.clone(),
+                    None,
+                    precision,
+                )
+                .unwrap()
+                .hidden_state
+        });
+        let legacy = time(&|| {
+            legacy_dispatch(
+                &module,
+                flat_input.clone(),
+                weights.clone(),
+                selected.clone(),
+                precision,
+            )
+        });
+        println!(
+            "tokens={tokens} experts={experts} top_k={top_k} hidden={hidden} intermediate={intermediate}: \
+             batched {batched:?}, per-expert {legacy:?}, speedup {:.2}x",
+            legacy.as_secs_f64() / batched.as_secs_f64()
+        );
     }
 }
