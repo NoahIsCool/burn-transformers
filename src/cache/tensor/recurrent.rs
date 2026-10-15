@@ -8,12 +8,14 @@
 //! accepted terminal snapshot, rather than trying to subtract rejected updates.
 
 use core::num::NonZeroUsize;
+use core::ops::Range;
 
-use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend};
 
+use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
 
-use super::kv::{selection_tensor, validate_batch, validate_reorder_indices};
+use super::kv::validate_batch;
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
@@ -223,6 +225,34 @@ pub(crate) struct PreparedRecurrentStateWrite<B: Backend> {
     matrix: Tensor<B, 4>,
     /// Validated single-row replacement convolution history.
     convolution: Tensor<B, 3>,
+}
+
+/// A validated whole-batch terminal-state replacement.
+#[derive(Debug)]
+pub(crate) struct PreparedRecurrentBatchWrite<B: Backend> {
+    /// Destination layer.
+    layer: usize,
+    /// New matrices `[batch, heads, rows, columns]`.
+    matrix: Tensor<B, 4>,
+    /// New histories `[batch, channels, width]`.
+    convolution: Tensor<B, 3>,
+    /// Rows that keep committed state (`true`), or `None` when all rows change.
+    keep: Option<Tensor<B, 1, Bool>>,
+}
+
+/// A validated staging of post-token snapshots for a contiguous row range.
+#[derive(Debug)]
+pub(crate) struct PreparedRecurrentStage<B: Backend> {
+    /// Destination layer.
+    layer: usize,
+    /// Destination rows; the input's batch axis covers exactly these rows.
+    rows: Range<usize>,
+    /// Snapshot slots `[start, start + tokens)` receiving the input.
+    snapshots: Range<usize>,
+    /// Matrix snapshots `[rows, tokens, heads, rows, columns]`.
+    matrices: Tensor<B, 5>,
+    /// Convolution snapshots `[rows, tokens, channels, width]`.
+    convolutions: Tensor<B, 4>,
 }
 
 /// One sequence's recurrent state selected for the next decode step.
@@ -505,8 +535,11 @@ impl<B: Backend> RecurrentStateCache<B> {
 
     /// Borrows a layer's whole-batch matrix and convolution state.
     ///
-    /// This is the preferred decode interface: one model kernel can update all
-    /// batch rows without a host-side loop over sequences.
+    /// Batched models read every row at once here (or through
+    /// [`read_working_batch`](Self::read_working_batch) during speculation)
+    /// and publish all rows with one
+    /// [`TensorStepWrites::push_recurrent_batch`](super::TensorStepWrites::push_recurrent_batch),
+    /// avoiding a host-side loop over sequences.
     ///
     /// # Errors
     ///
@@ -532,37 +565,93 @@ impl<B: Backend> RecurrentStateCache<B> {
         matrix: Tensor<B, 4>,
         convolution: Tensor<B, 3>,
     ) -> TensorCacheResult<()> {
+        let rows = self.config.sequence_count();
+        let write = self.prepare_batch_state(layer, matrix, convolution, &vec![true; rows])?;
+        self.apply_batch_state_writes(vec![write]);
+        Ok(())
+    }
+
+    /// Validates a whole-batch terminal-state replacement that keeps inactive rows.
+    ///
+    /// Rows with `active[b] == false` keep their committed state: applying
+    /// selects them from the old tensor with one `mask_where`, so a ragged
+    /// step needs no per-row assignment. When every row is active the input
+    /// replaces the state with a single full-range assignment.
+    pub(crate) fn prepare_batch_state(
+        &self,
+        layer: usize,
+        matrix: Tensor<B, 4>,
+        convolution: Tensor<B, 3>,
+        active: &[bool],
+    ) -> TensorCacheResult<PreparedRecurrentBatchWrite<B>> {
         if self.staging_active {
             return Err(TensorCacheError::TransactionActive {
                 operation: "write committed recurrent state",
             });
         }
         self.validate_batch_state_pair(layer, &matrix, &convolution)?;
+        let rows = self.config.sequence_count();
+        if active.len() != rows {
+            return Err(DecodeStateError::SequenceCountMismatch {
+                expected: rows,
+                actual: active.len(),
+            }
+            .into());
+        }
+        let keep = active.contains(&false).then(|| {
+            Tensor::<B, 1, Bool>::from_data(
+                TensorData::new(active.iter().map(|&row| !row).collect::<Vec<_>>(), [rows]),
+                &self.device,
+            )
+        });
+        Ok(PreparedRecurrentBatchWrite {
+            layer,
+            matrix,
+            convolution,
+            keep,
+        })
+    }
+
+    /// Applies prepared whole-batch state writes; every fallible check already ran.
+    pub(crate) fn apply_batch_state_writes(&mut self, writes: Vec<PreparedRecurrentBatchWrite<B>>) {
         let spec = self.spec;
-        let batch_size = self.config.sequence_count();
-        let state = self.layer_mut(layer)?;
-        state.matrix.inplace(|tensor| {
-            tensor.slice_assign(
-                [
-                    0..batch_size,
-                    0..spec.state_heads(),
-                    0..spec.state_rows(),
-                    0..spec.state_columns(),
-                ],
-                matrix,
-            )
-        });
-        state.convolution.inplace(|tensor| {
-            tensor.slice_assign(
-                [
-                    0..batch_size,
-                    0..spec.convolution_channels(),
-                    0..spec.convolution_width(),
-                ],
-                convolution,
-            )
-        });
-        Ok(())
+        let rows = self.config.sequence_count();
+        for write in writes {
+            let state = &mut self.layers[write.layer];
+            let (mut matrix, mut convolution) = (write.matrix, write.convolution);
+            if let Some(keep) = write.keep {
+                let matrix_mask = keep
+                    .clone()
+                    .reshape([rows, 1, 1, 1])
+                    .expand(spec.matrix_shape(rows));
+                let convolution_mask = keep
+                    .reshape([rows, 1, 1])
+                    .expand(spec.convolution_shape(rows));
+                matrix = matrix.mask_where(matrix_mask, state.matrix.clone());
+                convolution = convolution.mask_where(convolution_mask, state.convolution.clone());
+            }
+            state.matrix.inplace(|tensor| {
+                tensor.slice_assign(
+                    [
+                        0..rows,
+                        0..spec.state_heads(),
+                        0..spec.state_rows(),
+                        0..spec.state_columns(),
+                    ],
+                    matrix,
+                )
+            });
+            state.convolution.inplace(|tensor| {
+                tensor.slice_assign(
+                    [
+                        0..rows,
+                        0..spec.convolution_channels(),
+                        0..spec.convolution_width(),
+                    ],
+                    convolution,
+                )
+            });
+        }
     }
 
     /// Reads one sequence's committed recurrent terminal state.
@@ -648,11 +737,20 @@ impl<B: Backend> RecurrentStateCache<B> {
 
     /// Reads the latest working recurrent state for the entire batch.
     ///
-    /// A synthetic snapshot axis concatenates committed state at index zero
-    /// with proposal snapshots at indices `1..`. A single device-side
-    /// [`Tensor::gather_nd`] then selects `(batch_row, staged_length)` for every
-    /// row, supporting ragged proposals without host-side tensor slicing.
-    /// Outside staging this only clones the committed tensor handles.
+    /// Row `b` with `s_b` staged snapshots reads snapshot `s_b - 1`, or its
+    /// committed state when `s_b == 0`. Three cases avoid touching more state
+    /// than they return:
+    ///
+    /// * no row staged (or no transaction): the committed handles are cloned;
+    /// * every row staged the same `s > 0`: one slice of snapshot `s - 1` over
+    ///   the whole batch;
+    /// * ragged: the contiguous `[batch, proposal, ...]` staging tensor is
+    ///   viewed as `[batch * proposal, ...]` and one `select` gathers flat row
+    ///   `b * proposal + max(s_b, 1) - 1`; rows with `s_b == 0` then take their
+    ///   committed state through one `mask_where`.
+    ///
+    /// Each case copies at most twice the returned state and never
+    /// concatenates committed state onto the staging buffer.
     ///
     /// # Errors
     ///
@@ -664,11 +762,12 @@ impl<B: Backend> RecurrentStateCache<B> {
     ) -> TensorCacheResult<RecurrentBatchStateRead<B>> {
         let state = self.layer(layer)?;
         let staged_lengths = &self.staged_lengths[layer];
-        if !self.staging_active || staged_lengths.iter().all(|&length| length == 0) {
+        let staged_rows: Vec<bool> = staged_lengths.iter().map(|&length| length > 0).collect();
+        if !self.staging_active || !staged_rows.contains(&true) {
             return Ok(RecurrentBatchStateRead {
                 matrix: state.matrix.clone(),
                 convolution: state.convolution.clone(),
-                staged_rows: vec![false; self.config.sequence_count()],
+                staged_rows,
             });
         }
         let staged_matrix = state
@@ -679,43 +778,76 @@ impl<B: Backend> RecurrentStateCache<B> {
             .staged_convolution
             .as_ref()
             .ok_or(TensorCacheError::StagingDisabled)?;
-        let mut coordinates = Vec::with_capacity(self.config.sequence_count() * 2);
-        for (sequence, &staged_length) in staged_lengths.iter().enumerate() {
-            coordinates.push(i32::try_from(sequence).map_err(|_| {
-                TensorCacheError::TensorIndexOverflow {
-                    axis: "batch",
-                    index: sequence,
-                }
-            })?);
-            coordinates.push(i32::try_from(staged_length).map_err(|_| {
-                TensorCacheError::TensorIndexOverflow {
-                    axis: "proposal",
-                    index: staged_length,
-                }
-            })?);
+        let batch_size = self.config.sequence_count();
+        let spec = self.spec;
+        if let Some(snapshot) = uniform_snapshot(staged_lengths) {
+            return Ok(RecurrentBatchStateRead {
+                matrix: staged_matrix
+                    .clone()
+                    .slice([
+                        0..batch_size,
+                        snapshot..snapshot + 1,
+                        0..spec.state_heads(),
+                        0..spec.state_rows(),
+                        0..spec.state_columns(),
+                    ])
+                    .reshape(spec.matrix_shape(batch_size)),
+                convolution: staged_convolution
+                    .clone()
+                    .slice([
+                        0..batch_size,
+                        snapshot..snapshot + 1,
+                        0..spec.convolution_channels(),
+                        0..spec.convolution_width(),
+                    ])
+                    .reshape(spec.convolution_shape(batch_size)),
+                staged_rows,
+            });
         }
-        let indices = Tensor::<B, 2, Int>::from_ints(
-            TensorData::new(coordinates, [self.config.sequence_count(), 2]),
-            &self.device,
-        );
-        let matrix_source = Tensor::cat(
-            vec![
-                state.matrix.clone().unsqueeze_dim::<5>(1),
-                staged_matrix.clone(),
-            ],
-            1,
-        );
-        let convolution_source = Tensor::cat(
-            vec![
-                state.convolution.clone().unsqueeze_dim::<4>(1),
-                staged_convolution.clone(),
-            ],
-            1,
-        );
+
+        let flat_rows = flat_snapshot_rows(staged_lengths, spec.staging_capacity())?;
+        let selector =
+            Tensor::<B, 1, Int>::from_ints(TensorData::new(flat_rows, [batch_size]), &self.device);
+        let flat = batch_size * spec.staging_capacity();
+        let mut matrix = staged_matrix
+            .clone()
+            .reshape([
+                flat,
+                spec.state_heads(),
+                spec.state_rows(),
+                spec.state_columns(),
+            ])
+            .select(0, selector.clone());
+        let mut convolution = staged_convolution
+            .clone()
+            .reshape([flat, spec.convolution_channels(), spec.convolution_width()])
+            .select(0, selector);
+        if staged_rows.contains(&false) {
+            // `true` marks rows without a proposal, which keep committed state.
+            let committed_rows = Tensor::<B, 1, Bool>::from_data(
+                TensorData::new(
+                    staged_rows
+                        .iter()
+                        .map(|&staged| !staged)
+                        .collect::<Vec<_>>(),
+                    [batch_size],
+                ),
+                &self.device,
+            );
+            let matrix_mask = committed_rows
+                .clone()
+                .reshape([batch_size, 1, 1, 1])
+                .expand(spec.matrix_shape(batch_size));
+            let convolution_mask = committed_rows
+                .reshape([batch_size, 1, 1])
+                .expand(spec.convolution_shape(batch_size));
+            matrix = matrix.mask_where(matrix_mask, state.matrix.clone());
+            convolution = convolution.mask_where(convolution_mask, state.convolution.clone());
+        }
         Ok(RecurrentBatchStateRead {
-            matrix: matrix_source.gather_nd::<2, 4>(indices.clone()),
-            convolution: convolution_source.gather_nd::<2, 3>(indices),
-            staged_rows: staged_lengths.iter().map(|&length| length > 0).collect(),
+            matrix,
+            convolution,
+            staged_rows,
         })
     }
 
@@ -806,62 +938,8 @@ impl<B: Backend> RecurrentStateCache<B> {
         matrices: Tensor<B, 5>,
         convolutions: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
-        if !self.staging_active {
-            return Err(TensorCacheError::TransactionNotActive);
-        }
-        let token_count = self.validate_snapshot_pair(layer, sequence, &matrices, &convolutions)?;
-        let start = self.staged_lengths[layer][sequence];
-        let end =
-            start
-                .checked_add(token_count)
-                .ok_or(TensorCacheError::StagingCapacityExceeded {
-                    requested: usize::MAX,
-                    capacity: self.spec.staging_capacity(),
-                })?;
-        if end > self.spec.staging_capacity() {
-            return Err(TensorCacheError::StagingCapacityExceeded {
-                requested: end,
-                capacity: self.spec.staging_capacity(),
-            });
-        }
-        if token_count == 0 {
-            return Ok(());
-        }
-
-        let spec = self.spec;
-        let state = self.layer_mut(layer)?;
-        let staged_matrix = state
-            .staged_matrix
-            .as_mut()
-            .ok_or(TensorCacheError::StagingDisabled)?;
-        let staged_convolution = state
-            .staged_convolution
-            .as_mut()
-            .ok_or(TensorCacheError::StagingDisabled)?;
-        staged_matrix.inplace(|tensor| {
-            tensor.slice_assign(
-                [
-                    sequence..sequence + 1,
-                    start..end,
-                    0..spec.state_heads(),
-                    0..spec.state_rows(),
-                    0..spec.state_columns(),
-                ],
-                matrices,
-            )
-        });
-        staged_convolution.inplace(|tensor| {
-            tensor.slice_assign(
-                [
-                    sequence..sequence + 1,
-                    start..end,
-                    0..spec.convolution_channels(),
-                    0..spec.convolution_width(),
-                ],
-                convolutions,
-            )
-        });
-        self.staged_lengths[layer][sequence] = end;
+        let stage = self.prepare_row_snapshots(layer, sequence, matrices, convolutions)?;
+        self.apply_snapshot_stages(vec![stage]);
         Ok(())
     }
 
@@ -883,10 +961,45 @@ impl<B: Backend> RecurrentStateCache<B> {
         matrices: Tensor<B, 5>,
         convolutions: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
+        let stage = self.prepare_batch_snapshots(layer, matrices, convolutions)?;
+        self.apply_snapshot_stages(vec![stage]);
+        Ok(())
+    }
+
+    /// Validates staging one row's `[1, tokens, ...]` snapshots without mutating storage.
+    pub(crate) fn prepare_row_snapshots(
+        &self,
+        layer: usize,
+        sequence: usize,
+        matrices: Tensor<B, 5>,
+        convolutions: Tensor<B, 4>,
+    ) -> TensorCacheResult<PreparedRecurrentStage<B>> {
         if !self.staging_active {
             return Err(TensorCacheError::TransactionNotActive);
         }
-        let token_count = self.validate_batch_snapshot_pair(layer, &matrices, &convolutions)?;
+        let tokens = self.validate_snapshot_pair(layer, sequence, &matrices, &convolutions)?;
+        let start = self.staged_lengths[layer][sequence];
+        self.prepare_stage(
+            layer,
+            sequence..sequence + 1,
+            start,
+            tokens,
+            matrices,
+            convolutions,
+        )
+    }
+
+    /// Validates staging a uniform `[batch, tokens, ...]` snapshot block without mutating storage.
+    pub(crate) fn prepare_batch_snapshots(
+        &self,
+        layer: usize,
+        matrices: Tensor<B, 5>,
+        convolutions: Tensor<B, 4>,
+    ) -> TensorCacheResult<PreparedRecurrentStage<B>> {
+        if !self.staging_active {
+            return Err(TensorCacheError::TransactionNotActive);
+        }
+        let tokens = self.validate_batch_snapshot_pair(layer, &matrices, &convolutions)?;
         let offsets = &self.staged_lengths[layer];
         let start = offsets[0];
         if let Some((sequence, &actual)) = offsets
@@ -901,59 +1014,81 @@ impl<B: Backend> RecurrentStateCache<B> {
                 actual,
             });
         }
-        let end =
-            start
-                .checked_add(token_count)
-                .ok_or(TensorCacheError::StagingCapacityExceeded {
-                    requested: usize::MAX,
-                    capacity: self.spec.staging_capacity(),
-                })?;
-        if end > self.spec.staging_capacity() {
-            return Err(TensorCacheError::StagingCapacityExceeded {
-                requested: end,
-                capacity: self.spec.staging_capacity(),
-            });
-        }
-        if token_count == 0 {
-            return Ok(());
-        }
+        let rows = 0..self.config.sequence_count();
+        self.prepare_stage(layer, rows, start, tokens, matrices, convolutions)
+    }
 
+    /// Checks staging capacity and allocation for snapshots `[start, start + tokens)` of `rows`.
+    fn prepare_stage(
+        &self,
+        layer: usize,
+        rows: Range<usize>,
+        start: usize,
+        tokens: usize,
+        matrices: Tensor<B, 5>,
+        convolutions: Tensor<B, 4>,
+    ) -> TensorCacheResult<PreparedRecurrentStage<B>> {
+        let end = start
+            .checked_add(tokens)
+            .filter(|&end| end <= self.spec.staging_capacity())
+            .ok_or(TensorCacheError::StagingCapacityExceeded {
+                requested: start.saturating_add(tokens),
+                capacity: self.spec.staging_capacity(),
+            })?;
+        let state = self.layer(layer)?;
+        if tokens > 0 && (state.staged_matrix.is_none() || state.staged_convolution.is_none()) {
+            return Err(TensorCacheError::StagingDisabled);
+        }
+        Ok(PreparedRecurrentStage {
+            layer,
+            rows,
+            snapshots: start..end,
+            matrices,
+            convolutions,
+        })
+    }
+
+    /// Applies prepared snapshot stages; every fallible check already ran.
+    pub(crate) fn apply_snapshot_stages(&mut self, stages: Vec<PreparedRecurrentStage<B>>) {
         let spec = self.spec;
-        let batch_size = self.config.sequence_count();
-        let state = self.layer_mut(layer)?;
-        let staged_matrix = state
-            .staged_matrix
-            .as_mut()
-            .ok_or(TensorCacheError::StagingDisabled)?;
-        let staged_convolution = state
-            .staged_convolution
-            .as_mut()
-            .ok_or(TensorCacheError::StagingDisabled)?;
-        staged_matrix.inplace(|tensor| {
-            tensor.slice_assign(
-                [
-                    0..batch_size,
-                    start..end,
-                    0..spec.state_heads(),
-                    0..spec.state_rows(),
-                    0..spec.state_columns(),
-                ],
-                matrices,
-            )
-        });
-        staged_convolution.inplace(|tensor| {
-            tensor.slice_assign(
-                [
-                    0..batch_size,
-                    start..end,
-                    0..spec.convolution_channels(),
-                    0..spec.convolution_width(),
-                ],
-                convolutions,
-            )
-        });
-        self.staged_lengths[layer].fill(end);
-        Ok(())
+        for stage in stages {
+            if stage.snapshots.is_empty() {
+                continue;
+            }
+            let state = &mut self.layers[stage.layer];
+            if let (Some(staged_matrix), Some(staged_convolution)) =
+                (&mut state.staged_matrix, &mut state.staged_convolution)
+            {
+                let rows = stage.rows.clone();
+                let snapshots = stage.snapshots.clone();
+                staged_matrix.inplace(|tensor| {
+                    tensor.slice_assign(
+                        [
+                            rows.clone(),
+                            snapshots.clone(),
+                            0..spec.state_heads(),
+                            0..spec.state_rows(),
+                            0..spec.state_columns(),
+                        ],
+                        stage.matrices,
+                    )
+                });
+                staged_convolution.inplace(|tensor| {
+                    tensor.slice_assign(
+                        [
+                            rows,
+                            snapshots,
+                            0..spec.convolution_channels(),
+                            0..spec.convolution_width(),
+                        ],
+                        stage.convolutions,
+                    )
+                });
+            }
+            for sequence in stage.rows {
+                self.staged_lengths[stage.layer][sequence] = stage.snapshots.end;
+            }
+        }
     }
 
     /// Returns whether proposal snapshots are currently active.
@@ -973,22 +1108,30 @@ impl<B: Backend> RecurrentStateCache<B> {
         Ok(self.staged_lengths[layer][sequence])
     }
 
+    /// Borrows every row's staged snapshot count for one layer.
+    pub(crate) fn staged_lengths_of(&self, layer: usize) -> TensorCacheResult<&[usize]> {
+        self.layer(layer)?;
+        Ok(&self.staged_lengths[layer])
+    }
+
     /// Rejects every non-zero intermediate recurrent rewind.
+    ///
+    /// The decode state has already rejected extensions. A terminal state can
+    /// only stay unchanged or restart from zero (the Verus-verified
+    /// `first_inexact_recurrent_rewind`).
     pub(crate) fn validate_truncate(
         &self,
         current: &[usize],
         requested: &[usize],
     ) -> TensorCacheResult<()> {
-        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
-            if to < from && to != 0 {
-                return Err(TensorCacheError::UnsafeRecurrentTruncate {
-                    sequence,
-                    current: from,
-                    requested: to,
-                });
-            }
+        match first_inexact_recurrent_rewind(current, requested) {
+            None => Ok(()),
+            Some(sequence) => Err(TensorCacheError::UnsafeRecurrentTruncate {
+                sequence,
+                current: current[sequence],
+                requested: requested[sequence],
+            }),
         }
-        Ok(())
     }
 
     /// Restores the exact initial state for rows truncated to zero.
@@ -1130,30 +1273,25 @@ impl<B: Backend> RecurrentStateCache<B> {
         self.staging_active = false;
     }
 
-    /// Reorders or duplicates every recurrent batch row.
-    pub(crate) fn reorder(&mut self, indices: &[usize]) -> TensorCacheResult<()> {
-        if self.staging_active {
-            return Err(TensorCacheError::TransactionActive {
-                operation: "reorder recurrent state",
-            });
-        }
-        validate_reorder_indices(indices, self.config.sequence_count())?;
-        let selection = selection_tensor::<B>(indices, &self.device)?;
+    /// Reorders or duplicates the committed recurrent batch rows.
+    ///
+    /// `selection` holds source rows already validated by the decode state.
+    /// Outside a transaction the snapshot tensors are unreachable scratch
+    /// space (every staged length is zero), so only committed state moves;
+    /// gathering `[batch, proposal, ...]` snapshots would cost `1 + S` times
+    /// the committed state for no observable effect.
+    pub(crate) fn reorder_rows(&mut self, selection: &Tensor<B, 1, Int>) {
+        debug_assert!(!self.staging_active);
+        debug_assert!(
+            self.staged_lengths
+                .iter()
+                .flatten()
+                .all(|&length| length == 0)
+        );
         for state in &mut self.layers {
-            select_batch_4(&mut state.matrix, &selection);
-            select_batch_3(&mut state.convolution, &selection);
-            if let Some(tensor) = &mut state.staged_matrix {
-                select_batch_5(tensor, &selection);
-            }
-            if let Some(tensor) = &mut state.staged_convolution {
-                select_batch_4(tensor, &selection);
-            }
+            select_batch_4(&mut state.matrix, selection);
+            select_batch_3(&mut state.convolution, selection);
         }
-        for lengths in &mut self.staged_lengths {
-            let old = lengths.clone();
-            *lengths = indices.iter().map(|&index| old[index]).collect();
-        }
-        Ok(())
     }
 
     /// Returns a checked immutable layer reference.
@@ -1164,14 +1302,6 @@ impl<B: Backend> RecurrentStateCache<B> {
                 layer,
                 layers: self.layers.len(),
             })
-    }
-
-    /// Returns a checked mutable layer reference.
-    fn layer_mut(&mut self, layer: usize) -> TensorCacheResult<&mut RecurrentLayer<B>> {
-        let layers = self.layers.len();
-        self.layers
-            .get_mut(layer)
-            .ok_or(TensorCacheError::LayerOutOfBounds { layer, layers })
     }
 
     /// Validates one committed matrix/convolution pair.
@@ -1349,6 +1479,31 @@ fn validate_sequence(sequence: usize, batch_size: usize) -> TensorCacheResult<()
     }
 }
 
+/// Returns the shared snapshot index `s - 1` when every row staged the same `s > 0`.
+fn uniform_snapshot(staged_lengths: &[usize]) -> Option<usize> {
+    let (&first, rest) = staged_lengths.split_first()?;
+    (first > 0 && rest.iter().all(|&length| length == first)).then(|| first - 1)
+}
+
+/// Computes each row's flat index `row * capacity + max(staged, 1) - 1` into
+/// the `[batch * capacity, ...]` view of a staging tensor.
+///
+/// Rows without a proposal point at their first (unused) snapshot slot; the
+/// caller replaces them with committed state.
+fn flat_snapshot_rows(staged_lengths: &[usize], capacity: usize) -> TensorCacheResult<Vec<i32>> {
+    staged_lengths
+        .iter()
+        .enumerate()
+        .map(|(row, &staged)| {
+            let flat = row * capacity + staged.max(1) - 1;
+            i32::try_from(flat).map_err(|_| TensorCacheError::TensorIndexOverflow {
+                axis: "batch * proposal",
+                index: flat,
+            })
+        })
+        .collect()
+}
+
 /// Validates proposal and acceptance vector sizes before direct indexing.
 fn validate_commit_vector_lengths(
     expected: usize,
@@ -1496,11 +1651,6 @@ fn select_batch_3<B: Backend>(tensor: &mut Tensor<B, 3>, indices: &Tensor<B, 1, 
 
 /// Applies a batch gather to a rank-four state tensor.
 fn select_batch_4<B: Backend>(tensor: &mut Tensor<B, 4>, indices: &Tensor<B, 1, Int>) {
-    tensor.inplace(|value| value.select(0, indices.clone()));
-}
-
-/// Applies a batch gather to a rank-five state tensor.
-fn select_batch_5<B: Backend>(tensor: &mut Tensor<B, 5>, indices: &Tensor<B, 1, Int>) {
     tensor.inplace(|value| value.select(0, indices.clone()));
 }
 

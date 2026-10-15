@@ -11,6 +11,8 @@
 
 use core::fmt;
 
+use super::lengths::{LengthLedger, LengthViolation};
+use super::transaction::TransactionToken;
 use super::{CacheConfig, TransactionError};
 
 /// A checked before/after description of one sequence-length mutation.
@@ -48,8 +50,8 @@ impl LengthTransition {
 
     /// Returns the appended absolute token range.
     ///
-    /// This method is intended for transitions returned by [`DecodeState::advance`]
-    /// or [`DecodeState::advance_all`]. A truncating transition yields an empty
+    /// This method is intended for transitions returned by [`SequenceLengths::advance`]
+    /// or [`SequenceLengths::advance_all`]. A truncating transition yields an empty
     /// range at its new endpoint.
     #[must_use]
     pub fn appended_range(self) -> core::ops::Range<usize> {
@@ -62,24 +64,43 @@ impl LengthTransition {
 /// Lengths count all logically processed tokens, including tokens evicted from
 /// a sliding-window layer. They therefore remain suitable as absolute RoPE
 /// offsets. Physical cache tensors are intentionally not stored here.
+///
+/// # Committed and working lengths
+///
+/// [`lengths`](Self::lengths) always reports *committed* lengths. During a
+/// speculative transaction ([`TransactionalCache::mark`]), appends move a
+/// separate *working* cursor reported by
+/// [`working_lengths`](Self::working_lengths); committing an accepted prefix
+/// is the only way committed lengths change while a transaction is active.
+/// Outside a transaction both accessors return the same lengths. Every
+/// transition is computed by the Verus-verified ledger in `lengths.rs` and
+/// published only after it succeeds, so a rejected call never changes state.
+///
+/// [`TransactionalCache::mark`]: super::TransactionalCache::mark
 #[derive(Debug, PartialEq, Eq)]
-pub struct DecodeState {
+pub struct SequenceLengths {
     /// Validated batch, capacity, and retention geometry.
-    pub(crate) config: CacheConfig,
-    /// Absolute processed-token counts, each at most the configured capacity.
-    pub(crate) lengths: Vec<usize>,
-    /// Baseline checkpoint while speculative appends are active.
-    pub(crate) active_transaction: Option<super::transaction::ActiveTransaction>,
+    config: CacheConfig,
+    /// Verified committed lengths and optional working cursor.
+    pub(super) ledger: LengthLedger,
+    /// Identity of the active transaction; present exactly when the ledger is active.
+    pub(super) transaction: Option<TransactionToken>,
 }
 
-impl DecodeState {
+/// Former name of [`SequenceLengths`].
+///
+/// The crate root also exports an unrelated `DecodeState` lifecycle *trait*
+/// for architecture states, so new code should prefer `SequenceLengths`.
+pub type DecodeState = SequenceLengths;
+
+impl SequenceLengths {
     /// Creates an empty decode state for the validated configuration.
     #[must_use]
     pub fn new(config: CacheConfig) -> Self {
         Self {
             config,
-            lengths: vec![0; config.sequence_count()],
-            active_transaction: None,
+            ledger: LengthLedger::new(config.capacity(), config.sequence_count()),
+            transaction: None,
         }
     }
 
@@ -95,14 +116,12 @@ impl DecodeState {
     ) -> Result<Self, DecodeStateError> {
         let lengths = lengths.into();
         validate_length_count(config.sequence_count(), lengths.len())?;
-        for (sequence, &length) in lengths.iter().enumerate() {
-            validate_capacity(sequence, length, config.capacity())?;
-        }
-
+        let ledger = LengthLedger::from_lengths(config.capacity(), &lengths)
+            .map_err(|violation| length_error(violation, "initialize"))?;
         Ok(Self {
             config,
-            lengths,
-            active_transaction: None,
+            ledger,
+            transaction: None,
         })
     }
 
@@ -112,40 +131,56 @@ impl DecodeState {
         self.config
     }
 
-    /// Returns all logical sequence lengths.
+    /// Returns all committed logical sequence lengths.
+    ///
+    /// During a transaction these stay at the transaction baseline; see
+    /// [`working_lengths`](Self::working_lengths) for the tentative cursor.
     #[must_use]
     pub fn lengths(&self) -> &[usize] {
-        &self.lengths
+        self.ledger.committed()
     }
 
-    /// Returns one logical sequence length.
+    /// Returns committed lengths; an explicit synonym of [`lengths`](Self::lengths).
+    #[must_use]
+    pub fn committed_lengths(&self) -> &[usize] {
+        self.ledger.committed()
+    }
+
+    /// Returns the lengths the next append extends.
+    ///
+    /// Inside a transaction these include tentative proposal tokens; outside a
+    /// transaction they equal [`lengths`](Self::lengths).
+    #[must_use]
+    pub fn working_lengths(&self) -> &[usize] {
+        self.ledger.working()
+    }
+
+    /// Returns one committed logical sequence length.
     ///
     /// # Errors
     ///
     /// Returns [`DecodeStateError::SequenceOutOfBounds`] for an invalid index.
     pub fn length(&self, sequence: usize) -> Result<usize, DecodeStateError> {
-        self.lengths
-            .get(sequence)
-            .copied()
-            .ok_or(DecodeStateError::SequenceOutOfBounds {
-                sequence,
-                sequence_count: self.lengths.len(),
-            })
+        self.validate_sequence(sequence)?;
+        Ok(self.ledger.committed()[sequence])
     }
 
-    /// Returns the unused logical capacity for one sequence.
+    /// Returns how many more tokens the working cursor of one sequence accepts.
     ///
     /// # Errors
     ///
     /// Returns [`DecodeStateError::SequenceOutOfBounds`] for an invalid index.
     pub fn remaining_capacity(&self, sequence: usize) -> Result<usize, DecodeStateError> {
-        Ok(self.config.capacity() - self.length(sequence)?)
+        self.validate_sequence(sequence)?;
+        Ok(self.config.capacity() - self.ledger.working()[sequence])
     }
 
     /// Advances one sequence by a checked token count.
     ///
     /// An advance is the only lifecycle operation allowed inside an active
-    /// transaction because speculative decoding may only append tentative state.
+    /// transaction because speculative decoding may only append tentative
+    /// state; it then moves the working cursor, and the returned transition
+    /// describes that cursor.
     ///
     /// # Errors
     ///
@@ -156,26 +191,16 @@ impl DecodeState {
         sequence: usize,
         token_count: usize,
     ) -> Result<LengthTransition, DecodeStateError> {
-        let sequence_count = self.lengths.len();
-        let length =
-            self.lengths
-                .get_mut(sequence)
-                .ok_or(DecodeStateError::SequenceOutOfBounds {
-                    sequence,
-                    sequence_count,
-                })?;
-        let previous = *length;
-        let current =
-            previous
-                .checked_add(token_count)
-                .ok_or(DecodeStateError::LengthOverflow {
-                    sequence,
-                    length: previous,
-                    additional: token_count,
-                })?;
-        validate_capacity(sequence, current, self.config.capacity())?;
-        *length = current;
-
+        self.validate_sequence(sequence)?;
+        let mut counts = vec![0; self.ledger.committed().len()];
+        counts[sequence] = token_count;
+        let previous = self.ledger.working()[sequence];
+        let next = self
+            .ledger
+            .advanced(&counts)
+            .map_err(|violation| length_error(violation, "advance"))?;
+        let current = next.working()[sequence];
+        self.ledger = next;
         Ok(LengthTransition {
             sequence,
             previous,
@@ -187,7 +212,7 @@ impl DecodeState {
     ///
     /// Validation happens for all sequences before any length is changed.
     /// This matters for ragged batches: one overflowing row cannot leave other
-    /// rows partially advanced.
+    /// rows partially advanced. Inside a transaction the working cursor moves.
     ///
     /// # Errors
     ///
@@ -197,36 +222,12 @@ impl DecodeState {
         &mut self,
         token_counts: &[usize],
     ) -> Result<Vec<LengthTransition>, DecodeStateError> {
-        validate_length_count(self.lengths.len(), token_counts.len())?;
-
-        let mut next = Vec::with_capacity(self.lengths.len());
-        for (sequence, (&length, &additional)) in self.lengths.iter().zip(token_counts).enumerate()
-        {
-            let current =
-                length
-                    .checked_add(additional)
-                    .ok_or(DecodeStateError::LengthOverflow {
-                        sequence,
-                        length,
-                        additional,
-                    })?;
-            validate_capacity(sequence, current, self.config.capacity())?;
-            next.push(current);
-        }
-
-        let transitions = self
-            .lengths
-            .iter()
-            .copied()
-            .zip(next.iter().copied())
-            .enumerate()
-            .map(|(sequence, (previous, current))| LengthTransition {
-                sequence,
-                previous,
-                current,
-            })
-            .collect();
-        self.lengths = next;
+        let next = self
+            .ledger
+            .advanced(token_counts)
+            .map_err(|violation| length_error(violation, "advance"))?;
+        let transitions = transitions(self.ledger.working(), next.working());
+        self.ledger = next;
         Ok(transitions)
     }
 
@@ -249,14 +250,9 @@ impl DecodeState {
     ) -> Result<LengthTransition, DecodeStateError> {
         self.ensure_topology_mutation_allowed("truncate")?;
         let previous = self.length(sequence)?;
-        if new_length > previous {
-            return Err(DecodeStateError::CannotExtendByTruncation {
-                sequence,
-                current: previous,
-                requested: new_length,
-            });
-        }
-        self.lengths[sequence] = new_length;
+        let mut requested = self.ledger.committed().to_vec();
+        requested[sequence] = new_length;
+        self.ledger = self.plan_truncate(&requested)?;
         Ok(LengthTransition {
             sequence,
             previous,
@@ -278,31 +274,9 @@ impl DecodeState {
         &mut self,
         new_lengths: &[usize],
     ) -> Result<Vec<LengthTransition>, DecodeStateError> {
-        self.ensure_topology_mutation_allowed("truncate_all")?;
-        validate_length_count(self.lengths.len(), new_lengths.len())?;
-        for (sequence, (&current, &requested)) in self.lengths.iter().zip(new_lengths).enumerate() {
-            if requested > current {
-                return Err(DecodeStateError::CannotExtendByTruncation {
-                    sequence,
-                    current,
-                    requested,
-                });
-            }
-        }
-
-        let transitions = self
-            .lengths
-            .iter()
-            .copied()
-            .zip(new_lengths.iter().copied())
-            .enumerate()
-            .map(|(sequence, (previous, current))| LengthTransition {
-                sequence,
-                previous,
-                current,
-            })
-            .collect();
-        self.lengths.copy_from_slice(new_lengths);
+        let next = self.plan_truncate(new_lengths)?;
+        let transitions = transitions(self.ledger.committed(), next.committed());
+        self.ledger = next;
         Ok(transitions)
     }
 
@@ -313,19 +287,9 @@ impl DecodeState {
     /// Returns [`DecodeStateError::TransactionActive`] while speculative state
     /// is active; callers must commit or roll back first.
     pub fn reset(&mut self) -> Result<Vec<LengthTransition>, DecodeStateError> {
-        self.ensure_topology_mutation_allowed("reset")?;
-        let transitions = self
-            .lengths
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(sequence, previous)| LengthTransition {
-                sequence,
-                previous,
-                current: 0,
-            })
-            .collect();
-        self.lengths.fill(0);
+        let next = self.plan_reset()?;
+        let transitions = transitions(self.ledger.committed(), next.committed());
+        self.ledger = next;
         Ok(transitions)
     }
 
@@ -340,21 +304,83 @@ impl DecodeState {
     /// Returns an error for a length mismatch, an out-of-range source index, or
     /// an active speculative transaction. On error the state is unchanged.
     pub fn reorder(&mut self, source_indices: &[usize]) -> Result<(), DecodeStateError> {
-        self.ensure_topology_mutation_allowed("reorder")?;
-        validate_length_count(self.lengths.len(), source_indices.len())?;
-
-        let mut reordered = Vec::with_capacity(self.lengths.len());
-        for &source in source_indices {
-            reordered.push(self.length(source)?);
-        }
-        self.lengths = reordered;
+        self.ledger = self.plan_reorder(source_indices)?;
         Ok(())
     }
 
     /// Returns whether a speculative transaction is active.
     #[must_use]
     pub const fn has_active_transaction(&self) -> bool {
-        self.active_transaction.is_some()
+        self.transaction.is_some()
+    }
+
+    /// Returns each row's tentative proposal length (all zero outside a transaction).
+    #[must_use]
+    pub fn proposal_lengths(&self) -> Vec<usize> {
+        self.ledger.proposals()
+    }
+
+    /// Plans an atomic truncation without publishing it.
+    pub(crate) fn plan_truncate(
+        &self,
+        requested: &[usize],
+    ) -> Result<LengthLedger, DecodeStateError> {
+        self.ensure_topology_mutation_allowed("truncate")?;
+        self.ledger
+            .truncated(requested)
+            .map_err(|violation| length_error(violation, "truncate"))
+    }
+
+    /// Plans an atomic reorder without publishing it.
+    pub(crate) fn plan_reorder(&self, indices: &[usize]) -> Result<LengthLedger, DecodeStateError> {
+        self.ensure_topology_mutation_allowed("reorder")?;
+        self.ledger
+            .reordered(indices)
+            .map_err(|violation| length_error(violation, "reorder"))
+    }
+
+    /// Plans a reset to zero lengths without publishing it.
+    pub(crate) fn plan_reset(&self) -> Result<LengthLedger, DecodeStateError> {
+        self.ensure_topology_mutation_allowed("reset")?;
+        self.ledger
+            .reset()
+            .map_err(|violation| length_error(violation, "reset"))
+    }
+
+    /// Plans advancing the working cursor (committed outside a transaction).
+    pub(crate) fn plan_advance(&self, counts: &[usize]) -> Result<LengthLedger, DecodeStateError> {
+        self.ledger
+            .advanced(counts)
+            .map_err(|violation| length_error(violation, "advance"))
+    }
+
+    /// Publishes a ledger planned from this state outside any transaction.
+    ///
+    /// Callers pass only ledgers returned by `plan_*` on this same state after
+    /// all physical validation succeeded; ending a transaction goes through
+    /// [`finish_transaction`](Self::finish_transaction) instead.
+    pub(crate) fn publish(&mut self, ledger: LengthLedger) {
+        debug_assert!(!ledger.is_active() && self.transaction.is_none());
+        self.ledger = ledger;
+    }
+
+    /// Publishes a ledger from [`plan_advance`](Self::plan_advance), inside or outside a transaction.
+    pub(crate) fn publish_advance(&mut self, ledger: LengthLedger) {
+        debug_assert_eq!(ledger.is_active(), self.transaction.is_some());
+        self.ledger = ledger;
+    }
+
+    /// Rejects an out-of-range row index with the batch size for context.
+    fn validate_sequence(&self, sequence: usize) -> Result<(), DecodeStateError> {
+        let sequence_count = self.ledger.committed().len();
+        if sequence < sequence_count {
+            Ok(())
+        } else {
+            Err(DecodeStateError::SequenceOutOfBounds {
+                sequence,
+                sequence_count,
+            })
+        }
     }
 
     /// Rejects reset/reorder/truncate operations while an append-only transaction is active.
@@ -370,7 +396,84 @@ impl DecodeState {
     }
 }
 
-/// Failure while updating [`DecodeState`] lifecycle metadata.
+/// Describes the row-wise change from `previous` to `current` lengths.
+fn transitions(previous: &[usize], current: &[usize]) -> Vec<LengthTransition> {
+    previous
+        .iter()
+        .zip(current)
+        .enumerate()
+        .map(|(sequence, (&previous, &current))| LengthTransition {
+            sequence,
+            previous,
+            current,
+        })
+        .collect()
+}
+
+/// Maps a verified-ledger violation to the public metadata error.
+///
+/// `operation` names the rejected lifecycle call when a transaction blocks it.
+/// Transaction-specific violations (`commit`, `rollback`) are mapped by the
+/// transaction module, which owns their richer diagnostics.
+pub(crate) fn length_error(
+    violation: LengthViolation,
+    operation: &'static str,
+) -> DecodeStateError {
+    match violation {
+        LengthViolation::CountMismatch { expected, actual } => {
+            DecodeStateError::SequenceCountMismatch { expected, actual }
+        }
+        LengthViolation::Overflow {
+            sequence,
+            length,
+            additional,
+        } => DecodeStateError::LengthOverflow {
+            sequence,
+            length,
+            additional,
+        },
+        LengthViolation::CapacityExceeded {
+            sequence,
+            requested,
+            capacity,
+        } => DecodeStateError::CapacityExceeded {
+            sequence,
+            requested,
+            capacity,
+        },
+        LengthViolation::Extension {
+            sequence,
+            current,
+            requested,
+        } => DecodeStateError::CannotExtendByTruncation {
+            sequence,
+            current,
+            requested,
+        },
+        LengthViolation::SourceOutOfBounds {
+            source,
+            sequence_count,
+            ..
+        } => DecodeStateError::SequenceOutOfBounds {
+            sequence: source,
+            sequence_count,
+        },
+        LengthViolation::PrefixExceedsProposal {
+            sequence,
+            accepted,
+            proposed,
+        } => TransactionError::PrefixExceedsAppended {
+            sequence,
+            accepted,
+            appended: proposed,
+        }
+        .into(),
+        LengthViolation::TransactionActive => DecodeStateError::TransactionActive { operation },
+        LengthViolation::TransactionInactive => TransactionError::NoActiveTransaction.into(),
+    }
+}
+
+/// Failure while updating [`SequenceLengths`] lifecycle metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeStateError {
     /// The caller supplied a different number of per-sequence values.
@@ -497,23 +600,6 @@ fn validate_length_count(expected: usize, actual: usize) -> Result<(), DecodeSta
         Ok(())
     } else {
         Err(DecodeStateError::SequenceCountMismatch { expected, actual })
-    }
-}
-
-/// Rejects a requested logical length beyond capacity while accepting the exact endpoint.
-fn validate_capacity(
-    sequence: usize,
-    requested: usize,
-    capacity: usize,
-) -> Result<(), DecodeStateError> {
-    if requested <= capacity {
-        Ok(())
-    } else {
-        Err(DecodeStateError::CapacityExceeded {
-            sequence,
-            requested,
-            capacity,
-        })
     }
 }
 

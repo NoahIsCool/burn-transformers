@@ -18,7 +18,10 @@
 //! returned segments partition the retained suffix in order, that every segment
 //! fits inside the ring, and that each token lands in, or is read from, physical
 //! slot `absolute_position mod capacity`. Writes of a full ring touch every
-//! slot exactly once. Tensor copies driven by these plans remain covered by
+//! slot exactly once. Mirrored writes stay below `2 * capacity` with the
+//! mirror exactly one capacity after the primary, a mirrored read's offset `j`
+//! reads the slot of position `start + j`, and a staged commit plans only the
+//! accepted prefix. Tensor copies driven by these plans remain covered by
 //! the cache test suite.
 
 use core::fmt;
@@ -159,15 +162,53 @@ impl StagedRingTransactionPlan {
         accepted_tokens: usize,
         capacity: NonZeroUsize,
     ) -> Result<RingWritePlan, RingPlanError> {
-        let staged_tokens = self.staged_input.len();
-        if accepted_tokens > staged_tokens {
-            return Err(RingPlanError::CommitPrefixExceedsStaged {
-                accepted: accepted_tokens,
-                staged: staged_tokens,
-            });
-        }
-        plan_ring_write(self.staged_positions.start, accepted_tokens, capacity)
+        commit_prefix_slots(
+            self.staged_positions.start,
+            self.staged_input.len(),
+            accepted_tokens,
+            capacity.get(),
+        )
     }
+}
+
+/// Verified core of [`StagedRingTransactionPlan::commit_prefix`].
+///
+/// Accepting `accepted` of `staged` proposals at absolute `staged_start`
+/// writes exactly the accepted prefix: every input range lies inside
+/// `[0, accepted)`, hence inside the staging buffer, and proposal `j` lands
+/// in slot `(staged_start + j) mod capacity`. Rejected proposals are never
+/// planned, so rollback needs no ring write at all.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        capacity > 0,
+    ensures
+        accepted > staged ==> result == Err::<RingWritePlan, RingPlanError>(
+            RingPlanError::CommitPrefixExceedsStaged { accepted, staged }),
+        result matches Ok(plan) ==> {
+            &&& accepted <= staged
+            &&& plan.appended_positions.start == staged_start
+            &&& plan.appended_positions.end == staged_start + accepted
+            &&& plan.retained_input.end == accepted
+            &&& forall|i: int| #![auto] 0 <= i < plan.segments.len() ==> {
+                &&& plan.segments[i].input.end <= accepted
+                &&& plan.segments[i].physical.end <= capacity
+                &&& forall|j: int| plan.segments[i].input.start <= j < plan.segments[i].input.end
+                    ==> #[trigger] ring_slot(staged_start as int, j, capacity as int)
+                        == plan.segments[i].physical.start + (j - plan.segments[i].input.start)
+            }
+        },
+))]
+fn commit_prefix_slots(
+    staged_start: usize,
+    staged: usize,
+    accepted: usize,
+    capacity: usize,
+) -> Result<RingWritePlan, RingPlanError> {
+    if accepted > staged {
+        return Err(RingPlanError::CommitPrefixExceedsStaged { accepted, staged });
+    }
+    plan_ring_write_slots(staged_start, accepted, capacity)
 }
 
 impl RingWritePlan {
@@ -241,6 +282,7 @@ impl RingReadPlan {
 ///
 /// Mirroring slot `s` at `s + capacity` makes every suffix of at most
 /// `capacity` tokens readable as one contiguous physical slice.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirroredRingWriteSegment {
     /// Contiguous interval within the incoming token chunk.
@@ -272,6 +314,7 @@ impl MirroredRingWriteSegment {
 }
 
 /// Single-slice read plan for a mirrored ring.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirroredRingReadPlan {
     /// Absolute suffix visible to sliding attention.
@@ -545,22 +588,86 @@ pub fn plan_mirrored_ring_write(
     token_count: usize,
     capacity: NonZeroUsize,
 ) -> Result<Vec<MirroredRingWriteSegment>, RingPlanError> {
-    capacity
-        .get()
-        .checked_mul(2)
-        .ok_or(RingPlanError::DoubledCapacityOverflow {
-            capacity: capacity.get(),
-        })?;
-    let standard = plan_ring_write(start_position, token_count, capacity)?;
-    Ok(standard
-        .segments
-        .iter()
-        .map(|segment| MirroredRingWriteSegment {
-            input: segment.input.clone(),
-            primary: segment.physical.clone(),
-            mirror: segment.physical.start + capacity.get()..segment.physical.end + capacity.get(),
-        })
-        .collect())
+    mirrored_write_slots(start_position, token_count, capacity.get())
+}
+
+/// Verified core of [`plan_mirrored_ring_write`] over a raw, positive capacity.
+///
+/// Each standard ring segment is written twice: at its primary slots and at
+/// the same slots shifted by `capacity`, so both copies stay below `2 * capacity`
+/// and every token still lands in slot `(start_position + j) mod capacity`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        capacity > 0,
+    ensures
+        result is Err ==> start_position + token_count > usize::MAX || 2 * capacity > usize::MAX,
+        result matches Ok(segments) ==> {
+            &&& 2 * capacity <= usize::MAX
+            &&& start_position + token_count <= usize::MAX
+            &&& segments.len() <= 2
+            &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
+                &&& segments[i].input.start < segments[i].input.end <= token_count
+                &&& segments[i].primary.end <= capacity
+                &&& segments[i].input.end - segments[i].input.start
+                    == segments[i].primary.end - segments[i].primary.start
+                &&& segments[i].mirror.start == segments[i].primary.start + capacity
+                &&& segments[i].mirror.end == segments[i].primary.end + capacity
+                &&& segments[i].mirror.end <= 2 * capacity
+                &&& forall|j: int| segments[i].input.start <= j < segments[i].input.end ==>
+                    #[trigger] ring_slot(start_position as int, j, capacity as int)
+                        == segments[i].primary.start + (j - segments[i].input.start)
+            }
+        },
+))]
+fn mirrored_write_slots(
+    start_position: usize,
+    token_count: usize,
+    capacity: usize,
+) -> Result<Vec<MirroredRingWriteSegment>, RingPlanError> {
+    if capacity.checked_mul(2).is_none() {
+        return Err(RingPlanError::DoubledCapacityOverflow { capacity });
+    }
+    let standard = plan_ring_write_slots(start_position, token_count, capacity)?;
+    let mut mirrored: Vec<MirroredRingWriteSegment> = Vec::with_capacity(standard.segments.len());
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= standard.segments.len(),
+            standard.segments.len() <= 2,
+            capacity > 0,
+            2 * capacity <= usize::MAX,
+            mirrored.len() == index,
+            forall|i: int| #![auto] 0 <= i < standard.segments.len() ==> {
+                &&& standard.segments[i].input.start < standard.segments[i].input.end
+                &&& standard.segments[i].input.end <= token_count
+                &&& standard.segments[i].physical.end <= capacity
+                &&& standard.segments[i].input.end - standard.segments[i].input.start
+                    == standard.segments[i].physical.end - standard.segments[i].physical.start
+                &&& forall|j: int| standard.segments[i].input.start <= j
+                    < standard.segments[i].input.end ==>
+                    #[trigger] ring_slot(start_position as int, j, capacity as int)
+                        == standard.segments[i].physical.start
+                            + (j - standard.segments[i].input.start)
+            },
+            forall|i: int| #![auto] 0 <= i < index ==> {
+                &&& mirrored[i].input == standard.segments[i].input
+                &&& mirrored[i].primary == standard.segments[i].physical
+                &&& mirrored[i].mirror.start == standard.segments[i].physical.start + capacity
+                &&& mirrored[i].mirror.end == standard.segments[i].physical.end + capacity
+            },
+        decreases standard.segments.len() - index,
+    ))]
+    while index < standard.segments.len() {
+        let segment = &standard.segments[index];
+        mirrored.push(MirroredRingWriteSegment {
+            input: segment.input.start..segment.input.end,
+            primary: segment.physical.start..segment.physical.end,
+            mirror: segment.physical.start + capacity..segment.physical.end + capacity,
+        });
+        index += 1;
+    }
+    Ok(mirrored)
 }
 
 /// Plans the single contiguous read enabled by a mirrored ring.
@@ -572,19 +679,64 @@ pub fn plan_mirrored_ring_read(
     sequence_length: usize,
     capacity: NonZeroUsize,
 ) -> Result<MirroredRingReadPlan, RingPlanError> {
-    capacity
-        .get()
-        .checked_mul(2)
-        .ok_or(RingPlanError::DoubledCapacityOverflow {
-            capacity: capacity.get(),
-        })?;
-    let retained_positions = sliding_window_range(sequence_length, capacity);
-    let retained_count = retained_positions.end - retained_positions.start;
-    let physical_start = retained_positions.start % capacity.get();
+    mirrored_read_slots(sequence_length, capacity.get())
+}
 
+/// Verified core of [`plan_mirrored_ring_read`] over a raw, positive capacity.
+///
+/// A mirrored allocation holds ring slot `s` at physical indices `s` and
+/// `s + capacity`, so physical index `q < 2 * capacity` holds slot
+/// `q mod capacity`. Starting at `start mod capacity`, the retained run of at
+/// most `capacity` positions is therefore one contiguous range, and offset
+/// `j` reads exactly the slot of absolute position `start + j`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        capacity > 0,
+    ensures
+        result is Err <==> 2 * capacity > usize::MAX,
+        result matches Ok(plan) ==> {
+            let retained = if sequence_length <= capacity { sequence_length } else { capacity };
+            &&& plan.retained_positions.start == sequence_length - retained
+            &&& plan.retained_positions.end == sequence_length
+            &&& plan.physical.start == plan.retained_positions.start % capacity
+            &&& plan.physical.end == plan.physical.start + retained
+            &&& plan.physical.end <= 2 * capacity
+            &&& forall|j: int| 0 <= j < retained ==>
+                #[trigger] ring_slot(plan.physical.start as int, j, capacity as int)
+                    == ring_slot(plan.retained_positions.start as int, j, capacity as int)
+        },
+))]
+fn mirrored_read_slots(
+    sequence_length: usize,
+    capacity: usize,
+) -> Result<MirroredRingReadPlan, RingPlanError> {
+    if capacity.checked_mul(2).is_none() {
+        return Err(RingPlanError::DoubledCapacityOverflow { capacity });
+    }
+    let retained = if sequence_length <= capacity {
+        sequence_length
+    } else {
+        capacity
+    };
+    let retained_start = sequence_length - retained;
+    let physical_start = retained_start % capacity;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|j: int| 0 <= j < retained implies
+            #[trigger] ring_slot(physical_start as int, j, capacity as int)
+                == ring_slot(retained_start as int, j, capacity as int)
+        by {
+            // (a mod c + j) mod c == (a + j) mod c for 0 <= j < c.
+            vstd::arithmetic::div_mod::lemma_add_mod_noop(retained_start as int, j, capacity as int);
+            vstd::arithmetic::div_mod::lemma_add_mod_noop(physical_start as int, j, capacity as int);
+            vstd::arithmetic::div_mod::lemma_small_mod(j as nat, capacity as nat);
+            vstd::arithmetic::div_mod::lemma_mod_twice(retained_start as int, capacity as int);
+        }
+    }
     Ok(MirroredRingReadPlan {
-        retained_positions,
-        physical: physical_start..physical_start + retained_count,
+        retained_positions: retained_start..sequence_length,
+        physical: physical_start..physical_start + retained,
     })
 }
 
