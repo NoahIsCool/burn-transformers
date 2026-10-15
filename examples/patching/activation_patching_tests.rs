@@ -2,7 +2,9 @@
 //!
 //! A real checkpoint is not needed: the identities checked here hold for any
 //! causal decoder, so a two-block random Llama-family model built through
-//! `AutoCausalLm` exercises the same trait calls as a loaded checkpoint.
+//! `AutoCausalLm` exercises the same trait calls as a loaded checkpoint. A
+//! tiny GPT-2 shows that a family `AutoCausalLm` does not dispatch runs
+//! through the same sweep as a concrete model type.
 //!
 //! The random weights must be the same on every run. Flex keeps one
 //! process-wide random generator, `Backend::seed` resets it, and parameters
@@ -16,6 +18,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use super::*;
 use burn::tensor::{Device, Int, backend::Backend};
+use transformers::models::gpt2::{Gpt2Config, Gpt2ForCausalLm};
 
 /// Serializes the tests that seed and draw from Flex's process-wide random generator.
 static RNG_LOCK: Mutex<()> = Mutex::new(());
@@ -152,4 +155,44 @@ fn seeded_model_is_reproducible_and_separates_the_prompts() {
         gap > 0.1,
         "logit-difference gap {gap} is too close to the 1e-3 threshold"
     );
+}
+
+/// GPT-2 is not an `AutoCausalLm` family, but its concrete model satisfies the sweep's two trait bounds.
+///
+/// GPT-2 applies a final LayerNorm after the last block. It acts on each token
+/// separately, so patching the final token after the last block still
+/// reproduces the clean logits exactly and the other tokens recover nothing.
+#[test]
+fn concrete_gpt2_runs_through_the_same_sweep() {
+    let (_rng, model) = seeded(|device| {
+        Gpt2ForCausalLm::<Cpu>::init(
+            Gpt2Config {
+                vocab_size: 16,
+                n_embd: 8,
+                n_head: 2,
+                n_layer: 2,
+                n_positions: 16,
+                n_inner: Some(16),
+                // GPT-2's default 0.02 leaves this random model's logit gap
+                // near the sweep's 1e-3 rejection threshold; unit-scale
+                // weights separate the prompts clearly.
+                initializer_range: 1.0,
+                ..Default::default()
+            },
+            device,
+        )
+        .expect("valid tiny GPT-2 configuration")
+    });
+    let sweep = patching_sweep(
+        &model,
+        prompt([1, 2, 3, 4, 5]),
+        prompt([1, 2, 9, 4, 5]),
+        2..5,
+        6,
+        7,
+    )
+    .unwrap();
+    // Seed 7 gives a gap of about 1.1 on this configuration.
+    assert!((sweep.clean - sweep.corrupt).abs() > 0.1);
+    assert_eq!(sweep.recovered[1], [0.0, 0.0, 1.0]);
 }

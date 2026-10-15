@@ -4,9 +4,13 @@
 //! cargo run --release --locked --features tokenizers --example activation_patching -- MODEL_DIR
 //! ```
 //!
-//! `MODEL_DIR` is any local checkpoint that `AutoCausalLm` loads: GPT-2,
-//! GPT-NeoX, Llama, Mistral, Qwen, SmolLM, OLMo, Gemma, and the other
-//! registered families. Nothing is downloaded.
+//! `MODEL_DIR` is a local checkpoint whose `config.json` names a `model_type`
+//! in `AutoCausalLm::MODEL_TYPES`: the Llama family (Llama, Mistral, Qwen2,
+//! Qwen3, SmolLM, OLMo 2), Gemma 2 and 3, Qwen3.5, Qwen3-MoE, DeepSeek-V2,
+//! Nemotron-H, gpt-oss, and Muse Glimmer. Nothing is downloaded.
+//! `AutoCausalLm` does not dispatch GPT-2 or GPT-NeoX checkpoints; load
+//! `Gpt2ForCausalLm` or `GptNeoXForCausalLm` directly instead and pass it to
+//! `patching_sweep`, which accepts any model implementing the two traits below.
 //!
 //! The task is indirect-object identification (Wang et al., 2022,
 //! <https://arxiv.org/abs/2211.00593>). After "When Mary and John went to the
