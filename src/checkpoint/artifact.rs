@@ -238,13 +238,18 @@ fn discover_checkpoint_with_policy(
 
 /// Prefers standard artifact names, then accepts only an unambiguous fallback.
 ///
-/// A directory holding both `model.safetensors` and
-/// `model.safetensors.index.json` is ambiguous: Hugging Face would load the
-/// single file, while a stale or divergent index could describe different
-/// weights. Rather than silently pick one, discovery fails closed and the caller
-/// selects an artifact explicitly. The selected artifact still passes the same
-/// containment and metadata checks as an explicitly named file; directory
-/// enumeration does not authorize its paths.
+/// When both `model.safetensors` and `model.safetensors.index.json` exist,
+/// Hugging Face loads the single file and ignores the index. Discovery accepts
+/// that layout only when the two provably agree: the index parses and its
+/// `weight_map` names exactly the single file, as some exported repositories
+/// ship. It then loads through the index, which validates every listed tensor
+/// against that file. An index that names other shards, names none, or cannot
+/// be read could describe different weights, so discovery fails closed with
+/// [`CheckpointError::AmbiguousArtifacts`] and the caller selects an artifact
+/// explicitly (an explicit index selection reports the precise index error).
+/// The selected artifact still passes the same containment and metadata checks
+/// as an explicitly named file; directory enumeration does not authorize its
+/// paths.
 fn discover_auto(
     root: PathBuf,
     options: &LoadOptions,
@@ -254,9 +259,14 @@ fn discover_auto(
     let has_single = root.join(STANDARD_SINGLE).is_file();
     match (has_index, has_single) {
         (true, true) => {
-            return Err(CheckpointError::AmbiguousArtifacts {
-                candidates: vec![STANDARD_SINGLE.to_owned(), STANDARD_INDEX.to_owned()],
-            });
+            return match read_single_file_index(&root, options) {
+                Some(document) => {
+                    discover_index_document(root, STANDARD_INDEX, document, options, policy)
+                }
+                None => Err(CheckpointError::AmbiguousArtifacts {
+                    candidates: vec![STANDARD_SINGLE.to_owned(), STANDARD_INDEX.to_owned()],
+                }),
+            };
         }
         (true, false) => return discover_index(root, STANDARD_INDEX, options, policy),
         (false, true) => return discover_single(root, STANDARD_SINGLE, options),
@@ -335,6 +345,34 @@ fn discover_single(
     })
 }
 
+/// Returns the standard index when its `weight_map` names only `model.safetensors`.
+///
+/// Any read, size-limit, or parse failure, and any other shard set (including
+/// an empty one), yields `None`: the two standard artifacts are then not
+/// provably the same weights.
+fn read_single_file_index(root: &Path, options: &LoadOptions) -> Option<RawIndexDocument> {
+    let path = resolve_local_file(root, STANDARD_INDEX, "checkpoint index").ok()?;
+    let document = read_index(&path, options).ok()?;
+    let weight_map = &document.index.weight_map;
+    let names_only_the_single_file =
+        !weight_map.is_empty() && weight_map.values().all(|shard| shard == STANDARD_SINGLE);
+    names_only_the_single_file.then_some(document)
+}
+
+/// Reads the selected index file and cross-checks it against its shards.
+///
+/// See [`discover_index_document`] for the reconciliation rules.
+fn discover_index(
+    root: PathBuf,
+    relative_path: &str,
+    options: &LoadOptions,
+    policy: Option<&PinnedIndexTotalSizePolicy>,
+) -> Result<CheckpointManifest> {
+    let path = resolve_local_file(&root, relative_path, "checkpoint index")?;
+    let index_document = read_index(&path, options)?;
+    discover_index_document(root, relative_path, index_document, options, policy)
+}
+
 /// Cross-checks every index entry against all shard inventories before returning.
 ///
 /// Physical tensor names must be unique and assigned to their declared shards.
@@ -346,14 +384,13 @@ fn discover_single(
 /// `text_encoder/model.safetensors.index.json`) finds its co-located shards.
 /// Each name is validated as a portable relative path before it is joined, and
 /// the joined root-relative path identifies the shard everywhere downstream.
-fn discover_index(
+fn discover_index_document(
     root: PathBuf,
     relative_path: &str,
+    index_document: RawIndexDocument,
     options: &LoadOptions,
     policy: Option<&PinnedIndexTotalSizePolicy>,
 ) -> Result<CheckpointManifest> {
-    let path = resolve_local_file(&root, relative_path, "checkpoint index")?;
-    let index_document = read_index(&path, options)?;
     let index = &index_document.index;
     let shard_names: BTreeSet<_> = index.weight_map.values().cloned().collect();
     if shard_names.len() > options.limits.max_shards {
@@ -1149,7 +1186,7 @@ struct RawIndex {
     /// Optional byte-accounting metadata supplied by the checkpoint producer.
     #[serde(default)]
     metadata: Option<RawIndexMetadata>,
-    /// Unique tensor names mapped to root-relative shard names.
+    /// Unique tensor names mapped to shard names relative to the index directory.
     #[serde(deserialize_with = "deserialize_unique_string_map")]
     weight_map: BTreeMap<String, String>,
 }

@@ -2780,6 +2780,82 @@ fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair
     assert_eq!(sink.events, ["write:indexed"]);
 }
 
+/// A standard index that names only `model.safetensors` agrees with it and is accepted.
+#[test]
+fn auto_discovery_accepts_an_index_that_names_only_the_single_file() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[
+            FixtureTensor::new("a", TensorDType::F32, [2]),
+            FixtureTensor::new("b", TensorDType::F16, [3]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[("a", "model.safetensors"), ("b", "model.safetensors")],
+        Some(14),
+    );
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(
+        &manifest.source,
+        ArtifactSource::Index { relative_path, declared_total_size: Some(14), .. }
+        if relative_path == "model.safetensors.index.json"
+    ));
+    assert_eq!(manifest.shards.len(), 1);
+    assert_eq!(manifest.shards[0].relative_path, "model.safetensors");
+    assert!(manifest.tensor("a").is_some() && manifest.tensor("b").is_some());
+
+    // The index is still validated against the file it names.
+    write_index(temp.path(), &[("a", "model.safetensors")], None);
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::IndexMismatch { tensor, .. }) if tensor == "b"
+    ));
+}
+
+/// Both standard artifacts stay ambiguous unless the index names exactly the single file.
+#[test]
+fn auto_discovery_rejects_indexes_that_do_not_name_only_the_single_file() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F32, [1])],
+    );
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("b", TensorDType::F32, [1])],
+    );
+    let ambiguous = |temp: &TempDir| {
+        matches!(
+            discover_checkpoint(temp.path(), &LoadOptions::default()),
+            Err(CheckpointError::AmbiguousArtifacts { candidates })
+            if candidates == ["model.safetensors", "model.safetensors.index.json"]
+        )
+    };
+    write_index(
+        temp.path(),
+        &[("a", "model.safetensors"), ("b", "part.safetensors")],
+        None,
+    );
+    assert!(ambiguous(&temp), "an index that also names another shard");
+    write_index(temp.path(), &[], None);
+    assert!(ambiguous(&temp), "an empty weight_map");
+    let mut options = LoadOptions::default();
+    write_index(temp.path(), &[("a", "model.safetensors")], None);
+    options.limits.max_index_bytes = 1;
+    assert!(
+        matches!(
+            discover_checkpoint(temp.path(), &options),
+            Err(CheckpointError::AmbiguousArtifacts { .. })
+        ),
+        "an index over the size limit"
+    );
+}
+
 proptest! {
     #[test]
     /// Generated dtype storage calculations scale linearly for byte-aligned element counts.
