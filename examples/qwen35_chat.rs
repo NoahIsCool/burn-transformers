@@ -9,11 +9,21 @@
 //! program does not imply quantized-training support. Decode state is external to
 //! parameters: its capacity covers the complete prompt plus the requested token
 //! budget, and prefill is chunked into at most 256 tokens. Generation uses the
-//! checkpoint's defaults after overriding `max_new_tokens`. No optimizer records
-//! or training dropout participate in this inference-only path.
+//! checkpoint's defaults after overriding `max_new_tokens`; settings in
+//! `generation_config.json` that the crate does not implement are listed on
+//! standard error. Text is streamed as it is generated: an incremental decoder
+//! emits each piece once its UTF-8 characters are complete, so multi-byte
+//! characters split across tokens never print as replacement glyphs. No
+//! optimizer records or training dropout participate in this inference-only
+//! path.
 
 #[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
-use std::{env, error::Error as StdError, io, path::PathBuf};
+use std::{
+    env,
+    error::Error as StdError,
+    io::{self, Write},
+    path::PathBuf,
+};
 
 #[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
 use burn::backend::Metal;
@@ -23,7 +33,7 @@ use transformers::{
     EncodeOptions, Error,
     cache::CacheConfig,
     checkpoint::{DTypePolicy, LoadOptions, TensorDType},
-    generate_causal,
+    generate_causal_streaming,
 };
 
 /// Immutable upstream identity used by the v0.1 Qwen profile.
@@ -49,6 +59,9 @@ fn main() -> Result<(), Box<dyn StdError>> {
         ..AutoLoadOptions::default()
     };
     let loaded = AutoCausalLm::<Metal>::load_local(&root, &options, &device)?;
+    for (setting, value) in loaded.unsupported_generation_settings() {
+        eprintln!("ignoring unsupported generation setting {setting} = {value}");
+    }
     let tokenizer = loaded
         .tokenizer()
         .ok_or_else(|| Error::Tokenizer("the local Qwen profile requires tokenizer.json".into()))?;
@@ -70,7 +83,9 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .checked_add(max_new_tokens.saturating_sub(1))
         .ok_or_else(|| io::Error::other("prompt and generation length overflow usize"))?;
     let vocabulary_size = loaded.model().config().vocabulary_size();
-    let output = generate_causal(
+    let mut text = tokenizer.decode_stream(true);
+    let mut stdout = io::stdout().lock();
+    generate_causal_streaming(
         loaded.model(),
         CausalGenerationRequest {
             prompt,
@@ -79,12 +94,16 @@ fn main() -> Result<(), Box<dyn StdError>> {
             prefill_chunk_size: Some(256),
             vocabulary_size,
         },
+        |token| {
+            if let Some(piece) = text.step(token.token_id)? {
+                write!(stdout, "{piece}")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|error| Error::Generation(format!("failed to print: {error}")))?;
+            }
+            Ok(())
+        },
     )?;
-    let sequence = output
-        .sequences
-        .first()
-        .ok_or_else(|| io::Error::other("generation returned no sequence"))?;
-    println!("{}", tokenizer.decode(&sequence.token_ids, true)?);
+    writeln!(stdout)?;
     Ok(())
 }
 
