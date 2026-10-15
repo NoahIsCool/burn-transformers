@@ -791,7 +791,7 @@ fn chat_rendering_validates_selection_and_reserved_context() {
     }
 }
 
-/// The bounded Python-string-method adapter validates values and argument arity.
+/// Python string methods validate values and argument arity inside the template.
 #[cfg(feature = "chat-templates")]
 #[test]
 fn chat_python_string_methods_match_supported_semantics() {
@@ -799,8 +799,9 @@ fn chat_python_string_methods_match_supported_semantics() {
     let mut tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
     let messages = [ChatMessage::text("user", "hello")];
     for (expression, expected) in [
-        ("'Hello'.startswith('He')", "true"),
-        ("'Hello'.endswith('lo')", "true"),
+        // Booleans print as Python's `str(True)`, as in Hugging Face.
+        ("'Hello'.startswith('He')", "True"),
+        ("'Hello'.endswith('lo')", "True"),
         ("'a:b::c'.split(':') | join('|')", "a|b||c"),
         ("'  x  '.lstrip()", "x  "),
         ("'  x  '.rstrip()", "  x"),
@@ -811,6 +812,7 @@ fn chat_python_string_methods_match_supported_semantics() {
         ("'hello'.strip('')", "hello"),
         ("'HeLLo'.lower()", "hello"),
         ("'HeLLo'.upper()", "HELLO"),
+        ("'x y'.split() | join('|')", "x|y"),
     ] {
         tokenizer
             .metadata
@@ -828,7 +830,6 @@ fn chat_python_string_methods_match_supported_semantics() {
         "'x'.startswith()",
         "'x'.endswith('a','b')",
         "'x'.startswith(1)",
-        "'x'.split()",
         "'x'.strip(1)",
         "'x'.strip('a','b')",
         "'x'.lower(1)",
@@ -1119,5 +1120,406 @@ fn flan_t5_truncation_matches_hugging_face_golden_ids() {
     assert_eq!(
         encode_ids(&tokenizer, text, false, Some(4), TruncationSide::Right).unwrap(),
         [13959, 1566, 12, 2968]
+    );
+}
+
+/// Loads the base fixture with one default chat template.
+#[cfg(feature = "chat-templates")]
+fn chat_fixture(template: &str) -> (TempDir, LocalTokenizer) {
+    let mut config = base_config();
+    config["chat_template"] = Value::String(template.into());
+    let directory = fixture(config);
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    (directory, tokenizer)
+}
+
+/// Unset optional message fields are absent, so `'tool_calls' in message` is false (TOK-3).
+#[cfg(feature = "chat-templates")]
+#[test]
+fn chat_messages_omit_unset_fields_like_python_dicts() {
+    // Golden from transformers 5.2.0 render_jinja_template with the same messages.
+    let template = "{%- for message in messages %}\n    {%- if 'tool_calls' in message %}\n        {%- if not message.tool_calls|length == 1 %}{{ raise_exception('one tool call') }}{%- endif %}\n        {%- set call = message.tool_calls[0].function %}\n        {{- '<|call|>' + call.name + ' ' + call.arguments | tojson + '<|end|>' }}\n    {%- elif message.role == 'tool' %}\n        {{- '<|tool ' + message.tool_call_id + '|>' + message.content + '<|end|>' }}\n    {%- else %}\n        {{- '<|' + message.role + '|>' + message.content + '<|end|>' }}\n    {%- endif %}\n{%- endfor %}";
+    let (_directory, tokenizer) = chat_fixture(template);
+    let messages = [
+        ChatMessage::text("user", "weather?"),
+        ChatMessage::text("assistant", "").with_tool_calls(serde_json::json!([{
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": {"city": "Zürich", "unit": "c"}}
+        }])),
+        ChatMessage::text("tool", "21").with_tool_call_id("call_1"),
+    ];
+    assert_eq!(
+        tokenizer
+            .render_chat(&messages, &ChatTemplateOptions::default())
+            .unwrap(),
+        "<|user|>weather?<|end|><|call|>get_weather {\"city\": \"Zürich\", \"unit\": \"c\"}<|end|><|tool call_1|>21<|end|>"
+    );
+    let serialized = serde_json::to_value(ChatMessage::text("user", "hi")).unwrap();
+    assert_eq!(
+        serialized,
+        serde_json::json!({"role": "user", "content": "hi"})
+    );
+    let full = ChatMessage::new(
+        "assistant",
+        serde_json::json!([{"type": "text", "text": "x"}]),
+    )
+    .with_reasoning_content("think")
+    .with_name("bot")
+    .with_tool_calls(serde_json::json!([]))
+    .with_tool_call_id("id")
+    .with_field("thinking", true);
+    let value = serde_json::to_value(&full).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "x"}],
+            "reasoning_content": "think",
+            "name": "bot",
+            "tool_calls": [],
+            "tool_call_id": "id",
+            "thinking": true
+        })
+    );
+    // Deserialization collects unknown keys into `extra` and round-trips.
+    let parsed: ChatMessage = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed, full);
+}
+
+/// Extra message keys cannot silently replace a named field.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn chat_message_extra_keys_cannot_shadow_named_fields() {
+    let (_directory, tokenizer) = chat_fixture("{{ messages[0].role }}");
+    for field in [
+        "role",
+        "content",
+        "reasoning_content",
+        "tool_calls",
+        "name",
+        "tool_call_id",
+    ] {
+        let message = ChatMessage::text("user", "x").with_field(field, "shadow");
+        let error = tokenizer
+            .render_chat(&[message], &ChatTemplateOptions::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("extra key `{field}`")),
+            "{error}"
+        );
+    }
+    let message = ChatMessage::text("user", "x").with_field("custom", "ok");
+    assert_eq!(
+        tokenizer
+            .render_chat(&[message], &ChatTemplateOptions::default())
+            .unwrap(),
+        "user"
+    );
+}
+
+/// The context matches `apply_chat_template`: tools, documents, special tokens, optional switches.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn chat_context_matches_hugging_face_variables() {
+    // Golden: HF passes tools=None and documents=None and omits undeclared special tokens.
+    let template = "{{ bos_token }}|{{ eos_token }}|{{ unk_token }}|{{ pad_token }}|{{ sep_token }}|{{ cls_token }}|{{ mask_token }}|{{ add_generation_prompt }}|{{ tools }}|{{ documents }}|{{ enable_thinking is defined }}|{{ add_vision_id is defined }}";
+    let (_directory, mut tokenizer) = chat_fixture(template);
+    let messages = [ChatMessage::text("user", "x")];
+    assert_eq!(
+        tokenizer
+            .render_chat(&messages, &ChatTemplateOptions::default())
+            .unwrap(),
+        "<bos>|<eos>|<unk>|<pad>||||False|None|None|False|False"
+    );
+    tokenizer.metadata.special_tokens = SpecialTokens::default();
+    let options = ChatTemplateOptions {
+        add_generation_prompt: true,
+        tools: Some(serde_json::json!([{"name": "t"}])),
+        documents: Some(serde_json::json!([{"text": "d", "title": "T"}])),
+        enable_thinking: Some(false),
+        add_vision_id: true,
+        ..ChatTemplateOptions::default()
+    };
+    assert_eq!(
+        tokenizer.render_chat(&messages, &options).unwrap(),
+        "|||||||True|[{'name': 't'}]|[{'text': 'd', 'title': 'T'}]|True|True"
+    );
+    for documents in [serde_json::json!("text"), serde_json::json!([1])] {
+        let error = tokenizer
+            .render_chat(
+                &messages,
+                &ChatTemplateOptions {
+                    documents: Some(documents),
+                    ..ChatTemplateOptions::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("list of objects"), "{error}");
+    }
+    for reserved in [
+        "documents",
+        "sep_token",
+        "cls_token",
+        "mask_token",
+        "raise_exception",
+        "strftime_now",
+    ] {
+        let error = tokenizer
+            .render_chat(
+                &messages,
+                &ChatTemplateOptions {
+                    extra_context: BTreeMap::from([(reserved.into(), Value::Null)]),
+                    ..ChatTemplateOptions::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("reserved variable"), "{error}");
+    }
+}
+
+/// Declared `sep`/`cls`/`mask` tokens are resolved and exposed to templates.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn encoder_special_tokens_are_resolved_and_exposed() {
+    let mut config = base_config();
+    config["sep_token"] = serde_json::json!("hello");
+    config["cls_token"] = serde_json::json!({"content": "world"});
+    config["mask_token"] = serde_json::json!("<unk>");
+    config["chat_template"] = serde_json::json!("{{ sep_token }}{{ cls_token }}{{ mask_token }}");
+    let directory = fixture(config);
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    let special = &tokenizer.metadata().special_tokens;
+    assert_eq!(special.sep.as_ref().map(|token| token.id), Some(4));
+    assert_eq!(special.cls.as_ref().map(|token| token.id), Some(5));
+    assert_eq!(special.mask.as_ref().map(|token| token.id), Some(0));
+    assert_eq!(
+        special.named().map(|(name, _)| name).collect::<Vec<_>>(),
+        [
+            "bos_token",
+            "eos_token",
+            "unk_token",
+            "sep_token",
+            "pad_token",
+            "cls_token",
+            "mask_token"
+        ]
+    );
+    assert_eq!(
+        tokenizer
+            .render_chat(
+                &[ChatMessage::text("user", "x")],
+                &ChatTemplateOptions::default()
+            )
+            .unwrap(),
+        "helloworld<unk>"
+    );
+}
+
+/// `continue_final_message` cuts the prompt after the final text, as Hugging Face does.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn continue_final_message_leaves_the_final_turn_open() {
+    let (_directory, tokenizer) = chat_fixture(
+        "{% for m in messages %}<{{ m.role }}>{{ m.content }}</{{ m.role }}>\n{% endfor %}",
+    );
+    let options = ChatTemplateOptions {
+        continue_final_message: true,
+        ..ChatTemplateOptions::default()
+    };
+    let messages = [
+        ChatMessage::text("user", "hi"),
+        ChatMessage::text("assistant", "The answer is"),
+    ];
+    // Golden from transformers 5.2.0.
+    assert_eq!(
+        tokenizer.render_chat(&messages, &options).unwrap(),
+        "<user>hi</user>\n<assistant>The answer is"
+    );
+    // Structured content continues its last text block.
+    let structured = [ChatMessage::new(
+        "assistant",
+        serde_json::json!([{"type": "text", "text": "first"}, {"type": "image"}, {"type": "text", "text": "second"}]),
+    )];
+    let (_directory, blocks) = chat_fixture(
+        "{% for block in messages[0].content %}{% if block.text %}[{{ block.text }}]{% endif %}{% endfor %}",
+    );
+    assert_eq!(
+        blocks.render_chat(&structured, &options).unwrap(),
+        "[first][second"
+    );
+    // Whitespace trimmed by the template after the marker is trimmed from the prompt too.
+    let (_directory, trimming) = chat_fixture("{{ messages[0].content | trim }}  END");
+    assert_eq!(
+        trimming
+            .render_chat(&[ChatMessage::text("assistant", "go")], &options)
+            .unwrap(),
+        "go"
+    );
+    for (messages, template, expected) in [
+        (
+            vec![ChatMessage::new("assistant", Value::Null)],
+            "x",
+            "contain text",
+        ),
+        (
+            vec![ChatMessage::new(
+                "assistant",
+                serde_json::json!([{"type": "image"}]),
+            )],
+            "x",
+            "contain text",
+        ),
+        (
+            vec![ChatMessage::text("assistant", "go")],
+            "static",
+            "dropped the final message",
+        ),
+        (
+            vec![ChatMessage::text("assistant", "go")],
+            "{{ messages[0].content | replace('go', 'stop') }}",
+            "altered the final message",
+        ),
+    ] {
+        let (_directory, tokenizer) = chat_fixture(template);
+        let error = tokenizer.render_chat(&messages, &options).unwrap_err();
+        assert!(error.to_string().contains(expected), "{template}: {error}");
+    }
+    let error = tokenizer
+        .render_chat(
+            &messages,
+            &ChatTemplateOptions {
+                continue_final_message: true,
+                add_generation_prompt: true,
+                ..ChatTemplateOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("mutually exclusive"), "{error}");
+}
+
+/// A fixed clock makes `strftime_now` reproducible through the public options.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn chat_options_fix_the_template_clock() {
+    let (_directory, tokenizer) = chat_fixture("{{ strftime_now('%d %b %Y') }}");
+    let options = ChatTemplateOptions {
+        current_time_unix_seconds: Some(1_721_999_109),
+        ..ChatTemplateOptions::default()
+    };
+    assert_eq!(
+        tokenizer
+            .render_chat(&[ChatMessage::text("user", "x")], &options)
+            .unwrap(),
+        "26 Jul 2024"
+    );
+    // Options deserialize from partial JSON, defaulting every omitted switch.
+    let parsed: ChatTemplateOptions =
+        serde_json::from_value(serde_json::json!({"add_generation_prompt": true})).unwrap();
+    assert!(parsed.add_generation_prompt && !parsed.continue_final_message);
+    assert_eq!(parsed.current_time_unix_seconds, None);
+}
+
+/// Builds the tool-use conversation used by the real-template goldens.
+///
+/// Dictionaries are key-sorted so the goldens hold with or without
+/// order-preserving JSON maps.
+#[cfg(feature = "chat-templates")]
+fn tool_use_conversation() -> (Vec<ChatMessage>, ChatTemplateOptions) {
+    let messages = vec![
+        ChatMessage::text("user", "Weather in Paris?"),
+        ChatMessage::text("assistant", "").with_tool_calls(serde_json::json!([{
+            "function": {"arguments": {"city": "Paris"}, "name": "get_weather"},
+            "type": "function"
+        }])),
+        ChatMessage::text("tool", "18C")
+            .with_tool_call_id("call_0")
+            .with_name("get_weather"),
+    ];
+    let options = ChatTemplateOptions {
+        add_generation_prompt: true,
+        tools: Some(serde_json::json!([{
+            "function": {
+                "description": "Get the weather for a city.",
+                "name": "get_weather",
+                "parameters": {
+                    "properties": {"city": {"description": "City name", "type": "string"}},
+                    "required": ["city"],
+                    "type": "object"
+                }
+            },
+            "type": "function"
+        }])),
+        extra_context: BTreeMap::from([
+            ("current_date".into(), serde_json::json!("2026-09-05")),
+            ("reasoning_strength".into(), serde_json::json!("low")),
+        ]),
+        ..ChatTemplateOptions::default()
+    };
+    (messages, options)
+}
+
+/// Loads a pinned local tokenizer named by an environment variable.
+#[cfg(feature = "chat-templates")]
+fn pinned_tokenizer(variable: &str) -> LocalTokenizer {
+    let root = std::env::var_os(variable)
+        .unwrap_or_else(|| panic!("{variable} must name the pinned local checkpoint"));
+    LocalTokenizer::from_directory(root).unwrap()
+}
+
+/// Qwen3.5's official tool prompt matches `apply_chat_template` byte for byte.
+///
+/// Golden from transformers 5.2.0 with the pinned Qwen3.5-0.8B tokenizer
+/// (revision 2fc06364715b967f1860aea9cf38778875588b17).
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "requires TRANSFORMERS_QWEN35_DIR with the pinned Qwen3.5 tokenizer"]
+fn qwen35_tool_prompt_matches_hugging_face() {
+    let tokenizer = pinned_tokenizer("TRANSFORMERS_QWEN35_DIR");
+    let (messages, options) = tool_use_conversation();
+    let expected = "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"function\": {\"description\": \"Get the weather for a city.\", \"name\": \"get_weather\", \"parameters\": {\"properties\": {\"city\": {\"description\": \"City name\", \"type\": \"string\"}}, \"required\": [\"city\"], \"type\": \"object\"}}, \"type\": \"function\"}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    assert_eq!(
+        tokenizer.render_chat(&messages, &options).unwrap(),
+        expected
+    );
+}
+
+/// Nemotron-H's official template renders a plain request (its `tools is iterable` guard).
+///
+/// Golden from transformers 5.2.0 with the pinned Nemotron 3.5 Lightning
+/// tokenizer (revision a9904d24bcc1d289a1950fa9d2b978c47cf903b9).
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "requires TRANSFORMERS_NEMOTRON_H_DIR with the pinned Nemotron-H tokenizer"]
+fn nemotron_plain_prompt_matches_hugging_face() {
+    let tokenizer = pinned_tokenizer("TRANSFORMERS_NEMOTRON_H_DIR");
+    let rendered = tokenizer
+        .render_chat(
+            &[ChatMessage::text("user", "Hello")],
+            &ChatTemplateOptions {
+                add_generation_prompt: true,
+                ..ChatTemplateOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        rendered,
+        "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    );
+}
+
+/// Muse Glimmer's official tool prompt (conditional keyword arguments, `dict.get`) matches.
+///
+/// Golden from transformers 5.2.0 with the pinned Muse Glimmer tokenizer
+/// (revision a4e59da52a7bc87ae7251dd5545c0dd437c44b68).
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "requires TRANSFORMERS_MUSE_GLIMMER_DIR with the pinned Muse Glimmer tokenizer"]
+fn muse_glimmer_tool_prompt_matches_hugging_face() {
+    let tokenizer = pinned_tokenizer("TRANSFORMERS_MUSE_GLIMMER_DIR");
+    let (messages, options) = tool_use_conversation();
+    let expected = "<|begin_of_text|><|start|>system<|message|>You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04.\nCurrent date: 2026-09-05.\n\nReasoning strength: low.\n\nIn this environment you have access to a set of tools you can use to answer the user's question.\n\nYou can invoke a function by writing a \"<atem:function_calls>\" block like the following:\n<atem:function_calls>\n<atem:invoke name=\"$FUNCTION_NAME\">\n<atem:parameter name=\"$PARAMETER_NAME\">$PARAMETER_VALUE</atem:parameter>\n...\n</atem:invoke>\n</atem:function_calls>\n\nString and scalar parameters should be specified as is, while lists and objects should use JSON format. Note that spaces for string values are not stripped. The output is not expected to be valid XML and is parsed with regular expressions.\nHere are the functions available in JSONSchema format:\n// Tool metadata\n{\"name\": \"get_weather\", \"description\": \"\"}\n// Function schemas\n{\"name\": \"get_weather\", \"description\": \"Get the weather for a city.\", \"parameters\": {\"properties\": {\"city\": {\"description\": \"City name\", \"type\": \"string\"}}, \"required\": [\"city\"], \"type\": \"object\"}}\n\nHere's an example of how to call a function in the tool set:\n(If the tool namespace is not specified, invoke the function directly as `example_function_name` rather than `example_tool_name.example_function_name`)\n\nto=example_tool_name.example_function_name\n\n<atem:function_calls>\n<atem:invoke name=\"example_tool_name.example_function_name\">\n<atem:parameter name=\"example_parameter_1\">value_1</atem:parameter>\n<atem:parameter name=\"example_parameter_2\">This is the value for the second parameter\nthat can span\n\"multiple\" lines\n</atem:parameter>\n</atem:invoke>\n</atem:function_calls>\n\n# Valid recipients: \"self\", \"get_weather.*\", \"user\".<|eot|><|start|>user<|message|>Weather in Paris?<|eot|><|start|>assistant to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eot|><|start|>tool get_weather<|message|><tool_output name=\"get_weather\">\n18C\n</tool_output><|eot|><|start|>assistant";
+    assert_eq!(
+        tokenizer.render_chat(&messages, &options).unwrap(),
+        expected
     );
 }

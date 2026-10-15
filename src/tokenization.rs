@@ -17,11 +17,22 @@
 //! Truncation and padding blocks serialized inside `tokenizer.json` are cleared
 //! at load time: like `transformers`, this crate applies them only on request.
 //!
+//! # Chat templates
+//!
+//! With the `chat-templates` feature, [`LocalTokenizer::render_chat`] renders a
+//! checkpoint's Jinja chat template the way Hugging Face's
+//! `apply_chat_template` does: the same whitespace rules, lenient undefined
+//! variables, Python `str`/`dict` methods and value printing, a `json.dumps`
+//! `tojson` filter, `raise_exception`, `strftime_now`, the `tools` and
+//! `documents` variables, and every declared special token. Messages serialize
+//! like the plain dictionaries Python callers pass, so optional keys are
+//! absent rather than `null`.
+//!
 //! Chat templates are data supplied by a checkpoint and therefore are treated
-//! as untrusted programs. The optional MiniJinja environment has no filesystem
-//! loader, rejects undefined values, limits recursion, and meters execution
-//! with fuel. These constraints do not prove a template benign, but they bound
-//! the resources and capabilities available to ordinary model templates.
+//! as untrusted programs. The MiniJinja environment has no filesystem loader,
+//! limits recursion, bounds printed nesting, and meters execution with fuel.
+//! These constraints do not prove a template benign, but they bound the
+//! resources and capabilities available to ordinary model templates.
 
 use std::{
     collections::BTreeMap,
@@ -41,8 +52,17 @@ use crate::{
     architecture::{TokenMask, bool_tensor_from_values},
 };
 
+/// Proleptic-Gregorian calendar arithmetic for `strftime_now`, verified by Verus.
+#[cfg(feature = "chat-templates")]
+mod calendar;
+/// Hugging Face-compatible chat-template environment and `strftime`.
+#[cfg(feature = "chat-templates")]
+mod chat_template;
 /// Dependency-free truncation-budget and padding arithmetic, verified by Verus.
 mod layout;
+/// Python `str`/`dict` methods, printing, and `json.dumps` for templates.
+#[cfg(feature = "chat-templates")]
+mod pycompat;
 
 use layout::{content_token_budget, pad_token_row, padding_split, validity_mask};
 
@@ -50,9 +70,40 @@ use layout::{content_token_budget, pad_token_row, padding_split, validity_mask};
 const MAX_TOKENIZER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Maximum accepted auxiliary metadata file size in bytes.
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
-/// Instruction budget limiting each local chat-template evaluation.
+/// Marker appended to the final message when it is rendered as an open prefix.
+///
+/// The same text Hugging Face uses; rendering is cut at its last occurrence.
 #[cfg(feature = "chat-templates")]
-const CHAT_TEMPLATE_FUEL: u64 = 250_000;
+const CONTINUE_FINAL_MESSAGE_TAG: &str = "CONTINUE_FINAL_MESSAGE_TAG ";
+/// Template variables supplied by the renderer that `extra_context` cannot replace.
+#[cfg(feature = "chat-templates")]
+const RESERVED_CHAT_VARIABLES: &[&str] = &[
+    "messages",
+    "tools",
+    "documents",
+    "add_generation_prompt",
+    "add_vision_id",
+    "enable_thinking",
+    "bos_token",
+    "eos_token",
+    "unk_token",
+    "sep_token",
+    "pad_token",
+    "cls_token",
+    "mask_token",
+    "raise_exception",
+    "strftime_now",
+];
+/// Named [`ChatMessage`] fields that a flattened extra key must not shadow.
+#[cfg(feature = "chat-templates")]
+const CHAT_MESSAGE_FIELDS: &[&str] = &[
+    "role",
+    "content",
+    "reasoning_content",
+    "tool_calls",
+    "name",
+    "tool_call_id",
+];
 
 /// Side on which shorter rows receive padding tokens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +211,9 @@ pub struct SpecialToken {
 }
 
 /// Common special tokens normalized from Hugging Face metadata.
+///
+/// These are Hugging Face's named special-token attributes; each declared one
+/// is exposed to chat templates as `bos_token`, `eos_token`, and so on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecialTokens {
     /// Beginning-of-sequence token.
@@ -170,8 +224,36 @@ pub struct SpecialTokens {
     pub pad: Option<SpecialToken>,
     /// Unknown-token fallback.
     pub unk: Option<SpecialToken>,
+    /// Segment separator used by encoder tokenizers such as BERT's `[SEP]`.
+    #[serde(default)]
+    pub sep: Option<SpecialToken>,
+    /// Classification token such as BERT's `[CLS]`.
+    #[serde(default)]
+    pub cls: Option<SpecialToken>,
+    /// Masked-language-model token such as `[MASK]`.
+    #[serde(default)]
+    pub mask: Option<SpecialToken>,
     /// Additional special tokens in their artifact order.
     pub additional: Vec<SpecialToken>,
+}
+
+impl SpecialTokens {
+    /// Lists declared named tokens with their chat-template variable names.
+    ///
+    /// The order matches Hugging Face's `SPECIAL_TOKENS_ATTRIBUTES`.
+    pub fn named(&self) -> impl Iterator<Item = (&'static str, &SpecialToken)> {
+        [
+            ("bos_token", &self.bos),
+            ("eos_token", &self.eos),
+            ("unk_token", &self.unk),
+            ("sep_token", &self.sep),
+            ("pad_token", &self.pad),
+            ("cls_token", &self.cls),
+            ("mask_token", &self.mask),
+        ]
+        .into_iter()
+        .filter_map(|(name, token)| token.as_ref().map(|token| (name, token)))
+    }
 }
 
 /// Normalized, serializable tokenizer-side checkpoint metadata.
@@ -193,47 +275,129 @@ pub struct TokenizerMetadata {
     pub chat_templates: BTreeMap<String, String>,
 }
 
-/// One role/content pair passed to a checkpoint chat template.
+/// One message passed to a checkpoint chat template.
+///
+/// A message reaches the template exactly like the plain dictionary a Python
+/// caller would pass to `apply_chat_template`: unset optional fields are
+/// *absent*, not `null`, so membership tests such as
+/// `{% if 'tool_calls' in message %}` (used by Llama 3.x templates) take the
+/// same branch as in Hugging Face. Checkpoint-specific keys go in
+/// [`Self::extra`] and appear beside the named fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
-    /// Template-visible role such as `system`, `user`, or `assistant`.
+    /// Template-visible role such as `system`, `user`, `assistant`, or `tool`.
     pub role: String,
     /// Template-visible message content; strings and structured multimodal lists are accepted.
     pub content: Value,
     /// Optional hidden reasoning content used by Qwen-style assistant turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Optional structured tool calls emitted by an assistant turn.
+    ///
+    /// Hugging Face's convention is a list of
+    /// `{"type": "function", "function": {"name": ..., "arguments": {...}}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Value>,
     /// Optional participant or tool name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Optional ID linking a `tool` result message to the call that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Additional template-visible keys; they must not repeat a named field.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl ChatMessage {
-    /// Creates a conventional text-only chat message.
-    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+    /// Creates a message with arbitrary JSON content, such as a multimodal block list.
+    pub fn new(role: impl Into<String>, content: impl Into<Value>) -> Self {
         Self {
             role: role.into(),
-            content: Value::String(content.into()),
+            content: content.into(),
             reasoning_content: None,
             tool_calls: None,
             name: None,
+            tool_call_id: None,
+            extra: BTreeMap::new(),
         }
+    }
+
+    /// Creates a conventional text-only chat message.
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(role, Value::String(content.into()))
+    }
+
+    /// Attaches hidden reasoning content to an assistant turn.
+    #[must_use]
+    pub fn with_reasoning_content(mut self, reasoning_content: impl Into<String>) -> Self {
+        self.reasoning_content = Some(reasoning_content.into());
+        self
+    }
+
+    /// Attaches the tool calls an assistant turn emitted.
+    #[must_use]
+    pub fn with_tool_calls(mut self, tool_calls: Value) -> Self {
+        self.tool_calls = Some(tool_calls);
+        self
+    }
+
+    /// Attaches a participant or tool name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Links a `tool` result message to the call that produced it.
+    #[must_use]
+    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
+        self
+    }
+
+    /// Adds one checkpoint-specific key visible to the template.
+    #[must_use]
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.extra.insert(key.into(), value.into());
+        self
     }
 }
 
 /// Optional variables controlling checkpoint chat-template rendering.
+///
+/// Fields mirror the arguments of Hugging Face's `apply_chat_template`.
+/// Optional switches that are unset are *absent* from the template context,
+/// so `{% if enable_thinking is defined %}` behaves as in Python.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChatTemplateOptions {
     /// Named template; omission selects `default` or the only available template.
     pub template_name: Option<String>,
     /// Whether the rendered prompt should end at the next assistant turn prefix.
     pub add_generation_prompt: bool,
-    /// Optional tool schemas exposed to templates that support tool use.
+    /// Render the final message as an open prefix that the model continues.
+    ///
+    /// Equivalent to Hugging Face's `continue_final_message`: the prompt is cut
+    /// right after the final message's text, dropping the template's
+    /// end-of-turn markup. Incompatible with [`Self::add_generation_prompt`].
+    pub continue_final_message: bool,
+    /// Optional tool schemas exposed as `tools` to templates that support tool use.
     pub tools: Option<Value>,
+    /// Optional retrieval documents exposed as `documents`: a list of objects,
+    /// conventionally with `title` and `text` keys.
+    pub documents: Option<Value>,
     /// Whether multimodal templates should number image and video placeholders.
     pub add_vision_id: bool,
     /// Optional reasoning-mode switch used by checkpoints that expose one.
     pub enable_thinking: Option<bool>,
+    /// Fixed instant, in Unix seconds, that `strftime_now` formats (as UTC).
+    ///
+    /// `None` reads the host clock. Hugging Face formats host *local* time;
+    /// this crate has no timezone database and always uses UTC. Fix the
+    /// instant (or pass a template's own date variable, such as Llama's
+    /// `date_string`, in [`Self::extra_context`]) for reproducible prompts.
+    pub current_time_unix_seconds: Option<i64>,
     /// Additional checkpoint-specific variables; reserved built-ins cannot be replaced.
     pub extra_context: BTreeMap<String, Value>,
 }
@@ -569,65 +733,93 @@ impl LocalTokenizer {
     }
 
     /// Renders one bounded checkpoint chat template without filesystem access.
+    ///
+    /// The template sees `messages`, `tools`, `documents`,
+    /// `add_generation_prompt`, every declared special token (`bos_token`,
+    /// `eos_token`, ...), the optional switches in `options`, the globals
+    /// `raise_exception` and `strftime_now`, and `options.extra_context`.
     #[cfg(feature = "chat-templates")]
     pub fn render_chat(
         &self,
         messages: &[ChatMessage],
         options: &ChatTemplateOptions,
     ) -> Result<String> {
-        use minijinja::{Environment, ErrorKind, UndefinedBehavior};
-
         if messages.is_empty() {
             return Err(Error::Tokenizer(
                 "chat rendering requires at least one message".into(),
             ));
         }
+        if options.continue_final_message && options.add_generation_prompt {
+            return Err(Error::Tokenizer(
+                "continue_final_message and add_generation_prompt are mutually exclusive: the first extends the final message, the second starts a new assistant turn".into(),
+            ));
+        }
         let (name, template) = select_template(&self.metadata.chat_templates, options)?;
-        let mut environment = Environment::new();
-        environment.set_undefined_behavior(UndefinedBehavior::Strict);
-        environment.set_recursion_limit(64);
-        environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
-        environment.set_unknown_method_callback(huggingface_string_method);
-        environment.add_function(
-            "raise_exception",
-            |message: String| -> core::result::Result<String, minijinja::Error> {
-                Err(minijinja::Error::new(ErrorKind::InvalidOperation, message))
-            },
-        );
+        let mut messages = chat_messages_value(messages)?;
+        let continued_text = if options.continue_final_message {
+            Some(mark_final_message(&mut messages)?)
+        } else {
+            None
+        };
+        let context = self.chat_context(messages, options)?;
+        let rendered = chat_template::render_template(
+            template,
+            &Value::Object(context),
+            options.current_time_unix_seconds,
+        )
+        .map_err(|error| Error::Tokenizer(format!("chat template `{name}` failed: {error}")))?;
+        match continued_text {
+            Some(final_text) => cut_after_final_message(rendered, &final_text),
+            None => Ok(rendered),
+        }
+    }
 
+    /// Assembles the template variables Hugging Face passes to a chat template.
+    #[cfg(feature = "chat-templates")]
+    fn chat_context(
+        &self,
+        messages: Value,
+        options: &ChatTemplateOptions,
+    ) -> Result<Map<String, Value>> {
+        if let Some(documents) = &options.documents
+            && !documents
+                .as_array()
+                .is_some_and(|documents| documents.iter().all(Value::is_object))
+        {
+            return Err(Error::Tokenizer(
+                "chat documents must be a list of objects, conventionally with `title` and `text`"
+                    .into(),
+            ));
+        }
         let mut context = Map::new();
+        context.insert("messages".into(), messages);
+        context.insert("tools".into(), options.tools.clone().unwrap_or(Value::Null));
         context.insert(
-            "messages".into(),
-            serde_json::to_value(messages).map_err(|error| {
-                Error::Tokenizer(format!("failed to serialize chat messages: {error}"))
-            })?,
+            "documents".into(),
+            options.documents.clone().unwrap_or(Value::Null),
         );
         context.insert(
             "add_generation_prompt".into(),
             Value::Bool(options.add_generation_prompt),
         );
-        context.insert("tools".into(), options.tools.clone().unwrap_or(Value::Null));
-        context.insert("add_vision_id".into(), Value::Bool(options.add_vision_id));
-        context.insert(
-            "enable_thinking".into(),
-            options.enable_thinking.map_or(Value::Null, Value::Bool),
-        );
-        insert_special_context(&mut context, "bos_token", &self.metadata.special_tokens.bos);
-        insert_special_context(&mut context, "eos_token", &self.metadata.special_tokens.eos);
-        insert_special_context(&mut context, "pad_token", &self.metadata.special_tokens.pad);
-        insert_special_context(&mut context, "unk_token", &self.metadata.special_tokens.unk);
+        if let Some(enable_thinking) = options.enable_thinking {
+            context.insert("enable_thinking".into(), Value::Bool(enable_thinking));
+        }
+        if options.add_vision_id {
+            context.insert("add_vision_id".into(), Value::Bool(true));
+        }
+        for (name, token) in self.metadata.special_tokens.named() {
+            context.insert(name.into(), Value::String(token.content.clone()));
+        }
         for (name, value) in &options.extra_context {
-            if context.contains_key(name) {
+            if RESERVED_CHAT_VARIABLES.contains(&name.as_str()) {
                 return Err(Error::Tokenizer(format!(
                     "extra chat context cannot replace reserved variable `{name}`"
                 )));
             }
             context.insert(name.clone(), value.clone());
         }
-
-        environment
-            .render_str(template, Value::Object(context))
-            .map_err(|error| Error::Tokenizer(format!("chat template `{name}` failed: {error}")))
+        Ok(context)
     }
 
     /// Renders and tokenizes a chat prompt with checkpoint delimiters exactly once.
@@ -751,6 +943,9 @@ fn normalize_metadata(
         eos: resolve_special("eos_token", tokenizer_config, special_map, tokenizer)?,
         pad: resolve_special("pad_token", tokenizer_config, special_map, tokenizer)?,
         unk: resolve_special("unk_token", tokenizer_config, special_map, tokenizer)?,
+        sep: resolve_special("sep_token", tokenizer_config, special_map, tokenizer)?,
+        cls: resolve_special("cls_token", tokenizer_config, special_map, tokenizer)?,
+        mask: resolve_special("mask_token", tokenizer_config, special_map, tokenizer)?,
         additional: resolve_additional(tokenizer_config, special_map, tokenizer)?,
     };
     let mut chat_templates = parse_chat_templates(get("chat_template"))?;
@@ -998,90 +1193,78 @@ fn select_template<'a>(
     }))
 }
 
-/// Implements the small Python-string-method subset used by official HF templates.
+/// Serializes messages as template dictionaries, rejecting shadowed field names.
 #[cfg(feature = "chat-templates")]
-fn huggingface_string_method(
-    _state: &minijinja::State<'_, '_>,
-    value: &minijinja::Value,
-    method: &str,
-    arguments: &[minijinja::Value],
-) -> core::result::Result<minijinja::Value, minijinja::Error> {
-    use minijinja::{Error as JinjaError, ErrorKind, Value as JinjaValue};
-
-    let source = value
-        .as_str()
-        .ok_or_else(|| JinjaError::from(ErrorKind::UnknownMethod))?;
-    let one_string = || {
-        if arguments.len() != 1 {
-            return Err(JinjaError::new(
-                ErrorKind::InvalidOperation,
-                format!("string.{method} expects exactly one string argument"),
-            ));
+fn chat_messages_value(messages: &[ChatMessage]) -> Result<Value> {
+    for (index, message) in messages.iter().enumerate() {
+        if let Some(key) = message
+            .extra
+            .keys()
+            .find(|key| CHAT_MESSAGE_FIELDS.contains(&key.as_str()))
+        {
+            return Err(Error::Tokenizer(format!(
+                "chat message {index} extra key `{key}` would replace the named field of the same name"
+            )));
         }
-        arguments[0].as_str().ok_or_else(|| {
-            JinjaError::new(
-                ErrorKind::InvalidOperation,
-                format!("string.{method} expects a string argument"),
-            )
-        })
-    };
-    match method {
-        "startswith" => Ok(JinjaValue::from(source.starts_with(one_string()?))),
-        "endswith" => Ok(JinjaValue::from(source.ends_with(one_string()?))),
-        "split" => Ok(JinjaValue::from_serialize(
-            source
-                .split(one_string()?)
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        )),
-        "lstrip" | "rstrip" | "strip" => {
-            if arguments.len() > 1
-                || arguments
-                    .first()
-                    .is_some_and(|value| value.as_str().is_none())
-            {
-                return Err(JinjaError::new(
-                    ErrorKind::InvalidOperation,
-                    format!("string.{method} accepts at most one string argument"),
-                ));
-            }
-            let characters = arguments.first().and_then(JinjaValue::as_str);
-            let stripped = match (method, characters) {
-                ("lstrip", Some(characters)) => {
-                    source.trim_start_matches(|character| characters.contains(character))
-                }
-                ("rstrip", Some(characters)) => {
-                    source.trim_end_matches(|character| characters.contains(character))
-                }
-                ("strip", Some(characters)) => {
-                    source.trim_matches(|character| characters.contains(character))
-                }
-                ("lstrip", None) => source.trim_start(),
-                ("rstrip", None) => source.trim_end(),
-                ("strip", None) => source.trim(),
-                _ => source,
-            };
-            Ok(JinjaValue::from(stripped.to_owned()))
-        }
-        "lower" if arguments.is_empty() => Ok(JinjaValue::from(source.to_lowercase())),
-        "upper" if arguments.is_empty() => Ok(JinjaValue::from(source.to_uppercase())),
-        _ => Err(JinjaError::from(ErrorKind::UnknownMethod)),
     }
+    serde_json::to_value(messages)
+        .map_err(|error| Error::Tokenizer(format!("failed to serialize chat messages: {error}")))
 }
 
-/// Adds a special token spelling or JSON null to template context.
+/// Appends [`CONTINUE_FINAL_MESSAGE_TAG`] to the final message's text and returns that text.
+///
+/// For structured content, the last block with a string `text` field is
+/// marked, as in Hugging Face.
 #[cfg(feature = "chat-templates")]
-fn insert_special_context(
-    context: &mut Map<String, Value>,
-    name: &str,
-    token: &Option<SpecialToken>,
-) {
-    context.insert(
-        name.into(),
-        token
-            .as_ref()
-            .map_or(Value::Null, |token| Value::String(token.content.clone())),
-    );
+fn mark_final_message(messages: &mut Value) -> Result<String> {
+    let missing_text = || {
+        Error::Tokenizer("continue_final_message requires the final message to contain text".into())
+    };
+    let content = messages
+        .as_array_mut()
+        .and_then(|messages| messages.last_mut())
+        .and_then(|message| message.get_mut("content"))
+        .ok_or_else(missing_text)?;
+    let text = match content {
+        Value::String(text) => text,
+        Value::Array(blocks) => blocks
+            .iter_mut()
+            .rev()
+            .find_map(|block| match block.get_mut("text") {
+                Some(Value::String(text)) => Some(text),
+                _ => None,
+            })
+            .ok_or_else(missing_text)?,
+        _ => return Err(missing_text()),
+    };
+    let original = text.clone();
+    text.push_str(CONTINUE_FINAL_MESSAGE_TAG);
+    Ok(original)
+}
+
+/// Cuts a rendered prompt right after the final message, as Hugging Face does.
+///
+/// If the template trimmed the whitespace following the marker, trailing
+/// whitespace is trimmed from the prompt too.
+#[cfg(feature = "chat-templates")]
+fn cut_after_final_message(mut rendered: String, final_text: &str) -> Result<String> {
+    let marker = CONTINUE_FINAL_MESSAGE_TAG.trim_end();
+    let Some(location) = rendered.rfind(marker) else {
+        return Err(Error::Tokenizer(
+            "continue_final_message is set but the template dropped the final message".into(),
+        ));
+    };
+    if !rendered.contains(final_text.trim()) {
+        return Err(Error::Tokenizer(
+            "continue_final_message is set but the template altered the final message".into(),
+        ));
+    }
+    let preserved_spacing = rendered[location..].starts_with(CONTINUE_FINAL_MESSAGE_TAG);
+    rendered.truncate(location);
+    if !preserved_spacing {
+        rendered.truncate(rendered.trim_end().len());
+    }
+    Ok(rendered)
 }
 
 #[cfg(test)]
