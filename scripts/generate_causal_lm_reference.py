@@ -171,11 +171,43 @@ def truncate_config(config: Any, layers: int) -> None:
         config.layer_types = list(config.layer_types[:layers])
 
 
-def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> tuple[Any, Any]:
-    """Loads the tokenizer and the eager model, in `dtype` (one of `DTYPES`), from local files only.
+def cast_floating_parameters(model: Any, dtype: Any) -> int:
+    """Casts every floating parameter of `model` to the torch `dtype` in place; returns how many changed.
+
+    Buffers are deliberately left alone. Transformers keeps some of them in
+    F32 whatever the model dtype, most importantly the rotary ``inv_freq``
+    tables: rounding those to BF16 moves every rotary angle (by up to 0.28 rad
+    at position 183 for gpt-oss-20b's YaRN frequencies), so a BF16 reference
+    would no longer be ordinary BF16 inference. ``torch.nn.Module.to`` casts
+    buffers too and is therefore not used. Integer parameters and those
+    already in `dtype` are untouched; tied parameters are visited once.
+    """
+
+    import torch
+
+    changed = 0
+    with torch.no_grad():
+        for parameter in model.parameters():
+            if parameter.is_floating_point() and parameter.dtype != dtype:
+                parameter.data = parameter.data.to(dtype)
+                changed += 1
+    return changed
+
+
+def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> Any:
+    """Loads the eager model, in `dtype` (one of `DTYPES`), from local files only.
 
     With `layers`, only the first `layers` decoder blocks are built and
     loaded (see `truncate_config`); the checkpoint's other blocks are ignored.
+
+    Quantized checkpoints can leave dequantized parameters in another dtype:
+    without CUDA kernels Transformers decodes MXFP4 experts to BF16 whatever
+    `dtype` says, and its grouped expert kernels then cast F32 activations
+    down to BF16, so an "F32" reference would not be F32. Every floating
+    parameter is therefore cast to `dtype` after loading (exact for the BF16
+    decodings; nothing changes for an ordinary checkpoint or for
+    ``bfloat16``), while buffers keep the dtype Transformers chose (see
+    `cast_floating_parameters`).
     """
 
     if dtype not in DTYPES:
@@ -186,7 +218,6 @@ def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = Non
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(0)
     transformers.utils.logging.disable_progress_bar()
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     config = transformers.AutoConfig.from_pretrained(model_dir, local_files_only=True)
     if layers is not None:
         truncate_config(config, layers)
@@ -197,14 +228,20 @@ def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = Non
         dtype=getattr(torch, dtype),
         attn_implementation="eager",
     )
-    # Quantized checkpoints can leave dequantized parameters in another dtype:
-    # Transformers decodes MXFP4 experts to BF16 regardless of `dtype`, and its
-    # grouped expert kernels then cast F32 activations down to BF16. Casting
-    # every parameter (exactly, for BF16 values) keeps the whole reference in
-    # the requested dtype; it is a no-op for ordinary checkpoints.
-    model = model.to(getattr(torch, dtype))
+    cast_floating_parameters(model, getattr(torch, dtype))
     model.eval()
-    return tokenizer, model
+    return model
+
+
+def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> tuple[Any, Any]:
+    """Loads the checkpoint's own tokenizer and its eager model (see `load_causal_lm`)."""
+
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    import transformers
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    return tokenizer, load_causal_lm(model_dir, dtype, layers)
 
 
 def prompt_logits(model: Any, token_ids: list[int]) -> Any:
