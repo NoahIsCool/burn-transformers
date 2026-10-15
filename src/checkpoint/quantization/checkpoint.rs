@@ -31,12 +31,13 @@ use burn::tensor::TensorData;
 use super::{
     BurnpackAppendOutcome, BurnpackArtifactSummary, BurnpackProvenance, BurnpackSessionLimits,
     BurnpackStagingStats, QuantizationEligibility, QuantizationError, QuantizationExclusion,
-    QuantizedBurnpackSession, WeightQuantizationConfig, classify_weight_for_quantization,
+    QuantizedBurnpackSession, QuantizedTensorMetadata, SourceFloatDType, WeightQuantizationConfig,
+    classify_weight_for_quantization,
     provenance::{ProvenanceExecutionStats, hash_local_checkpoint_provenance_audited},
 };
 use crate::checkpoint::{
     CheckpointError, CheckpointManifest, ExecutionFailureCause, ExecutionStats, LoadPlan,
-    LoadReport, LocalShardSource, QuantizationRecord, TensorSink, execute_load_plan,
+    LoadReport, LocalShardSource, QuantizationRecord, TensorDType, TensorSink, execute_load_plan,
 };
 
 /// Controls one strict, architecture-aware checkpoint conversion.
@@ -76,6 +77,74 @@ pub enum UnalignedMatrixPolicy {
 /// aligns rows to whole packed `u32` words for both Q4 and Q8.
 fn group_aligned_matrix(shape: &[usize], config: WeightQuantizationConfig) -> bool {
     matches!(shape, [_, input] if input.is_multiple_of(config.group_size.get()))
+}
+
+/// Predicts every packed entry and the provenance of a conversion, then checks limits.
+///
+/// Targets are classified with their post-transform shapes exactly as the sink
+/// will classify them; metadata sizes depend only on shape and configuration.
+/// Provenance digests are placeholders of the correct length.
+fn preflight_planned_sidecar(
+    session: &QuantizedBurnpackSession,
+    manifest: &CheckpointManifest,
+    plan: &LoadPlan,
+    options: QuantizedCheckpointOptions,
+) -> Result<(), QuantizationError> {
+    let mut planned = Vec::new();
+    for tensor in &plan.tensors {
+        let Ok(shape) = tensor
+            .shape
+            .iter()
+            .map(|&dimension| usize::try_from(dimension))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            continue;
+        };
+        if classify_weight_for_quantization(&tensor.target, &shape)
+            != QuantizationEligibility::Eligible
+            || (options.unaligned == UnalignedMatrixPolicy::Exclude
+                && !group_aligned_matrix(&shape, options.weights))
+        {
+            continue;
+        }
+        // Non-float targets fail at quantization time with their own error.
+        let Some(source_dtype) = source_float_dtype(tensor.dtype) else {
+            continue;
+        };
+        let metadata = QuantizedTensorMetadata::new(&shape, source_dtype, options.weights)?;
+        planned.push((tensor.target.as_str(), metadata));
+    }
+    let provenance = BurnpackProvenance {
+        load_plan_sha256: "0".repeat(64),
+        checkpoint_shards: manifest
+            .shards
+            .iter()
+            .map(|shard| {
+                (
+                    shard.relative_path.clone(),
+                    super::BurnpackShardProvenance {
+                        file_bytes: shard.file_bytes,
+                        sha256: "0".repeat(64),
+                    },
+                )
+            })
+            .collect(),
+    };
+    session.preflight_inventory(
+        planned.iter().map(|(name, metadata)| (*name, metadata)),
+        &provenance,
+    )
+}
+
+/// Maps a planned float dtype to the quantizer's source-dtype vocabulary.
+fn source_float_dtype(dtype: TensorDType) -> Option<SourceFloatDType> {
+    match dtype {
+        TensorDType::F16 => Some(SourceFloatDType::F16),
+        TensorDType::BF16 => Some(SourceFloatDType::Bf16),
+        TensorDType::F32 => Some(SourceFloatDType::F32),
+        TensorDType::F64 => Some(SourceFloatDType::F64),
+        _ => None,
+    }
 }
 
 /// Finds the first plan target that `Reject` refuses, before any source read.
@@ -285,8 +354,25 @@ pub fn quantize_local_checkpoint_to_burnpack(
             )
         })?;
 
+    // Fail before any hashing or source read when the planned sidecar cannot fit
+    // the session limits: count, per-tensor and total payload, and manifest.
+    if let Err(cause) = preflight_planned_sidecar(&session, manifest, plan, options) {
+        return Err(conversion_failure(
+            output_path,
+            None,
+            CheckpointQuantizationFailureCause::Quantization(cause),
+            CheckpointQuantizationProgress {
+                report,
+                execution: ExecutionStats::default(),
+                staging: session.stats(),
+                excluded: Vec::new(),
+                provenance: provenance_stats,
+            },
+        ));
+    }
+
     // Hashing on both sides of pass two prevents a source mutation from spanning
-    // conversion unnoticed. The one-MiB hash buffer is independent of model size.
+    // conversion unnoticed. Each hash worker's buffer is independent of model size.
     provenance_stats.pre_execution = Some(Default::default());
     let (initial_provenance, initial_hash_stats) =
         match hash_local_checkpoint_provenance_audited(manifest, plan) {

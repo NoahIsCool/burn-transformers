@@ -495,6 +495,58 @@ impl QuantizedBurnpackSession {
         }
     }
 
+    /// Checks a complete planned inventory against this session's limits.
+    ///
+    /// `planned` lists the `(name, metadata)` of every tensor the caller intends
+    /// to append, and `provenance` the provenance it intends to bind (digests may
+    /// be placeholders; only lengths matter). The tensor count, each payload,
+    /// the staged total, and the manifest estimate, including the per-entry
+    /// digest lines and provenance, are summed exactly as the incremental checks
+    /// would, so a conversion that cannot fit fails before reading any source.
+    /// The session itself is not modified.
+    pub(crate) fn preflight_inventory<'a>(
+        &self,
+        planned: impl IntoIterator<Item = (&'a str, &'a QuantizedTensorMetadata)>,
+        provenance: &BurnpackProvenance,
+    ) -> Result<()> {
+        let mut projected = self.stats;
+        for (name, metadata) in planned {
+            let payload_bytes = metadata
+                .packed_value_bytes
+                .checked_add(metadata.scale_bytes)
+                .ok_or(QuantizationError::ByteLengthOverflow {
+                    context: "preflight quantized tensor payload length",
+                })?;
+            let probe = Self::projection(self, projected);
+            let (staged, estimate) = probe.preflight_append(name, metadata, payload_bytes)?;
+            projected.tensor_count += 1;
+            projected.staged_payload_bytes = staged;
+            projected.estimated_manifest_bytes = estimate;
+        }
+        let bound = projected
+            .estimated_manifest_bytes
+            .checked_add(estimated_provenance_bytes(provenance)?)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "bound manifest size estimate",
+            })?;
+        if bound > self.limits.max_manifest_bytes as u64 {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "estimated manifest",
+                attempted: bound,
+                limit: self.limits.max_manifest_bytes as u64,
+            });
+        }
+        Ok(())
+    }
+
+    /// Borrows this session's limits with hypothetical staging counters.
+    fn projection(&self, stats: BurnpackStagingStats) -> LimitProjection<'_> {
+        LimitProjection {
+            limits: &self.limits,
+            stats,
+        }
+    }
+
     /// Appends an already validated reference-quantized tensor to disk staging.
     ///
     /// This consumes and drops the packed buffers after their bytes have been
@@ -668,66 +720,14 @@ impl QuantizedBurnpackSession {
     }
 
     /// Checks prospective count, payload, staging, and manifest bounds before writing.
-    ///
-    /// The manifest estimate charges each entry its exact pretty-printed size
-    /// plus the digest line bound later (see [`manifest_entry_estimate`]); final
-    /// serialization is still checked against the actual byte limit.
     fn preflight_append(
         &self,
         name: &str,
         metadata: &QuantizedTensorMetadata,
         payload_bytes: u64,
     ) -> Result<(u64, u64)> {
-        let next_count = self.stats.tensor_count.checked_add(1).ok_or(
-            QuantizationError::ByteLengthOverflow {
-                context: "staged tensor count",
-            },
-        )?;
-        if next_count > self.limits.max_tensors {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "tensor count",
-                attempted: next_count as u64,
-                limit: self.limits.max_tensors as u64,
-            });
-        }
-        if payload_bytes > self.limits.max_tensor_payload_bytes {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "tensor payload",
-                attempted: payload_bytes,
-                limit: self.limits.max_tensor_payload_bytes,
-            });
-        }
-        let next_staged = self
-            .stats
-            .staged_payload_bytes
-            .checked_add(payload_bytes)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "total staged payload length",
-            })?;
-        if next_staged > self.limits.max_staged_bytes {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "staged payload",
-                attempted: next_staged,
-                limit: self.limits.max_staged_bytes,
-            });
-        }
-
-        let entry_cost = manifest_entry_estimate(name, metadata)?;
-        let next_estimate = self
-            .stats
-            .estimated_manifest_bytes
-            .checked_add(entry_cost)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "manifest size estimate",
-            })?;
-        if next_estimate > self.limits.max_manifest_bytes as u64 {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "estimated manifest",
-                attempted: next_estimate,
-                limit: self.limits.max_manifest_bytes as u64,
-            });
-        }
-        Ok((next_staged, next_estimate))
+        self.projection(self.stats)
+            .preflight_append(name, metadata, payload_bytes)
     }
 
     /// Rejects empty, reserved, overlong, or already staged tensor names.
@@ -1249,6 +1249,79 @@ fn packed_execution_support(manifest: &BurnpackQuantizationManifest) -> PackedEx
         PackedExecutionSupport::BurnQFloatMatmul
     } else {
         PackedExecutionSupport::Unavailable
+    }
+}
+
+/// Session limits paired with actual or hypothetical staging counters.
+struct LimitProjection<'a> {
+    /// Limits the session enforces.
+    limits: &'a BurnpackSessionLimits,
+    /// Counters after the tensors staged (or planned) so far.
+    stats: BurnpackStagingStats,
+}
+
+impl LimitProjection<'_> {
+    /// Checks prospective count, payload, staging, and manifest bounds before writing.
+    ///
+    /// The manifest estimate charges each entry its exact pretty-printed size
+    /// plus the digest line bound later (see [`manifest_entry_estimate`]); final
+    /// serialization is still checked against the actual byte limit.
+    fn preflight_append(
+        &self,
+        name: &str,
+        metadata: &QuantizedTensorMetadata,
+        payload_bytes: u64,
+    ) -> Result<(u64, u64)> {
+        let next_count = self.stats.tensor_count.checked_add(1).ok_or(
+            QuantizationError::ByteLengthOverflow {
+                context: "staged tensor count",
+            },
+        )?;
+        if next_count > self.limits.max_tensors {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "tensor count",
+                attempted: next_count as u64,
+                limit: self.limits.max_tensors as u64,
+            });
+        }
+        if payload_bytes > self.limits.max_tensor_payload_bytes {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "tensor payload",
+                attempted: payload_bytes,
+                limit: self.limits.max_tensor_payload_bytes,
+            });
+        }
+        let next_staged = self
+            .stats
+            .staged_payload_bytes
+            .checked_add(payload_bytes)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "total staged payload length",
+            })?;
+        if next_staged > self.limits.max_staged_bytes {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "staged payload",
+                attempted: next_staged,
+                limit: self.limits.max_staged_bytes,
+            });
+        }
+
+        let entry_cost = manifest_entry_estimate(name, metadata)?;
+        let next_estimate = self
+            .stats
+            .estimated_manifest_bytes
+            .checked_add(entry_cost)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "manifest size estimate",
+            })?;
+        if next_estimate > self.limits.max_manifest_bytes as u64 {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "estimated manifest",
+                attempted: next_estimate,
+                limit: self.limits.max_manifest_bytes as u64,
+            });
+        }
+        Ok((next_staged, next_estimate))
     }
 }
 
