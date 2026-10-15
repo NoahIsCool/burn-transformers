@@ -669,3 +669,39 @@ fn causal_mask_rejects_lengths_beyond_i64() {
         assert!(error.to_string().contains(message));
     }
 }
+
+/// A padded cached suffix (`Q < K`) gives the same projected output in both graphs.
+#[test]
+fn cached_suffix_gqa_output_agrees_between_native_and_eager_graphs() {
+    use burn::tensor::{TensorData, Tolerance};
+
+    let device = Default::default();
+    // One module whose lazily initialized parameters are shared by both graphs.
+    let mut module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .init::<Flex>(&device)
+        .unwrap();
+    let hidden = |sequence: usize, seed: usize| {
+        let values = (0..2 * sequence * 8)
+            .map(|index| ((index * 7 + seed) % 13) as f32 * 0.15 - 0.9)
+            .collect::<Vec<_>>();
+        Tensor::<Flex, 3>::from_data(TensorData::new(values, [2, sequence, 8]), &device)
+    };
+    let projection = module.project(hidden(3, 1), hidden(7, 2)).unwrap();
+    let valid = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        [
+            [true, true, true, true, true, true, true],
+            [false, false, true, true, true, true, true],
+        ]
+        .into(),
+        &device,
+    ));
+    let mask = padding_attention_mask(None, Some(&valid), 2, 4, 3, 7).unwrap();
+    let actual = module
+        .attend(projection.clone(), mask.clone(), None, true)
+        .unwrap();
+    module.precision_mode = AttentionPrecisionMode::EagerFp32Softmax;
+    let expected = module.attend(projection, mask, None, true).unwrap();
+    actual
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
+}

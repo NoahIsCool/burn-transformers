@@ -25,12 +25,12 @@
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig, LinearLayout},
-    tensor::{Bool, DType, Int, Tensor, activation::softmax, backend::Backend},
+    tensor::{Bool, Int, Tensor, backend::Backend},
 };
 
 use crate::{
     Error, Result,
-    attention::{bottom_right_causal_mask, fp32_softmax},
+    attention::{bottom_right_causal_mask, eager_probabilities, union_exclusions, zero_excluded},
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
@@ -546,38 +546,23 @@ impl<B: Backend> MultiLatentAttention<B> {
         let values = hooks.apply(points.value(), values)?;
         let scores = query.matmul(keys.swap_dims(2, 3)) * self.config.softmax_scale;
         let scores = hooks.apply(points.scores(), scores)?;
-        let exclusion = if causal {
-            let causal_mask = bottom_right_causal_mask(
+        // One query row aligned with the final key sees every key, so causality
+        // is a no-op there and needs no mask.
+        let causal_mask = if causal && query_sequence > 1 {
+            Some(bottom_right_causal_mask(
                 batch,
                 heads,
                 query_sequence,
                 key_sequence,
                 &scores.device(),
-            )?;
-            Some(match mask {
-                Some(mask) => mask.bool_or(causal_mask),
-                None => causal_mask,
-            })
+            )?)
         } else {
-            mask
+            None
         };
-        let scores = if let Some(exclusion) = &exclusion {
-            scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
-        } else {
-            scores
-        };
-        let scores = if let Some(bias) = bias {
-            scores + bias
-        } else {
-            scores
-        };
-        let pattern = fp32_softmax(scores, exclusion.clone());
+        let exclusion = union_exclusions(mask, causal_mask);
+        let pattern = eager_probabilities(scores, exclusion.as_ref(), bias, None);
         let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
-            Ok(if let Some(exclusion) = &exclusion {
-                pattern.mask_fill(exclusion.clone(), 0.0)
-            } else {
-                pattern
-            })
+            Ok(zero_excluded(pattern, exclusion.as_ref()))
         })?;
         let context = hooks.apply(points.head_context(), pattern.matmul(values))?;
         let context = context.swap_dims(1, 2).reshape([
@@ -929,41 +914,24 @@ fn interleaved_to_split<B: Backend>(
         .reshape([batch, heads, sequence, width]))
 }
 
-/// Applies a true-means-masked attention mask and FP32 softmax reduction.
+/// Applies a `true == excluded` mask and the shared FP32 softmax.
+///
+/// Excluded logits become `-inf` in the input dtype, which the shared softmax
+/// maps to exact zeros; rows without any visible key become zero rows.
 fn attention_probabilities<B: Backend>(
     logits: Tensor<B, 4>,
     mask: Option<Tensor<B, 4, Bool>>,
 ) -> Result<Tensor<B, 4>> {
-    if let Some(mask) = mask {
-        if mask.dims() != logits.dims() {
-            return Err(Error::shape(
-                "mla.attention_mask",
-                format!("{:?}", logits.dims()),
-                format!("{:?}", mask.dims()),
-            ));
-        }
-        let dtype = logits.dtype();
-        let shape = logits.dims();
-        let row_has_key = mask
-            .clone()
-            .bool_not()
-            .int()
-            .sum_dim(3)
-            .greater_elem(0)
-            .expand(shape);
-        let probabilities = softmax(
-            logits
-                .cast(DType::F32)
-                .mask_fill(mask.clone(), f32::NEG_INFINITY)
-                .mask_fill(row_has_key.bool_not(), 0.0),
-            3,
-        )
-        .mask_fill(mask, 0.0);
-        Ok(probabilities.cast(dtype))
-    } else {
-        let dtype = logits.dtype();
-        Ok(softmax(logits.cast(DType::F32), 3).cast(dtype))
+    if let Some(mask) = &mask
+        && mask.dims() != logits.dims()
+    {
+        return Err(Error::shape(
+            "mla.attention_mask",
+            format!("{:?}", logits.dims()),
+            format!("{:?}", mask.dims()),
+        ));
     }
+    Ok(eager_probabilities(logits, mask.as_ref(), None, None))
 }
 
 #[cfg(test)]

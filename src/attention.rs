@@ -2,38 +2,51 @@
 //!
 //! Attention maps a query to a convex combination of values using
 //! `softmax(Q K^T / sqrt(d)) V`. Grouped-query attention stores fewer key/value
-//! heads than query heads and repeats each KV head across a contiguous query
-//! group only for the attention operation. The cache therefore retains native
-//! KV heads instead of paying the repeated representation's memory cost.
+//! heads than query heads; each KV head serves a contiguous group of query
+//! heads. Caches and every K/V intervention point keep the native KV heads.
+//! Attention evaluation also keeps them: a group's queries are folded into
+//! extra query rows of one call instead of repeating the KV history per query
+//! head (see [`grouped_query_attention`]).
 //!
 //! Rotary and relative-position transformations are deliberately separate from
 //! projection and attention dispatch. This lets one architecture rotate only a
 //! prefix, another use NoPE layers, and T5 provide an additive relative bias
 //! without duplicating projection code. Backend-native attention is the default.
 //! Architectures whose pinned eager graphs materialize reduced-precision scores
-//! before an explicit F32 softmax can opt into that exact operation order; the
-//! unfused path can be paired with [`AttentionExecutionPolicy`] to cap every
-//! score-like plane by evaluating complete attention rows in synchronized query
-//! chunks. This is a storage bound, not a linear-time attention approximation:
-//! full-attention chunks still visit every key.
+//! before an explicit F32 softmax can opt into that exact operation order.
+//!
+//! [`AttentionExecutionPolicy`] plans query chunks that bound every score-like
+//! plane; it is a storage bound, not a linear-time approximation, because each
+//! chunk still visits its complete key support. [`GroupedQueryAttention`]
+//! itself always evaluates complete planes; the Muse-Glimmer family currently
+//! executes such plans with its synchronized chunk loop.
 //!
 //! Queries use `[batch, query_head, query_token, head_dim]`; keys and values
 //! retain native KV heads until dispatch. Score masks use `true == excluded`,
 //! whereas incoming token-validity masks use `true == valid`. Causal alignment is
-//! bottom-right for cached prefixes. Exclusions are restored after interventions,
-//! and eager softmax defines fully excluded rows as zero probabilities.
+//! bottom-right for cached prefixes on every backend: query row `i` of `Q` sees
+//! keys `j <= i + K - Q`. Exclusions are restored after interventions, and eager
+//! softmax defines fully excluded rows as zero probabilities.
+
+mod dispatch;
+mod mask;
 
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, Int, Tensor,
-        activation::{sigmoid, silu, softmax},
+        Bool, DType, Tensor,
+        activation::{sigmoid, silu},
         backend::Backend,
-        module::attention,
         ops::AttentionModuleOptions,
     },
 };
+
+use dispatch::{Operands, causal_exclusion, default_scale, grouped_mix, scaled_scores};
+pub(crate) use dispatch::{dispatch_attention, eager_probabilities, zero_excluded};
+pub use dispatch::{grouped_query_attention, repeat_key_value};
+use mask::padding_plane;
+pub(crate) use mask::{bottom_right_causal_mask, union_exclusions};
 
 use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
@@ -620,7 +633,8 @@ impl<B: Backend> GroupedQueryAttention<B> {
     /// token-valid masks should first pass through [`padding_attention_mask`].
     /// Projected tensors and additive bias must share a dense floating dtype and
     /// device; the mask and output projection must also use that device. No
-    /// implicit dtype conversions are performed.
+    /// implicit dtype conversions are performed. Keys and values keep their
+    /// native KV heads; see [`grouped_query_attention`] for the evaluation.
     pub fn attend(
         &self,
         projection: AttentionProjection<B>,
@@ -629,53 +643,41 @@ impl<B: Backend> GroupedQueryAttention<B> {
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
         validate_projection(self, &projection, mask.as_ref(), bias.as_ref())?;
-        let [batch, _, query_sequence, _] = projection.query.dims();
-        let key = repeat_key_value(projection.key, self.query_heads)?;
-        let value = repeat_key_value(projection.value, self.query_heads)?;
-        let context = dispatch_attention(
-            projection.query,
+        let AttentionProjection {
+            query,
             key,
             value,
-            mask,
-            bias,
-            AttentionModuleOptions {
-                scale: self.scale,
-                softcap: self.softcap,
-                is_causal: causal,
+            gate,
+        } = projection;
+        let context = self.head_context(
+            Operands {
+                query,
+                key,
+                value,
+                mask,
+                bias,
+                sinks: None,
             },
-            self.precision_mode,
-        )?
-        .swap_dims(1, 2)
-        .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
-        let context = match (self.output_gate, projection.gate) {
-            (AttentionOutputGate::None, None) => context,
-            (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
-            (AttentionOutputGate::Silu, Some(gate)) => context * silu(gate),
-            _ => {
-                return Err(Error::shape(
-                    "attention.gate",
-                    format!("a gate matching {:?}", self.output_gate),
-                    "a mismatched gate payload",
-                ));
-            }
-        };
-        operations::linear(context, &self.o_proj)
+            causal,
+        )?;
+        self.project_heads(context, gate)
     }
 
     /// Evaluates attention with selected Q/K/V, score, pattern, or head edits.
     ///
     /// Q/K/V points observe the supplied projection: after any normalization
     /// and positional transforms already performed by the caller, with native
-    /// KV heads before grouped-query repetition. Head context is
+    /// KV heads (`[batch, kv_head, token, head_dim]` for K/V). Head context is
     /// `[batch, query_head, query_token, head_dim]` before the output gate and
     /// projection. These points preserve the configured attention dispatch.
     ///
     /// Scores and patterns require [`AttentionPrecisionMode::EagerFp32Softmax`]
     /// because backend-native kernels do not expose a portable intermediate
     /// arithmetic graph. Scores are scaled and softcapped, before exclusion
-    /// masks and additive bias. Patterns follow softmax and the cast back to
-    /// the query dtype. Selecting either point materializes the full quadratic
-    /// score plane; callers must provision memory for it.
+    /// masks and additive bias, as `[batch, query_head, query_token, key_token]`.
+    /// Patterns follow softmax and the cast back to the query dtype. Selecting
+    /// either point materializes the full quadratic score plane; callers must
+    /// provision memory for it.
     ///
     /// Pattern edits need not remain normalized or positive, allowing direct
     /// ablation and other experiments. Excluded links are zeroed again after
@@ -757,7 +759,8 @@ impl<B: Backend> GroupedQueryAttention<B> {
         let inspect_projection = [points.query(), points.key(), points.value()]
             .into_iter()
             .any(|point| hooks.needs_point(point.info()));
-        if !inspect_projection && !materialize && !hooks.needs_point(points.head_context().info()) {
+        let inspect_context = hooks.needs_point(points.head_context().info());
+        if !inspect_projection && !materialize && !inspect_context {
             return self.attend(projection, mask, bias, causal);
         }
         if materialize && self.precision_mode != AttentionPrecisionMode::EagerFp32Softmax {
@@ -770,113 +773,102 @@ impl<B: Backend> GroupedQueryAttention<B> {
         projection.query = hooks.apply(points.query(), projection.query)?;
         projection.key = hooks.apply(points.key(), projection.key)?;
         projection.value = hooks.apply(points.value(), projection.value)?;
-        if !materialize && !hooks.needs_point(points.head_context().info()) {
+        if !materialize && !inspect_context {
             return self.attend(projection, mask, bias, causal);
         }
-
-        let [batch, _, query_sequence, head_dim] = projection.query.dims();
-        let key_sequence = projection.key.dims()[2];
-        let key = repeat_key_value(projection.key, self.query_heads)?;
-        let value = repeat_key_value(projection.value, self.query_heads)?;
+        let AttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let operands = Operands {
+            query,
+            key,
+            value,
+            mask,
+            bias,
+            sinks: None,
+        };
         let context = if materialize {
-            let scale = self
-                .scale
-                .unwrap_or_else(|| (head_dim as f64).sqrt().recip());
-            let scores = projection.query.matmul(key.swap_dims(2, 3)) * scale;
-            let scores = if let Some(softcap) = self.softcap {
-                (scores / softcap).tanh() * softcap
-            } else {
-                scores
-            };
-            let scores = hooks.apply(points.scores(), scores)?;
-            let exclusion = if causal {
-                let causal_mask = bottom_right_causal_mask(
-                    batch,
-                    self.query_heads,
-                    query_sequence,
-                    key_sequence,
-                    &scores.device(),
-                )?;
-                Some(mask.map_or(causal_mask.clone(), |mask| mask.bool_or(causal_mask)))
-            } else {
-                mask
-            };
-            let scores = if let Some(exclusion) = &exclusion {
-                scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
-            } else {
-                scores
-            };
-            let scores = if let Some(bias) = bias {
-                scores + bias
-            } else {
-                scores
-            };
-            let pattern = fp32_softmax(scores, exclusion.clone());
-            let pattern = if let Some(transform) = transform {
-                let shape = pattern.dims();
-                let dtype = pattern.dtype();
-                let device = pattern.device();
-                let pattern = transform(pattern).map_err(|error| {
-                    Error::configuration(
-                        "attention.pattern_transform",
-                        format!("structural transform failed: {error}"),
-                    )
-                })?;
-                if pattern.dims() != shape || pattern.dtype() != dtype || pattern.device() != device
-                {
-                    return Err(Error::configuration(
-                        "attention.pattern_transform",
-                        "structural transform must preserve pattern shape, dtype, and device",
-                    ));
-                }
-                if let Some(exclusion) = &exclusion {
-                    pattern.mask_fill(exclusion.clone(), 0.0)
-                } else {
-                    pattern
-                }
-            } else {
-                pattern
-            };
-            let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
-                Ok(if let Some(exclusion) = &exclusion {
-                    pattern.mask_fill(exclusion.clone(), 0.0)
-                } else {
-                    pattern
-                })
-            })?;
-            pattern.matmul(value)
+            self.materialized_context(operands, causal, points, hooks, transform)?
         } else {
-            dispatch_attention(
-                projection.query,
-                key,
-                value,
-                mask,
-                bias,
-                AttentionModuleOptions {
-                    scale: self.scale,
-                    softcap: self.softcap,
-                    is_causal: causal,
-                },
-                self.precision_mode,
-            )?
+            self.head_context(operands, causal)?
         };
-        let context = hooks
-            .apply(points.head_context(), context)?
-            .swap_dims(1, 2)
-            .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
-        let context = match (self.output_gate, projection.gate) {
-            (AttentionOutputGate::None, None) => context,
-            (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
-            (AttentionOutputGate::Silu, Some(gate)) => context * silu(gate),
-            _ => {
-                return Err(Error::shape(
-                    "attention.gate",
-                    format!("a gate matching {:?}", self.output_gate),
-                    "a mismatched gate payload",
-                ));
-            }
+        let context = hooks.apply(points.head_context(), context)?;
+        self.project_heads(context, gate)
+    }
+
+    /// Evaluates per-head context `[batch, query_head, query, head_dim]` with the configured graph.
+    fn head_context(&self, operands: Operands<B>, causal: bool) -> Result<Tensor<B, 4>> {
+        dispatch::evaluate(operands, self.module_options(causal), self.precision_mode)
+    }
+
+    /// Evaluates the eager graph while exposing scores and patterns to hooks.
+    ///
+    /// Scores and patterns are per query head even though the matmuls run on
+    /// folded native KV heads. A structural transform runs before pattern
+    /// hooks; exclusions are re-applied after the transform and every edit.
+    fn materialized_context(
+        &self,
+        operands: Operands<B>,
+        causal: bool,
+        points: AttentionPoints,
+        hooks: &mut Hooks<'_, B>,
+        transform: Option<&mut PatternTransform<'_, B>>,
+    ) -> Result<Tensor<B, 4>> {
+        let geometry = operands.geometry()?;
+        let Operands {
+            query,
+            key,
+            value,
+            mask,
+            bias,
+            sinks,
+        } = operands;
+        let device = query.device();
+        let scale = self.scale.unwrap_or_else(|| default_scale(self.head_dim));
+        let scores = hooks.apply(
+            points.scores(),
+            scaled_scores(query, key, scale, self.softcap),
+        )?;
+        let exclusion = union_exclusions(mask, causal_exclusion(causal, geometry, &device)?);
+        let pattern = eager_probabilities(scores, exclusion.as_ref(), bias, sinks);
+        let pattern = match transform {
+            Some(transform) => apply_pattern_transform(transform, pattern, exclusion.as_ref())?,
+            None => pattern,
         };
-        operations::linear(context, &self.o_proj)
+        let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
+            Ok(zero_excluded(pattern, exclusion.as_ref()))
+        })?;
+        Ok(grouped_mix(pattern, value))
+    }
+
+    /// Applies the output gate and projection to per-head context `[batch, query_head, query, head_dim]`.
+    fn project_heads(
+        &self,
+        context: Tensor<B, 4>,
+        gate: Option<Tensor<B, 3>>,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, _, query_sequence, _] = context.dims();
+        let context = context.swap_dims(1, 2).reshape([
+            batch,
+            query_sequence,
+            self.query_heads * self.head_dim,
+        ]);
+        operations::linear(
+            apply_output_gate(context, gate, self.output_gate)?,
+            &self.o_proj,
+        )
+    }
+
+    /// Returns Burn attention options for this module and causal flag.
+    fn module_options(&self, causal: bool) -> AttentionModuleOptions {
+        AttentionModuleOptions {
+            scale: self.scale,
+            softcap: self.softcap,
+            is_causal: causal,
+        }
     }
 
     /// Evaluates attention without RoPE or relative-position bias.
@@ -901,152 +893,52 @@ impl<B: Backend> GroupedQueryAttention<B> {
     }
 }
 
-/// Dispatches either backend-native or explicitly ordered eager attention.
+/// Multiplies flattened head outputs by the configured output gate.
 ///
-/// The eager mode computes score scaling and optional softcapping in the input
-/// dtype, applies exclusions and additive bias, promotes only the softmax to
-/// F32, casts probabilities back, and multiplies by `V` in the original dtype.
-/// Callers must provide shape-compatible Q/K/V, mask, and bias tensors.
-pub(crate) fn dispatch_attention<B: Backend>(
-    query: Tensor<B, 4>,
-    key: Tensor<B, 4>,
-    value: Tensor<B, 4>,
-    mask: Option<Tensor<B, 4, Bool>>,
-    bias: Option<Tensor<B, 4>>,
-    options: AttentionModuleOptions,
-    precision_mode: AttentionPrecisionMode,
-) -> Result<Tensor<B, 4>> {
-    if precision_mode == AttentionPrecisionMode::BackendDefault {
-        return Ok(attention(query, key, value, mask, bias, options));
+/// `Sigmoid` computes `context * sigmoid(gate)` and `Silu` computes
+/// `context * gate * sigmoid(gate)`; the gate must be present exactly when a
+/// gating convention is configured.
+fn apply_output_gate<B: Backend>(
+    context: Tensor<B, 3>,
+    gate: Option<Tensor<B, 3>>,
+    kind: AttentionOutputGate,
+) -> Result<Tensor<B, 3>> {
+    match (kind, gate) {
+        (AttentionOutputGate::None, None) => Ok(context),
+        (AttentionOutputGate::Sigmoid, Some(gate)) => Ok(context * sigmoid(gate)),
+        (AttentionOutputGate::Silu, Some(gate)) => Ok(context * silu(gate)),
+        _ => Err(Error::shape(
+            "attention.gate",
+            format!("a gate matching {kind:?}"),
+            "a mismatched gate payload",
+        )),
     }
-    let [batch, heads, query_sequence, head_dim] = query.dims();
-    let key_sequence = key.dims()[2];
-    let scale = options
-        .scale
-        .unwrap_or_else(|| (head_dim as f64).sqrt().recip());
-    let scores = query.matmul(key.swap_dims(2, 3)) * scale;
-    let scores = if let Some(softcap) = options.softcap {
-        (scores / softcap).tanh() * softcap
-    } else {
-        scores
-    };
-    let causal_mask = if options.is_causal {
-        Some(bottom_right_causal_mask(
-            batch,
-            heads,
-            query_sequence,
-            key_sequence,
-            &scores.device(),
-        )?)
-    } else {
-        None
-    };
-    let exclusion = match (mask, causal_mask) {
-        (Some(mask), Some(causal_mask)) => Some(mask.bool_or(causal_mask)),
-        (Some(mask), None) => Some(mask),
-        (None, Some(causal_mask)) => Some(causal_mask),
-        (None, None) => None,
-    };
-    let scores = if let Some(exclusion) = &exclusion {
-        scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
-    } else {
-        scores
-    };
-    let scores = if let Some(bias) = bias {
-        scores + bias
-    } else {
-        scores
-    };
-    let probabilities = fp32_softmax(scores, exclusion);
-    Ok(probabilities.matmul(value))
 }
 
-/// Applies FP32 softmax and defines fully excluded rows as exact zeros.
+/// Runs a structural pattern transform and checks that it preserves the pattern contract.
 ///
-/// Additive bias and score interventions can also remove all row support by
-/// producing only negative infinities, even without a boolean exclusion mask.
-pub(crate) fn fp32_softmax<B: Backend>(
-    scores: Tensor<B, 4>,
-    exclusion: Option<Tensor<B, 4, Bool>>,
-) -> Tensor<B, 4> {
-    let dtype = scores.dtype();
-    let shape = scores.dims();
-    let unsupported_row = scores
-        .clone()
-        .equal_elem(f32::NEG_INFINITY)
-        .all_dim(3)
-        .expand(shape);
-    let scores = scores.mask_fill(unsupported_row.clone(), 0.0);
-    let Some(exclusion) = exclusion else {
-        return softmax(scores.cast(DType::F32), 3)
-            .mask_fill(unsupported_row, 0.0)
-            .cast(dtype);
-    };
-    let row_has_key = exclusion
-        .clone()
-        .bool_not()
-        .int()
-        .sum_dim(3)
-        .greater_elem(0)
-        .expand(shape);
-    softmax(
-        scores
-            .cast(DType::F32)
-            .mask_fill(row_has_key.bool_not(), 0.0),
-        3,
-    )
-    .mask_fill(exclusion, 0.0)
-    .mask_fill(unsupported_row, 0.0)
-    .cast(dtype)
-}
-
-/// Builds the bottom-right causal exclusion `key > query + (K - Q)`.
-///
-/// Bottom-right alignment is essential for cached decoding, where a query
-/// chunk is a suffix of a longer key sequence. `true` excludes a pair.
-pub(crate) fn bottom_right_causal_mask<B: Backend>(
-    batch: usize,
-    heads: usize,
-    query_sequence: usize,
-    key_sequence: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let query_end = i64::try_from(query_sequence)
-        .map_err(|_| Error::configuration("attention.causal_mask", "query length exceeds i64"))?;
-    let key_end = i64::try_from(key_sequence)
-        .map_err(|_| Error::configuration("attention.causal_mask", "key length exceeds i64"))?;
-    let offset = key_end - query_end;
-    let query = (Tensor::<B, 1, Int>::arange(0..query_end, device) + offset)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([batch, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..key_end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([batch, heads, query_sequence, key_sequence]);
-    Ok(key.greater(query))
-}
-
-/// Repeats native KV heads into contiguous query-head groups for one attention call.
-pub fn repeat_key_value<B: Backend>(
-    tensor: Tensor<B, 4>,
-    query_heads: usize,
+/// The transform's result is re-masked so it cannot reactivate excluded links.
+fn apply_pattern_transform<B: Backend>(
+    transform: &mut PatternTransform<'_, B>,
+    pattern: Tensor<B, 4>,
+    exclusion: Option<&Tensor<B, 4, Bool>>,
 ) -> Result<Tensor<B, 4>> {
-    let [batch, key_value_heads, sequence, head_dim] = tensor.dims();
-    if key_value_heads == 0 || query_heads == 0 || !query_heads.is_multiple_of(key_value_heads) {
+    let shape = pattern.dims();
+    let dtype = pattern.dtype();
+    let device = pattern.device();
+    let pattern = transform(pattern).map_err(|error| {
+        Error::configuration(
+            "attention.pattern_transform",
+            format!("structural transform failed: {error}"),
+        )
+    })?;
+    if pattern.dims() != shape || pattern.dtype() != dtype || pattern.device() != device {
         return Err(Error::configuration(
-            "attention.head_grouping",
-            format!(
-                "query_heads ({query_heads}) must be non-zero and divisible by key_value_heads ({key_value_heads})"
-            ),
+            "attention.pattern_transform",
+            "structural transform must preserve pattern shape, dtype, and device",
         ));
     }
-    let groups = query_heads / key_value_heads;
-    if groups == 1 {
-        return Ok(tensor);
-    }
-    Ok(tensor
-        .unsqueeze_dim::<5>(2)
-        .expand([batch, key_value_heads, groups, sequence, head_dim])
-        .reshape([batch, query_heads, sequence, head_dim]))
+    Ok(zero_excluded(pattern, exclusion))
 }
 
 /// Validates projected tensor topology before dispatching a backend attention kernel.
@@ -1233,6 +1125,11 @@ fn validate_projection<B: Backend>(
 }
 
 /// Converts semantic valid-token masks into Burn's `true == excluded` mask.
+///
+/// Query masks are `[batch, query]` and key masks `[batch, key]`, both with
+/// `true == valid`. The result is `[batch, heads, query, key]`: one Boolean
+/// `[batch, 1, query, key]` plane expanded (not copied) across heads, or
+/// `None` when neither mask is supplied.
 pub fn padding_attention_mask<B: Backend>(
     query_mask: Option<&TokenMask<B>>,
     key_mask: Option<&TokenMask<B>>,
@@ -1247,50 +1144,10 @@ pub fn padding_attention_mask<B: Backend>(
             "batch, heads, query sequence, and key sequence must be non-zero",
         ));
     }
-    let query_invalid = if let Some(mask) = query_mask {
-        let [mask_batch, mask_sequence] = mask.as_tensor().dims();
-        if [mask_batch, mask_sequence] != [batch, query_sequence] {
-            return Err(Error::shape(
-                "query_mask",
-                format!("[{batch}, {query_sequence}]"),
-                format!("[{mask_batch}, {mask_sequence}]"),
-            ));
-        }
-        Some(
-            mask.as_tensor()
-                .clone()
-                .bool_not()
-                .reshape([batch, 1, query_sequence, 1])
-                .expand([batch, heads, query_sequence, key_sequence]),
-        )
-    } else {
-        None
-    };
-    let key_invalid = if let Some(mask) = key_mask {
-        let [mask_batch, mask_sequence] = mask.as_tensor().dims();
-        if [mask_batch, mask_sequence] != [batch, key_sequence] {
-            return Err(Error::shape(
-                "key_mask",
-                format!("[{batch}, {key_sequence}]"),
-                format!("[{mask_batch}, {mask_sequence}]"),
-            ));
-        }
-        Some(
-            mask.as_tensor()
-                .clone()
-                .bool_not()
-                .reshape([batch, 1, 1, key_sequence])
-                .expand([batch, heads, query_sequence, key_sequence]),
-        )
-    } else {
-        None
-    };
-    Ok(match (query_invalid, key_invalid) {
-        (Some(query), Some(key)) => Some(query.bool_or(key)),
-        (Some(query), None) => Some(query),
-        (None, Some(key)) => Some(key),
-        (None, None) => None,
-    })
+    Ok(
+        padding_plane(query_mask, key_mask, batch, query_sequence, key_sequence)?
+            .map(|plane| plane.expand([batch, heads, query_sequence, key_sequence])),
+    )
 }
 
 #[cfg(test)]
