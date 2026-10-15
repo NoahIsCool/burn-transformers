@@ -60,19 +60,47 @@
 //!
 //! # Dtype and tolerance
 //!
-//! `TRANSFORMERS_GPT_OSS_DTYPE` selects the stored dtype (`f16`, `bf16`, or
-//! `f32`); it defaults to `f32` for an F32 bundle and `f16` otherwise. An F32
-//! bundle compared in F32 differs only by reduction order: the default
-//! tolerance is [`F32_TOLERANCE`]. A BF16 reference runs everything,
-//! including its eager attention softmax, in BF16, so logits differ by BF16
-//! rounding accumulated over 24 blocks and a near-tie in routing may select a
-//! different expert; its default, [`BF16_TOLERANCE`] = `1.0` logit, is
-//! provisional until the integrator records the measured deviation on Metal.
-//! `TRANSFORMERS_GPT_OSS_TOLERANCE` overrides either. Independently of the
-//! reference, cached and batched passes must agree with this crate's own
-//! stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for the dtype. Greedy
-//! tokens are compared while the reference's top-2 margin exceeds twice the
-//! tolerance, and at least [`DEFAULT_MIN_GREEDY`] tokens must be compared.
+//! `TRANSFORMERS_GPT_OSS_DTYPE` selects the stored dtype (`f16`, `bf16`,
+//! `f32`, or `f64`); it defaults to the bundle's own dtype, so an F32 bundle
+//! runs in F32 and a BF16 bundle in BF16 (set `f16` for the Metal F16
+//! profile). An F32 run against an F32 bundle differs only by reduction
+//! order: every logit must lie within [`F32_TOLERANCE`] and their mean
+//! deviation within [`F32_MEAN_TOLERANCE`]. Whenever the run or the bundle is
+//! half precision, rounding dominates and [`HALF_TOLERANCE`] and
+//! [`HALF_MEAN_TOLERANCE`] apply instead. `TRANSFORMERS_GPT_OSS_TOLERANCE`
+//! and `TRANSFORMERS_GPT_OSS_MEAN_TOLERANCE` override them.
+//!
+//! Matching storage dtypes does not make a half-precision comparison like for
+//! like: Transformers' BF16 eager path also rounds its attention and router
+//! softmaxes to BF16, while this crate normalizes in F32. On four real blocks
+//! (Flex, the four prompts below), the crate's BF16 run is no closer to the
+//! BF16 reference than to the F32 one, and the BF16 reference itself is about
+//! as far from the F32 reference:
+//!
+//! | run | reference | max \|Δ\| | mean \|Δ\| per prompt |
+//! | --- | --- | --- | --- |
+//! | crate F32 | F32 | `1.3e-4` | below `5e-6` |
+//! | crate BF16 | F32 | `1.37` | at most `0.030` |
+//! | crate F16 | F32 | `1.82` | at most `0.062` |
+//! | crate BF16 | BF16 | `1.71` | at most `0.054` |
+//! | crate F16 | BF16 | `1.85` | at most `0.060` |
+//! | Transformers BF16 | F32 | `1.73` | at most `0.055` |
+//!
+//! So a half-precision run (Metal F16 included) is best qualified against a
+//! truncated **F32** bundle, which measures its own rounding; a full BF16
+//! bundle then checks the whole depth at the BF16 reference's resolution.
+//! The half-precision defaults cover the four-block measurements with some
+//! headroom; they are provisional for the full 24-block model, whose
+//! deviation the integrator records.
+//!
+//! Independently of the reference, cached and batched passes must agree with
+//! this crate's own stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for
+//! the dtype. Greedy tokens are compared while the reference's top-2 margin
+//! exceeds twice the tolerance, and at least [`DEFAULT_MIN_GREEDY`] tokens
+//! must be compared (`TRANSFORMERS_GPT_OSS_MIN_GREEDY` overrides it). A
+//! truncated model's greedy margins are mostly below one logit, so a
+//! half-precision run against a truncated bundle compares no greedy tokens
+//! and needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`.
 //!
 //! # Measured
 //!
@@ -82,8 +110,11 @@
 //! `7.6e-5` (mean `3.4e-6`); four blocks (two sliding, two full), with a
 //! 183-token fourth prompt, by at most `1.3e-4` (mean below `5e-6`), the
 //! token-by-token cached decode of that prompt (wrapping the 128-slot ring)
-//! by `7.6e-5`, and all 32 greedy tokens match. The full-model BF16 bundle
-//! and the Metal runs are the integrator's.
+//! by `7.6e-5`, and all 32 greedy tokens match. The half-precision rows of
+//! the table above come from the same four-block F32 bundle and a four-block
+//! BF16 bundle generated from the same prompts
+//! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`). The
+//! full-model BF16 bundle and the Metal runs are the integrator's.
 
 #![cfg(feature = "flex")]
 
@@ -106,16 +137,35 @@ use transformers::{
     },
 };
 
-/// Default absolute logit tolerance against an F32 bundle evaluated in F32.
+/// Default absolute logit tolerance of an F32 (or F64) run against an F32 bundle.
 const F32_TOLERANCE: f32 = 1e-3;
 
-/// Default absolute logit tolerance against a BF16 bundle; see the module documentation.
-const BF16_TOLERANCE: f32 = 1.0;
+/// Default bound on one prompt's mean absolute logit deviation, F32 run against an F32 bundle.
+const F32_MEAN_TOLERANCE: f32 = 1e-4;
+
+/// Default absolute logit tolerance when the run or the bundle is half precision.
+///
+/// Four real blocks deviate by at most `1.85` in every half-precision pairing
+/// (see the module documentation); provisional for the full model.
+const HALF_TOLERANCE: f32 = 2.5;
+
+/// Default bound on one prompt's mean absolute logit deviation in half precision.
+///
+/// Four real blocks stay at or below `0.062`; an architectural error moves
+/// most logits of most positions, so the mean separates it from rounding
+/// noise far better than the maximum. Provisional for the full model.
+const HALF_MEAN_TOLERANCE: f32 = 0.15;
 
 /// Absolute agreement of cached/batched passes with this crate's stateless pass, per dtype.
+///
+/// The batched check compares a left-padded batch with each prompt run
+/// alone, so it also absorbs any shape dependence of half-precision kernels.
+/// On four real blocks on Flex the largest gaps were `3.6e-5` (F32), `0.125`
+/// (BF16), and `0.41` (F16): Flex's F16 matmul accumulates in F16, so F16
+/// runs there are noisier than BF16 ones.
 const SELF_CONSISTENCY_TOLERANCE: [(TensorDType, f32); 3] = [
     (TensorDType::F32, 1e-3),
-    (TensorDType::F16, 0.25),
+    (TensorDType::F16, 0.5),
     (TensorDType::BF16, 0.5),
 ];
 
@@ -214,30 +264,50 @@ struct Settings {
     dtype: TensorDType,
     /// Absolute logit tolerance against the reference.
     tolerance: f32,
+    /// Bound on each prompt's mean absolute logit deviation from the reference.
+    mean_tolerance: f32,
     /// Minimum number of decisive greedy tokens.
     minimum_greedy: usize,
+}
+
+/// Returns the dtype a bundle was evaluated in, from its provenance name.
+fn bundle_dtype(name: &str) -> TensorDType {
+    match name {
+        "float32" => TensorDType::F32,
+        "bfloat16" => TensorDType::BF16,
+        other => panic!("unsupported reference dtype {other}"),
+    }
+}
+
+/// Returns the default `(maximum, mean)` logit tolerances of running `run` against a `bundle` reference.
+///
+/// Only a full-precision run against an F32 bundle is held to reduction-order
+/// accuracy; any half-precision side is held to rounding accuracy.
+fn default_tolerances(bundle: TensorDType, run: TensorDType) -> (f32, f32) {
+    let full_precision =
+        bundle == TensorDType::F32 && matches!(run, TensorDType::F32 | TensorDType::F64);
+    if full_precision {
+        (F32_TOLERANCE, F32_MEAN_TOLERANCE)
+    } else {
+        (HALF_TOLERANCE, HALF_MEAN_TOLERANCE)
+    }
 }
 
 impl Settings {
     /// Reads the settings; dtype and tolerance defaults follow the bundle's dtype.
     fn new(model_dir: PathBuf, reference: &Reference) -> Self {
-        let f32_bundle = reference.dtype == "float32";
+        let bundle = bundle_dtype(&reference.dtype);
         let dtype = match std::env::var("TRANSFORMERS_GPT_OSS_DTYPE").as_deref() {
             Ok("f64") => TensorDType::F64,
             Ok("f32") => TensorDType::F32,
             Ok("bf16") => TensorDType::BF16,
             Ok("f16") => TensorDType::F16,
-            Err(_) if f32_bundle => TensorDType::F32,
-            Err(_) => TensorDType::F16,
+            Err(_) => bundle,
             Ok(other) => {
-                panic!("TRANSFORMERS_GPT_OSS_DTYPE must be f16, bf16, or f32, not {other}")
+                panic!("TRANSFORMERS_GPT_OSS_DTYPE must be f16, bf16, f32, or f64, not {other}")
             }
         };
-        let default_tolerance = if f32_bundle && dtype == TensorDType::F32 {
-            F32_TOLERANCE
-        } else {
-            BF16_TOLERANCE
-        };
+        let (default_tolerance, default_mean) = default_tolerances(bundle, dtype);
         let parse = |name: &str| {
             std::env::var(name)
                 .ok()
@@ -247,6 +317,7 @@ impl Settings {
             model_dir,
             dtype,
             tolerance: parse("TRANSFORMERS_GPT_OSS_TOLERANCE").unwrap_or(default_tolerance),
+            mean_tolerance: parse("TRANSFORMERS_GPT_OSS_MEAN_TOLERANCE").unwrap_or(default_mean),
             minimum_greedy: parse("TRANSFORMERS_GPT_OSS_MIN_GREEDY")
                 .map_or(DEFAULT_MIN_GREEDY, |value| value as usize),
         }
@@ -426,6 +497,10 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
         assert!(
             largest <= settings.tolerance,
             "prompt {index}: max |Δ| = {largest:e}"
+        );
+        assert!(
+            mean <= f64::from(settings.mean_tolerance),
+            "prompt {index}: mean |Δ| = {mean:e}"
         );
     }
 }
@@ -609,6 +684,35 @@ fn check_cached_long_prompt<B: Backend>(device: &B::Device) {
     assert!(largest <= settings.tolerance, "cached long prompt");
 }
 
+/// Runs default to the bundle's dtype; only full precision on both sides gets the tight tolerances.
+#[test]
+fn tolerance_defaults_follow_the_bundle_and_run_dtypes() {
+    use TensorDType::{BF16, F16, F32, F64};
+    assert_eq!(bundle_dtype("float32"), F32);
+    assert_eq!(bundle_dtype("bfloat16"), BF16);
+    assert!(std::panic::catch_unwind(|| bundle_dtype("float16")).is_err());
+    let tight = (F32_TOLERANCE, F32_MEAN_TOLERANCE);
+    let loose = (HALF_TOLERANCE, HALF_MEAN_TOLERANCE);
+    assert_eq!(default_tolerances(F32, F32), tight);
+    assert_eq!(default_tolerances(F32, F64), tight);
+    for (bundle, run) in [
+        (F32, F16),
+        (F32, BF16),
+        (BF16, BF16),
+        (BF16, F16),
+        (BF16, F32),
+    ] {
+        assert_eq!(
+            default_tolerances(bundle, run),
+            loose,
+            "{bundle:?} bundle, {run:?} run"
+        );
+    }
+    // The mean bound is the sharper half-precision check, and both cover the measurements.
+    const { assert!(HALF_MEAN_TOLERANCE < HALF_TOLERANCE / 10.0) };
+    const { assert!(HALF_TOLERANCE > 1.85 && HALF_MEAN_TOLERANCE > 0.062) };
+}
+
 /// Flex: every prompt position's logits.
 #[test]
 #[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 9-80 GiB of memory"]
@@ -639,7 +743,11 @@ fn flex_cached_long_prompt_matches_the_reference() {
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal {
-    //! Metal counterparts of the Flex checks (F16 by default), run serially by the integrator.
+    //! Metal counterparts of the Flex checks, run serially by the integrator.
+    //!
+    //! The stored dtype follows the bundle unless `TRANSFORMERS_GPT_OSS_DTYPE`
+    //! is set; the F16 profile sets `f16` and is best qualified against a
+    //! truncated F32 bundle (see this file's module documentation).
 
     use burn::backend::Metal;
 
