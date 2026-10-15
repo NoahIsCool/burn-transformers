@@ -30,9 +30,14 @@
 //!
 //! * **Router precision.** Transformers projects the router in the
 //!   activation dtype and runs top-k and softmax there; this crate projects
-//!   in the activation dtype and ranks and normalizes in F32 (identical in
-//!   F32; in BF16/F16 the selected experts agree and weights differ by at most
-//!   one rounding).
+//!   in the activation dtype and ranks and normalizes in F32. In F32 the two
+//!   agree up to matmul reduction order. In BF16/F16 the projections
+//!   accumulate differently, so router logits can differ by a rounding; the
+//!   selected experts then agree except where the `K`-th and `(K + 1)`-th
+//!   logits are equal or nearly so (exact ties go to the lowest expert index
+//!   here, while `torch.topk` leaves their order unspecified), and the
+//!   weights of agreeing selections differ by about one rounding of the
+//!   activation dtype.
 //! * **Rejected.** A `model_type` other than `gpt_oss`, non-zero
 //!   `attention_dropout`, an activation other than `silu`, a `swiglu_limit`
 //!   other than the reference's hard-coded `7.0`, a malformed `layer_types`,
