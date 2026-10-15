@@ -88,6 +88,21 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "attention_connectivity"
+path = "fuzz_targets/attention_connectivity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modular_specs"
+path = "fuzz_targets/modular_specs.rs"
+test = false
+doc = false
+bench = false
+
+# Keep fuzz-only dependencies and sanitizer artifacts outside the runtime package.
 [workspace]
 members = ["."]
 

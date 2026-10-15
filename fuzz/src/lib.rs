@@ -14,6 +14,7 @@
 //! rejected framing. Each module documents its byte layout next to its `exercise` function.
 
 pub mod artifacts;
+pub mod attention_connectivity;
 pub mod cache;
 pub mod chat_templates;
 pub mod configuration;
@@ -21,6 +22,7 @@ pub mod experiment_interfaces;
 pub mod generation;
 pub mod logits_processing;
 pub mod masks;
+pub mod modular_specs;
 pub mod rope_parameters;
 pub mod safetensors_headers;
 
