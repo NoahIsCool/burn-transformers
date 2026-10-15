@@ -1,34 +1,51 @@
 //! Real gpt-oss checkpoints against locally generated Transformers references.
 //!
-//! The reference bundle comes from `scripts/generate_causal_lm_reference.py`
-//! (Transformers `AutoModelForCausalLM`, CPU, eager attention), which for
-//! gpt-oss must run in BF16:
+//! Reference bundles come from `scripts/generate_causal_lm_reference.py`
+//! (Transformers `AutoModelForCausalLM`, CPU, eager attention). Without CUDA
+//! kernels Transformers decodes the MXFP4 experts to BF16 (its
+//! `convert_moe_packed_tensors`, which this crate reproduces bit for bit). Two
+//! kinds of bundle are useful:
 //!
-//! ```text
-//! python3 scripts/generate_causal_lm_reference.py --dtype bfloat16 \
-//!   --model-dir /Volumes/T9/models/openai/gpt-oss-20b \
-//!   --output /path/to/gpt-oss-20b-6cee5e81-bf16-reference.bundle \
-//!   --repository openai/gpt-oss-20b --revision 6cee5e81ee83917806bbde320786a8fb61efebee
-//! ```
+//! * a **full** BF16 reference of gpt-oss-20b, the release gate (the F32 model
+//!   does not fit a 96 GiB host):
 //!
-//! Without CUDA kernels Transformers decodes the MXFP4 experts to BF16 (its
-//! `convert_moe_packed_tensors`, which this crate reproduces bit for bit) and
-//! evaluates the whole model in BF16. The bundle records token IDs of a few
-//! fixed prompts, every prompt position's full-vocabulary logits (as F32), and
-//! a 32-token cached greedy continuation with each step's top-2 margin.
+//!   ```text
+//!   python3 scripts/generate_causal_lm_reference.py --dtype bfloat16 \
+//!     --model-dir /Volumes/T9/models/openai/gpt-oss-20b \
+//!     --output /path/to/gpt-oss-20b-6cee5e81-bf16-reference.bundle \
+//!     --repository openai/gpt-oss-20b --revision 6cee5e81ee83917806bbde320786a8fb61efebee
+//!   ```
 //!
-//! These tests are ignored by default and need two local directories:
+//! * a **truncated** F32 reference (`--num-hidden-layers 1`): the real
+//!   embedding, first block (sliding attention with real sinks, the real
+//!   router, 32 MXFP4-decoded experts), final norm, and head, in about 9 GiB.
+//!   It checks real weights end to end at F32 precision on Flex. This test
+//!   reads the truncation from the bundle's provenance and loads only those
+//!   blocks, allowlisting the checkpoint's other blocks as unread.
+//!
+//! The checks cover every prompt position's logits and decisive argmaxes,
+//! the cached greedy continuation, a ragged left-padded batched prefill
+//! (also against the crate's own stateless pass), and the longest prompt
+//! decoded token by token through the caches; include a prompt longer than
+//! the 128-token window (`--prompt`, repeatable) so sliding layers wrap
+//! their ring.
+//!
+//! Each bundle records token IDs of a few fixed prompts, every prompt
+//! position's full-vocabulary logits (as F32), and a 32-token cached greedy
+//! continuation with each step's top-2 margin. The tests are ignored by
+//! default and need two local directories:
 //!
 //! ```text
 //! TRANSFORMERS_GPT_OSS_DIR=/Volumes/T9/models/openai/gpt-oss-20b \
 //! TRANSFORMERS_GPT_OSS_REFERENCE_DIR=/path/to/reference.bundle \
-//! cargo test --release --features metal --test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1
+//! cargo test --release [--features metal] --test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1
 //! ```
 //!
-//! The checkpoint is loaded with the strict automatic loader: every tensor
-//! must be consumed (no missing or unexpected names) and all 48 expert
-//! projections must be decoded from MXFP4. The pairing of checkpoint and
-//! bundle is verified through the bundle's SHA-256 of `config.json`.
+//! A full bundle loads through the strict automatic loader; a truncated one
+//! through the family loader. Either way no tensor may be missing or
+//! unexpectedly present, and every expert projection of the loaded blocks
+//! must be decoded from MXFP4. The pairing of checkpoint and bundle is
+//! verified through the bundle's SHA-256 of `config.json`.
 //!
 //! # Memory
 //!
@@ -38,22 +55,36 @@
 //! 17 MB of scales, and its 1.06 GB decoded F16 output). F32 needs about
 //! 78 GiB and does not fit a 96 GiB host beside the operating system. The
 //! reference generator holds the BF16 model (about 39 GiB) plus the
-//! checkpoint's MXFP4 tensors while converting, so it needs about 55 GiB.
+//! checkpoint's MXFP4 tensors while converting, so it needs about 55 GiB. A
+//! one-block truncation needs about 9 GiB in F32 on either side.
 //!
 //! # Dtype and tolerance
 //!
-//! `TRANSFORMERS_GPT_OSS_DTYPE` selects the stored dtype: `f16` (default),
-//! `bf16`, or `f32`. The reference itself runs in BF16, including its eager
-//! attention softmax, so logits differ from any of these by BF16 rounding
-//! accumulated over 24 blocks, and a near-tie in routing may select a
-//! different expert. The default absolute tolerance,
-//! [`DEFAULT_TOLERANCE`] = `1.0` logit, is provisional until the integrator
-//! records the measured deviation on Metal; set `TRANSFORMERS_GPT_OSS_TOLERANCE`
-//! to tighten it. Independently of the reference, the cached and batched
-//! paths must agree with this crate's own stateless pass within
-//! [`SELF_CONSISTENCY_TOLERANCE`] scaled to the dtype. Greedy tokens are
-//! compared while the reference's top-2 margin exceeds twice the tolerance,
-//! and at least [`DEFAULT_MIN_GREEDY`] tokens must be compared.
+//! `TRANSFORMERS_GPT_OSS_DTYPE` selects the stored dtype (`f16`, `bf16`, or
+//! `f32`); it defaults to `f32` for an F32 bundle and `f16` otherwise. An F32
+//! bundle compared in F32 differs only by reduction order: the default
+//! tolerance is [`F32_TOLERANCE`]. A BF16 reference runs everything,
+//! including its eager attention softmax, in BF16, so logits differ by BF16
+//! rounding accumulated over 24 blocks and a near-tie in routing may select a
+//! different expert; its default, [`BF16_TOLERANCE`] = `1.0` logit, is
+//! provisional until the integrator records the measured deviation on Metal.
+//! `TRANSFORMERS_GPT_OSS_TOLERANCE` overrides either. Independently of the
+//! reference, cached and batched passes must agree with this crate's own
+//! stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for the dtype. Greedy
+//! tokens are compared while the reference's top-2 margin exceeds twice the
+//! tolerance, and at least [`DEFAULT_MIN_GREEDY`] tokens must be compared.
+
+//!
+//! # Measured
+//!
+//! On Flex/F32 against truncated F32 bundles of gpt-oss-20b at `6cee5e8`
+//! (Transformers 5.2.0, PyTorch 2.10.0, generated on this host on
+//! 2026-10-15): one block with the default prompts deviates by at most
+//! `7.6e-5` (mean `3.4e-6`); four blocks (two sliding, two full), with a
+//! 183-token fourth prompt, by at most `1.3e-4` (mean below `5e-6`), the
+//! token-by-token cached decode of that prompt (wrapping the 128-slot ring)
+//! by `7.6e-5`, and all 32 greedy tokens match. The full-model BF16 bundle
+//! and the Metal runs are the integrator's.
 
 #![cfg(feature = "flex")]
 
@@ -69,11 +100,18 @@ use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection,
     TokenMask,
     cache::CacheConfig,
-    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
+    checkpoint::{DTypePolicy, KeyMatcher, LoadOptions, LoadReport, TensorDType},
+    models::{
+        config::ModelConfig,
+        gpt_oss::{GptOssConfig, GptOssForCausalLm},
+    },
 };
 
-/// Default absolute logit tolerance against the BF16 reference; see the module documentation.
-const DEFAULT_TOLERANCE: f32 = 1.0;
+/// Default absolute logit tolerance against an F32 bundle evaluated in F32.
+const F32_TOLERANCE: f32 = 1e-3;
+
+/// Default absolute logit tolerance against a BF16 bundle; see the module documentation.
+const BF16_TOLERANCE: f32 = 1.0;
 
 /// Absolute agreement of cached/batched passes with this crate's stateless pass, per dtype.
 const SELF_CONSISTENCY_TOLERANCE: [(TensorDType, f32); 3] = [
@@ -84,9 +122,6 @@ const SELF_CONSISTENCY_TOLERANCE: [(TensorDType, f32); 3] = [
 
 /// Default minimum number of decisive greedy tokens that must be compared.
 const DEFAULT_MIN_GREEDY: usize = 2;
-
-/// Number of expert projections gpt-oss-20b stores as MXFP4 (two per layer).
-const MXFP4_PROJECTIONS: usize = 48;
 
 /// One prompt of the reference bundle.
 struct Prompt {
@@ -106,6 +141,10 @@ struct Reference {
     greedy: Vec<(i64, f32)>,
     /// SHA-256 of the configuration the bundle was generated from.
     config_sha256: String,
+    /// Evaluation dtype of the reference (`float32` or `bfloat16`).
+    dtype: String,
+    /// Blocks kept by a truncated reference, or `None` for the whole model.
+    layers: Option<usize>,
 }
 
 impl Reference {
@@ -149,14 +188,16 @@ impl Reference {
                 )
             })
             .collect();
+        let provenance = &manifest["provenance"];
         Self {
             vocabulary,
             prompts,
             greedy,
-            config_sha256: manifest["provenance"]["config_sha256"]
-                .as_str()
-                .unwrap()
-                .into(),
+            config_sha256: provenance["config_sha256"].as_str().unwrap().into(),
+            dtype: provenance["dtype"].as_str().unwrap_or("float32").into(),
+            layers: provenance["num_hidden_layers"]
+                .as_u64()
+                .map(|layers| layers as usize),
         }
     }
 }
@@ -166,12 +207,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Run settings read from the environment.
+/// Run settings read from the environment and the bundle.
 struct Settings {
     /// Checkpoint directory.
     model_dir: PathBuf,
-    /// Reference bundle directory.
-    reference_dir: PathBuf,
     /// Stored dtype of every floating parameter.
     dtype: TensorDType,
     /// Absolute logit tolerance against the reference.
@@ -181,34 +220,36 @@ struct Settings {
 }
 
 impl Settings {
-    /// Reads the settings; see the module documentation.
-    fn from_environment() -> Self {
-        let directory = |name: &str| {
-            std::env::var_os(name)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| panic!("set {name}; see the module documentation"))
-        };
+    /// Reads the settings; dtype and tolerance defaults follow the bundle's dtype.
+    fn new(model_dir: PathBuf, reference: &Reference) -> Self {
+        let f32_bundle = reference.dtype == "float32";
         let dtype = match std::env::var("TRANSFORMERS_GPT_OSS_DTYPE").as_deref() {
+            Ok("f64") => TensorDType::F64,
             Ok("f32") => TensorDType::F32,
             Ok("bf16") => TensorDType::BF16,
-            Ok("f16") | Err(_) => TensorDType::F16,
+            Ok("f16") => TensorDType::F16,
+            Err(_) if f32_bundle => TensorDType::F32,
+            Err(_) => TensorDType::F16,
             Ok(other) => {
                 panic!("TRANSFORMERS_GPT_OSS_DTYPE must be f16, bf16, or f32, not {other}")
             }
         };
+        let default_tolerance = if f32_bundle && dtype == TensorDType::F32 {
+            F32_TOLERANCE
+        } else {
+            BF16_TOLERANCE
+        };
         let parse = |name: &str| {
             std::env::var(name)
                 .ok()
-                .map(|value| value.parse().expect(name))
+                .map(|value| value.parse::<f32>().expect(name))
         };
         Self {
-            model_dir: directory("TRANSFORMERS_GPT_OSS_DIR"),
-            reference_dir: directory("TRANSFORMERS_GPT_OSS_REFERENCE_DIR"),
+            model_dir,
             dtype,
-            tolerance: parse("TRANSFORMERS_GPT_OSS_TOLERANCE").unwrap_or(DEFAULT_TOLERANCE),
+            tolerance: parse("TRANSFORMERS_GPT_OSS_TOLERANCE").unwrap_or(default_tolerance),
             minimum_greedy: parse("TRANSFORMERS_GPT_OSS_MIN_GREEDY")
-                .map(|value: f32| value as usize)
-                .unwrap_or(DEFAULT_MIN_GREEDY),
+                .map_or(DEFAULT_MIN_GREEDY, |value| value as usize),
         }
     }
 
@@ -221,40 +262,91 @@ impl Settings {
     }
 }
 
-/// Loads the checkpoint strictly after checking it matches the bundle.
-fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, Settings) {
-    let settings = Settings::from_environment();
-    let reference = Reference::read(&settings.reference_dir);
-    let config = std::fs::read(settings.model_dir.join("config.json")).unwrap();
-    assert_eq!(
-        hex(&Sha256::digest(&config)),
-        reference.config_sha256,
-        "the bundle was generated from another config.json"
+/// Returns a required directory from the environment.
+fn directory(name: &str) -> PathBuf {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("set {name}; see the module documentation"))
+}
+
+/// Checks the strict report: nothing missing or unexpected, and `layers` blocks of MXFP4 experts.
+fn check_report(report: &LoadReport, layers: usize) {
+    assert!(
+        report.missing.is_empty() && report.unexpected.is_empty(),
+        "missing {:?}, unexpected {:?}",
+        report.missing,
+        report.unexpected
     );
-    let options = AutoLoadOptions {
-        checkpoint: LoadOptions {
-            dtype_policy: DTypePolicy::Cast(settings.dtype),
-            ..LoadOptions::default()
-        },
-        load_tokenizer: false,
-        ..AutoLoadOptions::default()
-    };
-    let started = std::time::Instant::now();
-    let loaded =
-        AutoCausalLm::<B>::load_local(&settings.model_dir, &options, device).expect("strict load");
-    eprintln!("loaded in {:?}", started.elapsed());
-    let report = loaded.load_report();
-    assert!(report.missing.is_empty() && report.unexpected.is_empty());
     let decoded = report
         .transformed
         .iter()
         .filter(|record| record.operation == "dequantize_mxfp4")
         .count();
     assert_eq!(
-        decoded, MXFP4_PROJECTIONS,
+        decoded,
+        2 * layers,
         "every expert projection decodes from MXFP4"
     );
-    let model = loaded.into_model();
+}
+
+/// Loads the checkpoint (truncated as the bundle says) after checking it matches the bundle.
+fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, Settings) {
+    let model_dir = directory("TRANSFORMERS_GPT_OSS_DIR");
+    let reference = Reference::read(&directory("TRANSFORMERS_GPT_OSS_REFERENCE_DIR"));
+    let settings = Settings::new(model_dir, &reference);
+    let text = std::fs::read_to_string(settings.model_dir.join("config.json")).unwrap();
+    assert_eq!(
+        hex(&Sha256::digest(text.as_bytes())),
+        reference.config_sha256,
+        "the bundle was generated from another config.json"
+    );
+    let checkpoint = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(settings.dtype),
+        ..LoadOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let model = match reference.layers {
+        None => {
+            let options = AutoLoadOptions {
+                checkpoint,
+                load_tokenizer: false,
+                ..AutoLoadOptions::default()
+            };
+            let loaded = AutoCausalLm::<B>::load_local(&settings.model_dir, &options, device)
+                .expect("strict load");
+            let layers = GptOssConfig::from_json_str(&text)
+                .unwrap()
+                .num_hidden_layers;
+            check_report(loaded.load_report(), layers);
+            loaded.into_model()
+        }
+        Some(layers) => {
+            let mut config = GptOssConfig::from_json_str(&text).unwrap();
+            let total = config.num_hidden_layers;
+            config.num_hidden_layers = layers;
+            config.layer_types.truncate(layers);
+            let options = LoadOptions {
+                allow_unexpected: (layers..total)
+                    .map(|layer| KeyMatcher::prefix(format!("model.layers.{layer}.")))
+                    .collect(),
+                ..checkpoint
+            };
+            let mut model = GptOssForCausalLm::<B>::init(config, device).unwrap();
+            let outcome = model
+                .load_checkpoint(&settings.model_dir, &options)
+                .expect("strict truncated load");
+            check_report(&outcome.report, layers);
+            AutoCausalLm::from(model)
+        }
+    };
+    eprintln!(
+        "loaded {} blocks as {:?} in {:?}",
+        reference
+            .layers
+            .map_or("all".into(), |layers| layers.to_string()),
+        settings.dtype,
+        started.elapsed()
+    );
     assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
     (model, reference, settings)
 }
@@ -458,25 +550,92 @@ fn check_batched_prefill<B: Backend>(device: &B::Device) {
     }
 }
 
+/// The longest prompt decodes token by token through the caches, past the sliding window.
+///
+/// A quarter of the prompt is prefilled into a state whose capacity exceeds
+/// gpt-oss's 128-token window (so sliding layers use their ring), and every
+/// remaining token is decoded alone and compared with the reference logits
+/// at its position. A prompt longer than the window wraps the ring.
+fn check_cached_long_prompt<B: Backend>(device: &B::Device) {
+    let (model, reference, settings) = load::<B>(device);
+    let prompt = reference
+        .prompts
+        .iter()
+        .max_by_key(|prompt| prompt.tokens.len())
+        .unwrap();
+    let length = prompt.tokens.len();
+    let prefill = (length / 4).max(1);
+    let capacity = length.max(256);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, capacity).unwrap(), 1, device)
+        .unwrap();
+    let vocabulary = reference.vocabulary;
+    let expected =
+        |position: usize| &prompt.logits[position * vocabulary..(position + 1) * vocabulary];
+    let logits = host(
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: row::<B>(&prompt.tokens[..prefill], device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits,
+    );
+    let mut largest = gap(&logits, expected(prefill - 1));
+    for position in prefill..length {
+        let logits = host(
+            model
+                .decode(
+                    DecodeInput {
+                        token_ids: row::<B>(&prompt.tokens[position..=position], device),
+                        position_ids: None,
+                        token_mask: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap()
+                .logits,
+        );
+        largest = largest.max(gap(&logits, expected(position)));
+    }
+    eprintln!(
+        "cached decode of a {length}-token prompt (prefill {prefill}): max |Δ| = {largest:e}"
+    );
+    assert!(largest <= settings.tolerance, "cached long prompt");
+}
+
 /// Flex: every prompt position's logits.
 #[test]
-#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 40-80 GiB of memory"]
+#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 9-80 GiB of memory"]
 fn flex_prompt_logits_match_the_reference() {
     check_prompt_logits::<Flex<f32, i32>>(&Default::default());
 }
 
 /// Flex: the cached greedy continuation.
 #[test]
-#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 40-80 GiB of memory"]
+#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 9-80 GiB of memory"]
 fn flex_cached_greedy_matches_the_reference() {
     check_cached_greedy::<Flex<f32, i32>>(&Default::default());
 }
 
 /// Flex: a ragged left-padded batch of every prompt.
 #[test]
-#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 40-80 GiB of memory"]
+#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 9-80 GiB of memory"]
 fn flex_batched_prefill_matches_the_reference() {
     check_batched_prefill::<Flex<f32, i32>>(&Default::default());
+}
+
+/// Flex: the longest prompt decoded token by token, past the window.
+#[test]
+#[ignore = "needs TRANSFORMERS_GPT_OSS_DIR, _REFERENCE_DIR, and 9-80 GiB of memory"]
+fn flex_cached_long_prompt_matches_the_reference() {
+    check_cached_long_prompt::<Flex<f32, i32>>(&Default::default());
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -497,6 +656,13 @@ mod metal {
     #[ignore = "needs Metal, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
     fn metal_cached_greedy_matches_the_reference() {
         super::check_cached_greedy::<Metal>(&Default::default());
+    }
+
+    /// Metal: the longest prompt decoded token by token, past the window.
+    #[test]
+    #[ignore = "needs Metal, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
+    fn metal_cached_long_prompt_matches_the_reference() {
+        super::check_cached_long_prompt::<Metal>(&Default::default());
     }
 
     /// Metal: a ragged left-padded batch of every prompt.

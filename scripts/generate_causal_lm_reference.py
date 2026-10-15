@@ -30,7 +30,9 @@ Usage::
         --repository HuggingFaceTB/SmolLM-135M --revision <commit>
 
 Checkpoints too large to evaluate in F32 can be evaluated in BF16 with
-``--dtype bfloat16``; logits are still written as F32. gpt-oss is the
+``--dtype bfloat16``; logits are still written as F32. ``--num-hidden-layers N``
+keeps only the first ``N`` blocks (with the real embedding, final norm, and
+head), a real-weight smoke reference that fits in memory at F32. gpt-oss is the
 motivating case: without CUDA kernels Transformers decodes its MXFP4
 experts to BF16, and the F32 model (about 78 GiB for gpt-oss-20b) does not
 fit a 96 GiB host, while the BF16 one needs about 55 GiB while loading.
@@ -148,13 +150,33 @@ def provenance(model_dir: Path, arguments: argparse.Namespace) -> dict[str, Any]
         "config_sha256": sha256_file(model_dir / "config.json"),
         "weights_sha256": {path.name: sha256_file(path) for path in weight_files(model_dir)},
         "dtype": arguments.dtype,
+        "num_hidden_layers": arguments.num_hidden_layers,
         "device": "cpu",
         "attention_implementation": "eager",
     }
 
 
-def load_model(model_dir: Path, dtype: str = "float32") -> tuple[Any, Any]:
-    """Loads the tokenizer and the eager model, in `dtype` (one of `DTYPES`), from local files only."""
+def truncate_config(config: Any, layers: int) -> None:
+    """Keeps only the first `layers` decoder blocks of a configuration, in place.
+
+    `num_hidden_layers` and, when present, the per-layer `layer_types`
+    schedule are cut; every other field is unchanged, so the truncated model
+    loads the checkpoint's first blocks, embedding, final norm, and head.
+    """
+
+    if layers < 1 or layers > config.num_hidden_layers:
+        raise ValueError(f"cannot keep {layers} of {config.num_hidden_layers} layers")
+    config.num_hidden_layers = layers
+    if getattr(config, "layer_types", None):
+        config.layer_types = list(config.layer_types[:layers])
+
+
+def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> tuple[Any, Any]:
+    """Loads the tokenizer and the eager model, in `dtype` (one of `DTYPES`), from local files only.
+
+    With `layers`, only the first `layers` decoder blocks are built and
+    loaded (see `truncate_config`); the checkpoint's other blocks are ignored.
+    """
 
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
@@ -165,12 +187,22 @@ def load_model(model_dir: Path, dtype: str = "float32") -> tuple[Any, Any]:
     torch.manual_seed(0)
     transformers.utils.logging.disable_progress_bar()
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    config = transformers.AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    if layers is not None:
+        truncate_config(config, layers)
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_dir,
+        config=config,
         local_files_only=True,
         dtype=getattr(torch, dtype),
         attn_implementation="eager",
     )
+    # Quantized checkpoints can leave dequantized parameters in another dtype:
+    # Transformers decodes MXFP4 experts to BF16 regardless of `dtype`, and its
+    # grouped expert kernels then cast F32 activations down to BF16. Casting
+    # every parameter (exactly, for BF16 values) keeps the whole reference in
+    # the requested dtype; it is a no-op for ordinary checkpoints.
+    model = model.to(getattr(torch, dtype))
     model.eval()
     return tokenizer, model
 
@@ -214,7 +246,7 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     """Evaluates the prompts and writes the logits files into `staging`."""
 
     model_dir = arguments.model_dir.resolve(strict=True)
-    tokenizer, model = load_model(model_dir, arguments.dtype)
+    tokenizer, model = load_model(model_dir, arguments.dtype, arguments.num_hidden_layers)
     prompts = []
     for index, text in enumerate(arguments.prompts):
         token_ids = tokenizer(text, add_special_tokens=arguments.add_special_tokens)["input_ids"]
@@ -267,6 +299,11 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="evaluation dtype; logits are written as F32 either way",
     )
     parser.add_argument(
+        "--num-hidden-layers",
+        type=int,
+        help="keep only the first N decoder blocks (a real-weight smoke reference)",
+    )
+    parser.add_argument(
         "--no-special-tokens",
         dest="add_special_tokens",
         action="store_false",
@@ -277,6 +314,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         arguments.prompts = list(DEFAULT_PROMPTS)
     if arguments.greedy_tokens < 1:
         parser.error("--greedy-tokens must be at least one")
+    if arguments.num_hidden_layers is not None and arguments.num_hidden_layers < 1:
+        parser.error("--num-hidden-layers must be at least one")
     return arguments
 
 

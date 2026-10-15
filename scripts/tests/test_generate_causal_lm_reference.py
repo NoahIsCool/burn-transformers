@@ -108,6 +108,26 @@ class ReferenceGeneratorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             REFERENCE.load_model(Path("m"), "float16")
 
+    def test_truncation_keeps_the_first_layers(self) -> None:
+        """Truncation cuts the depth and the layer schedule; impossible depths are refused."""
+
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(num_hidden_layers=4, layer_types=["s", "f", "s", "f"])
+        REFERENCE.truncate_config(config, 2)
+        self.assertEqual((config.num_hidden_layers, config.layer_types), (2, ["s", "f"]))
+        plain = SimpleNamespace(num_hidden_layers=3)
+        REFERENCE.truncate_config(plain, 3)
+        self.assertEqual(plain.num_hidden_layers, 3)
+        for layers in (0, 4):
+            with self.assertRaises(ValueError):
+                REFERENCE.truncate_config(plain, layers)
+        base = ["--model-dir", "m", "--output", "o"]
+        self.assertIsNone(REFERENCE.parse_arguments(base).num_hidden_layers)
+        self.assertEqual(REFERENCE.parse_arguments(base + ["--num-hidden-layers", "1"]).num_hidden_layers, 1)
+        with self.assertRaises(SystemExit):
+            REFERENCE.parse_arguments(base + ["--num-hidden-layers", "0"])
+
     def test_publication_never_replaces_a_bundle(self) -> None:
         """A finished staging directory is renamed once; an existing bundle is kept."""
 
