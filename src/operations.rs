@@ -13,6 +13,13 @@
 //! `[..., O]`. Flattening only the activation's leading axes leaves packed
 //! weight block boundaries and packing dimensions unchanged.
 //!
+//! [`matmul_transposed`] evaluates the same rank-2 product against the transpose
+//! of a row-major `[output, input]` matrix, the readout `h · Eᵀ` of a tied
+//! `[vocabulary, hidden]` embedding table. It never reshapes the matrix: Burn's
+//! `module::linear` prepends unit axes to its weight, which Burn Flex 0.21 cannot
+//! express as a view of a transposed matrix and therefore answers by copying the
+//! complete table on every call.
+//!
 //! Dense floating projections remain differentiable through both inputs and
 //! parameters. Packed quantized projections retain their inference representation,
 //! but Burn 0.21 cannot differentiate those operations, including a frozen packed
@@ -166,12 +173,7 @@ pub fn linear<B: Backend, const D: usize>(
             )));
         }
     }
-    let rows = output_shape[..D - 1]
-        .iter()
-        .try_fold(1_usize, |product, dimension| {
-            product.checked_mul(*dimension)
-        })
-        .ok_or_else(|| Error::shape("linear.input", "representable leading axes", "overflow"))?;
+    let rows = leading_rows("linear.input", &output_shape)?;
     output_shape[D - 1] = weight_output;
 
     let mut output = input.reshape([rows, input_width]).matmul(weight);
@@ -179,6 +181,96 @@ pub fn linear<B: Backend, const D: usize>(
         output = output + bias.val().unsqueeze();
     }
     Ok(output.reshape(output_shape))
+}
+
+/// Multiplies the last axis of `input` by the transpose of a `[output, input]` matrix.
+///
+/// For `x` of shape `[..., I]` and a row-major matrix `M` of shape `[O, I]`, this
+/// returns `y = reshape(x, [-1, I]) · Mᵀ` restored to `[..., O]`, that is
+/// `y[..., o] = Σ_i x[..., i] · M[o, i]`. With `M` the `[vocabulary, hidden]`
+/// embedding table this is the tied language-model readout.
+///
+/// The product is one rank-2 matmul whose right operand is the transposed *view*
+/// of `M`, so no backend copies the matrix: Burn's `module::linear(x, Mᵀ)` instead
+/// reshapes the weight to `[1, ..., I, O]`, which Burn Flex 0.21 can only perform
+/// by materializing `Mᵀ` contiguously on every call (113 MB per decode step for
+/// SmolLM-135M's table, about two thirds of that model's Flex decode time).
+/// Flattening the activation's leading axes is free for the contiguous hidden
+/// states models produce. Values equal `module::linear(x, Mᵀ, None)` up to F32
+/// reassociation inside the backend's GEMM.
+///
+/// The matrix must be floating point with the activation's dtype and device;
+/// gradients flow to both operands.
+///
+/// # Errors
+///
+/// Returns [`Error::Shape`] for a rank-zero or empty input, or a matrix whose
+/// second axis differs from the input width or whose first axis is empty;
+/// [`Error::BackendCapability`] for quantized operands or mismatched dtypes; and
+/// [`Error::Configuration`] when the operands live on different devices.
+pub fn matmul_transposed<B: Backend, const D: usize>(
+    input: Tensor<B, D>,
+    matrix: Tensor<B, 2>,
+) -> Result<Tensor<B, D>> {
+    if D == 0 {
+        return Err(Error::shape(
+            "matmul_transposed.input",
+            "a tensor with at least one dimension",
+            "rank zero",
+        ));
+    }
+    let mut output_shape = input.dims();
+    if output_shape.contains(&0) {
+        return Err(Error::shape(
+            "matmul_transposed.input",
+            "non-zero dimensions ending in the matrix input width",
+            format!("{output_shape:?}"),
+        ));
+    }
+    if matches!(input.dtype(), DType::QFloat(_)) || matches!(matrix.dtype(), DType::QFloat(_)) {
+        return Err(Error::BackendCapability(
+            "matmul_transposed multiplies floating operands; dequantize packed tensors first"
+                .into(),
+        ));
+    }
+    if matrix.dtype() != input.dtype() {
+        return Err(Error::BackendCapability(format!(
+            "matmul_transposed.matrix dtype {:?} must match activation dtype {:?}",
+            matrix.dtype(),
+            input.dtype()
+        )));
+    }
+    if matrix.device() != input.device() {
+        return Err(Error::configuration(
+            "matmul_transposed.matrix",
+            "matrix and activations must share a device",
+        ));
+    }
+    let [matrix_output, matrix_input] = matrix.dims();
+    let input_width = output_shape[D - 1];
+    if matrix_input != input_width || matrix_output == 0 {
+        return Err(Error::shape(
+            "matmul_transposed.matrix",
+            format!("[nonzero_output, {input_width}]"),
+            format!("[{matrix_output}, {matrix_input}]"),
+        ));
+    }
+    let rows = leading_rows("matmul_transposed.input", &output_shape)?;
+    output_shape[D - 1] = matrix_output;
+    Ok(input
+        .reshape([rows, input_width])
+        .matmul(matrix.transpose())
+        .reshape(output_shape))
+}
+
+/// Returns the product of every axis but the last, the row count of a flattened input.
+fn leading_rows(tensor: &str, shape: &[usize]) -> Result<usize> {
+    shape[..shape.len().saturating_sub(1)]
+        .iter()
+        .try_fold(1_usize, |product, dimension| {
+            product.checked_mul(*dimension)
+        })
+        .ok_or_else(|| Error::shape(tensor, "representable leading axes", "overflow"))
 }
 
 /// Detects Burn 0.21's known packed Metal/autotune feature-unification hazard.
