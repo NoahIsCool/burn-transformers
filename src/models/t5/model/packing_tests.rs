@@ -77,6 +77,61 @@ fn malformed_columns_are_rejected() {
     assert_eq!(scatter_sources(&[1, 1], &[0, 0], 1, usize::MAX), None);
 }
 
+/// A padded slot needs an in-row column to read, so a zero-width input refuses a block.
+#[test]
+fn compaction_without_any_column_is_refused() {
+    assert_eq!(compaction_sources(&[0], &[], 0, 1), None);
+    assert_eq!(compaction_sources(&[0], &[], 0, 0), Some(Vec::new()));
+    assert_eq!(compaction_sources(&[], &[], 0, 3), Some(Vec::new()));
+}
+
+/// Padded slots are exactly the slots at or beyond a row's count.
+#[test]
+fn padded_slots_follow_row_counts() {
+    assert_eq!(
+        padded_slots(&[2, 0, 3], 3),
+        [false, false, true, true, true, true, false, false, false]
+    );
+    assert!(padded_slots(&[0, 0], 0).is_empty());
+    assert!(padded_slots(&[], 4).is_empty());
+    assert!(has_padded_slot(&[2, 0, 3], 3));
+    assert!(!has_padded_slot(&[3, 3], 3));
+    assert!(!has_padded_slot(&[], 3));
+    assert!(!has_padded_slot(&[0, 0], 0));
+}
+
+/// The iterator formulation that [`plan_rows`] replaced, kept as a behavioral reference.
+fn reference_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option<BatchedRows> {
+    let batch = valid_columns.len();
+    let counts: Vec<usize> = valid_columns.iter().map(Vec::len).collect();
+    let block = counts.iter().copied().max().unwrap_or(0);
+    if block > sequence {
+        return None;
+    }
+    let prefix = valid_columns.iter().all(|columns| {
+        columns
+            .iter()
+            .enumerate()
+            .all(|(slot, &column)| slot == column)
+    });
+    let packing = if prefix {
+        Packing::Prefix
+    } else {
+        let flat: Vec<usize> = valid_columns.iter().flatten().copied().collect();
+        Packing::Gather {
+            compact: compaction_sources(&counts, &flat, sequence, block)?,
+            scatter: scatter_sources(&counts, &flat, sequence, block)?,
+        }
+    };
+    Some(BatchedRows {
+        batch,
+        sequence,
+        block,
+        counts,
+        packing,
+    })
+}
+
 /// Group preservation requires a divisor group size and in-group indices.
 #[test]
 fn group_preservation_is_exact() {
@@ -128,6 +183,38 @@ proptest! {
                 }
             }
         }
+    }
+
+    /// The verified planner equals the former iterator implementation on arbitrary rows.
+    ///
+    /// Rows are drawn without any ordering guarantee, so malformed (unsorted,
+    /// duplicated, out-of-range, or too long) rows are exercised alongside
+    /// valid ones.
+    #[test]
+    fn plan_rows_matches_the_iterator_reference(
+        valid in proptest::collection::vec(proptest::collection::vec(0_usize..6, 0..5), 0..5),
+        sequence in 0_usize..6,
+    ) {
+        prop_assert_eq!(plan_rows(&valid, sequence), reference_rows(&valid, sequence));
+    }
+
+    /// Padded slots and the padding test agree with their definitions.
+    #[test]
+    fn padded_slots_property(
+        counts in proptest::collection::vec(0_usize..5, 0..5),
+        block in 0_usize..5,
+    ) {
+        let padded = padded_slots(&counts, block);
+        prop_assert_eq!(padded.len(), counts.len() * block);
+        for (row, &count) in counts.iter().enumerate() {
+            for slot in 0..block {
+                prop_assert_eq!(padded[row * block + slot], slot >= count);
+            }
+        }
+        prop_assert_eq!(
+            has_padded_slot(&counts, block),
+            counts.iter().any(|&count| count < block)
+        );
     }
 
     /// Group preservation agrees with its definition for arbitrary index vectors.

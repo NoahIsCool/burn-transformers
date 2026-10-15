@@ -4,14 +4,19 @@
 //! `src/models/t5/model/packing.rs`, the host plans behind batched T5
 //! stateful decoding:
 //!
-//! - `compaction_sources`: the flat gather that packs every row's valid tokens
-//!   left-aligned into a `[batch, Q]` block (row `b`'s tokens in slots
-//!   `0..n_b`, padding after them) never overflows, has exactly
-//!   `batch * Q` entries, and addresses only elements of the `[batch, S]`
-//!   input.
-//! - `scatter_sources`: the flat gather that restores the `[batch, S]` layout
-//!   never overflows, has exactly `batch * S` entries, and (for a nonempty
-//!   block) addresses only elements of the `[batch, Q]` block.
+//! - `plan_rows` (behind `BatchedRows::new`): the block width is the largest
+//!   row count; the prefix layout is chosen exactly when every row's valid
+//!   columns are `0..n_b`; otherwise slot `(b, i)` gathers rectangular column
+//!   `c_{b,i}` of row `b` (or column 0 when padded), column `c_{b,k}` scatters
+//!   back from slot `(b, k)`, and every other column reads slot `(b, 0)`; a
+//!   plan exists only when every row is strictly increasing below `S`, and a
+//!   refusal means a malformed row or an unrepresentable `B * S`.
+//! - `compaction_sources` and `scatter_sources`: every returned entry equals
+//!   its formula over the flat column list, and each refusal is
+//!   characterized (a count above the block, too few columns, an unsorted or
+//!   out-of-range row, or an unrepresentable extent).
+//! - `padded_slots` and `has_padded_slot`: exactly the slots `i >= n_b` are
+//!   padding.
 //! - `row_positions`: every block slot's causal visibility and relative-bias
 //!   query position equal their documented formulas (`L + i` for new tokens,
 //!   the row's last new position for padding, `L - 1` for inactive rows), so
