@@ -21,6 +21,7 @@ use super::*;
 use crate::{
     Error, LogitsSelection, TokenMask,
     architecture::bool_tensor_from_values,
+    attention::AttentionConnectivity,
     models::gemma::{GemmaConfig, GemmaVariant},
 };
 
@@ -574,6 +575,80 @@ fn rejected_calls_leave_the_state_unchanged() {
     }
     let next = decode_step(&model, &mut cache, ints([[5], [6]]));
     assert_eq!(next.dims(), [2, 1, VOCABULARY], "the state stays usable");
+}
+
+/// Cache planning refuses schedules one ring group cannot hold and keeps wide windows in full storage.
+///
+/// Every ring layer shares one group of `window` slots, so two different
+/// windows below the capacity are refused, as is chunked-local attention,
+/// whose blocks a ring cannot represent; both errors name the offending
+/// layer. A window at or above the capacity can never exclude a cached key,
+/// so such a layer lives in full storage beside the global layers, and the
+/// mixed model still decodes exactly like its stateless pass. The tiny
+/// Gemma 2 model slides on layers 0 and 2 (window 3).
+#[test]
+fn cache_planning_refuses_unstorable_schedules_and_keeps_wide_windows_in_full_storage() {
+    let model = tiny_model(GemmaVariant::Gemma2, 22);
+    let allocate = |model: &GemmaForCausalLm<B>, capacity: usize| {
+        model.new_decode_state(
+            CacheConfig::new(1, capacity).unwrap(),
+            1,
+            &Default::default(),
+        )
+    };
+    let with_layer = |layer: usize, connectivity: AttentionConnectivity| {
+        let mut changed = model.clone();
+        changed.model.layers[layer].schedule.connectivity = connectivity;
+        changed
+    };
+    let refused = |model: &GemmaForCausalLm<B>, capacity: usize, cause: &str| {
+        let error = allocate(model, capacity).unwrap_err();
+        assert!(matches!(error, Error::Configuration { .. }), "{error}");
+        for part in ["gemma.decode_state.layers", "layer 2", cause] {
+            assert!(error.to_string().contains(part), "{part}: {error}");
+        }
+    };
+
+    let two_windows = with_layer(2, AttentionConnectivity::SlidingWindow { window: 2 });
+    refused(&two_windows, 8, "one ring group holds one window");
+    // At capacity 3 only the window-2 layer is ring-stored, at 2 neither is.
+    assert_eq!(allocate(&two_windows, 3).unwrap().ring_layers(), 1);
+    assert_eq!(allocate(&two_windows, 2).unwrap().ring_layers(), 0);
+
+    let chunked = with_layer(2, AttentionConnectivity::ChunkedLocal { chunk: 4 });
+    refused(&chunked, 8, "chunked-local");
+    refused(&chunked, 2, "chunked-local");
+
+    let wide = with_layer(2, AttentionConnectivity::SlidingWindow { window: 8 });
+    let mut cache = allocate(&wide, 8).unwrap();
+    assert_eq!(
+        cache.ring_layers(),
+        1,
+        "only layer 0 slides below the capacity"
+    );
+    let tokens: [i64; 8] = [3, 17, 8, 25, 11, 4, 29, 6];
+    let prefill = wide
+        .prefill(
+            input(ints([[3, 17, 8, 25, 11]]), None, None),
+            &mut cache,
+            &all_logits(),
+        )
+        .unwrap()
+        .logits;
+    let mut cached = vec![prefill];
+    for &token in &tokens[5..] {
+        cached.push(decode_step(&wide, &mut cache, ints([[token]])));
+    }
+    let stateless = wide
+        .forward(input(ints([tokens]), None, None), &all_logits())
+        .unwrap()
+        .logits;
+    assert_close(
+        Tensor::cat(cached, 1),
+        stateless,
+        TOLERANCE,
+        "a full-storage sliding layer beside a ring layer",
+    );
 }
 
 /// States are bound to their model's layout and to its trained context.
