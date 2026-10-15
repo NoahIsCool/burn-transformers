@@ -731,3 +731,17 @@ mod autodiff {
         }
     }
 }
+
+proptest::proptest! {
+    /// Label-range acceptance matches exact 128-bit comparisons for every class count.
+    #[test]
+    fn label_range_check_matches_a_wide_integer_reference(
+        minimum in proptest::num::i64::ANY,
+        maximum in proptest::num::i64::ANY,
+        classes in proptest::num::usize::ANY,
+    ) {
+        let expected =
+            minimum >= 0 && maximum >= 0 && i128::from(maximum) < classes as i128;
+        proptest::prop_assert_eq!(labels_within(minimum, maximum, classes), expected);
+    }
+}

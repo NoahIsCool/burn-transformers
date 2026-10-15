@@ -34,7 +34,7 @@
 //! vocabularies, including Flex's scalar reduction path. Native SIMD reductions
 //! can behave differently. They accept finite F32/F64 logits; explicitly cast lower
 //! precision logits to F32 before computing loss. Logits remain on their device;
-//! cross-entropy label validation synchronizes minimum/maximum scalars. No
+//! cross-entropy label validation reads the label range in one synchronization. No
 //! implicit dtype promotion, gradient detachment, padding policy, or trainer is applied.
 //!
 //! For class logits `z`, `log_softmax(z)_i = z_i - m - log(sum_j exp(z_j-m))`,
@@ -48,12 +48,12 @@ use std::collections::HashMap;
 use burn::{
     module::{Module, ModuleVisitor, Param, ParamId},
     tensor::{
-        DType, ElementConversion, Int, Tensor,
+        DType, Int, Tensor,
         backend::{AutodiffBackend, Backend},
     },
 };
 
-use crate::{Error, Result};
+use crate::{Error, Result, experiment::read_int_scalars};
 
 // Parameter ownership and native optimizer compatibility.
 
@@ -189,7 +189,7 @@ pub fn log_softmax<B: Backend, const D: usize>(
 /// Mean categorical cross entropy for logits `[examples, classes]` and integer labels.
 ///
 /// Each label must be in `0..classes`; validation reads its minimum and maximum
-/// and therefore synchronizes the device. For padded batches, select the real
+/// together, synchronizing the device once. For padded batches, select the real
 /// examples first, or use [`log_softmax`] to build an explicit masked reduction.
 /// Loss is in nats and returned as a one-element tensor connected to the logits.
 pub fn cross_entropy<B: Backend>(
@@ -211,9 +211,13 @@ pub fn cross_entropy<B: Backend>(
             "targets and logits must use the same device",
         ));
     }
-    let minimum = targets.clone().min().into_scalar().elem::<i64>();
-    let maximum = targets.clone().max().into_scalar().elem::<i64>();
-    if minimum < 0 || maximum as u128 >= classes as u128 {
+    // One fallible readback of both extrema: a single device synchronization.
+    let range = read_int_scalars(
+        vec![targets.clone().min(), targets.clone().max()],
+        "training target labels",
+    )?;
+    let (minimum, maximum) = (range[0], range[1]);
+    if !labels_within(minimum, maximum, classes) {
         return Err(Error::configuration(
             "training.targets",
             format!("expected labels in 0..{classes}, found range {minimum}..={maximum}"),
@@ -257,6 +261,11 @@ pub fn kl_divergence<B: Backend>(
     let teacher = log_softmax(teacher_logits, 1)?;
     let per_example = sum_dim(teacher.clone().exp() * (teacher - student), 1).reshape([examples]);
     Ok(sum_dim(per_example, 0) / examples as f64)
+}
+
+/// Whether every label in `minimum..=maximum` indexes one of `classes` columns.
+fn labels_within(minimum: i64, maximum: i64, classes: usize) -> bool {
+    minimum >= 0 && usize::try_from(maximum).is_ok_and(|maximum| maximum < classes)
 }
 
 /// Checks nonempty tensor geometry and F32/F64 storage without reading logit values.

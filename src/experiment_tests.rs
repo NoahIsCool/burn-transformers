@@ -619,3 +619,148 @@ fn composition_context_rejects_invalid_extent_source_batch_positions_and_padding
     ));
     assert!(changed.validate([1, 3], &device).is_ok());
 }
+
+// Validation cost: position values once per pass, layouts once per block.
+
+/// Contiguous contexts equal explicit `0..T` positions and know their extent without a readback.
+#[test]
+fn contiguous_context_matches_explicit_positions_and_rejects_empty_extents() {
+    let device = Default::default();
+    let contiguous = ExecutionContext::<B>::contiguous(2, 3, &device).unwrap();
+    let explicit =
+        ExecutionContext::<B>::new(Tensor::from_ints([[0, 1, 2], [0, 1, 2]], &device), None)
+            .unwrap();
+    assert_eq!(
+        contiguous.positions.to_data().to_vec::<i32>().unwrap(),
+        explicit.positions.to_data().to_vec::<i32>().unwrap()
+    );
+    assert_eq!(contiguous.evaluated_context, explicit.evaluated_context);
+    assert!(contiguous.token_mask.is_none());
+    contiguous.validate([2, 3], &device).unwrap();
+    for (batch, tokens) in [(0, 3), (2, 0)] {
+        let error = ExecutionContext::<B>::contiguous(batch, tokens, &device).unwrap_err();
+        assert!(error.to_string().contains("execution.positions"), "{error}");
+    }
+}
+
+/// Layout checks never read position values; full validation catches edited public fields.
+#[test]
+fn layout_validation_is_value_free_while_full_validation_rejects_edited_positions() {
+    let device = Default::default();
+    let mut edited = context();
+    edited.positions = Tensor::from_ints([[0, -1, 2]], &device);
+    edited.validate_layout([1, 3], &device).unwrap();
+    let error = edited.validate([1, 3], &device).unwrap_err().to_string();
+    assert!(
+        error.contains("execution.positions") && error.contains("-1..=2"),
+        "{error}"
+    );
+
+    let mut shrunk = context();
+    shrunk.evaluated_context = 2;
+    shrunk.validate_layout([1, 3], &device).unwrap();
+    let error = shrunk.validate([1, 3], &device).unwrap_err().to_string();
+    assert!(error.contains("0..2"), "{error}");
+
+    // Public composition entry points validate values once before any block runs.
+    let input = Tensor::<B, 3>::ones([1, 3, 2], &device);
+    let block =
+        ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), matrix(2, 2, &[0.0; 4]))
+            .unwrap();
+    let error = block
+        .run(input.clone(), &edited, Layer::decoder(0))
+        .unwrap_err();
+    assert!(error.to_string().contains("execution.positions"), "{error}");
+    let adapter = WidthAdapter::new(matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]), 2, 2, 2, &device).unwrap();
+    let error = adapter.run(input, &shrunk, Layer::decoder(0)).unwrap_err();
+    assert!(error.to_string().contains("execution.positions"), "{error}");
+}
+
+/// Attaching an encoder checks its layout and nonnegative source positions together.
+#[test]
+fn with_encoder_validates_source_layout_and_positions() {
+    let device = Default::default();
+    let source = |positions: [[i32; 2]; 1]| EncoderContext {
+        hidden: Tensor::<B, 3>::ones([1, 2, 4], &device),
+        positions: Tensor::from_ints(positions, &device),
+        token_mask: None,
+    };
+    let attached = context().with_encoder(source([[5, 9]])).unwrap();
+    assert_eq!(attached.encoder.unwrap().positions.dims(), [1, 2]);
+    let error = context().with_encoder(source([[-3, 0]])).unwrap_err();
+    assert!(
+        error.to_string().contains("execution.encoder.positions"),
+        "{error}"
+    );
+    let mut wide = source([[0, 1]]);
+    wide.hidden = Tensor::ones([2, 2, 4], &device);
+    let error = context().with_encoder(wide).unwrap_err();
+    assert!(error.to_string().contains("execution.encoder"), "{error}");
+}
+
+/// One readback returns every scalar in order, widening I32 storage to `i64`.
+#[test]
+fn batched_integer_readback_preserves_order_and_handles_empty_input() {
+    let device = Default::default();
+    let values = Tensor::<B, 1, Int>::from_ints([4, -7, 2], &device);
+    let read = read_int_scalars(
+        vec![values.clone().max(), values.clone().min(), values.sum()],
+        "fixture scalars",
+    )
+    .unwrap();
+    assert_eq!(read, [4, -7, -1]);
+    assert!(
+        read_int_scalars::<B>(Vec::new(), "nothing")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+proptest::proptest! {
+    /// Position-range predicates agree with exact 128-bit integer arithmetic.
+    #[test]
+    fn position_range_helpers_match_a_wide_integer_reference(
+        low in proptest::num::i64::ANY,
+        high in proptest::num::i64::ANY,
+        extent in proptest::num::usize::ANY,
+    ) {
+        let expected_extent = (high >= 0 && i128::from(high) < usize::MAX as i128)
+            .then(|| (i128::from(high) + 1) as usize);
+        proptest::prop_assert_eq!(extent_after(high), expected_extent);
+        let expected_within = low >= 0 && low <= high && i128::from(high) < extent as i128;
+        proptest::prop_assert_eq!(positions_within(low, high, extent), expected_within);
+    }
+}
+
+/// Reports per-call validation cost; run with `--ignored --nocapture`.
+///
+/// Compares the sync-free layout check, the one-readback value check, and the
+/// previous scheme of two separate scalar readbacks. On Flex a readback is a
+/// cheap host copy; on Metal/CUDA every readback also drains the device queue.
+#[test]
+#[ignore = "timing report, not a correctness check"]
+fn validation_cost_report() {
+    use std::time::Instant;
+    let device = Default::default();
+    let context = ExecutionContext::<B>::contiguous(8, 512, &device).unwrap();
+    let iterations = 2_000;
+    let time = |label: &str, run: &mut dyn FnMut()| {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            run();
+        }
+        let nanoseconds = start.elapsed().as_nanos() / iterations as u128;
+        println!("{label}: {nanoseconds} ns/call");
+    };
+    time("validate_layout (0 readbacks)", &mut || {
+        context.validate_layout([8, 512], &device).unwrap()
+    });
+    time("validate (1 batched readback)", &mut || {
+        context.validate([8, 512], &device).unwrap()
+    });
+    time("previous scheme (2 scalar readbacks)", &mut || {
+        let low = context.positions.clone().min().into_scalar();
+        let high = context.positions.clone().max().into_scalar();
+        assert!(low <= high);
+    });
+}

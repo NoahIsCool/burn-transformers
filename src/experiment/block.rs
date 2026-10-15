@@ -62,6 +62,9 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
     }
 
     /// Executes this composition in a scope containing its declared inner points.
+    ///
+    /// This entry point validates position values once (one device
+    /// synchronization); nested blocks then check only tensor layouts.
     pub fn run_with_hooks(
         &self,
         hidden: Tensor<B, 3>,
@@ -69,6 +72,8 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
+        validate_width(&hidden, self.hidden_size, "residual_block.input")?;
+        context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
         hooks.run(self.activation_points(layer), |hooks| {
             self.forward(hidden, context, layer, hooks)
         })
@@ -149,7 +154,7 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
         validate_width(&hidden, self.hidden_size, "residual_block.input")?;
-        context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
+        context.validate_layout([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
         let hidden = hooks.apply(layer.residual_pre(), hidden)?;
         let residual = hidden.clone();
         let prepared = hooks.apply(layer.attention_input(), self.mixer_norm.prepare(hidden)?)?;
@@ -203,6 +208,9 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
     }
 
     /// Executes this composition in a scope containing its declared inner points.
+    ///
+    /// This entry point validates position values once (one device
+    /// synchronization); nested blocks then check only tensor layouts.
     pub fn run_with_hooks(
         &self,
         hidden: Tensor<B, 3>,
@@ -210,6 +218,8 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
+        validate_width(&hidden, self.input_size, "width_adapter.input")?;
+        context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
         hooks.run(self.activation_points(layer), |hooks| {
             self.forward(hidden, context, layer, hooks)
         })
@@ -271,7 +281,7 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> HiddenTransform<B> for W
         let [batch, tokens, _] = hidden.dims();
         let device = hidden.device();
         let dtype = hidden.dtype();
-        context.validate([batch, tokens], &device)?;
+        context.validate_layout([batch, tokens], &device)?;
         let hidden = match &self.input_projection {
             Some(projection) => operations::linear(hidden, projection)?,
             None => hidden,
@@ -424,7 +434,7 @@ impl<B: Backend> HiddenTransform<B> for crate::attention::GroupedQueryAttention<
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
         let [batch, tokens, _] = hidden.dims();
-        context.validate([batch, tokens], &hidden.device())?;
+        context.validate_layout([batch, tokens], &hidden.device())?;
         let policy =
             context.attention_for(layer, layer.stack() == crate::intervention::Stack::Decoder);
         let shape = [batch, self.query_heads, tokens, tokens];
