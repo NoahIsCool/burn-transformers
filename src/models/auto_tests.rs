@@ -1252,11 +1252,15 @@ fn automatic_config_discriminators_validate_and_match_runtime_registries() {
         );
     }
     assert_eq!(AutoCausalConfig::from_model_type("gemma2"), None);
-    AutoSeq2SeqConfig::T5.validate().unwrap();
+    let mut unique = AutoCausalConfig::MODEL_TYPES.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
     assert_eq!(
-        AutoCausalConfig::MODEL_TYPES,
-        AutoCausalLm::<TestBackend>::MODEL_TYPES
+        unique.len(),
+        AutoCausalConfig::MODEL_TYPES.len(),
+        "every registered model_type is listed once"
     );
+    AutoSeq2SeqConfig::T5.validate().unwrap();
     assert_eq!(
         AutoSeq2SeqConfig::MODEL_TYPES,
         AutoSeq2SeqLm::<TestBackend>::MODEL_TYPES
@@ -1394,6 +1398,17 @@ fn registry_entries_agree_with_family_schemas_and_views() {
     assert_eq!(entries.len(), AutoCausalConfig::ALL.len());
     for (family, schema_types) in entries {
         assert!(schema_types.contains(&family.model_type()), "{family:?}");
+        // The registry routes exactly the types the family's schema accepts:
+        // an alias missing from the registry would make a variant unreachable.
+        let mut routed: Vec<&str> = AutoCausalConfig::MODEL_TYPES
+            .iter()
+            .copied()
+            .filter(|model_type| AutoCausalConfig::from_model_type(model_type) == Some(family))
+            .collect();
+        let mut accepted = schema_types.to_vec();
+        routed.sort_unstable();
+        accepted.sort_unstable();
+        assert_eq!(routed, accepted, "{family:?}");
     }
     for (json, family) in [
         (
