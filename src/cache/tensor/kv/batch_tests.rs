@@ -882,12 +882,22 @@ fn batched_attention_matches_per_row_attention_within_f32_rounding() {
     }
 }
 
-/// Times one decode step per layer: batched write-ahead and read versus the per-row loop.
+/// Times one decode step per layer along three paths.
 ///
-/// Both paths run the same single-query softmax attention over the history
-/// plus the new token, so the comparison includes realistic consumption of
-/// the read (a strided view for the batched path, a concatenated copy for the
-/// per-row path). Run with
+/// 1. *per row*: read and materialize each row's history, concatenate its
+///    new token, attend, and write the token row by row (today's families);
+/// 2. *batched + cat*: one batched history read, joined with the step's
+///    token segment by concatenation (`with_segment` + `materialize`), one
+///    batched attention, one batched write — the `kv_read_plan` +
+///    `step_token_segment` path;
+/// 3. *batched write-ahead*: one batched write ahead of attention and one
+///    zero-copy view `[0, L + 1)` — the `write_kv_ahead` path.
+///
+/// Path 2 isolates batching from removing the history concatenation, which
+/// is what path 3 adds. All paths run the same single-query softmax
+/// attention with an exclusion mask built from key positions. The paths run
+/// one after another, so later paths see histories up to `2 * steps` tokens
+/// longer (at most 6% here). Run with
 /// `cargo test --release --lib batched_decode_step_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing measurement; run explicitly in release mode"]
@@ -898,7 +908,7 @@ fn batched_decode_step_timing() {
     let width = 64;
     let length = 1024;
     let steps = 32;
-    let config = CacheConfig::new(rows, length + 2 * steps).expect("config");
+    let config = CacheConfig::new(rows, length + 3 * steps).expect("config");
     let spec =
         NativeKvCacheSpec::new(1, heads, width, KvCacheStorage::Full, DType::F32).expect("spec");
     let mut cache =
@@ -940,9 +950,45 @@ fn batched_decode_step_timing() {
     }
     let per_row = started.elapsed() / u32::try_from(steps).expect("small");
 
-    // Batched: write ahead once, plan once, attend over one zero-copy view.
+    // Batched with concatenation: read the history, append the token segment.
     let started = Instant::now();
     for step in steps..2 * steps {
+        let start = length + step;
+        let plan = cache.plan_batch_read(&[start; 8]).expect("plan");
+        let position = i32::try_from(start).expect("small");
+        let positions = Tensor::<TestBackend, 2, Int>::from_ints(
+            TensorData::new(vec![position; 8], [8, 1]),
+            &device(),
+        );
+        let new_tokens =
+            KvBatchSegment::from_parts(token.clone(), token.clone(), positions.clone(), None);
+        let segment = cache
+            .read_batch(0, &plan)
+            .expect("read")
+            .with_segment(new_tokens)
+            .expect("join")
+            .materialize()
+            .expect("keys");
+        let excluded = segment
+            .exclusion_mask(&positions, heads, None)
+            .expect("mask");
+        let output = attend(
+            query.clone(),
+            segment.keys().clone(),
+            segment.values().clone(),
+            excluded,
+        );
+        assert!(output.sum().into_scalar() > 0.0);
+        let append = KvBatchAppend::right_padded(&[start; 8], &[1; 8], 1).expect("layout");
+        cache
+            .write_batch(0, &append, token.clone(), token.clone())
+            .expect("publish");
+    }
+    let concatenated = started.elapsed() / u32::try_from(steps).expect("small");
+
+    // Batched write-ahead: write once, plan once, attend over one zero-copy view.
+    let started = Instant::now();
+    for step in 2 * steps..3 * steps {
         let append = KvBatchAppend::right_padded(&[length + step; 8], &[1; 8], 1).expect("layout");
         cache
             .write_batch(0, &append, token.clone(), token.clone())
@@ -971,8 +1017,9 @@ fn batched_decode_step_timing() {
         );
         assert!(output.sum().into_scalar() > 0.0);
     }
-    let batched = started.elapsed() / u32::try_from(steps).expect("small");
+    let written_ahead = started.elapsed() / u32::try_from(steps).expect("small");
     println!(
-        "decode step with attention, 8 rows x ~1024 tokens x 8 heads x 64: per-row {per_row:?}, batched {batched:?}"
+        "decode step with attention, 8 rows x ~1024 tokens x 8 heads x 64: \
+         per-row {per_row:?}, batched + cat {concatenated:?}, batched write-ahead {written_ahead:?}"
     );
 }

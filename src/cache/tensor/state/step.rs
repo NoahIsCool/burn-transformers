@@ -50,8 +50,10 @@
 //! them, and batched reads mark them invalid). Rings cannot write ahead,
 //! because a wrapped write would overwrite a still-visible slot. Inside a
 //! transaction only in-place groups can. Each layer can be written ahead at
-//! most once per step and never combined with a pushed update of that layer;
-//! a second write is refused before it touches any tensor.
+//! most once per step and never combined with a pushed update of that layer:
+//! a write-ahead of an already recorded layer is refused before it touches
+//! any tensor, and a push recorded after a write-ahead fails publication's
+//! coverage check.
 
 use core::ops::Range;
 

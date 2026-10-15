@@ -1080,6 +1080,18 @@ fn duplicate_write_ahead_is_refused_before_writing() {
     step.push_recurrent_batch(0, 0, matrices(ROWS, 1.0), convolutions(ROWS, 1.0));
     state.publish_step(step).expect("publish");
     assert_eq!(state.lengths(), &[1, 0, 1]);
+
+    // A push recorded after a write-ahead of the same layer fails publication.
+    let mut step = written_ahead_step(&mut state, &[1, 1, 1], 5.0);
+    step.push_kv_batch(0, 1, kv_block(ROWS, 1, 6.0), kv_block(ROWS, 1, 6.0));
+    assert!(matches!(
+        state.publish_step(step),
+        Err(TensorCacheError::StepWriteCoverage {
+            problem: "duplicate write",
+            ..
+        })
+    ));
+    assert_eq!(state.lengths(), &[1, 0, 1]);
 }
 
 /// Steps of one bank survive operations on the other bank.
