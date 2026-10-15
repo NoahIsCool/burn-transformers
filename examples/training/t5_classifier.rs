@@ -13,7 +13,7 @@
 #[path = "support.rs"]
 mod support;
 
-use super::experiment::SentimentClassifier;
+use super::SentimentClassifier;
 use burn::{
     backend::Autodiff,
     module::{AutodiffModule, Module},

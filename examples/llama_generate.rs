@@ -8,7 +8,7 @@
 //! batched prefill, and cached single-token decode steps on the CPU.
 //!
 //! ```text
-//! cargo run --release --example llama_generate -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]
+//! cargo run --release --locked --features tokenizers --example llama_generate -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]
 //! ```
 
 use std::{env, error::Error as StdError, path::PathBuf};

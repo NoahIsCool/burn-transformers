@@ -12,7 +12,7 @@
 #[path = "support.rs"]
 mod support;
 
-use super::experiment::Classifier;
+use super::Classifier;
 use burn::{
     backend::Autodiff,
     module::{AutodiffModule, Module},

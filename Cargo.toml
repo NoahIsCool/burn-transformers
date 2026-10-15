@@ -75,28 +75,44 @@ proptest = "1.9.0"
 tempfile = "3.27.0"
 tracing = "=0.1.44"
 
+# Each example names the crate features it needs. Cargo skips it in builds
+# without them, and `cargo run --example NAME` prints the missing `--features`.
+# Examples not listed here need only the default features.
+
+[[example]]
+name = "activation_workbench"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "attention_head_attribution"
+required-features = ["std", "flex"]
+
 [[example]]
 name = "burn_training"
 required-features = ["train", "flex"]
-
-[[example]]
-name = "grokking_train"
-required-features = ["std", "flex", "autodiff"]
 
 [[example]]
 name = "clock_and_pizza_train"
 required-features = ["std", "flex", "autodiff"]
 
 [[example]]
-name = "tuned_lens_train"
-required-features = ["std", "flex", "autodiff", "tokenizers"]
+name = "custom_composition"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "flan_t5_small"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
+name = "gemma_generate"
+required-features = ["std", "flex", "tokenizers"]
 
 [[example]]
 name = "greater_than_train"
 required-features = ["std", "flex", "autodiff"]
 
 [[example]]
-name = "train_qwen_adapter"
+name = "grokking_train"
 required-features = ["std", "flex", "autodiff"]
 
 [[example]]
@@ -104,8 +120,28 @@ name = "llama_generate"
 required-features = ["std", "flex", "tokenizers"]
 
 [[example]]
-name = "gemma_generate"
-required-features = ["std", "flex", "tokenizers"]
+name = "mla_encoder_decoder"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "qwen35_chat"
+required-features = ["std", "metal", "chat-templates"]
+
+[[example]]
+name = "qwen_prefix"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "t5_classifier"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "train_qwen_adapter"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "tuned_lens_train"
+required-features = ["std", "flex", "autodiff", "tokenizers"]
 
 # Checkpoint integrity is part of ordinary local loading, and acceptance gates
 # hash tens of gigabytes. Keep SHA-256 optimized even when the surrounding
