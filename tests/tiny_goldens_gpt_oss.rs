@@ -28,7 +28,8 @@
 //!    cache capacities;
 //! 4. the cached greedy continuation, compared token by token while our
 //!    top-2 logit margin exceeds the tolerance;
-//! 5. router diagnostics and the reference load-balancing objective.
+//! 5. router diagnostics, and the load-balancing objective against
+//!    Transformers' pinned `aux_loss` for the same padded batch.
 //!
 //! # Tolerance
 //!
@@ -68,6 +69,26 @@ const TOLERANCE: f32 = 1e-5;
 
 /// Columns prefilled before cached single-token decoding.
 const PREFILL: usize = 6;
+
+/// Transformers' unscaled `aux_loss` for the golden batch (padding-masked, all four layers).
+///
+/// Pinned with Transformers 5.2.0 and PyTorch 2.10.0 from the fixture
+/// itself (`golden.json` predates this check and does not record it):
+///
+/// ```text
+/// model = AutoModelForCausalLM.from_pretrained(fixture, dtype=torch.float32,
+///                                              attn_implementation="eager").eval()
+/// golden = json.load(open(fixture / "golden.json"))
+/// output = model(input_ids=tensor(golden["input_ids"]),
+///                attention_mask=tensor(golden["attention_mask"]),
+///                position_ids=tensor(golden["position_ids"]),
+///                output_router_logits=True)
+/// output.aux_loss.item()  # 2.020416736602783
+/// ```
+///
+/// `router_aux_loss_coef` scales it only inside the training loss, so the
+/// crate's [`ForwardOptions::auxiliary_losses`] output is compared unscaled.
+const REFERENCE_LOAD_BALANCING_LOSS: f32 = 2.020_416_7;
 
 /// The fixture case.
 const CASE: &str = "gpt-oss";
@@ -409,7 +430,11 @@ fn cached_greedy_continuation_matches_transformers() {
     }
 }
 
-/// Router diagnostics and the load-balancing objective are returned on request.
+/// Router diagnostics are returned on request and the load-balancing objective equals the reference's.
+///
+/// The objective concatenates every layer's router logits over the valid
+/// tokens only, so a wrong padding mask, layer order, routing rule, or
+/// softmax moves it far beyond [`TOLERANCE`].
 #[test]
 fn router_logits_and_load_balancing_loss_are_reported() {
     let golden = Golden::read(&fixture());
@@ -431,8 +456,34 @@ fn router_logits_and_load_balancing_loss_are_reported() {
         assert_eq!(logits.dims(), [2, 12, 4]);
     }
     let loss = host(output.load_balancing_loss.expect("load-balancing loss"));
-    // E · Σ_{j,e} f_{j,e} p_e lies in (0, E · K]; uniform routing gives K = 2.
-    assert!(loss[0] > 0.0 && loss[0] <= 8.0, "{loss:?}");
+    assert_eq!(loss.len(), 1);
+    let gap = (loss[0] - REFERENCE_LOAD_BALANCING_LOSS).abs();
+    assert!(
+        gap <= TOLERANCE,
+        "load-balancing loss {} differs from the reference {REFERENCE_LOAD_BALANCING_LOSS} by {gap:e}",
+        loss[0]
+    );
+    // Without the mask, padding tokens would join the averages and move it.
+    let unmasked = host(
+        model
+            .forward(
+                CausalLmInput {
+                    token_mask: None,
+                    ..golden_input(&golden)
+                },
+                &ForwardOptions {
+                    auxiliary_losses: true,
+                    ..ForwardOptions::default()
+                },
+            )
+            .unwrap()
+            .load_balancing_loss
+            .expect("load-balancing loss"),
+    );
+    assert!(
+        (unmasked[0] - REFERENCE_LOAD_BALANCING_LOSS).abs() > 100.0 * TOLERANCE,
+        "the padding mask must matter: {unmasked:?}"
+    );
 }
 
 /// The fixture's configuration round-trips through the schema.
