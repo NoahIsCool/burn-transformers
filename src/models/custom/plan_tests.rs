@@ -240,7 +240,87 @@ fn history_writes_cover_exactly_the_appended_slots() {
     );
 }
 
+/// Full ranges are attained bounds; an empty list has none.
+#[test]
+fn full_range_reports_attained_bounds() {
+    assert_eq!(full_range(&[]), None);
+    assert_eq!(full_range(&[4]), Some((4, 4)));
+    assert_eq!(full_range(&[3, -2, 9, 0]), Some((-2, 9)));
+}
+
+/// Position violations ignore masked cells and report the first failing row's valid range.
+#[test]
+fn position_violations_report_the_first_failing_row() {
+    let validity = [true, false, true, true];
+    assert_eq!(
+        first_position_violation(&[1, 99, 0, 3], &validity, 2, 2, 4),
+        None
+    );
+    assert_eq!(
+        first_position_violation(&[1, 0, -1, 7], &validity, 2, 2, 4),
+        Some((-1, 7))
+    );
+    assert_eq!(
+        first_position_violation(&[4, 0, -1, 7], &validity, 2, 2, 4),
+        Some((4, 4))
+    );
+    assert_eq!(first_position_violation(&[], &[], 0, 3, 4), None);
+}
+
+/// The history prefix spans the longest row and marks each row's stored length.
+#[test]
+fn prefix_validity_marks_each_rows_length() {
+    assert_eq!(prefix_validity(&[]), None);
+    assert_eq!(
+        prefix_validity(&[2, 0, 3]),
+        Some((
+            3,
+            vec![true, true, false, false, false, false, true, true, true]
+        ))
+    );
+    assert_eq!(prefix_validity(&[0, 0]), Some((0, Vec::new())));
+}
+
 proptest::proptest! {
+    /// Position violations agree with a naive per-row scan of valid cells.
+    #[test]
+    fn position_violations_match_the_reference(
+        rows in 0usize..4,
+        step in 1usize..5,
+        values in proptest::collection::vec(-2i64..8, 16),
+        flags in proptest::collection::vec(proptest::bool::ANY, 16),
+        limit in 0usize..8,
+    ) {
+        let positions = &values[..rows * step];
+        let validity = &flags[..rows * step];
+        let expected = positions
+            .chunks_exact(step)
+            .zip(validity.chunks_exact(step))
+            .find_map(|(values, valid)| {
+                let listed = values.iter().zip(valid).filter(|(_, valid)| **valid).map(|(v, _)| *v);
+                let range = listed.clone().min().zip(listed.max())?;
+                let within = range.0 >= 0 && range.1 >= 0 && (range.1 as u64) < limit as u64;
+                (!within).then_some(range)
+            });
+        proptest::prop_assert_eq!(
+            first_position_violation(positions, validity, rows, step, limit),
+            expected
+        );
+    }
+
+    /// The prefix validity agrees with a naive comparison grid.
+    #[test]
+    fn prefix_validity_matches_the_reference(
+        lengths in proptest::collection::vec(0usize..6, 1..5),
+    ) {
+        let sequence = *lengths.iter().max().unwrap();
+        let expected = lengths
+            .iter()
+            .flat_map(|&length| (0..sequence).map(move |column| column < length))
+            .collect::<Vec<_>>();
+        proptest::prop_assert_eq!(prefix_validity(&lengths), Some((sequence, expected)));
+    }
+
     /// The planner agrees with the naive reference, and its window writes exactly the new slots.
     #[test]
     fn history_planning_matches_the_reference(

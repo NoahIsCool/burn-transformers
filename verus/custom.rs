@@ -27,7 +27,12 @@
 //!   written exactly when `L_r <= start + j < L_r + n_r`, and a written cell
 //!   gathers the unique valid column whose rank is `start + j - L_r`;
 //! - `plan_history`: composes both, discharging the window's precondition
-//!   from the append's postcondition.
+//!   from the append's postcondition;
+//! - `full_range`, `valid_range`, and `first_position_violation`: decode
+//!   validation reads attained token bounds and reports the first row whose
+//!   valid explicit positions leave `0..limit`, ignoring masked cells;
+//! - `prefix_validity`: the recomputed history prefix has width `max L_r`
+//!   and marks cell `(r, c)` valid exactly when `c < L_r`.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!

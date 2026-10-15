@@ -44,7 +44,9 @@ use super::{
         BackboneOutput, causal_output, gathered_router_diagnostics, mask_hidden, select_hidden,
         token_mask_from_values, validate_forward_options,
     },
-    plan::{HistoryAppendError, plan_history},
+    plan::{
+        HistoryAppendError, first_position_violation, full_range, plan_history, prefix_validity,
+    },
 };
 
 /// Model role encoded into state so equal-looking causal and seq2seq specs cannot be mixed.
@@ -222,6 +224,7 @@ impl<B: Backend> ModularDecodeState<B> {
             validate_explicit_positions(
                 positions,
                 &validity,
+                batch,
                 step,
                 self.model_spec.max_position_embeddings,
             )?;
@@ -439,14 +442,9 @@ impl<B: Backend> PreparedAppend<B> {
     /// Materializes the shortest rectangular prefix containing every compact row.
     fn history_input(&self, device: &B::Device) -> Result<CausalLmInput<B>> {
         let batch = self.new_lengths.len();
-        let sequence = *self
-            .new_lengths
-            .iter()
-            .max()
+        // Verified: width `max L_r`, and cell `(r, c)` is valid exactly when `c < L_r`.
+        let (sequence, validity) = prefix_validity(&self.new_lengths)
             .ok_or_else(|| Error::Cache("custom prepared append lost its batch".into()))?;
-        let validity = (0..batch)
-            .flat_map(|row| (0..sequence).map(move |column| column < self.new_lengths[row]))
-            .collect::<Vec<_>>();
         Ok(CausalLmInput {
             token_ids: self.tokens.clone().slice([0..batch, 0..sequence]),
             token_mask: Some(token_mask_from_values(validity, [batch, sequence], device)),
@@ -566,7 +564,7 @@ impl<B: Backend> PreparedAppend<B> {
 /// Every supplied ID is checked, including padded columns, because the custom
 /// decoder's contract treats the whole token tensor as caller data.
 fn validate_decode_token_ids(tokens: &[i64], vocabulary: usize) -> Result<()> {
-    let (Some(&minimum), Some(&maximum)) = (tokens.iter().min(), tokens.iter().max()) else {
+    let Some((minimum, maximum)) = full_range(tokens) else {
         return Ok(());
     };
     if plan::range_within(minimum, maximum, vocabulary) {
@@ -584,38 +582,38 @@ fn validate_decode_token_ids(tokens: &[i64], vocabulary: usize) -> Result<()> {
 
 /// Rejects explicit positions of valid cells outside the model context.
 ///
-/// Positions supplied at padded cells never enter the history and are not
-/// checked. Implicit positions are history slots below the capacity, which
-/// the model already bounds by its position range, so they need no check.
+/// `positions` and `validity` are row-major `[batch, step]`. Positions
+/// supplied at padded cells never enter the history and are not checked; the
+/// error reports the first failing row's valid range. Implicit positions are
+/// history slots below the capacity, which the model already bounds by its
+/// position range, so they need no check.
 fn validate_explicit_positions(
     positions: &[i64],
     validity: &[bool],
+    batch: usize,
     step: usize,
     limit: usize,
 ) -> Result<()> {
-    for (values, valid) in positions
-        .chunks_exact(step)
-        .zip(validity.chunks_exact(step))
-    {
-        let columns = plan::valid_columns(valid);
-        if let Some((minimum, maximum)) = plan::value_range(values, &columns)
-            && !plan::range_within(minimum, maximum, limit)
-        {
-            return Err(range_error(
-                "custom.decode.position_ids",
-                "position",
-                limit,
-                minimum,
-                maximum,
-            ));
-        }
+    match first_position_violation(positions, validity, batch, step, limit) {
+        Some((minimum, maximum)) => Err(range_error(
+            "custom.decode.position_ids",
+            "position",
+            limit,
+            minimum,
+            maximum,
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Converts host indices into Burn's signed `i64` index type.
 fn to_indices(indices: &[usize]) -> Result<Vec<i64>> {
-    indices.iter().map(|&index| to_index(index)).collect()
+    plan::signed_indices(indices).ok_or_else(|| {
+        Error::configuration(
+            "custom.decode",
+            "history index exceeds the signed tensor-index range",
+        )
+    })
 }
 
 /// Converts a host index into Burn's signed `i64` index type.

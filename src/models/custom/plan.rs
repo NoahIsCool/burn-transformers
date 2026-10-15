@@ -32,6 +32,13 @@
 //! `[start, end)` so every row's history is written by a constant number of
 //! tensor kernels, and [`plan_history`] composes the two.
 //!
+//! # Decode-input validation and history views
+//!
+//! [`full_range`] and [`first_position_violation`] validate a decode step's
+//! token IDs and valid explicit positions from the host readback, and
+//! [`prefix_validity`] builds the validity grid of the shortest rectangular
+//! history prefix `[batch, max L_r]` that the model recomputes.
+//!
 //! # Verified properties
 //!
 //! For every admissible input the proofs establish, without overflow:
@@ -45,7 +52,9 @@
 //! - window cell `(r, j)` is written exactly when `L_r <= start + j < L_r + n_r`,
 //!   and then gathers the unique valid input column whose rank is
 //!   `start + j - L_r`, so valid cells and written window cells correspond
-//!   one to one.
+//!   one to one;
+//! - decode validation reports attained bounds and the first failing row, and
+//!   the history prefix marks exactly the stored cells `c < L_r`.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -348,6 +357,38 @@ pub(crate) proof fn lemma_append_grid_row<T>(prefix: Seq<T>, tail: Seq<T>, step:
         ;
         assert(grid_row(prefix + tail, step, r) =~= grid_row(prefix, step, r));
     }
+}
+
+/// Every valid cell's value lies in `0..limit`.
+pub(crate) open spec fn valid_values_within(
+    values: Seq<i64>,
+    validity: Seq<bool>,
+    limit: int,
+) -> bool {
+    forall|c: int| 0 <= c < validity.len() && validity[c] ==> 0 <= #[trigger] values[c] < limit
+}
+
+/// `minimum` is attained by a valid cell and bounds every valid cell from below.
+pub(crate) open spec fn valid_minimum(values: Seq<i64>, validity: Seq<bool>, minimum: int) -> bool {
+    &&& forall|c: int| 0 <= c < validity.len() && validity[c] ==> minimum <= #[trigger] values[c]
+    &&& exists|c: int| 0 <= c < validity.len() && validity[c] && values[c] == minimum
+}
+
+/// `maximum` is attained by a valid cell and bounds every valid cell from above.
+pub(crate) open spec fn valid_maximum(values: Seq<i64>, validity: Seq<bool>, maximum: int) -> bool {
+    &&& forall|c: int| 0 <= c < validity.len() && validity[c] ==> #[trigger] values[c] <= maximum
+    &&& exists|c: int| 0 <= c < validity.len() && validity[c] && values[c] == maximum
+}
+
+/// Row `row` of `[rows, step]` positions keeps its valid positions in `0..limit`.
+pub(crate) open spec fn row_positions_within(
+    positions: Seq<i64>,
+    validity: Seq<bool>,
+    step: int,
+    row: int,
+    limit: int,
+) -> bool {
+    valid_values_within(grid_row(positions, step, row), grid_row(validity, step, row), limit)
 }
 
 /// Row `row` of a `[rows, step]` grid lies inside it, so its offsets are representable.
@@ -1126,6 +1167,282 @@ pub(crate) fn plan_history(
         }
         Err(error) => Err(error),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Decode-input validation and history views
+// ---------------------------------------------------------------------------
+
+/// Exact bounds of every value, or `None` for an empty list.
+///
+/// Both bounds are attained and enclose every value.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(range =>
+    ensures
+        match range {
+            Some((minimum, maximum)) => {
+                &&& values.len() > 0
+                &&& forall|i: int|
+                    0 <= i < values.len() ==> minimum <= #[trigger] values[i] <= maximum
+                &&& exists|i: int| 0 <= i < values.len() && values[i] == minimum
+                &&& exists|i: int| 0 <= i < values.len() && values[i] == maximum
+            },
+            None => values.len() == 0,
+        },
+))]
+pub(crate) fn full_range(values: &[i64]) -> Option<(i64, i64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut minimum = values[0];
+    let mut maximum = values[0];
+    let mut index: usize = 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= index <= values.len(),
+            forall|i: int| 0 <= i < index ==> minimum <= #[trigger] values[i] <= maximum,
+            exists|i: int| 0 <= i < index && values[i] == minimum,
+            exists|i: int| 0 <= i < index && values[i] == maximum,
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] < minimum {
+            minimum = values[index];
+        }
+        if values[index] > maximum {
+            maximum = values[index];
+        }
+        index += 1;
+    }
+    Some((minimum, maximum))
+}
+
+/// Exact bounds of the valid cells of one row, or `None` when no cell is valid.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(range =>
+    requires
+        values.len() == validity.len(),
+    ensures
+        match range {
+            Some((minimum, maximum)) => {
+                &&& valid_minimum(values@, validity@, minimum as int)
+                &&& valid_maximum(values@, validity@, maximum as int)
+            },
+            None => forall|c: int| 0 <= c < validity.len() ==> !#[trigger] validity[c],
+        },
+))]
+fn valid_range(values: &[i64], validity: &[bool]) -> Option<(i64, i64)> {
+    let mut range: Option<(i64, i64)> = None;
+    let mut column: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            column <= validity.len(),
+            values.len() == validity.len(),
+            match range {
+                Some((minimum, maximum)) => {
+                    &&& forall|c: int| 0 <= c < column && validity[c]
+                        ==> minimum <= #[trigger] values[c] <= maximum
+                    &&& exists|c: int| 0 <= c < column && validity[c] && values[c] == minimum
+                    &&& exists|c: int| 0 <= c < column && validity[c] && values[c] == maximum
+                },
+                None => forall|c: int| 0 <= c < column ==> !#[trigger] validity[c],
+            },
+        decreases validity.len() - column,
+    ))]
+    while column < validity.len() {
+        if validity[column] {
+            let value = values[column];
+            range = match range {
+                Some((minimum, maximum)) => Some((
+                    if value < minimum { value } else { minimum },
+                    if value > maximum { value } else { maximum },
+                )),
+                None => Some((value, value)),
+            };
+        }
+        column += 1;
+    }
+    range
+}
+
+/// Finds the first row whose valid explicit positions leave `0..limit`.
+///
+/// `positions` and `validity` are row-major `[rows, step]`. Positions at
+/// masked cells never enter the history and are ignored. The result is that
+/// row's attained valid range, or `None` when every row passes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(violation =>
+    requires
+        positions.len() == rows * step,
+        validity.len() == rows * step,
+    ensures
+        match violation {
+            Some((minimum, maximum)) => exists|row: int| 0 <= row < rows && {
+                &&& forall|r: int| 0 <= r < row ==> #[trigger] row_positions_within(
+                    positions@,
+                    validity@,
+                    step as int,
+                    r,
+                    limit as int,
+                )
+                &&& !row_positions_within(positions@, validity@, step as int, row, limit as int)
+                &&& valid_minimum(
+                    grid_row(positions@, step as int, row),
+                    grid_row(validity@, step as int, row),
+                    minimum as int,
+                )
+                &&& valid_maximum(
+                    grid_row(positions@, step as int, row),
+                    grid_row(validity@, step as int, row),
+                    maximum as int,
+                )
+            },
+            None => forall|r: int| 0 <= r < rows ==> #[trigger] row_positions_within(
+                positions@,
+                validity@,
+                step as int,
+                r,
+                limit as int,
+            ),
+        },
+))]
+pub(crate) fn first_position_violation(
+    positions: &[i64],
+    validity: &[bool],
+    rows: usize,
+    step: usize,
+    limit: usize,
+) -> Option<(i64, i64)> {
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            positions.len() == rows * step,
+            validity.len() == rows * step,
+            forall|r: int| 0 <= r < row ==> #[trigger] row_positions_within(
+                positions@,
+                validity@,
+                step as int,
+                r,
+                limit as int,
+            ),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_grid_row_in_bounds(row as int, rows as int, step as int);
+        }
+        let offset = row * step;
+        let values = &positions[offset..offset + step];
+        let valid = &validity[offset..offset + step];
+        if let Some((minimum, maximum)) = valid_range(values, valid) {
+            let within = minimum >= 0 && maximum >= 0 && (maximum as u64) < (limit as u64);
+            if !within {
+                // The attained bound outside `0..limit` is a failing valid cell.
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    let low = choose|c: int|
+                        0 <= c < valid@.len() && valid@[c] && values@[c] == minimum;
+                    let high = choose|c: int|
+                        0 <= c < valid@.len() && valid@[c] && values@[c] == maximum;
+                    if minimum < 0 {
+                        assert(!(0 <= values@[low]));
+                    } else {
+                        assert(!(values@[high] < limit));
+                    }
+                    assert(!row_positions_within(
+                        positions@,
+                        validity@,
+                        step as int,
+                        row as int,
+                        limit as int,
+                    ));
+                }
+                return Some((minimum, maximum));
+            }
+        }
+        row += 1;
+    }
+    None
+}
+
+/// Validity of the shortest rectangular history prefix holding every row.
+///
+/// The width is the largest row length `S = max L_r`, and cell `(r, c)` is
+/// valid exactly when `c < L_r`. Returns `None` for an empty batch.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(prefix =>
+    ensures
+        match prefix {
+            Some((sequence, validity)) => {
+                &&& lengths.len() > 0
+                &&& forall|r: int| 0 <= r < lengths.len() ==> #[trigger] lengths[r] <= sequence
+                &&& exists|r: int| 0 <= r < lengths.len() && lengths[r] == sequence
+                &&& validity.len() == lengths.len() * sequence
+                &&& forall|r: int, c: int| 0 <= r < lengths.len() && 0 <= c < sequence
+                    ==> #[trigger] grid_row(validity@, sequence as int, r)[c] == (c < lengths[r])
+            },
+            None => lengths.len() == 0,
+        },
+))]
+pub(crate) fn prefix_validity(lengths: &[usize]) -> Option<(usize, Vec<bool>)> {
+    if lengths.is_empty() {
+        return None;
+    }
+    let rows = lengths.len();
+    let mut sequence: usize = lengths[0];
+    let mut row: usize = 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= row <= rows,
+            rows == lengths.len(),
+            forall|r: int| 0 <= r < row ==> #[trigger] lengths[r] <= sequence,
+            exists|r: int| 0 <= r < row && lengths[r] == sequence,
+        decreases rows - row,
+    ))]
+    while row < rows {
+        if lengths[row] > sequence {
+            sequence = lengths[row];
+        }
+        row += 1;
+    }
+    let mut validity: Vec<bool> = Vec::new();
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows == lengths.len(),
+            validity.len() == row * sequence,
+            forall|r: int, c: int| 0 <= r < row && 0 <= c < sequence
+                ==> #[trigger] grid_row(validity@, sequence as int, r)[c] == (c < lengths[r]),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        let mut cells: Vec<bool> = Vec::with_capacity(sequence);
+        let mut column: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                column <= sequence,
+                row < rows,
+                rows == lengths.len(),
+                cells.len() == column,
+                forall|c: int|
+                    0 <= c < column ==> #[trigger] cells@[c] == (c < lengths[row as int]),
+            decreases sequence - column,
+        ))]
+        while column < sequence {
+            cells.push(column < lengths[row]);
+            column += 1;
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_append_grid_row(validity@, cells@, sequence as int, row as int);
+        }
+        validity.append(&mut cells);
+        row += 1;
+    }
+    Some((sequence, validity))
 }
 
 #[cfg(test)]
