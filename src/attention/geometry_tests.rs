@@ -242,3 +242,11 @@ fn native_routes_respect_causal_alignment() {
         }
     }
 }
+
+/// Broadcast shapes take the larger extent on every axis.
+#[test]
+fn broadcast_shapes_take_the_larger_extent() {
+    assert_eq!(broadcast_shape([2, 1, 3, 1], [1, 4, 3, 5]), [2, 4, 3, 5]);
+    assert_eq!(broadcast_shape([7, 7, 7, 7], [7, 7, 7, 7]), [7, 7, 7, 7]);
+    assert_eq!(broadcast_shape([0, 9, 1, 2], [3, 1, 1, 2]), [3, 9, 1, 2]);
+}

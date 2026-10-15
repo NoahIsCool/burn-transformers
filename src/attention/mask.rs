@@ -18,6 +18,7 @@
 
 use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend, get_device_settings};
 
+use super::geometry::broadcast_shape;
 use crate::{Error, Result, architecture::TokenMask};
 
 /// Builds the bottom-right causal exclusion `key > query + (K - Q)` as `[1, 1, Q, K]`.
@@ -68,6 +69,7 @@ pub(crate) fn union_exclusions<B: Backend>(
 ) -> Option<Tensor<B, 4, Bool>> {
     match (first, second) {
         (Some(first), Some(second)) => {
+            // Verified: the larger extent on every axis.
             let shape = broadcast_shape(first.dims(), second.dims());
             // The OR writes every element of the broadcast shape.
             audit_plane(shape);
@@ -212,11 +214,6 @@ fn invalid_tokens<B: Backend>(
 ) -> Result<Tensor<B, 2, Bool>> {
     check_token_mask(mask, name, batch, sequence)?;
     Ok(mask.as_tensor().clone().bool_not())
-}
-
-/// Returns the elementwise broadcast of two rank-4 shapes (size-one axes stretch).
-fn broadcast_shape(first: [usize; 4], second: [usize; 4]) -> [usize; 4] {
-    core::array::from_fn(|axis| first[axis].max(second[axis]))
 }
 
 /// Notes that a Boolean plane of `shape` is about to be materialized.

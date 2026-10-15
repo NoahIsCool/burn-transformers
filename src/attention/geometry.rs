@@ -465,6 +465,29 @@ pub(crate) fn native_route(
     NativeRoute::Folded { causal }
 }
 
+/// Elementwise broadcast of two rank-4 shapes: the larger extent on every axis.
+///
+/// Size-one axes stretch to the other operand's extent, so for broadcast-compatible
+/// operands this is their common shape.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(shape =>
+    ensures
+        forall|axis: int| 0 <= axis < 4 ==> #[trigger] shape[axis] == if first[axis]
+            >= second[axis] {
+            first[axis]
+        } else {
+            second[axis]
+        },
+))]
+pub(crate) fn broadcast_shape(first: [usize; 4], second: [usize; 4]) -> [usize; 4] {
+    [
+        first[0].max(second[0]),
+        first[1].max(second[1]),
+        first[2].max(second[2]),
+        first[3].max(second[3]),
+    ]
+}
+
 #[cfg(test)]
 #[path = "geometry_tests.rs"]
 mod tests;

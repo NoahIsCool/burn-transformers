@@ -165,6 +165,87 @@ fn window_widths_saturate_at_the_signed_limit() {
     assert_eq!(saturating_window(usize::MAX), i64::MAX);
 }
 
+/// Visibility metadata faults: zero windows first, then any extent or bound mismatch.
+#[test]
+fn visibility_faults_check_window_then_extents() {
+    let ok = |window, query, key, query_valid, key_valid, limits: &[usize]| {
+        visibility_fault(window, query, key, query_valid, key_valid, limits, 2, 2, 3)
+    };
+    assert_eq!(ok(None, [2, 2], [1, 3], None, None, &[2, 3]), None);
+    assert_eq!(
+        ok(Some(4), [1, 2], [2, 3], Some([2, 2]), Some([2, 3]), &[3, 3]),
+        None
+    );
+    // A zero window wins even over broken extents.
+    assert_eq!(
+        ok(Some(0), [5, 5], [5, 5], None, None, &[]),
+        Some(VisibilityFault::ZeroWindow)
+    );
+    for (query, key, query_valid, key_valid, limits) in [
+        ([3, 2], [1, 3], None, None, vec![2, 3]),
+        ([2, 2], [3, 3], None, None, vec![2, 3]),
+        ([2, 1], [1, 3], None, None, vec![2, 3]),
+        ([2, 2], [1, 4], None, None, vec![2, 3]),
+        ([2, 2], [1, 3], Some([1, 2]), None, vec![2, 3]),
+        ([2, 2], [1, 3], None, Some([2, 2]), vec![2, 3]),
+        ([2, 2], [1, 3], None, None, vec![3, 2]),
+        ([2, 2], [1, 3], None, None, vec![2]),
+    ] {
+        assert_eq!(
+            ok(Some(1), query, key, query_valid, key_valid, &limits),
+            Some(VisibilityFault::Shape),
+            "{query:?} {key:?} {query_valid:?} {key_valid:?} {limits:?}"
+        );
+    }
+}
+
+/// Projected components must match the configured, non-empty layout exactly.
+#[test]
+fn projection_extents_match_the_configured_layout() {
+    let layout = MlaHeads {
+        heads: 2,
+        content: 3,
+        rotary: 4,
+        rank: 5,
+    };
+    let content = [1, 2, 6, 3];
+    let rotary = [1, 2, 6, 4];
+    let latent = [1, 7, 5];
+    let key = [1, 1, 7, 4];
+    assert!(projection_matches(layout, content, rotary, latent, key));
+    for (content, rotary, latent, key) in [
+        ([0, 2, 6, 3], [0, 2, 6, 4], [0, 7, 5], [0, 1, 7, 4]),
+        ([1, 2, 0, 3], [1, 2, 0, 4], latent, key),
+        (content, rotary, [1, 0, 5], [1, 1, 0, 4]),
+        ([1, 3, 6, 3], [1, 3, 6, 4], latent, key),
+        ([1, 2, 6, 2], rotary, latent, key),
+        (content, rotary, [2, 7, 5], key),
+        (content, rotary, [1, 7, 4], key),
+        (content, [1, 2, 5, 4], latent, key),
+        (content, [1, 2, 6, 2], latent, key),
+        (content, rotary, latent, [1, 2, 7, 4]),
+        (content, rotary, latent, [1, 1, 6, 4]),
+    ] {
+        assert!(!projection_matches(layout, content, rotary, latent, key));
+    }
+}
+
+/// Bias extents broadcast when every axis is one or equal to the score plane.
+#[test]
+fn bias_extents_broadcast_axis_by_axis() {
+    let shape = [2, 3, 4, 5];
+    assert!(broadcasts_over(shape, shape));
+    assert!(broadcasts_over([1, 1, 1, 1], shape));
+    assert!(broadcasts_over([1, 3, 1, 5], shape));
+    for axis in 0..4 {
+        let mut extent = shape;
+        extent[axis] += 1;
+        assert!(!broadcasts_over(extent, shape));
+        extent[axis] = 0;
+        assert!(!broadcasts_over(extent, shape));
+    }
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(256))]
 

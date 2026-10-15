@@ -13,7 +13,13 @@
 //!   `K - Q + i + 1` and satisfy the prefix contract; the bound validator
 //!   accepts exactly contract-satisfying bounds; a chunk's key prefix covers
 //!   every row before its end; and window widths saturate exactly at
-//!   `i64::MAX`.
+//!   `i64::MAX`;
+//! - visibility metadata is accepted exactly when the window is non-zero,
+//!   positions and validity masks have their `[batch or 1, tokens]` and
+//!   `[batch, tokens]` extents, and the key bounds satisfy the prefix
+//!   contract; projected components are accepted exactly when they match the
+//!   configured non-empty layout; and a bias broadcasts exactly when every
+//!   axis is one or equal to the score plane.
 //!
 //! Not proved here: the Burn tensor projections, latent expansion, rotary
 //! application, softmax, and absorbed GEMMs that consume these widths; the

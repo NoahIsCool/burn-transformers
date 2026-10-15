@@ -484,6 +484,171 @@ pub(crate) fn saturating_window(window: usize) -> i64 {
     }
 }
 
+/// Why positional visibility metadata disagrees with one `[batch, query, key]` geometry.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VisibilityFault {
+    /// A sliding window of zero positions would exclude every key.
+    ZeroWindow,
+    /// Positions, validity, or key bounds have the wrong extents or values.
+    Shape,
+}
+
+/// Validates visibility metadata: a non-zero window, then every extent and the key bounds.
+///
+/// Position tensors are `[batch or 1, tokens]`, validity masks `[batch,
+/// tokens]`, and the key bounds must satisfy the prefix contract for
+/// `queries` rows over `keys` keys.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(fault =>
+    ensures
+        ({
+            let rows_ok = (query_positions[0] == batch || query_positions[0] == 1) && (
+            key_positions[0] == batch || key_positions[0] == 1);
+            let columns_ok = query_positions[1] == queries && key_positions[1] == keys;
+            let valid_ok = (query_valid is None || (query_valid->Some_0[0] == batch
+                && query_valid->Some_0[1] == queries)) && (key_valid is None || (
+            key_valid->Some_0[0] == batch && key_valid->Some_0[1] == keys));
+            let shape_ok = rows_ok && columns_ok && valid_ok && key_limits_contract(
+                limits@,
+                queries as int,
+                keys as int,
+            );
+            match fault {
+                None => window != Some(0usize) && shape_ok,
+                Some(VisibilityFault::ZeroWindow) => window == Some(0usize),
+                Some(VisibilityFault::Shape) => window != Some(0usize) && !shape_ok,
+            }
+        }),
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn visibility_fault(
+    window: Option<usize>,
+    query_positions: [usize; 2],
+    key_positions: [usize; 2],
+    query_valid: Option<[usize; 2]>,
+    key_valid: Option<[usize; 2]>,
+    limits: &[usize],
+    batch: usize,
+    queries: usize,
+    keys: usize,
+) -> Option<VisibilityFault> {
+    let limits_ok = key_limits_valid(limits, queries, keys);
+    let zero_window = match window {
+        Some(window) => window == 0,
+        None => false,
+    };
+    if zero_window {
+        return Some(VisibilityFault::ZeroWindow);
+    }
+    let query_valid_ok = match query_valid {
+        Some(valid) => valid[0] == batch && valid[1] == queries,
+        None => true,
+    };
+    let key_valid_ok = match key_valid {
+        Some(valid) => valid[0] == batch && valid[1] == keys,
+        None => true,
+    };
+    if !(query_positions[0] == batch || query_positions[0] == 1)
+        || !(key_positions[0] == batch || key_positions[0] == 1)
+        || query_positions[1] != queries
+        || key_positions[1] != keys
+        || !query_valid_ok
+        || !key_valid_ok
+        || !limits_ok
+    {
+        return Some(VisibilityFault::Shape);
+    }
+    None
+}
+
+/// Configured head layout of one MLA layer.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MlaHeads {
+    /// Attention heads `H`.
+    pub(crate) heads: usize,
+    /// Content query/key width `d_n`.
+    pub(crate) content: usize,
+    /// Rotary query/key width `d_r`.
+    pub(crate) rotary: usize,
+    /// KV latent rank `r`.
+    pub(crate) rank: usize,
+}
+
+/// Whether projected MLA components match the configured layout.
+///
+/// Content queries are `[B, H, Q, d_n]`, rotary queries `[B, H, Q, d_r]`, the
+/// latent `[B, K, r]`, and the shared rotary key `[B, 1, K, d_r]`, with `B`,
+/// `Q`, and `K` non-zero and read from the content queries and the latent.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(matches =>
+    ensures
+        matches == ({
+            let batch = query_content[0];
+            let queries = query_content[2];
+            let keys = latent[1];
+            &&& batch >= 1 && queries >= 1 && keys >= 1
+            &&& query_content[1] == layout.heads && query_content[3] == layout.content
+            &&& latent[0] == batch && latent[2] == layout.rank
+            &&& query_rotary[0] == batch && query_rotary[1] == layout.heads
+            &&& query_rotary[2] == queries && query_rotary[3] == layout.rotary
+            &&& rotated_key[0] == batch && rotated_key[1] == 1
+            &&& rotated_key[2] == keys && rotated_key[3] == layout.rotary
+        }),
+))]
+pub(crate) fn projection_matches(
+    layout: MlaHeads,
+    query_content: [usize; 4],
+    query_rotary: [usize; 4],
+    latent: [usize; 3],
+    rotated_key: [usize; 4],
+) -> bool {
+    let batch = query_content[0];
+    let queries = query_content[2];
+    let keys = latent[1];
+    batch != 0
+        && queries != 0
+        && keys != 0
+        && query_content[1] == layout.heads
+        && query_content[3] == layout.content
+        && latent[0] == batch
+        && latent[2] == layout.rank
+        && query_rotary[0] == batch
+        && query_rotary[1] == layout.heads
+        && query_rotary[2] == queries
+        && query_rotary[3] == layout.rotary
+        && rotated_key[0] == batch
+        && rotated_key[1] == 1
+        && rotated_key[2] == keys
+        && rotated_key[3] == layout.rotary
+}
+
+/// Whether `extent` broadcasts over `shape`: every axis is one or equal.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(broadcasts =>
+    ensures
+        broadcasts == forall|axis: int| 0 <= axis < 4 ==> (#[trigger] extent[axis] == 1
+            || extent[axis] == shape[axis]),
+))]
+pub(crate) fn broadcasts_over(extent: [usize; 4], shape: [usize; 4]) -> bool {
+    let mut axis = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            axis <= 4,
+            forall|done: int| 0 <= done < axis ==> (#[trigger] extent[done] == 1 || extent[done]
+                == shape[done]),
+        decreases 4 - axis,
+    ))]
+    while axis < 4 {
+        if extent[axis] != 1 && extent[axis] != shape[axis] {
+            return false;
+        }
+        axis += 1;
+    }
+    true
+}
+
 #[cfg(test)]
 #[path = "geometry_tests.rs"]
 mod tests;

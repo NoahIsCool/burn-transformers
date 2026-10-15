@@ -67,8 +67,9 @@ use crate::{
     },
 };
 use geometry::{
-    MlaAxis, MlaAxisFault, MlaMatrix, MlaWidthFault, chunk_key_end, key_limits_valid,
-    mla_axis_fault, mla_widths, saturating_window, suffix_key_limits,
+    MlaAxis, MlaAxisFault, MlaHeads, MlaMatrix, MlaWidthFault, VisibilityFault, broadcasts_over,
+    chunk_key_end, mla_axis_fault, mla_widths, projection_matches, saturating_window,
+    suffix_key_limits, visibility_fault,
 };
 
 /// Shape-bearing configuration for one multi-head latent-attention layer.
@@ -605,19 +606,22 @@ impl<B: Backend> MultiLatentAttention<B> {
         mask: Option<&Tensor<B, 4, Bool>>,
         bias: Option<&Tensor<B, 4>>,
     ) -> Result<()> {
-        let [batch, heads, queries, content] = projection.query_content.dims();
-        let [key_batch, keys, rank] = projection.normalized_latent.dims();
-        if batch == 0
-            || queries == 0
-            || keys == 0
-            || heads != self.config.num_heads
-            || content != self.config.qk_nope_head_dim
-            || key_batch != batch
-            || rank != self.config.kv_lora_rank
-            || projection.query_rotary.dims()
-                != [batch, heads, queries, self.config.qk_rope_head_dim]
-            || projection.rotated_key.dims() != [batch, 1, keys, self.config.qk_rope_head_dim]
-        {
+        let [batch, heads, queries, _] = projection.query_content.dims();
+        let keys = projection.normalized_latent.dims()[1];
+        let layout = MlaHeads {
+            heads: self.config.num_heads,
+            content: self.config.qk_nope_head_dim,
+            rotary: self.config.qk_rope_head_dim,
+            rank: self.config.kv_lora_rank,
+        };
+        // Verified: exactly the configured, non-empty component extents.
+        if !projection_matches(
+            layout,
+            projection.query_content.dims(),
+            projection.query_rotary.dims(),
+            projection.normalized_latent.dims(),
+            projection.rotated_key.dims(),
+        ) {
             return Err(Error::shape(
                 "mla.projection",
                 "non-empty projections matching the configured head and latent geometry",
@@ -661,12 +665,7 @@ impl<B: Backend> MultiLatentAttention<B> {
             }
         }
         if let Some(bias) = bias {
-            if bias
-                .dims()
-                .iter()
-                .zip(shape)
-                .any(|(&actual, expected)| actual != 1 && actual != expected)
-            {
+            if !broadcasts_over(bias.dims(), shape) {
                 return Err(Error::shape(
                     "mla.attention_bias",
                     format!("broadcast-compatible with {shape:?}"),
@@ -1205,30 +1204,26 @@ impl<B: Backend> PositionalVisibility<B> {
     ///
     /// Returns [`Error::Shape`] naming `mla.visibility` on any mismatch.
     pub(crate) fn validate(&self, batch: usize, queries: usize, keys: usize) -> Result<()> {
-        let rows_match = |rows: usize| rows == batch || rows == 1;
-        let [query_rows, query_columns] = self.query_positions.dims();
-        let [key_rows, key_columns] = self.key_positions.dims();
-        let valid_ok = |valid: &Option<Tensor<B, 2, Bool>>, columns: usize| {
-            valid
-                .as_ref()
-                .is_none_or(|valid| valid.dims() == [batch, columns])
-        };
-        // Verified: accepts exactly one nondecreasing bound in `1..=keys` per query.
-        let limits_ok = key_limits_valid(&self.key_limits, queries, keys);
-        if self.window == Some(0) {
+        // Verified: accepts exactly a non-zero window, matching extents, and
+        // one nondecreasing bound in `1..=keys` per query.
+        let fault = visibility_fault(
+            self.window,
+            self.query_positions.dims(),
+            self.key_positions.dims(),
+            self.query_valid.as_ref().map(Tensor::dims),
+            self.key_valid.as_ref().map(Tensor::dims),
+            &self.key_limits,
+            batch,
+            queries,
+            keys,
+        );
+        if fault == Some(VisibilityFault::ZeroWindow) {
             return Err(Error::configuration(
                 "attention.visibility.window",
                 "must be greater than zero",
             ));
         }
-        if !rows_match(query_rows)
-            || !rows_match(key_rows)
-            || query_columns != queries
-            || key_columns != keys
-            || !valid_ok(&self.query_valid, queries)
-            || !valid_ok(&self.key_valid, keys)
-            || !limits_ok
-        {
+        if fault == Some(VisibilityFault::Shape) {
             return Err(Error::shape(
                 "mla.visibility",
                 format!(
