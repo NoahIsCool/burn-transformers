@@ -109,12 +109,13 @@ pub enum ParameterInstallError {
     InitializedQuantized,
     /// The shape and ordinary float dtype cannot describe a host-sized payload.
     PayloadSizeOverflow,
-    /// Packed data would be requantized by this backend's layout mapper.
+    /// Packed data would not keep its exact blocks through the load mapper.
     ///
     /// Returned by [`install_packed_parameter`] under
-    /// [`PackedLayoutPolicy::RequireExact`]: the parameter's load mapper
+    /// [`PackedLayoutPolicy::RequireExact`]: either the parameter's load mapper
     /// permutes axes and [`packed_layout_is_exact`] reports that the backend
-    /// re-derives block scales after such a permutation.
+    /// re-derives block scales after such a permutation, or the mapper changes
+    /// values, dtype, or shape beyond an axis permutation.
     InexactPackedLayout,
     /// Ordinary float bytes disagree with the declared shape and dtype.
     PayloadLength {
@@ -160,7 +161,7 @@ impl fmt::Display for ParameterInstallError {
             }
             Self::InexactPackedLayout => write!(
                 formatter,
-                "this backend would requantize the packed weight while applying the parameter's layout mapper; install dequantized values or use a backend with exact packed layout operations"
+                "the parameter's load mapper would not preserve the packed weight's exact blocks on this backend (a requantizing axis permutation, or value or shape arithmetic); install dequantized values or use a backend with exact packed layout operations"
             ),
             Self::PayloadLength { expected, actual } => {
                 write!(
@@ -227,6 +228,22 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> std::result::Result<(), ParameterInstallError> {
+    validate_parameter_install(parameter, &data)?;
+    install_validated_parameter(parameter, data);
+    Ok(())
+}
+
+/// Checks every [`install_float_parameter`] precondition without mutating anything.
+///
+/// The order is part of the contract: rank, autodiff packed rejection, initialized
+/// QFloat rejection, checkpoint-facing shape, element kind, dense payload length,
+/// and finally backend storage support. Packed installers call this first so a
+/// rejected tensor never reaches a backend constructor; Burn 0.21 autodiff, for
+/// example, panics instead of returning an error when asked to build QFloat data.
+fn validate_parameter_install<B: Backend, const D: usize>(
+    parameter: &Param<Tensor<B, D>>,
+    data: &TensorData,
+) -> std::result::Result<(), ParameterInstallError> {
     let actual = data.shape.to_vec();
     if actual.len() != D {
         return Err(ParameterInstallError::Rank {
@@ -259,18 +276,42 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
         validate_float_payload_length(&actual, data.dtype, data.bytes.len())?;
     }
 
-    let device = parameter.lazy_device();
     let dtype = data.dtype;
-    if !B::dtype_usage(&device, dtype).contains(DTypeUsage::Storage) {
+    if !B::dtype_usage(&parameter.lazy_device(), dtype).contains(DTypeUsage::Storage) {
         return Err(ParameterInstallError::UnsupportedStorage {
             dtype: format!("{dtype:?}"),
         });
     }
+    Ok(())
+}
+
+/// Installs data that already passed [`validate_parameter_install`].
+///
+/// The tensor is built at its checkpoint dtype on the parameter's device and loaded
+/// through Burn's record path, so the parameter's mapper, device, and gradient
+/// policy apply exactly as for any other record.
+fn install_validated_parameter<B: Backend, const D: usize>(
+    parameter: &mut Param<Tensor<B, D>>,
+    data: TensorData,
+) {
+    let device = parameter.lazy_device();
+    let dtype = data.dtype;
     let tensor = Tensor::<B, D>::from_data(data, (&device, dtype));
+    load_parameter_tensor(parameter, tensor);
+}
+
+/// Loads a checkpoint-facing tensor through the parameter's record path.
+///
+/// The parameter keeps its mapper, device, and gradient policy. The temporary
+/// record clone only moves the existing parameter out of `&mut`; it shares the
+/// incoming backend allocation and is dropped once the mapped value replaces it.
+fn load_parameter_tensor<B: Backend, const D: usize>(
+    parameter: &mut Param<Tensor<B, D>>,
+    tensor: Tensor<B, D>,
+) {
     let record = Param::initialized(ParamId::new(), tensor);
     let existing = std::mem::replace(parameter, record.clone());
     *parameter = existing.load_record(record);
-    Ok(())
 }
 
 /// Checks dense floating storage before a backend can retain malformed metadata.
