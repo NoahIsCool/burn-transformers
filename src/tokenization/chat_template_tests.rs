@@ -417,7 +417,8 @@ fn oversized_values_and_prompts_fail_contextually() {
 ///
 /// MiniJinja's `seq + seq` is a lazy chain: 24 doublings cost about 100 units
 /// of fuel, but `| length` then walks 2^24 items through 24 nested iterators.
-/// The bounded `+` builds a list and stops at 2^20 items.
+/// The bounded `+` builds a list and stops at 2^20 items or at the render's
+/// cumulative budget, whichever comes first.
 #[test]
 fn doubled_sequences_finish_quickly() {
     let started = std::time::Instant::now();
@@ -427,10 +428,9 @@ fn doubled_sequences_finish_quickly() {
         None,
     )
     .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("1048576-item limit"),
-        "{error:#}"
-    );
+    // The doubling stops at the sequence-item limit or the cumulative budget,
+    // whichever it reaches first (the budget, for an empty context).
+    assert!(format!("{error:#}").contains("resource limit"), "{error:#}");
     assert!(started.elapsed().as_secs_f64() < 2.0);
     // Within the limit the doubled list is exact.
     assert_eq!(

@@ -314,7 +314,7 @@ fn huge_string_repetition_fails_contextually() {
 /// milliseconds, and string doubling in a loop grew memory exponentially per
 /// unit of fuel. Every `+`, `~`, `*`, and print is now checked against a
 /// per-value limit (and a cumulative budget) before it allocates, and the
-/// prompt streams into a writer bounded by `4 MiB + 4x` the context size.
+/// prompt streams into a writer bounded by `1 MiB + 4x` the context size.
 #[test]
 fn rendered_prompts_are_bounded() {
     for template in [
@@ -337,8 +337,9 @@ fn rendered_prompts_are_bounded() {
 /// `seq + seq` built a lazy chained iterable, so doubling a list 30 times cost
 /// about 100 instructions of fuel, but `| length` then walked 2^30 elements
 /// through 30 chained iterators (about ten minutes on Apple Silicon). The
-/// bounded `+` now materializes a list of at most 2^20 items, so doubling
-/// fails contextually after twenty steps, well within the time limit.
+/// bounded `+` now materializes a list within the render's item limit (2^20)
+/// and cumulative budget, so doubling fails contextually after about twenty
+/// steps, well within the time limit.
 #[test]
 fn concatenated_sequences_finish_quickly() {
     let (rendered, elapsed) = render_unchecked(
