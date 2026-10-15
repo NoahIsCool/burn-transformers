@@ -42,10 +42,14 @@
 //! the scan evaluates many chunks at once: intra-chunk outputs and per-chunk
 //! states for a whole block of chunks, then the chunk-entry states through one
 //! segmented decay product. `C · Bᵀ` is formed once per *group* and broadcast
-//! over the group's heads, so `B` and `C` are never copied per head. A block
-//! holds at most `2^24` F32 elements per `[batch, heads, chunks, T, T]` score
-//! plane (64 MiB) and only the terminal state crosses block boundaries, so
-//! prefill memory is independent of the prompt length.
+//! over the group's heads, so `B` and `C` are never copied per head. The
+//! number of chunks `c` per block is chosen so that one
+//! `[batch, heads, c, T, T]` F32 score plane holds at most `2^24` elements
+//! (64 MiB), but a block always holds at least one chunk, so a plane holds
+//! `max(2^24, batch·heads·T²)` elements and a block keeps a small constant
+//! number of such planes alive. Only the terminal state crosses block
+//! boundaries, so prefill memory is independent of the prompt length (it
+//! still grows with `batch·heads·T²`).
 //!
 //! # Batched rows
 //!
@@ -132,11 +136,18 @@ impl TimeStepLimits {
 /// Which execution paths clamp the discretization step `dt`, and to what interval.
 ///
 /// Reference implementations disagree, so the policy is explicit data rather
-/// than two loosely named scalars. Hugging Face Transformers' Mamba-2 family
-/// fallbacks (including Nemotron-H at the revision this crate pins) clamp only
-/// the chunked prefill scan, to `[time_step_min, +inf)`, and leave the
-/// single-token update unclamped; NVIDIA's Nemotron Nano remote code clamps
-/// both paths to the configured `time_step_limit`. These bounds are runtime
+/// than two loosely named scalars. At the pinned Hugging Face Transformers
+/// revision (`cfa309cfa34b5497a32fd50af49aa97aac94c054`) every Mamba-2 family
+/// fallback clamps only the chunked scan and leaves the single-token update
+/// unclamped, but the interval differs by family:
+///
+/// - Nemotron-H and Zamba2 clamp to `[time_step_min, +inf)`;
+/// - Mamba2, Bamba, GraniteMoeHybrid, and Falcon-H1 clamp to the configured
+///   `time_step_limit` (default `[0, +inf)`).
+///
+/// Each family therefore builds [`TimeStepClamp::chunked_only`] with its own
+/// interval. NVIDIA's Nemotron Nano remote code instead clamps both paths to
+/// `time_step_limit` ([`TimeStepClamp::both`]). These bounds are runtime
 /// limits and are unrelated to the `time_step_min/max` *initialization*
 /// range of `dt_bias`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -157,7 +168,11 @@ impl TimeStepClamp {
         }
     }
 
-    /// Clamps only chunked prefill, as the Transformers Mamba-2 fallbacks do.
+    /// Clamps only chunked prefill, as every pinned Transformers Mamba-2 fallback does.
+    ///
+    /// The interval is family-specific: `[time_step_min, +inf)` for Nemotron-H
+    /// and Zamba2, `time_step_limit` for Mamba2, Bamba, GraniteMoeHybrid, and
+    /// Falcon-H1 (see the type documentation).
     #[must_use]
     pub const fn chunked_only(limits: TimeStepLimits) -> Self {
         Self {
@@ -1226,13 +1241,21 @@ pub(crate) fn recurrent_scan<B: Backend>(
     ))
 }
 
-/// Largest number of score-plane elements one vectorized block of chunks may hold.
+/// Score-plane element budget that bounds the number of chunks in one vectorized block.
 ///
 /// A block of `c` chunks of width `l` materializes `[batch, heads, c, l, l]`
-/// F32 transition and weighted-kernel planes. `2^24` elements (64 MiB per
-/// plane) admits 16 chunks of 128 tokens for 64 heads at batch one, which
-/// replaces 16 sequential chunk iterations of about 40 kernels each by one
-/// batched pass, while keeping prefill memory independent of prompt length.
+/// F32 transition and weighted-kernel planes (plus cumulative-sum and masking
+/// temporaries of the same shape, and a group-shared `[batch, groups, c, l, l]`
+/// `C · Bᵀ` plane). The scan picks `c = clamp(budget / (batch·heads·l²), 1,
+/// chunks)`, so a plane holds at most `max(2^24, batch·heads·l²)` elements:
+/// the budget bounds the chunks per block, but one chunk is always admitted,
+/// so a single chunk larger than the budget (for example 64 heads with
+/// `l = 128` at batch 32, `2^25` elements or 128 MiB per plane) still runs as
+/// one block and the peak is a small constant multiple of that plane.
+/// `2^24` elements (64 MiB per plane) admits 16 chunks of 128 tokens for 64
+/// heads at batch one, which replaces 16 sequential chunk iterations of about
+/// 40 kernels each by one batched pass. Memory stays independent of the
+/// prompt length.
 pub(crate) const SCAN_BLOCK_ELEMENTS: usize = 1 << 24;
 
 /// Executes the SSD scan over blocks of chunks, carrying only terminal state between blocks.
