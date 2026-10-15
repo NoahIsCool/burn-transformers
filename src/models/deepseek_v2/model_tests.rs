@@ -382,7 +382,7 @@ fn unsupported_runtime_variants_fail_during_initialization() {
     assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).is_err());
 
     let mut config = tests_support::tiny_config();
-    config.topk_method = DeepseekTopKMethod::GroupLimitedGreedy;
+    config.scoring_func = crate::models::deepseek_v2::DeepseekScoringFunction::Sigmoid;
     assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).is_err());
 
     let mut config = tests_support::tiny_config();

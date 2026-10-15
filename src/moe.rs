@@ -776,6 +776,13 @@ impl<B: Backend> SparseMoe<B> {
     /// accumulation dtype independently of expert execution, allowing families
     /// such as DeepSeek to sum reduced-precision experts in FP32 while Qwen
     /// retains its residual-stream convention.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "no family dispatches through it since DeepSeek moved to dispatch_routed_experts"
+        )
+    )]
     pub(crate) fn dispatch_selected_experts(
         &self,
         flat_input: Tensor<B, 2>,

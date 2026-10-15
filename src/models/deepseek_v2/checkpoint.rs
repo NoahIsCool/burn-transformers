@@ -4,6 +4,9 @@
 //! linear mapper consumes that checkpoint orientation directly. The contract
 //! keeps every expert independent, maps the single widened shared expert to its
 //! own three matrices, and never treats expert-bank tensors as fused storage.
+//! `noaux_tc` routers additionally require the gate's F32
+//! `e_score_correction_bias` (`[n_routed_experts]`), which selects experts
+//! but never weights them.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +14,7 @@ use crate::checkpoint::{
     CheckpointManifest, ExpectedTensor, LoadOptions, LoadPlan, MappingPlan, build_load_plan,
 };
 
-use super::{ConfigError, DeepseekV2Config, Validate};
+use super::{ConfigError, DeepseekTopKMethod, DeepseekV2Config, Validate};
 
 /// Family identifier retained in checked checkpoint-dimension errors.
 const FAMILY: &str = "deepseek_v2";
@@ -165,6 +168,16 @@ impl DeepseekV2Config {
                     &format!("{layer}.sparse_mlp.routed.router.weight"),
                     vec![d.experts, d.hidden],
                 );
+                // `noaux_tc` routers ship their selection-only bias with the gate.
+                if self.topk_method == DeepseekTopKMethod::NoAuxTc {
+                    add_mapped(
+                        &mut expected,
+                        &mut mappings,
+                        &format!("{source_mlp}.gate.e_score_correction_bias"),
+                        &format!("{layer}.sparse_mlp.routed.correction_bias"),
+                        vec![d.experts],
+                    );
+                }
                 for expert in 0..self.n_routed_experts {
                     add_gated_mlp_mapped(
                         &mut expected,

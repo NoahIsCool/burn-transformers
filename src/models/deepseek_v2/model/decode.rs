@@ -20,19 +20,19 @@ use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics},
+    architecture::DecodeState as ArchitectureDecodeState,
     cache::CacheConfig,
     models::shared::{
         EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
         ensure_static_rotary_context, implicit_position_ids, index_tensor, prepare_stateful_rows,
         select_hidden_with_last_columns, validate_logits_selection,
     },
-    moe::{SparseMoeOutput, load_balancing_loss},
+    moe::SparseMoeOutput,
 };
 
 use super::{
     DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, INPUT_NAMES, ROUTER_DTYPE,
-    sequence_auxiliary_loss,
+    router_diagnostics,
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -622,29 +622,13 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
                     rows.into_iter().map(|row| row.selected).collect(),
                     "deepseek_v2.selected_experts",
                 )?;
-                let auxiliary = if options.auxiliary_losses {
-                    let loss = if self.config().seq_aux {
-                        sequence_auxiliary_loss(
-                            logits.clone(),
-                            selected.clone(),
-                            input.token_mask.as_ref(),
-                        )?
-                    } else {
-                        load_balancing_loss(
-                            logits.clone(),
-                            selected.clone(),
-                            input.token_mask.as_ref(),
-                        )?
-                    };
-                    Some(loss * self.config().aux_loss_alpha)
-                } else {
-                    None
-                };
-                Ok(RouterDiagnostics {
-                    logits: options.router_logits.then_some(logits),
-                    load_balancing_loss: auxiliary,
-                    z_loss: None,
-                })
+                router_diagnostics(
+                    logits,
+                    selected,
+                    input.token_mask.as_ref(),
+                    options,
+                    self.config(),
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         let selected = select_hidden_with_last_columns(

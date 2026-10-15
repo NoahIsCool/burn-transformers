@@ -5,13 +5,12 @@
 //! `y = x' + FFN(RMSNorm(x'))`. The pinned Lite checkpoint uses one dense
 //! SwiGLU block followed by 26 blocks that add a top-6 routed mixture to one
 //! always-active SwiGLU whose intermediate width is exactly twice an expert's
-//! width. The widened shared network is intentionally not represented as two
-//! independent experts because its checkpoint contains only three matrices.
+//! width (see [`DeepseekV2Moe`] for the routing policies and balance losses).
 
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{Bool, DType, Int, Tensor, activation::softmax, backend::Backend},
+    tensor::{Bool, DType, Int, Tensor, backend::Backend},
 };
 
 use crate::{
@@ -19,14 +18,14 @@ use crate::{
     architecture::{RouterDiagnostics, TokenMask},
     attention::padding_attention_mask,
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
-    moe::{SparseMoe, SparseMoeConfig, SparseMoeOutput, load_balancing_loss},
+    moe::SparseMoeOutput,
     normalization::{RmsNorm, RmsNormConfig},
     operations,
     position::{DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig},
 };
 
 use super::{
-    DeepseekScoringFunction, DeepseekTopKMethod, DeepseekV2Config,
+    DeepseekV2Config,
     mla::{MlaMixOutput, MultiLatentAttention, MultiLatentAttentionConfig},
 };
 use crate::models::{
@@ -36,15 +35,13 @@ use crate::models::{
 
 /// External compressed MLA caches and transactional prefill/decode execution.
 mod decode;
+/// Routed-plus-shared expert block, router policies, and balance losses.
+mod moe;
 
 pub use decode::{DeepseekV2DecodeState, MlaExecutionPath};
+pub use moe::DeepseekV2Moe;
 
-/// Dtype of every router projection, probability, and diagnostic logit.
-///
-/// The reference router casts both operands to FP32 before the projection, so
-/// router logits are FP32 even in F16/BF16 checkpoints. Placeholders for
-/// inactive decode rows must use the same dtype to be concatenated with them.
-const ROUTER_DTYPE: DType = DType::F32;
+use moe::{ROUTER_DTYPE, router_diagnostics};
 
 /// Tensor names reported by DeepSeek-V2 input errors.
 const INPUT_NAMES: InputNames<'static> = InputNames {
@@ -55,189 +52,6 @@ const INPUT_NAMES: InputNames<'static> = InputNames {
 
 /// Owner named when a stateless tensor is on another device than the weights.
 const PARAMETERS: &str = "DeepSeek model parameters";
-
-/// Routed expert output together with the always-active shared contribution.
-#[derive(Clone, Debug)]
-struct DeepseekMoeOutput<B: Backend> {
-    /// Sum of selected routed contributions and the widened shared network.
-    hidden_state: Tensor<B, 3>,
-    /// Routing choices and accounting retained for optional diagnostics.
-    routed: SparseMoeOutput<B>,
-}
-
-/// DeepSeek's top-k routed bank plus one widened shared SwiGLU network.
-#[derive(Module, Debug)]
-pub struct DeepseekV2Moe<B: Backend> {
-    /// Selected-only routed expert dispatcher.
-    pub routed: SparseMoe<B>,
-    /// One always-active checkpoint module of width `n_shared * expert_width`.
-    pub shared_experts: GatedFeedForward<B>,
-}
-
-impl<B: Backend> DeepseekV2Moe<B> {
-    /// Allocates the exact single-process V2-Lite expert topology.
-    fn init(config: &DeepseekV2Config, device: &B::Device) -> Result<Self> {
-        if config.ep_size != 1 {
-            return Err(Error::BackendCapability(
-                "DeepSeek expert-parallel checkpoints require distributed execution, which is deferred from v1"
-                    .into(),
-            ));
-        }
-        if config.scoring_func != DeepseekScoringFunction::Softmax
-            || config.topk_method != DeepseekTopKMethod::Greedy
-        {
-            return Err(Error::BackendCapability(
-                "the v1 DeepSeek-V2 runtime implements the pinned softmax/greedy router only"
-                    .into(),
-            ));
-        }
-        let mut routed = SparseMoeConfig::new(
-            config.hidden_size,
-            config.moe_intermediate_size,
-            config.n_routed_experts,
-            config.num_experts_per_tok,
-        );
-        // The reference only normalizes a multi-expert mixture. For top-1
-        // routing, normalization would erase the router's confidence and make
-        // every selected route have unit weight.
-        let renormalize_selected = config.num_experts_per_tok > 1 && config.norm_topk_prob;
-        routed.renormalize_selected = renormalize_selected;
-        // The reference applies routed_scaling_factor only on its unnormalized
-        // branch. Lite uses `norm_topk_prob=false`, but retaining this condition
-        // keeps other V2 configs mathematically faithful.
-        routed.routed_scale = if renormalize_selected {
-            1.0
-        } else {
-            config.routed_scaling_factor
-        };
-        let shared_width = config
-            .moe_intermediate_size
-            .checked_mul(config.n_shared_experts)
-            .ok_or_else(|| {
-                Error::configuration(
-                    "deepseek_v2.shared_experts",
-                    "intermediate width product overflows usize",
-                )
-            })?;
-        Ok(Self {
-            routed: routed.init(device)?,
-            shared_experts: GatedFeedForwardConfig::new(config.hidden_size, shared_width)
-                .init(device)?,
-        })
-    }
-
-    /// Evaluates only selected routed experts and always evaluates the shared MLP.
-    fn forward(&self, input: Tensor<B, 3>) -> Result<DeepseekMoeOutput<B>> {
-        let [batch, sequence, hidden] = input.dims();
-        if batch == 0 || sequence == 0 || hidden != self.routed.hidden_size {
-            return Err(Error::shape(
-                "deepseek_v2.moe.input",
-                format!("[batch>0, sequence>0, {}]", self.routed.hidden_size),
-                format!("[{batch}, {sequence}, {hidden}]"),
-            ));
-        }
-        if self.routed.experts_per_token == 0
-            || self.routed.experts_per_token > self.routed.routed.len()
-        {
-            return Err(Error::configuration(
-                "deepseek_v2.moe.experts_per_token",
-                "must fit the instantiated routed expert bank",
-            ));
-        }
-        let tokens = batch.checked_mul(sequence).ok_or_else(|| {
-            Error::shape(
-                "deepseek_v2.moe.input",
-                "a representable batch * sequence product",
-                format!("{batch} * {sequence}"),
-            )
-        })?;
-        let input_dtype = input.dtype();
-        let flat_input = input.clone().reshape([tokens, hidden]);
-        // The official router casts both operands to FP32 before the projection,
-        // not merely before softmax. This avoids an F16 rounding event changing
-        // the selected expert and therefore an entire nonlinear subgraph.
-        let router_logits = burn::tensor::module::linear(
-            input.clone().cast(ROUTER_DTYPE),
-            self.routed.router.weight.val().cast(ROUTER_DTYPE),
-            None,
-        );
-        let probabilities = softmax(router_logits.clone(), 2);
-        let (selected_weights, selected_experts) =
-            deterministic_top_k(probabilities, self.routed.experts_per_token);
-        let mut flat_weights = selected_weights
-            .clone()
-            .reshape([tokens, self.routed.experts_per_token]);
-        if self.routed.renormalize_selected {
-            let denominator = flat_weights.clone().sum_dim(1).clamp_min(f32::MIN_POSITIVE);
-            flat_weights = flat_weights / denominator;
-        }
-        flat_weights = flat_weights * self.routed.routed_scale;
-        let flat_experts = selected_experts
-            .clone()
-            .reshape([tokens, self.routed.experts_per_token]);
-        // The reference keeps probabilities, weighted expert contributions,
-        // and index-add accumulation in FP32. Only the complete routed mixture
-        // is rounded back to the residual dtype, avoiding one rounding event
-        // per expert contribution in reduced precision.
-        let dispatch = self.routed.dispatch_selected_experts(
-            flat_input,
-            flat_weights.clone(),
-            flat_experts,
-            DType::F32,
-        )?;
-        let routed = SparseMoeOutput {
-            hidden_state: dispatch
-                .hidden_state
-                .cast(input_dtype)
-                .reshape([batch, sequence, hidden]),
-            router_logits,
-            selected_experts,
-            selected_weights: flat_weights.reshape([
-                batch,
-                sequence,
-                self.routed.experts_per_token,
-            ]),
-            expert_token_counts: dispatch.expert_token_counts,
-            evaluated_experts: dispatch.evaluated_experts,
-        };
-        Ok(DeepseekMoeOutput {
-            hidden_state: routed.hidden_state.clone() + self.shared_experts.forward(input)?,
-            routed,
-        })
-    }
-}
-
-/// Selects largest probabilities with a backend-independent smallest-ID tie rule.
-fn deterministic_top_k<B: Backend>(
-    probabilities: Tensor<B, 3>,
-    k: usize,
-) -> (Tensor<B, 3>, Tensor<B, 3, Int>) {
-    let [batch, sequence, experts] = probabilities.dims();
-    let device = probabilities.device();
-    let expert_ids = Tensor::<B, 1, Int>::arange(0..experts as i64, &device)
-        .reshape([1, 1, experts])
-        .expand([batch, sequence, experts]);
-    let mut remaining = probabilities.clone();
-    let mut weights = Vec::with_capacity(k);
-    let mut indices = Vec::with_capacity(k);
-    for _ in 0..k {
-        let maximum = remaining.clone().max_dim(2);
-        let tied = remaining.clone().equal(maximum);
-        let selected = expert_ids
-            .clone()
-            .mask_fill(tied.bool_not(), experts as i64)
-            .min_dim(2);
-        weights.push(probabilities.clone().gather(2, selected.clone()));
-        indices.push(selected.clone());
-        remaining = remaining.mask_fill(
-            expert_ids
-                .clone()
-                .equal(selected.expand([batch, sequence, experts])),
-            f32::NEG_INFINITY,
-        );
-    }
-    (Tensor::cat(weights, 2), Tensor::cat(indices, 2))
-}
 
 /// One DeepSeek-V2 decoder layer.
 #[derive(Module, Debug)]
@@ -468,7 +282,8 @@ impl<B: Backend> DeepseekV2Model<B> {
                 && (options.router_logits || options.auxiliary_losses)
             {
                 routers.push(router_diagnostics(
-                    &routed,
+                    routed.router_logits,
+                    routed.selected_experts,
                     input.token_mask.as_ref(),
                     options,
                     &self.config,
@@ -677,95 +492,18 @@ fn stateless_attention_mask<B: Backend>(
     )
 }
 
-/// Produces optional router diagnostics using DeepSeek's configured aux semantics.
-fn router_diagnostics<B: Backend>(
-    output: &SparseMoeOutput<B>,
-    mask: Option<&TokenMask<B>>,
-    options: &ForwardOptions,
-    config: &DeepseekV2Config,
-) -> Result<RouterDiagnostics<B>> {
-    let auxiliary = if options.auxiliary_losses {
-        let raw = if config.seq_aux {
-            sequence_auxiliary_loss(
-                output.router_logits.clone(),
-                output.selected_experts.clone(),
-                mask,
-            )?
-        } else {
-            load_balancing_loss(
-                output.router_logits.clone(),
-                output.selected_experts.clone(),
-                mask,
-            )?
-        };
-        Some(raw * config.aux_loss_alpha)
-    } else {
-        None
-    };
-    Ok(RouterDiagnostics {
-        logits: options.router_logits.then(|| output.router_logits.clone()),
-        load_balancing_loss: auxiliary,
-        z_loss: None,
-    })
-}
-
-/// Implements DeepSeek's per-sequence expert-balance auxiliary objective.
-fn sequence_auxiliary_loss<B: Backend>(
-    router_logits: Tensor<B, 3>,
-    selected: Tensor<B, 3, Int>,
-    mask: Option<&TokenMask<B>>,
-) -> Result<Tensor<B, 1>> {
-    let [batch, sequence, experts] = router_logits.dims();
-    let [selected_batch, selected_sequence, top_k] = selected.dims();
-    if batch == 0
-        || sequence == 0
-        || experts == 0
-        || top_k == 0
-        || [selected_batch, selected_sequence] != [batch, sequence]
-    {
-        return Err(Error::shape(
-            "deepseek_v2.router_aux",
-            "matching non-empty [batch, sequence, experts/top_k] tensors",
-            format!(
-                "logits={:?}, selected={:?}",
-                router_logits.dims(),
-                selected.dims()
-            ),
-        ));
-    }
-    let probabilities = burn::tensor::activation::softmax(router_logits.cast(DType::F32), 2);
-    let mut assignments = selected.one_hot::<4>(experts).float();
-    let valid = match mask {
-        Some(mask) => {
-            if mask.as_tensor().dims() != [batch, sequence] {
-                return Err(Error::shape(
-                    "deepseek_v2.router_aux.mask",
-                    format!("[{batch}, {sequence}]"),
-                    format!("{:?}", mask.as_tensor().dims()),
-                ));
-            }
-            mask.as_tensor().clone().float().cast(DType::F32)
-        }
-        None => Tensor::ones([batch, sequence], &probabilities.device()),
-    };
-    assignments = assignments * valid.clone().reshape([batch, sequence, 1, 1]);
-    let counts = assignments.sum_dim(1).sum_dim(2).reshape([batch, experts]);
-    let valid_count = valid.clone().sum_dim(1).reshape([batch, 1]).clamp_min(1.0);
-    let normalized_counts = counts * experts as f64 / (valid_count.clone() * top_k as f64);
-    let mean_probability = (probabilities * valid.reshape([batch, sequence, 1]))
-        .sum_dim(1)
-        .reshape([batch, experts])
-        / valid_count;
-    Ok((normalized_counts * mean_probability)
-        .sum_dim(1)
-        .mean()
-        .reshape([1]))
-}
-
 #[cfg(test)]
 #[path = "model_tests_support.rs"]
 /// Deterministic tiny topology and checkpoint weights shared by family tests.
 pub(crate) mod tests_support;
+
+#[cfg(test)]
+/// Hugging Face Transformers 5.2 goldens for the tiny reference topologies.
+mod goldens;
+
+#[cfg(test)]
+/// Tiny-model logit and routing parity with Hugging Face DeepSeek-V2 and V3.
+mod reference_tests;
 
 #[cfg(test)]
 #[path = "model_tests.rs"]
