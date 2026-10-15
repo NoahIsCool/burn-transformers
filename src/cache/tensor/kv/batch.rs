@@ -65,9 +65,10 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use crate::attention::position_limit;
 use crate::cache::DecodeStateError;
 use crate::cache::identity::IdentityToken;
-use crate::cache::retention::{WorkingWindow, ring_slot_position, ring_working_window};
+use crate::cache::retention::{WorkingWindow, ring_slot_position};
 use crate::cache::rows::{RowRun, row_runs};
 
+use super::plan::{committed_read_rows, working_read_rows};
 use super::{
     NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError, TensorCacheResult,
     validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
@@ -1060,23 +1061,13 @@ impl<B: Backend> NativeKvCache<B> {
     /// capacity, or a position outside Burn's portable `i32` index range.
     pub fn plan_batch_read(&self, lengths: &[usize]) -> TensorCacheResult<KvBatchReadPlan<B>> {
         self.validate_read_lengths(lengths)?;
-        let keep: Vec<usize> = match self.window {
-            Some(window) => lengths
-                .iter()
-                .map(|&length| length.min(window.get()))
-                .collect(),
-            None => lengths.to_vec(),
-        };
-        let retained = lengths
-            .iter()
-            .zip(&keep)
-            .map(|(&length, &keep)| length - keep..length)
-            .collect();
+        // The verified planner keeps `min(L_b, W)` (or `L_b`) positions per row.
+        let rows = committed_read_rows(lengths, self.window.map(NonZeroUsize::get));
         let segments = self
-            .committed_plan_segment(lengths, &keep)?
+            .committed_plan_segment(lengths, &rows.keep)?
             .into_iter()
             .collect();
-        Ok(self.plan(retained, segments, None))
+        Ok(self.plan(rows.retained, segments, None))
     }
 
     /// Plans a batched read of each row's working window during speculation.
@@ -1114,46 +1105,33 @@ impl<B: Backend> NativeKvCache<B> {
                 reason: "staged lengths differ between layers of the group",
             });
         }
-        let working = committed
-            .iter()
-            .zip(&staged)
-            .map(|(&length, &proposed)| {
-                validate_write_end(length, proposed, self.config.capacity())
-            })
-            .collect::<TensorCacheResult<Vec<_>>>()?;
+        let capacity = self.config.capacity();
+        // The verified planner checks every working end and splits each
+        // row's window into committed and staged parts.
+        let rows = working_read_rows(
+            committed,
+            &staged,
+            self.window.map(NonZeroUsize::get),
+            capacity,
+        )
+        .map_err(|(row, violation)| {
+            TensorCacheError::write_end(committed[row], staged[row], capacity, violation)
+        })?;
         let staging = PlannedStaging {
             epoch: self.staging_epoch,
             lengths: staged.clone(),
         };
         if self.spec.in_place_staging() {
-            let mut plan = self.plan_batch_read(&working)?;
+            let mut plan = self.plan_batch_read(&rows.ends)?;
             plan.staging = Some(staging);
             return Ok(plan);
         }
-        let windows: Vec<WorkingWindow> = committed
-            .iter()
-            .zip(&staged)
-            .map(|(&length, &proposed)| match self.window {
-                Some(window) => ring_working_window(length, proposed, window.get()),
-                None => WorkingWindow {
-                    retained_start: 0,
-                    committed_keep: length,
-                    staged_skip: 0,
-                },
-            })
-            .collect();
-        let retained = windows
-            .iter()
-            .zip(&working)
-            .map(|(window, &end)| window.retained_start..end)
-            .collect();
-        let keep: Vec<usize> = windows.iter().map(|window| window.committed_keep).collect();
         let mut segments: Vec<PlannedSegment<B>> = self
-            .committed_plan_segment(committed, &keep)?
+            .committed_plan_segment(committed, &rows.keep)?
             .into_iter()
             .collect();
-        segments.extend(self.staged_plan_segment(committed, &staged, &windows)?);
-        Ok(self.plan(retained, segments, Some(staging)))
+        segments.extend(self.staged_plan_segment(committed, &staged, &rows.windows)?);
+        Ok(self.plan(rows.retained, segments, Some(staging)))
     }
 
     /// Reads one layer through a batched read plan.

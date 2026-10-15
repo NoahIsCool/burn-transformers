@@ -25,7 +25,7 @@ use core::ops::Range;
 use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::identity::IdentityToken;
-use crate::cache::retention::{WorkingWindow, first_unsafe_ring_rewind, ring_working_window};
+use crate::cache::retention::first_unsafe_ring_rewind;
 use crate::cache::{
     CacheConfig, DecodeStateError, plan_mirrored_ring_write, plan_ring_read, plan_ring_write,
     plan_staged_ring_transaction,
@@ -40,20 +40,13 @@ use super::{
 };
 
 mod batch;
+mod plan;
 
 pub(crate) use batch::PreparedNativeKvBatchWrite;
 pub use batch::{KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment};
+pub use plan::KvCacheStorage;
 
-/// Physical time-axis strategy used by a native key/value cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KvCacheStorage {
-    /// Stores every logical position at its absolute time index.
-    Full,
-    /// Stores `position mod window`, producing at most two chronological views.
-    SlidingRing,
-    /// Duplicates each ring slot at `slot + window` for one contiguous view.
-    MirroredSlidingRing,
-}
+use plan::{TimeSlotViolation, mirrored_window_slots, visible_count, working_window};
 
 impl KvCacheStorage {
     /// Returns a stable human-readable storage name for diagnostics.
@@ -290,48 +283,43 @@ impl NativeKvCacheSpec {
     /// than the logical capacity, a window on full storage, in-place staging
     /// on ring storage, or `2W` overflow.
     pub fn committed_time_slots(self, config: CacheConfig) -> TensorCacheResult<usize> {
-        if self.in_place_staging && self.storage != KvCacheStorage::Full {
-            return Err(TensorCacheError::InPlaceStagingRequiresFullStorage {
-                storage: self.storage.as_str(),
-            });
-        }
-        if let Some(window) = self.sliding_window {
-            if self.storage == KvCacheStorage::Full {
-                return Err(TensorCacheError::InvalidSlidingWindow {
-                    storage: self.storage.as_str(),
-                    window: window.get(),
-                    capacity: config.capacity(),
+        let storage = self.storage.as_str();
+        let capacity = config.capacity();
+        // The extent and every rejection are the Verus-verified planner's.
+        plan::committed_time_slots(
+            self.storage,
+            self.in_place_staging,
+            self.sliding_window.map(NonZeroUsize::get),
+            config.sliding_window().map(NonZeroUsize::get),
+            capacity,
+        )
+        .map_err(|violation| match violation {
+            TimeSlotViolation::InPlaceStagingRequiresFullStorage => {
+                TensorCacheError::InPlaceStagingRequiresFullStorage { storage }
+            }
+            TimeSlotViolation::WindowOnFullStorage { window } => {
+                TensorCacheError::InvalidSlidingWindow {
+                    storage,
+                    window,
+                    capacity,
                     reason: "full storage retains every position; use a ring storage mode",
-                });
+                }
             }
-            if window.get() > config.capacity() {
-                return Err(TensorCacheError::InvalidSlidingWindow {
-                    storage: self.storage.as_str(),
-                    window: window.get(),
-                    capacity: config.capacity(),
+            TimeSlotViolation::WindowExceedsCapacity { window } => {
+                TensorCacheError::InvalidSlidingWindow {
+                    storage,
+                    window,
+                    capacity,
                     reason: "the window exceeds the logical capacity",
-                });
+                }
             }
-        }
-        let window = || {
-            self.effective_window(config)
-                .ok_or(TensorCacheError::SlidingWindowRequired {
-                    storage: self.storage.as_str(),
-                })
-        };
-        match self.storage {
-            KvCacheStorage::Full => Ok(config.capacity()),
-            KvCacheStorage::SlidingRing => Ok(window()?.get()),
-            KvCacheStorage::MirroredSlidingRing => {
-                let window = window()?;
-                window
-                    .get()
-                    .checked_mul(2)
-                    .ok_or(TensorCacheError::MirroredCapacityOverflow {
-                        window: window.get(),
-                    })
+            TimeSlotViolation::WindowRequired => {
+                TensorCacheError::SlidingWindowRequired { storage }
             }
-        }
+            TimeSlotViolation::MirroredOverflow { window } => {
+                TensorCacheError::MirroredCapacityOverflow { window }
+            }
+        })
     }
 }
 
@@ -860,10 +848,7 @@ impl<B: Backend> NativeKvCache<B> {
                 capacity: self.config.capacity(),
             });
         }
-        let retained = match self.window {
-            Some(window) => sequence_length.min(window.get()),
-            None => sequence_length,
-        };
+        let retained = visible_count(sequence_length, self.window.map(NonZeroUsize::get));
         Ok(KvCacheRead {
             retained_positions: sequence_length - retained..sequence_length,
             segments: self.committed_segments(cache_layer, sequence, sequence_length, retained)?,
@@ -904,14 +889,8 @@ impl<B: Backend> NativeKvCache<B> {
             // Proposals already sit in committed slots `[C, C + P)`.
             return self.read_sequence(layer, sequence, working_length);
         }
-        let plan = match self.window {
-            Some(window) => ring_working_window(committed_length, staged, window.get()),
-            None => WorkingWindow {
-                retained_start: 0,
-                committed_keep: committed_length,
-                staged_skip: 0,
-            },
-        };
+        // `validate_write_end` proved `committed_length + staged` fits.
+        let plan = working_window(committed_length, staged, self.window.map(NonZeroUsize::get));
         let mut segments =
             self.committed_segments(cache_layer, sequence, committed_length, plan.committed_keep)?;
         segments.push(read_staged_segment(
@@ -968,13 +947,14 @@ impl<B: Backend> NativeKvCache<B> {
                 .collect(),
             KvCacheStorage::MirroredSlidingRing => {
                 // Slot `s` is duplicated at `s + W`, so any run of at most `W`
-                // positions starting at slot `start mod W` is contiguous.
-                let physical_start = start % self.window()?.get();
+                // positions starting at slot `start mod W` is contiguous; the
+                // verified `mirrored_window_slots` computes that run.
+                let slots = mirrored_window_slots(start, keep.get(), self.window()?.get());
                 vec![read_segment(
                     layer,
                     sequence,
                     start..length,
-                    physical_start..physical_start + keep.get(),
+                    slots,
                     self.spec,
                 )]
             }

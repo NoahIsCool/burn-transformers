@@ -35,6 +35,12 @@
 //!   shares one snapshot exactly when every row staged the same positive
 //!   count, and each flat gather index `b * P + max(s_b, 1) - 1` decodes to
 //!   row `b` and its own snapshot, failing exactly beyond `i32::MAX`.
+//! * `src/cache/tensor/kv/plan.rs`: native KV planning. The committed time
+//!   extent is exactly the capacity, `W`, or `2W` and every inconsistent
+//!   storage/window configuration is rejected with its first rule; committed
+//!   reads keep `min(L, W)` positions; working reads check every end and
+//!   split each window exactly as the verified working window does; mirrored
+//!   runs read the slot of each matching position below `2W`.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -53,3 +59,15 @@ pub mod rows;
 pub mod tensor_plan;
 #[path = "../src/cache/tensor/recurrent/plan.rs"]
 pub mod recurrent_plan;
+#[path = "../src/cache/tensor/kv/plan.rs"]
+pub mod kv_plan;
+
+/// Mirrors the crate paths `crate::cache::*` used by the tensor-cache planners.
+pub mod cache {
+    pub use crate::{lengths, retention, ring, rows};
+
+    /// Mirrors `crate::cache::tensor`.
+    pub mod tensor {
+        pub use crate::tensor_plan as plan;
+    }
+}
