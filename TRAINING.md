@@ -91,12 +91,64 @@ discoverable and apply the desired policies through Burn's optimizer APIs or
 your explicit loop. No additional parameter-group or trainer framework is
 introduced by this crate.
 
-## Evaluation, initialization, and records
+## Initialize deliberately
 
-Seed the backend before initializing and materializing parameters. Burn can
-initialize parameters lazily; cloning an uninitialized parameter can produce
-independent draws. Inspect the actual owner's values when recording baselines.
-Different backends or libraries need not produce the same weights from a seed.
+Comparisons between architectures trained from random weights are meaningful
+only when every candidate starts from a stated distribution. Burn's defaults
+are Kaiming-uniform `Linear` weights and `N(0, 1)` embeddings; with tied
+embeddings the initial logits then have standard deviation about `sqrt(d)`,
+so the softmax starts nearly one-hot. Measured on a one-layer modular model
+with `d = 256` and `V = 512`: Burn's defaults give logit standard deviation
+15.9 and an initial loss of about 250 nats, while `N(0, 0.02^2)` gives 0.32
+and 6.33 nats, close to the uniform `ln V = 6.24`.
+
+`InitPolicy` states the distribution as data and applies it to any Burn
+module by parameter role (embedding, projection, residual projection, bias,
+other), with path overrides taking precedence:
+
+```rust
+use transformers::initialization::{InitPolicy, ParameterInit};
+
+// N(0, 0.02^2) embeddings and projections, zero biases, GPT-2's 1/sqrt(2L)
+// scaling for the projections that write the residual, and the final norm's
+// scale reset to one; other parameters keep their constructed values.
+let policy = InitPolicy::normal(0.02)
+    .with_depth_scaling(layers, ["o_proj", "down_proj"])
+    .with_override("final_norm", ParameterInit::Ones);
+policy.validate_for(&model)?; // dry run: every name must match the model
+let (model, report) = policy.apply(model)?;
+```
+
+- `ParameterInit` is `Keep`, `Normal { std }`, `Zeros`, `Ones`, or
+  `Constant { value }`. An override path matches whole dot-separated
+  components, as an exact parameter path or a module prefix; the last
+  matching override wins.
+- Names are checked before anything changes: an override that matches no
+  parameter, or a residual projection that names no `Linear` field, is an
+  error rather than a silently skipped rule.
+- Replaced values keep their parameter identity, dtype, device, trainability,
+  and save/load mapper, so records and optimizers see the same parameters;
+  tied parameters receive one shared tensor; packed quantized parameters are
+  kept. `report` lists every parameter with its role and initializer.
+- `apply` materializes every replaced parameter. `apply_lazy` keeps lazy
+  parameters lazy and replaces their deferred initializer, so a parameter
+  overwritten by a loaded record is never drawn. Burn still computes its own
+  default once at the first read before drawing the policy's value, draws
+  happen in first-read order, and clones taken before the first read draw
+  independently; use `apply` when that matters.
+- Seed the backend first (`B::seed(&device, seed)`) for reproducible draws.
+  Different backends need not produce the same weights from a seed.
+
+Model helpers build the matching policy: `ModularCausalLm::init_with(spec,
+&ModularCausalLm::scaled_init_policy(&spec, 0.02), &device)` (and the seq2seq
+equivalent) names the residual projections the spec actually contains, and
+`Gpt2Config::init_policy()` / `GptNeoXConfig::init_policy()` reproduce those
+families' Hugging Face initialization. The GPT policies keep LayerNorm
+parameters as constructed; add `ParameterInit::Ones` and `Zeros` overrides to
+reset them as well. Modular T5 relative-position biases start from
+`N(0, 1/hidden_size)`, the reference initialization.
+
+## Evaluation and records
 
 Use `model.valid()` for evaluation on the inner backend. Explicit Burn `Dropout`
 modules then become inactive. Freezing parameters does not disable dropout.
@@ -133,9 +185,25 @@ explicitly cast lower precision logits to F32 before loss computation. The
 helpers validate shapes and targets but do not choose padding or task policy.
 Cross-entropy validates label bounds by reading their minimum and maximum,
 which synchronizes the device; logits remain on their original device.
-Pairwise reduction does not remove every F32 limit: very small cross entropy
-can round to zero near probability one. Paper guides identify F64-reference
-and F32-training differences explicitly.
+Pairwise reduction (folding contiguous halves) does not remove every F32
+limit: very small cross entropy can round to zero near probability one. Paper
+guides identify F64-reference and F32-training differences explicitly.
+
+Sparse-expert families return their router balance objective when
+`ForwardOptions` requests it, as a diagnostic that never changes the logits.
+Qwen3-MoE and gpt-oss (`gpt_oss_load_balancing_loss`) reproduce Transformers'
+stack-wide `aux_loss` without its coefficient, and Nemotron-H returns
+Megatron's normalized sigmoid switch loss (one under perfect balance), also
+unweighted: multiply these by the checkpoint's coefficient before adding them
+to a training loss. DeepSeek's value follows its pinned reference and already
+includes `aux_loss_alpha`; its `seq_aux = false` form is now `1/top_k` of what
+earlier versions returned, which had reused the Qwen formula. Padding is
+excluded from every count and mean.
+
+Copying one pretrained parameter to several targets with `TransferPlan`
+creates independent parameters that train separately; `TiePolicy::Preserve`
+keeps only ties that already exist in the source. Tie parameters explicitly in
+one owner if they must stay shared.
 
 | Computation | Training contract |
 | --- | --- |
@@ -145,6 +213,7 @@ and F32-training differences explicitly.
 | Explicitly dequantized frozen weights | Floating-point training path, with its memory and compute costs. |
 | Packed inference prefix on the inner backend | May supply detached features to a trainable head. |
 | Cached or recurrent decode interventions | Require a separate state contract; use stateless full-sequence training here. |
+| Long sequences under autodiff | Score-bounded attention chunking is inference-only; Muse and DeepSeek switch to unbounded attention on autodiff backends, so memory grows with the full score plane. |
 
 ## Train, then test the mechanism
 

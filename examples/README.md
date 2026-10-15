@@ -39,8 +39,12 @@ cargo run --release --locked --example qwen_prefix -- --random
 
 [activation_workbench.rs](activation_workbench.rs) captures selected neurons,
 ablates and restores them, inserts an adapter, and allows future tokens through
-attention. [qwen_prefix.rs](qwen_prefix.rs) demonstrates block selection and
-optional local weight loading. Their random task outputs are not learned results.
+attention. It then runs one family-generic experiment, written once against
+the `HookedModel` and `StagedModel` traits (an activation cache of every point,
+a residual ablation, and staged clean-to-corrupted patching), on a modular
+decoder, GPT-2, and a Llama-family model selected by `AutoCausalLm`.
+[qwen_prefix.rs](qwen_prefix.rs) demonstrates block selection and optional
+local weight loading. Their random task outputs are not learned results.
 
 ## 1. Grokking: train, then find the circuit
 
@@ -168,6 +172,20 @@ The [v0.3 validation](../acceptance/measurements/v0_3-training-validation-202609
 adds native training checks, the eleven inexpensive example executions, and
 both compiler profiles. Longer scientific runs retain their individual evidence.
 
-[flan_t5_small.rs](flan_t5_small.rs) and [qwen35_chat.rs](qwen35_chat.rs) remain
-local checkpoint/generation references. Follow their feature and artifact
-requirements. Training compatibility does not extend checkpoint support claims.
+## Load a checkpoint and generate
+
+These programs read a local checkpoint directory; none downloads anything.
+
+| Example | Checkpoints | Run with |
+| --- | --- | --- |
+| [llama_generate.rs](llama_generate.rs) | Any `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, or `olmo2` directory | `--features tokenizers --example llama_generate -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]` |
+| [gemma_generate.rs](gemma_generate.rs) | Gemma 2, Gemma 3 text, or the text tower of multimodal Gemma 3 | `--features tokenizers --example gemma_generate -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]` |
+| [flan_t5_small.rs](flan_t5_small.rs) | The pinned FLAN-T5-small revision; cache-aware four-beam translation | `--no-default-features --features std,flex,tokenizers --example flan_t5_small -- MODEL_DIR "PROMPT"` |
+| [qwen35_chat.rs](qwen35_chat.rs) | The pinned Qwen3.5-0.8B revision on Metal; chat-template rendering | see [the Qwen profile](../QWEN3_5_0_8B_RELEASE.md) |
+
+Prefix each row with `cargo run --release --locked`. The Llama and Gemma
+examples require the `tokenizers` feature, cast weights to F32, and run on the
+Flex CPU backend; an F32 Gemma 3 4B needs about 16 GiB of memory. Follow each
+example's feature and artifact requirements. Training compatibility does not extend checkpoint
+support claims; the [model status page](../ARCHITECTURE_COMPATIBILITY.md)
+records which checkpoints are validated.

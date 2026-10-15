@@ -2,7 +2,10 @@
 
 This preserves the v0.2 scope. The subsequent [v0.3 training contract](TRAINING.md)
 and [training examples](examples/README.md) now extend these interfaces through
-native Burn optimization, freezing, and checkpoints.
+native Burn optimization, freezing, and checkpoints. The generic
+`architecture::HookedModel` and `StagedModel` traits later made the hook and
+staged interfaces below uniform across every model family; see
+[EXPERIMENTS.md](EXPERIMENTS.md#one-experiment-any-model).
 
 ## Consumer workflow
 
