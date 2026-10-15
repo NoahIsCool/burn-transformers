@@ -62,14 +62,19 @@
 //! random-weight checkpoints of both types (full-vocabulary logits at every
 //! valid position of an unpadded and a left-padded row, per-layer hidden
 //! states, cached/uncached and batched-ragged agreement, greedy
-//! continuations; largest logit gap `1.5e-6`) and, on Flex/F32, against a
-//! locally generated Transformers 5.2.0 reference for the
-//! `google/gemma-3-4b-it` text tower (`tests/gemma_artifacts.rs`): strict
-//! loading with exactly the 439 vision-tower tensors ignored, every prompt
-//! position's full-vocabulary logits within `1.7e-4`, a left-padded batched
-//! prefill within `1.1e-4`, and all 32 cached greedy tokens identical.
-//! Real-checkpoint Metal/F16 acceptance and Gemma 2 real weights are
-//! separate gates.
+//! continuations; largest logit gap `1.5e-6`; the attention soft-cap also
+//! in its saturated regime) and, on Flex/F32, against locally generated
+//! Transformers 5.2.0 references for the `google/gemma-3-4b-it` text tower
+//! (`tests/gemma_artifacts.rs`): strict loading with exactly the 439
+//! vision-tower tensors ignored; on short prompts every position's
+//! full-vocabulary logits within `1.7e-4`, a left-padded batched prefill
+//! within `1.1e-4`, and all 32 cached greedy tokens identical; and on a
+//! 1237-token prompt that crosses the 1024-token sliding window, logits on
+//! both sides of the window within `1.2e-3` (Transformers' own eager and
+//! SDPA graphs differ by `3.2e-3` there), a cached run whose 29 sliding
+//! layers wrap their 1024-slot rings within `1.5e-4`, and all 8 greedy
+//! tokens identical. Contexts beyond 1237 tokens, real-checkpoint Metal/F32
+//! and F16 acceptance, and Gemma 2 real weights are not yet gated.
 
 mod architecture;
 mod checkpoint;
