@@ -1311,54 +1311,6 @@ fn prefill_timing() {
     }
 }
 
-#[test]
-#[ignore = "temporary profile"]
-fn prefill_profile_tmp() {
-    use super::{block_chunk_ranges, unit_lower_inverse};
-    let config = DeltaRuleConfig::default();
-    for (sequence, heads, kw, vw) in [(1024usize, 16usize, 128usize, 128usize), (8, 2, 4, 3)] {
-        let input = smooth_fixture(sequence, heads, kw, vw);
-        for _ in 0..3 {
-            let t = std::time::Instant::now();
-            let prepared =
-                PreparedDeltaRule::new(input.clone(), config.normalization_epsilon).unwrap();
-            let t_prep = t.elapsed();
-            let t = std::time::Instant::now();
-            let operands = ChunkOperands::new(&prepared, config.chunk_size);
-            let t_ops = t.elapsed();
-            let ranges = block_chunk_ranges(operands.chunks, CHUNKS_PER_BLOCK);
-            let t = std::time::Instant::now();
-            let block = ChunkBlock::new(&operands, ranges[0].clone());
-            let t_block = t.elapsed();
-            let chunk = operands.chunk;
-            let n = ranges[0].len();
-            let strict = Tensor::<TestBackend, 5>::random(
-                [n, 1, heads, chunk, chunk],
-                burn::tensor::Distribution::Uniform(-0.1, 0.1),
-                &Default::default(),
-            )
-            .tril(-1);
-            let t = std::time::Instant::now();
-            let _ = unit_lower_inverse(strict);
-            let t_inv = t.elapsed();
-            let state = Tensor::<TestBackend, 5>::zeros([1, 1, heads, kw, vw], &Default::default());
-            let mut outputs = Vec::new();
-            let t = std::time::Instant::now();
-            let _ = block.scan(state, &mut outputs);
-            let t_scan = t.elapsed();
-            let t = std::time::Instant::now();
-            let _ = chunked_gated_delta_rule(input.clone(), config).unwrap();
-            let t_total = t.elapsed();
-            let t = std::time::Instant::now();
-            let _ = recurrent_gated_delta_rule(input.clone(), config).unwrap();
-            let t_rec = t.elapsed();
-            println!(
-                "{sequence} {heads} {kw}: prep {t_prep:?} operands {t_ops:?} block {t_block:?} (inverse {t_inv:?}) scan {t_scan:?} total {t_total:?} recurrent {t_rec:?}"
-            );
-        }
-    }
-}
-
 /// Balanced blocks partition the chunks, respect the limit, and never strand a short tail.
 #[test]
 fn block_ranges_are_balanced_partitions() {
@@ -1419,27 +1371,41 @@ fn recurrence_is_preferred_only_for_short_tiny_segments() {
     );
 }
 
-/// The rank-2 product forms exactly the direct differences, so the decay matrix is bit-identical.
+/// Every decay entry is the single rounded subtraction, bit-identical to the direct formula.
+///
+/// The input is the strided heads-major view of a token-minor
+/// `[chunks, batch, C, heads, 1]` tensor, as in the chunked rule, with
+/// cumulative log decays reaching about `-120` so that any rounding of `G`
+/// before the subtraction (as a TF32 matrix product would do) is visible
+/// after `exp`.
 #[test]
 fn causal_decay_matrix_is_exactly_the_masked_exponential() {
     let device = Default::default();
-    let cumulative = Tensor::<TestBackend, 1, Int>::arange(0..2 * 3 * 7, &device)
-        .float()
-        .mul_scalar(0.731)
-        .sin()
-        .mul_scalar(-3.0)
-        .reshape([2, 1, 3, 7, 1])
-        .cumsum(3);
+    let (chunks, batch, width, heads) = (2, 2, 7, 3);
+    let token_minor =
+        Tensor::<TestBackend, 1, Int>::arange(0..(chunks * batch * width * heads) as i64, &device)
+            .float()
+            .mul_scalar(0.731)
+            .sin()
+            .abs()
+            .mul_scalar(-30.0)
+            .reshape([chunks, batch, width, heads, 1])
+            .cumsum(2);
+    let cumulative = token_minor.swap_dims(2, 3);
     let direct = (cumulative.clone() - cumulative.clone().swap_dims(3, 4))
         .tril(0)
         .exp()
         .tril(0);
+    let actual = causal_decay_matrix(cumulative.clone());
+    assert_eq!(actual.dims(), [chunks, batch, heads, width, width]);
     assert_eq!(
-        causal_decay_matrix(cumulative)
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap(),
+        actual.into_data().to_vec::<f32>().unwrap(),
         direct.into_data().to_vec::<f32>().unwrap()
+    );
+    let deepest = cumulative.min().into_scalar();
+    assert!(
+        deepest < -100.0,
+        "fixture must exercise large |G|: {deepest}"
     );
 }
 

@@ -1288,24 +1288,49 @@ impl<B: Backend> ChunkBlock<B> {
 
 /// Builds `D[i, j] = exp(G_i - G_j)` for `i >= j` and zero above the diagonal.
 ///
-/// `cumulative` holds `G` as `[.., C, 1]`. The differences `G_i - G_j` are the
-/// rank-2 product `[G_i, 1] · [1, -G_j]`, evaluated by one dense matrix
-/// product instead of a doubly broadcast subtraction (which Flex can only walk
-/// element by element). It is exactly the subtraction: both products are
-/// exact, so the accumulated sum is the single correctly rounded `G_i - G_j`
-/// in any summation order. Filling the future with `-inf` before `exp` both
-/// zeroes it and keeps its positive differences from overflowing.
+/// `cumulative` holds `G` as `[chunks, batch, heads, C, 1]` with any strides;
+/// the result is dense `[chunks, batch, heads, C, C]`.
+///
+/// # Exactness
+///
+/// Every `G_i - G_j` is one correctly rounded F32 subtraction on every
+/// backend. The difference is deliberately never formed by a matrix product:
+/// accelerator GEMM kernels may round F32 operands to TF32 (a 10-bit
+/// mantissa), and `exp` turns that absolute error in `G` (about `|G| / 2^11`,
+/// with `|G|` reaching ~100 inside a 64-token chunk) into a relative error of
+/// several percent in `D`.
+///
+/// # Layout
+///
+/// The `M = chunks * batch * heads` matrices are flattened to `[M * C, C]`
+/// rows: row `(m, i)` subtracts the dense row `(G_(m, j))_j` from the
+/// broadcast scalar `G_(m, i)`. The dense rows come from a leading-axis repeat
+/// (block copies) and the causal mask is materialized at full shape the same
+/// way, so the subtraction, mask, and exponential all run on dense operands;
+/// a doubly broadcast 5-D subtraction or a broadcast mask would fall back to
+/// scalar index walks on Flex. Filling the future with `-inf` before `exp`
+/// zeroes it, keeps its positive differences from overflowing, and keeps the
+/// gradient finite there.
 fn causal_decay_matrix<B: Backend>(cumulative: Tensor<B, 5>) -> Tensor<B, 5> {
     let [chunks, batch, heads, width, _] = cumulative.dims();
+    let matrices = chunks * batch * heads;
     let device = cumulative.device();
-    let ones = Tensor::<B, 5>::ones([chunks, batch, heads, width, 1], (&device, DType::F32));
-    let rows = Tensor::cat(vec![cumulative.clone(), ones.clone()], 4);
-    let columns = Tensor::cat(vec![ones, cumulative.neg()], 4).swap_dims(3, 4);
+    // `[M * C, 1]`: entry `(m, i)` is `G_i` of matrix `m`.
+    let rows = cumulative.reshape([matrices * width, 1]);
+    // `[M * C, C]`: entry `((m, i), j)` is `G_j` of matrix `m`, for every `i`.
+    let columns = rows
+        .clone()
+        .reshape([matrices, 1, width])
+        .repeat_dim(1, width)
+        .reshape([matrices * width, width]);
     let future = Tensor::<B, 2, Bool>::tril_mask([width, width], 0, &device)
-        .reshape([1, 1, 1, width, width]);
-    rows.matmul(columns)
+        .reshape([1, width * width])
+        .repeat_dim(0, matrices)
+        .reshape([matrices * width, width]);
+    (rows - columns)
         .mask_fill(future, f32::NEG_INFINITY)
         .exp()
+        .reshape([chunks, batch, heads, width, width])
 }
 
 /// Returns `(I + L)^-1` for strictly lower-triangular `L` over the last two axes.
