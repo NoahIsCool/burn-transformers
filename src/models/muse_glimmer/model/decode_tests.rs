@@ -2,7 +2,7 @@
 
 use burn::{
     backend::Flex,
-    tensor::{Bool, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -542,6 +542,99 @@ fn bounded_cached_prefill_matches_unbounded_execution() {
         .into_data()
         .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
     assert_eq!(bounded_state.lengths(), unbounded_state.lengths());
+}
+
+/// Two sliding layers, so every layer reads `[ring history | fresh block]`.
+fn sliding_only_config() -> MuseGlimmerTextConfig {
+    MuseGlimmerTextConfig {
+        num_hidden_layers: 2,
+        layer_types: vec![MuseGlimmerLayerType::SlidingAttention; 2],
+        layer_rope_theta: vec![10_000.0; 2],
+        ..tiny_config()
+    }
+}
+
+/// A long cached prefill over a full ring runs under a window-sized score bound.
+///
+/// Regression (review DSM-R2): cached sliding layers planned and scored all
+/// `H + Q` keys. Here `W = H = 3` and a 16-token cached prefill follows a
+/// 3-token prompt; the policy admits 2-row chunks of at most
+/// `H + W - 1 + 2 = 7` keys (28 score elements over 2 query heads), while
+/// one row against all 19 keys needs 38, so the all-keys plan was rejected.
+/// Logits must match the unbounded model and the stateless forward.
+#[test]
+fn cached_ring_prefill_runs_under_a_window_sized_score_bound() {
+    let device = Default::default();
+    let unbounded = initialized_model::<TestBackend>(sliding_only_config(), &device)
+        .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+        .expect("unbounded fixture");
+    let bounded = unbounded
+        .clone()
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(2, 28))
+        .expect("window-sized chunks");
+    let prompt = vec![3_i32, 17, 5];
+    let suffix = (0..16_i32)
+        .map(|step| (step * 7 + 1) % 32)
+        .collect::<Vec<_>>();
+    let tokens = |values: &[i32]| {
+        Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(values.to_vec(), [1, values.len()]),
+            &device,
+        )
+    };
+    let all = ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        ..Default::default()
+    };
+    let run = |model: &MuseGlimmerForCausalLm<TestBackend>| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 19).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: tokens(&prompt),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect("prompt prefill");
+        let logits = model
+            .decode(
+                DecodeInput {
+                    token_ids: tokens(&suffix),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &all,
+            )
+            .expect("cached prefill within the window-sized bound")
+            .logits;
+        assert_eq!(state.lengths(), &[19]);
+        logits
+    };
+    let expected = run(&unbounded);
+    run(&bounded)
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(2e-6));
+    let stateless = unbounded
+        .forward(
+            CausalLmInput {
+                token_ids: tokens(&[prompt.clone(), suffix.clone()].concat()),
+                token_mask: None,
+                position_ids: None,
+            },
+            &all,
+        )
+        .unwrap()
+        .logits
+        .narrow(1, prompt.len(), suffix.len());
+    expected
+        .into_data()
+        .assert_approx_eq::<f32>(&stateless.into_data(), Tolerance::absolute(2e-5));
 }
 
 /// Interior holes and ordinary padding retain semantic cached/stateless parity.

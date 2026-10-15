@@ -26,11 +26,14 @@
 //! # Bounded execution
 //!
 //! Every call evaluates synchronized query chunks planned by the model's
-//! [`AttentionExecutionPolicy`]. Each chunk slices exactly the keys its rows
-//! may see: the causal prefix for global layers (keys after the chunk's last
-//! row are never scored) and the union of row windows for unpadded local
-//! layers. Every score, mask, and probability plane therefore stays within the
-//! policy's score bound, including single-chunk calls. Masks are built from
+//! [`AttentionExecutionPolicy`]. Each chunk slices the keys its rows may see:
+//! the causal prefix for global layers (keys after the chunk's last row are
+//! never scored), the union of row windows for unpadded local layers, and,
+//! for cached local layers over `[ring history | fresh block]`, the window
+//! union once no chunk row can see history (the whole ring before that; see
+//! `schedule::ring_chunk_keys`). Every score, mask, and probability plane
+//! therefore stays within the policy's score bound, including single-chunk
+//! calls. Masks are built from
 //! token positions (valid-token ordinals with padding, so holes consume no
 //! window capacity), one `[batch, 1, rows, keys]` plane per chunk. Autodiff
 //! evaluates one call instead, because its tape retains every chunk anyway.
@@ -76,7 +79,7 @@ use crate::{
     },
 };
 
-use super::{MuseGlimmerLayerType, MuseGlimmerTextConfig};
+use super::{MuseGlimmerLayerType, MuseGlimmerTextConfig, schedule::ring_chunk_keys};
 use crate::models::{
     config::{PartialRotary, RopeContext},
     shared::{
@@ -264,25 +267,16 @@ impl<B: Backend> MuseGlimmerAttention<B> {
         .with_window(window);
         let policy = self.effective_policy(&device);
         // Column-indexed window slicing is exact only without padding holes.
-        let indexed_window = if token_mask.is_none() { window } else { None };
-        let bounded_keys = indexed_window
-            .and_then(|window| {
-                window.checked_add(
-                    policy
-                        .maximum_query_tokens(query_sequence)
-                        .saturating_sub(1),
-                )
-            })
-            .map_or(key_sequence, |bound| bound.min(key_sequence));
-        let plan = policy.plan(batch, self.query_heads, query_sequence, bounded_keys)?;
-        let chunks = plan_muse_attention_chunks(
+        let slicing = MuseKeySlicing::Aligned {
+            window: if token_mask.is_none() { window } else { None },
+        };
+        let chunks = plan_attention_chunks(
             policy,
-            plan,
             batch,
             self.query_heads,
             query_sequence,
             key_sequence,
-            indexed_window,
+            slicing,
         )?;
         self.chunked_context(projection, &chunks, &visibility)
     }
@@ -486,17 +480,142 @@ struct MuseAttentionChunk {
     plane_elements: usize,
 }
 
-/// Expands one policy plan into every concrete, causally trimmed Muse chunk.
+/// Key geometry of one Muse attention call, which fixes every chunk's key slice.
+///
+/// Every variant has queries `0..Q` and keys `0..K` with `K >= Q`; the chunk
+/// planner validates each slice against the plan's bound and the policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MuseKeySlicing<'a> {
+    /// Keys end where the queries end: query row `i` sits at key column
+    /// `K - Q + i` (stateless self-attention, or an unpadded cached suffix).
+    /// With a column-indexed `window`, a chunk reads the union of its rows'
+    /// windows ([`aligned_key_range`]); without one, its causal prefix
+    /// `0..K - Q + end`.
+    Aligned {
+        /// Local window in key columns, or `None` for causal-prefix slicing.
+        window: Option<usize>,
+    },
+    /// A cached sliding layer: `K - Q` ring slots in *physical* (not
+    /// chronological) order followed by the `Q` fresh block entries, so fresh
+    /// entry `k` of every row is key column `K - Q + k`. A chunk reads the
+    /// whole ring only while one of its rows can still see history, and
+    /// otherwise exactly its rows' window union (the Verus-verified
+    /// [`ring_chunk_keys`]).
+    RingHistory {
+        /// Local window `W > 0` in positions.
+        window: usize,
+    },
+    /// Position-ordered cached keys with verified causal prefix bounds
+    /// (full-storage cache reads).
+    PrefixLimits {
+        /// Nondecreasing bounds: query rows `0..=i` need only keys `0..limits[i]`.
+        limits: &'a [usize],
+    },
+}
+
+impl MuseKeySlicing<'_> {
+    /// Returns the widest key slice of any chunk of at most `maximum_query` rows.
+    ///
+    /// The policy sizes its chunks with this bound, and the planner rejects
+    /// any realized slice that exceeds it, so the bound is never trusted
+    /// blindly. Aligned windows need `W + q - 1` keys, ring chunks at most
+    /// `(K - Q) + W - 1 + q`, and causal prefixes up to all `K` keys.
+    fn planning_bound(self, queries: usize, keys: usize, maximum_query: usize) -> usize {
+        let bound = match self {
+            Self::Aligned {
+                window: Some(window),
+            } => window.saturating_add(maximum_query.saturating_sub(1)),
+            Self::Aligned { window: None } | Self::PrefixLimits { .. } => keys,
+            Self::RingHistory { window } => keys
+                .saturating_sub(queries)
+                .saturating_add(window.saturating_sub(1))
+                .saturating_add(maximum_query),
+        };
+        bound.min(keys)
+    }
+
+    /// Returns the key slice that query rows `rows` (non-empty, in `0..Q`) may see.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] for a zero window, an empty or
+    /// out-of-range query range, or prefix limits that do not cover `Q` rows
+    /// within `1..=K`, and [`Error::Shape`] when `K < Q`.
+    fn key_range(self, queries: usize, keys: usize, rows: Range<usize>) -> Result<Range<usize>> {
+        let offset = keys.checked_sub(queries).ok_or_else(|| {
+            Error::shape(
+                "muse_glimmer.attention_alignment",
+                "key sequence at least as long as query sequence",
+                format!("query={queries}, key={keys}"),
+            )
+        })?;
+        if rows.is_empty() || rows.end > queries {
+            return Err(Error::configuration(
+                "muse_glimmer.attention_chunk",
+                "query range must be non-empty and in bounds",
+            ));
+        }
+        match self {
+            Self::Aligned {
+                window: Some(window),
+            } => aligned_key_range(queries, keys, rows, window),
+            // Keys at or after `K - Q + end` follow every query of the chunk.
+            Self::Aligned { window: None } => Ok(0..offset + rows.end),
+            Self::RingHistory { window } => (window > 0)
+                .then(|| ring_chunk_keys(offset, rows.start, rows.end, window))
+                .flatten()
+                .map(|(start, end)| start..end)
+                .ok_or_else(|| {
+                    Error::configuration(
+                        "muse_glimmer.attention_chunk",
+                        "a ring window must be non-zero",
+                    )
+                }),
+            Self::PrefixLimits { limits } => match limits.get(rows.end - 1) {
+                Some(&limit) if limits.len() == queries && (1..=keys).contains(&limit) => {
+                    Ok(0..limit)
+                }
+                _ => Err(Error::configuration(
+                    "muse_glimmer.attention_chunk",
+                    format!(
+                        "{} key limits must cover {queries} query rows within 1..={keys}",
+                        limits.len()
+                    ),
+                )),
+            },
+        }
+    }
+}
+
+/// Plans the policy's query chunks for one call and expands them with `slicing`.
+///
+/// The plan is sized with [`MuseKeySlicing::planning_bound`] for the
+/// policy's largest chunk, then [`plan_muse_attention_chunks`] realizes and
+/// audits every chunk against it.
+fn plan_attention_chunks(
+    policy: AttentionExecutionPolicy,
+    batch: usize,
+    heads: usize,
+    queries: usize,
+    keys: usize,
+    slicing: MuseKeySlicing<'_>,
+) -> Result<Vec<MuseAttentionChunk>> {
+    let bound = slicing.planning_bound(queries, keys, policy.maximum_query_tokens(queries));
+    let plan = policy.plan(batch, heads, queries, bound)?;
+    plan_muse_attention_chunks(policy, plan, batch, heads, queries, keys, slicing)
+}
+
+/// Expands one policy plan into every concrete, trimmed Muse chunk.
 ///
 /// Muse attention is always causal with queries bottom-right aligned to the
-/// keys (`K >= Q`). Query chunks come from [`AttentionExecutionPlan::query_ranges`].
-/// Global attention scores only the causal prefix `0..K - Q + end` of a chunk
-/// ending at row `end`; later keys are excluded for every row of the chunk.
-/// Unpadded local attention narrows each chunk to the union of its row
-/// windows ([`sliding_window_key_range`]). The function rejects any concrete
-/// key slice wider than the bound used to choose the chunk size and validates
-/// every realized plane against the policy, so a successful return proves
-/// that each score, mask, and probability plane is bounded.
+/// keys (`K >= Q`). Query chunks come from [`AttentionExecutionPlan::query_ranges`],
+/// and each chunk's keys from `slicing` ([`MuseKeySlicing::key_range`]):
+/// global attention scores only the causal prefix of the chunk's last row,
+/// and local attention only the union of its rows' windows. The function
+/// rejects any concrete key slice wider than the bound used to choose the
+/// chunk size and validates every realized plane against the policy, so a
+/// successful return proves that each score, mask, and probability plane is
+/// bounded.
 #[allow(clippy::too_many_arguments)]
 fn plan_muse_attention_chunks(
     policy: AttentionExecutionPolicy,
@@ -505,7 +624,7 @@ fn plan_muse_attention_chunks(
     heads: usize,
     query_sequence: usize,
     key_sequence: usize,
-    indexed_window: Option<usize>,
+    slicing: MuseKeySlicing<'_>,
 ) -> Result<Vec<MuseAttentionChunk>> {
     if query_sequence != plan.query_sequence() {
         return Err(Error::configuration(
@@ -522,22 +641,16 @@ fn plan_muse_attention_chunks(
             "key sequence must be non-zero",
         ));
     }
-    let offset = key_sequence.checked_sub(query_sequence).ok_or_else(|| {
-        Error::shape(
+    if key_sequence < query_sequence {
+        return Err(Error::shape(
             "muse_glimmer.attention_alignment",
             "key sequence at least as long as query sequence",
             format!("query={query_sequence}, key={key_sequence}"),
-        )
-    })?;
+        ));
+    }
     let mut chunks = Vec::with_capacity(plan.chunk_count());
     for query_range in plan.query_ranges() {
-        let key_range = match indexed_window {
-            Some(window) => {
-                aligned_key_range(query_sequence, key_sequence, query_range.clone(), window)?
-            }
-            // Keys at or after `K - Q + end` follow every query of the chunk.
-            None => 0..offset + query_range.end,
-        };
+        let key_range = slicing.key_range(query_sequence, key_sequence, query_range.clone())?;
         if key_range.len() > plan.key_sequence_bound() {
             return Err(Error::BackendCapability(format!(
                 "Muse attention key union {} exceeds planned bound {} for query range {query_range:?}",

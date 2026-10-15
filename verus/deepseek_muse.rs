@@ -22,7 +22,11 @@
 //!   without underflow, and the last layer is always global;
 //! * `group_slots` gives every layer the number of earlier layers of its kind,
 //!   so each cache group's slots are dense and strictly increasing in layer
-//!   order (an injective schedule).
+//!   order (an injective schedule);
+//! * `ring_chunk_keys` returns, for cached sliding attention over
+//!   `[ring history | fresh block]`, a key slice that contains every fresh key
+//!   visible to the chunk's rows, the whole ring while any row can still see
+//!   history, no history otherwise, and at most `H + W - 1 + rows` keys.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Burn tensor
 //! programs driven by these plans (gathers, scatters, cache writes, and

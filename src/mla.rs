@@ -1265,6 +1265,11 @@ impl<B: Backend> PositionalVisibility<B> {
         self.key_limits[rows.end - 1]
     }
 
+    /// Returns the host prefix bounds: query rows `0..=i` see only keys `0..limits[i]`.
+    pub(crate) fn key_limits(&self) -> &[usize] {
+        &self.key_limits
+    }
+
     /// Builds `[batch, heads, rows, keys]` exclusions (`true` = excluded) for one chunk.
     ///
     /// Ranges index the full query and key axes and must lie inside them; the

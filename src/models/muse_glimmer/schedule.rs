@@ -1,4 +1,6 @@
-//! Dependency-free Muse-Glimmer layer schedules, verified in place by Verus.
+//! Dependency-free Muse-Glimmer layer schedules and cached key geometry, verified in place by Verus.
+//!
+//! # Layer schedule
 //!
 //! Muse counts its hybrid schedule *backward* from the last layer: of `n`
 //! layers, layer `i` is a global (full-attention, NoPE) layer exactly when
@@ -9,8 +11,29 @@
 //! needs its dense *slot* inside its group: the number of earlier layers of
 //! the same kind. [`group_slots`](crate::models::muse_glimmer::schedule::group_slots) computes that map; its proof establishes
 //! that each group's slots are exactly `0, 1, …` in layer order, hence
-//! injective and dense. Both functions are checked through
-//! `verus/deepseek_muse.rs`.
+//! injective and dense.
+//!
+//! # Ring key slices
+//!
+//! A batched cached step evaluates a `[B, T]` block whose query `k` of row
+//! `b` sits at position `L_b + k`. Sliding layers read their ring history in
+//! physical slot order (not chronologically) and append the step's fresh
+//! block, so the keys are `[history H | block T]` and fresh entry `j` of
+//! *every* row is key column `H + j`. Under a window of `W` positions, query
+//! `k` sees `L_b + k - W < p <= L_b + k`: fresh entries `k - W < j <= k`
+//! and, only while `k + 1 < W`, some history slots. A query chunk `s..e`
+//! therefore needs exactly
+//!
+//! ```text
+//! keys = H + s + 1 - W .. H + e     if s + 1 >= W   (no history)
+//!      = 0             .. H + e     otherwise       (the whole ring)
+//! ```
+//!
+//! which is row-independent and at most `H + W - 1 + (e - s)` keys wide
+//! ([`ring_chunk_keys`](crate::models::muse_glimmer::schedule::ring_chunk_keys)),
+//! instead of every key of the step.
+//!
+//! All three functions are checked through `verus/deepseek_muse.rs`.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -49,6 +72,14 @@ pub proof fn lemma_count_bounded(kinds: Seq<bool>, kind: bool)
     if kinds.len() > 0 {
         lemma_count_bounded(kinds.drop_last(), kind);
     }
+}
+
+/// Fresh block entry `j` is visible to block query `k` under a `window`-position window.
+///
+/// Both sit in the same row at positions `L_b + j` and `L_b + k`, so the
+/// causal and window rules reduce to `k - window < j <= k`.
+pub open spec fn fresh_visible(k: int, j: int, window: int) -> bool {
+    0 <= j <= k && k < j + window
 }
 
 } // verus!
@@ -124,6 +155,49 @@ pub(crate) fn group_slots(global: &[bool]) -> Vec<usize> {
         index += 1;
     }
     slots
+}
+
+/// Returns the key slice `(lo, hi)` that block query rows `start..end` need over `[history | block]`.
+///
+/// See the module documentation: rows at or past `window - 1` skip the ring
+/// history and read exactly the union of their windows; earlier rows read
+/// the whole history (its slots are in ring order, so no narrower contiguous
+/// slice is exact); and every slice ends at the chunk's last fresh entry.
+/// Requires `start < end` and `window > 0`; returns `None` only when
+/// `history + end` overflows `usize`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(range =>
+    requires
+        start < end,
+        window > 0,
+    ensures
+        match range {
+            Some((lo, hi)) => {
+                &&& hi == history + end
+                &&& lo <= hi
+                &&& forall|k: int, j: int| start <= k < end && #[trigger] fresh_visible(k, j, window as int)
+                        ==> lo <= history + j && history + j < hi
+                &&& (start + 1 < window ==> lo == 0)
+                &&& (start + 1 >= window ==> history <= lo && lo == history + start + 1 - window)
+                &&& hi - lo <= history + window - 1 + (end - start)
+            },
+            None => history + end > usize::MAX,
+        },
+))]
+pub(crate) fn ring_chunk_keys(
+    history: usize,
+    start: usize,
+    end: usize,
+    window: usize,
+) -> Option<(usize, usize)> {
+    let hi = history.checked_add(end)?;
+    // `start < end` keeps `start + 1` in range, and `lo <= history + start < hi`.
+    let lo = if start >= window - 1 {
+        history + (start + 1 - window)
+    } else {
+        0
+    };
+    Some((lo, hi))
 }
 
 #[cfg(test)]

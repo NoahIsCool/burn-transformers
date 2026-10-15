@@ -608,7 +608,7 @@ fn stress_muse_32k_attention_envelope_on_metal() {
         MUSE_32K_STRESS_HEADS,
         MUSE_32K_STRESS_SEQUENCE,
         MUSE_32K_STRESS_SEQUENCE,
-        None,
+        MuseKeySlicing::Aligned { window: None },
     )
     .expect("audit all global chunks");
     assert_eq!(global_chunks.len(), 512);
@@ -636,7 +636,9 @@ fn stress_muse_32k_attention_envelope_on_metal() {
         MUSE_32K_STRESS_HEADS,
         MUSE_32K_STRESS_SEQUENCE,
         MUSE_32K_STRESS_SEQUENCE,
-        Some(MUSE_32K_STRESS_WINDOW),
+        MuseKeySlicing::Aligned {
+            window: Some(MUSE_32K_STRESS_WINDOW),
+        },
     )
     .expect("audit all sliding chunks");
     assert_eq!(local_chunks.len(), 64);
@@ -875,7 +877,7 @@ fn stress_muse_32k_attention_envelope_on_metal() {
         MUSE_32K_STRESS_HEADS,
         GLOBAL_QUERY_ROWS,
         MUSE_32K_STRESS_SEQUENCE,
-        None,
+        MuseKeySlicing::Aligned { window: None },
     )
     .expect("audit representative global suffix");
     assert_eq!(
@@ -930,7 +932,9 @@ fn stress_muse_32k_attention_envelope_on_metal() {
         MUSE_32K_STRESS_HEADS,
         LOCAL_QUERY_ROWS,
         MUSE_32K_STRESS_SEQUENCE,
-        Some(MUSE_32K_STRESS_WINDOW),
+        MuseKeySlicing::Aligned {
+            window: Some(MUSE_32K_STRESS_WINDOW),
+        },
     )
     .expect("audit representative sliding suffix");
     assert_eq!(representative_local_chunks.len(), 2);
@@ -1309,9 +1313,16 @@ fn official_32k_chunk_schedules_bound_every_realized_plane() {
     let global_plan = policy
         .plan(1, HEADS, SEQUENCE, SEQUENCE)
         .expect("official global plan");
-    let global =
-        plan_muse_attention_chunks(policy, global_plan, 1, HEADS, SEQUENCE, SEQUENCE, None)
-            .expect("expand global chunks");
+    let global = plan_muse_attention_chunks(
+        policy,
+        global_plan,
+        1,
+        HEADS,
+        SEQUENCE,
+        SEQUENCE,
+        MuseKeySlicing::Aligned { window: None },
+    )
+    .expect("expand global chunks");
     assert_eq!(global.len(), 512);
     assert_eq!(global.first().unwrap().query_range, 0..64);
     assert_eq!(global.last().unwrap().query_range, 32_704..32_768);
@@ -1347,7 +1358,9 @@ fn official_32k_chunk_schedules_bound_every_realized_plane() {
         HEADS,
         SEQUENCE,
         SEQUENCE,
-        Some(WINDOW),
+        MuseKeySlicing::Aligned {
+            window: Some(WINDOW),
+        },
     )
     .expect("expand local chunks");
     assert_eq!(local.len(), 64);
@@ -1370,34 +1383,232 @@ fn official_32k_chunk_schedules_bound_every_realized_plane() {
     assert_contiguous_query_coverage(&local, SEQUENCE);
 }
 
+/// Cached ring chunks read history only while a row can see it, then only their window union.
+///
+/// Regression (review DSM-R2): cached sliding layers planned every chunk
+/// against all `H + Q` keys of `[ring history | fresh block]`. With `W = 3`,
+/// `H = 3`, and 8-row chunks of a 32-token cached prefill, the first chunk
+/// must read the whole ring plus its fresh prefix and every later chunk
+/// exactly `W - 1 + 8` fresh keys.
+#[test]
+fn cached_ring_chunks_skip_history_once_rows_pass_the_window() {
+    let policy = AttentionExecutionPolicy::query_chunked(8, 1 << 20);
+    let chunks = plan_attention_chunks(
+        policy,
+        1,
+        2,
+        32,
+        35,
+        MuseKeySlicing::RingHistory { window: 3 },
+    )
+    .expect("ring chunks");
+    let ranges = chunks
+        .iter()
+        .map(|chunk| (chunk.query_range.clone(), chunk.key_range.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ranges,
+        [
+            (0..8, 0..11),
+            (8..16, 9..19),
+            (16..24, 17..27),
+            (24..32, 25..35)
+        ]
+    );
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.plane_shape == [1, 2, 8, chunk.key_range.len()])
+    );
+    // Window one: every query sees only its own fresh key.
+    let own = plan_attention_chunks(
+        policy,
+        1,
+        2,
+        8,
+        12,
+        MuseKeySlicing::RingHistory { window: 1 },
+    )
+    .expect("unit window");
+    assert_eq!(own[0].key_range, 4..12);
+    // A fresh prefill (no history) reads only fresh keys.
+    let fresh = plan_attention_chunks(
+        policy,
+        1,
+        2,
+        16,
+        16,
+        MuseKeySlicing::RingHistory { window: 4 },
+    )
+    .expect("fresh ring prefill");
+    assert_eq!(fresh[0].key_range, 0..8);
+    assert_eq!(fresh[1].key_range, 5..16);
+    let zero = plan_attention_chunks(
+        policy,
+        1,
+        2,
+        4,
+        6,
+        MuseKeySlicing::RingHistory { window: 0 },
+    )
+    .expect_err("zero windows are rejected");
+    assert!(zero.to_string().contains("non-zero"), "{zero}");
+}
+
+/// A released-geometry 32K cached prefill on a full 2048-slot ring scores ~13x fewer keys.
+///
+/// The old cached path planned all `2048 + 32768` keys per chunk; ring
+/// slicing plans `H + W - 1 + q` and realizes exactly the window union once
+/// a chunk starts at or past row `W - 1`.
+#[test]
+fn released_cached_ring_prefill_scores_only_window_unions() {
+    /// Released query-head count.
+    const HEADS: usize = 32;
+    /// Released local window, also the ring history width of a full ring.
+    const WINDOW: usize = 2048;
+    /// Cached prefill length.
+    const QUERIES: usize = 32_768;
+    let policy = AttentionExecutionPolicy::default();
+    let keys = WINDOW + QUERIES;
+    let chunks = plan_attention_chunks(
+        policy,
+        1,
+        HEADS,
+        QUERIES,
+        keys,
+        MuseKeySlicing::RingHistory { window: WINDOW },
+    )
+    .expect("released ring chunks");
+    assert_contiguous_query_coverage(&chunks, QUERIES);
+    for chunk in &chunks {
+        let (start, end) = (chunk.query_range.start, chunk.query_range.end);
+        let expected = if start + 1 >= WINDOW {
+            WINDOW + start + 1 - WINDOW..WINDOW + end
+        } else {
+            0..WINDOW + end
+        };
+        assert_eq!(chunk.key_range, expected, "chunk {start}..{end}");
+        assert!(chunk.plane_elements <= 1 << 26);
+    }
+    // Measured: 73 chunks of 455 rows, widest slice 4323 keys, 13.6x fewer scores.
+    let scored = chunks
+        .iter()
+        .map(|chunk| chunk.plane_elements)
+        .sum::<usize>();
+    let untrimmed = HEADS * QUERIES * keys;
+    assert!(
+        scored * 13 < untrimmed,
+        "ring slicing must remove >92% of the score work"
+    );
+    let untrimmed_chunks = policy
+        .plan(1, HEADS, QUERIES, keys)
+        .expect("all-key plan")
+        .chunk_count();
+    assert!(
+        chunks.len() * 7 < untrimmed_chunks,
+        "{} ring chunks versus {untrimmed_chunks} all-key chunks",
+        chunks.len()
+    );
+}
+
+/// Prefix-limit slicing reads each chunk's verified causal prefix and rejects bad limits.
+#[test]
+fn cached_prefix_limit_chunks_follow_the_verified_limits() {
+    let policy = AttentionExecutionPolicy::query_chunked(2, 1 << 20);
+    let limits = [3, 4, 5, 6];
+    let chunks = plan_attention_chunks(
+        policy,
+        1,
+        2,
+        4,
+        6,
+        MuseKeySlicing::PrefixLimits { limits: &limits },
+    )
+    .expect("prefix chunks");
+    assert_eq!(chunks[0].key_range, 0..4);
+    assert_eq!(chunks[1].key_range, 0..6);
+    // Too few limits, a limit beyond the keys, and a zero limit ending a chunk.
+    for bad in [&[3, 4, 5][..], &[3, 4, 5, 7], &[3, 0, 5, 6]] {
+        let error = plan_attention_chunks(
+            policy,
+            1,
+            2,
+            4,
+            6,
+            MuseKeySlicing::PrefixLimits { limits: bad },
+        )
+        .expect_err("limits must cover every query within the keys");
+        assert!(error.to_string().contains("key limits"), "{error}");
+    }
+}
+
 /// Concrete expansion rejects stale plans and underestimated local unions.
 #[test]
 fn chunk_schedule_fails_closed_on_plan_drift_and_key_underestimates() {
     let policy = AttentionExecutionPolicy::query_chunked(4, 1024);
     let plan = policy.plan(1, 2, 8, 4).expect("small plan");
-    let query_drift = plan_muse_attention_chunks(policy, plan, 1, 2, 7, 8, None)
-        .expect_err("query geometry must match the immutable plan");
+    let query_drift = plan_muse_attention_chunks(
+        policy,
+        plan,
+        1,
+        2,
+        7,
+        8,
+        MuseKeySlicing::Aligned { window: None },
+    )
+    .expect_err("query geometry must match the immutable plan");
     assert!(query_drift.to_string().contains("covers 8 query rows"));
 
-    let underestimated = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 8, Some(5))
-        .expect_err("later local union is wider than the declared bound");
+    let underestimated = plan_muse_attention_chunks(
+        policy,
+        plan,
+        1,
+        2,
+        8,
+        8,
+        MuseKeySlicing::Aligned { window: Some(5) },
+    )
+    .expect_err("later local union is wider than the declared bound");
     assert!(
         underestimated
             .to_string()
             .contains("exceeds planned bound 4")
     );
 
-    let plane_drift =
-        plan_muse_attention_chunks(AttentionExecutionPolicy::Unbounded, plan, 1, 3, 8, 8, None)
-            .expect_err("a looser runtime policy cannot widen an immutable plan");
+    let plane_drift = plan_muse_attention_chunks(
+        AttentionExecutionPolicy::Unbounded,
+        plan,
+        1,
+        3,
+        8,
+        8,
+        MuseKeySlicing::Aligned { window: None },
+    )
+    .expect_err("a looser runtime policy cannot widen an immutable plan");
     assert!(plane_drift.to_string().contains("immutable execution plan"));
 
-    let misaligned = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 4, None)
-        .expect_err("causal queries are the suffix of their keys");
+    let misaligned = plan_muse_attention_chunks(
+        policy,
+        plan,
+        1,
+        2,
+        8,
+        4,
+        MuseKeySlicing::Aligned { window: None },
+    )
+    .expect_err("causal queries are the suffix of their keys");
     assert!(misaligned.to_string().contains("at least as long"));
 
-    let empty_keys = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 0, None)
-        .expect_err("empty key storage must fail before slicing");
+    let empty_keys = plan_muse_attention_chunks(
+        policy,
+        plan,
+        1,
+        2,
+        8,
+        0,
+        MuseKeySlicing::Aligned { window: None },
+    )
+    .expect_err("empty key storage must fail before slicing");
     assert!(
         empty_keys
             .to_string()
@@ -1930,8 +2141,18 @@ fn single_chunk_local_attention_respects_the_score_bound() {
     let heads = model.config().num_attention_heads;
     let policy = AttentionExecutionPolicy::query_chunked(512, heads * WINDOW);
     let plan = policy.plan(1, heads, 1, WINDOW).unwrap();
-    let chunks =
-        plan_muse_attention_chunks(policy, plan, 1, heads, 1, WINDOW + 1, Some(WINDOW)).unwrap();
+    let chunks = plan_muse_attention_chunks(
+        policy,
+        plan,
+        1,
+        heads,
+        1,
+        WINDOW + 1,
+        MuseKeySlicing::Aligned {
+            window: Some(WINDOW),
+        },
+    )
+    .unwrap();
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].key_range, 1..WINDOW + 1);
     assert_eq!(chunks[0].plane_elements, heads * WINDOW);

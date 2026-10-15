@@ -22,7 +22,10 @@
 //! slot order and append the step's tokens as a second segment. Queries sit
 //! at cache slots `L_b + k`; visibility (causality, the window, validity) is
 //! derived from key positions, and stale invalid slots are zeroed before the
-//! value product. Long cached prefills run in score-bounded query chunks.
+//! value product. Long cached prefills run in score-bounded query chunks:
+//! global chunks score their verified causal key prefix, and local chunks
+//! score the whole ring only while one of their rows can still see history,
+//! then exactly their rows' window union (`schedule::ring_chunk_keys`).
 //!
 //! Token IDs and explicit positions are validated only at valid columns, so
 //! packing overwrites padding entries with token and position zero
@@ -59,7 +62,8 @@ use crate::{
 };
 
 use super::{
-    INPUT_NAMES, MuseAttentionChunk, MuseAttentionProjection, MuseGlimmerForCausalLm, RotaryTables,
+    INPUT_NAMES, MuseAttentionProjection, MuseGlimmerForCausalLm, MuseKeySlicing, RotaryTables,
+    plan_attention_chunks,
 };
 use crate::models::muse_glimmer::{
     MuseGlimmerLayerType, MuseGlimmerTextConfig, schedule::group_slots,
@@ -554,8 +558,11 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
 /// `segment` holds slot-ordered keys and values with their positions and
 /// validity; invalid slots' values are zeroed first so stale bytes cannot
 /// poison attention. Full storage is position-ordered, so each query chunk
-/// reads only its causal key prefix; ring chunks read every slot. Returns the
-/// head context `[batch, query_heads, block, head_dim]`.
+/// reads only its verified causal key prefix. A sliding layer's keys are
+/// `[ring history | fresh block]`: chunks whose rows can still see history
+/// read the whole ring, later chunks only their rows' window union, and the
+/// plan is sized for that width (`MuseKeySlicing::RingHistory`) rather than
+/// for every key. Returns the head context `[batch, query_heads, block, head_dim]`.
 fn cached_context<B: Backend>(
     layer: &super::MuseGlimmerDecoderLayer<B>,
     projection: &MuseAttentionProjection<B>,
@@ -575,22 +582,23 @@ fn cached_context<B: Backend>(
     let positional = matches!(slot, MuseGlimmerLayerCache::Full { .. });
     let visibility = layout.visibility(segment, positional).with_window(window);
     let device = keyed.query.device();
-    let policy = attention.effective_policy(&device);
-    let plan = policy.plan(batch, attention.query_heads, queries, keys)?;
-    let chunks = plan
-        .query_ranges()
-        .map(|rows| {
-            let key_end = visibility.key_end(&rows);
-            policy.validate_chunk(batch, attention.query_heads, rows.len(), key_end)?;
-            let plane_shape = [batch, attention.query_heads, rows.len(), key_end];
-            Ok(MuseAttentionChunk {
-                query_range: rows,
-                key_range: 0..key_end,
-                plane_elements: plane_shape.iter().product(),
-                plane_shape,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let slicing = match (slot, window) {
+        // History width `keys - queries`: the step's fresh block is the last segment.
+        (MuseGlimmerLayerCache::Sliding { .. }, Some(window)) => {
+            MuseKeySlicing::RingHistory { window }
+        }
+        _ => MuseKeySlicing::PrefixLimits {
+            limits: visibility.key_limits(),
+        },
+    };
+    let chunks = plan_attention_chunks(
+        attention.effective_policy(&device),
+        batch,
+        attention.query_heads,
+        queries,
+        keys,
+        slicing,
+    )?;
     debug_assert_eq!(layout.block(), queries);
     attention.chunked_context(&keyed, &chunks, &visibility)
 }
