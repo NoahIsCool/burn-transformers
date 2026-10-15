@@ -84,8 +84,8 @@ pub use causal::{
 pub use history::TokenHistory;
 pub use random::SplitMix64;
 pub use seq2seq::{
-    BeamSearchConfig, BeamSearchSequence, Seq2SeqBeamSearchOutput, Seq2SeqBeamSearchRequest,
-    generate_seq2seq_beam_search,
+    BeamSearchConfig, BeamSearchSequence, EarlyStopping, Seq2SeqBeamSearchOutput,
+    Seq2SeqBeamSearchRequest, generate_seq2seq_beam_search,
 };
 
 use core::marker::PhantomData;

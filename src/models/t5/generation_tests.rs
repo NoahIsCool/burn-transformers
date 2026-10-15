@@ -73,6 +73,50 @@ fn family_helper_runs_a_tiny_real_t5_graph() {
     }));
 }
 
+/// An exactly sized cache (`max_new_tokens` slots) suffices for every length and stopping flag.
+///
+/// The decoder-start token takes one slot and the final selected token is
+/// never decoded, so a run writes at most `1 + max_new_tokens - 1` slots;
+/// the shared preflight rejects smaller caches and the decode state rejects
+/// writes beyond its capacity, so success proves the size is sufficient.
+#[test]
+fn family_helper_sizes_the_cache_exactly_for_every_length() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(tiny_config(), &device)
+        .expect("tiny T5 model");
+    for max_new_tokens in 1..=4 {
+        for early_stopping in [false, true] {
+            let output = generate_t5_beam_search(
+                &model,
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[3, 4, 5], [6, 7, 8]],
+                        &device,
+                    ),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                T5BeamSearchOptions {
+                    max_new_tokens,
+                    num_beams: 3,
+                    num_return_sequences: 2,
+                    early_stopping,
+                    ..T5BeamSearchOptions::default()
+                },
+            )
+            .expect("exactly sized T5 beam search");
+            assert_eq!(output.sequences.len(), 2);
+            assert!(
+                output
+                    .sequences
+                    .iter()
+                    .flatten()
+                    .all(|sequence| { (1..=max_new_tokens).contains(&sequence.token_ids.len()) })
+            );
+        }
+    }
+}
+
 /// PAD is intentionally singular because inactive beam rows need one ID.
 #[test]
 fn family_token_defaults_reject_missing_empty_and_ambiguous_pad() {
