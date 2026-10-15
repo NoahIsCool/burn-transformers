@@ -19,16 +19,22 @@
 //!
 //! 1. [`TensorDecodeState::step`] starts a [`TensorStepWrites`] for the step.
 //! 2. Each attention layer reads its history for the whole batch, either
-//!    through a [`KvBatchReadPlan`] built once per step
+//!    through a [`KvBatchReadPlan`] built once per step and group
 //!    ([`TensorDecodeState::kv_read_plan`]) plus the step's own tokens
 //!    ([`TensorDecodeState::step_token_segment`]), or, for full storage, by
 //!    writing the new tokens ahead ([`TensorDecodeState::write_kv_ahead`]) and
 //!    reading one zero-copy view ([`TensorDecodeState::read_kv_through`]).
 //!    [`KvBatchSegment::exclusion_mask`] turns key positions into the causal,
-//!    sliding-window, and padding mask.
+//!    sliding-window, and padding mask, and [`KvBatchSegment::masked_values`]
+//!    zeroes the unspecified values of invalid slots.
 //! 3. Each layer records its new keys/values and recurrent states in the step.
 //! 4. [`TensorDecodeState::publish_step`] validates the whole write set and
 //!    commits it, or stages it inside a speculative transaction.
+//!
+//! A step belongs to the state and bank version it was created at, and a
+//! read plan to the group (and transaction) that built it; using either after
+//! the state moved on, or with another state or group, is an error rather
+//! than a silent misread.
 //!
 //! The per-row APIs (`read_sequence`, `prepare_direct_writes`, …) remain for
 //! families that still run one row at a time.

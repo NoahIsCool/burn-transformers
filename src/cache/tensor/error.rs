@@ -140,6 +140,21 @@ pub enum TensorCacheError {
         reason: &'static str,
     },
 
+    /// A step write set no longer matches the decode state it is used with.
+    ///
+    /// Steps are bound to the state that created them and to that bank's
+    /// lifecycle version: any later length change, transaction transition,
+    /// reorder, truncate, reset, mutable bank access, or another step's
+    /// publication or write-ahead invalidates them, because their write-ahead
+    /// slots and token positions were derived from the old cursors.
+    #[error("{bank} step is stale: {reason}; start a new step from the current state")]
+    StaleStep {
+        /// Bank the step targets.
+        bank: &'static str,
+        /// Why the step no longer applies.
+        reason: &'static str,
+    },
+
     /// Key/value inputs were given to a latent group, or a latent to a key/value group.
     #[error("this cache group stores {expected}")]
     PlaneKindMismatch {

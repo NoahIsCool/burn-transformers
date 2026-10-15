@@ -29,6 +29,7 @@ use super::{
 
 mod step;
 
+use step::StepVersions;
 pub use step::{StepBank, TensorStepWrites, TokenAlignment};
 
 // Bank allocation and coordinated tensor writes.
@@ -507,6 +508,8 @@ pub struct TensorDecodeState<B: Backend> {
     mtp_metadata: Option<SequenceLengths>,
     /// Device required by all attached tensor banks.
     device: B::Device,
+    /// State identity and per-bank lifecycle versions that step write sets must match.
+    versions: StepVersions,
 }
 
 impl<B: Backend> TensorDecodeState<B> {
@@ -528,6 +531,7 @@ impl<B: Backend> TensorDecodeState<B> {
             mtp: None,
             mtp_metadata: None,
             device: device.clone(),
+            versions: StepVersions::new(),
         })
     }
 
@@ -542,6 +546,7 @@ impl<B: Backend> TensorDecodeState<B> {
             mtp: None,
             mtp_metadata: None,
             device: device.clone(),
+            versions: StepVersions::new(),
         }
     }
 
@@ -606,8 +611,12 @@ impl<B: Backend> TensorDecodeState<B> {
     }
 
     /// Mutably borrows the main decoder cache bank.
+    ///
+    /// Mutable access can change tensors behind the state's cursors, so it
+    /// invalidates every outstanding main-bank [`TensorStepWrites`].
     #[must_use]
     pub const fn main_mut(&mut self) -> &mut TensorCacheBank<B> {
+        self.versions.bump(StepBank::Main);
         &mut self.main
     }
 
@@ -618,8 +627,12 @@ impl<B: Backend> TensorDecodeState<B> {
     }
 
     /// Mutably borrows the independent MTP cache bank when enabled.
+    ///
+    /// Like [`main_mut`](Self::main_mut), this invalidates every outstanding
+    /// MTP-bank [`TensorStepWrites`].
     #[must_use]
     pub const fn mtp_mut(&mut self) -> Option<&mut TensorCacheBank<B>> {
+        self.versions.bump(StepBank::Mtp);
         self.mtp.as_mut()
     }
 
@@ -636,6 +649,7 @@ impl<B: Backend> TensorDecodeState<B> {
         let bank =
             TensorCacheBank::new(self.metadata.config(), self.main.batch_size(), &self.device)?;
         self.mtp_metadata = Some(SequenceLengths::new(self.metadata.config()));
+        self.versions.bump(StepBank::Mtp);
         Ok(self.mtp.insert(bank))
     }
 
@@ -664,6 +678,7 @@ impl<B: Backend> TensorDecodeState<B> {
         }
         self.mtp = Some(bank);
         self.mtp_metadata = Some(SequenceLengths::new(self.metadata.config()));
+        self.versions.bump(StepBank::Mtp);
         Ok(())
     }
 
@@ -679,6 +694,7 @@ impl<B: Backend> TensorDecodeState<B> {
     /// Returns metadata errors for count, integer, or capacity overflow.
     pub fn advance(&mut self, token_counts: &[usize]) -> TensorCacheResult<()> {
         self.metadata.advance_all(token_counts)?;
+        self.versions.bump(StepBank::Main);
         self.sync_history_locks();
         Ok(())
     }
@@ -697,6 +713,7 @@ impl<B: Backend> TensorDecodeState<B> {
             .as_mut()
             .ok_or(TensorCacheError::MtpNotEnabled)?
             .advance_all(token_counts)?;
+        self.versions.bump(StepBank::Mtp);
         self.sync_history_locks();
         Ok(())
     }
@@ -721,6 +738,8 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(mtp), Some(metadata)) = (&mut self.mtp, &self.mtp_metadata) {
             mtp.begin_staging(metadata.lengths())?;
         }
+        // Steps derived outside the transaction would write committed slots.
+        self.versions.bump_all();
         // Neither ledger is active (checked above), so both marks succeed.
         let main = self.metadata.mark()?;
         let mtp = self
@@ -816,6 +835,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.finish_transaction(next);
         }
+        self.versions.bump_all();
         self.sync_history_locks();
         Ok(())
     }
@@ -879,6 +899,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.finish_transaction(next);
         }
+        self.versions.bump_all();
         Ok(())
     }
 
@@ -903,6 +924,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.publish(next);
         }
+        self.versions.bump_all();
         self.sync_history_locks();
         Ok(())
     }
@@ -934,6 +956,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.publish(next);
         }
+        self.versions.bump_all();
         self.sync_history_locks();
         Ok(())
     }
@@ -958,6 +981,7 @@ impl<B: Backend> TensorDecodeState<B> {
         self.main.validate_truncate(&current, lengths)?;
         self.main.apply_truncate(&current, lengths);
         self.metadata.publish(next);
+        self.versions.bump(StepBank::Main);
         self.sync_history_locks();
         Ok(())
     }
@@ -982,6 +1006,7 @@ impl<B: Backend> TensorDecodeState<B> {
         bank.validate_truncate(&current, lengths)?;
         bank.apply_truncate(&current, lengths);
         metadata.publish(next);
+        self.versions.bump(StepBank::Mtp);
         self.sync_history_locks();
         Ok(())
     }
@@ -1025,6 +1050,7 @@ impl<B: Backend> TensorDecodeState<B> {
         mtp_bank.apply_truncate(&mtp_current, mtp_lengths);
         self.metadata.publish(main_next);
         mtp_metadata.publish(mtp_next);
+        self.versions.bump_all();
         self.sync_history_locks();
         Ok(())
     }

@@ -703,8 +703,18 @@ fn latent_groups_publish_through_steps() {
             .expect("read");
         assert_eq!(read.materialize().expect("keys").latent().dims(), [2, 2, 4]);
     }
+    // Layer 0 is already covered: a second write is refused before any tensor work.
     assert!(matches!(
-        batched.write_kv_ahead(&mut step, 0, 0, kv_block(2, 2, 0.0), kv_block(2, 2, 0.0)),
+        batched.write_latent_ahead(&mut step, 0, 0, latent(2, 2, 5.0)),
+        Err(TensorCacheError::StepWriteCoverage {
+            problem: "duplicate write",
+            ..
+        })
+    ));
+    // A rejected write-ahead of another step leaves `step` current.
+    let mut other = batched.step(&[2, 1]).expect("step");
+    assert!(matches!(
+        batched.write_kv_ahead(&mut other, 0, 0, kv_block(2, 2, 0.0), kv_block(2, 2, 0.0)),
         Err(TensorCacheError::PlaneKindMismatch { .. })
     ));
     batched.publish_step(step).expect("publish");
@@ -806,4 +816,300 @@ fn checked_reads_use_state_cursors_and_detect_stray_staging() {
     ));
     state.rollback(mark).expect("rollback");
     assert!(state.read_kv(StepBank::Main, 0, 0, 0).is_ok());
+}
+
+/// Writes layers 0 and 1 of the full group ahead and pushes the ring and recurrent groups.
+///
+/// The result is a complete step for the [`state`] fixture.
+fn written_ahead_step(
+    state: &mut TensorDecodeState<TestBackend>,
+    counts: &[usize],
+    tag: f32,
+) -> TensorStepWrites<TestBackend> {
+    let block = counts.iter().copied().max().unwrap_or(1).max(1);
+    let mut step = state.step(counts).expect("step");
+    for layer in 0..2 {
+        let offset = tag + layer as f32;
+        state
+            .write_kv_ahead(
+                &mut step,
+                0,
+                layer,
+                kv_block(ROWS, block, offset),
+                kv_block(ROWS, block, offset + 100.0),
+            )
+            .expect("write ahead");
+    }
+    step.push_kv_batch(
+        1,
+        0,
+        kv_block(ROWS, block, tag + 10.0),
+        kv_block(ROWS, block, tag + 110.0),
+    );
+    step.push_recurrent_batch(0, 0, matrices(ROWS, tag), convolutions(ROWS, tag));
+    step
+}
+
+/// Asserts that an operation on a step reports it stale.
+fn assert_stale<T: core::fmt::Debug>(result: TensorCacheResult<T>, reason: &str) {
+    match result {
+        Err(TensorCacheError::StaleStep { reason: actual, .. }) => {
+            assert!(actual.contains(reason), "{actual}");
+        }
+        other => panic!("expected a stale step ({reason}), got {other:?}"),
+    }
+}
+
+/// A write-ahead made outside a transaction cannot be published into one.
+///
+/// Its tokens went to committed slots, but a separate-staging group reads
+/// proposals from its staging buffer, which the write never touched:
+/// publishing would record proposals whose data is missing and a later
+/// commit would copy zeros over the real tokens.
+#[test]
+fn write_ahead_cannot_be_published_into_a_later_transaction() {
+    let mut state = state(2, false);
+    state
+        .publish_step(batched_step(&state, &[1, 1, 1], 1, 1.0))
+        .expect("prefill");
+    let step = written_ahead_step(&mut state, &[1, 1, 1], 7.0);
+    let mark = state.begin_transaction().expect("transaction");
+    let before = (snapshot(&state), staged(&state));
+    let plan = state.kv_read_plan(StepBank::Main, 0).expect("history plan");
+    assert_stale(state.read_kv_through(&step, 0, 0, &plan), "bank changed");
+    assert_stale(state.kv_read_plan_through(&step, 0), "bank changed");
+    assert_stale(
+        state.step_token_segment(&step, kv_block(ROWS, 1, 0.0), kv_block(ROWS, 1, 0.0)),
+        "bank changed",
+    );
+    assert_stale(state.publish_step(step), "bank changed");
+    assert_eq!(state.working_lengths(), &[1, 1, 1]);
+    assert_eq!((snapshot(&state), staged(&state)), before);
+    state.rollback(mark).expect("rollback");
+}
+
+/// A write-ahead does not survive a reset that zeroed its slots.
+#[test]
+fn write_ahead_cannot_be_published_after_reset() {
+    let mut state = state(0, false);
+    let step = written_ahead_step(&mut state, &[1, 1, 1], 9.0);
+    state.reset().expect("reset");
+    let before = snapshot(&state);
+    assert_stale(state.publish_step(step), "bank changed");
+    assert_eq!(state.lengths(), &[0, 0, 0]);
+    assert_eq!(snapshot(&state), before);
+}
+
+/// A step, with or without write-ahead, only publishes into the state that created it.
+#[test]
+fn steps_cannot_be_published_into_another_state() {
+    let mut origin = state(0, false);
+    let mut target = state(0, false);
+    let before = snapshot(&target);
+    let ahead = written_ahead_step(&mut origin, &[1, 1, 1], 9.0);
+    assert_stale(target.publish_step(ahead), "another decode state");
+    let pushed = batched_step(&origin, &[1, 1, 1], 1, 2.0);
+    assert_stale(target.publish_step(pushed), "another decode state");
+    assert_eq!(target.lengths(), &[0, 0, 0]);
+    assert_eq!(snapshot(&target), before);
+    assert!(
+        TensorCacheError::StaleStep {
+            bank: "main",
+            reason: "x"
+        }
+        .to_string()
+        .contains("main step is stale")
+    );
+}
+
+/// Every operation that can move a bank's cursors or tensors invalidates its outstanding steps.
+#[test]
+fn lifecycle_operations_invalidate_outstanding_steps() {
+    type Operation = fn(&mut TensorDecodeState<TestBackend>);
+    let operations: [(&str, Operation); 8] = [
+        ("advance", |state| {
+            state.advance(&[1, 0, 0]).expect("advance")
+        }),
+        ("begin", |state| {
+            state.begin_transaction().expect("transaction");
+        }),
+        ("reorder", |state| {
+            state.reorder(&[2, 1, 0]).expect("reorder")
+        }),
+        ("truncate", |state| {
+            state.truncate(&[0, 2, 2]).expect("truncate")
+        }),
+        ("reset", |state| state.reset().expect("reset")),
+        ("mutable access", |state| {
+            let _ = state.main_mut();
+        }),
+        ("another publish", |state| {
+            let other = batched_step(state, &[1, 1, 1], 1, 5.0);
+            state.publish_step(other).expect("publish");
+        }),
+        ("another write-ahead", |state| {
+            let _abandoned = written_ahead_step(state, &[1, 1, 1], 6.0);
+        }),
+    ];
+    for (name, operation) in operations {
+        let mut state = state(2, false);
+        state
+            .publish_step(batched_step(&state, &[2, 2, 2], 2, 1.0))
+            .expect("prefill");
+        let step = batched_step(&state, &[1, 1, 1], 1, 3.0);
+        operation(&mut state);
+        assert!(
+            matches!(
+                state.publish_step(step),
+                Err(TensorCacheError::StaleStep { .. })
+            ),
+            "{name}"
+        );
+    }
+
+    // Commit and rollback end the transaction a step was staged against.
+    for commit in [true, false] {
+        let mut state = state(2, false);
+        let mark = state.begin_transaction().expect("transaction");
+        let step = batched_step(&state, &[1, 1, 1], 1, 3.0);
+        if commit {
+            state.commit_prefix(mark, &[0, 0, 0]).expect("commit");
+        } else {
+            state.rollback(mark).expect("rollback");
+        }
+        assert_stale(state.publish_step(step), "bank changed");
+    }
+
+    // A rejected operation changes nothing and leaves steps current.
+    let mut state = state(2, false);
+    let step = batched_step(&state, &[1, 1, 1], 1, 3.0);
+    assert!(state.truncate(&[1, 0, 0]).is_err());
+    assert!(state.reorder(&[5, 0, 0]).is_err());
+    state.publish_step(step).expect("still current");
+}
+
+/// Of two steps on one bank, only the one that wrote ahead last stays valid.
+#[test]
+fn a_write_ahead_claims_the_bank_from_other_steps() {
+    let mut state = state(0, false);
+    let mut first = state.step(&[1, 1, 1]).expect("step");
+    let mut second = state.step(&[1, 1, 1]).expect("step");
+    state
+        .write_kv_ahead(
+            &mut first,
+            0,
+            0,
+            kv_block(ROWS, 1, 1.0),
+            kv_block(ROWS, 1, 2.0),
+        )
+        .expect("first write-ahead");
+    assert_stale(
+        state.write_kv_ahead(
+            &mut second,
+            0,
+            0,
+            kv_block(ROWS, 1, 3.0),
+            kv_block(ROWS, 1, 4.0),
+        ),
+        "bank changed",
+    );
+    assert_stale(state.publish_step(second), "bank changed");
+    state
+        .write_kv_ahead(
+            &mut first,
+            0,
+            1,
+            kv_block(ROWS, 1, 5.0),
+            kv_block(ROWS, 1, 6.0),
+        )
+        .expect("the claiming step keeps writing");
+    first.push_kv_batch(1, 0, kv_block(ROWS, 1, 7.0), kv_block(ROWS, 1, 8.0));
+    first.push_recurrent_batch(0, 0, matrices(ROWS, 1.0), convolutions(ROWS, 1.0));
+    state.publish_step(first).expect("publish");
+    assert_eq!(state.lengths(), &[1, 1, 1]);
+    let keys = state
+        .read_kv(StepBank::Main, 0, 0, 0)
+        .expect("read")
+        .materialize()
+        .expect("one key")
+        .0;
+    assert_eq!(
+        keys.into_data().to_vec::<f32>().expect("F32"),
+        kv_block(1, 1, 1.0)
+            .into_data()
+            .to_vec::<f32>()
+            .expect("F32"),
+        "the first step's write-ahead was not overwritten"
+    );
+}
+
+/// A layer can be written ahead once per step and never on top of a pushed update.
+#[test]
+fn duplicate_write_ahead_is_refused_before_writing() {
+    let mut state = state(0, false);
+    let mut step = state.step(&[1, 0, 1]).expect("step");
+    step.push_kv_batch(0, 0, kv_block(ROWS, 1, 1.0), kv_block(ROWS, 1, 1.0));
+    state
+        .write_kv_ahead(
+            &mut step,
+            0,
+            1,
+            kv_block(ROWS, 1, 2.0),
+            kv_block(ROWS, 1, 2.0),
+        )
+        .expect("first write-ahead");
+    let before = snapshot(&state);
+    for layer in [0, 1] {
+        assert!(matches!(
+            state.write_kv_ahead(
+                &mut step,
+                0,
+                layer,
+                kv_block(ROWS, 1, 3.0),
+                kv_block(ROWS, 1, 3.0),
+            ),
+            Err(TensorCacheError::StepWriteCoverage {
+                sequence: 0,
+                problem: "duplicate write",
+                ..
+            })
+        ));
+        assert_eq!(snapshot(&state), before, "layer {layer}");
+    }
+    step.push_kv_batch(1, 0, kv_block(ROWS, 1, 4.0), kv_block(ROWS, 1, 4.0));
+    step.push_recurrent_batch(0, 0, matrices(ROWS, 1.0), convolutions(ROWS, 1.0));
+    state.publish_step(step).expect("publish");
+    assert_eq!(state.lengths(), &[1, 0, 1]);
+}
+
+/// Steps of one bank survive operations on the other bank.
+#[test]
+fn bank_versions_are_independent() {
+    let config = CacheConfig::new(ROWS, 8).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::with_config(config, &device());
+    let spec =
+        NativeKvCacheSpec::new(1, HEADS, DIM, KvCacheStorage::Full, DType::F32).expect("geometry");
+    state.main_mut().add_native_kv(spec).expect("main group");
+    state
+        .enable_mtp()
+        .expect("MTP")
+        .add_native_kv(spec)
+        .expect("MTP group");
+    let mut main = state.step(&[1, 1, 1]).expect("main step");
+    main.push_kv_batch(0, 0, kv_block(ROWS, 1, 1.0), kv_block(ROWS, 1, 1.0));
+    let mut mtp = state.mtp_step(&[1, 0, 1]).expect("MTP step");
+    mtp.push_kv_batch(0, 0, kv_block(ROWS, 1, 2.0), kv_block(ROWS, 1, 2.0));
+    state.advance_mtp(&[0, 0, 0]).expect("MTP advance");
+    state
+        .publish_step(main)
+        .expect("main step survives MTP operations");
+    assert_stale(state.publish_step(mtp), "bank changed");
+    let mut mtp = state.mtp_step(&[1, 0, 1]).expect("MTP step");
+    mtp.push_kv_batch(0, 0, kv_block(ROWS, 1, 2.0), kv_block(ROWS, 1, 2.0));
+    state.advance(&[0, 0, 0]).expect("main advance");
+    state
+        .publish_step(mtp)
+        .expect("MTP step survives main operations");
+    assert_eq!(state.lengths(), &[1, 1, 1]);
+    assert_eq!(state.mtp_lengths(), Some([1, 0, 1].as_slice()));
 }

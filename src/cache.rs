@@ -27,8 +27,12 @@
 //! * [`tensor`] owns the Burn tensors: key/value and latent groups
 //!   ([`NativeKvCache`]), recurrent state ([`RecurrentStateCache`]), banks,
 //!   and the decode state with its step write sets ([`TensorStepWrites`]).
+//! * `identity.rs` gives caches and decode states allocation-backed
+//!   identities, so read plans and step write sets are only accepted by the
+//!   object (and lifecycle version) that produced them.
 
 mod config;
+mod identity;
 mod lengths;
 mod retention;
 mod ring;

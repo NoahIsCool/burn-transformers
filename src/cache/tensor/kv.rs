@@ -24,6 +24,7 @@ use core::ops::Range;
 
 use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
+use crate::cache::identity::IdentityToken;
 use crate::cache::retention::{WorkingWindow, first_unsafe_ring_rewind, ring_working_window};
 use crate::cache::{
     CacheConfig, DecodeStateError, plan_mirrored_ring_write, plan_ring_read, plan_ring_write,
@@ -559,6 +560,12 @@ pub struct NativeKvCache<B: Backend> {
     /// `baseline[b] + j`, and working reads check that callers pass this same
     /// committed length.
     staging_baseline: Option<Vec<usize>>,
+    /// Identity stamped on every batched read plan this group builds.
+    identity: IdentityToken,
+    /// Number of transactions begun so far; working read plans record it so
+    /// a plan from an earlier transaction is rejected even when its staged
+    /// lengths happen to match.
+    staging_epoch: u64,
 }
 
 impl<B: Backend> NativeKvCache<B> {
@@ -656,6 +663,8 @@ impl<B: Backend> NativeKvCache<B> {
             committed_time_slots,
             window: spec.effective_window(config),
             staging_baseline: None,
+            identity: IdentityToken::new(),
+            staging_epoch: 0,
         })
     }
 
@@ -1104,6 +1113,7 @@ impl<B: Backend> NativeKvCache<B> {
             lengths.fill(0);
         }
         self.staging_baseline = baseline;
+        self.staging_epoch = self.staging_epoch.wrapping_add(1);
         self.staging_active = true;
         Ok(())
     }

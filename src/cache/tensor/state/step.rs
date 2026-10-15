@@ -17,10 +17,26 @@
 //! 4. publishes the lengths and applies the prepared writes, which cannot
 //!    fail.
 //!
-//! A rejected step therefore changes nothing (with one documented exception,
-//! write-ahead, below). This replaces the per-family `PendingKvWrite` structs
-//! and coverage checks, works for any number of KV and recurrent groups, and
-//! makes speculative staging all-or-nothing per step.
+//! A rejected step changes no length and no readable cache position; only
+//! write-ahead (below) may leave bytes in slots beyond the lengths. The step
+//! API is intended to replace the per-family `PendingKvWrite` structs and
+//! coverage checks (families migrate to it next); it works for any number of
+//! KV, latent, and recurrent groups and makes speculative staging
+//! all-or-nothing per step.
+//!
+//! # Step validity
+//!
+//! A step is derived from the cursors of one bank of one decode state at one
+//! moment: its tokens' positions start at the working lengths, and its
+//! write-ahead tokens sit in physical slots computed from them. Every step
+//! therefore carries a [`StepOrigin`] — the state's identity and the bank's
+//! lifecycle version — and every step operation rejects a step whose origin
+//! is no longer current with [`TensorCacheError::StaleStep`]. The version
+//! advances whenever anything other than the step itself could have moved
+//! those cursors or slots: advance, begin/commit/rollback, reorder, truncate,
+//! reset, mutable bank access, MTP attachment, and the publication or
+//! write-ahead of *another* step. A step's own write-ahead re-stamps it, so
+//! of two steps on one bank only the one that wrote ahead last stays valid.
 //!
 //! # Write-ahead
 //!
@@ -31,14 +47,18 @@
 //! unreachable until the step is published, so a failed step keeps *logical*
 //! atomicity: lengths and every readable position are unchanged, while slots
 //! beyond the lengths may hold the abandoned tokens (later writes overwrite
-//! them). Rings cannot write ahead, because a wrapped write would overwrite a
-//! still-visible slot. Inside a transaction only in-place groups can.
+//! them, and batched reads mark them invalid). Rings cannot write ahead,
+//! because a wrapped write would overwrite a still-visible slot. Inside a
+//! transaction only in-place groups can. Each layer can be written ahead at
+//! most once per step and never combined with a pushed update of that layer;
+//! a second write is refused before it touches any tensor.
 
 use core::ops::Range;
 
 use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::SequenceLengths;
+use crate::cache::identity::IdentityToken;
 use crate::cache::tensor::kv::{
     KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead,
 };
@@ -60,6 +80,99 @@ pub enum StepBank {
     Main,
     /// The auxiliary multi-token-prediction groups and their own cursor.
     Mtp,
+}
+
+impl StepBank {
+    /// Returns the bank's name for diagnostics.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Mtp => "MTP",
+        }
+    }
+}
+
+/// The decode state and bank version a step was derived from.
+#[derive(Debug, Clone)]
+struct StepOrigin {
+    /// Identity of the decode state that created the step.
+    state: IdentityToken,
+    /// Lifecycle version of the step's bank when the step was created or last wrote ahead.
+    version: u64,
+}
+
+/// Per-bank lifecycle versions that bind step write sets to one decode state.
+///
+/// A version is a counter that the owning [`TensorDecodeState`] advances on
+/// every change to a bank's cursors, transaction, or tensors made outside
+/// the step being validated (see the module documentation). Counters wrap
+/// with `wrapping_add`; reaching a collision would take 2^64 lifecycle
+/// operations while one stale step is kept alive, which is not a practical
+/// concern.
+#[derive(Debug)]
+pub(super) struct StepVersions {
+    /// Identity of the owning decode state, shared by every step it creates.
+    state: IdentityToken,
+    /// Lifecycle version of the main bank.
+    main: u64,
+    /// Lifecycle version of the MTP bank.
+    mtp: u64,
+}
+
+impl StepVersions {
+    /// Starts both banks at version zero under a fresh state identity.
+    pub(super) fn new() -> Self {
+        Self {
+            state: IdentityToken::new(),
+            main: 0,
+            mtp: 0,
+        }
+    }
+
+    /// Invalidates every outstanding step of one bank.
+    pub(super) const fn bump(&mut self, bank: StepBank) {
+        match bank {
+            StepBank::Main => self.main = self.main.wrapping_add(1),
+            StepBank::Mtp => self.mtp = self.mtp.wrapping_add(1),
+        }
+    }
+
+    /// Invalidates every outstanding step of both banks.
+    pub(super) const fn bump_all(&mut self) {
+        self.bump(StepBank::Main);
+        self.bump(StepBank::Mtp);
+    }
+
+    /// Returns a bank's current version.
+    const fn current(&self, bank: StepBank) -> u64 {
+        match bank {
+            StepBank::Main => self.main,
+            StepBank::Mtp => self.mtp,
+        }
+    }
+
+    /// Stamps a new step for `bank` with the current state identity and version.
+    fn stamp(&self, bank: StepBank) -> StepOrigin {
+        StepOrigin {
+            state: self.state.clone(),
+            version: self.current(bank),
+        }
+    }
+
+    /// Accepts a step only if this state created it and its bank is unchanged since.
+    fn check<B: Backend>(&self, step: &TensorStepWrites<B>) -> TensorCacheResult<()> {
+        let reason = if step.origin.state != self.state {
+            "it was created by another decode state"
+        } else if step.origin.version != self.current(step.bank) {
+            "its bank changed after the step was created or last wrote ahead"
+        } else {
+            return Ok(());
+        };
+        Err(TensorCacheError::StaleStep {
+            bank: step.bank.as_str(),
+            reason,
+        })
+    }
 }
 
 /// Where each row's new tokens sit on a batched input's token axis.
@@ -105,6 +218,17 @@ enum KvEntry<B: Backend> {
         /// Working lengths when the tokens were written.
         starts: Vec<usize>,
     },
+}
+
+impl<B: Backend> KvEntry<B> {
+    /// Returns the `(group, layer)` this entry updates.
+    const fn target(&self) -> (usize, usize) {
+        match self {
+            Self::Row { group, layer, .. }
+            | Self::Batch { group, layer, .. }
+            | Self::WrittenAhead { group, layer, .. } => (*group, *layer),
+        }
+    }
 }
 
 /// One recorded recurrent update.
@@ -156,10 +280,15 @@ enum RecurrentEntry<B: Backend> {
 /// values, and recurrent states while the forward pass runs, then hand it to
 /// [`TensorDecodeState::publish_step`]. Recording never fails; every check
 /// happens at publication, before anything changes.
+///
+/// A step belongs to the state and bank version it was created at; see the
+/// module documentation on step validity.
 #[derive(Debug)]
 pub struct TensorStepWrites<B: Backend> {
     /// Bank receiving the step.
     bank: StepBank,
+    /// State identity and bank version the step's cursors were derived from.
+    origin: StepOrigin,
     /// New tokens per row; zero marks an inactive row.
     counts: Vec<usize>,
     /// Token placement of batched inputs.
@@ -317,8 +446,18 @@ impl<B: Backend> TensorStepWrites<B> {
     /// Returns whether the step recorded a write-ahead for `(group, layer)`.
     fn wrote_ahead(&self, group: usize, layer: usize) -> bool {
         self.kv.iter().any(|entry| {
-            matches!(entry, KvEntry::WrittenAhead { group: g, layer: l, .. } if *g == group && *l == layer)
+            matches!(entry, KvEntry::WrittenAhead { .. }) && entry.target() == (group, layer)
         })
+    }
+
+    /// Returns whether the step already records any KV update for `(group, layer)`.
+    fn records_kv(&self, group: usize, layer: usize) -> bool {
+        self.kv.iter().any(|entry| entry.target() == (group, layer))
+    }
+
+    /// Returns the first row with new tokens (row 0 when every row is inactive).
+    fn first_active_row(&self) -> usize {
+        self.counts.iter().position(|&count| count > 0).unwrap_or(0)
     }
 
     /// Resolves each row's first input column for a batched input of width `block`.
@@ -514,6 +653,7 @@ impl<B: Backend> TensorDecodeState<B> {
         validate_count(self.batch_size(), token_counts.len())?;
         Ok(TensorStepWrites {
             bank,
+            origin: self.versions.stamp(bank),
             counts: token_counts.to_vec(),
             alignment: TokenAlignment::RightPadded,
             kv: Vec::new(),
@@ -592,6 +732,8 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// Use it to attend over the history *before* the step's own tokens; the
     /// step's tokens then join through [`step_token_segment`](Self::step_token_segment).
+    /// The plan reads only this group; build it after the last lifecycle
+    /// operation and use it until the step is published.
     ///
     /// # Errors
     ///
@@ -617,13 +759,15 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// # Errors
     ///
-    /// Returns an error when the group cannot write ahead (see
-    /// [`write_kv_ahead`](Self::write_kv_ahead)) or the step overflows capacity.
+    /// Returns an error for a stale step, a group that cannot write ahead (see
+    /// [`write_kv_ahead`](Self::write_kv_ahead)), or a step that overflows
+    /// capacity.
     pub fn kv_read_plan_through(
         &self,
         step: &TensorStepWrites<B>,
         group: usize,
     ) -> TensorCacheResult<KvBatchReadPlan<B>> {
+        self.versions.check(step)?;
         let (bank, lengths) = self.step_target(step.bank)?;
         let cache = bank.native_kv(group)?;
         validate_write_ahead(
@@ -655,11 +799,14 @@ impl<B: Backend> TensorDecodeState<B> {
     /// the step records the layer as covered. See the module documentation
     /// for the logical-atomicity contract.
     ///
+    /// The write re-stamps `step` with the bank's new version, so any other
+    /// outstanding step of this bank becomes stale.
+    ///
     /// # Errors
     ///
-    /// Returns an error for ring storage, for a transaction on a group without
-    /// in-place staging, or for any write validation error. Nothing is
-    /// written on error.
+    /// Returns an error for a stale step, a layer the step already covers,
+    /// ring storage, a transaction on a group without in-place staging, or
+    /// any write validation error. Nothing is written on error.
     pub fn write_kv_ahead(
         &mut self,
         step: &mut TensorStepWrites<B>,
@@ -690,6 +837,9 @@ impl<B: Backend> TensorDecodeState<B> {
     }
 
     /// Plane-generic core of the write-ahead methods.
+    ///
+    /// Every check runs before the single tensor assignment; afterwards the
+    /// bank's version advances and only `step` is re-stamped with it.
     fn write_planes_ahead(
         &mut self,
         step: &mut TensorStepWrites<B>,
@@ -697,6 +847,16 @@ impl<B: Backend> TensorDecodeState<B> {
         layer: usize,
         planes: Vec<Tensor<B, 4>>,
     ) -> TensorCacheResult<()> {
+        self.versions.check(step)?;
+        if step.records_kv(group, layer) {
+            return Err(coverage_error(
+                "native KV",
+                group,
+                layer,
+                step.first_active_row(),
+                "duplicate write",
+            ));
+        }
         let (bank, lengths) = self.step_target(step.bank)?;
         let starts = lengths.working_lengths().to_vec();
         let staging = lengths.has_active_transaction();
@@ -718,6 +878,10 @@ impl<B: Backend> TensorDecodeState<B> {
         };
         // Staged lengths are published with the step, not here.
         let _deferred = bank.native_kv[group].apply_batch_tensors(write);
+        // The written slots now belong to this step alone: any other step of
+        // this bank, which may hold write-aheads at the same slots, is stale.
+        self.versions.bump(step.bank);
+        step.origin = self.versions.stamp(step.bank);
         step.kv.push(KvEntry::WrittenAhead {
             group,
             layer,
@@ -730,8 +894,9 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// # Errors
     ///
-    /// Returns an error when the step has not written this layer ahead, or
-    /// for the errors of [`NativeKvCache::read_batch`](super::NativeKvCache::read_batch).
+    /// Returns an error for a stale step, a layer the step has not written
+    /// ahead, or the errors of
+    /// [`NativeKvCache::read_batch`](super::NativeKvCache::read_batch).
     pub fn read_kv_through(
         &self,
         step: &TensorStepWrites<B>,
@@ -739,6 +904,7 @@ impl<B: Backend> TensorDecodeState<B> {
         layer: usize,
         plan: &KvBatchReadPlan<B>,
     ) -> TensorCacheResult<KvBatchRead<B>> {
+        self.versions.check(step)?;
         if !step.wrote_ahead(group, layer) {
             return Err(TensorCacheError::BatchPlanMismatch {
                 layer,
@@ -758,14 +924,15 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// # Errors
     ///
-    /// Returns an error for a disabled bank, a misplaced token range, or a
-    /// position beyond Burn's portable `i32` range.
+    /// Returns an error for a stale step, a disabled bank, a misplaced token
+    /// range, or a position beyond Burn's portable `i32` range.
     pub fn step_token_segment(
         &self,
         step: &TensorStepWrites<B>,
         keys: Tensor<B, 4>,
         values: Tensor<B, 4>,
     ) -> TensorCacheResult<KvBatchSegment<B>> {
+        self.versions.check(step)?;
         let (_, lengths) = self.step_target(step.bank)?;
         let [rows, _, block, _] = keys.dims();
         validate_count(step.counts.len(), rows)?;
@@ -828,10 +995,12 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// # Errors
     ///
-    /// Returns an error for incomplete, duplicate, or inconsistent coverage,
-    /// capacity overflow, or any tensor validation failure. On error nothing
-    /// changes, except slots beyond the lengths that a write-ahead filled.
+    /// Returns an error for a stale step, incomplete, duplicate, or
+    /// inconsistent coverage, capacity overflow, or any tensor validation
+    /// failure. On error nothing changes, except slots beyond the lengths that
+    /// a write-ahead filled.
     pub fn publish_step(&mut self, step: TensorStepWrites<B>) -> TensorCacheResult<()> {
+        self.versions.check(&step)?;
         let bank_kind = step.bank;
         let (bank, lengths) = self.step_target(bank_kind)?;
         validate_count(self.batch_size(), step.counts.len())?;
@@ -855,6 +1024,7 @@ impl<B: Backend> TensorDecodeState<B> {
         };
         lengths.publish_advance(next);
         apply_step(bank, prepared);
+        self.versions.bump(bank_kind);
         self.sync_history_locks();
         Ok(())
     }
@@ -1110,14 +1280,9 @@ fn prepare_kv<B: Backend>(
             layer,
             starts: written,
         } => {
-            if let Some(sequence) = (0..starts.len()).find(|&row| written[row] != starts[row]) {
-                return Err(TensorCacheError::TransactionCursorMismatch {
-                    sequence,
-                    cursor: "write-ahead start",
-                    expected: starts[sequence],
-                    actual: written[sequence],
-                });
-            }
+            // The version check in `publish_step` proves no lifecycle
+            // operation ran since the write, so the cursors cannot have moved.
+            debug_assert_eq!(written.as_slice(), starts, "write-ahead cursors moved");
             let updates = if staging {
                 bank.native_kv(*group)?
                     .staged_updates_for(*layer, starts, &step.counts)?

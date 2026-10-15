@@ -13,7 +13,7 @@ use core::num::NonZeroUsize;
 use proptest::prelude::*;
 
 use super::*;
-use crate::cache::CacheConfig;
+use crate::cache::{CacheConfig, KvCacheStorage};
 
 /// Deterministic host backend for exact comparisons.
 type TestBackend = Flex<f32, i32>;
@@ -515,16 +515,20 @@ fn invalid_batched_writes_are_rejected_atomically() {
     );
 }
 
-/// Plans reject other geometries and stale staging.
+/// Plans read only the group that built them, within the transaction they were built in.
 #[test]
-fn read_plans_are_bound_to_geometry_and_staging() {
+fn read_plans_are_bound_to_their_group_and_transaction() {
     let mut ring = cache(2, 8, KvCacheStorage::SlidingRing, 3, 2, false);
     let full = cache(2, 8, KvCacheStorage::Full, 1, 0, false);
+    let twin = cache(2, 8, KvCacheStorage::Full, 1, 0, false);
     let plan = full.plan_batch_read(&[1, 2]).expect("plan");
-    assert!(matches!(
-        ring.read_batch(0, &plan),
-        Err(TensorCacheError::BatchPlanMismatch { .. })
-    ));
+    for other in [&ring, &twin] {
+        // Even an identically configured group refuses another group's plan.
+        assert!(matches!(
+            other.read_batch(0, &plan),
+            Err(TensorCacheError::BatchPlanMismatch { reason, .. }) if reason.contains("another cache group")
+        ));
+    }
     assert!(matches!(
         full.plan_batch_read(&[1]),
         Err(TensorCacheError::Metadata(_))
@@ -562,6 +566,176 @@ fn read_plans_are_bound_to_geometry_and_staging() {
         .to_string()
         .contains("layer 3")
     );
+}
+
+/// A working plan from an in-place group never reads a separate-staging group, and vice versa.
+///
+/// Both groups hold the same committed tokens and stage the same proposal.
+/// The in-place plan is one committed segment `[0, C + P)`; applied to the
+/// separate-staging group it would read committed slot `C`, which does not
+/// hold the proposal.
+#[test]
+fn working_plans_do_not_cross_staging_modes() {
+    let mut in_place = cache(1, 8, KvCacheStorage::Full, 1, 2, true);
+    let mut separate = cache(1, 8, KvCacheStorage::Full, 1, 2, false);
+    let prefill = KvBatchAppend::right_padded(&[0], &[2], 2).expect("layout");
+    let proposal = KvBatchAppend::right_padded(&[2], &[1], 1).expect("layout");
+    for group in [&mut in_place, &mut separate] {
+        group
+            .write_batch(0, &prefill, block(1, 2, 1.0), block(1, 2, 2.0))
+            .expect("prefill");
+        group.begin_staging_from(&[2]).expect("staging");
+        group
+            .stage_batch(0, &proposal, block(1, 1, 3.0), block(1, 1, 4.0))
+            .expect("stage");
+    }
+    let in_place_plan = in_place.plan_working_batch_read(&[2]).expect("plan");
+    let separate_plan = separate.plan_working_batch_read(&[2]).expect("plan");
+    for (group, plan) in [(&separate, &in_place_plan), (&in_place, &separate_plan)] {
+        assert!(matches!(
+            group.read_batch(0, plan),
+            Err(TensorCacheError::BatchPlanMismatch { reason, .. }) if reason.contains("another cache group")
+        ));
+    }
+    // Each group's own plan reads the same chronological keys.
+    let own = |group: &NativeKvCache<TestBackend>, plan| {
+        chronological_row(&group.read_batch(0, plan).expect("read"), 0)
+    };
+    assert_eq!(
+        own(&in_place, &in_place_plan),
+        own(&separate, &separate_plan)
+    );
+}
+
+/// A latent group refuses a key/value group's plan, and the reverse.
+#[test]
+fn plans_do_not_cross_kv_and_latent_groups() {
+    let config = CacheConfig::new(2, 6).expect("config");
+    let kv = NativeKvCache::<TestBackend>::new(
+        config,
+        2,
+        NativeKvCacheSpec::new(1, 1, 3, KvCacheStorage::Full, DType::F32).expect("geometry"),
+        &device(),
+    )
+    .expect("KV group");
+    let latent = NativeKvCache::<TestBackend>::new(
+        config,
+        2,
+        NativeKvCacheSpec::latent(1, 3, KvCacheStorage::Full, DType::F32).expect("geometry"),
+        &device(),
+    )
+    .expect("latent group");
+    let kv_plan = kv.plan_batch_read(&[1, 2]).expect("plan");
+    let latent_plan = latent.plan_batch_read(&[1, 2]).expect("plan");
+    assert!(matches!(
+        latent.read_batch(0, &kv_plan),
+        Err(TensorCacheError::BatchPlanMismatch { .. })
+    ));
+    assert!(matches!(
+        kv.read_batch(0, &latent_plan),
+        Err(TensorCacheError::BatchPlanMismatch { .. })
+    ));
+}
+
+/// A working plan from an earlier transaction is refused even when the staged lengths agree.
+#[test]
+fn working_plans_expire_with_their_transaction() {
+    for in_place in [false, true] {
+        let mut group = cache(2, 8, KvCacheStorage::Full, 1, 2, in_place);
+        let proposal = KvBatchAppend::right_padded(&[0, 0], &[1, 1], 1).expect("layout");
+        group.begin_staging_from(&[0, 0]).expect("staging");
+        group
+            .stage_batch(0, &proposal, block(2, 1, 1.0), block(2, 1, 1.0))
+            .expect("stage");
+        let first = group.plan_working_batch_read(&[0, 0]).expect("plan");
+        group.rollback_staging();
+        assert!(matches!(
+            group.read_batch(0, &first),
+            Err(TensorCacheError::BatchPlanMismatch { reason, .. }) if reason.contains("another transaction")
+        ));
+        // The next transaction stages the same lengths with different values.
+        group.begin_staging_from(&[0, 0]).expect("staging");
+        group
+            .stage_batch(0, &proposal, block(2, 1, 5.0), block(2, 1, 5.0))
+            .expect("stage");
+        assert!(matches!(
+            group.read_batch(0, &first),
+            Err(TensorCacheError::BatchPlanMismatch { reason, .. }) if reason.contains("another transaction")
+        ));
+        let current = group.plan_working_batch_read(&[0, 0]).expect("plan");
+        assert!(
+            group.read_batch(0, &current).is_ok(),
+            "in place: {in_place}"
+        );
+    }
+}
+
+/// Non-finite bytes in an invalid slot poison raw values but not `masked_values`.
+///
+/// Row 1 stages a NaN proposal in place and rolls it back; the slot keeps the
+/// NaN but lies beyond the row's length. A batched read over both rows
+/// exposes it as an invalid key. Masked scores neutralize the NaN key, yet
+/// `0 · NaN` in the value product still yields NaN unless the values are
+/// masked; with masked values the row equals its per-row attention.
+#[test]
+fn masked_values_neutralize_non_finite_invalid_slots() {
+    let mut group = cache(2, 8, KvCacheStorage::Full, 1, 2, true);
+    let prefill = KvBatchAppend::right_padded(&[0, 0], &[3, 1], 3).expect("layout");
+    let keys = block(2, 3, 0.0).mul_scalar(1e-3);
+    let values = block(2, 3, 0.0).mul_scalar(2e-3);
+    group
+        .write_batch(0, &prefill, keys, values)
+        .expect("prefill");
+    group.begin_staging_from(&[3, 1]).expect("staging");
+    let draft = KvBatchAppend::right_padded(&[3, 1], &[0, 1], 1).expect("layout");
+    let nan = Tensor::<TestBackend, 4>::full([2, HEADS, 1, DIM], f32::NAN, &device());
+    group
+        .stage_batch(0, &draft, nan.clone(), nan)
+        .expect("stage NaN draft");
+    group.rollback_staging();
+
+    let segment = group
+        .read_batch(0, &group.plan_batch_read(&[3, 1]).expect("plan"))
+        .expect("read")
+        .materialize()
+        .expect("keys");
+    let positions =
+        Tensor::<TestBackend, 2, Int>::from_ints(TensorData::new(vec![2, 0], [2, 1]), &device());
+    let excluded = segment
+        .exclusion_mask(&positions, HEADS, None)
+        .expect("mask");
+    let query = block(2, 1, 0.0).mul_scalar(3e-3);
+    let raw = host(&attend(
+        query.clone(),
+        segment.keys().clone(),
+        segment.values().clone(),
+        excluded.clone(),
+    ));
+    assert!(raw.iter().any(|value| value.is_nan()), "the hazard is real");
+    let masked = segment.masked_values();
+    assert!(host(&masked).iter().all(|value| value.is_finite()));
+    let safe = host(&attend(
+        query.clone(),
+        segment.keys().clone(),
+        masked,
+        excluded,
+    ));
+    assert!(safe.iter().all(|value| value.is_finite()));
+
+    // Row 1 attends to its single committed key only: the output is that value.
+    let history = group.read_sequence(0, 1, 1).expect("row read");
+    let (_, row_values) = history.materialize().expect("one key");
+    let per_row = host(&row_values);
+    assert_eq!(&safe[HEADS * DIM..], per_row.as_slice());
+
+    // Fully valid segments are returned without masking.
+    let full = group
+        .read_batch(0, &group.plan_batch_read(&[1, 1]).expect("plan"))
+        .expect("read")
+        .materialize()
+        .expect("keys");
+    assert!(full.key_valid().is_none());
+    assert_eq!(host(&full.masked_values()), host(full.values()));
 }
 
 /// Exclusion masks equal a brute-force causal, window, and padding rule.

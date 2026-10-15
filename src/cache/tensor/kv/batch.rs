@@ -40,7 +40,22 @@
 //! A [`KvBatchReadPlan`] holds the per-step positions and masks. Every layer
 //! of a group shares the same lengths within a step, so a model plans once per
 //! step and reads each layer through the plan, uploading the small position
-//! and mask tensors once instead of once per layer.
+//! and mask tensors once instead of once per layer. A plan reads only the
+//! group that built it, and a working plan only within the transaction it was
+//! built in.
+//!
+//! # Invalid slots
+//!
+//! Because every row is read over the same slot range, a row shorter than the
+//! longest one, or a ring slot outside a row's window, yields *invalid* keys.
+//! Their keys and values are unspecified bytes: zeros, older tokens, rejected
+//! speculative proposals, abandoned write-ahead tokens, or rows left behind by
+//! a truncate or reorder. Such bytes can be non-finite (an F16 draft that
+//! overflowed, say). Excluding a key by *replacing* its score with `-inf`
+//! (`mask_fill`) neutralizes a non-finite key, but its value still enters
+//! `softmax(scores) · V` with weight `0`, and `0 · NaN = NaN`. Consumers must
+//! therefore use [`KvBatchSegment::masked_values`] (or zero invalid values
+//! themselves) unless they can rule out non-finite cache contents.
 
 use core::num::NonZeroUsize;
 use core::ops::Range;
@@ -48,13 +63,13 @@ use core::ops::Range;
 use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::DecodeStateError;
+use crate::cache::identity::IdentityToken;
 use crate::cache::retention::{WorkingWindow, ring_slot_position, ring_working_window};
 use crate::cache::rows::{RowRun, row_runs};
 
 use super::{
-    KvCacheStorage, NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError,
-    TensorCacheResult, validate_plane_count, validate_sequence, validate_tensor,
-    validate_write_end,
+    NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError, TensorCacheResult,
+    validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
 };
 
 // Write layouts.
@@ -708,25 +723,41 @@ struct PlannedSegment<B: Backend> {
     valid: Option<Tensor<B, 2, Bool>>,
 }
 
+/// The transaction state a working read plan was built against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedStaging {
+    /// The group's transaction counter when the plan was built.
+    epoch: u64,
+    /// Proposal lengths per row that every layer read must still match.
+    lengths: Vec<usize>,
+}
+
 /// Per-step plan for reading every layer of one KV group in batch.
 ///
 /// Build it once per step with [`NativeKvCache::plan_batch_read`] or
 /// [`NativeKvCache::plan_working_batch_read`], then call
-/// [`NativeKvCache::read_batch`] for each layer. The plan records the staged
-/// lengths it assumed and every read checks them, so a plan cannot silently
-/// read a layer whose proposals have since changed.
+/// [`NativeKvCache::read_batch`] for each layer. A plan is stamped with the
+/// identity of the group that built it and is rejected by every other group,
+/// even one with identical geometry, because staging mode and contents
+/// differ between groups. A working plan also records its transaction and
+/// staged lengths, and every read checks them, so it cannot read a layer
+/// whose proposals have since changed or a later transaction's proposals.
+///
+/// Committed positions are a function of the lengths the plan was built for.
+/// Full storage keeps every position at its own slot, so such a plan stays
+/// correct while those prefixes are unchanged; a ring's slots are reused, so
+/// a ring plan is only valid until the group's next committed write. Plan
+/// after the lengths change (in practice, once per step).
 #[derive(Debug, Clone)]
 pub struct KvBatchReadPlan<B: Backend> {
     /// Visible absolute interval of each row.
     retained: Vec<Range<usize>>,
     /// Planned segments in storage order.
     segments: Vec<PlannedSegment<B>>,
-    /// Separate-staging lengths assumed by a working plan.
-    staged: Option<Vec<usize>>,
-    /// Storage mode of the planned group.
-    storage: KvCacheStorage,
-    /// Ring width of the planned group.
-    window: Option<NonZeroUsize>,
+    /// Identity of the group that built the plan.
+    source: IdentityToken,
+    /// Transaction and staged lengths assumed by a working plan; `None` for committed plans.
+    staging: Option<PlannedStaging>,
 }
 
 impl<B: Backend> KvBatchReadPlan<B> {
@@ -756,6 +787,10 @@ pub struct KvBatchRead<B: Backend> {
 }
 
 /// Keys, values, positions, and validity for one storage segment.
+///
+/// Keys and values of invalid entries are unspecified and may be non-finite;
+/// see the module documentation on invalid slots and
+/// [`masked_values`](Self::masked_values).
 #[derive(Debug, Clone)]
 pub struct KvBatchSegment<B: Backend> {
     /// Keys `[batch, kv_heads, keys, head_dim]`.
@@ -854,6 +889,28 @@ impl<B: Backend> KvBatchSegment<B> {
         &self.positions
     }
 
+    /// Returns values with every invalid key's entries set to zero.
+    ///
+    /// Attention computes `softmax(scores) · V`; an excluded key has weight
+    /// `0`, but `0 · NaN` and `0 · ∞` are `NaN`, so a non-finite stale value in
+    /// an invalid slot would poison its row. Zeroing makes the product
+    /// exactly `0`. When every key is valid the values are returned as is (a
+    /// shared handle, no copy); otherwise this writes one masked copy of the
+    /// values `[batch, kv_heads, keys, head_dim]`.
+    #[must_use]
+    pub fn masked_values(&self) -> Tensor<B, 4> {
+        let Some(valid) = &self.valid else {
+            return self.values.clone();
+        };
+        let [batch, heads, keys, channels] = self.values.dims();
+        let invalid = valid
+            .clone()
+            .bool_not()
+            .reshape([batch, 1, keys, 1])
+            .expand([batch, heads, keys, channels]);
+        self.values.clone().mask_fill(invalid, 0.0)
+    }
+
     /// Borrows key validity `[batch, keys]` (`true` = valid), or `None` if all are valid.
     #[must_use]
     pub const fn key_valid(&self) -> Option<&Tensor<B, 2, Bool>> {
@@ -867,6 +924,10 @@ impl<B: Backend> KvBatchSegment<B> {
     /// has left the window (`k + W <= q`, i.e. only `q - W < k <= q` remain).
     /// A query with no remaining key yields a fully excluded row; callers must
     /// handle such rows (for example inactive batch rows) explicitly.
+    ///
+    /// Apply the mask by replacing scores (`mask_fill` with `-inf`), never by
+    /// adding a bias: invalid keys may be non-finite, and `NaN + (-inf)` stays
+    /// `NaN`. Values need [`masked_values`](Self::masked_values) as well.
     ///
     /// # Errors
     ///
@@ -981,8 +1042,8 @@ impl<B: Backend> NativeKvCache<B> {
     /// Full storage reads the prefix view `[0, max_b L_b)`; ring storage reads
     /// its first `min(W, max_b L_b)` physical slots. Keys beyond a row's
     /// visible window are marked invalid. The plan is valid for every layer
-    /// and at any time, since committed tensors only change through committed
-    /// writes.
+    /// of this group while the committed contents of `[0, L_b)` are unchanged
+    /// (for a ring: until its next committed write); see [`KvBatchReadPlan`].
     ///
     /// # Errors
     ///
@@ -1051,9 +1112,13 @@ impl<B: Backend> NativeKvCache<B> {
                 validate_write_end(length, proposed, self.config.capacity())
             })
             .collect::<TensorCacheResult<Vec<_>>>()?;
+        let staging = PlannedStaging {
+            epoch: self.staging_epoch,
+            lengths: staged.clone(),
+        };
         if self.spec.in_place_staging() {
             let mut plan = self.plan_batch_read(&working)?;
-            plan.staged = Some(staged);
+            plan.staging = Some(staging);
             return Ok(plan);
         }
         let windows: Vec<WorkingWindow> = committed
@@ -1079,40 +1144,46 @@ impl<B: Backend> NativeKvCache<B> {
             .into_iter()
             .collect();
         segments.extend(self.staged_plan_segment(committed, &staged, &windows)?);
-        Ok(self.plan(retained, segments, Some(staged)))
+        Ok(self.plan(retained, segments, Some(staging)))
     }
 
     /// Reads one layer through a batched read plan.
     ///
     /// Slicing is the only tensor work: a single-segment plan returns views of
     /// the cache allocation, and positions and masks are shared handles.
+    /// Keys and values of invalid entries are unspecified (see the module
+    /// documentation on invalid slots).
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid layer, a plan built for another
-    /// geometry, or a working plan whose staged lengths no longer match.
+    /// Returns an error for an invalid layer, a plan built by another group,
+    /// or a working plan from another transaction or whose staged lengths no
+    /// longer match.
     pub fn read_batch(
         &self,
         layer: usize,
         plan: &KvBatchReadPlan<B>,
     ) -> TensorCacheResult<KvBatchRead<B>> {
         let cache_layer = self.layer(layer)?;
-        if plan.storage != self.spec.storage()
-            || plan.window != self.window
-            || plan.retained.len() != self.config.sequence_count()
-        {
+        if plan.source != self.identity {
             return Err(TensorCacheError::BatchPlanMismatch {
                 layer,
-                reason: "the plan was built for a different cache geometry",
+                reason: "the plan was built by another cache group",
             });
         }
-        if let Some(staged) = &plan.staged
-            && (!self.staging_active || self.staged_lengths[layer] != *staged)
-        {
-            return Err(TensorCacheError::BatchPlanMismatch {
-                layer,
-                reason: "staged proposals changed since the plan was built",
-            });
+        if let Some(staging) = &plan.staging {
+            if !self.staging_active || staging.epoch != self.staging_epoch {
+                return Err(TensorCacheError::BatchPlanMismatch {
+                    layer,
+                    reason: "the plan was built in another transaction",
+                });
+            }
+            if self.staged_lengths[layer] != staging.lengths {
+                return Err(TensorCacheError::BatchPlanMismatch {
+                    layer,
+                    reason: "staged proposals changed since the plan was built",
+                });
+            }
         }
         let rows = 0..self.config.sequence_count();
         let heads = 0..self.spec.key_value_heads();
@@ -1150,19 +1221,18 @@ impl<B: Backend> NativeKvCache<B> {
         })
     }
 
-    /// Assembles a plan stamped with this cache's geometry.
+    /// Assembles a plan stamped with this group's identity.
     fn plan(
         &self,
         retained: Vec<Range<usize>>,
         segments: Vec<PlannedSegment<B>>,
-        staged: Option<Vec<usize>>,
+        staging: Option<PlannedStaging>,
     ) -> KvBatchReadPlan<B> {
         KvBatchReadPlan {
             retained,
             segments,
-            staged,
-            storage: self.spec.storage(),
-            window: self.window,
+            source: self.identity.clone(),
+            staging,
         }
     }
 
