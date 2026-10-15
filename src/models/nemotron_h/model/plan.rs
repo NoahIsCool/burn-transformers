@@ -46,14 +46,16 @@
 //!
 //! Every function here is dependency-free integer logic, checked in place by
 //! Verus through `verus/nemotron.rs` (see `verus/README.md`). For all
-//! admissible inputs the proofs establish freedom from overflow and that every
-//! compact-batch map has its stated length and addresses only valid entries
-//! of its source (a flat index below `B * S`, `B * N`, or the appended zero
-//! row), so tensor programs built from these plans cannot index out of range.
-//! They also prove the per-slot query-position rule (a query never lies
-//! beyond its row's last readable key), the policies' exact decision rules,
-//! and the MTP cursor invariant. Tensor programs driven by the plans remain
-//! covered by Rust tests.
+//! admissible inputs the proofs establish freedom from overflow and the exact
+//! contents of every compact-batch map: `N` is the largest row count, each
+//! `gather`, `unpack`, `packed`, and `last` entry equals its equation above,
+//! `scatter` sends valid column `c_{b,k}` to slot `(b, k)` and every other
+//! column to the zero row, and `unpack` addresses the zero row exactly at
+//! padded slots. A plan is refused exactly for malformed columns or
+//! unrepresentable extents. They also prove every slot's query position (a
+//! query never lies beyond its row's last readable key), the policies' exact
+//! decision rules, and the MTP cursor invariant. Tensor programs driven by
+//! the plans remain covered by Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -123,6 +125,151 @@ proof fn lemma_total_monotone(columns: Seq<Vec<usize>>, rows: int, more: int)
     }
 }
 
+/// Running totals are never negative.
+proof fn lemma_total_nonnegative(columns: Seq<Vec<usize>>, rows: int)
+    ensures
+        total_tokens(columns, rows) >= 0,
+    decreases rows,
+{
+    if rows > 0 {
+        lemma_total_nonnegative(columns, rows - 1);
+    }
+}
+
+/// Row-major flat index of entry `(row, column)` in a matrix `width` columns wide.
+pub open spec fn flat(row: int, column: int, width: int) -> int {
+    row * width + column
+}
+
+/// An entry of an earlier row lies before the first entry of row `rows`.
+proof fn lemma_flat_below(row: int, column: int, rows: int, width: int)
+    requires
+        0 <= row < rows,
+        0 <= column < width,
+    ensures
+        0 <= flat(row, column, width) < rows * width,
+{
+    assert(row * width + width <= rows * width) by (nonlinear_arith)
+        requires 0 <= row < rows, width >= 0;
+    assert(row * width >= 0) by (nonlinear_arith)
+        requires row >= 0, width >= 0;
+}
+
+/// Valid token `j` of row `row` precedes every token of later rows in packed order.
+proof fn lemma_packed_below(columns: Seq<Vec<usize>>, row: int, rows: int, j: int)
+    requires
+        0 <= row < rows <= columns.len(),
+        0 <= j < columns[row]@.len(),
+    ensures
+        0 <= total_tokens(columns, row) + j < total_tokens(columns, rows),
+{
+    lemma_total_step(columns, row);
+    lemma_total_monotone(columns, row + 1, rows);
+    lemma_total_nonnegative(columns, row);
+}
+
+/// Some row among the first `rows` has exactly `width` valid columns.
+pub open spec fn attains(columns: Seq<Vec<usize>>, rows: int, width: int) -> bool {
+    exists|b: int| 0 <= b < rows && #[trigger] columns[b]@.len() == width
+}
+
+/// The position [`slot_position`] assigns to slot `slot` of a row (see its documentation).
+pub open spec fn slot_position_spec(baseline: int, count: int, slot: int) -> int {
+    if slot < count {
+        baseline + slot
+    } else if baseline + count > 0 {
+        baseline + count - 1
+    } else {
+        0
+    }
+}
+
+/// Packed (row-major valid-token) index `o_b + j` of valid token `j` of row `b`.
+pub open spec fn packed_index(columns: Seq<Vec<usize>>, row: int, j: int) -> int {
+    total_tokens(columns, row) + j
+}
+
+/// Every flat entry of rows `0..rows` lies before the first entry of row `rows`.
+pub open spec fn rows_below(rows: int, width: int) -> bool {
+    forall|b: int, j: int| 0 <= b < rows && 0 <= j < width
+        ==> 0 <= #[trigger] flat(b, j, width) < rows * width
+}
+
+/// Every valid token of rows `0..rows` precedes the packed tokens of row `rows`.
+pub open spec fn packed_rows_below(columns: Seq<Vec<usize>>, rows: int) -> bool {
+    forall|b: int, j: int| 0 <= b < rows && 0 <= j < columns[b]@.len()
+        ==> 0 <= #[trigger] packed_index(columns, b, j) < total_tokens(columns, rows)
+}
+
+/// `gather[b N + j] = b S + c_{b,j}` for valid slots and `b S` for padded slots of rows `0..rows`.
+pub open spec fn gathers_rows(
+    gather: Seq<usize>,
+    columns: Seq<Vec<usize>>,
+    rows: int,
+    width: int,
+    sequence: int,
+) -> bool {
+    forall|b: int, j: int| 0 <= b < rows && 0 <= j < width
+        ==> #[trigger] gather[flat(b, j, width)]
+            == flat(b, if j < columns[b]@.len() { columns[b]@[j] as int } else { 0 }, sequence)
+}
+
+/// `unpack[b N + j] = o_b + j` for valid slots and `T` for padded slots of rows `0..rows`.
+pub open spec fn unpacks_rows(
+    unpack: Seq<usize>,
+    columns: Seq<Vec<usize>>,
+    rows: int,
+    width: int,
+    tokens: int,
+) -> bool {
+    forall|b: int, j: int| 0 <= b < rows && 0 <= j < width
+        ==> #[trigger] unpack[flat(b, j, width)]
+            == if j < columns[b]@.len() { packed_index(columns, b, j) } else { tokens }
+}
+
+/// `packed[o_b + j] = b N + j` for every valid token of rows `0..rows`.
+pub open spec fn packs_rows(
+    packed: Seq<usize>,
+    columns: Seq<Vec<usize>>,
+    rows: int,
+    width: int,
+) -> bool {
+    forall|b: int, j: int| 0 <= b < rows && 0 <= j < columns[b]@.len()
+        ==> #[trigger] packed[packed_index(columns, b, j)] == flat(b, j, width)
+}
+
+/// `scatter[b S + c_{b,k}] = b N + k`, and every other column of rows `0..rows` reads `padding`.
+pub open spec fn scatters_rows(
+    scatter: Seq<usize>,
+    columns: Seq<Vec<usize>>,
+    rows: int,
+    width: int,
+    sequence: int,
+    padding: int,
+) -> bool {
+    &&& forall|b: int, k: int| 0 <= b < rows && 0 <= k < columns[b]@.len()
+        ==> #[trigger] scatter[flat(b, columns[b]@[k] as int, sequence)] == flat(b, k, width)
+    &&& forall|b: int, s: int| 0 <= b < rows && 0 <= s < sequence
+        && !columns[b]@.contains(s as usize)
+        ==> #[trigger] scatter[flat(b, s, sequence)] == padding
+}
+
+/// `last[b] = b N + n_b - 1`, or `padding` for an inactive row, for rows `0..rows`.
+pub open spec fn lasts_rows(
+    last: Seq<usize>,
+    columns: Seq<Vec<usize>>,
+    rows: int,
+    width: int,
+    padding: int,
+) -> bool {
+    forall|b: int| 0 <= b < rows
+        ==> #[trigger] last[b] == if columns[b]@.len() == 0 {
+            padding
+        } else {
+            flat(b, columns[b]@.len() - 1, width)
+        }
+}
+
 } // verus!
 
 /// Right-padded compact layout of one ragged batch (see the module documentation).
@@ -172,17 +319,22 @@ impl CompactPlan {
 
 /// Plans the compact layout of rows whose valid columns are `columns[b]`.
 ///
-/// Returns `None` when a row's columns are not strictly increasing below
-/// `sequence`, or when a flat index would overflow `usize`. On success every
-/// map has its documented length and stays inside its source: `gather` below
-/// `B * S`, `scatter` and `last` at most `B * N` (the zero row), `packed`
-/// below `B * N`, and `unpack` at most `T` (the zero row).
+/// Returns `None` exactly when a row's columns are not strictly increasing
+/// below `sequence`, or when a flat extent (`T`, `B * N`, or `B * S`) would
+/// overflow `usize`. On success the proof establishes every equation of the
+/// module documentation: `N` is the largest row count, `gather`, `unpack`,
+/// `packed`, and `last` hold exactly their documented entries, `scatter`
+/// sends valid column `c_{b,k}` to compact slot `(b, k)` and every other
+/// column to the zero row `B * N`, and an `unpack` entry equals `T` exactly
+/// at padded slots. Each map therefore stays inside its source.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(planned =>
     ensures
         match planned {
             Some(plan) => {
                 let batch = columns.len() as int;
+                let width = plan.width as int;
+                let tokens = total_tokens(columns@, batch);
                 &&& plan.sequence == sequence
                 &&& plan.counts.len() == batch
                 &&& forall|b: int| 0 <= b < batch ==> {
@@ -190,18 +342,34 @@ impl CompactPlan {
                     &&& plan.counts@[b] <= plan.width
                     &&& sorted_unique_below(columns@[b]@, sequence as int)
                 }
-                &&& plan.gather.len() == batch * plan.width
+                &&& plan.width > 0 ==> attains(columns@, batch, width)
+                &&& plan.gather.len() == batch * width
                 &&& plan.scatter.len() == batch * sequence
-                &&& plan.unpack.len() == batch * plan.width
-                &&& plan.packed.len() == total_tokens(columns@, batch)
+                &&& plan.unpack.len() == batch * width
+                &&& plan.packed.len() == tokens
                 &&& plan.last.len() == batch
+                &&& gathers_rows(plan.gather@, columns@, batch, width, sequence as int)
+                &&& unpacks_rows(plan.unpack@, columns@, batch, width, tokens)
+                &&& packs_rows(plan.packed@, columns@, batch, width)
+                &&& scatters_rows(plan.scatter@, columns@, batch, width, sequence as int, batch * width)
+                &&& lasts_rows(plan.last@, columns@, batch, width, batch * width)
+                &&& forall|b: int, j: int| 0 <= b < batch && 0 <= j < width
+                    ==> (#[trigger] plan.unpack@[flat(b, j, width)] == tokens)
+                        == (j >= columns@[b]@.len())
                 &&& all_below(plan.gather@, batch * sequence)
-                &&& all_at_most(plan.scatter@, batch * plan.width)
-                &&& all_below(plan.packed@, batch * plan.width)
-                &&& all_at_most(plan.unpack@, plan.packed.len() as int)
-                &&& all_at_most(plan.last@, batch * plan.width)
+                &&& all_at_most(plan.scatter@, batch * width)
+                &&& all_below(plan.packed@, batch * width)
+                &&& all_at_most(plan.unpack@, tokens)
+                &&& all_at_most(plan.last@, batch * width)
             },
-            None => true,
+            None => {
+                ||| exists|b: int| 0 <= b < columns.len()
+                    && !sorted_unique_below(#[trigger] columns@[b]@, sequence as int)
+                ||| total_tokens(columns@, columns.len() as int) > usize::MAX
+                ||| exists|b: int| 0 <= b < columns.len()
+                    && columns.len() * (#[trigger] columns@[b]@.len()) > usize::MAX
+                ||| columns.len() * sequence > usize::MAX
+            },
         },
 ))]
 pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option<CompactPlan> {
@@ -215,6 +383,7 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
             row <= batch,
             tokens == total_tokens(columns@, row as int),
             width > 0 ==> sequence > 0,
+            width > 0 ==> attains(columns@, row as int, width as int),
             forall|b: int| 0 <= b < row ==> {
                 &&& #[trigger] columns@[b]@.len() <= width
                 &&& sorted_unique_below(columns@[b]@, sequence as int)
@@ -232,12 +401,32 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
             if count > 0 {
                 assert(columns@[row as int]@[0] < sequence);
             }
+            lemma_total_step(columns@, row as int);
+            lemma_total_monotone(columns@, row as int + 1, batch as int);
         }
         if count > width {
             width = count;
         }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            if width > 0 && width == count {
+                assert(columns@[row as int]@.len() == width);
+            }
+        }
         tokens = tokens.checked_add(count)?;
         row += 1;
+    }
+    // An overflowing `B * N` is witnessed by a row whose count is `N`.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if batch * width > usize::MAX {
+            if width == 0 {
+                assert(batch * width == 0) by (nonlinear_arith)
+                    requires width == 0;
+            }
+            let b = choose|b: int| 0 <= b < batch && #[trigger] columns@[b]@.len() == width;
+            assert(columns@[b]@.len() == width);
+        }
     }
     let compact_slots = batch.checked_mul(width)?;
     let rectangular_slots = batch.checked_mul(sequence)?;
@@ -273,6 +462,11 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
             scatter.len() == row * sequence,
             last.len() == row,
             packed.len() == total_tokens(columns@, row as int),
+            gathers_rows(gather@, columns@, row as int, width as int, sequence as int),
+            unpacks_rows(unpack@, columns@, row as int, width as int, tokens as int),
+            packs_rows(packed@, columns@, row as int, width as int),
+            scatters_rows(scatter@, columns@, row as int, width as int, sequence as int, compact_slots as int),
+            lasts_rows(last@, columns@, row as int, width as int, compact_slots as int),
             all_below(gather@, batch * sequence),
             all_at_most(scatter@, batch * width),
             all_below(packed@, batch * width),
@@ -292,6 +486,21 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 by {
                     lemma_total_monotone(columns@, row as int + 1, batch as int);
                 };
+            lemma_total_nonnegative(columns@, row as int);
+            // Entries of earlier rows lie before everything this row appends.
+            assert forall|b: int, j: int| 0 <= b < row && 0 <= j < width
+                implies 0 <= #[trigger] flat(b, j, width as int) < row * width by {
+                lemma_flat_below(b, j, row as int, width as int);
+            }
+            assert forall|b: int, j: int| 0 <= b < row && 0 <= j < sequence
+                implies 0 <= #[trigger] flat(b, j, sequence as int) < row * sequence by {
+                lemma_flat_below(b, j, row as int, sequence as int);
+            }
+            assert forall|b: int, j: int| 0 <= b < row && 0 <= j < columns@[b]@.len()
+                implies 0 <= #[trigger] packed_index(columns@, b, j)
+                    < total_tokens(columns@, row as int) by {
+                lemma_packed_below(columns@, b, row as int, j);
+            }
         }
         counts.push(count);
         let mut slot: usize = 0;
@@ -311,6 +520,7 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 rectangular_start + sequence <= batch * sequence,
                 compact_slots == batch * width,
                 tokens == total_tokens(columns@, batch as int),
+                total_tokens(columns@, row as int) >= 0,
                 total_tokens(columns@, row as int + 1) <= tokens,
                 total_tokens(columns@, row as int + 1)
                     == total_tokens(columns@, row as int) + count,
@@ -319,6 +529,18 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 unpack.len() == row * width + slot,
                 packed.len() == total_tokens(columns@, row as int)
                     + if slot < count { slot as int } else { count as int },
+                rows_below(row as int, width as int),
+                packed_rows_below(columns@, row as int),
+                gathers_rows(gather@, columns@, row as int, width as int, sequence as int),
+                unpacks_rows(unpack@, columns@, row as int, width as int, tokens as int),
+                packs_rows(packed@, columns@, row as int, width as int),
+                forall|j: int| 0 <= j < slot ==> #[trigger] gather@[flat(row as int, j, width as int)]
+                    == flat(row as int, if j < count { valid@[j] as int } else { 0 }, sequence as int),
+                forall|j: int| 0 <= j < slot ==> #[trigger] unpack@[flat(row as int, j, width as int)]
+                    == if j < count { packed_index(columns@, row as int, j) } else { tokens as int },
+                forall|j: int| 0 <= j < slot && j < count
+                    ==> #[trigger] packed@[packed_index(columns@, row as int, j)]
+                        == flat(row as int, j, width as int),
                 all_below(gather@, batch * sequence),
                 all_below(packed@, batch * width),
                 all_at_most(unpack@, tokens as int),
@@ -347,22 +569,51 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 valid@ == columns@[row as int]@,
                 count == columns@[row as int]@.len(),
                 count <= width,
+                sorted_unique_below(columns@[row as int]@, sequence as int),
+                forall|b: int| 0 <= b < batch ==> {
+                    &&& #[trigger] columns@[b]@.len() <= width
+                    &&& sorted_unique_below(columns@[b]@, sequence as int)
+                },
+                compact_start == row * width,
+                rectangular_start == row * sequence,
                 compact_start + width <= batch * width,
                 compact_slots == batch * width,
                 column <= sequence,
                 next <= count,
                 scatter.len() == row * sequence + column,
+                rows_below(row as int, sequence as int),
+                scatters_rows(scatter@, columns@, row as int, width as int, sequence as int, compact_slots as int),
+                // Matched columns lie before the cursor; unmatched ones at or after it.
+                forall|k: int| 0 <= k < next ==> #[trigger] valid@[k] < column,
+                forall|k: int| next <= k < count ==> #[trigger] valid@[k] >= column,
+                forall|k: int| 0 <= k < next
+                    ==> #[trigger] scatter@[flat(row as int, valid@[k] as int, sequence as int)]
+                        == flat(row as int, k, width as int),
+                forall|s: int| 0 <= s < column && !valid@.contains(s as usize)
+                    ==> #[trigger] scatter@[flat(row as int, s, sequence as int)] == compact_slots,
                 all_at_most(scatter@, batch * width),
             decreases sequence - column,
         ))]
         while column < sequence {
             if next < count && valid[next] == column {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    assert(valid@.contains(column));
+                }
                 scatter.push(compact_start + next);
                 next += 1;
             } else {
                 scatter.push(compact_slots);
             }
             column += 1;
+        }
+        // Every valid column lies below `sequence`, so the merge matched all of them.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            if next < count {
+                assert(valid@[next as int] >= column);
+                assert(valid@[next as int] < sequence);
+            }
         }
         last.push(if count == 0 {
             compact_slots
@@ -375,10 +626,48 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 by (nonlinear_arith);
             assert((row as int + 1) * sequence as int == row as int * sequence as int + sequence as int)
                 by (nonlinear_arith);
+            let next_row = row as int + 1;
+            assert forall|b: int, j: int| 0 <= b < next_row && 0 <= j < width
+                implies #[trigger] gather@[flat(b, j, width as int)]
+                    == flat(b, if j < columns@[b]@.len() { columns@[b]@[j] as int } else { 0 }, sequence as int)
+            by {}
+            assert forall|b: int, j: int| 0 <= b < next_row && 0 <= j < width
+                implies #[trigger] unpack@[flat(b, j, width as int)]
+                    == if j < columns@[b]@.len() { packed_index(columns@, b, j) } else { tokens as int }
+            by {}
+            assert forall|b: int, j: int| 0 <= b < next_row && 0 <= j < columns@[b]@.len()
+                implies #[trigger] packed@[packed_index(columns@, b, j)] == flat(b, j, width as int)
+            by {}
+            assert forall|b: int, k: int| 0 <= b < next_row && 0 <= k < columns@[b]@.len()
+                implies #[trigger] scatter@[flat(b, columns@[b]@[k] as int, sequence as int)]
+                    == flat(b, k, width as int)
+            by {}
+            assert forall|b: int, s: int|
+                0 <= b < next_row && 0 <= s < sequence && !columns@[b]@.contains(s as usize)
+                implies #[trigger] scatter@[flat(b, s, sequence as int)] == compact_slots
+            by {}
+            assert forall|b: int| 0 <= b < next_row
+                implies #[trigger] last@[b] == if columns@[b]@.len() == 0 {
+                    compact_slots as int
+                } else {
+                    flat(b, columns@[b]@.len() - 1, width as int)
+                }
+            by {}
         }
         compact_start += width;
         rectangular_start += sequence;
         row += 1;
+    }
+    // An `unpack` entry equals `T` exactly at padded slots.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|b: int, j: int| 0 <= b < batch && 0 <= j < width
+            implies (#[trigger] unpack@[flat(b, j, width as int)] == tokens)
+                == (j >= columns@[b]@.len()) by {
+            if j < columns@[b]@.len() {
+                lemma_packed_below(columns@, b, batch as int, j);
+            }
+        }
     }
     Some(CompactPlan {
         sequence,
@@ -409,6 +698,7 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
         match position {
             Some(position) => {
                 &&& baseline + count <= usize::MAX
+                &&& position == slot_position_spec(baseline as int, count as int, slot as int)
                 &&& slot < count ==> position == baseline + slot
                 &&& slot >= count && baseline + count > 0 ==> position + 1 == baseline + count
                 &&& slot >= count && baseline + count == 0 ==> position == 0
@@ -432,8 +722,9 @@ pub(crate) const fn slot_position(baseline: usize, count: usize, slot: usize) ->
 /// Slot `(b, j)` holds [`slot_position`]`(W_b, n_b, j)`: valid slots continue
 /// the row's numbering and padded slots repeat its last readable position, so
 /// no query of a row with history is ever fully excluded by causality or a
-/// sliding window. Returns `None` when `baselines` and `counts` differ in
-/// length or a position exceeds `usize` or `i64`.
+/// sliding window. Returns `None` exactly when `baselines` and `counts`
+/// differ in length, `B * N` overflows, or some slot's position exceeds
+/// `usize` or `i64`; the proof establishes the exact value of every slot.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(positions =>
     ensures
@@ -441,9 +732,19 @@ pub(crate) const fn slot_position(baseline: usize, count: usize, slot: usize) ->
             Some(positions) => {
                 &&& counts.len() == baselines.len()
                 &&& positions.len() == baselines.len() * width
+                &&& forall|b: int, j: int| 0 <= b < baselines.len() && 0 <= j < width
+                    ==> #[trigger] positions@[flat(b, j, width as int)]
+                        == slot_position_spec(baselines@[b] as int, counts@[b] as int, j)
                 &&& forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0
             },
-            None => true,
+            None => {
+                ||| counts.len() != baselines.len()
+                ||| baselines.len() * width > usize::MAX
+                ||| exists|b: int, j: int| 0 <= b < baselines.len() && 0 <= j < width && (
+                    baselines@[b] + counts@[b] > usize::MAX
+                    || #[trigger] slot_position_spec(baselines@[b] as int, counts@[b] as int, j)
+                        > i64::MAX)
+            },
         },
 ))]
 pub(crate) fn query_positions(
@@ -462,10 +763,21 @@ pub(crate) fn query_positions(
             counts.len() == baselines.len(),
             row <= baselines.len(),
             positions.len() == row * width,
+            forall|b: int, j: int| 0 <= b < row && 0 <= j < width
+                ==> #[trigger] positions@[flat(b, j, width as int)]
+                    == slot_position_spec(baselines@[b] as int, counts@[b] as int, j),
             forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
         decreases baselines.len() - row,
     ))]
     while row < baselines.len() {
+        // Entries of earlier rows lie before everything this row appends.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|b: int, j: int| 0 <= b < row && 0 <= j < width
+                implies 0 <= #[trigger] flat(b, j, width as int) < row * width by {
+                lemma_flat_below(b, j, row as int, width as int);
+            }
+        }
         let mut slot: usize = 0;
         #[cfg_attr(verus_keep_ghost, verus_spec(
             invariant
@@ -473,12 +785,38 @@ pub(crate) fn query_positions(
                 row < baselines.len(),
                 slot <= width,
                 positions.len() == row * width + slot,
+                rows_below(row as int, width as int),
+                forall|b: int, j: int| 0 <= b < row && 0 <= j < width
+                    ==> #[trigger] positions@[flat(b, j, width as int)]
+                        == slot_position_spec(baselines@[b] as int, counts@[b] as int, j),
+                forall|j: int| 0 <= j < slot
+                    ==> #[trigger] positions@[flat(row as int, j, width as int)]
+                        == slot_position_spec(baselines@[row as int] as int, counts@[row as int] as int, j),
                 forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
             decreases width - slot,
         ))]
         while slot < width {
+            // Slot `(row, slot)` witnesses either failure below.
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let ghost spec_position = slot_position_spec(
+                    baselines@[row as int] as int,
+                    counts@[row as int] as int,
+                    slot as int,
+                );
+                assert(baselines@[row as int] + counts@[row as int] > usize::MAX
+                    || spec_position > i64::MAX
+                    ==> (0 <= row < baselines.len() && 0 <= slot < width && (
+                        baselines@[row as int] + counts@[row as int] > usize::MAX
+                        || slot_position_spec(
+                            baselines@[row as int] as int,
+                            counts@[row as int] as int,
+                            slot as int,
+                        ) > i64::MAX)));
+            }
             let position = slot_position(baselines[row], counts[row], slot)?;
-            if position > i64::MAX as usize {
+            // `usize` has at most 64 bits, so widening to `u64` is lossless.
+            if position as u64 > i64::MAX as u64 {
                 return None;
             }
             positions.push(position as i64);
@@ -488,6 +826,9 @@ pub(crate) fn query_positions(
         proof! {
             assert((row as int + 1) * width as int == row as int * width as int + width as int)
                 by (nonlinear_arith);
+            assert forall|b: int, j: int| 0 <= b < row + 1 && 0 <= j < width
+                implies #[trigger] positions@[flat(b, j, width as int)]
+                    == slot_position_spec(baselines@[b] as int, counts@[b] as int, j) by {}
         }
         row += 1;
     }

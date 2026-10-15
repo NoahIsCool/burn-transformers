@@ -3,15 +3,17 @@
 //! Verifies, in place, the specifications attached to
 //! `src/models/nemotron_h/model/plan.rs`: the compact-batch maps that
 //! gather, scatter, pack, unpack, and select the last token of ragged rows
-//! (exact lengths and in-range addresses, including the appended zero rows),
-//! absolute query positions (padded slots repeat a row's last readable
-//! position, so no query of a row with history loses every key), the
-//! reference Mamba-2 path choice, the
-//! transactional recurrent-staging policy, the shifted MTP cursor after a
-//! truncation, and the one-pass verification length. The planning file
-//! reuses the shared strictly-increasing check, so the shared planning module
-//! is included at its crate path. See `verus/README.md` for the method,
-//! toolchain, and command.
+//! (every entry equals its documented equation, the compact width is the
+//! largest row count, the scatter is the inverse of the gather on valid
+//! columns, and a plan is refused exactly for malformed columns or
+//! unrepresentable extents), the exact absolute query position of every
+//! compact slot (padded slots repeat a row's last readable position, so no
+//! query of a row with history loses every key), the reference Mamba-2 path
+//! choice, the transactional recurrent-staging policy, the shifted MTP cursor
+//! after a truncation, and the one-pass verification length. The planning
+//! file reuses the shared strictly-increasing check, so the shared planning
+//! module is included at its crate path. See `verus/README.md` for the
+//! method, toolchain, and command.
 //!
 //! Burn tensor programs driven by these plans (index selects, cache steps,
 //! and attention masks) remain covered by the Rust tests in
