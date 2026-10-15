@@ -18,6 +18,9 @@
 //! whole batch, and scatters results back to the rectangular `[B, S]` layout
 //! with exact zeros at padding and for rows without tokens. Fully valid
 //! inputs (unmasked prefill, one-token decode of every row) need no packing.
+//! Token IDs and explicit positions are validated only at valid columns, so
+//! packing overwrites padding entries with token and position zero
+//! (`BlockLayout::compact_inert`) before the embedding and rotary tables.
 //! Each layer writes its new latents ahead into slots `[L_b, L_b + n_b)` and
 //! attends over one zero-copy slot-ordered view `[0, E)`,
 //! `E = max_b (L_b + n_b)`; keys beyond a row's end are invalid and masked,
@@ -421,9 +424,11 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
             return self.inactive_output(&input, &prepared, options);
         };
         let path = phase.execution_path(prepared.sequence);
-        let tokens = layout.compact(input.token_ids.clone());
+        // Masked columns are never validated, so padding entries receive the
+        // valid token 0 and position 0 instead of whatever sentinel they hold.
+        let tokens = layout.compact_inert(input.token_ids.clone(), 0);
         let positions = match &input.position_ids {
-            Some(position_ids) => layout.compact(position_ids.clone()),
+            Some(position_ids) => layout.compact_inert(position_ids.clone(), 0),
             None => layout.implicit_positions(),
         };
         let angles = self.cached_rotary_tables(positions, &prepared)?;

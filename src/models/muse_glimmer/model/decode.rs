@@ -24,6 +24,10 @@
 //! derived from key positions, and stale invalid slots are zeroed before the
 //! value product. Long cached prefills run in score-bounded query chunks.
 //!
+//! Token IDs and explicit positions are validated only at valid columns, so
+//! packing overwrites padding entries with token and position zero
+//! (`BlockLayout::compact_inert`) before the embedding and rotary tables.
+//!
 //! # Atomicity
 //!
 //! Every input, capacity, and cursor check runs before any model work. Ring
@@ -357,9 +361,11 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         else {
             return self.inactive_output(&prepared, options, &device);
         };
-        let tokens = layout.compact(input.token_ids.clone());
+        // Masked columns are never validated, so padding entries receive the
+        // valid token 0 and position 0 instead of whatever sentinel they hold.
+        let tokens = layout.compact_inert(input.token_ids.clone(), 0);
         let positions = match &input.position_ids {
-            Some(position_ids) => layout.compact(position_ids.clone()),
+            Some(position_ids) => layout.compact_inert(position_ids.clone(), 0),
             None => layout.implicit_positions(),
         };
         let tables = self.cached_rotary_tables(positions, &prepared)?;

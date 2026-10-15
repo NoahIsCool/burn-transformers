@@ -3,7 +3,12 @@
 //! The host plan comes from the Verus-verified `batch` module (see its
 //! documentation for the equations); this module uploads it once per call and
 //! applies it to tensors: [`BlockLayout::compact`](crate::models::deepseek_v2::model::block::BlockLayout::compact) gathers each row's valid
-//! tokens to the left of the block, [`BlockLayout::scatter`](crate::models::deepseek_v2::model::block::BlockLayout::scatter) restores
+//! tokens to the left of the block, [`BlockLayout::compact_inert`](crate::models::deepseek_v2::model::block::BlockLayout::compact_inert)
+//! additionally overwrites padding entries with a known-valid value (token
+//! IDs and explicit positions are validated only at valid columns, so the
+//! source column a padding entry gathers may hold any sentinel, and a finished
+//! row's padding gathers such an unvalidated column),
+//! [`BlockLayout::scatter`](crate::models::deepseek_v2::model::block::BlockLayout::scatter) restores
 //! `[B, S, X]` results with exact zeros at padding (one gather from the block
 //! with an appended zero row), and [`BlockLayout::visibility`](crate::models::deepseek_v2::model::block::BlockLayout::visibility) describes the
 //! block's queries against one batched cache read. Fully valid calls (every
@@ -135,6 +140,30 @@ impl<B: Backend> BlockLayout<B> {
         }
     }
 
+    /// Packs a rectangular `[B, S]` integer tensor and sets every padding entry to `fill`.
+    ///
+    /// Callers validate token IDs and explicit positions only at a row's
+    /// valid columns, so masked columns may carry arbitrary sentinels (an
+    /// out-of-vocabulary pad ID, `-1`, `i32::MAX`). [`Self::compact`] gathers
+    /// padding entries from column `c_0` of a row, or from column `0` of a
+    /// finished row whose every column is masked, so without this step a
+    /// sentinel would reach an embedding gather (an out-of-bounds read) or a
+    /// rotary table. `fill` must itself be valid for the consumer (token `0`,
+    /// position `0`); padding entries are excluded from attention and from
+    /// every scattered output, so the value never influences a result.
+    /// Calls without padding entries (`query_valid` is `None`) skip the fill.
+    pub(crate) fn compact_inert(
+        &self,
+        rectangular: Tensor<B, 2, Int>,
+        fill: i64,
+    ) -> Tensor<B, 2, Int> {
+        let packed = self.compact(rectangular);
+        match &self.query_valid {
+            Some(valid) => packed.mask_fill(valid.clone().bool_not(), fill),
+            None => packed,
+        }
+    }
+
     /// Restores block results `[B, T, X]` to `[B, S, X]` with exact zeros at padding.
     pub(crate) fn scatter<K>(&self, block: Tensor<B, 3, K>) -> Tensor<B, 3, K>
     where
@@ -183,3 +212,8 @@ impl<B: Backend> BlockLayout<B> {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "block_tests.rs"]
+/// Packing, inert padding, scattering, and visibility geometry of ragged blocks.
+mod tests;

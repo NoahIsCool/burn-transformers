@@ -1211,6 +1211,96 @@ fn batched_cached_logits_match_stateless_rows_after_wraparound() {
     }
 }
 
+/// Masked sentinels of a finished or padded row never reach the embedding or RoPE.
+///
+/// Masked columns are not validated, so a finished row may carry an
+/// out-of-vocabulary pad ID, `-1`, `i32::MIN`, or `i32::MAX`, with an equally
+/// invalid explicit position. Regression (review DSM-R1): batched packing
+/// gathered a finished row's column 0 into the block and Flex panicked in the
+/// embedding gather. Every sentinel must produce bit-identical logits to
+/// padding with token and position 0, for one- and two-token steps, implicit
+/// and explicit positions, and finished and left-padded rows.
+#[test]
+fn masked_sentinel_tokens_and_positions_are_inert() {
+    let (model, device) = tiny_model();
+    /// Builds row 1's tokens, mask, and positions around a sentinel token `pad` and position `at`.
+    type MaskedRow = fn(i32, i32) -> (Vec<i32>, Vec<bool>, Vec<i32>);
+    let cases: [(usize, MaskedRow); 3] = [
+        (1, |pad, at| (vec![pad], vec![false], vec![at])),
+        (2, |pad, at| {
+            (vec![pad, pad], vec![false, false], vec![at, at])
+        }),
+        (2, |pad, at| (vec![pad, 8], vec![false, true], vec![at, 3])),
+    ];
+    for (width, row) in cases {
+        for explicit in [false, true] {
+            let run = |pad: i32, at: i32| {
+                let (tokens, mask, positions) = row(pad, at);
+                let active_tokens = [7, 9][..width].to_vec();
+                let active_positions = [3, 4][..width].to_vec();
+                let mut state = model
+                    .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+                    .unwrap();
+                model
+                    .prefill(
+                        CausalLmInput {
+                            token_ids: Tensor::from_ints([[1, 2, 3], [4, 5, 6]], &device),
+                            token_mask: None,
+                            position_ids: None,
+                        },
+                        &mut state,
+                        &ForwardOptions::default(),
+                    )
+                    .unwrap();
+                let output = model
+                    .decode(
+                        DecodeInput {
+                            token_ids: Tensor::from_data(
+                                TensorData::new([active_tokens, tokens].concat(), [2, width]),
+                                &device,
+                            ),
+                            token_mask: Some(TokenMask::new(
+                                Tensor::<TestBackend, 2, Bool>::from_data(
+                                    TensorData::new([vec![true; width], mask].concat(), [2, width]),
+                                    &device,
+                                ),
+                            )),
+                            position_ids: explicit.then(|| {
+                                Tensor::from_data(
+                                    TensorData::new(
+                                        [active_positions, positions].concat(),
+                                        [2, width],
+                                    ),
+                                    &device,
+                                )
+                            }),
+                        },
+                        &mut state,
+                        &ForwardOptions {
+                            logits: crate::LogitsSelection::All,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("pad {pad} at {at}: {error}"));
+                (output.logits.into_data(), state.lengths().to_vec())
+            };
+            let baseline = run(0, 0);
+            for (pad, at) in [
+                (32, 32),
+                (-1, -1),
+                (i32::MAX, i32::MAX),
+                (i32::MIN, 1 << 20),
+            ] {
+                assert_eq!(
+                    run(pad, at),
+                    baseline,
+                    "width {width}, explicit {explicit}, pad {pad}, position {at}"
+                );
+            }
+        }
+    }
+}
+
 /// Measures batched decode against one batch-one call per row (the previous algorithm).
 ///
 /// Run with `cargo test --release --lib muse_batched_decode_benchmark -- --ignored --nocapture`.

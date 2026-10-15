@@ -63,9 +63,13 @@ pub(crate) struct RowMaps {
 ///
 /// `columns` are the row's valid columns `c_0 < … < c_{n-1} < sequence` and
 /// `block >= n` is the packed width `T`. Block entry `k < n` gathers column
-/// `c_k`; padding entries `k >= n` gather column `c_0` (or `0` for an empty
-/// row), an arbitrary valid value that every consumer masks. Column `c_k`
-/// scatters entry `k`, and every other column scatters the zero row `T`.
+/// `c_k`; padding entries `k >= n` gather column `c_0`, or column `0` for an
+/// empty row. That column is in range but its *value* is arbitrary: an empty
+/// row's column `0` is masked and therefore never validated, so consumers
+/// that index with gathered values (token IDs, positions) must overwrite
+/// padding entries (`BlockLayout::compact_inert`), and every other consumer
+/// masks them. Column `c_k` scatters entry `k`, and every other column
+/// scatters the zero row `T`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(maps =>
     requires
