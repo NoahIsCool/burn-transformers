@@ -33,8 +33,13 @@
 //! mark exactly the slots `i >= n_b`. [`row_positions`], which plans every
 //! slot's causal visibility and relative-bias position, computes exactly its
 //! documented formulas, never letting a slot see past its row's appended
-//! history, and [`groups_preserved`] exactly characterizes group-preserving
-//! beam reorders.
+//! history; [`step_positions`] lays those positions out for the whole batch,
+//! takes the contiguous-bias shortcut exactly when every active row shares
+//! one committed length, and reports the attained largest bias position;
+//! [`displacement_bound`] then bounds every key-to-query displacement, the
+//! precondition of the exact positional bias. [`groups_preserved`] exactly
+//! characterizes group-preserving beam reorders, and [`first_out_of_range`]
+//! finds the first reorder index outside the batch.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -223,6 +228,17 @@ proof fn lemma_rows_below(rows: int, width: int)
             requires 0 <= b < rows, 0 <= j < width;
         assert(b * width >= 0) by (nonlinear_arith)
             requires 0 <= b, 0 <= j < width;
+    }
+}
+
+/// Last key position slot `i` of a row may attend to (see [`row_positions`]).
+pub open spec fn visible_position(length: int, count: int, i: int) -> int {
+    if count == 0 {
+        length - 1
+    } else if i < count {
+        length + i
+    } else {
+        length + count - 1
     }
 }
 
@@ -1025,6 +1041,8 @@ pub(super) fn scatter_sources(
         match positions {
             Some((visible, query)) => {
                 &&& count <= block
+                &&& length + block <= usize::MAX
+                &&& length + block <= i64::MAX
                 &&& visible.len() == block
                 &&& query.len() == block
                 &&& forall|i: int| 0 <= i < block ==> #[trigger] query[i] == length + i
@@ -1092,6 +1110,261 @@ pub(super) fn row_positions(
         slot += 1;
     }
     Some((visible, query))
+}
+
+/// Slot positions and relative-bias geometry of one batched step.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StepPositions {
+    /// Mask position of every block slot `[B, Q]` (see [`row_positions`]).
+    pub(super) mask_positions: Vec<i64>,
+    /// Bias position `L_b + i` of every block slot `[B, Q]`.
+    pub(super) bias_positions: Vec<i64>,
+    /// The committed length shared by every active row, when there is one.
+    pub(super) shared_length: Option<usize>,
+    /// Largest bias position `max_b (L_b + Q - 1)`, or zero for an empty block.
+    pub(super) max_position: usize,
+}
+
+/// Plans every slot's positions from committed lengths `L_b` and new-token counts `n_b`.
+///
+/// Rows are paired as `lengths.iter().zip(counts)` pairs them. Row `b`'s
+/// block slots receive [`row_positions`]`(L_b, n_b, Q)`; `shared_length` is
+/// the common length of the active rows (`n_b > 0`) when there is at least
+/// one and they all agree, which lets the caller use the contiguous bias;
+/// `max_position` bounds every bias position. Returns `None` exactly when a
+/// row has `n_b > Q` or a position would exceed `usize` or `i64`. The proof
+/// establishes every slot's positions, the exact shared-length rule, and
+/// that `max_position` is the attained maximum.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(planned =>
+    ensures
+        ({
+            let rows = if lengths.len() < counts.len() { lengths.len() as int } else { counts.len() as int };
+            match planned {
+                Some(plan) => {
+                    &&& plan.mask_positions.len() == rows * block
+                    &&& plan.bias_positions.len() == rows * block
+                    &&& forall|b: int| 0 <= b < rows ==> {
+                        &&& #[trigger] counts@[b] <= block
+                        &&& lengths@[b] + block <= i64::MAX
+                    }
+                    &&& forall|b: int, i: int| 0 <= b < rows && 0 <= i < block
+                        ==> #[trigger] plan.bias_positions@[flat(b, i, block as int)] == lengths@[b] + i
+                    &&& forall|b: int, i: int| 0 <= b < rows && 0 <= i < block
+                        ==> #[trigger] plan.mask_positions@[flat(b, i, block as int)]
+                            == visible_position(lengths@[b] as int, counts@[b] as int, i)
+                    &&& match plan.shared_length {
+                        Some(length) => {
+                            &&& exists|b: int| 0 <= b < rows && #[trigger] counts@[b] > 0
+                            &&& forall|b: int| 0 <= b < rows && #[trigger] counts@[b] > 0
+                                ==> lengths@[b] == length
+                        },
+                        None => {
+                            ||| forall|b: int| 0 <= b < rows ==> #[trigger] counts@[b] == 0
+                            ||| exists|b: int, c: int| 0 <= b < rows && 0 <= c < rows
+                                && #[trigger] counts@[b] > 0 && #[trigger] counts@[c] > 0
+                                && lengths@[b] != lengths@[c]
+                        },
+                    }
+                    &&& block > 0 ==> forall|b: int| 0 <= b < rows
+                        ==> #[trigger] lengths@[b] + block - 1 <= plan.max_position
+                    &&& (block > 0 && rows > 0) ==> exists|b: int| 0 <= b < rows
+                        && #[trigger] lengths@[b] + block - 1 == plan.max_position
+                    &&& (block == 0 || rows == 0) ==> plan.max_position == 0
+                },
+                None => exists|b: int| 0 <= b < rows && (
+                    #[trigger] counts@[b] > block
+                    || lengths@[b] + block > usize::MAX
+                    || lengths@[b] + block > i64::MAX),
+            }
+        }),
+))]
+pub(super) fn step_positions(
+    lengths: &[usize],
+    counts: &[usize],
+    block: usize,
+) -> Option<StepPositions> {
+    let rows = if lengths.len() < counts.len() {
+        lengths.len()
+    } else {
+        counts.len()
+    };
+    let mut mask_positions: Vec<i64> = Vec::with_capacity(counts.len().saturating_mul(block));
+    let mut bias_positions: Vec<i64> = Vec::with_capacity(counts.len().saturating_mul(block));
+    let mut shared_length: Option<usize> = None;
+    let mut uniform = true;
+    let mut max_position: usize = 0;
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            rows <= lengths.len(),
+            rows <= counts.len(),
+            rows == lengths.len() || rows == counts.len(),
+            row <= rows,
+            mask_positions.len() == row * block,
+            bias_positions.len() == row * block,
+            forall|b: int| 0 <= b < row ==> {
+                &&& #[trigger] counts@[b] <= block
+                &&& lengths@[b] + block <= i64::MAX
+            },
+            forall|b: int, i: int| 0 <= b < row && 0 <= i < block
+                ==> #[trigger] bias_positions@[flat(b, i, block as int)] == lengths@[b] + i,
+            forall|b: int, i: int| 0 <= b < row && 0 <= i < block
+                ==> #[trigger] mask_positions@[flat(b, i, block as int)]
+                    == visible_position(lengths@[b] as int, counts@[b] as int, i),
+            // `shared_length` is the first active row's length; `uniform` says every
+            // active row so far has it.
+            shared_length is None <==> forall|b: int| 0 <= b < row ==> #[trigger] counts@[b] == 0,
+            shared_length matches Some(length) ==> exists|b: int| 0 <= b < row
+                && #[trigger] counts@[b] > 0 && lengths@[b] == length,
+            shared_length matches Some(length) ==> (uniform <==> forall|b: int|
+                0 <= b < row && #[trigger] counts@[b] > 0 ==> lengths@[b] == length),
+            shared_length is None ==> uniform,
+            block > 0 ==> forall|b: int| 0 <= b < row
+                ==> #[trigger] lengths@[b] + block - 1 <= max_position,
+            (block > 0 && row > 0) ==> exists|b: int| 0 <= b < row
+                && #[trigger] lengths@[b] + block - 1 == max_position,
+            (block == 0 || row == 0) ==> max_position == 0,
+        decreases rows - row,
+    ))]
+    while row < rows {
+        let length = lengths[row];
+        let count = counts[row];
+        if count > 0 {
+            match shared_length {
+                None => shared_length = Some(length),
+                Some(shared) => {
+                    if shared != length {
+                        uniform = false;
+                    }
+                }
+            }
+        }
+        // Verified per-row plan; `None` means a malformed count or a position beyond i64.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(counts@[row as int] > block || lengths@[row as int] + block > usize::MAX
+                || lengths@[row as int] + block > i64::MAX
+                ==> (0 <= row < rows && (#[trigger] counts@[row as int] > block
+                    || lengths@[row as int] + block > usize::MAX
+                    || lengths@[row as int] + block > i64::MAX)));
+            lemma_rows_below(row as int, block as int);
+        }
+        let (visible, query) = row_positions(length, count, block)?;
+        let mut slot: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                row < rows,
+                rows <= lengths.len(),
+                rows <= counts.len(),
+                length == lengths@[row as int],
+                count == counts@[row as int],
+                count <= block,
+                length + block <= i64::MAX,
+                length + block <= usize::MAX,
+                visible.len() == block,
+                query.len() == block,
+                forall|i: int| 0 <= i < block ==> #[trigger] query[i] == length + i,
+                forall|i: int| 0 <= i < block ==> #[trigger] visible[i]
+                    == visible_position(length as int, count as int, i),
+                slot <= block,
+                mask_positions.len() == row * block + slot,
+                bias_positions.len() == row * block + slot,
+                rows_below(row as int, block as int),
+                forall|b: int, i: int| 0 <= b < row && 0 <= i < block
+                    ==> #[trigger] bias_positions@[flat(b, i, block as int)] == lengths@[b] + i,
+                forall|b: int, i: int| 0 <= b < row && 0 <= i < block
+                    ==> #[trigger] mask_positions@[flat(b, i, block as int)]
+                        == visible_position(lengths@[b] as int, counts@[b] as int, i),
+                forall|i: int| 0 <= i < slot
+                    ==> #[trigger] bias_positions@[flat(row as int, i, block as int)] == length + i,
+                forall|i: int| 0 <= i < slot
+                    ==> #[trigger] mask_positions@[flat(row as int, i, block as int)]
+                        == visible_position(length as int, count as int, i),
+            decreases block - slot,
+        ))]
+        while slot < block {
+            mask_positions.push(visible[slot]);
+            bias_positions.push(query[slot]);
+            slot += 1;
+        }
+        if block > 0 {
+            // `row_positions` checked `length + block <= i64::MAX`.
+            let last = length + (block - 1);
+            if last > max_position {
+                max_position = last;
+            }
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(row * block + block == (row + 1) * block) by (nonlinear_arith);
+            assert(counts@[row as int] == count);
+            assert(lengths@[row as int] + block - 1 == length + block - 1);
+        }
+        row += 1;
+    }
+    Some(StepPositions {
+        mask_positions,
+        bias_positions,
+        shared_length: if uniform { shared_length } else { None },
+        max_position,
+    })
+}
+
+/// Bounds every displacement `|k - q|` between a key slot and a bias position.
+///
+/// Key slots are `0..key_slots` and bias positions lie in `0..=max_position`,
+/// so `max(max_position, key_slots - 1)` (zero without keys) bounds every
+/// displacement, which is the precondition of T5's exact positional bias.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(bound =>
+    ensures
+        bound >= max_position,
+        bound + 1 >= key_slots,
+        bound == max_position || bound + 1 == key_slots,
+))]
+pub(super) fn displacement_bound(max_position: usize, key_slots: usize) -> usize {
+    let last_key = key_slots.saturating_sub(1);
+    if max_position >= last_key {
+        max_position
+    } else {
+        last_key
+    }
+}
+
+/// Finds the first reorder index outside a batch of `batch` rows.
+///
+/// Returns the value of the first entry `indices[p] >= batch`, or `None`
+/// when every entry addresses a row of the batch.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    ensures
+        match found {
+            Some(index) => exists|p: int| 0 <= p < indices.len() && {
+                &&& #[trigger] indices@[p] == index
+                &&& index >= batch
+                &&& forall|q: int| 0 <= q < p ==> #[trigger] indices@[q] < batch
+            },
+            None => forall|p: int| 0 <= p < indices.len() ==> #[trigger] indices@[p] < batch,
+        },
+))]
+pub(super) fn first_out_of_range(indices: &[usize], batch: usize) -> Option<usize> {
+    let mut position: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            position <= indices.len(),
+            forall|q: int| 0 <= q < position ==> #[trigger] indices@[q] < batch,
+        decreases indices.len() - position,
+    ))]
+    while position < indices.len() {
+        if indices[position] >= batch {
+            return Some(indices[position]);
+        }
+        position += 1;
+    }
+    None
 }
 
 /// Whether `indices` keeps every row inside its group of `group_size` consecutive rows.

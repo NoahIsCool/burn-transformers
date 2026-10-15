@@ -64,7 +64,10 @@ use crate::{
 use super::{
     DECODER_INPUT, T5ForConditionalGeneration, bias,
     block::{CrossAttentionPlan, CrossSource, SelfAttentionPlan, SelfKeyValues, StackPlan},
-    packing::{BatchedRows, Packing, groups_preserved, row_positions},
+    packing::{
+        BatchedRows, Packing, displacement_bound, first_out_of_range, groups_preserved,
+        step_positions,
+    },
     validate_encoder_layout, validate_encoder_output, validate_options,
 };
 use crate::models::shared::{
@@ -731,38 +734,19 @@ struct StepGeometry {
 
 impl StepGeometry {
     /// Derives slot positions from committed lengths `L_b` and new-token counts `n_b`.
+    ///
+    /// The verified [`step_positions`] plans every slot; `None` means a
+    /// position beyond `i64`.
     fn new(lengths: &[usize], counts: &[usize], block: usize) -> Result<Self> {
-        let overflow = || Error::configuration("t5.decoder.positions", "position exceeds i64");
-        let batch = counts.len();
-        let mut mask_positions = Vec::with_capacity(batch.saturating_mul(block));
-        let mut bias_positions = Vec::with_capacity(batch.saturating_mul(block));
-        let mut shared_length = None;
-        let mut uniform = true;
-        let mut max_position = 0_usize;
-        for (&length, &count) in lengths.iter().zip(counts) {
-            if count > 0 {
-                match shared_length {
-                    None => shared_length = Some(length),
-                    Some(shared) if shared != length => uniform = false,
-                    Some(_) => {}
-                }
-            }
-            // Verified per-row plan; `None` means a position beyond i64.
-            let (visible, query) = row_positions(length, count, block).ok_or_else(overflow)?;
-            mask_positions.extend(visible);
-            bias_positions.extend(query);
-            if let Some(last) = block.checked_sub(1) {
-                // `row_positions` checked `length + block <= i64::MAX`.
-                max_position = max_position.max(length + last);
-            }
-        }
+        let plan = step_positions(lengths, counts, block)
+            .ok_or_else(|| Error::configuration("t5.decoder.positions", "position exceeds i64"))?;
         Ok(Self {
-            batch,
+            batch: counts.len(),
             block,
-            mask_positions,
-            bias_positions,
-            shared_length: shared_length.filter(|_| uniform),
-            max_position,
+            mask_positions: plan.mask_positions,
+            bias_positions: plan.bias_positions,
+            shared_length: plan.shared_length,
+            max_position: plan.max_position,
         })
     }
 
@@ -817,7 +801,7 @@ impl StepGeometry {
         let keys = Tensor::<B, 1, Int>::arange(0..keys, device)
             .reshape([1, key_slots])
             .expand([self.batch, key_slots]);
-        let bound = self.max_position.max(key_slots.saturating_sub(1));
+        let bound = displacement_bound(self.max_position, key_slots);
         bias::positional_bias(table, queries, keys, bound)
     }
 }
@@ -1002,7 +986,7 @@ fn validate_reorder(indices: &[usize], batch: usize) -> Result<()> {
             indices.len()
         )));
     }
-    if let Some(&index) = indices.iter().find(|&&index| index >= batch) {
+    if let Some(index) = first_out_of_range(indices, batch) {
         return Err(Error::Cache(format!(
             "T5 reorder index {index} is outside batch {batch}"
         )));

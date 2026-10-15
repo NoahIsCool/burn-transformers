@@ -22,9 +22,16 @@
 //!   the row's last new position for padding, `L - 1` for inactive rows), so
 //!   no slot of an active row sees a key past `L + n - 1`, and no position
 //!   overflows `i64`.
+//! - `step_positions` (behind the decoder's `StepGeometry`): every slot of
+//!   every row carries its `row_positions` entries; the shared committed
+//!   length exists exactly when some row is active and every active row has
+//!   that length; the largest bias position is attained; and a refusal
+//!   names a row with `n_b > Q` or an unrepresentable position.
+//!   `displacement_bound` bounds every key-to-query displacement.
 //! - `groups_preserved`: exactly characterizes reorders that keep every row
 //!   inside its group of `group_size` consecutive rows, which is what lets
-//!   beam search leave T5's encoder binding and cross-attention keys in place.
+//!   beam search leave T5's encoder binding and cross-attention keys in place;
+//!   `first_out_of_range` returns the first reorder index outside the batch.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!

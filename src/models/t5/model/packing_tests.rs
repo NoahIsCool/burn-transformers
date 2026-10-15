@@ -132,6 +132,76 @@ fn reference_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option<Batch
     })
 }
 
+/// The iterator formulation of the step geometry that [`step_positions`] replaced.
+fn reference_step(lengths: &[usize], counts: &[usize], block: usize) -> Option<StepPositions> {
+    let mut mask_positions = Vec::new();
+    let mut bias_positions = Vec::new();
+    let mut shared_length = None;
+    let mut uniform = true;
+    let mut max_position = 0_usize;
+    for (&length, &count) in lengths.iter().zip(counts) {
+        if count > 0 {
+            match shared_length {
+                None => shared_length = Some(length),
+                Some(shared) if shared != length => uniform = false,
+                Some(_) => {}
+            }
+        }
+        let (visible, query) = row_positions(length, count, block)?;
+        mask_positions.extend(visible);
+        bias_positions.extend(query);
+        if let Some(last) = block.checked_sub(1) {
+            max_position = max_position.max(length + last);
+        }
+    }
+    Some(StepPositions {
+        mask_positions,
+        bias_positions,
+        shared_length: shared_length.filter(|_| uniform),
+        max_position,
+    })
+}
+
+/// Step geometry shares a length only when every active row agrees on it.
+#[test]
+fn step_positions_share_only_agreeing_active_lengths() {
+    let plan = step_positions(&[4, 2, 4], &[2, 0, 1], 2).unwrap();
+    assert_eq!(plan.mask_positions, [4, 5, 1, 1, 4, 4]);
+    assert_eq!(plan.bias_positions, [4, 5, 2, 3, 4, 5]);
+    assert_eq!(plan.shared_length, Some(4));
+    assert_eq!(plan.max_position, 5);
+    assert_eq!(
+        step_positions(&[3, 1], &[1, 1], 1).unwrap().shared_length,
+        None
+    );
+    assert_eq!(
+        step_positions(&[3, 1], &[0, 0], 1).unwrap().shared_length,
+        None
+    );
+    assert_eq!(step_positions(&[3, 1], &[0, 0], 0).unwrap().max_position, 0);
+    assert_eq!(step_positions(&[], &[], 2).unwrap().max_position, 0);
+    assert_eq!(step_positions(&[0], &[2], 1), None);
+    assert_eq!(step_positions(&[usize::MAX], &[0], 1), None);
+}
+
+/// The displacement bound covers the last key and the largest bias position.
+#[test]
+fn displacement_bound_covers_keys_and_queries() {
+    assert_eq!(displacement_bound(5, 3), 5);
+    assert_eq!(displacement_bound(1, 7), 6);
+    assert_eq!(displacement_bound(0, 0), 0);
+    assert_eq!(displacement_bound(4, 5), 4);
+}
+
+/// The first reorder index outside the batch is reported by value.
+#[test]
+fn first_out_of_range_reports_the_first_offender() {
+    assert_eq!(first_out_of_range(&[0, 2, 5, 9], 3), Some(5));
+    assert_eq!(first_out_of_range(&[0, 2, 1], 3), None);
+    assert_eq!(first_out_of_range(&[], 0), None);
+    assert_eq!(first_out_of_range(&[0], 0), Some(0));
+}
+
 /// Group preservation requires a divisor group size and in-group indices.
 #[test]
 fn group_preservation_is_exact() {
@@ -196,6 +266,43 @@ proptest! {
         sequence in 0_usize..6,
     ) {
         prop_assert_eq!(plan_rows(&valid, sequence), reference_rows(&valid, sequence));
+    }
+
+    /// The verified step geometry equals the former iterator implementation.
+    #[test]
+    fn step_positions_match_the_iterator_reference(
+        lengths in proptest::collection::vec(0_usize..9, 0..5),
+        counts in proptest::collection::vec(0_usize..4, 0..5),
+        block in 0_usize..4,
+    ) {
+        prop_assert_eq!(
+            step_positions(&lengths, &counts, block),
+            reference_step(&lengths, &counts, block)
+        );
+    }
+
+    /// The reorder check agrees with a linear search for the first offender.
+    #[test]
+    fn first_out_of_range_matches_a_search(
+        indices in proptest::collection::vec(0_usize..6, 0..6),
+        batch in 0_usize..6,
+    ) {
+        prop_assert_eq!(
+            first_out_of_range(&indices, batch),
+            indices.iter().copied().find(|&index| index >= batch)
+        );
+    }
+
+    /// Every displacement between a key slot and a bias position is within the bound.
+    #[test]
+    fn displacement_bound_property(max_position in 0_usize..20, key_slots in 0_usize..20) {
+        let bound = displacement_bound(max_position, key_slots);
+        for key in 0..key_slots {
+            for query in 0..=max_position {
+                prop_assert!(key.abs_diff(query) <= bound);
+            }
+        }
+        prop_assert_eq!(bound, max_position.max(key_slots.saturating_sub(1)));
     }
 
     /// Padded slots and the padding test agree with their definitions.
