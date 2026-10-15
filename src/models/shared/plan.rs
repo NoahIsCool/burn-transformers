@@ -380,57 +380,6 @@ pub proof fn lemma_grid_row_in_bounds(row: int, rows: int, width: int)
     ;
 }
 
-/// The recursive column list is exactly the strictly increasing list of valid columns.
-pub proof fn lemma_spec_valid_columns(row: Seq<bool>)
-    requires
-        row.len() <= usize::MAX,
-    ensures
-        lists_valid_columns(row, spec_valid_columns(row)),
-    decreases row.len(),
-{
-    if row.len() > 0 {
-        let prefix = row.drop_last();
-        lemma_spec_valid_columns(prefix);
-        let earlier = spec_valid_columns(prefix);
-        let columns = spec_valid_columns(row);
-        let last = (row.len() - 1) as usize;
-        assert(last as int == row.len() - 1);
-        if row.last() {
-            assert(columns == earlier.push(last));
-        } else {
-            assert(columns == earlier);
-        }
-        assert forall|a: int, b: int| 0 <= a < b < columns.len()
-            implies columns[a] < columns[b] by {
-            if b < earlier.len() {
-                assert(earlier[a] < earlier[b]);
-            } else {
-                assert(earlier[a] < prefix.len());
-            }
-        }
-        assert forall|a: int| 0 <= a < columns.len() implies columns[a] < row.len() by {
-            if a < earlier.len() {
-                assert(earlier[a] < prefix.len());
-            }
-        }
-        assert forall|a: int| 0 <= a < columns.len() implies row[#[trigger] columns[a] as int] by {
-            if a < earlier.len() {
-                assert(prefix[earlier[a] as int]);
-            }
-        }
-        assert forall|c: int| 0 <= c < row.len() && #[trigger] row[c]
-            implies columns.contains(c as usize) by {
-            if c < row.len() - 1 {
-                assert(prefix[c]);
-                let a = choose|a: int| 0 <= a < earlier.len() && earlier[a] == c as usize;
-                assert(columns[a] == c as usize);
-            } else {
-                assert(columns[columns.len() - 1] == c as usize);
-            }
-        }
-    }
-}
-
 } // verus!
 
 /// Rectangular reconstruction strategy for one compact row.
@@ -1264,6 +1213,7 @@ pub(crate) fn row_valid_columns(
             row <= batch,
             mask matches Some(flags) ==> flags.len() == batch * sequence,
             mask is None ==> dense@ == row_columns(mask, sequence as int, 0),
+            mask is None ==> lists_valid_columns(mask_row(mask, sequence as int, 0), dense@),
             rows.len() == row,
             forall|r: int| 0 <= r < row ==> {
                 &&& #[trigger] rows@[r]@ == row_columns(mask, sequence as int, r)
@@ -1290,7 +1240,6 @@ pub(crate) fn row_valid_columns(
                 assert(mask_row(mask, sequence as int, row as int)
                     =~= mask_row(mask, sequence as int, 0));
             }
-            lemma_spec_valid_columns(mask_row(mask, sequence as int, row as int));
         }
         rows.push(columns);
         row += 1;
@@ -1722,6 +1671,234 @@ fn contains_zero(values: &[usize]) -> bool {
     false
 }
 
+/// Lists every row's valid columns of an optional mask together with their counts.
+///
+/// Row `r` lists exactly `row_columns(mask, sequence, r)`, every listed
+/// column lies below `sequence`, and the count is the list's length.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(grid =>
+    requires
+        mask matches Some(flags) ==> flags.len() == batch * sequence,
+    ensures
+        grid.0.len() == batch,
+        grid.1.len() == batch,
+        forall|r: int|
+            #![trigger grid.0@[r]]
+            #![trigger grid.1@[r]]
+            #![trigger row_columns(mask, sequence as int, r)]
+            0 <= r < batch ==> {
+                &&& grid.0@[r]@ == row_columns(mask, sequence as int, r)
+                &&& grid.1@[r] == row_columns(mask, sequence as int, r).len()
+            },
+        forall|r: int, k: int| 0 <= r < batch && 0 <= k < grid.0@[r].len()
+            ==> #[trigger] grid.0@[r]@[k] < sequence,
+))]
+fn plan_row_grid(
+    mask: Option<&[bool]>,
+    batch: usize,
+    sequence: usize,
+) -> (Vec<Vec<usize>>, Vec<usize>) {
+    let valid_indices = row_valid_columns(mask, batch, sequence);
+    let token_counts = list_lengths(valid_indices.as_slice());
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|r: int, k: int| 0 <= r < batch && 0 <= k < valid_indices@[r].len()
+            implies #[trigger] valid_indices@[r]@[k] < sequence by {
+            lemma_grid_row_in_bounds(r, batch as int, sequence as int);
+            assert(lists_valid_columns(mask_row(mask, sequence as int, r), valid_indices@[r]@));
+            assert(mask_row(mask, sequence as int, r).len() == sequence);
+        }
+    }
+    (valid_indices, token_counts)
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Restates a row-context failure over planned lists as one over the mask's columns.
+pub(crate) proof fn lemma_host_value_error(
+    mask: Option<&[bool]>,
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    batch: int,
+    sequence: int,
+    lengths: Seq<usize>,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    valid_indices: Seq<Vec<usize>>,
+    ends: Seq<usize>,
+    error: RowValueError,
+)
+    requires
+        forall|r: int| #![trigger valid_indices[r]] 0 <= r < batch ==> {
+            &&& valid_indices[r]@ == row_columns(mask, sequence, r)
+            &&& ends[r] == lengths[r] + row_columns(mask, sequence, r).len()
+        },
+        exists|row: int| 0 <= row < batch && {
+            &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+                tokens,
+                positions,
+                valid_indices[r]@,
+                sequence,
+                r,
+                vocabulary,
+                position_limit,
+                ends[r] as int,
+            )
+            &&& row_value_error(
+                tokens,
+                positions,
+                valid_indices[row]@,
+                sequence,
+                row,
+                vocabulary,
+                position_limit,
+                error,
+            )
+        },
+    ensures
+        exists|row: int| 0 <= row < batch && {
+            &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+                tokens,
+                positions,
+                row_columns(mask, sequence, r),
+                sequence,
+                r,
+                vocabulary,
+                position_limit,
+                lengths[r] + row_columns(mask, sequence, r).len(),
+            )
+            &&& row_value_error(
+                tokens,
+                positions,
+                row_columns(mask, sequence, row),
+                sequence,
+                row,
+                vocabulary,
+                position_limit,
+                error,
+            )
+        },
+{
+    let row = choose|row: int| 0 <= row < batch && {
+        &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+        )
+        &&& row_value_error(
+            tokens,
+            positions,
+            valid_indices[row]@,
+            sequence,
+            row,
+            vocabulary,
+            position_limit,
+            error,
+        )
+    };
+    assert forall|r: int| 0 <= r < row implies #[trigger] row_succeeds(
+        tokens,
+        positions,
+        row_columns(mask, sequence, r),
+        sequence,
+        r,
+        vocabulary,
+        position_limit,
+        lengths[r] + row_columns(mask, sequence, r).len(),
+    ) by {
+        assert(valid_indices[r]@ == row_columns(mask, sequence, r));
+        assert(row_succeeds(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+        ));
+    }
+    assert(valid_indices[row]@ == row_columns(mask, sequence, row));
+}
+
+/// Restates successful row contexts over planned lists as ones over the mask's columns.
+pub(crate) proof fn lemma_host_contexts(
+    mask: Option<&[bool]>,
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    batch: int,
+    sequence: int,
+    lengths: Seq<usize>,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    valid_indices: Seq<Vec<usize>>,
+    token_counts: Seq<usize>,
+    ends: Seq<usize>,
+    contexts: Seq<usize>,
+)
+    requires
+        forall|r: int| #![trigger valid_indices[r]] 0 <= r < batch ==> {
+            &&& valid_indices[r]@ == row_columns(mask, sequence, r)
+            &&& ends[r] == lengths[r] + token_counts[r]
+        },
+        forall|r: int| 0 <= r < batch ==> #[trigger] row_context_ok(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+            contexts[r] as int,
+        ),
+    ensures
+        forall|r: int| 0 <= r < batch ==> #[trigger] row_context_ok(
+            tokens,
+            positions,
+            row_columns(mask, sequence, r),
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            lengths[r] + token_counts[r],
+            contexts[r] as int,
+        ),
+{
+    assert forall|r: int| 0 <= r < batch implies #[trigger] row_context_ok(
+        tokens,
+        positions,
+        row_columns(mask, sequence, r),
+        sequence,
+        r,
+        vocabulary,
+        position_limit,
+        lengths[r] + token_counts[r],
+        contexts[r] as int,
+    ) by {
+        assert(valid_indices[r]@ == row_columns(mask, sequence, r));
+        assert(row_context_ok(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+            contexts[r] as int,
+        ));
+    }
+}
+
+} // verus!
+
 /// Plans the host side of one stateful call after its single readback.
 ///
 /// The mask, token IDs, and optional explicit positions are row-major
@@ -1754,6 +1931,9 @@ fn contains_zero(values: &[usize]) -> bool {
             planned,
         ),
 ))]
+// A separate solver keeps this composition's proof independent of the
+// order and content of the other queries in the module.
+#[cfg_attr(verus_keep_ghost, verifier::spinoff_prover)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_host_rows(
     mask: Option<&[bool]>,
@@ -1767,20 +1947,8 @@ pub(crate) fn plan_host_rows(
     vocabulary: usize,
     position_limit: Option<usize>,
 ) -> Result<HostRows, HostRowsError> {
-    let valid_indices = row_valid_columns(mask, batch, sequence);
+    let (valid_indices, token_counts) = plan_row_grid(mask, batch, sequence);
     let last_columns = row_last_columns(mask, batch, sequence);
-    let token_counts = list_lengths(valid_indices.as_slice());
-    // Each planned list is the row's specified column list, and its length the count.
-    #[cfg(verus_keep_ghost)]
-    proof! {
-        assert forall|r: int| 0 <= r < batch implies {
-            &&& valid_indices@[r]@ == #[trigger] row_columns(mask, sequence as int, r)
-            &&& token_counts@[r] == row_columns(mask, sequence as int, r).len()
-        } by {
-            assert(valid_indices@[r]@ == row_columns(mask, sequence as int, r));
-            assert(token_counts@[r] == valid_indices@[r].len());
-        }
-    }
     // Verus compiles verified bodies as Rust 2021, so this avoids a `let` chain.
     let empty_row = if reject_empty_rows {
         contains_zero(token_counts.as_slice())
@@ -1790,18 +1958,21 @@ pub(crate) fn plan_host_rows(
     if empty_row {
         return Err(HostRowsError::EmptyRow);
     }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if reject_empty_rows {
+            assert forall|r: int| 0 <= r < batch
+                implies #[trigger] row_columns(mask, sequence as int, r).len() > 0 by {
+                assert(token_counts@[r] != 0);
+            }
+        }
+    }
     let ends = match plan_appends(lengths, token_counts.as_slice(), capacity) {
         Ok(ends) => ends,
         Err(error) => return Err(HostRowsError::Append(error)),
     };
     #[cfg(verus_keep_ghost)]
     proof! {
-        assert forall|r: int, k: int| 0 <= r < batch && 0 <= k < valid_indices@[r].len()
-            implies #[trigger] valid_indices@[r]@[k] < sequence by {
-            lemma_grid_row_in_bounds(r, batch as int, sequence as int);
-            assert(lists_valid_columns(mask_row(mask, sequence as int, r), valid_indices@[r]@));
-            assert(mask_row(mask, sequence as int, r).len() == sequence);
-        }
         assert forall|r: int| 0 <= r < batch implies #[trigger] ends@[r]
             == lengths[r] + row_columns(mask, sequence as int, r).len() by {
             assert(token_counts@[r] == row_columns(mask, sequence as int, r).len());
@@ -1810,13 +1981,6 @@ pub(crate) fn plan_host_rows(
             implies lengths[r] + #[trigger] row_columns(mask, sequence as int, r).len()
             <= capacity by {
             assert(ends@[r] <= capacity);
-            assert(ends@[r] == lengths[r] + row_columns(mask, sequence as int, r).len());
-        }
-        if reject_empty_rows {
-            assert forall|r: int| 0 <= r < batch
-                implies #[trigger] row_columns(mask, sequence as int, r).len() > 0 by {
-                assert(token_counts@[r] != 0);
-            }
         }
     }
     let evaluated_contexts = match row_contexts(
@@ -1832,83 +1996,39 @@ pub(crate) fn plan_host_rows(
         Err(error) => {
             #[cfg(verus_keep_ghost)]
             proof! {
-                let row = choose|row: int| 0 <= row < batch && {
-                    &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
-                        tokens@,
-                        positions,
-                        valid_indices@[r]@,
-                        sequence as int,
-                        r,
-                        vocabulary as int,
-                        position_limit,
-                        ends@[r] as int,
-                    )
-                    &&& row_value_error(
-                        tokens@,
-                        positions,
-                        valid_indices@[row]@,
-                        sequence as int,
-                        row,
-                        vocabulary as int,
-                        position_limit,
-                        error,
-                    )
-                };
-                assert forall|r: int| 0 <= r < row implies #[trigger] row_succeeds(
+                lemma_host_value_error(
+                    mask,
                     tokens@,
                     positions,
-                    row_columns(mask, sequence as int, r),
+                    batch as int,
                     sequence as int,
-                    r,
+                    lengths@,
                     vocabulary as int,
                     position_limit,
-                    lengths[r] + row_columns(mask, sequence as int, r).len(),
-                ) by {
-                    assert(row_succeeds(
-                        tokens@,
-                        positions,
-                        valid_indices@[r]@,
-                        sequence as int,
-                        r,
-                        vocabulary as int,
-                        position_limit,
-                        ends@[r] as int,
-                    ));
-                    assert(valid_indices@[r]@ == row_columns(mask, sequence as int, r));
-                    assert(ends@[r] == lengths[r] + row_columns(mask, sequence as int, r).len());
-                }
-                assert(valid_indices@[row]@ == row_columns(mask, sequence as int, row));
+                    valid_indices@,
+                    ends@,
+                    error,
+                );
             }
             return Err(HostRowsError::Values(error));
         }
     };
     #[cfg(verus_keep_ghost)]
     proof! {
-        assert forall|r: int| 0 <= r < batch implies #[trigger] row_context_ok(
+        lemma_host_contexts(
+            mask,
             tokens@,
             positions,
-            row_columns(mask, sequence as int, r),
+            batch as int,
             sequence as int,
-            r,
+            lengths@,
             vocabulary as int,
             position_limit,
-            lengths[r] + token_counts@[r],
-            evaluated_contexts@[r] as int,
-        ) by {
-            assert(row_context_ok(
-                tokens@,
-                positions,
-                valid_indices@[r]@,
-                sequence as int,
-                r,
-                vocabulary as int,
-                position_limit,
-                ends@[r] as int,
-                evaluated_contexts@[r] as int,
-            ));
-            assert(valid_indices@[r]@ == row_columns(mask, sequence as int, r));
-            assert(ends@[r] == lengths[r] + token_counts@[r]);
-        }
+            valid_indices@,
+            token_counts@,
+            ends@,
+            evaluated_contexts@,
+        );
     }
     Ok(HostRows {
         valid_indices,
