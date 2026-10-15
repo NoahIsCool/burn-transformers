@@ -572,3 +572,15 @@ fn t5_recipe_rejects_empty_inputs_and_reports_full_hidden_diagnostics() {
             .all(|hidden| hidden.dims() == [1, 3, 4])
     );
 }
+
+/// An encoder-only recipe needs only the bidirectional bucket bound.
+#[test]
+fn t5_encoder_recipe_accepts_encoder_only_bucket_geometry() {
+    let mut config = config();
+    config.relative_attention_num_buckets = 32;
+    config.relative_attention_max_distance = 12;
+    assert!(crate::ArchitectureConfig::validate(&config).is_err());
+    let recipe = T5EncoderRecipe::from_config(config).expect("the encoder bound holds");
+    recipe.validate().unwrap();
+    recipe.init::<TestBackend>(&Default::default()).unwrap();
+}

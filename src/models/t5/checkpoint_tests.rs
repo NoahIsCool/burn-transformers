@@ -472,7 +472,7 @@ fn dimension_overflow_is_reported_before_inventory_allocation() {
         num_layers: 1,
         num_decoder_layers: Some(1),
         relative_attention_num_buckets: 4,
-        relative_attention_max_distance: 2,
+        relative_attention_max_distance: 3,
         ..T5Config::default()
     };
     let error = config.checkpoint_contract().unwrap_err();

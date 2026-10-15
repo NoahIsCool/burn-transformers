@@ -39,7 +39,7 @@ use crate::{
     position::{T5RelativePositionBias, T5RelativePositionBiasConfig},
 };
 
-use super::{T5Config, T5FeedForwardProjection};
+use super::{T5Config, T5FeedForwardProjection, T5Stacks};
 use crate::models::shared::{
     DeferredChecks, DeferredInput, ImplicitPositions, InputContract, InputNames, ValidatedInput,
     check_nonempty_mask, defer_input, ensure_grid, ensure_nonempty, ensure_same_device,

@@ -91,7 +91,8 @@ pub struct T5EncoderRecipe {
 impl T5EncoderRecipe {
     /// Creates a faithful encoder recipe from a validated T5-family configuration.
     pub fn from_config(config: T5Config) -> Result<Self> {
-        crate::ArchitectureConfig::validate(&config)?;
+        // Encoder-only: the causal decoder's stricter bucket bound does not apply.
+        config.validate_stacks(T5Stacks::EncoderOnly)?;
         let layers = vec![T5EncoderLayerSpec::from_config(&config); config.num_layers];
         Ok(Self { config, layers })
     }
@@ -103,14 +104,17 @@ impl T5EncoderRecipe {
         let mut base = self.config.clone();
         base.num_layers = 1;
         base.num_decoder_layers = Some(1);
-        crate::ArchitectureConfig::validate(&base)?;
+        base.validate_stacks(T5Stacks::EncoderOnly)?;
         for (index, layer) in self.layers.iter().enumerate() {
-            crate::ArchitectureConfig::validate(&layer.config(&base)).map_err(|error| {
-                Error::configuration(
-                    format!("t5.encoder.recipe.layers.{index}"),
-                    error.to_string(),
-                )
-            })?;
+            layer
+                .config(&base)
+                .validate_stacks(T5Stacks::EncoderOnly)
+                .map_err(|error| {
+                    Error::configuration(
+                        format!("t5.encoder.recipe.layers.{index}"),
+                        Error::from(error).to_string(),
+                    )
+                })?;
         }
         Ok(())
     }
