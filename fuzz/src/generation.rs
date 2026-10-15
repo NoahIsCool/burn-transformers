@@ -6,10 +6,12 @@
 //!    exactly when [`expected_valid`], an independent restatement of every
 //!    documented rule, does. That covers the sampling warpers (`temperature`,
 //!    `top_k`, `top_p`, `min_p`), the three penalties, `min_new_tokens <=
-//!    max_new_tokens`, special-token and stop-sequence IDs, and finite in-vocabulary
-//!    `logit_bias` entries. An accepted configuration also survives a JSON round
-//!    trip with the same verdict; floats may move by a few ulps there (see
-//!    `crate::floats_round_trip`).
+//!    max_new_tokens`, special-token and stop-sequence IDs, and in-vocabulary
+//!    `logit_bias` entries, with every float control checked in F32 (divisors
+//!    round to normal positive values, additive controls to finite ones;
+//!    findings GEN-F32-1..4). An accepted configuration also survives a JSON
+//!    round trip with the same verdict and bit-identical floats (`serde_json`'s
+//!    `float_roundtrip` parser; see `crate::floats_round_trip`).
 //! 2. **Stopping.** A [`GenerationTracker`] fed up to 128 tokens into a small
 //!    ragged batch reports exactly the finish reasons of [`expected_finish`]:
 //!    EOS first, then the longest stop suffix (earliest on ties) once the row has
@@ -51,16 +53,23 @@ fn expected_finish(config: &GenerationConfig, tokens: &[u32]) -> Option<FinishRe
 fn expected_valid(config: &GenerationConfig, vocabulary: usize) -> bool {
     let in_vocabulary = |token: u32| u64::from(token) < vocabulary as u64;
     let finite_positive = |value: f64| value.is_finite() && value > 0.0;
+    // Float controls are validated in F32, the processing precision: divisors
+    // must round to normal positive values, additive controls to finite ones.
+    let normal_f32 = |value: f64| {
+        let rounded = value as f32;
+        rounded.is_finite() && rounded >= f32::MIN_POSITIVE
+    };
+    let finite_f32 = |value: f64| (value as f32).is_finite();
     vocabulary > 0
         && config.max_new_tokens > 0
         && config.min_new_tokens <= config.max_new_tokens
-        && finite_positive(config.temperature)
+        && normal_f32(config.temperature)
         && config.top_k.is_none_or(|k| k >= 1 && k <= vocabulary)
         && config.top_p.is_none_or(|p| finite_positive(p) && p <= 1.0)
         && config.min_p.is_none_or(|p| (0.0..=1.0).contains(&p))
-        && finite_positive(config.repetition_penalty)
-        && config.presence_penalty.is_finite()
-        && config.frequency_penalty.is_finite()
+        && normal_f32(config.repetition_penalty)
+        && finite_f32(config.presence_penalty)
+        && finite_f32(config.frequency_penalty)
         && config
             .eos_token_ids
             .iter()
@@ -73,7 +82,7 @@ fn expected_valid(config: &GenerationConfig, vocabulary: usize) -> bool {
         && config
             .logit_bias
             .iter()
-            .all(|(&token, &bias)| in_vocabulary(token) && bias.is_finite())
+            .all(|(&token, &bias)| in_vocabulary(token) && finite_f32(bias))
 }
 
 /// Decodes a token ID that is usually in the vocabulary and sometimes just outside it.
@@ -156,7 +165,7 @@ fn decode_config(bytes: &mut Bytes<'_>, vocabulary: usize) -> GenerationConfig {
 
 /// Checks that an accepted configuration survives JSON serialization.
 ///
-/// Integer, ID, and enum fields must round-trip exactly; floats approximately.
+/// Integer, ID, enum, and float fields must all round-trip exactly.
 /// The round-tripped configuration must keep the validation verdict.
 fn check_round_trip(config: &GenerationConfig, vocabulary: usize) {
     let encoded = serde_json::to_string(config).expect("finite configuration serializes");

@@ -14,9 +14,9 @@
 //!
 //! 1. **Totality.** Validation never panics and fails only with
 //!    [`Error::Configuration`].
-//! 2. **Round trip.** A valid spec serializes and parses back to the same JSON
-//!    (integers exactly, floats within a relative `1e-14`; see
-//!    `crate::floats_round_trip`) and still validates.
+//! 2. **Round trip.** A valid spec serializes and parses back to the same JSON,
+//!    integers and floats exactly (see `crate::floats_round_trip`), and still
+//!    validates.
 //! 3. **Construction.** [`ModularCausalLm::init`] (or
 //!    [`ModularSeq2SeqLm::init`]) succeeds exactly for valid specs without the
 //!    documented capability gaps (gated residuals, Mamba2, positions beyond

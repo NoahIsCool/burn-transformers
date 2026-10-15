@@ -1204,6 +1204,49 @@ fn prompt_length_processing_promotes_half_logits_and_checks_inputs() {
     );
 }
 
+/// Generation floats round-trip through JSON bit for bit, however long their exponent.
+///
+/// `serde_json`'s `float_roundtrip` parser makes the shortest representation
+/// parse back exactly; without it the first two values below read back an ulp
+/// away (`3.7997969716361846e-262` became `3.799796971636185e-262`).
+#[test]
+fn configuration_floats_round_trip_exactly() {
+    for value in [
+        3.799_796_971_636_184_6e-262,
+        2.291_712_365_432_881e-9,
+        5e-324,
+        f64::MAX,
+        0.1,
+        1e-46,
+    ] {
+        let config = GenerationConfig {
+            temperature: value,
+            repetition_penalty: value,
+            presence_penalty: -value,
+            frequency_penalty: value,
+            top_p: Some(value),
+            min_p: Some(value),
+            logit_bias: BTreeMap::from([(3, value)]),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&config).unwrap();
+        let restored: GenerationConfig = serde_json::from_str(&text).unwrap();
+        let bits = |config: &GenerationConfig| {
+            [
+                config.temperature,
+                config.repetition_penalty,
+                config.presence_penalty,
+                config.frequency_penalty,
+                config.top_p.unwrap(),
+                config.min_p.unwrap(),
+                config.logit_bias[&3],
+            ]
+            .map(f64::to_bits)
+        };
+        assert_eq!(bits(&config), bits(&restored), "{text}");
+    }
+}
+
 /// Older serialized configurations load with neutral defaults for the newer controls.
 #[test]
 fn configuration_serde_defaults_and_round_trips_new_controls() {

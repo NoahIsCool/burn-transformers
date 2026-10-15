@@ -22,9 +22,8 @@
 //!    For every translated entry, flat or per layer type, the softmax
 //!    multiplier is a normal positive `f32` (finding ROPE-SOFTMAX-1, fixed:
 //!    translation once validated `m` but not `m^2`).
-//! 4. **Round trip.** A parsed set serializes and parses back to the same JSON:
-//!    integers exactly, floats within a relative `1e-14` (see
-//!    `crate::floats_round_trip`; `serde_json` parses floats approximately).
+//! 4. **Round trip.** A parsed set serializes and parses back to the same JSON,
+//!    integers and floats exactly (see `crate::floats_round_trip`).
 //! 5. **Layer types.** `validate_layer_types` accepts exactly when every used
 //!    layer type has an entry and every entry is used.
 

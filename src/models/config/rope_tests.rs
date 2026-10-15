@@ -261,6 +261,82 @@ fn non_object_json_is_not_rope_parameters() {
     assert!(optional.is_none());
 }
 
+/// Floats with long mantissas and extreme exponents survive a JSON round trip bit for bit.
+///
+/// Without `serde_json`'s `float_roundtrip` parser (enabled in `Cargo.toml`),
+/// about 30% of random finite `f64` values read back an ulp or more away; the
+/// first five values below are such cases (`3.7997969716361846e-262` became
+/// `3.799796971636185e-262`), so a config re-read from JSON could move. The
+/// shortest representation that serde writes now parses to the same bits.
+#[test]
+fn long_exponent_floats_round_trip_exactly() {
+    for value in [
+        3.799_796_971_636_184_6e-262,
+        2.291_712_365_432_881e-9,
+        -1.527_077_339_613_215e-236,
+        3.032_824_792_993_530_5e-68,
+        2.364_662_401_457_127_4e-157,
+        f64::MIN_POSITIVE,
+        5e-324,
+        f64::MAX,
+        8.988_465_674_311_58e307,
+        1.000_000_000_000_000_2,
+        9.007_199_254_740_993e15,
+        0.1,
+        1e23,
+        -2.225_073_858_507_201e-308,
+        -0.0,
+    ] {
+        let parameters = RopeParameters {
+            rope_type: RopeType::Linear,
+            factor: Some(value),
+            mscale_all_dim: Some(value),
+            short_factor: Some(vec![value, -value]),
+            ..RopeParameters::default()
+        };
+        let text = serde_json::to_string(&parameters).unwrap();
+        let restored: RopeParameters = serde_json::from_str(&text).unwrap();
+        for (original, parsed) in [
+            (parameters.factor, restored.factor),
+            (parameters.mscale_all_dim, restored.mscale_all_dim),
+        ] {
+            assert_eq!(
+                original.unwrap().to_bits(),
+                parsed.unwrap().to_bits(),
+                "{text}"
+            );
+        }
+        let factors = |rope: &RopeParameters| {
+            rope.short_factor
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(factors(&parameters), factors(&restored), "{text}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// Every finite `f64` in a RoPE mapping round-trips through JSON bit for bit.
+    #[test]
+    fn every_finite_float_round_trips_exactly(bits in any::<u64>()) {
+        let value = f64::from_bits(bits);
+        prop_assume!(value.is_finite());
+        let parameters = RopeParameters {
+            rope_theta: Some(value),
+            ..RopeParameters::default()
+        };
+        let restored: RopeParameterSet =
+            serde_json::from_str(&serde_json::to_string(&parameters).unwrap()).unwrap();
+        let theta = restored.parameters_for("any").unwrap().rope_theta.unwrap();
+        prop_assert_eq!(theta.to_bits(), bits);
+    }
+}
+
 /// Both shapes serialize back to the form they were parsed from.
 #[test]
 fn parameter_sets_round_trip_through_serialization() {
