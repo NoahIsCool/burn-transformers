@@ -11,7 +11,10 @@
 //!
 //! Each comparison times the former algorithm (kept here verbatim as an
 //! oracle) and the new one on identical inputs, checks that both produce the
-//! same values, and prints the median of several repetitions. Timings include
+//! same values wherever attention reads them, and prints the median of several
+//! repetitions. Relative-bias tables must match exactly; sliding masks must
+//! match on every valid query row, because padded query rows are unconstrained
+//! by design (their outputs are discarded). Timings include
 //! every device synchronization the algorithm performs. One element of each
 //! result is read back, so lazy backends cannot skip work, without charging
 //! either side for copying a full plane to the host (attention consumes the
@@ -193,6 +196,25 @@ fn relative_bias_tables_versus_per_layer_host_loops() {
             &per_layer_relative_bias(&biases[0], positions).into_data(),
             true,
         );
+    // The shared default-position table broadcasts over the batch axis.
+    let shared = StackPass::new(
+        contiguous.clone(),
+        None,
+        sequence,
+        crate::intervention::Stack::Decoder,
+        burn::tensor::DType::F32,
+    )
+    .with_row_invariant_positions(true)
+    .relative_bias(&biases[0])
+    .unwrap();
+    assert_eq!(shared.dims()[0], 1);
+    shared
+        .expand([batch, heads, sequence, sequence])
+        .into_data()
+        .assert_eq(
+            &per_layer_relative_bias(&biases[0], contiguous).into_data(),
+            true,
+        );
     println!(
         "T5 bias, batch {batch}, tokens {sequence}, heads {heads}, {layers} layers, per-row gapped positions: per-layer host {old:.2} ms, pass table {new:.2} ms ({:.1}x)",
         old / new
@@ -211,30 +233,49 @@ fn connectivity_planes_versus_per_layer_integer_masks() {
     let (batch, sequence, heads, layers, window) = (2, 512, 8, 8, 128);
     let (_, token_mask) = positions_and_mask(batch, sequence, &device);
     let positions = crate::attention::valid_token_ordinals(&token_mask);
+    let pass_plane = |pass: &StackPass<TestBackend>| {
+        pass.self_attention(
+            crate::intervention::Layer::decoder(0),
+            AttentionConnectivity::SlidingWindow { window },
+            heads,
+        )
+        .unwrap()
+        .mask
+        .unwrap()
+    };
+    let new_pass = || {
+        StackPass::new(
+            positions.clone(),
+            Some(&token_mask),
+            sequence,
+            crate::intervention::Stack::Decoder,
+            burn::tensor::DType::F32,
+        )
+    };
+    // Equal on every valid query row; padded query rows are unconstrained by design.
+    let valid_queries = token_mask
+        .as_tensor()
+        .clone()
+        .reshape([batch, 1, sequence, 1])
+        .expand([batch, heads, sequence, sequence]);
+    pass_plane(&new_pass())
+        .bool_and(valid_queries.clone())
+        .into_data()
+        .assert_eq(
+            &per_layer_sliding_mask(&token_mask, heads, window)
+                .bool_and(valid_queries)
+                .into_data(),
+            true,
+        );
     let old = median_ms(5, || {
         for _ in 0..layers {
             force(per_layer_sliding_mask(&token_mask, heads, window));
         }
     });
     let new = median_ms(5, || {
-        let pass = StackPass::new(
-            positions.clone(),
-            Some(&token_mask),
-            sequence,
-            crate::intervention::Stack::Decoder,
-            burn::tensor::DType::F32,
-        );
+        let pass = new_pass();
         for _ in 0..layers {
-            force(
-                pass.self_attention(
-                    crate::intervention::Layer::decoder(0),
-                    AttentionConnectivity::SlidingWindow { window },
-                    heads,
-                )
-                .unwrap()
-                .mask
-                .unwrap(),
-            );
+            force(pass_plane(&pass));
         }
     });
     println!(
