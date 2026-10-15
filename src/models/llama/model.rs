@@ -25,11 +25,11 @@
 //!
 //! Those paths are written once against the crate-private `DecoderGraph`
 //! interface of the `graph` submodule, never against Llama types, so other
-//! dense decoders can reuse them: [`LlamaForCausalLm`] implements the
-//! interface with the blocks above, and a family with, say, sandwich norms,
-//! soft-capped scores, or per-layer-type rotary tables implements it with
-//! its own block and inherits the stateless, hooked, staged, and genuinely
-//! batched cached paths unchanged.
+//! dense decoders reuse them: [`LlamaForCausalLm`] implements the interface
+//! with the blocks above, and the Gemma family
+//! ([`crate::models::gemma`]) implements it with sandwich-normalized,
+//! soft-capped blocks and per-layer-type rotary tables, inheriting the
+//! stateless, hooked, staged, and genuinely batched cached paths unchanged.
 //!
 //! # Tensor axes and precision
 //!
@@ -82,6 +82,21 @@ mod step;
 pub(super) mod test_support;
 
 pub use decode::LlamaDecodeState;
+
+pub(crate) mod engine {
+    //! The execution entry points shared by every `DecoderGraph` (see [`super::graph`]).
+    //!
+    //! A family whose model implements the graph interface gets its
+    //! stateless, hooked, staged, and batched cached passes by calling these
+    //! functions with itself; the Llama family's own inherent methods do
+    //! exactly that.
+
+    pub(crate) use super::decode::{Phase, forward_cached};
+    pub(crate) use super::experiment::{
+        activation_points, embed_with_hooks, forward, forward_with_hooks, normalize_with_hooks,
+        run_layers_with_hooks,
+    };
+}
 use graph::{
     DecoderBlock, DecoderGeometry, DecoderGraph, GraphLabels, LayerKeys, RotarySchedule,
     missing_rotary_tables, rotate, vocabulary_projection,

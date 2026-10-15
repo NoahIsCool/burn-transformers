@@ -29,9 +29,10 @@
 //! # Shared implementation
 //!
 //! The functions of this module are generic over the crate-private
-//! `DecoderGraph` interface, so every dense decoder built on it gets the
-//! same catalog, validity masks, and staged semantics; the inherent methods
-//! and trait implementations of each family only delegate.
+//! `DecoderGraph` interface, so every dense decoder built on it (the Llama
+//! and Gemma families) gets the same catalog, validity masks, and staged
+//! semantics; the inherent methods and trait implementations of each family
+//! only delegate.
 
 use core::ops::Range;
 

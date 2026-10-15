@@ -76,8 +76,8 @@
 //!
 //! The state, the cache layout, and the step are generic over the
 //! crate-private `DecoderGraph` interface: [`forward_cached`] runs any
-//! graph's blocks against a [`LlamaDecodeState`], which another family can
-//! wrap in its own state type. Every layer's rule must be global or a
+//! graph's blocks against a [`LlamaDecodeState`], and the Gemma family wraps
+//! the same state in its own type. Every layer's rule must be global or a
 //! sliding window, and all sliding layers below the capacity must share one
 //! window, because they share one ring group.
 
@@ -261,6 +261,9 @@ impl CacheLayout {
 // The decode state.
 
 /// External KV state of a Llama-family model.
+///
+/// The Gemma family reuses this state (wrapped in its own type), because
+/// both families run the same batched cache step.
 #[derive(Debug)]
 pub struct LlamaDecodeState<B: Backend> {
     /// Cache tensors and per-row committed lengths.

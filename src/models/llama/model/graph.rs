@@ -1,4 +1,4 @@
-//! The dense-decoder interface the shared execution paths run against.
+//! The dense-decoder interface shared by the Llama and Gemma families.
 //!
 //! The stateless, hooked, staged, and batched cached execution paths in this
 //! directory never name a family. They run against a [`DecoderGraph`]: an

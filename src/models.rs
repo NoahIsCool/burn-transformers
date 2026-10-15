@@ -9,6 +9,7 @@ mod auto;
 pub mod config;
 pub mod custom;
 pub mod deepseek_v2;
+pub mod gemma;
 pub mod gpt2;
 pub mod gpt_neox;
 pub mod llama;
