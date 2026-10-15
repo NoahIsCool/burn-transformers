@@ -71,3 +71,51 @@ fn tensor_state_sequences_match_the_history_oracle() {
         exercise_tensor_state(&input);
     }
 }
+
+/// The MTP bank follows its own steps and cursor through every lifecycle operation.
+#[test]
+fn mtp_bank_follows_steps_commits_reorder_truncate_and_reset() {
+    let geometry = Geometry {
+        rows: 2,
+        capacity: 10,
+        windows: [1, 4],
+        staging: 2,
+        recurrent: false,
+        mtp: true,
+        layers: 1,
+        width: 1,
+    };
+    let mut harness = TensorHarness::new(geometry);
+    assert!(harness.publish_mtp(&[2, 1], true));
+    harness.check();
+    assert!(harness.publish(&[1, 1], false));
+    assert!(harness.begin());
+    assert!(harness.publish_mtp(&[1, 2], false));
+    assert!(harness.publish(&[2, 1], true));
+    harness.check();
+    // Staged MTP tokens need their own accepted prefix.
+    assert!(!harness.commit(&[1, 1], false));
+    harness.check();
+    assert!(harness.commit(&[1, 1], true));
+    harness.check();
+    assert!(harness.reorder(&[1, 0]));
+    harness.check();
+    assert!(harness.truncate_mtp(&[1, 0]));
+    harness.check();
+    assert!(harness.begin());
+    // Three MTP tokens exceed the staging capacity of two.
+    assert!(!harness.publish_mtp(&[3, 0], true));
+    assert!(!harness.truncate_mtp(&[0, 0]));
+    assert!(harness.rollback());
+    harness.check();
+    assert!(harness.reset());
+    harness.check();
+    let mut plain = TensorHarness::new(Geometry {
+        mtp: false,
+        ..geometry
+    });
+    assert!(!plain.publish_mtp(&[1, 1], true));
+    assert!(!plain.truncate_mtp(&[0, 0]));
+    plain.check();
+    exercise_tensor_state(include_bytes!("../seeds/cache_transactions/tensor_mtp"));
+}
