@@ -20,6 +20,28 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: the Q8 code stored as two's-complement byte `byte` in `[0, 255]`.
+pub open spec fn byte_code(byte: int) -> int {
+    if byte < 128 { byte } else { byte - 256 }
+}
+
+/// Specification: the Q4 code stored as two's-complement nibble `nibble` in `[0, 15]`.
+pub open spec fn nibble_code(nibble: int) -> int {
+    if nibble < 8 { nibble } else { nibble - 16 }
+}
+
+/// Specification: Q4 code `index` of `packed`, the low nibble of byte `index / 2`
+/// for even `index` and its high nibble for odd `index`.
+pub open spec fn packed_nibble_code(packed: Seq<u8>, index: int) -> int {
+    let byte = packed[index / 2] as int;
+    nibble_code(if index % 2 == 0 { byte % 16 } else { byte / 16 })
+}
+
+} // verus!
+
 /// Packed storage width of one quantized code.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +152,8 @@ pub(crate) fn join_nibbles(low: u8, high: u8) -> u8 {
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(nibbles =>
     ensures
+        nibbles.0 == byte % 16,
+        nibbles.1 == byte / 16,
         nibbles.0 <= 15,
         nibbles.1 <= 15,
         byte == nibbles.0 + 16 * nibbles.1,
@@ -139,21 +163,25 @@ pub(crate) fn split_nibbles(byte: u8) -> (u8, u8) {
 }
 
 /// Reads code `index` from a packed buffer, or `None` past its end.
+///
+/// The postcondition pins the decoded value, not only its range: Q8 code `i` is
+/// byte `i`, and Q4 code `i` is the low nibble of byte `i / 2` for even `i` and
+/// the high nibble for odd `i`, so swapping the nibble order fails verification.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(code =>
     ensures
         match code {
-            Some(value) => {
-                &&& width == CodeWidth::Byte ==> index < packed@.len()
-                    && value as int == (if packed@[index as int] < 128 {
-                        packed@[index as int] as int
-                    } else {
-                        packed@[index as int] - 256
-                    })
-                &&& width == CodeWidth::Nibble ==> index / 2 < packed@.len()
+            Some(value) => match width {
+                CodeWidth::Byte => index < packed@.len()
+                    && value as int == byte_code(packed@[index as int] as int),
+                CodeWidth::Nibble => index / 2 < packed@.len()
                     && -8 <= value <= 7
+                    && value as int == packed_nibble_code(packed@, index as int),
             },
-            None => width == CodeWidth::Byte ==> index >= packed@.len(),
+            None => match width {
+                CodeWidth::Byte => index >= packed@.len(),
+                CodeWidth::Nibble => index / 2 >= packed@.len(),
+            },
         }
 ))]
 pub(crate) fn read_code(width: CodeWidth, packed: &[u8], index: usize) -> Option<i8> {

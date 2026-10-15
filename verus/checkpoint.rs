@@ -21,8 +21,9 @@
 //!
 //! It also verifies `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed
 //! lengths (`n` and `ceil(n / 2)`, never above `n`), the two's-complement nibble
-//! and byte encodings and their inverses, nibble joining and splitting, and
-//! in-bounds code reads.
+//! and byte encodings and their inverses, nibble joining and splitting, and code
+//! reads that return exactly the stored code (Q8 byte `i`; Q4 low nibble of byte
+//! `i / 2` for even `i`, high nibble for odd `i`) and `None` exactly past the end.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
 //! driven by these plans, file I/O, error mapping, and the floating-point
