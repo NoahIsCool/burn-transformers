@@ -52,7 +52,7 @@
 //! - [`LogitsProcessor::process_with_prompt_lengths`] rebuilds that history
 //!   from host token rows with an explicit prompt boundary and promotes
 //!   half-precision logits like [`generate_causal`], so it reproduces the
-//!   coordinator's processing exactly (speculative decoders use this form).
+//!   coordinator's processing exactly; it is the form speculative decoders need.
 //! - [`LogitsProcessor::process`] and [`LogitsProcessor::process_with_mask`]
 //!   keep their original meaning: every supplied history token counts as
 //!   generated, and the logits dtype is kept.
