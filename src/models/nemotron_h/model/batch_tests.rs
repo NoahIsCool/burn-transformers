@@ -148,6 +148,24 @@ fn identity_batch_skips_every_map() {
     );
 }
 
+/// Device query positions follow the plan's counts, repeating a row's last position at padding.
+#[test]
+fn query_positions_repeat_the_last_readable_position() {
+    let (_, batch) = ragged();
+    let positions = |baselines: &[usize]| {
+        batch.query_positions(baselines).map(|positions| {
+            positions
+                .into_data()
+                .convert::<i64>()
+                .to_vec::<i64>()
+                .unwrap()
+        })
+    };
+    // The inactive last row repeats its last cached position.
+    assert_eq!(positions(&[1, 0, 3, 4]).unwrap(), [1, 2, 0, 1, 3, 4, 3, 3]);
+    assert!(positions(&[1, 0, 3]).is_err());
+}
+
 /// Mis-sized inputs and invalid plans are contextual errors.
 #[test]
 fn invalid_inputs_are_rejected() {

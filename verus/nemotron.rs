@@ -4,7 +4,9 @@
 //! `src/models/nemotron_h/model/plan.rs`: the compact-batch maps that
 //! gather, scatter, pack, unpack, and select the last token of ragged rows
 //! (exact lengths and in-range addresses, including the appended zero rows),
-//! absolute query positions, the reference Mamba-2 path choice, the
+//! absolute query positions (padded slots repeat a row's last readable
+//! position, so no query of a row with history loses every key), the
+//! reference Mamba-2 path choice, the
 //! transactional recurrent-staging policy, the shifted MTP cursor after a
 //! truncation, and the one-pass verification length. The planning file
 //! reuses the shared strictly-increasing check, so the shared planning module

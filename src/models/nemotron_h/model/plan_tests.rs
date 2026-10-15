@@ -127,13 +127,41 @@ fn overflowing_extents_are_rejected() {
     assert!(plan_compaction(&columns, usize::MAX).is_none());
 }
 
-/// Query positions continue every row's numbering, including padded slots.
+/// Valid slots continue every row's numbering; padded slots repeat its last readable position.
 #[test]
 fn query_positions_follow_working_lengths() {
-    assert_eq!(query_positions(&[3, 0], 2).unwrap(), [3, 4, 0, 1]);
-    assert!(query_positions(&[usize::MAX], 2).is_none());
+    assert_eq!(query_positions(&[3, 0], &[2, 2], 2).unwrap(), [3, 4, 0, 1]);
+    // Row 0 pads after one token, row 1 is a left-padded prompt, row 2 is a
+    // finished row with history, and row 3 has neither tokens nor history.
+    assert_eq!(
+        query_positions(&[3, 0, 5, 0], &[1, 2, 0, 0], 3).unwrap(),
+        [3, 3, 3, 0, 1, 1, 4, 4, 4, 0, 0, 0]
+    );
+    assert!(query_positions(&[3], &[1, 1], 2).is_none());
+    assert!(query_positions(&[usize::MAX], &[2], 2).is_none());
+    // A padded slot repeats the last position instead of computing `W + j`.
+    assert_eq!(slot_position(usize::MAX - 1, 1, 5), Some(usize::MAX - 1));
+    assert_eq!(slot_position(usize::MAX, 1, 0), None);
+    assert_eq!(slot_position(0, 0, 3), Some(0));
     #[cfg(target_pointer_width = "64")]
-    assert!(query_positions(&[i64::MAX as usize + 1], 1).is_none());
+    assert!(query_positions(&[i64::MAX as usize + 1], &[1], 1).is_none());
+}
+
+/// Regression for review NEMR-6: a padded query keeps a readable key inside the window.
+///
+/// With the former `W_b + j` numbering, the left-padded row of a `[4, 2]`
+/// prefill under a two-token window put its padded slot 3 at position 3,
+/// beyond the window of both valid keys `{0, 1}`, so every key was excluded.
+#[test]
+fn padded_queries_keep_a_key_inside_a_sliding_window() {
+    let positions = query_positions(&[0, 0], &[4, 2], 4).unwrap();
+    assert_eq!(positions, [0, 1, 2, 3, 0, 1, 1, 1]);
+    let window = 2;
+    for (row, length) in [(0usize, 4i64), (1, 2)] {
+        for &query in &positions[row * 4..row * 4 + 4] {
+            assert!((0..length).any(|key| key <= query && key + window > query));
+        }
+    }
 }
 
 /// The recurrent update needs exactly one token and existing state.
@@ -187,6 +215,38 @@ proptest! {
         let columns = columns_of(&mask);
         let plan = plan_compaction(&columns, 5).unwrap();
         assert_plan_is_consistent(&columns, 5, &plan);
+    }
+
+    /// Every slot position follows its defining rule and sees a readable key.
+    ///
+    /// For a row with `W + n > 0` the position `q` satisfies `q < W + n`, so
+    /// the key at `q` is readable and lies inside every window `w >= 1`.
+    #[test]
+    fn query_positions_follow_slot_rules(
+        rows in proptest::collection::vec((0usize..6, 0usize..4), 1..5),
+        extra in 0usize..3,
+    ) {
+        let baselines = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+        let counts = rows.iter().map(|row| row.1).collect::<Vec<_>>();
+        let width = counts.iter().copied().max().unwrap_or(0) + extra;
+        let positions = query_positions(&baselines, &counts, width).unwrap();
+        prop_assert_eq!(positions.len(), rows.len() * width);
+        for (row, (&baseline, &count)) in baselines.iter().zip(&counts).enumerate() {
+            let end = baseline + count;
+            for slot in 0..width {
+                let position = usize::try_from(positions[row * width + slot]).unwrap();
+                prop_assert_eq!(Some(position), slot_position(baseline, count, slot));
+                if slot < count {
+                    prop_assert_eq!(position, baseline + slot);
+                } else {
+                    prop_assert_eq!(position, end.max(1) - 1);
+                }
+                prop_assert!(position <= baseline + slot);
+                if end > 0 {
+                    prop_assert!(position < end);
+                }
+            }
+        }
     }
 
     /// The MTP mapping never advances and preserves `mtp + 1 <= max(target, 1)`.

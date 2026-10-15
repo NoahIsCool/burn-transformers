@@ -210,18 +210,23 @@ impl<B: Backend> CompactBatch<B> {
         )
     }
 
-    /// Absolute positions `[B, N]` of every compact slot after `baselines`.
+    /// Absolute query positions `[B, N]` of every compact slot after `baselines`.
+    ///
+    /// Valid slots continue each row's numbering; padded slots repeat the
+    /// row's last readable position (see [`super::plan::slot_position`]).
     ///
     /// # Errors
     ///
-    /// Returns a configuration error when a position exceeds `i64`.
+    /// Returns a configuration error when `baselines` does not cover every row
+    /// or a position exceeds `i64`.
     pub(super) fn query_positions(&self, baselines: &[usize]) -> Result<Tensor<B, 2, Int>> {
-        let positions = query_positions(baselines, self.plan.width).ok_or_else(|| {
-            Error::configuration(
-                "nemotron_h.position",
-                "cached position exceeds the signed index range",
-            )
-        })?;
+        let positions =
+            query_positions(baselines, &self.plan.counts, self.plan.width).ok_or_else(|| {
+                Error::configuration(
+                    "nemotron_h.position",
+                    "cached positions need one baseline per row within the signed index range",
+                )
+            })?;
         Ok(Tensor::from_data(
             TensorData::new(positions, [baselines.len(), self.plan.width]),
             &self.device,

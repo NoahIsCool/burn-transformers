@@ -22,7 +22,10 @@
 //!   *ahead* of attention and attend over one zero-copy view `[0, L_b + n_b)`
 //!   of every row. Keys are excluded by absolute position (`k > q`, outside
 //!   the sliding window, or beyond a row's end); a dense batch with equal
-//!   lengths needs no mask at all, only bottom-right causality.
+//!   lengths needs no mask at all, only bottom-right causality. Padded query
+//!   slots repeat their row's last readable position, so they never lose
+//!   every key and their discarded outputs are ordinary finite softmaxes on
+//!   every backend (only a row with neither history nor tokens has no key).
 //! - MoE blocks route only the `T = sum_b n_b` packed valid tokens, so padding
 //!   never reaches a router or an expert and routing costs one host
 //!   synchronization per block for the whole batch.
@@ -453,7 +456,7 @@ struct PassContext<'a, B: Backend> {
     transactional: Option<TransactionalMamba>,
     /// Batched KV read plan through this step, when the model has attention.
     kv_plan: Option<KvBatchReadPlan<B>>,
-    /// Absolute query positions `[B, N]`, when exclusions are needed.
+    /// Absolute query positions `[B, N]` (padding repeats a row's last), when exclusions are needed.
     query_positions: Option<Tensor<B, 2, Int>>,
     /// Sliding window that can exclude a key in this call, if any.
     window: Option<NonZeroUsize>,

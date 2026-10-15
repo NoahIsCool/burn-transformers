@@ -25,6 +25,12 @@
 //! row's first rectangular column, which is always in range; callers replace
 //! those tokens before embedding them.
 //!
+//! Attention queries take absolute positions from [`query_positions`]: slot
+//! `(b, j)` sits at `W_b + j` after the row's `W_b` cached tokens, and a
+//! padded slot repeats the row's last readable position, so causality and a
+//! sliding window never exclude every key of a padded query in a row with
+//! history.
+//!
 //! # Execution policies
 //!
 //! [`mamba_step`] chooses the Mamba-2 path of one row exactly as the pinned
@@ -44,8 +50,10 @@
 //! compact-batch map has its stated length and addresses only valid entries
 //! of its source (a flat index below `B * S`, `B * N`, or the appended zero
 //! row), so tensor programs built from these plans cannot index out of range.
-//! They also prove the policies' exact decision rules and the MTP cursor
-//! invariant. Tensor programs driven by the plans remain covered by Rust tests.
+//! They also prove the per-slot query-position rule (a query never lies
+//! beyond its row's last readable key), the policies' exact decision rules,
+//! and the MTP cursor invariant. Tensor programs driven by the plans remain
+//! covered by Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -384,28 +392,74 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
     })
 }
 
-/// Absolute positions `W_b + j` of every compact slot `(b, j)`, `[B * N]`.
+/// Absolute query position of compact slot `slot` in a row with `count` valid tokens after `baseline`.
 ///
-/// Padded slots continue the row's numbering, so a padded query sees every
-/// valid key of its row and attention rows are never fully excluded for an
-/// active row. Returns `None` when a position exceeds `usize` or `i64`.
+/// A valid slot (`slot < count`) sits at `W + slot`. A padded slot repeats the
+/// row's last readable position `max(W + n, 1) - 1`, the position of its last
+/// valid (or, for an inactive row, last cached) key. Every key at or before
+/// that position is readable and the key at that position lies inside any
+/// sliding window, so a padded query of a row with history is never fully
+/// excluded; its output is discarded, but it stays a finite, ordinary softmax
+/// on every backend. Numbering padded slots `W + slot` instead could push a
+/// padded query beyond a sliding window of every valid key. Returns `None`
+/// when `W + n` overflows.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(position =>
+    ensures
+        match position {
+            Some(position) => {
+                &&& baseline + count <= usize::MAX
+                &&& slot < count ==> position == baseline + slot
+                &&& slot >= count && baseline + count > 0 ==> position + 1 == baseline + count
+                &&& slot >= count && baseline + count == 0 ==> position == 0
+                &&& position <= baseline + slot
+                &&& baseline + count > 0 ==> position < baseline + count
+            },
+            None => baseline + count > usize::MAX,
+        },
+))]
+pub(crate) const fn slot_position(baseline: usize, count: usize, slot: usize) -> Option<usize> {
+    match baseline.checked_add(count) {
+        None => None,
+        Some(_) if slot < count => Some(baseline + slot),
+        Some(end) if end > 0 => Some(end - 1),
+        Some(_) => Some(0),
+    }
+}
+
+/// Absolute query positions of every compact slot `(b, j)`, `[B * N]`.
+///
+/// Slot `(b, j)` holds [`slot_position`]`(W_b, n_b, j)`: valid slots continue
+/// the row's numbering and padded slots repeat its last readable position, so
+/// no query of a row with history is ever fully excluded by causality or a
+/// sliding window. Returns `None` when `baselines` and `counts` differ in
+/// length or a position exceeds `usize` or `i64`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(positions =>
     ensures
         match positions {
             Some(positions) => {
+                &&& counts.len() == baselines.len()
                 &&& positions.len() == baselines.len() * width
                 &&& forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0
             },
             None => true,
         },
 ))]
-pub(crate) fn query_positions(baselines: &[usize], width: usize) -> Option<Vec<i64>> {
+pub(crate) fn query_positions(
+    baselines: &[usize],
+    counts: &[usize],
+    width: usize,
+) -> Option<Vec<i64>> {
+    if counts.len() != baselines.len() {
+        return None;
+    }
     let total = baselines.len().checked_mul(width)?;
     let mut positions: Vec<i64> = Vec::with_capacity(total);
     let mut row: usize = 0;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
+            counts.len() == baselines.len(),
             row <= baselines.len(),
             positions.len() == row * width,
             forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
@@ -415,6 +469,7 @@ pub(crate) fn query_positions(baselines: &[usize], width: usize) -> Option<Vec<i
         let mut slot: usize = 0;
         #[cfg_attr(verus_keep_ghost, verus_spec(
             invariant
+                counts.len() == baselines.len(),
                 row < baselines.len(),
                 slot <= width,
                 positions.len() == row * width + slot,
@@ -422,7 +477,7 @@ pub(crate) fn query_positions(baselines: &[usize], width: usize) -> Option<Vec<i
             decreases width - slot,
         ))]
         while slot < width {
-            let position = baselines[row].checked_add(slot)?;
+            let position = slot_position(baselines[row], counts[row], slot)?;
             if position > i64::MAX as usize {
                 return None;
             }
