@@ -440,11 +440,29 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
             format!("{:?}", mask.as_tensor().dims()),
         ));
     }
-    let prompt_valid = metadata::mask_values(
-        request.prompt.token_mask.as_ref(),
+    if let Some(positions) = &request.prompt.position_ids
+        && positions.dims() != [batch, sequence]
+    {
+        return Err(Error::shape(
+            "generation.prompt.position_ids",
+            format!("[{batch}, {sequence}]"),
+            format!("{:?}", positions.dims()),
+        ));
+    }
+    // One transfer reads the mask together with any explicit positions.
+    let metadata::HostGrid {
+        valid: prompt_valid,
+        values: prompt_positions,
+    } = metadata::read_grid(
+        request
+            .prompt
+            .token_mask
+            .as_ref()
+            .map(|mask| mask.as_tensor().clone()),
+        request.prompt.position_ids.clone(),
         batch,
         sequence,
-        "prompt token mask",
+        "prompt mask and positions",
     )?;
     let prompt_lengths = metadata::nonempty_row_lengths(&prompt_valid, batch, sequence, "prompt")?;
     let maximum_prompt = prompt_lengths.iter().copied().max().unwrap_or(0);
@@ -459,27 +477,18 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
         )));
     }
 
-    let next_positions = match &request.prompt.position_ids {
-        Some(positions) => {
-            if positions.dims() != [batch, sequence] {
-                return Err(Error::shape(
-                    "generation.prompt.position_ids",
-                    format!("[{batch}, {sequence}]"),
-                    format!("{:?}", positions.dims()),
-                ));
-            }
-            let values = metadata::tensor_i64_values(positions.clone(), "prompt position IDs")?;
-            Some(metadata::next_positions(
+    let next_positions = prompt_positions
+        .map(|values| {
+            metadata::next_positions(
                 &values,
                 &prompt_valid,
                 batch,
                 sequence,
                 request.generation.max_new_tokens,
                 "prompt",
-            )?)
-        }
-        None => None,
-    };
+            )
+        })
+        .transpose()?;
 
     Ok(PreparedRequest {
         batch,

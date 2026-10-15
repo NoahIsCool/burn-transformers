@@ -304,23 +304,32 @@ fn standalone_block_errors_name_block_fields() {
     assert!(matches!(&error, Error::Configuration { field, .. } if field == "cross_attention"));
 }
 
-/// Well-formed but unexecutable mechanisms fail with capability errors before allocation.
+/// Unexecutable mechanisms fail before allocation; a Mamba-2 block builds from the shared kernel.
 #[test]
 fn unexecutable_blocks_report_capabilities() {
     let device: Device = Default::default();
     let mut gated = block(attention(PositionEncodingSpec::None));
     gated.residual = ResidualTopology::Gated;
-    let mamba = block(MixerSpec::Mamba2(Mamba2Spec {
-        heads: 2,
-        head_dim: 4,
-        state_dim: 4,
-        convolution_kernel: 4,
-        group_size: 1,
-    }));
-    for spec in [gated, mamba] {
-        let error = ModularLayer::<TestBackend>::init(&spec, 8, None, &device).unwrap_err();
-        assert!(matches!(error, Error::BackendCapability(_)), "{error:?}");
-    }
+    let error = ModularLayer::<TestBackend>::init(&gated, 8, None, &device).unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)), "{error:?}");
+
+    let mamba = |convolution_kernel| {
+        block(MixerSpec::Mamba2(Mamba2Spec {
+            heads: 2,
+            head_dim: 4,
+            state_dim: 4,
+            convolution_kernel,
+            group_size: 1,
+        }))
+    };
+    ModularLayer::<TestBackend>::init(&mamba(4), 8, None, &device)
+        .expect("Mamba-2 blocks execute through the shared kernel");
+    // The spec accepts a width-one convolution, which the Mamba-2 kernel cannot run.
+    let error = ModularLayer::<TestBackend>::init(&mamba(1), 8, None, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "layer.mixer.mamba2"),
+        "{error:?}"
+    );
 }
 
 /// A standalone decoder block with cross-attention reads the context's encoder source.

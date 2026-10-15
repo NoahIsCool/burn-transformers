@@ -2,12 +2,12 @@
 
 use burn::{
     backend::Flex,
-    tensor::{DType, Int, Tensor, TensorData},
+    tensor::{Bool, DType, Int, Tensor, TensorData},
 };
 
 use super::{
-    can_pack_token_ids, checked_token_id, empty_rows, nonempty_row_lengths, read_token_selection,
-    rectangle_size, required_cache_capacity, vec_with_capacity,
+    HostGrid, can_pack_token_ids, checked_token_id, empty_rows, nonempty_row_lengths, read_grid,
+    read_token_selection, rectangle_size, required_cache_capacity, vec_with_capacity,
 };
 use crate::generation::TokenSelection;
 
@@ -27,6 +27,78 @@ fn allocation_and_rectangle_failures_are_recoverable() {
     );
     assert_eq!(rectangle_size(3, 4, "fixture").unwrap(), 12);
     assert!(nonempty_row_lengths(&[], 0, 0, "empty").unwrap().is_empty());
+}
+
+/// A mask and its aligned values come back from one fused read, split exactly.
+///
+/// Every combination is covered: neither tensor (no read, all valid), a mask
+/// alone, values alone, and both concatenated in one transfer.
+#[test]
+fn grids_split_fused_mask_and_value_reads_exactly() {
+    let device = Default::default();
+    let mask = || {
+        Tensor::<TestBackend, 2, Bool>::from_data(
+            TensorData::from([[false, true, true], [true, true, false]]),
+            &device,
+        )
+    };
+    let values = || Tensor::<TestBackend, 2, Int>::from_ints([[7, 0, 1], [2, 3, -4]], &device);
+    let flags = vec![false, true, true, true, true, false];
+    let numbers = vec![7, 0, 1, 2, 3, -4];
+    for (mask, values, expected) in [
+        (
+            None,
+            None,
+            HostGrid {
+                valid: vec![true; 6],
+                values: None,
+            },
+        ),
+        (
+            Some(mask()),
+            None,
+            HostGrid {
+                valid: flags.clone(),
+                values: None,
+            },
+        ),
+        (
+            None,
+            Some(values()),
+            HostGrid {
+                valid: vec![true; 6],
+                values: Some(numbers.clone()),
+            },
+        ),
+        (
+            Some(mask()),
+            Some(values()),
+            HostGrid {
+                valid: flags,
+                values: Some(numbers),
+            },
+        ),
+    ] {
+        assert_eq!(read_grid(mask, values, 2, 3, "grid").unwrap(), expected);
+    }
+}
+
+/// Misshaped grids and impossible rectangles fail before any device read.
+#[test]
+fn grids_reject_misshaped_tensors_and_overflowing_rectangles() {
+    let device = Default::default();
+    let values = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2], [3, 4]], &device);
+    let error = read_grid(None, Some(values), 2, 3, "prompt").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("prompt values has shape [2, 2], expected [2, 3]"),
+        "{error}"
+    );
+    let mask = Tensor::<TestBackend, 2, Bool>::from_data(TensorData::from([[true]]), &device);
+    let error = read_grid(Some(mask), None, 1, 2, "prompt").unwrap_err();
+    assert!(error.to_string().contains("prompt mask has shape [1, 1]"));
+    assert!(read_grid::<TestBackend>(None, None, usize::MAX, 2, "prompt").is_err());
 }
 
 /// The cache holds the prompt plus every fed-back token, never the final one.

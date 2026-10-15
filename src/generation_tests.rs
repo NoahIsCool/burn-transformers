@@ -426,25 +426,99 @@ fn sampling_stream_boundaries_are_explicit() {
     assert!(processor.select(Tensor::zeros([2, 3], &device)).is_err());
 }
 
-/// Top-k retains exactly k finite entries, including tied boundary values.
-#[test]
-fn top_k_is_exact_even_at_ties() {
+/// Applies `top_k` sampling filtering to host rows and returns the processed scores.
+fn top_k_filtered(rows: &[Vec<f32>], top_k: usize) -> Vec<f32> {
     let device = Default::default();
+    let vocabulary = rows[0].len();
     let config = GenerationConfig {
         strategy: SamplingStrategy::Sample,
-        top_k: Some(2),
+        top_k: Some(top_k),
         ..Default::default()
     };
     let processor =
-        LogitsProcessor::<TestBackend>::new(config, 4, &device).expect("valid processor");
-    let output = processor
-        .process(Tensor::from_floats([[3.0, 2.0, 2.0, 1.0]], &device), None)
+        LogitsProcessor::<TestBackend>::new(config, vocabulary, &device).expect("valid processor");
+    let flat = rows.iter().flatten().copied().collect::<Vec<_>>();
+    let logits = Tensor::from_data(TensorData::new(flat, [rows.len(), vocabulary]), &device);
+    processor
+        .process(logits, None)
         .expect("valid scores")
         .into_data()
         .to_vec::<f32>()
-        .expect("float output");
-    assert_eq!(output.iter().filter(|value| value.is_finite()).count(), 2);
-    assert_eq!(output[0], 3.0);
+        .expect("float output")
+}
+
+/// Hugging Face's top-k rule: keep `z_i >= z_(k)`, the k-th greatest score of the row.
+fn reference_top_k(row: &[f32], top_k: usize) -> Vec<f32> {
+    let mut sorted = row.to_vec();
+    sorted.sort_by(|left, right| right.total_cmp(left));
+    let boundary = sorted[top_k - 1];
+    row.iter()
+        .map(|&score| {
+            if score < boundary {
+                f32::NEG_INFINITY
+            } else {
+                score
+            }
+        })
+        .collect()
+}
+
+/// Top-k keeps every token tied with the k-th score, as Hugging Face's `TopKLogitsWarper` does.
+///
+/// With scores `[3, 2, 2, 1]` and `k = 2` the boundary score is 2, so both
+/// tied tokens survive; keeping exactly two would drop one of them by sort
+/// order, which neither Hugging Face nor this crate does.
+#[test]
+fn top_k_keeps_ties_with_the_boundary_score() {
+    let output = top_k_filtered(&[vec![3.0, 2.0, 2.0, 1.0]], 2);
+    assert_eq!(output, [3.0, 2.0, 2.0, f32::NEG_INFINITY]);
+    // Without ties exactly k tokens survive, in any position.
+    let output = top_k_filtered(&[vec![0.5, 4.0, -1.0, 2.0]], 2);
+    assert_eq!(output, [f32::NEG_INFINITY, 4.0, f32::NEG_INFINITY, 2.0]);
+    // An all-equal row keeps everything; k = 1 keeps every maximum.
+    assert_eq!(top_k_filtered(&[vec![1.0; 4]], 1), [1.0; 4]);
+    let output = top_k_filtered(&[vec![5.0, 1.0, 5.0, 0.0]], 1);
+    assert_eq!(output, [5.0, f32::NEG_INFINITY, 5.0, f32::NEG_INFINITY]);
+    // Rows are independent, and earlier -inf constraints stay excluded.
+    let output = top_k_filtered(
+        &[
+            vec![f32::NEG_INFINITY, 1.0, 1.0, 0.0],
+            vec![2.0, 2.0, 2.0, 3.0],
+        ],
+        2,
+    );
+    assert_eq!(
+        output,
+        [
+            f32::NEG_INFINITY,
+            1.0,
+            1.0,
+            f32::NEG_INFINITY,
+            2.0,
+            2.0,
+            2.0,
+            3.0
+        ]
+    );
+}
+
+proptest::proptest! {
+    /// Top-k filtering matches Hugging Face's boundary rule on rows with many ties.
+    #[test]
+    fn top_k_matches_the_hugging_face_boundary_rule(
+        rows in proptest::collection::vec(proptest::collection::vec(-3_i8..=3, 6), 1..4),
+        top_k in 1_usize..=6,
+    ) {
+        let rows = rows
+            .iter()
+            .map(|row| row.iter().map(|&value| f32::from(value) * 0.5).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let expected = rows
+            .iter()
+            .flat_map(|row| reference_top_k(row, top_k))
+            .collect::<Vec<_>>();
+        proptest::prop_assert_eq!(top_k_filtered(&rows, top_k), expected);
+    }
 }
 
 /// Nucleus filtering includes the item that crosses the target probability.

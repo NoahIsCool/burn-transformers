@@ -6,17 +6,24 @@
 //! those values together so an application cannot accidentally report one
 //! revision while executing another model. The bundle performs no network I/O;
 //! [`ModelSourceMetadata`] canonicalizes an already-present local directory.
+//!
+//! A bundle whose model implements [`HookedModel`] or [`StagedModel`]
+//! implements them too, by delegating to that model, so family-generic
+//! experiment code accepts `&loaded` directly.
 
 use std::{
     collections::BTreeMap,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
+use burn::tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Error, GenerationConfig, Result,
+    CausalLmInput, Error, ForwardOptions, GenerationConfig, Result,
+    architecture::{HookedModel, StagedModel},
     checkpoint::{
         ExecutionStats, LoadReport,
         quantization::{
@@ -25,6 +32,8 @@ use crate::{
             ProvenanceExecutionStats, ProvenanceHashStats,
         },
     },
+    experiment::HiddenState,
+    intervention::{Hooks, PointInfo, Stack},
 };
 
 /// Tokenizer type carried by [`LoadedModel`] when tokenizer support is enabled.
@@ -368,9 +377,12 @@ impl<M> LoadedModel<M> {
     /// Records checkpoint generation settings that this crate could not apply.
     ///
     /// Automatic loaders call this with the behavior-changing keys of
-    /// `generation_config.json` (beam search, `min_p`, `max_length`, ...) whose
-    /// values differ from Hugging Face's neutral defaults, so callers can see
-    /// where generation may diverge from the reference implementation.
+    /// `generation_config.json` (beam search, `typical_p`, `max_length`, ...)
+    /// whose values differ from Hugging Face's neutral defaults, so callers can
+    /// see where generation may diverge from the reference implementation.
+    /// Seq2seq loads also report the logits-processor constraints (`min_p`,
+    /// `no_repeat_ngram_size`, `min_new_tokens`) that their beam search does
+    /// not read.
     #[must_use]
     pub fn with_unsupported_generation_settings(
         mut self,
@@ -430,7 +442,7 @@ impl<M> LoadedModel<M> {
     /// Returns checkpoint generation settings that were present but not applied.
     ///
     /// Keys are `generation_config.json` field names such as `num_beams` or
-    /// `min_p`; an empty map means every behavior-changing setting the
+    /// `typical_p`; an empty map means every behavior-changing setting the
     /// checkpoint declared is honored by [`Self::generation_defaults`].
     pub fn unsupported_generation_settings(&self) -> &BTreeMap<String, Value> {
         &self.unsupported_generation_settings
@@ -754,6 +766,70 @@ fn validate_execution_stats(report: &LoadReport, stats: &ExecutionStats) -> Resu
         }
     }
     Ok(())
+}
+
+// Experiments on a loaded bundle run on its model.
+
+impl<B: Backend, M: HookedModel<B>> HookedModel<B> for LoadedModel<M> {
+    /// The loaded model's complete input.
+    type Input = M::Input;
+    /// The loaded model's complete output.
+    type Output = M::Output;
+
+    /// Lists the loaded model's activation points.
+    fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        self.model.activation_points()
+    }
+
+    /// Runs the loaded model's hooked forward pass; the bundle's metadata is untouched.
+    fn forward_with_hooks(
+        &self,
+        input: M::Input,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<M::Output> {
+        self.model.forward_with_hooks(input, options, hooks)
+    }
+}
+
+impl<B: Backend, M: StagedModel<B>> StagedModel<B> for LoadedModel<M> {
+    /// Number of blocks the loaded model can stage.
+    fn num_layers(&self) -> usize {
+        self.model.num_layers()
+    }
+
+    /// Stack whose layer addresses the loaded model's staged blocks emit.
+    fn stack(&self) -> Stack {
+        self.model.stack()
+    }
+
+    /// Embeds tokens with the loaded model.
+    fn embed_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.embed_with_hooks(input, hooks)
+    }
+
+    /// Runs a block range of the loaded model.
+    fn run_layers_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        range: Range<usize>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.run_layers_with_hooks(state, range, hooks)
+    }
+
+    /// Applies the loaded model's final normalization.
+    fn normalize_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.normalize_with_hooks(state, hooks)
+    }
 }
 
 /// Rejects empty, surrounding-whitespace, and control-character provenance.

@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, backend::Backend};
 
-use crate::{Error, Result, TokenMask, architecture::tensor_bool_values};
+use crate::{Error, Result, TokenMask};
 
 use super::{GenerationConfig, metadata};
 
@@ -365,12 +365,24 @@ impl<B: Backend> TokenHistory<B> {
             return Ok(history);
         }
 
-        // One host read validates IDs and feeds the n-gram index and lengths.
+        // One host read (mask and IDs together) validates IDs and feeds the
+        // n-gram index and lengths; a mask the caller already holds is not re-read.
         let expected = metadata::rectangle_size(batch, width, "generation history")?;
-        let valid = match (host_valid, &mask) {
-            (Some(valid), _) => valid.to_vec(),
-            (None, Some(mask)) => tensor_bool_values(mask.clone(), "generation history mask")?,
-            (None, None) => vec![true; expected],
+        let needs_values = needs_counts || ngram_size > 0;
+        let device_mask = match host_valid {
+            Some(_) => None,
+            None => mask.clone(),
+        };
+        let grid = metadata::read_grid(
+            device_mask,
+            needs_values.then(|| tokens.clone()),
+            batch,
+            width,
+            "generation history",
+        )?;
+        let valid = match host_valid {
+            Some(valid) => valid.to_vec(),
+            None => grid.valid,
         };
         if valid.len() != expected {
             return Err(Error::Generation(format!(
@@ -378,12 +390,7 @@ impl<B: Backend> TokenHistory<B> {
                 valid.len()
             )));
         }
-        let needs_values = needs_counts || ngram_size > 0;
-        let values = if needs_values {
-            metadata::tensor_i64_values(tokens.clone(), "generation history")?
-        } else {
-            Vec::new()
-        };
+        let values = grid.values.unwrap_or_default();
         for row in 0..batch {
             for column in 0..width {
                 let offset = row * width + column;

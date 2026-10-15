@@ -838,7 +838,7 @@ fn modular_spec_round_trips_through_json() {
     assert_eq!(decoded, spec);
 }
 
-/// Invalid MLA rotary dimensions, unsupported Mamba2, and undefined residual gates fail explicitly.
+/// Invalid MLA rotary dimensions, unrunnable Mamba-2 geometry, and undefined residual gates fail explicitly.
 #[test]
 fn unavailable_or_ambiguous_components_are_rejected() {
     let device = Default::default();
@@ -865,12 +865,16 @@ fn unavailable_or_ambiguous_components_are_rejected() {
         heads: 2,
         head_dim: 4,
         state_dim: 8,
-        convolution_kernel: 4,
+        convolution_kernel: 1,
         group_size: 1,
     });
     let error = ModularCausalLm::<TestBackend>::init(decoder(vec![layer(mamba)]), &device)
-        .expect_err("Mamba2 kernel is not executable yet");
-    assert!(error.to_string().contains("requests Mamba2"));
+        .expect_err("the Mamba-2 kernel needs a convolution of width two or more");
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, reason }
+            if field.ends_with("layers[0].mixer.mamba2") && reason.contains("at least two")),
+        "{error:?}"
+    );
 
     let mut gated = layer(attention(PositionEncodingSpec::None));
     gated.residual = ResidualTopology::Gated;

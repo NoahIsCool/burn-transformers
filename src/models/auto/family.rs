@@ -26,7 +26,7 @@ use crate::{
     Error, Result,
     checkpoint::{CheckpointManifest, LoadPlan, TensorSink},
     models::{
-        config::{ConfigError, ModelConfig, TokenIds},
+        config::{ModelConfig, TokenIds},
         deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
         llama::{LlamaCheckpointOptions, LlamaFamilyConfig, LlamaForCausalLm},
         muse_glimmer::{
@@ -102,14 +102,6 @@ pub(super) trait CausalFamily<B: Backend>: Sized + TensorSink {
 
 // Shared planning helpers.
 
-/// Maps a family contract error to its `architecture.field` configuration context.
-fn contract_error(error: ConfigError) -> Error {
-    Error::configuration(
-        format!("{}.{}", error.architecture, error.field),
-        error.reason,
-    )
-}
-
 /// Maps a checkpoint discovery or planning failure to a checkpoint error.
 fn checkpoint_error(error: impl core::fmt::Display) -> Error {
     Error::Checkpoint(error.to_string())
@@ -183,9 +175,7 @@ impl<B: Backend> CausalFamily<B> for DeepseekV2ForCausalLm<B> {
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
         let manifest = discover(root, options)?;
-        let contract = config
-            .checkpoint_contract(DeepseekV2CheckpointOptions::default())
-            .map_err(contract_error)?;
+        let contract = config.checkpoint_contract(DeepseekV2CheckpointOptions::default())?;
         let plan = contract
             .build_load_plan(&manifest, &options.checkpoint)
             .map_err(checkpoint_error)?;
@@ -225,9 +215,7 @@ impl<B: Backend> CausalFamily<B> for MuseGlimmerForCausalLm<B> {
             LanguageNamespace::Wrapped => MuseGlimmerCheckpointSource::Multimodal,
             LanguageNamespace::TextOnly => MuseGlimmerCheckpointSource::TextOnly,
         };
-        let contract = config
-            .checkpoint_contract(MuseGlimmerCheckpointOptions { source })
-            .map_err(contract_error)?;
+        let contract = config.checkpoint_contract(MuseGlimmerCheckpointOptions { source })?;
         let plan = contract
             .build_load_plan(&manifest, &options.checkpoint)
             .map_err(checkpoint_error)?;
@@ -271,9 +259,7 @@ impl<B: Backend> CausalFamily<B> for NemotronHForCausalLm<B> {
                 .with_provenance(NemotronHCheckpointProvenance::new(repository, revision)),
             _ => NemotronHCheckpointOptions::default(),
         };
-        let contract = config
-            .checkpoint_contract(architecture_options)
-            .map_err(contract_error)?;
+        let contract = config.checkpoint_contract(architecture_options)?;
         let manifest = contract
             .discover_checkpoint(root, &options.checkpoint)
             .map_err(checkpoint_error)?;
@@ -316,12 +302,10 @@ impl<B: Backend> CausalFamily<B> for Qwen3_5ForCausalLm<B> {
             LanguageNamespace::Wrapped => Qwen3_5CheckpointSource::Multimodal,
             LanguageNamespace::TextOnly => Qwen3_5CheckpointSource::TextOnly,
         };
-        let contract = config
-            .checkpoint_contract(Qwen3_5CheckpointOptions {
-                source,
-                include_mtp: options.qwen_mtp,
-            })
-            .map_err(contract_error)?;
+        let contract = config.checkpoint_contract(Qwen3_5CheckpointOptions {
+            source,
+            include_mtp: options.qwen_mtp,
+        })?;
         let plan = contract
             .build_load_plan(&manifest, &options.checkpoint)
             .map_err(checkpoint_error)?;
@@ -363,9 +347,7 @@ impl<B: Backend> CausalFamily<B> for Qwen3MoeForCausalLm<B> {
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
         let manifest = discover(root, options)?;
-        let contract = config
-            .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
-            .map_err(contract_error)?;
+        let contract = config.checkpoint_contract(Qwen3MoeCheckpointOptions::default())?;
         let plan = contract
             .build_load_plan(&manifest, &options.checkpoint)
             .map_err(checkpoint_error)?;
@@ -402,9 +384,7 @@ impl<B: Backend> CausalFamily<B> for LlamaForCausalLm<B> {
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
         let manifest = discover(root, options)?;
-        let contract = config
-            .checkpoint_contract(LlamaCheckpointOptions::default())
-            .map_err(contract_error)?;
+        let contract = config.checkpoint_contract(LlamaCheckpointOptions::default())?;
         let plan = contract
             .build_load_plan(&manifest, &options.checkpoint)
             .map_err(checkpoint_error)?;

@@ -577,3 +577,184 @@ fn dynamic_captures_cover_every_rank_and_restore_typed_tensors() {
     let other = Hooks::<B>::new();
     assert!(other.get_dynamic(&handles[0]).is_err());
 }
+
+/// The sink point is the mass missing from each pattern row, emitted only on request, and read-only.
+#[test]
+fn sink_probability_is_the_mass_missing_from_each_pattern_row() {
+    let device = Default::default();
+    let points = Layer::decoder(2).self_attention();
+    let point = points.sink_probability();
+    assert_eq!(
+        point.info().name,
+        "decoder.layers.2.attention.sink_probability"
+    );
+    assert_eq!(point.info().axes, [Axis::Batch, Axis::Head, Axis::Query]);
+    assert_eq!(
+        Layer::encoder(0)
+            .cross_attention()
+            .sink_probability()
+            .info()
+            .name,
+        "encoder.layers.0.cross_attention.sink_probability"
+    );
+    assert!(!points.all().contains(&point.info()));
+
+    // Rows summing to 0.75, 1, and 0 (fully excluded) leave 0.25, 0, and 1 for the sink.
+    let pattern = || {
+        Tensor::<B, 4>::from_floats(
+            [[[[0.5, 0.25, 0.0], [0.2, 0.3, 0.5], [0.0, 0.0, 0.0]]]],
+            &device,
+        )
+    };
+    let catalog = vec![points.pattern().info(), point.info()];
+    let mut hooks = Hooks::<B>::new();
+    let sink = hooks.capture(point.clone());
+    let row = hooks.capture(point.query_token(2));
+    hooks
+        .run(catalog.clone(), |hooks| {
+            let pattern = hooks.apply(points.pattern(), pattern())?;
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap();
+    let captured = hooks.get(&sink).unwrap();
+    assert_eq!(captured.dtype(), DType::F32);
+    let expected = [0.25_f32, 0.0, 1.0];
+    for (actual, expected) in captured
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .iter()
+        .zip(expected)
+    {
+        assert!((actual - expected).abs() < 1e-6, "{actual} vs {expected}");
+    }
+    assert_eq!(
+        hooks
+            .get(&row)
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        [1.0]
+    );
+
+    // An edit of the pattern is reflected in the derived sink mass.
+    let mut edited = Hooks::<B>::new();
+    let sink = edited.capture(point.clone());
+    edited.edit(points.pattern().query_token(1), |row| row * 0.5);
+    edited
+        .run(catalog.clone(), |hooks| {
+            let pattern = hooks.apply(points.pattern(), pattern())?;
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap();
+    let second = edited
+        .get(&sink)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()[1];
+    assert!((second - 0.5).abs() < 1e-6, "{second}");
+
+    // Editing the derived point is an intervention error, not a silent no-op.
+    let mut rejected = Hooks::<B>::new();
+    rejected.edit(point.clone(), |sink| sink * 0.0);
+    let error = rejected
+        .run(catalog, |hooks| {
+            let pattern = hooks.apply(points.pattern(), pattern())?;
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Intervention { point: name, .. } if name == &point.info().name),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("read-only"), "{error}");
+
+    // Without a request the helper does nothing, even outside a scope.
+    let mut idle = Hooks::<B>::new();
+    idle.apply_sink_probability(points, &pattern()).unwrap();
+}
+
+/// On real sink attention, the derived point equals the sink's softmax share of each row.
+///
+/// With per-head sink logits `s_h` and scaled scores `z_k`, the eager graph
+/// normalizes `[z_1, ..., z_K, s_h]` and drops the last column, so
+/// `p_sink = exp(s_h) / (exp(s_h) + sum_k exp(z_k))`.
+#[test]
+fn sink_probability_matches_the_sink_softmax_share() {
+    use burn::{module::Param, tensor::TensorData};
+
+    use crate::attention::{
+        AttentionPrecisionMode, AttentionProjection, GroupedQueryAttentionConfig,
+    };
+
+    let device = Default::default();
+    let sinks = [0.5_f32, -1.0, 2.0, 0.0];
+    let mut module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .with_attention_sinks(true)
+        .with_precision_mode(AttentionPrecisionMode::EagerFp32Softmax)
+        .init::<B>(&device)
+        .unwrap();
+    module.sinks = Some(Param::from_tensor(Tensor::from_floats(sinks, &device)));
+    let tensor = |shape: [usize; 4], seed: usize| {
+        let count = shape.iter().product::<usize>();
+        let values = (0..count)
+            .map(|index| ((index * 5 + seed) % 11) as f32 * 0.2 - 1.0)
+            .collect::<Vec<_>>();
+        Tensor::<B, 4>::from_data(TensorData::new(values, shape), &device)
+    };
+    let projection = AttentionProjection {
+        query: tensor([2, 4, 3, 2], 1),
+        key: tensor([2, 2, 5, 2], 2),
+        value: tensor([2, 2, 5, 2], 3),
+        gate: None,
+    };
+    let points = Layer::decoder(0).self_attention();
+    let mut hooks = Hooks::<B>::new();
+    let scores = hooks.capture(points.scores());
+    let pattern = hooks.capture(points.pattern());
+    let catalog = vec![points.scores().info(), points.pattern().info()];
+    hooks
+        .run(catalog, |hooks| {
+            module.attend_with_hooks(projection, None, None, false, points, hooks)
+        })
+        .unwrap();
+    let scores = hooks
+        .get(&scores)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let pattern = hooks.get(&pattern).unwrap();
+
+    let mut derived = Hooks::<B>::new();
+    let sink = derived.capture(points.sink_probability());
+    derived
+        .run(vec![points.sink_probability().info()], |hooks| {
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap();
+    let sink = derived.get(&sink).unwrap();
+    assert_eq!(sink.dims(), [2, 4, 3]);
+    let sink = sink.into_data().to_vec::<f32>().unwrap();
+    for (row, &actual) in sink.iter().enumerate() {
+        let head = (row / 3) % 4;
+        let logit = f64::from(sinks[head]);
+        let keys = &scores[row * 5..row * 5 + 5];
+        let maximum = keys
+            .iter()
+            .map(|&score| f64::from(score))
+            .fold(logit, f64::max);
+        let denominator = (logit - maximum).exp()
+            + keys
+                .iter()
+                .map(|&score| (f64::from(score) - maximum).exp())
+                .sum::<f64>();
+        let expected = (logit - maximum).exp() / denominator;
+        assert!(
+            (f64::from(actual) - expected).abs() < 1e-5,
+            "row {row}: {actual} vs {expected}"
+        );
+    }
+}

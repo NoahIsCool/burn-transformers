@@ -155,8 +155,8 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
     /// capture/edit points, listed by [`Self::activation_points`]. This reference path
     /// materializes attention matrices with quadratic sequence memory cost; select
     /// it explicitly for experiments that need those points. Initialization keeps
-    /// [`AttentionPrecisionMode::BackendDefault`]. Any decoder DeltaNet mixers
-    /// retain their recurrent computation; their cross-attention uses the chosen mode.
+    /// [`AttentionPrecisionMode::BackendDefault`]. Any decoder DeltaNet or Mamba-2
+    /// mixers retain their recurrent computation; their cross-attention uses the chosen mode.
     /// MLA self-attention retains its explicit eager graph.
     #[must_use]
     pub fn with_attention_precision(mut self, mode: AttentionPrecisionMode) -> Self {

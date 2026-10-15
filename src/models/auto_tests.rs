@@ -1309,7 +1309,11 @@ fn model_detection_wrapper_precedence_and_typed_failures_are_stable() {
     );
 }
 
-/// Each parser maps schema failures into its automatic-model context without allocating weights.
+/// Each family parser's errors convert through `From<ConfigLoadError>` without allocating weights.
+///
+/// A malformed field keeps the parser's diagnostic under the field `config`, and a
+/// topology violation keeps its structured `architecture.field` path, so the
+/// automatic registry reports exactly what the family parser found.
 #[test]
 fn all_registry_parsers_preserve_configuration_error_context() {
     let device = Default::default();
@@ -1318,12 +1322,23 @@ fn all_registry_parsers_preserve_configuration_error_context() {
             serde_json::json!({"model_type":family,"vocab_size":"not an integer"}).to_string();
         assert!(
             matches!(AutoCausalLm::<TestBackend>::from_config_json(&json, &device).unwrap_err(),
-            Error::Configuration { field, reason } if field == "auto_causal.config" && !reason.is_empty())
+            Error::Configuration { field, reason } if field == "config"
+                && reason.starts_with("invalid model config JSON: ") && reason.contains("not an integer")),
+            "{family}"
         );
     }
+    let invalid_topology = serde_json::to_string(&Qwen3MoeConfig {
+        vocab_size: 0,
+        ..tiny_qwen_moe()
+    })
+    .unwrap();
+    assert!(
+        matches!(AutoCausalLm::<TestBackend>::from_config_json(&invalid_topology, &device).unwrap_err(),
+        Error::Configuration { field, reason } if field == "qwen3_moe.vocab_size" && reason == "must be nonzero")
+    );
     assert!(
         matches!(AutoSeq2SeqLm::<TestBackend>::from_config_json(r#"{"model_type":"t5","vocab_size":"invalid"}"#, &device).unwrap_err(),
-        Error::Configuration { field, reason } if field == "auto_seq2seq.config" && !reason.is_empty())
+        Error::Configuration { field, reason } if field == "config" && reason.starts_with("invalid model config JSON: "))
     );
     assert!(
         matches!(AutoSeq2SeqLm::<TestBackend>::from_config_json(r#"{"model_type":"qwen3_moe"}"#, &device).unwrap_err(),

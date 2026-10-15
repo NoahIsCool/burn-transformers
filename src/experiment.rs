@@ -466,27 +466,16 @@ impl<B: Backend> ExecutionContext<B> {
 ///
 /// Each input is a `[1]` tensor such as `positions.min()`. Concatenating them on
 /// the device before the readback replaces one blocking transfer per scalar with
-/// one in total. Integer storage may be I32 or I64; values widen to `i64`.
-/// Readback failures become [`Error::BackendCapability`] rather than panics.
+/// one in total. Integer storage may be I32 or I64 (mixed dtypes are widened
+/// losslessly); values return as `i64`, one per input. This is the crate's
+/// shared fused reader (`models::shared::checks::read_int_tensors`) applied to
+/// scalars. Readback failures become [`Error::BackendCapability`] rather than
+/// panics.
 pub(crate) fn read_int_scalars<B: Backend>(
     scalars: Vec<Tensor<B, 1, Int>>,
     purpose: &str,
 ) -> Result<Vec<i64>> {
-    let expected = scalars.len();
-    if expected == 0 {
-        return Ok(Vec::new());
-    }
-    let data = Tensor::cat(scalars, 0)
-        .try_into_data()
-        .map_err(|error| Error::BackendCapability(format!("cannot read {purpose}: {error}")))?;
-    let values = data.iter::<i64>().collect::<Vec<_>>();
-    if values.len() != expected {
-        return Err(Error::BackendCapability(format!(
-            "cannot read {purpose}: expected {expected} scalars, found {}",
-            values.len()
-        )));
-    }
-    Ok(values)
+    crate::models::shared::checks::read_int_tensors(scalars, purpose)
 }
 
 /// A representation at an explicit block and normalization boundary.

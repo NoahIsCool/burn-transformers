@@ -61,11 +61,15 @@ use crate::{
     LogitsSelection, Result, Seq2SeqLanguageModel, TokenMask,
     architecture::{bool_tensor_from_values, select_bool_tensor},
     cache::CacheConfig,
+    models::shared::rows::index_tensor,
 };
 
 use super::bookkeeping::{beam_row, fill_beam_expansion, frontier_capacity};
 use super::metadata::{self, extract_last_logits};
 use super::probability_accumulation_dtype;
+
+/// Name reported when a beam row-gather index cannot be uploaded.
+const BEAM_ROWS: &str = "beam_search.row_indices";
 
 /// Label used for model-logit shape errors raised by beam search.
 const MODEL_LOGITS: &str = "beam_search.model_logits";
@@ -437,11 +441,20 @@ impl PreparedRequest {
             decoder_sequence,
             "decoder_prompt",
         )?;
-        let decoder_valid = metadata::mask_values(
-            request.decoder_prompt.token_mask.as_ref(),
+        // One transfer reads the decoder mask together with any explicit positions.
+        let metadata::HostGrid {
+            valid: decoder_valid,
+            values: decoder_positions,
+        } = metadata::read_grid(
+            request
+                .decoder_prompt
+                .token_mask
+                .as_ref()
+                .map(|mask| mask.as_tensor().clone()),
+            request.decoder_prompt.position_ids.clone(),
             decoder_batch,
             decoder_sequence,
-            "decoder prompt mask",
+            "decoder prompt mask and positions",
         )?;
         let decoder_prompt_lengths = metadata::nonempty_row_lengths(
             &decoder_valid,
@@ -473,22 +486,15 @@ impl PreparedRequest {
             )));
         }
 
-        let initial_next_positions = request
-            .decoder_prompt
-            .position_ids
-            .clone()
-            .map(|positions| {
-                metadata::tensor_i64_values(positions, "decoder prompt positions").and_then(
-                    |values| {
-                        metadata::next_positions(
-                            &values,
-                            &decoder_valid,
-                            decoder_batch,
-                            decoder_sequence,
-                            request.search.max_new_tokens,
-                            "decoder prompt",
-                        )
-                    },
+        let initial_next_positions = decoder_positions
+            .map(|values| {
+                metadata::next_positions(
+                    &values,
+                    &decoder_valid,
+                    decoder_batch,
+                    decoder_sequence,
+                    request.search.max_new_tokens,
+                    "decoder prompt",
                 )
             })
             .transpose()?;
@@ -1064,7 +1070,7 @@ fn select_encoder<B: Backend>(
     encoder: EncoderOutput<B>,
     indices: &[usize],
 ) -> Result<EncoderOutput<B>> {
-    let selector = batch_selector::<B>(indices, &encoder.hidden_state.device())?;
+    let selector = index_tensor::<B>(indices, &encoder.hidden_state.device(), BEAM_ROWS)?;
     Ok(EncoderOutput {
         hidden_state: encoder.hidden_state.select(0, selector.clone()),
         token_mask: encoder.token_mask.map(|mask| {
@@ -1088,7 +1094,7 @@ fn select_input<B: Backend>(
     input: CausalLmInput<B>,
     indices: &[usize],
 ) -> Result<CausalLmInput<B>> {
-    let selector = batch_selector::<B>(indices, &input.token_ids.device())?;
+    let selector = index_tensor::<B>(indices, &input.token_ids.device(), BEAM_ROWS)?;
     Ok(CausalLmInput {
         token_ids: input.token_ids.select(0, selector.clone()),
         token_mask: input.token_mask.map(|mask| {
@@ -1111,24 +1117,6 @@ fn beam_expansion_indices(batch: usize, beams: usize) -> Result<Vec<usize>> {
     let mut indices = metadata::vec_with_capacity(count, "beam expansion indices")?;
     fill_beam_expansion(&mut indices, count, beams);
     Ok(indices)
-}
-
-/// Converts host indices to Burn's portable signed batch selector.
-fn batch_selector<B: Backend>(indices: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::Generation(format!(
-                    "beam batch index {index} exceeds the signed tensor-index domain"
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
 }
 
 /// Validates optional mask and position rectangles before model execution.

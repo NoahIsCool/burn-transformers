@@ -1,19 +1,26 @@
 //! Host-side metadata helpers shared by the generation coordinators.
 //!
-//! Coordinators read a few small tensors back to the host: prompt masks and
-//! positions once per request, and the selected token IDs with their log
-//! probabilities once per decode step. Everything here is `O(batch *
-//! sequence)` or smaller; vocabulary-sized tensors never cross the device
-//! boundary. Allocation goes through `try_reserve_exact`, so a request whose
-//! metadata cannot be allocated fails with an error instead of aborting.
+//! Coordinators read a few small tensors back to the host: a prompt's mask and
+//! positions (or a history's mask and token IDs) once per request, and the
+//! selected token IDs with their log probabilities once per decode step. Each
+//! of those is a single device-to-host transfer: [`read_grid`] concatenates a
+//! mask with its aligned integer tensor, and [`read_token_selection`] packs IDs
+//! with their scores. Everything here is `O(batch * sequence)` or smaller;
+//! vocabulary-sized tensors never cross the device boundary. Allocation goes
+//! through `try_reserve_exact`, so a request whose metadata cannot be allocated
+//! fails with an error instead of aborting.
 //!
 //! Integer index arithmetic delegates to the Verus-verified functions in
 //! `bookkeeping`; this module adds tensor readback and error context.
 
-use burn::tensor::{DType, Element, ElementConversion, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{
+    Bool, DType, Element, ElementConversion, Int, Tensor, TensorData, backend::Backend,
+};
 use burn::tensor::{bf16, f16};
 
-use crate::{Error, Result, TokenMask, architecture::tensor_bool_values};
+use crate::{
+    Error, Result, architecture::tensor_bool_values, models::shared::checks::read_int_tensors,
+};
 
 use super::TokenSelection;
 use super::bookkeeping::{PositionError, next_position_after, row_span};
@@ -112,22 +119,78 @@ fn float_slice_f64<E: Element>(data: &TensorData, label: &str) -> Result<Vec<f64
         })
 }
 
-/// Reads a `[batch, sequence]` token mask, or returns an all-valid rectangle.
-pub(super) fn mask_values<B: Backend>(
-    mask: Option<&TokenMask<B>>,
+/// Host copy of a `[batch, sequence]` validity mask and an aligned integer tensor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HostGrid {
+    /// Row-major validity flags; all `true` when no mask was supplied.
+    pub(super) valid: Vec<bool>,
+    /// Row-major integer values (positions or token IDs), when supplied.
+    pub(super) values: Option<Vec<i64>>,
+}
+
+/// Reads a `[batch, sequence]` mask and an aligned integer tensor in one transfer.
+///
+/// The mask (as 0/1 integers) and the values are flattened and concatenated
+/// into one integer readback, so a padded prompt with explicit positions, or
+/// a masked history with token IDs, costs one device-to-host synchronization
+/// instead of two. A missing mask means every slot is valid; with neither
+/// tensor nothing is read. Both tensors must already have shape
+/// `[batch, sequence]`.
+///
+/// # Errors
+///
+/// Returns [`Error::Generation`] when a supplied tensor does not hold
+/// `batch * sequence` elements or the host buffers cannot be allocated, and
+/// [`Error::BackendCapability`] when the backend cannot read the values.
+pub(super) fn read_grid<B: Backend>(
+    mask: Option<Tensor<B, 2, Bool>>,
+    values: Option<Tensor<B, 2, Int>>,
     batch: usize,
     sequence: usize,
     label: &str,
-) -> Result<Vec<bool>> {
-    match mask {
-        Some(mask) => tensor_bool_values(mask.as_tensor().clone(), label),
-        None => {
-            let count = rectangle_size(batch, sequence, label)?;
-            let mut valid = vec_with_capacity(count, label)?;
-            valid.resize(count, true);
-            Ok(valid)
+) -> Result<HostGrid> {
+    let count = rectangle_size(batch, sequence, label)?;
+    for (name, dims) in [
+        ("mask", mask.as_ref().map(Tensor::dims)),
+        ("values", values.as_ref().map(Tensor::dims)),
+    ] {
+        if let Some(dims) = dims
+            && dims != [batch, sequence]
+        {
+            return Err(Error::Generation(format!(
+                "{label} {name} has shape {dims:?}, expected [{batch}, {sequence}]"
+            )));
         }
     }
+    let (mask, values) = match (mask, values) {
+        // A mask alone is read directly as booleans.
+        (Some(mask), None) => {
+            return Ok(HostGrid {
+                valid: tensor_bool_values(mask, label)?,
+                values: None,
+            });
+        }
+        pair => pair,
+    };
+    let has_mask = mask.is_some();
+    let has_values = values.is_some();
+    let flat = mask
+        .map(|mask| mask.int().reshape([count]))
+        .into_iter()
+        .chain(values.map(|values| values.reshape([count])))
+        .collect::<Vec<_>>();
+    let read = read_int_tensors(flat, label)?;
+    let (mask_slots, value_slots) = read.split_at(if has_mask { count } else { 0 });
+    let mut valid = vec_with_capacity(count, label)?;
+    if has_mask {
+        valid.extend(mask_slots.iter().map(|&flag| flag != 0));
+    } else {
+        valid.resize(count, true);
+    }
+    Ok(HostGrid {
+        valid,
+        values: has_values.then(|| value_slots.to_vec()),
+    })
 }
 
 /// Counts valid entries per row of a flattened `[batch, sequence]` mask.
