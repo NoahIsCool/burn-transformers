@@ -39,14 +39,15 @@ pub(crate) mod rows;
 #[cfg(test)]
 mod test_support;
 
-pub(crate) use checks::{DeferredChecks, ensure_same_device};
+pub(crate) use checks::{DeferredChecks, ensure_grid, ensure_nonempty, ensure_same_device};
 pub(crate) use input::{
-    EmptyRows, InputContract, InputNames, ValidatedInput, check_nonempty_mask, validate_input,
+    EmptyRows, ImplicitPositions, InputContract, InputNames, ValidatedInput, check_nonempty_mask,
+    validate_input, validate_nonempty_mask, validate_token_values,
 };
 pub(crate) use logits::{
     select_hidden, select_hidden_with_last_columns, validate_logits_selection,
 };
 pub(crate) use rows::{
-    StatefulContract, StatefulRows, concat_rows, ensure_static_rotary_context,
-    implicit_position_ids, index_tensor, prepare_stateful_rows,
+    CompactRow, StatefulContract, StatefulRows, concat_rows, ensure_static_rotary_context,
+    implicit_position_ids, index_tensor, prepare_stateful_rows, read_valid_columns,
 };

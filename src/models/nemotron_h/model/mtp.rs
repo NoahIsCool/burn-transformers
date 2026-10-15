@@ -20,10 +20,10 @@ use crate::{
 };
 
 use super::{
-    NemotronHDecodeState, NemotronHForCausalLm,
+    INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm,
     decode::{KV_GROUP, cached_attention_mask},
-    validate_token_ids,
 };
+use crate::models::shared::validate_token_values;
 
 /// One cached MTP prediction after projection through the shared target head.
 #[derive(Debug)]
@@ -128,7 +128,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             &head.eh_proj.weight.val().device(),
             state.tensors.device(),
         )?;
-        validate_token_ids(next_token_ids.clone(), self.config().vocab_size)?;
+        validate_token_values(
+            &next_token_ids,
+            self.config().vocab_size,
+            INPUT_NAMES.token_ids,
+        )?;
 
         let committed = state
             .tensors
@@ -251,7 +255,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             &prompt_token_ids.device(),
             state.tensors.device(),
         )?;
-        validate_token_ids(prompt_token_ids.clone(), self.config().vocab_size)?;
+        validate_token_values(
+            &prompt_token_ids,
+            self.config().vocab_size,
+            INPUT_NAMES.token_ids,
+        )?;
         if state.tensors.lengths() != [sequence] {
             return Err(Error::Cache(format!(
                 "Nemotron-H target cache length must equal MTP prompt length {sequence}, found {:?}",

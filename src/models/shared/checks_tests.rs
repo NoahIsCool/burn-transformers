@@ -13,7 +13,7 @@ fn passing_checks_report_ranges_counts_and_context() {
     let mut checks = DeferredChecks::new();
     let token_range = checks.values_below(&tokens, 4, "t.input_ids", "token");
     let counts = checks.row_counts(&mask([[true, false], [true, true]]), "t.mask", true);
-    let position_range = checks.observe_range(&positions, "t.position_ids", "position");
+    let position_range = checks.values_below(&positions, 8, "t.position_ids", "position");
     let readout = checks.run("test").expect("valid values");
     assert_eq!(readout.range(token_range), (0, 3));
     assert_eq!(readout.min_row_count(counts), 1);
@@ -76,16 +76,20 @@ fn optional_row_counts_accept_empty_rows() {
     assert_eq!(checks.run("test").unwrap().min_row_count(counts), 0);
 }
 
-/// Unbounded ranges never fail, but a negative maximum has no context extent.
+/// A negative or unrepresentable maximum has no context extent.
 #[test]
-fn observed_ranges_reject_negative_context() {
-    let mut checks = DeferredChecks::new();
-    let range = checks.observe_range(&ints([[-4, -2]]), "t.position_ids", "position");
-    let readout = checks.run("test").expect("unbounded range");
+fn context_rejects_maxima_without_an_extent() {
+    let readout = Readout {
+        values: vec![-4, -2, 0, i64::MAX],
+    };
     assert!(matches!(
-        readout.context(range, "t.position_ids"),
+        readout.context(RangeId(0), "t.position_ids"),
         Err(Error::Configuration { .. })
     ));
+    assert_eq!(
+        readout.context(RangeId(2), "t.position_ids").ok(),
+        usize::try_from(i64::MAX).ok().map(|maximum| maximum + 1)
+    );
 }
 
 /// An empty check list performs no backend work and returns an empty readout.

@@ -6,6 +6,7 @@ use burn::{
 };
 
 use super::*;
+use crate::LogitsSelection;
 
 /// CPU Flex backend with F32 activations and I32 token indices for tiny models.
 type TestBackend = Flex<f32, i32>;

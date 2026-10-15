@@ -125,16 +125,67 @@ fn composable_mask_check_defers_row_counts() {
     assert!(checks.run("test").is_err());
 }
 
-/// Contracts without a position bound still derive the context extent.
+/// Contracts without a position bound pass positions through uninspected.
 #[test]
-fn unbounded_positions_still_report_context() {
+fn unbounded_positions_are_not_inspected() {
     let contract = InputContract::new(NAMES, "test parameters", 10);
     let validated = validate(
-        &input(ints([[1, 2]]), None, Some(ints([[40, 41]]))),
+        &input(ints([[1, 2]]), None, Some(ints([[-40, 41]]))),
         &contract,
     )
     .unwrap();
-    assert_eq!(validated.evaluated_context, 42);
+    assert_eq!(int_values(validated.positions.unwrap()), vec![-40, 41]);
+    assert_eq!(validated.evaluated_context, 0);
+}
+
+/// Position-free contracts materialize nothing unless positions are explicit.
+#[test]
+fn unused_numbering_resolves_only_explicit_positions() {
+    let contract = contract().with_implicit_positions(ImplicitPositions::Unused);
+    let implicit = validate(&input(ints([[1, 2]]), None, None), &contract).unwrap();
+    assert!(implicit.positions.is_none());
+    assert_eq!(implicit.evaluated_context, 0);
+    assert!(matches!(
+        implicit.require_positions("p"),
+        Err(Error::Configuration { .. })
+    ));
+
+    let explicit = validate(
+        &input(ints([[1, 2]]), None, Some(ints([[3, 4]]))),
+        &contract,
+    )
+    .unwrap();
+    assert_eq!(int_values(explicit.positions.unwrap()), vec![3, 4]);
+    assert_eq!(explicit.evaluated_context, 5);
+    assert_same_error(
+        validate(
+            &input(ints([[1, 2]]), None, Some(ints([[3, 9]]))),
+            &contract,
+        )
+        .unwrap_err(),
+        Error::shape(
+            "t.position_ids",
+            "position values in 0..8",
+            "observed range 3..=9",
+        ),
+    );
+}
+
+/// Standalone helpers validate tokens and masks with one readback each.
+#[test]
+fn standalone_helpers_share_error_convention() {
+    assert!(validate_token_values(&ints([[0, 9]]), 10, "x.ids").is_ok());
+    assert_same_error(
+        validate_token_values(&ints([[0, 10]]), 10, "x.ids").unwrap_err(),
+        Error::shape("x.ids", "token values in 0..10", "observed range 0..=10"),
+    );
+    assert!(validate_nonempty_mask::<TestBackend>(None, 1, 1, "x.mask").is_ok());
+    assert!(validate_nonempty_mask(Some(&mask([[true, false]])), 1, 2, "x.mask").is_ok());
+    assert_same_error(
+        validate_nonempty_mask(Some(&mask([[true, false]])), 2, 1, "x.mask").unwrap_err(),
+        Error::shape("x.mask", "[2, 1]", "[1, 2]"),
+    );
+    assert!(validate_nonempty_mask(Some(&mask([[false, false]])), 1, 2, "x.mask").is_err());
 }
 
 /// Every geometric violation reports the offending tensor.

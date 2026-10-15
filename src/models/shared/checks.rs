@@ -37,8 +37,8 @@ enum Check<'a> {
         name: &'a str,
         /// Human-readable quantity, such as `token` or `position`.
         quantity: &'static str,
-        /// Exclusive upper bound; `None` records the range without checking it.
-        limit: Option<usize>,
+        /// Exclusive upper bound.
+        limit: usize,
         /// Index of the minimum; the maximum immediately follows it.
         slot: usize,
     },
@@ -84,17 +84,17 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
         name: &'a str,
         quantity: &'static str,
     ) -> RangeId {
-        self.push_range(values, Some(limit), name, quantity)
-    }
-
-    /// Records the `[minimum, maximum]` range of `values` without bounding it.
-    pub(crate) fn observe_range<const D: usize>(
-        &mut self,
-        values: &Tensor<B, D, Int>,
-        name: &'a str,
-        quantity: &'static str,
-    ) -> RangeId {
-        self.push_range(values, None, name, quantity)
+        let slot = self.reductions.len();
+        // `Tensor::min`/`max` reduce every axis to a `[1]` tensor without a host read.
+        self.reductions.push(values.clone().min());
+        self.reductions.push(values.clone().max());
+        self.checks.push(Check::Range {
+            name,
+            quantity,
+            limit,
+            slot,
+        });
+        RangeId(slot)
     }
 
     /// Records the smallest number of valid tokens in any mask row.
@@ -138,27 +138,6 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
             readout.evaluate(check)?;
         }
         Ok(readout)
-    }
-
-    /// Records a `[minimum, maximum]` pair and its optional bound.
-    fn push_range<const D: usize>(
-        &mut self,
-        values: &Tensor<B, D, Int>,
-        limit: Option<usize>,
-        name: &'a str,
-        quantity: &'static str,
-    ) -> RangeId {
-        let slot = self.reductions.len();
-        // `Tensor::min`/`max` reduce every axis to a `[1]` tensor without a host read.
-        self.reductions.push(values.clone().min());
-        self.reductions.push(values.clone().max());
-        self.checks.push(Check::Range {
-            name,
-            quantity,
-            limit,
-            slot,
-        });
-        RangeId(slot)
     }
 }
 
@@ -205,7 +184,7 @@ impl Readout {
             Check::Range {
                 name,
                 quantity,
-                limit: Some(limit),
+                limit,
                 slot,
             } => {
                 let (minimum, maximum) = self.range(RangeId(slot));
@@ -215,7 +194,6 @@ impl Readout {
                     Err(range_error(name, quantity, limit, minimum, maximum))
                 }
             }
-            Check::Range { limit: None, .. } => Ok(()),
             Check::NonEmptyRows { name, slot } => {
                 if self.min_row_count(RowCountId(slot)) > 0 {
                     Ok(())

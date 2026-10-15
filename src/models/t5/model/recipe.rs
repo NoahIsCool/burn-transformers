@@ -224,21 +224,15 @@ impl<B: Backend> T5Encoder<B> {
         use crate::experiment::{ExecutionContext, HiddenState};
 
         let model_device = self.shared.weight.lazy_device();
-        validate_input_devices(&source, "encoder", &model_device)?;
-        let [batch, sequence] = source.token_ids.dims();
-        if batch == 0 || sequence == 0 {
-            return Err(Error::shape(
-                "t5.encoder.input_ids",
-                "non-empty [batch, sequence]",
-                format!("[{batch}, {sequence}]"),
-            ));
-        }
-        validate_token_ids(
-            source.token_ids.clone(),
-            self.recipe.config.vocab_size,
-            "encoder",
+        // Relative-position experiments may supply explicit positions, which pass
+        // through uninspected; tokens and mask rows share one readback.
+        validate_input(
+            &source,
+            &model_device,
+            &InputContract::new(ENCODER_INPUT, PARAMETERS, self.recipe.config.vocab_size)
+                .with_implicit_positions(ImplicitPositions::Unused),
         )?;
-        validate_nonempty_mask(source.token_mask.as_ref(), batch, sequence, "encoder")?;
+        let [batch, sequence] = source.token_ids.dims();
         let positional_end = i64::try_from(sequence).map_err(|_| {
             Error::configuration(
                 "t5.encoder.positions",
@@ -375,10 +369,11 @@ impl<B: Backend> T5Encoder<B> {
     /// Checks `[batch, token, d_model]` residuals, dtype/device, cursor, and encoder-only policies.
     fn validate_state(&self, state: &crate::experiment::HiddenState<B>) -> Result<()> {
         state.validate(self.recipe.config.d_model)?;
-        ensure_model_device(
+        ensure_same_device(
             "t5.encoder.hidden",
             &state.hidden.device(),
             &self.shared.weight.lazy_device(),
+            PARAMETERS,
         )?;
         if state.hidden.dtype() != self.shared.weight.val().dtype() {
             return Err(Error::BackendCapability(

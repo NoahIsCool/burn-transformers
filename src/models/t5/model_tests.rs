@@ -7,6 +7,7 @@ use burn::{
 };
 
 use super::*;
+use crate::LogitsSelection;
 use crate::models::config::ModelConfig;
 
 /// CPU backend used by T5 component and stateless execution tests.
@@ -114,7 +115,7 @@ fn encoder_is_bidirectional_and_decoder_self_attention_is_causal() {
 /// Stateless preflight names token, mask, position, encoder, and head tensors.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("t5.encoder.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("t5.encoder.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "t5.encoder.input_ids",
         "t5.encoder.token_mask",
@@ -126,7 +127,7 @@ fn stateless_device_affinity_errors_are_contextual() {
         "t5.encoder_output.token_mask",
         "t5.lm_head",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));

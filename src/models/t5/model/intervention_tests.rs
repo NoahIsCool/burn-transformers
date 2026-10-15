@@ -6,6 +6,7 @@ use burn::{
 };
 
 use super::*;
+use crate::LogitsSelection;
 
 /// CPU backend used for hook parity and padding regressions.
 type TestBackend = Flex<f32, i32>;
