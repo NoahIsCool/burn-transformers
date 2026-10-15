@@ -9,6 +9,7 @@ use burn::{
 };
 
 use super::{CausalGenerationRequest, GenerationToken, generate_causal, generate_causal_streaming};
+use crate::generation::metadata;
 use crate::{
     CausalLmInput, DecodeState, Error, FinishReason, GenerationConfig, SamplingStrategy, TokenMask,
     cache::CacheConfig,
@@ -167,7 +168,7 @@ fn active_nonfinite_probabilities_cancel_before_the_invalid_token() {
     }
 }
 
-/// Runtime half-precision selected values cannot be decoded as the backend's default F32.
+/// Half-precision logits yield F32 log probabilities that the host reads back exactly.
 #[test]
 fn selected_log_probabilities_respect_runtime_float_dtype() {
     use burn::tensor::DType;
@@ -189,9 +190,14 @@ fn selected_log_probabilities_respect_runtime_float_dtype() {
             let selected = processor
                 .select_with_log_probs(logits)
                 .expect("selected probabilities");
-            assert_eq!(selected.log_probabilities.dtype(), dtype);
+            // F16/BF16 log-sum-exp runs in F32, as in Hugging Face; F32/F64 keep their dtype.
+            let expected = match dtype {
+                DType::F16 | DType::BF16 => DType::F32,
+                other => other,
+            };
+            assert_eq!(selected.log_probabilities.dtype(), expected);
             assert_eq!(selected.log_probabilities.dims(), [2]);
-            let values = super::tensor_f64_values(
+            let values = metadata::tensor_f64_values(
                 selected.log_probabilities,
                 "selected probability fixture",
             )
@@ -200,7 +206,7 @@ fn selected_log_probabilities_respect_runtime_float_dtype() {
             assert!(
                 values
                     .iter()
-                    .all(|value| (*value + core::f64::consts::LN_2).abs() < 0.01)
+                    .all(|value| (*value + core::f64::consts::LN_2).abs() < 1e-6)
             );
         }
     }
@@ -214,17 +220,17 @@ fn host_probability_conversion_preserves_f64_and_rejects_invalid_storage() {
     let exact = -1.0_f64 - 2.0_f64.powi(-40);
     let data = TensorData::new(vec![exact], [1]);
     assert_eq!(
-        super::host_float_data_f64(data, "F64 fixture").expect("native F64"),
+        metadata::host_float_data_f64(data, "F64 fixture").expect("native F64"),
         [exact]
     );
     let integer = TensorData::new(vec![1_i32], [1]);
-    let error = super::host_float_data_f64(integer, "integer fixture")
+    let error = metadata::host_float_data_f64(integer, "integer fixture")
         .expect_err("probabilities must use float storage");
     assert!(matches!(error, Error::BackendCapability(_)));
     assert!(error.to_string().contains("integer fixture"));
     let mut malformed = TensorData::new(vec![0_u8; 3], [3]);
     malformed.dtype = DType::F32;
-    let error = super::host_float_data_f64(malformed, "truncated fixture")
+    let error = metadata::host_float_data_f64(malformed, "truncated fixture")
         .expect_err("bad element size must not panic");
     assert!(error.to_string().contains("truncated fixture"));
 }
@@ -239,13 +245,13 @@ fn flex32_host_probability_storage_is_lossless_and_checked() {
     // This is CubeCL's host-data contract; Flex CPU cannot execute Flex32
     // casts, so ordinary CPU CI covers storage independently of GPU kernels.
     data.dtype = DType::Flex32;
-    let actual = super::host_float_data_f64(data, "Flex32 fixture")
+    let actual = metadata::host_float_data_f64(data, "Flex32 fixture")
         .expect("Flex32 is supported floating storage");
     assert_eq!(actual, values.map(f64::from));
     assert!(actual[1].is_sign_negative());
     let mut malformed = TensorData::new(vec![0_u8; 3], [3]);
     malformed.dtype = DType::Flex32;
-    let error = super::host_float_data_f64(malformed, "truncated Flex32 fixture")
+    let error = metadata::host_float_data_f64(malformed, "truncated Flex32 fixture")
         .expect_err("invalid Flex32 element size is recoverable");
     assert!(error.to_string().contains("truncated Flex32 fixture"));
 }
@@ -291,11 +297,13 @@ fn native_flex32_generation_readback() {
             .expect("native Flex32 probability processing");
         assert_eq!(selected.log_probabilities.dtype(), DType::Flex32);
         assert_eq!(
-            super::tensor_i64_values(selected.token_ids, "Flex32 selection").expect("selected ID"),
+            metadata::tensor_i64_values(selected.token_ids, "Flex32 selection")
+                .expect("selected ID"),
             [2]
         );
-        let values = super::tensor_f64_values(selected.log_probabilities, "Flex32 log probability")
-            .expect("native Flex32 host readback");
+        let values =
+            metadata::tensor_f64_values(selected.log_probabilities, "Flex32 log probability")
+                .expect("native Flex32 host readback");
         assert_eq!(values.len(), 1);
         assert!(values[0].is_finite() && values[0] <= 0.0);
     }
@@ -710,9 +718,13 @@ fn model_output_shape_errors_are_contextual_in_every_prefill_mode() {
         assert!(error.to_string().contains("33"));
     }
     for shape in [[2, 1, 32], [1, 2, 32], [1, 1, 31]] {
-        let error =
-            super::extract_last_logits(Tensor::<TestBackend, 3>::zeros(shape, &device), 1, 32)
-                .expect_err("one wrong output axis");
+        let error = metadata::extract_last_logits(
+            Tensor::<TestBackend, 3>::zeros(shape, &device),
+            1,
+            32,
+            "generation.model_logits",
+        )
+        .expect_err("one wrong output axis");
         assert!(error.to_string().contains("generation.model_logits"));
     }
 }
@@ -786,12 +798,14 @@ fn chunked_prefill_rejects_invalid_compact_metadata() {
 /// Position planning validates overflow, signed bounds, ragged inputs, and padding.
 #[test]
 fn compact_position_metadata_has_checked_boundaries() {
-    let error = super::prompt_lengths(&[], usize::MAX, 2).expect_err("product overflow");
+    let error =
+        metadata::nonempty_row_lengths(&[], usize::MAX, 2, "prompt").expect_err("product overflow");
     assert!(error.to_string().contains("element count overflows"));
-    let error = super::prompt_lengths(&[true], 1, 2).expect_err("ragged mask");
+    let error = metadata::nonempty_row_lengths(&[true], 1, 2, "prompt").expect_err("ragged mask");
     assert!(error.to_string().contains("expected 2"));
     assert_eq!(
-        super::prompt_lengths(&[true, false, true, false], 2, 2).expect("valid rows"),
+        metadata::nonempty_row_lengths(&[true, false, true, false], 2, 2, "prompt")
+            .expect("valid rows"),
         [1, 1]
     );
     for (positions, valid, batch, sequence, tokens, message) in [
@@ -803,7 +817,7 @@ fn compact_position_metadata_has_checked_boundaries() {
             1,
             1,
             usize::MAX,
-            "signed position domain",
+            "portable signed index range",
         ),
         (vec![0], vec![false], 1, 1, 1, "no valid position"),
         (
@@ -820,7 +834,7 @@ fn compact_position_metadata_has_checked_boundaries() {
             1,
             1,
             2,
-            "explicit positions overflow",
+            "portable signed index range",
         ),
         (
             vec![i64::from(i32::MAX)],
@@ -831,17 +845,18 @@ fn compact_position_metadata_has_checked_boundaries() {
             "portable signed index range",
         ),
     ] {
-        let error = super::next_explicit_positions(&positions, &valid, batch, sequence, tokens)
+        let error = metadata::next_positions(&positions, &valid, batch, sequence, tokens, "prompt")
             .expect_err("invalid compact position metadata");
         assert!(error.to_string().contains(message), "{error}");
     }
     assert_eq!(
-        super::next_explicit_positions(
+        metadata::next_positions(
             &[i64::MAX, 7, -1, i64::from(i32::MAX)],
             &[false, true, false, true],
             2,
             2,
             1,
+            "prompt",
         )
         .expect("masked sentinels are ignored and last sampled token is not decoded"),
         [8, i64::from(i32::MAX) + 1]
@@ -1017,7 +1032,7 @@ impl crate::CausalLanguageModel<TestBackend> for FinishedRowModel<TestBackend> {
         use crate::DecodeState;
 
         self.enter("decode")?;
-        let ids = super::tensor_i64_values(input.token_ids.clone(), "feedback IDs").unwrap();
+        let ids = metadata::tensor_i64_values(input.token_ids.clone(), "feedback IDs").unwrap();
         let valid = input
             .token_mask
             .as_ref()
@@ -1028,7 +1043,7 @@ impl crate::CausalLanguageModel<TestBackend> for FinishedRowModel<TestBackend> {
             .to_vec::<bool>()
             .unwrap();
         let positions =
-            super::tensor_i64_values(input.position_ids.clone().unwrap(), "feedback positions")
+            metadata::tensor_i64_values(input.position_ids.clone().unwrap(), "feedback positions")
                 .unwrap();
         let mut output = self.inner.decode(input, state, options)?;
         let mut feedback = self.feedback.lock().unwrap();
@@ -1602,4 +1617,392 @@ fn release_v2_overlapping_stops_stream_at_the_exact_cache_boundary() {
             lengths: vec![2, 3],
         }]
     );
+}
+
+/// Prefill chunks made entirely of padding are skipped instead of sent to `decode`.
+///
+/// Right-padded fixed-width prompts end in chunks with no valid token. Such a
+/// chunk cannot change any row's cache or logits, and architectures such as
+/// the custom stack reject an entirely inactive decode step.
+#[test]
+fn all_padding_prefill_chunks_are_skipped() {
+    let (inner, device) = tiny_model();
+    let model = CoordinatorModel {
+        inner,
+        calls: Default::default(),
+        drops: Default::default(),
+        fault: None,
+    };
+    let request = CausalGenerationRequest {
+        prompt: CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 2, 3, 31, 31, 31], [4, 5, 31, 31, 31, 31]], &device),
+            token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                [
+                    [true, true, true, false, false, false],
+                    [true, true, false, false, false, false],
+                ]
+                .into(),
+                &device,
+            ))),
+            position_ids: None,
+        },
+        cache: CacheConfig::new(2, 8).unwrap(),
+        generation: GenerationConfig {
+            max_new_tokens: 2,
+            ..Default::default()
+        },
+        prefill_chunk_size: Some(2),
+        vocabulary_size: 32,
+    };
+    let chunked = generate_causal(&model, request.clone()).expect("chunked generation");
+    let calls = model.calls.lock().unwrap();
+    // Chunk 0..2 is dense, chunk 2..4 is ragged, chunk 4..6 is all padding.
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| (call.stage, call.width))
+            .collect::<Vec<_>>(),
+        [("prefill", 2), ("decode", 2), ("decode", 1)]
+    );
+    assert_eq!(calls[1].lengths, [3, 2]);
+    drop(calls);
+    let mut one_shot_request = request;
+    one_shot_request.prefill_chunk_size = None;
+    let one_shot = generate_causal(&model.inner, one_shot_request).expect("one-shot generation");
+    for (chunked, one_shot) in chunked.sequences.iter().zip(&one_shot.sequences) {
+        assert_eq!(chunked.token_ids, one_shot.token_ids);
+    }
+}
+
+/// Coordinator penalties with incremental history equal a naive full-history loop.
+///
+/// The reference loop rebuilds penalties from the complete prompt-plus-output
+/// tensor every step through the stateless `process` path, which counts all
+/// history; `PromptAndGenerated` makes the two semantics coincide.
+#[test]
+fn incremental_coordinator_penalties_match_full_history_reference() {
+    use crate::generation::PenaltyScope;
+    use crate::{CausalLanguageModel, DecodeInput, ForwardOptions, LogitsProcessor};
+
+    let (model, device) = tiny_model();
+    let generation = GenerationConfig {
+        max_new_tokens: 5,
+        repetition_penalty: 1.4,
+        presence_penalty: 0.3,
+        frequency_penalty: 0.6,
+        additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+        no_repeat_ngram_size: 2,
+        logit_bias: [(3, 0.75)].into(),
+        ..Default::default()
+    };
+    let output = generate_causal(&model, request(&device, generation.clone())).expect("penalized");
+    let sequence = &output.sequences[0];
+
+    let processor = LogitsProcessor::<TestBackend>::new(generation, 32, &device).unwrap();
+    let options = ForwardOptions::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let mut history = vec![1_i64, 2];
+    let mut logits = model
+        .prefill(
+            request(&device, GenerationConfig::default()).prompt,
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .logits
+        .squeeze_dim::<2>(1);
+    for (step, (&expected, &expected_score)) in sequence
+        .token_ids
+        .iter()
+        .zip(&sequence.log_probabilities)
+        .enumerate()
+    {
+        let history_tensor = Tensor::<TestBackend, 2, Int>::from_data(
+            burn::tensor::TensorData::new(history.clone(), [1, history.len()]),
+            &device,
+        );
+        let selection = processor
+            .process_and_select_with_log_probs(logits, Some(history_tensor))
+            .unwrap();
+        let token = metadata::tensor_i64_values(selection.token_ids, "token").unwrap()[0];
+        let score = metadata::tensor_f64_values(selection.log_probabilities, "score").unwrap()[0];
+        assert_eq!(token, i64::from(expected), "step {step}");
+        assert!((score - expected_score).abs() < 1e-6, "step {step}");
+        history.push(token);
+        logits = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[token as i32]], &device),
+                    position_ids: None,
+                    token_mask: None,
+                },
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .squeeze_dim::<2>(1);
+    }
+    // The n-gram constraint holds over prompt and output.
+    let mut bigrams = std::collections::HashSet::new();
+    for pair in history.windows(2) {
+        assert!(
+            bigrams.insert((pair[0], pair[1])),
+            "repeated bigram {pair:?}"
+        );
+    }
+}
+
+/// `min_new_tokens` keeps a row alive past an EOS the model would emit immediately.
+#[test]
+fn min_new_tokens_defer_end_of_sequence_in_generation() {
+    let (model, device) = tiny_model();
+    let baseline = generate_causal(
+        &model,
+        request(
+            &device,
+            GenerationConfig {
+                max_new_tokens: 3,
+                ..Default::default()
+            },
+        ),
+    )
+    .expect("baseline generation");
+    let first = baseline.sequences[0].token_ids[0];
+    let deferred = generate_causal(
+        &model,
+        request(
+            &device,
+            GenerationConfig {
+                max_new_tokens: 3,
+                min_new_tokens: 2,
+                eos_token_ids: vec![first],
+                ..Default::default()
+            },
+        ),
+    )
+    .expect("deferred EOS generation");
+    let tokens = &deferred.sequences[0].token_ids;
+    assert!(tokens.len() >= 2, "{tokens:?}");
+    assert!(!tokens[..2].contains(&first), "{tokens:?}");
+}
+
+/// Wraps the tiny model and rounds every output logit to F16.
+///
+/// With `keep_half`, logits leave the model as F16 tensors; otherwise the
+/// same F16-rounded values are returned as F32. A coordinator that promotes
+/// half-precision logits before processing treats both identically.
+#[derive(burn::module::Module, Debug)]
+struct HalfLogitsModel<B: Backend> {
+    /// Real Qwen graph and cache.
+    inner: Qwen3_5ForCausalLm<B>,
+    /// Whether the returned logits keep the F16 storage dtype; shared so one
+    /// lazily initialized weight set serves both runs.
+    #[module(skip)]
+    keep_half: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<B: Backend> HalfLogitsModel<B> {
+    /// Rounds logits to F16 and optionally restores the F32 dtype.
+    fn round(&self, mut output: crate::CausalLmOutput<B>) -> crate::CausalLmOutput<B> {
+        let half = output.logits.cast(burn::tensor::DType::F16);
+        output.logits = if self.keep_half.load(std::sync::atomic::Ordering::Relaxed) {
+            half
+        } else {
+            half.cast(burn::tensor::DType::F32)
+        };
+        output
+    }
+}
+
+impl<B: Backend> crate::CausalLanguageModel<B> for HalfLogitsModel<B> {
+    /// Configuration of the wrapped Qwen graph.
+    type Config = Qwen3_5TextConfig;
+    /// Unmodified external decode state of the wrapped Qwen model.
+    type State = <Qwen3_5ForCausalLm<B> as crate::CausalLanguageModel<B>>::State;
+
+    /// Rounds stateless logits like the cached paths.
+    fn forward(
+        &self,
+        input: CausalLmInput<B>,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<B>> {
+        Ok(self.round(self.inner.forward(input, options)?))
+    }
+
+    /// Allocates the real cache.
+    fn new_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> crate::Result<Self::State> {
+        self.inner.new_decode_state(config, batch_size, device)
+    }
+
+    /// Rounds prefill logits.
+    fn prefill(
+        &self,
+        input: CausalLmInput<B>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<B>> {
+        Ok(self.round(self.inner.prefill(input, state, options)?))
+    }
+
+    /// Rounds decode logits.
+    fn decode(
+        &self,
+        input: crate::DecodeInput<B>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<B>> {
+        Ok(self.round(self.inner.decode(input, state, options)?))
+    }
+}
+
+/// Half-precision model logits are processed in F32, exactly like F16-rounded F32 logits.
+#[test]
+fn half_precision_logits_are_processed_in_f32() {
+    let generation = GenerationConfig {
+        max_new_tokens: 4,
+        repetition_penalty: 1.05,
+        frequency_penalty: 0.3,
+        strategy: SamplingStrategy::Sample,
+        temperature: 0.9,
+        top_p: Some(0.95),
+        seed: 5,
+        ..Default::default()
+    };
+    // One model instance for both runs: parameters initialize lazily from
+    // the process-global backend seed, so clones or separate fixtures could
+    // hold different weights.
+    let (inner, device) = tiny_model();
+    let model = HalfLogitsModel {
+        inner,
+        keep_half: Default::default(),
+    };
+    let mut outputs = Vec::new();
+    for keep_half in [true, false] {
+        model
+            .keep_half
+            .store(keep_half, std::sync::atomic::Ordering::Relaxed);
+        outputs.push(
+            generate_causal(&model, request(&device, generation.clone())).expect("generation"),
+        );
+    }
+    assert_eq!(outputs[0], outputs[1]);
+}
+
+/// Replaying a coordinator run through the prompt-aware stateless path reproduces it exactly.
+///
+/// This is the processing a speculative decoder applies to its target model:
+/// it holds prompt-plus-output rows on the host and rebuilds history every
+/// step with [`crate::LogitsProcessor::process_with_prompt_lengths`]. With
+/// F16 model logits, default-scope presence/frequency, `min_new_tokens`
+/// shorter than the prompt, n-gram bans, bias, and both strategies, every
+/// token and log probability must equal the coordinator's bit for bit.
+#[test]
+fn prompt_length_processing_replays_generate_causal_exactly() {
+    use crate::{CausalLanguageModel, DecodeInput, ForwardOptions, LogitsProcessor};
+
+    let (inner, device) = tiny_model();
+    let model = HalfLogitsModel {
+        inner,
+        keep_half: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    };
+    let prompt = [1_u32, 2, 3, 4];
+    let request = |generation: GenerationConfig| CausalGenerationRequest {
+        prompt: CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4]], &device),
+            token_mask: None,
+            position_ids: None,
+        },
+        cache: CacheConfig::new(1, 12).expect("test cache config"),
+        generation,
+        prefill_chunk_size: None,
+        vocabulary_size: 32,
+    };
+    let penalized = GenerationConfig {
+        max_new_tokens: 6,
+        repetition_penalty: 1.3,
+        presence_penalty: 0.4,
+        frequency_penalty: 0.2,
+        no_repeat_ngram_size: 2,
+        logit_bias: [(5, 0.5)].into(),
+        temperature: 0.8,
+        top_k: Some(12),
+        min_p: Some(0.02),
+        seed: 11,
+        ..Default::default()
+    };
+    // EOS is the token greedy decoding would emit first, so `min_new_tokens`
+    // (3, below the 4-token prompt) visibly defers it.
+    let baseline = generate_causal(&model, request(penalized.clone())).expect("baseline");
+    let eos = baseline.sequences[0].token_ids[0];
+
+    for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+        let generation = GenerationConfig {
+            strategy,
+            min_new_tokens: 3,
+            eos_token_ids: vec![eos],
+            ..penalized.clone()
+        };
+        let output = generate_causal(&model, request(generation.clone())).expect("generation");
+        let sequence = &output.sequences[0];
+        assert!(sequence.token_ids.len() >= 3, "{strategy:?}: {sequence:?}");
+        assert!(!sequence.token_ids[..3].contains(&eos), "{strategy:?}");
+
+        let processor = LogitsProcessor::<TestBackend>::new(generation, 32, &device).unwrap();
+        let options = ForwardOptions::default();
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 12).unwrap(), 1, &device)
+            .unwrap();
+        let mut logits = model
+            .prefill(
+                request(GenerationConfig::default()).prompt,
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .squeeze_dim::<2>(1);
+        let mut history = prompt.to_vec();
+        for (step, (&expected, &expected_score)) in sequence
+            .token_ids
+            .iter()
+            .zip(&sequence.log_probabilities)
+            .enumerate()
+        {
+            let processed = processor
+                .process_with_prompt_lengths(logits, &[&history], &[prompt.len()])
+                .unwrap();
+            let selection = processor.select_with_log_probs(processed).unwrap();
+            let token = metadata::tensor_i64_values(selection.token_ids, "token").unwrap()[0];
+            let score =
+                metadata::tensor_f64_values(selection.log_probabilities, "score").unwrap()[0];
+            assert_eq!(token, i64::from(expected), "{strategy:?} step {step}");
+            assert_eq!(
+                score.to_bits(),
+                expected_score.to_bits(),
+                "{strategy:?} step {step}"
+            );
+            history.push(expected);
+            logits = model
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::from_ints([[token as i32]], &device),
+                        position_ids: None,
+                        token_mask: None,
+                    },
+                    &mut state,
+                    &options,
+                )
+                .unwrap()
+                .logits
+                .squeeze_dim::<2>(1);
+        }
+    }
 }
