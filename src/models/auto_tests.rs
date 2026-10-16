@@ -466,6 +466,195 @@ fn every_causal_family_matches_bounded_and_one_shot_prefill() {
     }
 }
 
+/// Every registered causal family as a tiny automatic model, each Llama-family alias included.
+///
+/// Parameters are seeded per family; the vocabularies are 32 for the hand-built
+/// configurations and 96 for the committed tiny-golden ones.
+fn tiny_auto_causal_models(
+    device: &RegistryDevice,
+) -> Vec<(&'static str, AutoCausalLm<TestBackend>)> {
+    let mut models = Vec::new();
+    TestBackend::seed(device, 10_101);
+    models.push((
+        "Qwen3.5",
+        AutoCausalLm::from(Qwen3_5ForCausalLm::init(tiny_qwen(), device).unwrap()),
+    ));
+    models.push((
+        "Qwen3-MoE",
+        AutoCausalLm::from(Qwen3MoeForCausalLm::init(tiny_qwen_moe(), device).unwrap()),
+    ));
+    models.push((
+        "DeepSeek-V2",
+        AutoCausalLm::from(
+            crate::models::deepseek_v2::model::tests_support::initialized_model(
+                crate::models::deepseek_v2::model::tests_support::tiny_config(),
+                device,
+            ),
+        ),
+    ));
+    models.push((
+        "Muse Glimmer",
+        AutoCausalLm::from(MuseGlimmerForCausalLm::init(tiny_muse(), device).unwrap()),
+    ));
+    models.push((
+        "Nemotron-H",
+        AutoCausalLm::from(NemotronHForCausalLm::init(tiny_nemotron(), device).unwrap()),
+    ));
+    for (name, json) in [
+        (
+            "Llama 3",
+            include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+        ),
+        (
+            "Mistral sliding",
+            include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
+        ),
+        (
+            "SmolLM3",
+            include_str!("../../tests/fixtures/tiny_goldens/smollm3/config.json"),
+        ),
+        (
+            "Gemma 2",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
+        ),
+        (
+            "Gemma 3 text",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
+        ),
+        (
+            "gpt-oss",
+            include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
+        ),
+    ] {
+        models.push((
+            name,
+            AutoCausalLm::<TestBackend>::from_config_json(json, device).unwrap(),
+        ));
+    }
+    for family in AutoCausalConfig::ALL {
+        assert!(
+            models.iter().any(|(_, model)| model.family() == *family),
+            "tiny registry fixtures lack {family:?}"
+        );
+    }
+    models
+}
+
+/// Every model rejects a batch that disagrees with its cache before allocating.
+///
+/// `new_decode_state` takes the batch twice, once in `CacheConfig` and once as
+/// an argument; `new_decode_state_for` takes it from the configuration, so it
+/// cannot disagree. Covers every registered causal family, T5, and the
+/// modular causal and seq2seq models.
+#[test]
+fn decode_state_batch_must_match_the_cache_sequence_count() {
+    use crate::{
+        cache::TensorCacheError,
+        models::custom::{ModularCausalLm, ModularSeq2SeqLm},
+    };
+    let device = Default::default();
+    let cache = CacheConfig::new(2, 8).unwrap();
+    /// Family tensor caches report the typed mismatch; the modular reference
+    /// state reports the same two counts as a cache error.
+    #[track_caller]
+    fn assert_mismatch<S: core::fmt::Debug>(name: &str, result: Result<S>, requested: usize) {
+        let error = result.expect_err(name);
+        let typed = matches!(
+            error,
+            Error::TensorCache(TensorCacheError::BatchSizeMismatch { configured: 2, requested: found })
+                if found == requested
+        );
+        let modular = matches!(
+            &error,
+            Error::Cache(reason)
+                if *reason == format!("custom decode state expected 2 sequences, received batch size {requested}")
+        );
+        assert!(
+            typed || (modular && name.starts_with("Modular")),
+            "{name}: {error:?}"
+        );
+    }
+    for (name, model) in tiny_auto_causal_models(&device) {
+        for batch in [1, 3] {
+            assert_mismatch(
+                name,
+                CausalLanguageModel::new_decode_state(&model, cache, batch, &device),
+                batch,
+            );
+        }
+        let state = model.new_decode_state_for(cache, &device).unwrap();
+        assert_eq!(
+            (state.batch_size(), state.lengths()),
+            (2, &[0, 0][..]),
+            "{name}"
+        );
+    }
+    let t5 = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    let automatic_t5 = AutoSeq2SeqLm::from(t5.clone());
+    assert_mismatch(
+        "T5",
+        Seq2SeqLanguageModel::new_decode_state(&t5, cache, 1, &device),
+        1,
+    );
+    assert_mismatch(
+        "AutoSeq2SeqLm<T5>",
+        Seq2SeqLanguageModel::new_decode_state(&automatic_t5, cache, 3, &device),
+        3,
+    );
+    assert_eq!(
+        t5.new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+    assert_eq!(
+        automatic_t5
+            .new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+    let modular = ModularCausalLm::<TestBackend>::init(tiny_modular(), &device).unwrap();
+    assert_mismatch(
+        "ModularCausalLm",
+        CausalLanguageModel::new_decode_state(&modular, cache, 1, &device),
+        1,
+    );
+    assert_eq!(
+        modular
+            .new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+    // Bidirectional encoders cannot hold the causal DeltaNet scan; keep attention only.
+    let mut attention_only = tiny_modular();
+    attention_only.layers.truncate(1);
+    let modular_seq2seq = ModularSeq2SeqLm::<TestBackend>::init(
+        crate::architecture::Seq2SeqSpec {
+            encoder: attention_only.clone(),
+            decoder: attention_only,
+            cross_attention_heads: 2,
+            cross_attention_head_dim: 4,
+            cross_attention_options: crate::architecture::AttentionOptions::default(),
+        },
+        &device,
+    )
+    .unwrap();
+    assert_mismatch(
+        "ModularSeq2SeqLm",
+        Seq2SeqLanguageModel::new_decode_state(&modular_seq2seq, cache, 3, &device),
+        3,
+    );
+    assert_eq!(
+        modular_seq2seq
+            .new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+}
+
 /// Automatic dispatch preserves the same fresh-state fallback and parity contract.
 #[test]
 fn auto_causal_dispatch_matches_bounded_and_one_shot_prefill() {
