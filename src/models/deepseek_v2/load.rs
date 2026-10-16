@@ -17,7 +17,8 @@ use thiserror::Error;
 use crate::{
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        PackedLayoutPolicy, ParameterInstallError, TensorSink, execute_local_load_plan,
+        install_packed_parameter,
     },
     feed_forward::GatedFeedForward,
     normalization::RmsNorm,
@@ -469,16 +470,24 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Installs a statically ranked float parameter with target context.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), DeepseekV2LoadError> {
-    install_float_parameter(parameter, data).map_err(|source| DeepseekV2LoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| DeepseekV2LoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

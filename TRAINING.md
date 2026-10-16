@@ -137,6 +137,15 @@ random or locally loaded Qwen prefix. It checks task and intermediate-loss
 gradients, unchanged backbone tensors, and an identical next optimizer update
 after resume. The fixture reports training-set accuracy only.
 
+To start from pretrained weights of a known family, initialize the model from
+its configuration and call its `load_checkpoint` method. For the advertised
+Qwen3.5 family, create the model with
+`Qwen3_5ForCausalLm::init(config, &device)` and then call
+`model.load_checkpoint(root, &LoadOptions::default())` on it. The `checkpoint`
+module documentation's "Loading a concrete family" lists every family's method
+and options, and `AutoCausalLm::load_local` chooses the family from
+`config.json` instead.
+
 Use the same ownership principle for parameter groups: keep their parameters
 discoverable and apply the desired policies through Burn's optimizer APIs or
 your explicit loop. No additional parameter-group or trainer framework is
@@ -213,7 +222,7 @@ fn fragment<B: Backend>(spec: DecoderSpec, device: B::Device) -> Result<()> {
 -->
 <!-- doctest modular-spec -->
 ```rust
-let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+let policy = spec.scaled_init_policy(0.02);
 let model = ModularCausalLm::<B>::init_with(spec, &policy, &device)?;
 ```
 
@@ -282,7 +291,9 @@ unweighted: multiply these by the checkpoint's coefficient before adding them
 to a training loss. DeepSeek's value follows its pinned reference and already
 includes `aux_loss_alpha`; its `seq_aux = false` form is now `1/top_k` of what
 earlier versions returned, which had reused the Qwen formula. Padding is
-excluded from every count and mean.
+excluded from every count and mean. The FP32 router projection of DeepSeek-V2
+and Nemotron-H receives a gradient on every backward pass, including a pass
+over an auxiliary loss alone.
 
 Copying one pretrained parameter to several targets with `TransferPlan`
 creates independent parameters that train separately; `TiePolicy::Preserve`
@@ -297,7 +308,7 @@ one owner if they must stay shared.
 | Explicitly dequantized frozen weights | Floating-point training path, with its memory and compute costs. |
 | Packed inference prefix on the inner backend | May supply detached features to a trainable head. |
 | Cached or recurrent decode interventions | Require a separate state contract; use stateless full-sequence training here. |
-| Long sequences under autodiff | Score-bounded attention chunking is inference-only; Muse and DeepSeek switch to unbounded attention on autodiff backends, so memory grows with the full score plane. |
+| Long sequences under autodiff | Score-bounded attention chunking bounds inference only: Muse, DeepSeek, and `GroupedQueryAttention::attend_bounded` switch to one unbounded call on autodiff backends (`AttentionExecutionPolicy::effective_on`), so memory grows with the full score plane. |
 
 ## Train, then test the mechanism
 

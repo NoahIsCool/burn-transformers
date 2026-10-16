@@ -41,7 +41,7 @@ use crate::{
     },
     experiment::{AttentionPolicy, ExecutionContext, HiddenState},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
-    intervention::{Axis, Hooks, Layer, Point, PointInfo, Stack},
+    intervention::{Hooks, Layer, Point, PointInfo, Stack},
     moe::{
         RoutedExpertPrecision, RoutedWeightingPrecision, SparseMoe, SparseMoeConfig,
         deterministic_top_k, dispatch_routed_experts, load_balancing_loss, router_logits,
@@ -75,34 +75,24 @@ const PARAMETERS: &str = "Qwen3 MoE model parameters";
 
 /// Pre-softmax router scores of a sparse layer, `[batch, token, expert]`.
 ///
-/// Emitted by [`Qwen3MoeForCausalLm::forward_with_hooks`] for every sparse
-/// layer, after the router projection and before routing. Edits change which
-/// experts are selected and their mixture weights.
+/// The same point as [`Layer::router_logits`], which every MoE family shares;
+/// [`Qwen3MoeForCausalLm::forward_with_hooks`] emits it for every sparse layer,
+/// after the router projection and before routing.
+#[deprecated(note = "use `Layer::router_logits`, the point every MoE family shares")]
 #[must_use]
 pub fn router_logits_point(layer: Layer) -> Point<3> {
-    Point::custom(
-        mlp_point_name(layer, "router_logits"),
-        [Axis::Batch, Axis::Token, Axis::Other("expert")],
-    )
+    layer.router_logits()
 }
 
 /// FP32 mixture weights of the selected experts, `[batch, token, expert_slot]`.
 ///
-/// Slot `j` weights the `j`-th selected expert (ordered by decreasing router
-/// score) after Qwen's top-k renormalization. Edits rescale each expert's
-/// contribution without changing which experts run.
+/// The same point as [`Layer::router_weights`], which every MoE family shares:
+/// slot `j` weights the `j`-th selected expert (ordered by decreasing router
+/// score) after Qwen's top-k renormalization.
+#[deprecated(note = "use `Layer::router_weights`, the point every MoE family shares")]
 #[must_use]
 pub fn router_weights_point(layer: Layer) -> Point<3> {
-    Point::custom(
-        mlp_point_name(layer, "router_weights"),
-        [Axis::Batch, Axis::Token, Axis::Other("expert_slot")],
-    )
-}
-
-/// Names a point beside the layer's built-in MLP points, e.g. `decoder.layers.3.mlp.<suffix>`.
-fn mlp_point_name(layer: Layer, suffix: &str) -> String {
-    let input = layer.mlp_input().info().name;
-    format!("{}.{suffix}", input.trim_end_matches(".input"))
+    layer.router_weights()
 }
 
 /// One decoder block with GQA and either a routed or dense SwiGLU branch.
@@ -122,7 +112,10 @@ pub struct Qwen3MoeDecoderLayer<B: Backend> {
 
 impl<B: Backend> Qwen3MoeDecoderLayer<B> {
     /// Allocates one layer whose feed-forward kind follows the validated schedule.
-    fn init(config: &Qwen3MoeConfig, layer_index: usize, device: &B::Device) -> Result<Self> {
+    ///
+    /// `sparse` is the layer's entry of [`Qwen3MoeConfig::moe_layer_flags`],
+    /// computed once for the whole stack.
+    fn init(config: &Qwen3MoeConfig, sparse: bool, device: &B::Device) -> Result<Self> {
         let mut attention = GroupedQueryAttentionConfig::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -137,7 +130,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
                 .with_round_before_scale(true)
                 .init(device)
         };
-        let (sparse_mlp, dense_mlp) = if config.is_moe_layer(layer_index) {
+        let (sparse_mlp, dense_mlp) = if sparse {
             let mut sparse = SparseMoeConfig::new(
                 config.hidden_size,
                 config.moe_intermediate_size,
@@ -297,10 +290,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
             layer.mlp_input().info(),
         ]);
         if self.sparse_mlp.is_some() {
-            points.extend([
-                router_logits_point(layer).info(),
-                router_weights_point(layer).info(),
-            ]);
+            points.extend([layer.router_logits().info(), layer.router_weights().info()]);
         } else {
             points.extend([
                 layer.mlp_pre_activation().info(),
@@ -345,7 +335,7 @@ fn routed_with_hooks<B: Backend>(
     let residual_dtype = input.dtype();
     let flat_input = input.clone().reshape([tokens, hidden]);
     let logits = hooks.apply(
-        router_logits_point(layer),
+        layer.router_logits(),
         router_logits(input, &moe.router, moe.routing.projection)?,
     )?;
     let decision = moe.router_config().route(
@@ -354,7 +344,7 @@ fn routed_with_hooks<B: Backend>(
     )?;
     let weights = hooks
         .apply(
-            router_weights_point(layer),
+            layer.router_weights(),
             decision.weights.reshape([batch, sequence, slots]),
         )?
         .reshape([tokens, slots]);
@@ -524,8 +514,12 @@ impl<B: Backend> Qwen3MoeModel<B> {
             ));
         }
         let rope = config.rope_config()?;
-        let layers = (0..config.num_hidden_layers)
-            .map(|index| Qwen3MoeDecoderLayer::init(&config, index, device))
+        // One O(L + M) pass over the schedule; asking `is_moe_layer` per
+        // block would rescan `mlp_only_layers` (M entries) L times.
+        let layers = config
+            .moe_layer_flags()
+            .into_iter()
+            .map(|sparse| Qwen3MoeDecoderLayer::init(&config, sparse, device))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
@@ -591,7 +585,7 @@ impl<B: Backend> Qwen3MoeModel<B> {
     /// rotary embedding, native-head V, and head context (scores and pattern
     /// only under [`AttentionPrecisionMode::EagerFp32Softmax`]), the MLP input
     /// and output, and residual after the block. Sparse blocks add
-    /// [`router_logits_point`] and [`router_weights_point`]; dense blocks the
+    /// [`Layer::router_logits`] and [`Layer::router_weights`]; dense blocks the
     /// gate pre-activation and activation.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let mut points = vec![Stack::Decoder.embedding().info()];

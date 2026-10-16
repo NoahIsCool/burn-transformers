@@ -462,9 +462,8 @@ proptest! {
 /// Training adds `alpha * aux` to the language-model loss and runs one
 /// backward pass, so the test differentiates `sum(hidden) + 100 aux` and
 /// checks that the router gradient differs from that of `sum(hidden)` alone.
-/// (A backward pass over the auxiliary loss *alone* after routed dispatch
-/// currently yields no router gradient on Burn 0.21 autodiff; see the
-/// package report's follow-ups.)
+/// A backward pass over the auxiliary loss alone also reaches the router; see
+/// [`auxiliary_loss_alone_reaches_the_router_on_every_pass`].
 #[cfg(feature = "autodiff")]
 #[test]
 fn auxiliary_loss_gradient_reaches_the_router() {
@@ -645,6 +644,70 @@ fn empty_router_tensors_are_shape_errors() {
         assert!(
             matches!(&error, Error::Shape { tensor, .. } if tensor == "deepseek_v2.router_aux"),
             "{error}"
+        );
+    }
+}
+
+/// A backward pass over the balance loss alone gives the router a gradient every time.
+///
+/// DeepSeek-V2 routes through the shared FP32 router projection
+/// (`RouterProjectionPrecision::Fp32`). While that projection used
+/// `burn::tensor::module::linear`, Burn 0.21's `Autodiff<Flex>` gave the
+/// router weight a gradient on the first backward pass of a loss that reached
+/// it only through the router logits, and nondeterministically none on most
+/// later passes, so an auxiliary-only training phase silently skipped the
+/// router. The projection is now the plain flattened product, and every pass
+/// must produce a finite, nonzero router gradient: twelve consecutive passes
+/// on one installed model, alternating the sequence-wise and batch-wise loss
+/// forms and changing the input each time.
+#[cfg(feature = "autodiff")]
+#[test]
+fn auxiliary_loss_alone_reaches_the_router_on_every_pass() {
+    use burn::backend::Autodiff;
+
+    /// Reverse-mode backend over the deterministic CPU backend.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let model =
+        tests_support::reference_model::<AdBackend>(tests_support::reference_v2_config(), &device);
+    let moe = model.model.layers[1].sparse_mlp.as_ref().unwrap();
+    for pass in 0..12 {
+        let input = Tensor::<AdBackend, 3>::from_data(
+            TensorData::new(
+                (0..2 * 3 * 8)
+                    .map(|value| ((value + pass) as f32 * 0.37).sin())
+                    .collect(),
+                [2, 3, 8],
+            ),
+            &device,
+        );
+        let output = moe.forward(input).unwrap();
+        let loss = auxiliary_loss(
+            output.routed.router_logits,
+            output.routed.selected_experts,
+            None,
+            RouterScoring::Softmax,
+            pass % 2 == 0,
+        )
+        .unwrap()
+        .sum();
+        let gradients = loss.backward();
+        let gradient = moe
+            .routed
+            .router
+            .weight
+            .grad(&gradients)
+            .unwrap_or_else(|| panic!("pass {pass}: the router received no gradient"))
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(
+            gradient.iter().all(|value| value.is_finite()),
+            "pass {pass}: non-finite router gradient"
+        );
+        assert!(
+            gradient.iter().any(|&value| value != 0.0),
+            "pass {pass}: zero router gradient"
         );
     }
 }

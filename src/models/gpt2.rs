@@ -67,7 +67,9 @@ mod checkpoint;
 pub(crate) mod extents;
 mod model;
 
-pub use checkpoint::{Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2LoadError};
+pub use checkpoint::{
+    Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2CheckpointLoadError, Gpt2LoadError,
+};
 pub use model::{Gpt2Block, Gpt2ForCausalLm, Gpt2Model, Gpt2ModelOutput};
 
 // Explicit graph choices; checkpoint data never selects a different nonlinearity.

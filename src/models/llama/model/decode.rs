@@ -104,15 +104,15 @@ use crate::{
 
 use super::super::{
     LlamaFamilyConfig,
-    plan::{
-        LayerReach, RingPlanError, cache_slots, group_indices, plan_ring, truncation_leaves_bytes,
-        widest_context,
-    },
+    plan::{LayerReach, RingPlanError, plan_ring},
 };
 use super::{
     LlamaForCausalLm,
     graph::{DecoderBlock, DecoderGraph, GraphLabels, LayerKeys, RotaryTables},
     step::StepLayout,
+};
+use crate::models::shared::decoder_plan::{
+    cache_slots, group_indices, truncation_leaves_bytes, widest_context,
 };
 
 // Cache layout.

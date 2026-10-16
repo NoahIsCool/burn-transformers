@@ -24,9 +24,9 @@ use crate::{
     Error,
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, ExpectedTensor,
-        IndexTensorAlias, KeyMatcher, LoadOptions, LoadPlan, MappingPlan, ParameterInstallError,
-        TensorDType, TensorSink, build_load_plan, discover_checkpoint, execute_local_load_plan,
-        install_float_parameter,
+        IndexTensorAlias, KeyMatcher, LoadOptions, LoadPlan, MappingPlan, PackedLayoutPolicy,
+        ParameterInstallError, TensorDType, TensorSink, build_load_plan, discover_checkpoint,
+        execute_local_load_plan, install_packed_parameter,
     },
 };
 
@@ -56,7 +56,7 @@ impl Gpt2CheckpointLayout {
     ///
     /// # Errors
     ///
-    /// `Gpt2CheckpointLoadError::Namespace` unless exactly one of `wte.weight`
+    /// [`Gpt2CheckpointLoadError::Namespace`] unless exactly one of `wte.weight`
     /// and `transformer.wte.weight` is present.
     pub fn detect(manifest: &CheckpointManifest) -> Result<Self, Gpt2CheckpointLoadError> {
         let backbone = manifest.tensors.contains_key("wte.weight");
@@ -241,7 +241,7 @@ impl Gpt2CheckpointContract {
 /// Contextual failure while installing one planned GPT-2 parameter.
 ///
 /// This is the [`TensorSink`] error of [`Gpt2Model`] and [`Gpt2ForCausalLm`];
-/// a complete load reports it inside `Gpt2CheckpointLoadError::Execution`.
+/// a complete load reports it inside [`Gpt2CheckpointLoadError::Execution`].
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Gpt2LoadError {
@@ -265,11 +265,6 @@ pub enum Gpt2LoadError {
 /// Failure from configuration, namespace detection, strict planning, or streamed execution.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-#[expect(
-    unnameable_types,
-    reason = "public load methods return this type, so src/models/gpt2.rs must re-export it; \
-              delete this expectation in the change that adds that re-export"
-)]
 pub enum Gpt2CheckpointLoadError {
     /// The declared graph is invalid.
     #[error(transparent)]
@@ -331,7 +326,7 @@ impl<B: Backend> Gpt2Model<B> {
     ///
     /// # Errors
     ///
-    /// Returns a `Gpt2CheckpointLoadError` naming the failing stage.
+    /// Returns a [`Gpt2CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
@@ -376,7 +371,7 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
     ///
     /// # Errors
     ///
-    /// Returns a `Gpt2CheckpointLoadError` naming the failing stage.
+    /// Returns a [`Gpt2CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
@@ -455,16 +450,24 @@ impl<B: Backend> TensorSink for Gpt2Model<B> {
     }
 }
 
-/// Installs floating data using the parameter's layout contract and adds its target to errors.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), Gpt2LoadError> {
-    install_float_parameter(parameter, data).map_err(|source| Gpt2LoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| Gpt2LoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 /// Requires the declared bias to exist before installing its rank-one floating payload.

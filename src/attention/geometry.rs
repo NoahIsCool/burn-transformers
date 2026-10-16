@@ -230,9 +230,7 @@ pub(crate) fn operand_geometry(
     {
         return Err(OperandFault::EmptyAxis);
     }
-    // A bound remainder (not `is_multiple_of`, which Verus does not specify).
-    let ungrouped = query_heads % key_value_heads;
-    if ungrouped != 0 {
+    if !query_heads.is_multiple_of(key_value_heads) {
         return Err(OperandFault::UngroupedHeads);
     }
     if key[0] != batch

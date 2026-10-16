@@ -29,8 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ArchitectureConfig, Error, Result,
     checkpoint::{
-        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LoadOptions, MappingPlan,
-        TensorDType, TensorOperation, build_load_plan, execute_local_load_plan,
+        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LanguageNamespace,
+        LoadOptions, MappingPlan, TensorDType, TensorOperation, build_load_plan,
+        execute_local_load_plan,
     },
     normalization::RmsNormConfig,
     transfer::{
@@ -256,19 +257,15 @@ impl Qwen3_5BackboneRecipe {
                 "recipe loading owns its explicit parameter exceptions; remove broad missing/unexpected allowlists",
             ));
         }
-        let manifest = CheckpointManifest::discover(root, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let manifest = CheckpointManifest::discover(root, &options.checkpoint)?;
         let source = source_namespace(&manifest, options.source)?;
         let source_contract = self
             .source_config
             .checkpoint_contract(Qwen3_5CheckpointOptions {
                 source,
                 include_mtp: false,
-            })
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        let source_plan = source_contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            })?;
+        let source_plan = source_contract.build_load_plan(&manifest, &options.checkpoint)?;
         let initialization_dtype = source_plan
             .tensors
             .iter()
@@ -381,8 +378,7 @@ impl Qwen3_5BackboneRecipe {
         if self.source_config.tie_word_embeddings {
             report.omitted.push(ParameterDisposition::new("lm_head.weight", "tied vocabulary view omitted; its embedding storage owner remains available to the backbone"));
         }
-        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)?;
         let new_parameters = report
             .newly_initialized
             .iter_mut()
@@ -399,7 +395,7 @@ impl Qwen3_5BackboneRecipe {
             dtype: initialization_dtype,
         });
         let checkpoint = execute_local_load_plan(&manifest, &plan, &mut model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            .map_err(Error::checkpoint_execution)?;
         for conversion in &checkpoint.report.dtype_converted {
             if let Some(index) = report
                 .reused
@@ -483,12 +479,10 @@ impl Qwen3_5BackboneRecipe {
             ),
         ];
         for (index, config) in configurations.iter().enumerate() {
-            let contract = config
-                .checkpoint_contract(Qwen3_5CheckpointOptions {
-                    source: Qwen3_5CheckpointSource::TextOnly,
-                    include_mtp: false,
-                })
-                .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            let contract = config.checkpoint_contract(Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: false,
+            })?;
             for tensor in contract.expected_tensors() {
                 let Some(suffix) = tensor.name.strip_prefix("model.layers.0.") else {
                     continue;
@@ -573,9 +567,13 @@ impl<B: Backend> ModuleMapper<B> for InitializeDtype {
     }
 }
 
-/// Uses an explicit namespace or requires exactly one recognized embedding key.
+/// Uses an explicit namespace or detects exactly one language namespace.
 ///
-/// Ambiguous or absent namespaces fail rather than guessing a model layout.
+/// Detection is the shared [`LanguageNamespace`] classifier, so recipe,
+/// concrete-family, and automatic loading choose the same layout for the same
+/// checkpoint. Ambiguous or absent namespaces fail rather than guessing a
+/// model layout, as [`crate::checkpoint::CheckpointError::AmbiguousLanguageNamespace`]
+/// or [`crate::checkpoint::CheckpointError::LanguageNamespaceNotFound`].
 fn source_namespace(
     manifest: &CheckpointManifest,
     explicit: Option<Qwen3_5CheckpointSource>,
@@ -583,19 +581,10 @@ fn source_namespace(
     if let Some(source) = explicit {
         return Ok(source);
     }
-    match (
-        manifest.tensor("model.embed_tokens.weight").is_some(),
-        manifest
-            .tensor("model.language_model.embed_tokens.weight")
-            .is_some(),
-    ) {
-        (true, false) => Ok(Qwen3_5CheckpointSource::TextOnly),
-        (false, true) => Ok(Qwen3_5CheckpointSource::Multimodal),
-        _ => Err(Error::configuration(
-            "qwen.recipe.source",
-            "expected exactly one Qwen embedding namespace",
-        )),
-    }
+    Ok(match LanguageNamespace::of_manifest(manifest, "Qwen")? {
+        LanguageNamespace::Wrapped => Qwen3_5CheckpointSource::Multimodal,
+        LanguageNamespace::TextOnly => Qwen3_5CheckpointSource::TextOnly,
+    })
 }
 
 /// Reads and parses local `config.json` under a 16 MiB bound.

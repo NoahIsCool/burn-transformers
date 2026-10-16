@@ -825,6 +825,75 @@ fn clamped_dt_model(half: bool) -> NemotronHForCausalLm<TestBackend> {
     }
 }
 
+/// The chunk scan and the recurrent update agree exactly when no step is clamped.
+///
+/// As in the pinned reference, the chunk scan clamps the step
+/// `Δ = softplus(dt + dt_bias)` below at `time_step_min` (`1e-3`) and the
+/// single-step update does not. With `dt_bias = 0` every step of this fixture
+/// is about `0.69`, so the clamp is inactive and the two paths leave the same
+/// recurrent state to F32 rounding after three tokens; with `dt_bias = -12`
+/// every step is about `6e-6`, the clamp raises it, and the states differ by
+/// an order-one relative amount. Which path a row takes therefore matters
+/// only for checkpoints whose steps fall below `time_step_min`.
+#[test]
+fn chunked_and_recurrent_paths_agree_exactly_above_the_step_clamp() {
+    let device = Default::default();
+    for (bias, agree) in [(0.0, true), (-12.0, false)] {
+        let model = with_dt_bias(contract_model(), bias);
+        let mixer = model.model.layers[0].mamba.as_ref().unwrap();
+        let normalized = model.model.layers[0].norm.forward(
+            model
+                .model
+                .embed_tokens
+                .forward(Tensor::from_ints([[5, 6, 7]], &device)),
+        );
+        let zero =
+            NemotronMamba2State::zeros(&mixer.config(), 1, normalized.dtype(), &device).unwrap();
+        let (_, chunked) = mixer
+            .forward_with_state(
+                normalized.clone(),
+                None,
+                &zero,
+                NemotronMamba2Mode::ChunkedPrefill,
+            )
+            .unwrap();
+        let mut recurrent = zero;
+        for token in 0..3 {
+            let (_, next) = mixer
+                .forward_with_state(
+                    normalized.clone().narrow(1, token, 1),
+                    None,
+                    &recurrent,
+                    NemotronMamba2Mode::Recurrent,
+                )
+                .unwrap();
+            recurrent = next;
+        }
+        let expected = chunked.recurrent.into_data().to_vec::<f32>().unwrap();
+        let actual = recurrent.recurrent.into_data().to_vec::<f32>().unwrap();
+        let scale = expected
+            .iter()
+            .fold(0.0_f32, |max, value| max.max(value.abs()));
+        assert!(scale > 0.0, "dt_bias {bias}: the state must be nonzero");
+        let difference = actual
+            .iter()
+            .zip(&expected)
+            .fold(0.0_f32, |max, (left, right)| max.max((left - right).abs()))
+            / scale;
+        if agree {
+            assert!(
+                difference <= 1e-5,
+                "dt_bias {bias}: relative difference {difference:e}"
+            );
+        } else {
+            assert!(
+                difference >= 0.1,
+                "dt_bias {bias}: relative difference {difference:e}"
+            );
+        }
+    }
+}
+
 /// A one-token prompt uses the reference chunk scan, matching the stateless forward.
 ///
 /// Regression for NEM-4: the compact row length alone selected the recurrent

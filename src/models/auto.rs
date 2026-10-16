@@ -446,6 +446,16 @@ macro_rules! causal_registry {
                 <AutoCausalConfig as ArchitectureConfig>::MODEL_TYPES;
 
             /// Parses a direct or wrapped configuration and initializes its lazy graph.
+            ///
+            /// Parameters are lazy, but the graph allocates host-side module
+            /// structures in proportion to the declared depth. Validation caps
+            /// the depth at [`MAX_LAYERS`](crate::models::config::MAX_LAYERS)
+            /// (2^18) blocks. A Llama graph measured 8.7 GB of host memory at the
+            /// former 2^20 bound, so one near the current bound needs roughly a
+            /// quarter of that (extrapolated, not measured). Screen untrusted
+            /// configurations before calling this, or use
+            /// [`Self::load_local`], which checks the depth against the
+            /// checkpoint before it builds the graph.
             pub fn from_config_json(json: &str, device: &B::Device) -> Result<Self> {
                 match detect_model_type(json)?.as_str() {
                     $(
@@ -1016,6 +1026,16 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
     pub const MODEL_TYPES: &'static [&'static str] = &["t5"];
 
     /// Parses a direct configuration and initializes its lazy graph.
+    ///
+    /// Parameters are lazy, but the graph allocates host-side module
+    /// structures in proportion to the declared depth. Validation caps each
+    /// stack at [`MAX_LAYERS`](crate::models::config::MAX_LAYERS) (2^18)
+    /// blocks. A T5 graph measured 28.8 GB of host memory at the former 2^20
+    /// bound per stack, so one near the current bound needs roughly a quarter
+    /// of that (extrapolated, not measured). Screen untrusted configurations
+    /// before calling this, or use
+    /// [`Self::load_local`], which checks the depth against the checkpoint
+    /// before it builds the graph.
     pub fn from_config_json(json: &str, device: &B::Device) -> Result<Self> {
         match detect_model_type(json)?.as_str() {
             "t5" => {

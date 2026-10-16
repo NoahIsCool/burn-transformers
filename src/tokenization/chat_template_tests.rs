@@ -6,6 +6,8 @@
 use proptest::prelude::*;
 use serde_json::json;
 
+use std::borrow::Cow;
+
 use super::*;
 use sandbox::{RenderBudget, RenderLimits};
 
@@ -69,20 +71,23 @@ fn source_line_endings_are_normalized_like_jinja2() {
     }
 }
 
-/// Known difference: the newline right after `{% raw %}` is dropped, where Jinja2 keeps it.
+/// The newline right after `{% raw %}` is kept, as in Jinja2.
 ///
 /// Jinja2 applies `trim_blocks` after `{% endraw %}` but not after
-/// `{% raw %}`; MiniJinja trims after both. transformers 5.2.0 renders
-/// `{% raw %}\n{{ x }}\n{% endraw %}` as `"\n{{ x }}\n"`. This test pins the
-/// documented difference and fails once it is fixed, so the module and
-/// `tokenization` documentation can drop it.
+/// `{% raw %}`; MiniJinja trims after both, so the source is rewritten
+/// first. transformers 5.2.0 renders `{% raw %}\n{{ x }}\n{% endraw %}` as
+/// `"\n{{ x }}\n"`, and `{% raw -%}` strips the newline in both engines.
 #[test]
-fn raw_block_opening_newline_is_dropped_unlike_jinja2() {
+fn raw_block_opening_newline_is_kept_like_jinja2() {
     assert_eq!(
         rendered("{% raw %}\n{{ x }}\n{% endraw %}", json!({})),
-        "{{ x }}\n"
+        "\n{{ x }}\n"
     );
-    // Elsewhere raw blocks match Jinja2, including the trim after `endraw`.
+    assert_eq!(
+        rendered("{%- raw %}\n\n{{ x }}{% endraw %}", json!({})),
+        "\n\n{{ x }}"
+    );
+    // Elsewhere raw blocks already matched Jinja2, including the trim after `endraw`.
     assert_eq!(
         rendered("A{% raw %}{{ x }}{% endraw %}\nB", json!({})),
         "A{{ x }}B"
@@ -90,6 +95,44 @@ fn raw_block_opening_newline_is_dropped_unlike_jinja2() {
     assert_eq!(
         rendered("{% raw -%}\n {{ x }}{% endraw %}", json!({})),
         "{{ x }}"
+    );
+    // Every raw section is handled, and other block tags keep `trim_blocks`.
+    assert_eq!(
+        rendered(
+            "{% if true %}\nA{% endif %}{% raw %}\nB{% endraw %}{% raw %}\nC{% endraw %}",
+            json!({})
+        ),
+        "A\nB\nC"
+    );
+}
+
+/// The raw-section rewrite touches only real opening tags followed by a newline.
+///
+/// `{% raw %}` inside a comment, inside another raw section, or inside a
+/// string literal is data; a template without such a tag is borrowed.
+#[test]
+fn raw_opening_rewrite_changes_only_real_opening_tags() {
+    for unchanged in [
+        "no tags at all",
+        "{% raw %}{{ x }}{% endraw %}",
+        "{% raw -%}\n{% endraw %}",
+        "{# {% raw %}\n #}text",
+        "{{ '{% raw %}\n' }}",
+        "{% raw %}",
+        "{% if x %}raw\n{% endif %}",
+    ] {
+        assert!(
+            matches!(keep_raw_opening_newlines(unchanged), Cow::Borrowed(_)),
+            "{unchanged:?}"
+        );
+    }
+    assert_eq!(
+        keep_raw_opening_newlines("{% raw %}\n{% raw %}\n{% endraw %}{% raw %}\n{% endraw %}"),
+        "{% raw %}\n\n{% raw %}\n{% endraw %}{% raw %}\n\n{% endraw %}"
+    );
+    assert_eq!(
+        keep_raw_opening_newlines("{%- raw %}\nA{% endraw %}{%raw%}\n"),
+        "{%- raw %}\n\nA{% endraw %}{%raw%}\n\n"
     );
 }
 

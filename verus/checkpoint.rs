@@ -136,10 +136,11 @@
 //!   nibble kept zero), so packing then reading is the identity;
 //!   `first_code_violation` returns `None` exactly for canonical buffers and
 //!   otherwise names the first short read, reserved code, or dirty Q4 padding;
-//! - `src/checkpoint/division.rs` (shared with `verus/perf.rs`):
-//!   `ceil_div_u64` and `ceil_div_usize` return the exact ceiling without
-//!   forming `n + d - 1`: the least `q` with `n <= q · d`, never above `n` and
-//!   positive for positive `n` (`lemma_ceiling_bounds`);
+//! - `src/division.rs` (shared with `verus/perf.rs`, `verus/gpt_oss.rs`, and
+//!   `verus/mixers.rs`): `ceil_div_u64` and `ceil_div_usize` return the
+//!   exact ceiling without forming `n + d - 1`: the least `q` with
+//!   `n <= q · d < n + d`, never above `n` and positive for positive `n`
+//!   (`lemma_ceiling_bounds`);
 //! - `src/checkpoint/quantization/counts.rs`: `wire_counts` derives the
 //!   persisted group (`⌈n / G⌉`), packed-byte, and scale-byte counts exactly,
 //!   with the scale length proved never to overflow for `G >= 32`
@@ -172,7 +173,7 @@
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #![allow(unused)]
 
-#[path = "../src/checkpoint/division.rs"]
+#[path = "../src/division.rs"]
 pub mod division;
 
 #[path = "../src/checkpoint/dtype/scalar.rs"]
@@ -207,8 +208,3 @@ pub mod counts;
 
 #[path = "../src/checkpoint/quantization/staging.rs"]
 pub mod staging;
-
-/// Mirrors the crate path `crate::checkpoint::division` used by the counts.
-pub mod checkpoint {
-    pub use crate::division;
-}

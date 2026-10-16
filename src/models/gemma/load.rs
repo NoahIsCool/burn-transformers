@@ -19,7 +19,8 @@ use thiserror::Error;
 use crate::{
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        PackedLayoutPolicy, ParameterInstallError, TensorSink, execute_local_load_plan,
+        install_packed_parameter,
     },
     feed_forward::GatedFeedForward,
     models::config::ConfigError,
@@ -86,16 +87,14 @@ pub enum GemmaCheckpointLoadError {
         #[from]
         ConfigError,
     ),
-    /// The manifest holds no (or several) Gemma language namespaces.
-    #[error("{0}")]
-    Namespace(
-        /// Detection diagnostic naming the candidate embeddings.
-        String,
-    ),
-    /// Discovery or expected/observed validation failed.
+    /// Discovery, namespace detection, or expected/observed validation failed.
+    ///
+    /// A manifest with no Gemma language embedding, or with several, is
+    /// [`CheckpointError::LanguageEmbeddingNotFound`] or
+    /// [`CheckpointError::AmbiguousLanguageEmbedding`].
     #[error(transparent)]
     Checkpoint(
-        /// Discovery or planning failure.
+        /// Discovery, detection, or planning failure.
         #[from]
         CheckpointError,
     ),
@@ -114,7 +113,7 @@ impl GemmaCheckpointLoadError {
     pub fn execution_failure(&self) -> Option<&ExecutionFailure<GemmaLoadError>> {
         match self {
             Self::Execution(failure) => Some(failure),
-            Self::Config(_) | Self::Namespace(_) | Self::Checkpoint(_) => None,
+            Self::Config(_) | Self::Checkpoint(_) => None,
         }
     }
 }
@@ -139,8 +138,7 @@ impl<B: Backend> GemmaForCausalLm<B> {
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, GemmaCheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
-        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))
-            .map_err(GemmaCheckpointLoadError::Namespace)?;
+        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))?;
         self.load_discovered(&manifest, options, GemmaCheckpointOptions { source })
     }
 
@@ -342,16 +340,24 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), GemmaLoadError> {
-    install_float_parameter(parameter, data).map_err(|source| GemmaLoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| GemmaLoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 /// Reports a target whose component the configuration did not allocate.

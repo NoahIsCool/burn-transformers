@@ -23,21 +23,18 @@ use serde::{Deserialize, Serialize};
 mod checkpoint;
 mod load;
 pub mod model;
-// `plan::any_sparse_layer` stays the Verus-verified, test-only reference for
-// the schedule check in `validate`, which marks the overrides once instead of
-// scanning them per block (`O(L + M)` rather than `O(L · M)`).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "any_sparse_layer is a verified test oracle")
-)]
 mod plan;
 
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
 pub use model::{
     Qwen3MoeBackboneOutput, Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm,
-    Qwen3MoeModel, qwen3_moe_load_balancing_loss, router_logits_point, router_weights_point,
+    Qwen3MoeModel, qwen3_moe_load_balancing_loss,
 };
+// Deprecated spellings of `Layer::router_logits` and `Layer::router_weights`,
+// kept for code written against unreleased sources.
+#[allow(deprecated)]
+pub use model::{router_logits_point, router_weights_point};
 
 use super::config::{
     ConfigError, ModelConfig, PartialRotary, RopeContext, RopeParameters, TokenIds, Validate,

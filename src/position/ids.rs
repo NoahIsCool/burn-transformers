@@ -392,6 +392,7 @@ pub fn derive_batched_position_ids(
 /// Invalid shape or arithmetic while deriving absolute position IDs.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PositionIdError {
     /// `batch_size * sequence_length` overflowed `usize`.
     ShapeOverflow {

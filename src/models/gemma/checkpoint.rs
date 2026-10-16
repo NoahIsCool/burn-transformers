@@ -62,14 +62,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{
-    CheckpointManifest, ExpectedTensor, KeyMatcher, LoadOptions, LoadPlan, MappingPlan,
-    build_load_plan,
+    CheckpointError, CheckpointManifest, ExpectedTensor, KeyMatcher, LoadOptions, LoadPlan,
+    MappingPlan, build_load_plan,
 };
 use crate::models::config::ConfigError;
 
 use super::architecture::GemmaArchitecture;
 use super::config::GemmaConfig;
-use super::plan::{ExtentError, UniqueFlag, checkpoint_extent, projection_extent, unique_flag};
+use super::plan::{UniqueFlag, unique_flag};
+use crate::models::shared::decoder_plan::{ExtentError, checkpoint_extent, projection_extent};
 
 /// The published SafeTensors namespace a Gemma checkpoint uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -124,11 +125,16 @@ impl GemmaCheckpointSource {
 
     /// Classifies a tensor-name set by its embedding name.
     ///
+    /// Exactly one layout's embedding (see [`Self::language_prefix`]) must be
+    /// present; vision-tower and other names are ignored.
+    ///
     /// # Errors
     ///
-    /// Returns a message when no layout's embedding is present, or more
-    /// than one is (an ambiguous checkpoint).
-    pub fn detect<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+    /// [`CheckpointError::LanguageEmbeddingNotFound`] with every candidate
+    /// embedding when none is present, and
+    /// [`CheckpointError::AmbiguousLanguageEmbedding`] with the present ones
+    /// when more than one is.
+    pub fn detect<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, CheckpointError> {
         let embeddings: Vec<String> = Self::ALL.map(Self::embedding_name).into();
         let mut found = [false; 3];
         for name in names {
@@ -138,19 +144,18 @@ impl GemmaCheckpointSource {
         }
         match unique_flag(&found) {
             UniqueFlag::Unique(index) => Ok(Self::ALL[index]),
-            UniqueFlag::Absent => Err(format!(
-                "Gemma checkpoint contains none of the embeddings {embeddings:?}"
-            )),
-            UniqueFlag::Ambiguous => {
-                let present: Vec<Self> = Self::ALL
+            UniqueFlag::Absent => Err(CheckpointError::LanguageEmbeddingNotFound {
+                family: "Gemma",
+                embeddings,
+            }),
+            UniqueFlag::Ambiguous => Err(CheckpointError::AmbiguousLanguageEmbedding {
+                family: "Gemma",
+                embeddings: embeddings
                     .into_iter()
                     .zip(found)
-                    .filter_map(|(source, found)| found.then_some(source))
-                    .collect();
-                Err(format!(
-                    "Gemma checkpoint ambiguously contains several language namespaces: {present:?}"
-                ))
-            }
+                    .filter_map(|(embedding, found)| found.then_some(embedding))
+                    .collect(),
+            }),
         }
     }
 }

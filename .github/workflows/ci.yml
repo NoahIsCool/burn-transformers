@@ -311,8 +311,11 @@ jobs:
       # campaigns need nightly cargo-fuzz and are described in fuzz/README.md.
       - name: Clippy
         run: cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets -- -D warnings
+      # `--all-targets` would also select the libFuzzer binaries despite their
+      # `test = false`, and each one fuzzes without a run limit; Clippy above
+      # already compiles them.
       - name: Harness tests
-        run: cargo test --manifest-path fuzz/Cargo.toml --locked --all-targets
+        run: cargo test --manifest-path fuzz/Cargo.toml --locked --lib --tests
 
   dependencies:
     name: Dependency advisories and licenses

@@ -221,12 +221,8 @@ pub open spec fn min_int(a: int, b: int) -> int {
         global == ((layers - 1 - index) % 4 == 0),
         index + 1 == layers ==> global,
 ))]
-#[allow(
-    clippy::manual_is_multiple_of,
-    reason = "Verus specifies `%` but has no specification for `usize::is_multiple_of`"
-)]
 pub(crate) fn is_global_layer(layers: usize, index: usize) -> bool {
-    (layers - 1 - index) % 4 == 0
+    (layers - 1 - index).is_multiple_of(4)
 }
 
 /// Returns the derived backward-counted schedule of `layers` layers (`true` = global).

@@ -401,7 +401,6 @@ fn automatic_t5_exposes_both_stacks_and_preserves_identity_outputs() {
 /// family's hooked pass rather than an unsupported or ordinary forward.
 #[test]
 fn automatic_gpt_oss_exposes_router_points_and_applies_edits() {
-    use crate::models::qwen3_moe::{router_logits_point, router_weights_point};
     let device = Default::default();
     let config = tiny_gpt_oss();
     let model =
@@ -409,8 +408,8 @@ fn automatic_gpt_oss_exposes_router_points_and_applies_edits() {
     let layer = Layer::decoder(1);
     let points = model.activation_points().unwrap();
     for point in [
-        router_logits_point(layer).info(),
-        router_weights_point(layer).info(),
+        layer.router_logits().info(),
+        layer.router_weights().info(),
         layer.mlp_output().info(),
     ] {
         assert!(points.contains(&point), "missing {}", point.name);
@@ -420,8 +419,8 @@ fn automatic_gpt_oss_exposes_router_points_and_applies_edits() {
     let expected = model.forward(input.clone(), &options).unwrap();
 
     let mut hooks = Hooks::new();
-    let logits = hooks.capture(router_logits_point(layer));
-    hooks.edit(router_weights_point(layer), |tensor| tensor);
+    let logits = hooks.capture(layer.router_logits());
+    hooks.edit(layer.router_weights(), |tensor| tensor);
     let identity = model
         .forward_with_hooks(input.clone(), &options, &mut hooks)
         .unwrap();
@@ -429,7 +428,7 @@ fn automatic_gpt_oss_exposes_router_points_and_applies_edits() {
     assert_eq!(hooks.get(&logits).unwrap().dims(), [2, 3, 4]);
 
     let mut hooks = Hooks::new();
-    hooks.edit(router_weights_point(layer), |tensor| tensor.zeros_like());
+    hooks.edit(layer.router_weights(), |tensor| tensor.zeros_like());
     let edited = model
         .forward_with_hooks(input, &options, &mut hooks)
         .unwrap();

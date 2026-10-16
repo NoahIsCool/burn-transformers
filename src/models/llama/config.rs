@@ -49,10 +49,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::architecture::LlamaArchitecture;
-use super::plan::derived_head_dim;
 use crate::models::config::{
     ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, token_ids,
 };
+use crate::models::shared::decoder_plan::derived_head_dim;
 
 /// Family name used for configuration errors that precede `model_type` resolution.
 pub(super) const FAMILY: &str = "llama";

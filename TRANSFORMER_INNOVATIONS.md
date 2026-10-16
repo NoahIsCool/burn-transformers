@@ -208,9 +208,13 @@ checkpoint column above uses them. They make no checkpoint claim.
 
 | Mechanism | Validation | Where it is available |
 | --- | --- | --- |
-| [LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional). Llama 3 scaling has the same goldens and a Llama 3.1-style tiny golden, and runs in the L3.1-8 column | Every RoPE family through the shared translator; custom specs; `RotaryAttention` |
+| [LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional). Llama 3 scaling has the same goldens and a Llama 3.1-style tiny golden, and runs in the L3.1-8 column | Every RoPE family through the shared translator; custom specs; `RotaryAttention`. Dynamic NTK is inert in the built-in families (equal to unscaled RoPE for every input they accept, since they refuse positions beyond `max_position_embeddings`) and effective in custom specs and `RotaryAttention` |
 | [Attention logit soft cap](#innovation-attention-softcap) | Gemma 2 tiny golden, including a saturated cap | Gemma 2; custom specs |
-| [Post-sublayer norms and full-width Q/K norm](#innovation-post-norm) | OLMo 2 tiny golden | Llama family (`olmo2`); custom specs |
+| [Post-sublayer (output-only) norms](#innovation-post-norm) | OLMo 2 tiny golden | Llama family (`olmo2`) only (custom `NormPlacement::Post` computes `N(x + F(x))`) |
+| [Full-width Q/K norm](#innovation-post-norm) | OLMo 2 tiny golden | Llama family (`olmo2`); custom specs |
+| [Scaled token embedding](#innovation-embedding-scale) | Gemma 2 modular parity (`models::custom::family_parity_tests::gemma2_blocks_and_readout_match_the_family`) | Gemma; custom specs (`DecoderSpec::embedding_scale`) |
+| [Final-logit soft cap](#innovation-logit-softcap) | Gemma 2 tiny golden and modular parity | Gemma 2, Muse; custom specs (`DecoderSpec::final_logit_softcap`) |
+| [Clamped SwiGLU experts](#innovation-clamped-swiglu) | gpt-oss tiny golden; `gpt_oss_clamped_experts_match_the_family` | gpt-oss; custom specs (`FeedForwardSpec::ClampedSwiGlu`, `FeedForwardSpec::ClampedMixtureOfExperts`) |
 | [Chunked-local connectivity](#innovation-sliding-attention) | Scalar mask oracle, property tests, fuzzing | Custom specs and shared attention |
 | [Differential attention](#innovation-differential-attention) | Transformers DiffLlama | Custom specs and shared attention |
 | [Sigmoid, group-limited, and correction-biased routing](#innovation-router-policies) | Transformers Mixtral, Qwen3-MoE, DeepSeek-V2/V3, and gpt-oss routing goldens | DeepSeek-V2 (`noaux_tc`, `group_limited_greedy`); custom specs |
@@ -528,8 +532,10 @@ all-valid sliding layers also slice each chunk's union of visible keys, at most
 $W+C-1$ keys for window $W$; genuinely padded inputs retain all physical key
 columns because semantic valid-token
 ordinals can span holes, but remain score-bounded by reducing $C$. Parameters,
-Q/K/V, output activations, and autodiff tapes are outside this bound, and
-multi-chunk autodiff is rejected rather than mislabeled as bounded. Query
+Q/K/V, output activations, and autodiff tapes are outside this bound; on
+autodiff backends, whose tape retains every chunk, the policy evaluates as one
+unbounded call with the same values (`AttentionExecutionPolicy::effective_on`),
+as in Muse Glimmer and MLA. Query
 chunking can select a different backend GEMM implementation at long lengths, so
 bit-for-bit claims remain confined to the unchanged single-chunk oracle path.
 
@@ -957,8 +963,11 @@ The clamp keeps rare large activations from dominating the expert output.
 
 **Implementation:** `ClampedSwiGlu` and `GatedFeedForward::forward_clamped` in
 [`feed_forward.rs`](src/feed_forward.rs); the de-interleaving loader in
-[`gpt_oss/load.rs`](src/models/gpt_oss/load.rs). **Reference:** the pinned
-gpt-oss implementation linked above.
+[`gpt_oss/load.rs`](src/models/gpt_oss/load.rs); custom specs:
+`FeedForwardSpec::ClampedSwiGlu` (dense) and
+`FeedForwardSpec::ClampedMixtureOfExperts`
+([`models/custom/feed_forward.rs`](src/models/custom/feed_forward.rs)).
+**Reference:** the pinned gpt-oss implementation linked above.
 
 <a id="innovation-gated-gelu"></a>
 ### Gated-GELU feed-forward
@@ -1240,10 +1249,15 @@ operation graph is used by Muse's scale-free per-head Q/K norms.
 
 Gemma multiplies the embedding by $\sqrt{d}$ before the first block,
 $h_0=E[x]\cdot\operatorname{round}_{dtype}(\sqrt{d})$, with the scalar rounded to
-the activation dtype first as the reference does. Tied embeddings with
-$N(0,\sigma^2)$ rows otherwise start the residual stream far below unit RMS.
+the activation dtype first. Gemma and Gemma 2 build
+`torch.tensor(sqrt(d), dtype)` (F16 rounded directly from f64, BF16 through
+F32); Gemma 3 casts an F32 buffer. These agree for every shipped width. Tied
+embeddings with $N(0,\sigma^2)$ rows otherwise start the residual stream far
+below unit RMS.
 
-**Implementation:** [`gemma/model.rs`](src/models/gemma/model.rs).
+**Implementation:** [`gemma/model.rs`](src/models/gemma/model.rs), with the
+rounding in `models::shared::scaling::round_to_dtype`; custom specs through
+`DecoderSpec::embedding_scale`.
 **Reference:** the pinned Gemma 3 implementation.
 
 <a id="innovation-post-norm"></a>
@@ -1307,7 +1321,9 @@ values there rather than computing a different graph.
 
 **Implementation:** [`MuseGlimmerForCausalLm::forward`](src/models/muse_glimmer/model.rs),
 the Gemma graph in [`gemma/model.rs`](src/models/gemma/model.rs), and the
-attention soft cap in [`attention.rs`](src/attention.rs).
+attention soft cap in [`attention.rs`](src/attention.rs); the final cap is the
+shared `models::shared::scaling::soft_cap`, which custom specs reach through
+`DecoderSpec::final_logit_softcap`.
 **Reference:** the pinned Muse configuration and Gemma 2 implementation.
 
 <a id="innovation-mtp"></a>

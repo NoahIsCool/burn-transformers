@@ -396,6 +396,31 @@ fn dense_override_uses_exactly_one_feed_forward_kind() {
     assert!(model.model.layers[1].dense_mlp.is_some());
 }
 
+/// Every block's feed-forward kind follows the schedule, overrides and step included.
+///
+/// The model reads the whole schedule once (`moe_layer_flags`); each block
+/// must still own exactly the kind `is_moe_layer` reports for it.
+#[test]
+fn every_block_follows_the_sparse_schedule() {
+    let device = Default::default();
+    for (step, overrides) in [(1, vec![]), (2, vec![]), (1, vec![2, 0]), (2, vec![3])] {
+        let mut config = tiny_config();
+        config.num_hidden_layers = 4;
+        config.max_window_layers = 4;
+        config.decoder_sparse_step = step;
+        config.mlp_only_layers = overrides.clone();
+        let model = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+        for (index, layer) in model.model.layers.iter().enumerate() {
+            let sparse = config.is_moe_layer(index);
+            assert_eq!(
+                (layer.sparse_mlp.is_some(), layer.dense_mlp.is_some()),
+                (sparse, !sparse),
+                "step {step}, overrides {overrides:?}, layer {index}"
+            );
+        }
+    }
+}
+
 /// Serialized router-output policy is honored in addition to call-site options.
 #[test]
 fn config_can_enable_router_logits_by_default() {
@@ -1198,14 +1223,8 @@ fn activation_catalog_names_router_and_dense_points() {
             .unwrap();
         assert_eq!(names[input + 1], router);
         assert_eq!(names[input + 2], weights);
-        assert_eq!(
-            router_logits_point(Layer::decoder(layer)).info().name,
-            router
-        );
-        assert_eq!(
-            router_weights_point(Layer::decoder(layer)).info().name,
-            weights
-        );
+        assert_eq!(Layer::decoder(layer).router_logits().info().name, router);
+        assert_eq!(Layer::decoder(layer).router_weights().info().name, weights);
     }
 }
 
@@ -1277,7 +1296,7 @@ fn router_edits_change_the_routed_computation() {
     let mut forced = crate::intervention::Hooks::new();
     // Force experts 2 and 3 for every token of layer 1.
     forced.edit(
-        router_logits_point(Layer::decoder(1)),
+        Layer::decoder(1).router_logits(),
         |logits: Tensor<TestBackend, 3>| {
             let bonus =
                 Tensor::<TestBackend, 1>::from_floats([0.0, 0.0, 50.0, 40.0], &logits.device())
@@ -1297,7 +1316,7 @@ fn router_edits_change_the_routed_computation() {
 
     let mut silenced = crate::intervention::Hooks::new();
     silenced.edit(
-        router_weights_point(Layer::decoder(1)),
+        Layer::decoder(1).router_weights(),
         |weights: Tensor<TestBackend, 3>| weights.zeros_like(),
     );
     let mlp = silenced.capture(Layer::decoder(1).mlp_output());
@@ -1348,7 +1367,7 @@ fn staged_execution_matches_the_fused_backbone() {
     assert_eq!(points, model.activation_points());
     // A hooked range emits exactly its own blocks' points.
     let mut hooks = crate::intervention::Hooks::new();
-    let router = hooks.capture(router_logits_point(Layer::decoder(2)));
+    let router = hooks.capture(Layer::decoder(2).router_logits());
     let state = model.model.embed(&input).unwrap();
     let state = model.model.run_layers(state, 0..2).unwrap();
     model

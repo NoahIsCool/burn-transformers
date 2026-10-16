@@ -87,11 +87,6 @@ pub enum Qwen3_5LoadError {
 /// Failure from topology validation, namespace detection, strict planning, or streamed execution.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-#[expect(
-    unnameable_types,
-    reason = "public load methods return this type, so src/models/qwen3_5.rs must re-export it; \
-              delete this expectation in the change that adds that re-export"
-)]
 pub enum Qwen3_5CheckpointLoadError {
     /// The model topology cannot describe a valid Qwen3.5-family checkpoint.
     #[error(transparent)]
@@ -161,7 +156,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
     ///
     /// # Errors
     ///
-    /// Returns a `Qwen3_5CheckpointLoadError` naming the failing stage.
+    /// Returns a [`Qwen3_5CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
@@ -187,10 +182,10 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
     /// # Errors
     ///
     /// As [`Self::load_checkpoint`]; additionally, before any planning,
-    /// `Qwen3_5CheckpointLoadError::UnloadedMtpGraph` when `include_mtp` is
+    /// [`Qwen3_5CheckpointLoadError::UnloadedMtpGraph`] when `include_mtp` is
     /// false but the model owns an MTP graph, which would stay randomly
     /// initialized and reachable through the speculative API, and
-    /// `Qwen3_5CheckpointLoadError::MissingMtpGraph` when `include_mtp` is
+    /// [`Qwen3_5CheckpointLoadError::MissingMtpGraph`] when `include_mtp` is
     /// true but the model has no MTP graph to receive the tensors.
     pub fn load_checkpoint_with(
         &mut self,

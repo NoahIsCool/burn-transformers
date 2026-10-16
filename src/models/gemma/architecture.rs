@@ -77,7 +77,7 @@
 
 use std::collections::BTreeMap;
 
-use burn::tensor::{DType, bf16, f16};
+use burn::tensor::DType;
 use serde::{Deserialize, Serialize};
 
 use super::config::{FAMILY, GemmaConfig, GemmaVariant};
@@ -94,6 +94,7 @@ use crate::{
             RopeParametersByLayerType, divisible, layer_count, nonzero, positive_finite,
         },
         llama::{RotaryPrecision, model::graph::RotarySchedule},
+        shared::scaling::round_to_dtype,
     },
     normalization::{RmsNormConfig, RmsNormRootMode},
     position::RopeConfig,
@@ -281,16 +282,14 @@ impl GemmaArchitecture {
     ///
     /// The value is rounded to F32 and then to `dtype`, exactly as the
     /// references' scalar tensor is, so multiplying an embedding of `dtype`
-    /// by it reproduces their product bit for bit. Integer dtypes keep the
-    /// F32 value (embeddings are always floating point).
+    /// by it reproduces their product bit for bit. F64 and integer dtypes
+    /// keep the F32 value, as Gemma 3's F32 `embed_scale` buffer does
+    /// (embeddings are always floating point). The rounding is the shared
+    /// `models::shared::scaling::round_to_dtype` that the modular stacks'
+    /// `DecoderSpec::embedding_scale` also uses.
     #[must_use]
     pub fn embedding_scale(&self, dtype: DType) -> f64 {
-        let single = (self.hidden_size as f64).sqrt() as f32;
-        match dtype {
-            DType::F16 => f64::from(f16::from_f32(single).to_f32()),
-            DType::BF16 => f64::from(bf16::from_f32(single).to_f32()),
-            _ => f64::from(single),
-        }
+        round_to_dtype(f64::from((self.hidden_size as f64).sqrt() as f32), dtype)
     }
 
     /// Returns the sliding-window width shared by every sliding layer, if any.

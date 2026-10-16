@@ -149,9 +149,7 @@ pub(crate) fn mla_axis_fault(
     if kv_rank == 0 {
         return Some(MlaAxisFault::Zero(MlaAxis::KvLoraRank));
     }
-    // A bound remainder (not `is_multiple_of`, which Verus does not specify).
-    let parity = rope % 2;
-    if parity != 0 {
+    if !rope.is_multiple_of(2) {
         return Some(MlaAxisFault::OddRotary);
     }
     let zero_rank = match query_rank {

@@ -339,9 +339,7 @@ pub fn head_groups(query_heads: usize, key_value_heads: usize) -> Option<usize> 
     if key_value_heads == 0 || query_heads == 0 {
         return None;
     }
-    // A bound remainder (not `is_multiple_of`, which Verus does not specify).
-    let ungrouped = query_heads % key_value_heads;
-    if ungrouped != 0 {
+    if !query_heads.is_multiple_of(key_value_heads) {
         return None;
     }
     let groups = query_heads / key_value_heads;

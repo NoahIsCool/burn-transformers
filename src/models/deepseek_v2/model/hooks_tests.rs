@@ -117,8 +117,8 @@ fn router_and_branch_points_are_live() {
     let baseline = model.forward(input(), &all_logits()).unwrap().logits;
     let layer = Layer::decoder(1);
     let mut hooks = Hooks::new();
-    let routed = hooks.capture(super::super::moe::routed_output_point(layer));
-    let shared = hooks.capture(super::super::moe::shared_output_point(layer));
+    let routed = hooks.capture(layer.routed_output());
+    let shared = hooks.capture(layer.shared_output());
     let output = hooks.capture(layer.mlp_output());
     model
         .forward_with_hooks(input(), &all_logits(), &mut hooks)
@@ -132,7 +132,7 @@ fn router_and_branch_points_are_live() {
 
     let mut hooks = Hooks::new();
     // Make expert 7 dominate every token's selection.
-    hooks.edit(super::super::moe::router_logits_point(layer), |logits| {
+    hooks.edit(layer.router_logits(), |logits| {
         let [batch, tokens, experts] = logits.dims();
         let boost = Tensor::<TestBackend, 1>::from_data(
             TensorData::new(

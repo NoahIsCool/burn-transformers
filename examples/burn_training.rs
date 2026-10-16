@@ -76,7 +76,7 @@ impl<B: Backend> Experiment<B> {
     /// Register the fixed backbone, adapter, 0.1 dropout, and binary readout in one Burn module.
     fn init(device: &B::Device) -> Self {
         let spec = recipe();
-        let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+        let policy = spec.scaled_init_policy(0.02);
         Self {
             backbone: ModularCausalLm::init_with(spec, &policy, device)
                 .expect("valid fixed recipe"),

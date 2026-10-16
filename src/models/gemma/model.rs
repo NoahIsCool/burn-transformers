@@ -75,7 +75,7 @@ use crate::{
                 RotarySchedule, missing_rotary_tables, rotate, vocabulary_projection,
             },
         },
-        shared::InputNames,
+        shared::{InputNames, scaling::soft_cap},
     },
     normalization::RmsNorm,
     operations,
@@ -423,10 +423,7 @@ impl<B: Backend> DecoderGraph<B> for GemmaForCausalLm<B> {
             self.lm_head.as_ref(),
             &self.model.embed_tokens,
         )?;
-        Ok(match self.architecture().final_logit_softcap {
-            Some(cap) => logits.div_scalar(cap).tanh().mul_scalar(cap),
-            None => logits,
-        })
+        Ok(soft_cap(logits, self.architecture().final_logit_softcap))
     }
 }
 

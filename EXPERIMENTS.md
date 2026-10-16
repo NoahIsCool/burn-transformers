@@ -281,18 +281,22 @@ hooks.edit(Layer::decoder(0).self_attention().head_context().head(0), |x| {
 });
 ```
 
-Catalogs omit what an execution path cannot expose faithfully. Family specifics:
+Catalogs omit what an execution path cannot expose faithfully. Every
+mixture-of-experts family addresses its router points through the same
+`Layer` constructors, and their axes are `Axis::EXPERT` and
+`Axis::EXPERT_SLOT`, so `Layer::decoder(3).router_logits().slice(Axis::EXPERT,
+5..6)` selects expert 5's logits on any of them. Family specifics:
 
 | Family | Notes on its catalog |
 | --- | --- |
 | Llama family, Gemma | Embedding; per block `residual.pre`, `attention.input`, Q/K/V, head context, `attention.output`, `mlp.input`, `mlp.pre_activation`, `mlp.activation`, `mlp.output`, `residual.post`; final norm. Gemma's embedding point is the `sqrt(d)`-scaled residual, and its `attention.output`/`mlp.output` follow the post-sublayer norms. |
-| gpt-oss | Like the Llama family, but the MLP exposes `mlp.router_logits` (`[batch, token, experts]`, before top-k: editing it changes which experts run) and `mlp.router_weights` (`[batch, token, k]` F32 mixture weights) instead of neuron points. |
-| Qwen3-MoE | Router points of the same names on sparse blocks (`models::qwen3_moe::router_logits_point` and `router_weights_point` build them); dense blocks expose neuron points. `Qwen3MoeModel` is a headless backbone with its own staged execution. |
+| gpt-oss | Like the Llama family, but the MLP exposes `mlp.router_logits` (`Layer::router_logits()`, `[batch, token, expert]`, before top-k: editing it changes which experts run) and `mlp.router_weights` (`Layer::router_weights()`, `[batch, token, expert_slot]` F32 mixture weights) instead of neuron points. |
+| Qwen3-MoE | The same two router points on sparse blocks (`Layer::router_logits()` and `router_weights()`); dense blocks expose neuron points. `Qwen3MoeModel` is a headless backbone with its own staged execution. |
 | Qwen3.5 / Qwen3.8 | DeltaNet blocks expose mixer input/output; full-attention blocks expose the attention points; the text backbone and individual blocks are public. |
-| DeepSeek-V2 | MLA's `kv_latent` (and `query_latent` for low-rank-query checkpoints), the expanded Q/K/V, scores, pattern, and head context; sparse blocks add `mlp.router_logits`, `mlp.routed_output`, and `mlp.shared_output`. Requesting an MLA point makes that layer evaluate one full score plane. |
+| DeepSeek-V2 | MLA's `kv_latent` (and `query_latent` for low-rank-query checkpoints), the expanded Q/K/V, scores, pattern, and head context; sparse blocks add `mlp.router_logits`, `mlp.routed_output`, and `mlp.shared_output` (`Layer::router_logits()`, `routed_output()`, and `shared_output()`). Requesting an MLA point makes that layer evaluate one full score plane. |
 | Muse Glimmer | Q/K/V, head context, `attention.gate_logits`, `attention.gate`, and the sandwich `post_attention_norm`/`post_feedforward_norm` points; no scores or pattern, because its exact path dispatches backend kernels. |
 | Nemotron-H | Points depend on the block kind: Mamba-2 blocks expose mixer input/output, attention blocks the attention points, dense blocks neuron points, and MoE blocks only their combined output. |
-| T5, GPT-2, GPT-NeoX | The full point set above, with encoder and cross-attention points for T5. |
+| T5, GPT-2, GPT-NeoX | The full point set above, with encoder and cross-attention points for T5. GPT-NeoX has no router, so it answers `router_logits` and `auxiliary_losses` requests with empty diagnostics. |
 | Custom modular models | Attention, MLA, and dense feed-forwards expose their full points; differential attention, DeltaNet, and Mamba-2 expose only mixer input/output; sparse MoE exposes its outer boundaries. |
 
 With padding, the points of the Llama family, Gemma, gpt-oss, and the T5
@@ -477,9 +481,10 @@ to two. Its clean reference therefore tests the changed computation itself.
 
 For long eager contexts, `GroupedQueryAttention::attend_bounded` runs exact
 attention in query chunks whose score planes stay below a configured element
-bound. Keys start at absolute position zero, it accepts no additive bias or
-hooks, and a multi-chunk call is inference-only (autodiff is rejected rather
-than silently unbounded). Structural masks for your own kernels come from
+bound. Keys start at absolute position zero, and it accepts no additive bias
+or hooks. On autodiff backends, whose tape keeps every chunk, the policy
+evaluates as one unbounded call with the same values
+(`AttentionExecutionPolicy::effective_on`), as in Muse and DeepSeek. Structural masks for your own kernels come from
 `AttentionConnectivity::exclusion_mask` with a `MaskGeometry`; give the
 geometry `with_key_start(n)` when a cache has dropped the first `n` keys, so
 chunk and window boundaries stay absolute.
@@ -608,12 +613,21 @@ positions:
 | Differential attention | `MixerSpec::DifferentialAttention`: paired heads `A_i - lambda A_(i+H/2)` with RoPE or no positions. |
 | Recurrent mixers | `MixerSpec::DeltaNet` (Gated DeltaNet); `MixerSpec::Mamba2`, executed by the shared Mamba-2 kernel with Hugging Face `Mamba2Config` defaults for settings the spec does not carry and a group-wise gated norm (the `mamba_ssm` convention). Both are causal only. |
 | Positions | `PositionEncodingSpec::Rope` with `RopeScaling::{None, Linear, DynamicNtk, Yarn, Llama3, LongRope, Proportional}`, `T5RelativeBias`, or `None`. |
-| Feed-forward | `Dense` (gated), `Ungated`, `ClampedSwiGlu`, `MixtureOfExperts` (with a `RoutingPolicy`: softmax or sigmoid scoring, top-k before or after scoring, group-limited selection, correction bias; plus shared experts, a shared-expert gate, and expert biases), or `None` for attention-only blocks. |
+| Feed-forward | `Dense` (gated), `Ungated`, `ClampedSwiGlu`, `MixtureOfExperts` (with a `RoutingPolicy`: softmax or sigmoid scoring, top-k before or after scoring, group-limited selection, correction bias; plus shared experts, a shared-expert gate, and expert biases), `ClampedMixtureOfExperts` (gpt-oss's clamped SwiGLU routed and shared experts; `experts.activation` must be `silu`), or `None` for attention-only blocks. |
+| Embedding and readout | `DecoderSpec::embedding_scale` multiplies token embeddings by a dtype-rounded scalar (Gemma's `sqrt(d)`), and `DecoderSpec::final_logit_softcap` caps logits at `c · tanh(z / c)` (Gemma 2); an encoder stack rejects a cap. |
 | Cross-attention | `Seq2SeqSpec::cross_attention_options` sets its score scale, soft cap, sinks, and biases. |
 
-Bidirectional encoder stacks reject sliding windows and recurrent mixers;
-`ResidualTopology::Gated` is describable but not yet executable. Both models
-implement `HookedModel` and `StagedModel` (seq2seq through its stage views).
+Bidirectional encoder stacks reject sliding windows and recurrent mixers.
+`ResidualTopology::Gated` stays reserved and is rejected at construction: no
+shipped family or pinned reference defines a gated residual, so its semantics
+would be invented, and executing it would add parameters to the stable block
+record layout. The `architecture::spec` documentation's "Not expressible"
+table lists the family mechanisms a spec cannot describe (Muse Glimmer's
+scale-free embedding norm and bounded logit map, GPT-2 absolute positions,
+GPT-NeoX parallel residuals, OLMo 2 output-only norms, and MTP heads), and the
+Gemma 2 and gpt-oss modular parity tests show specs reproducing those
+families block for block. Both models implement `HookedModel` and
+`StagedModel` (seq2seq through its stage views).
 Initialize from scratch with a depth-scaled policy (see
 [initialization](TRAINING.md#initialize-deliberately)):
 
@@ -628,14 +642,17 @@ fn fragment<B: Backend>(spec: DecoderSpec, device: B::Device) -> Result<()> {
 -->
 <!-- doctest modular-spec -->
 ```rust
-let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+let policy = spec.scaled_init_policy(0.02);
 let model = ModularCausalLm::<B>::init_with(spec, &policy, &device)?;
 ```
 
 Modular decoding is a correctness-oriented reference path: attention layers
 cache their token history and recompute, and recurrent mixers replay their
 history. Family runtimes keep the optimized native KV, latent, ring, and
-recurrent caches used for performance work.
+recurrent caches used for performance work. The modular decode state accepts
+inactive and never-started rows as exact-zero no-ops (such a row is evaluated
+over one uncommitted history slot), so `generate_causal` with
+`prefill_chunk_size` works on left-padded batches.
 
 ## Extend the computation
 

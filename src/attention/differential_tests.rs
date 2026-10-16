@@ -10,7 +10,7 @@ use super::*;
 /// Deterministic F32 CPU backend.
 type TestBackend = Flex<f32, i32>;
 
-/// Reference fixture values, evaluated in F64 exactly as the generator script does.
+/// Reference fixture values, evaluated in F64 exactly as `scripts/generate_diffllama_reference.py` does.
 fn values(count: usize, seed: usize, scale: f64) -> Vec<f32> {
     (0..count)
         .map(|index| {
@@ -21,6 +21,9 @@ fn values(count: usize, seed: usize, scale: f64) -> Vec<f32> {
 }
 
 /// `DiffLlamaAttention(layer_idx=1)` outputs pinned with transformers 5.2.0 / torch 2.10.0 (F32).
+///
+/// Regenerate and check with
+/// `python3 -I scripts/generate_diffllama_reference.py --check src/attention/differential_tests.rs`.
 ///
 /// Config: hidden 8, 4 heads, head_dim 2, `rms_norm_eps = 1e-5`, no bias. The
 /// q/k/v/o weights are `values(out * in, seed 1..=4, 0.05)` in `[out, in]`

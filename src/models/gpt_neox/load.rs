@@ -26,9 +26,9 @@ use thiserror::Error;
 
 use crate::checkpoint::{
     CheckpointError, CheckpointManifest, DTypeConversion, ExecutionFailure, ExecutionOutcome,
-    ExpectedTensor, KeyMatcher, LoadOptions, LoadPlan, LoadReport, MappingPlan,
+    ExpectedTensor, KeyMatcher, LoadOptions, LoadPlan, LoadReport, MappingPlan, PackedLayoutPolicy,
     ParameterInstallError, TensorSink, TransformRecord, build_load_plan, execute_local_load_plan,
-    install_float_parameter,
+    install_packed_parameter,
 };
 
 use super::{GptNeoXConfig, GptNeoXForCausalLm, GptNeoXLayer};
@@ -599,13 +599,21 @@ fn install_bias<B: Backend>(
     install(target, bias, data)
 }
 
-/// Installs floating data with the parameter's save/load layout and adds the target to errors.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), GptNeoXLoadError> {
-    install_float_parameter(parameter, data).map_err(|source| parameter_error(target, source))
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| parameter_error(target, source))
 }
 
 /// Attaches an architecture target to the shared parameter-installation diagnostic.

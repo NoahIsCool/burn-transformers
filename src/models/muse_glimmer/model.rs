@@ -86,8 +86,8 @@ use super::{
 use crate::models::{
     config::{PartialRotary, RopeContext},
     shared::{
-        InputContract, InputNames, ValidatedInput, ensure_same_device, select_hidden,
-        validate_input,
+        InputContract, InputNames, ValidatedInput, ensure_same_device, scaling::soft_cap,
+        select_hidden, validate_input,
     },
 };
 
@@ -230,13 +230,11 @@ impl<B: Backend> MuseGlimmerAttention<B> {
     ///
     /// An autodiff tape keeps every chunk's planes alive until backward, so
     /// chunking would cost synchronizations without bounding memory: autodiff
-    /// backends evaluate one unbounded call (same values) instead of failing.
+    /// backends evaluate one unbounded call (same values) instead of failing,
+    /// by the shared [`AttentionExecutionPolicy::effective_on`] rule. The
+    /// stored policy was validated by its setter.
     fn effective_policy(&self, device: &B::Device) -> AttentionExecutionPolicy {
-        if B::ad_enabled(device) {
-            AttentionExecutionPolicy::Unbounded
-        } else {
-            self.execution_policy
-        }
+        self.execution_policy.effective_on::<B>(device)
     }
 
     /// Evaluates bottom-right-aligned causal attention and returns the head context.
@@ -1306,8 +1304,12 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                 tied_projection(hidden, self.model.embed_tokens.weight.val())?
             }
         };
-        let cap = self.config().final_logit_softcapping;
-        Ok(((raw * self.config().output_multiplier) / cap).tanh() * cap)
+        // The bounded map `T · tanh(m · z / T)`: the multiplier, then the
+        // shared soft cap's divide, `tanh`, multiply.
+        Ok(soft_cap(
+            raw * self.config().output_multiplier,
+            Some(self.config().final_logit_softcapping),
+        ))
     }
 }
 

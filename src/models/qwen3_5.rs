@@ -44,7 +44,7 @@ mod recipe;
 pub use checkpoint::{
     Qwen3_5CheckpointContract, Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource,
 };
-pub use load::Qwen3_5LoadError;
+pub use load::{Qwen3_5CheckpointLoadError, Qwen3_5LoadError};
 pub use recipe::{
     LoadedQwen3_5Backbone, Qwen3_5BackboneRecipe, Qwen3_5LayerRecipe, Qwen3_5RecipeLoadOptions,
 };

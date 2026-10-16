@@ -39,7 +39,7 @@
 use core::marker::PhantomData;
 
 use burn::{
-    module::{Module, Param},
+    module::Module,
     tensor::{Tensor, activation::sigmoid, backend::Backend},
 };
 
@@ -51,10 +51,7 @@ use crate::{
         GatedFeedForwardConfig, mlp_hook_points,
     },
     intervention::{Hooks, Layer, PointInfo},
-    moe::{
-        RoutedExpertPrecision, RoutedWeightingPrecision, SparseMoe, SparseMoeOutput,
-        dispatch_routed_experts, router_logits,
-    },
+    moe::{SparseMoe, SparseMoeOutput},
     operations,
 };
 
@@ -114,84 +111,19 @@ pub(super) struct ClampedExperts<B: Backend> {
 impl<B: Backend> ClampedExperts<B> {
     /// Routes `[batch, token, hidden]` states and mixes the selected clamped experts.
     ///
-    /// Routing and weighting follow [`SparseMoe::forward`] step for step:
-    /// router logits in the policy's projection precision, FP32 ranking and
-    /// normalization, weights rounded per the layer's
-    /// [`RoutedWeightingPrecision`], and expert-major accumulation through the
-    /// shared memory-bounded dispatcher. Returns the same [`SparseMoeOutput`]
-    /// diagnostics. The caller has validated the block width, so the input is
-    /// a nonempty `[batch, token, hidden]` grid.
+    /// This is [`SparseMoe::forward`] with every routed and shared expert
+    /// evaluating the clamped unit: router logits in the policy's projection
+    /// precision, FP32 ranking and normalization, weights rounded per the
+    /// layer's [`RoutedWeightingPrecision`](crate::moe::RoutedWeightingPrecision),
+    /// and expert-major accumulation through the shared memory-bounded
+    /// dispatcher, with the same [`SparseMoeOutput`] diagnostics.
     ///
     /// # Errors
     ///
     /// Propagates routing errors (including a non-finite router score, named
     /// with its token) and expert projection errors.
     fn forward(&self, input: Tensor<B, 3>) -> Result<SparseMoeOutput<B>> {
-        let moe = &self.experts;
-        let [batch, sequence, hidden] = input.dims();
-        // The tensor holds `batch * sequence * hidden` elements, so the product fits.
-        let tokens = batch * sequence;
-        let residual_dtype = input.dtype();
-        let flat_input = input.clone().reshape([tokens, hidden]);
-        let logits = router_logits(input, &moe.router, moe.routing.projection)?;
-        let decision = moe.router_config().route(
-            logits.clone().reshape([tokens, moe.routed.len()]),
-            moe.correction_bias.as_ref().map(Param::val),
-        )?;
-        let (weights, precision) = match moe.weighting_precision {
-            RoutedWeightingPrecision::Residual => (
-                decision.weights.cast(residual_dtype),
-                RoutedExpertPrecision::uniform(residual_dtype),
-            ),
-            RoutedWeightingPrecision::Fp32ThenResidual => (
-                decision.weights,
-                RoutedExpertPrecision::fp32_weights_round_each(residual_dtype),
-            ),
-        };
-        let dispatch = dispatch_routed_experts(
-            flat_input.clone(),
-            weights.clone(),
-            decision.experts.clone(),
-            Some(decision.non_finite_tokens),
-            moe.routed.len(),
-            precision,
-            |expert, rows| moe.routed[expert].forward_clamped(rows, &self.glu),
-        )?;
-        let hidden_state = match self.shared_output(flat_input)? {
-            Some(shared) => dispatch.hidden_state + shared,
-            None => dispatch.hidden_state,
-        };
-        let slots = moe.experts_per_token;
-        Ok(SparseMoeOutput {
-            hidden_state: hidden_state.reshape([batch, sequence, hidden]),
-            router_logits: logits,
-            selected_experts: decision.experts.reshape([batch, sequence, slots]),
-            selected_weights: weights.reshape([batch, sequence, slots]),
-            expert_token_counts: dispatch.expert_token_counts,
-            evaluated_experts: dispatch.evaluated_experts,
-        })
-    }
-
-    /// Sums the clamped shared experts over `[tokens, hidden]` rows and applies the optional gate.
-    ///
-    /// Returns `None` without computing anything when there are no shared experts.
-    fn shared_output(&self, flat_input: Tensor<B, 2>) -> Result<Option<Tensor<B, 2>>> {
-        let moe = &self.experts;
-        let mut sum: Option<Tensor<B, 2>> = None;
-        for expert in &moe.shared {
-            let output = expert.forward_clamped(flat_input.clone(), &self.glu)?;
-            sum = Some(match sum {
-                Some(total) => total + output,
-                None => output,
-            });
-        }
-        let Some(sum) = sum else {
-            return Ok(None);
-        };
-        Ok(Some(match &moe.shared_expert_gate {
-            Some(gate) => sum * sigmoid(operations::linear(flat_input, gate)?),
-            None => sum,
-        }))
+        self.experts.forward_with_unit(input, Some(&self.glu))
     }
 }
 

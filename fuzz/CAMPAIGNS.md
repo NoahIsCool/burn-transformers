@@ -418,3 +418,45 @@ concurrent rate.
 
 It exited with status 0 and wrote no crash, timeout, or out-of-memory
 artifact.
+
+## 2026-10-16: CHAT-4 fixed and Transformers 5.2 template discovery
+
+The tokenization fix package made unnamed renders select a checkpoint's
+`tool_use` template whenever `tools` is set (CHAT-4), loaded templates from
+`chat_template.jinja` and `additional_chat_templates/*.jinja` before
+`tokenizer_config.json` as Transformers 5.2 does, and read template sources
+with universal newlines. The `chat_templates` harness gained the two template
+file storage forms and an exact loaded-templates oracle, and its CHAT-4
+tolerance was removed. Every campaign below used
+`cargo +nightly fuzz run -s none chat_templates <scratch corpus>
+fuzz/seeds/chat_templates -- -max_len=4096 -timeout=10 -rss_limit_mb=2048
+-print_final_stats=1` with `RAYON_NUM_THREADS=1` on macOS (without a
+sanitizer, since AddressSanitizer deadlocks there):
+
+| Source | Runs | Seconds | New units | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Working tree before the package was split, with the CHAT-4, template-file, and newline fixes | 10,000 | 14 | 769 | 85 MB |
+| The same tree, continuing on the grown corpus | 100,000 | 185 | 1,503 | 99 MB |
+| Exact sources of `d0c7f9b`, on the 1,903-file corpus | 50,000 | 125 | 397 | 102 MB |
+| Exact sources of `cc5107c` (after the dangling-path skip fix), fresh scratch corpus plus seeds | 30,000 | 34 | 1,242 | 74 MB |
+
+All four exited with status 0 and wrote no crash, timeout, or out-of-memory
+artifact.
+
+## 2026-10-16: configuration counts bounded (CFG-COUNT-1)
+
+The configuration-robustness fix package bounded every family's layer and
+expert counts by the shared `MAX_LAYERS` (2^18) and `MAX_EXPERTS` (2^20)
+before any allocation, and the `configuration` harness stopped filtering
+absurd counts and asserts the bounds instead. One bounded campaign on source
+`26c16bd`:
+`cargo +nightly fuzz run -s none --fuzz-dir fuzz configuration <fresh corpus>
+fuzz/seeds/configuration -- -runs=50000 -max_len=4096 -timeout=10
+-rss_limit_mb=2048`.
+
+| Target | Runs | Seconds | exec/s | cov | ft | Corpus | Fuzzer RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `configuration` | 50,000 | 9 | 5,555 | 5891 | 12790 | 690 entries, 434 KB | 51 MB |
+
+It found no crash, timeout, or out-of-memory input. An earlier run on
+`64ddd4d`, at the former 2^20 layer bound, also had no findings.

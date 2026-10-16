@@ -5,7 +5,9 @@
 //!
 //! Inputs never read downloaded weights; the only models built are modular specifications of
 //! at most two layers and sixteen channels. Configuration parsing keeps adversarial numeric
-//! dimensions while bounding layer counts that control validation loops. Tensor tests use at
+//! dimensions and does not filter absurd layer or expert counts; the harness instead asserts
+//! the shared `MAX_LAYERS` and `MAX_EXPERTS` bounds on every configuration a family accepts.
+//! Tensor tests use at
 //! most four sequences and sixteen tokens on the host-only Flex backend. Artifact and
 //! tokenizer discovery see only tiny, disposable local files and strict metadata limits.
 //!

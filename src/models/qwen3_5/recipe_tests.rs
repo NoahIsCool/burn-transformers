@@ -885,9 +885,13 @@ fn qwen_recipe_namespace_ambiguity_is_rejected_and_explicit_layout_is_honored() 
         .load_pretrained::<B>(directory.path(), &Default::default(), &Default::default())
         .unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("exactly one Qwen embedding namespace")
+        matches!(
+            error,
+            Error::CheckpointPlan(
+                crate::checkpoint::CheckpointError::AmbiguousLanguageNamespace { family: "Qwen" }
+            )
+        ),
+        "{error}"
     );
 }
 

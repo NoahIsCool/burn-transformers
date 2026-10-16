@@ -33,7 +33,6 @@ use super::{
         select_hidden, tied_projection, validate_and_resolve_input, validate_forward_options,
         validate_stack_execution, validate_staged_positions,
     },
-    init::scaled_init_policy,
     layer::ModularLayer,
     norm::ModularNorm,
     pass::StackPass,
@@ -109,15 +108,11 @@ impl<B: Backend> ModularCausalLm<B> {
 
     /// The recommended random-initialization policy for this topology.
     ///
-    /// Embeddings and projections draw from `N(0, std^2)` with zero biases (Hugging Face's
-    /// `initializer_range`, typically `0.02`), and projections that write into the residual
-    /// stream (`o_proj`, `down_proj`, DeltaNet and Mamba-2 `out_proj`, present in this spec)
-    /// are scaled by `1/sqrt(2 * layers)` as in GPT-2. Normalization scales, T5 biases,
-    /// DeltaNet and Mamba-2 decay and step parameters, convolutions, and other non-projection
-    /// parameters keep their constructed values.
+    /// The same policy as [`DecoderSpec::scaled_init_policy`], which needs no
+    /// backend type parameter: `spec.scaled_init_policy(0.02)`.
     #[must_use]
     pub fn scaled_init_policy(spec: &DecoderSpec, std: f64) -> InitPolicy {
-        scaled_init_policy([spec], spec.layers.len(), false, std)
+        spec.scaled_init_policy(std)
     }
 
     /// Selects the numerical execution path for conventional projected self-attention layers.

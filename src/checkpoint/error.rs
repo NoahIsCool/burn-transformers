@@ -55,6 +55,51 @@ pub enum CheckpointError {
         /// Model family whose namespaces were probed, such as `Muse`.
         family: &'static str,
     },
+    /// A checkpoint of a family whose published layouts are each identified by
+    /// the name of their token embedding (Gemma's text-only, multimodal, and
+    /// original multimodal releases) contains none of those embeddings.
+    #[error("{family} checkpoint contains none of the embeddings {embeddings:?}")]
+    LanguageEmbeddingNotFound {
+        /// Model family whose layouts were probed, such as `Gemma`.
+        family: &'static str,
+        /// The identifying embedding of every probed layout, in detection order.
+        embeddings: Vec<String>,
+    },
+    /// A checkpoint contains the identifying token embeddings of more than one
+    /// published layout, so its language namespace is ambiguous.
+    #[error(
+        "{family} checkpoint ambiguously contains the embeddings of several language \
+         namespaces: {embeddings:?}"
+    )]
+    AmbiguousLanguageEmbedding {
+        /// Model family whose layouts were probed, such as `Gemma`.
+        family: &'static str,
+        /// The identifying embeddings present, in detection order.
+        embeddings: Vec<String>,
+    },
+    /// The configuration needs more source tensors than the checkpoint holds.
+    ///
+    /// Every layer of every family owns at least one checkpoint tensor, so a
+    /// configuration's depth (or, for one-to-one contracts, its exact
+    /// inventory) bounds the tensors any loadable checkpoint must contain.
+    /// Automatic loading and direct T5 planning
+    /// ([`crate::models::t5::T5Config::plan_checkpoint`] and
+    /// [`crate::models::t5::T5ForConditionalGeneration::load_checkpoint`],
+    /// bounded by `num_layers` plus the decoder depth) check that bound
+    /// against the discovered tensors and index aliases before they build the
+    /// per-tensor contract, whose cost grows with the declared depth and
+    /// expert count. It is not checked when
+    /// [`super::LoadOptions::allow_missing`] can excuse missing tensors.
+    #[error(
+        "the configuration needs at least {required} checkpoint tensors, but the checkpoint \
+         provides only {available} (tensors plus index aliases)"
+    )]
+    TooFewTensors {
+        /// Lower bound on the distinct source tensors the configuration needs.
+        required: usize,
+        /// Discovered tensors plus resolved index-only aliases.
+        available: usize,
+    },
     /// A user- or index-supplied relative path was unsafe.
     #[error("unsafe checkpoint-relative path `{path}`: {reason}")]
     UnsafeRelativePath {

@@ -120,6 +120,7 @@ impl CacheConfig {
 
 /// Validation failure while constructing a [`CacheConfig`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CacheConfigError {
     /// At least one sequence is required.
     ZeroSequences,

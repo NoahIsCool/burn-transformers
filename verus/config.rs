@@ -25,7 +25,13 @@
 //!   the string/escape automaton `lexer_state` (sound: each listed offset
 //!   starts a token outside a string; complete: every such start is listed),
 //!   in increasing order and at least eight bytes apart, so the caller's
-//!   slices are ordered and non-overlapping.
+//!   slices are ordered and non-overlapping;
+//! * `count_fault`: a layer or expert count is accepted (`None`) exactly when
+//!   `1 <= value <= maximum`; a zero is reported before an excess;
+//! * `moe_inventory`: with `L` layers of which `S <= L` are sparse and `E`
+//!   experts, the result is
+//!   `Some(fixed + L·p_l + S·(p_s + E·p_e) + (L - S)·p_d)` exactly when that
+//!   total fits `usize`, and `None` otherwise.
 //!
 //! Not proved here: serde decoding, floating-point checks (theta, factors,
 //! partial rotary products), the string-keyed per-layer-type lookups, and the

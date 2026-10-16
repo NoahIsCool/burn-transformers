@@ -19,8 +19,10 @@
 //! The historical Pythia checkpoint and reference equations are pinned in
 //! `examples/mechanistic/tuned_lens/README.md`.
 //!
-//! [`GptNeoXForCausalLm`] (formerly `GptNeoXModel`, still available under that
-//! name) implements [`crate::architecture::HookedModel`] and
+//! [`GptNeoXForCausalLm`] owns its vocabulary head, so it follows the crate's
+//! `…ForCausalLm` naming (`…Model` names headless backbones elsewhere); the
+//! pre-release alias `GptNeoXModel` was removed. It implements
+//! [`crate::architecture::HookedModel`] and
 //! [`crate::architecture::StagedModel`], so generic activation caches and
 //! residual patching run on it unchanged. Random initialization follows
 //! Hugging Face ([`GptNeoXConfig::init_policy`]).
@@ -38,7 +40,7 @@ use crate::{
 };
 
 mod model;
-pub use model::{GptNeoXForCausalLm, GptNeoXLayer, GptNeoXModel};
+pub use model::{GptNeoXForCausalLm, GptNeoXLayer};
 mod load;
 mod widths;
 pub use load::{GptNeoXCheckpointContract, GptNeoXCheckpointLoadError, GptNeoXLoadError};

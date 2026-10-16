@@ -216,6 +216,7 @@ fn commit_error(violation: LengthViolation) -> DecodeStateError {
 
 /// Invalid transition in a [`TransactionalCache`] lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransactionError {
     /// A second mark was requested before finishing the active transaction.
     AlreadyActive,

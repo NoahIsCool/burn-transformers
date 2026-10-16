@@ -1,13 +1,17 @@
-//! Exact rounded-up integer division shared by the checkpoint loader's planners.
+//! Exact rounded-up integer division, the one verified ceiling of the crate.
 //!
-//! `⌈n / d⌉` for `d >= 1` is the least `q` with `n <= q · d`. Quantized group
-//! counts, packed Q4 byte counts, and transpose cache blocks, bands, and
-//! threads all use it. Computing it as `n / d + [n mod d != 0]` never forms
-//! the overflow-prone `n + d - 1`, so it is total on the whole integer range.
+//! `⌈n / d⌉` for `d >= 1` is the least `q` with `n <= q · d`; equivalently
+//! `n <= q · d < n + d`. Quantized group counts, packed Q4 byte counts,
+//! transpose cache blocks, bands, and threads, MXFP4 thread partitions,
+//! DeltaNet chunk plans and blocks, and Mamba-2 chunk counts all use it.
+//! Computing it as `n / d + [d ∤ n]` never forms the overflow-prone
+//! `n + d - 1`, so it is total on the whole integer range.
 //!
 //! The module has no crate, Burn, or allocator dependencies so that Verus can
-//! check it in place; `verus/checkpoint.rs` and `verus/perf.rs` both include it
-//! and mirror its crate path `crate::checkpoint::division`.
+//! check it in place. Every harness whose sources use its `ceiling`
+//! specification includes it at its crate path `crate::division`:
+//! `verus/checkpoint.rs`, `verus/perf.rs`, `verus/gpt_oss.rs` (MXFP4), and
+//! `verus/mixers.rs` (DeltaNet and Mamba-2).
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -24,13 +28,14 @@ pub open spec fn ceiling(dividend: int, divisor: int) -> int {
     }
 }
 
-/// `⌈n / d⌉` is the least `q` with `n <= q · d`; it never exceeds `n` and is positive for `n > 0`.
+/// `⌈n / d⌉` is the least `q` with `n <= q · d < n + d`; it never exceeds `n` and is positive for `n > 0`.
 pub proof fn lemma_ceiling_bounds(dividend: int, divisor: int)
     requires
         dividend >= 0,
         divisor >= 1,
     ensures
         dividend <= ceiling(dividend, divisor) * divisor,
+        ceiling(dividend, divisor) * divisor < dividend + divisor,
         ceiling(dividend, divisor) == 0 || (ceiling(dividend, divisor) - 1) * divisor < dividend,
         0 <= ceiling(dividend, divisor) <= dividend,
         dividend > 0 ==> ceiling(dividend, divisor) > 0,
@@ -66,6 +71,11 @@ pub proof fn lemma_ceiling_bounds(dividend: int, divisor: int)
                 dividend == divisor * q + r,
                 r == 0,
         ;
+        assert(q * divisor < dividend + divisor) by (nonlinear_arith)
+            requires
+                dividend == q * divisor,
+                divisor >= 1,
+        ;
         if q > 0 {
             assert((q - 1) * divisor < dividend) by (nonlinear_arith)
                 requires
@@ -86,6 +96,11 @@ pub proof fn lemma_ceiling_bounds(dividend: int, divisor: int)
             requires
                 dividend == divisor * q + r,
                 r < divisor,
+        ;
+        assert((q + 1) * divisor < dividend + divisor) by (nonlinear_arith)
+            requires
+                dividend == divisor * q + r,
+                r > 0,
         ;
         assert(q * divisor < dividend) by (nonlinear_arith)
             requires
@@ -125,6 +140,7 @@ pub proof fn lemma_ceiling_bounds(dividend: int, divisor: int)
     ensures
         quotient == ceiling(value as int, divisor as int),
         value <= quotient * divisor,
+        quotient * divisor < value + divisor,
         quotient == 0 || (quotient - 1) * divisor < value,
         value > 0 ==> quotient > 0,
         quotient <= value,
@@ -134,9 +150,8 @@ pub(crate) const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
     proof! {
         lemma_ceiling_bounds(value as int, divisor as int);
     }
-    // A named remainder keeps this Verus-checkable (`is_multiple_of` has no spec).
-    let remainder = value % divisor;
-    value / divisor + if remainder == 0 { 0 } else { 1 }
+    // `div_ceil` has no Verus specification; `is_multiple_of` has one.
+    value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
 
 /// Returns `⌈value / divisor⌉` over host indices; see [`ceil_div_u64`].
@@ -151,6 +166,7 @@ pub(crate) const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
     ensures
         quotient == ceiling(value as int, divisor as int),
         value <= quotient * divisor,
+        quotient * divisor < value + divisor,
         quotient == 0 || (quotient - 1) * divisor < value,
         value > 0 ==> quotient > 0,
         quotient <= value,
@@ -160,9 +176,7 @@ pub(crate) const fn ceil_div_usize(value: usize, divisor: usize) -> usize {
     proof! {
         lemma_ceiling_bounds(value as int, divisor as int);
     }
-    // A named remainder keeps this Verus-checkable (`is_multiple_of` has no spec).
-    let remainder = value % divisor;
-    value / divisor + if remainder == 0 { 0 } else { 1 }
+    value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
 
 #[cfg(test)]

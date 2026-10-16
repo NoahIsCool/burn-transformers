@@ -26,8 +26,8 @@ use thiserror::Error;
 
 use crate::{
     checkpoint::{
-        CheckpointError, ExecutionFailure, ExecutionOutcome, LoadOptions, ParameterInstallError,
-        TensorSink, execute_local_load_plan, install_float_parameter,
+        CheckpointError, ExecutionFailure, ExecutionOutcome, LoadOptions, PackedLayoutPolicy,
+        ParameterInstallError, TensorSink, execute_local_load_plan, install_packed_parameter,
     },
     normalization::RmsNorm,
 };
@@ -125,12 +125,20 @@ impl T5CheckpointLoadError {
 impl<B: Backend> T5ForConditionalGeneration<B> {
     /// Strictly plans and streams a local SafeTensors checkpoint into this model.
     ///
-    /// Pass one reads only bounded metadata and rejects missing, unexpected, or
-    /// shape-incompatible tensors before pass two initializes any model parameter.
-    /// Pass two holds at most one source payload and one output buffer at a time.
-    /// On an execution failure the returned error retains the exact partial
-    /// [`crate::checkpoint::LoadReport`]; callers should discard the partially
-    /// initialized model rather than continue inference.
+    /// Pass one is [`super::T5Config::plan_checkpoint`]: it reports
+    /// configuration errors, discovers the checkpoint, rejects one holding
+    /// fewer tensors than encoder plus decoder blocks with
+    /// [`CheckpointError::TooFewTensors`] before the per-parameter contract is
+    /// built, and reads only bounded metadata to reject missing, unexpected, or
+    /// shape-incompatible tensors before pass two initializes any model
+    /// parameter. Pass two holds at most one source payload and one output
+    /// buffer at a time. On an execution failure the returned error retains the
+    /// exact partial [`crate::checkpoint::LoadReport`]; callers should discard
+    /// the partially initialized model rather than continue inference.
+    ///
+    /// # Errors
+    ///
+    /// A [`T5CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
@@ -418,16 +426,24 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), T5LoadError> {
-    install_float_parameter(parameter, data).map_err(|source| T5LoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| T5LoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

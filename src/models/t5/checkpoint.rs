@@ -20,7 +20,7 @@ use std::path::Path;
 
 use crate::checkpoint::{
     CheckpointManifest, ExpectedTensor, IndexTensorAlias, KeyMatcher, LoadOptions, LoadPlan,
-    MappingPlan, build_load_plan, discover_checkpoint,
+    MappingPlan, build_load_plan, discover_checkpoint, require_source_tensors,
 };
 
 use super::{ConfigError, T5Config, Validate};
@@ -168,9 +168,67 @@ impl T5Config {
     /// storage into Burn's gradient-safe `[input, output]` layout through an
     /// auditable [`MappingPlan::transpose_2d`] operation.
     pub fn checkpoint_contract(&self) -> Result<T5CheckpointContract, ConfigError> {
+        Ok(self.contract_for(self.checked_dimensions()?))
+    }
+
+    /// Discovers and strictly plans a local SafeTensors checkpoint for this config.
+    ///
+    /// Every configuration error, including an attention width that does not
+    /// fit a checkpoint shape, is reported first, as by
+    /// [`Self::checkpoint_contract`]. Discovery then runs with the family's
+    /// index aliases, and the checkpoint must hold at least one tensor per
+    /// encoder and decoder block before the contract (one entry per parameter
+    /// of every block) is built. A configuration far deeper than its
+    /// checkpoint therefore fails with
+    /// [`crate::checkpoint::CheckpointError::TooFewTensors`] without
+    /// allocating that contract. The bound is skipped when
+    /// [`LoadOptions::allow_missing`] can excuse missing tensors.
+    ///
+    /// # Errors
+    ///
+    /// [`super::T5CheckpointLoadError::Config`] for an invalid configuration,
+    /// and [`super::T5CheckpointLoadError::Checkpoint`] for a discovery,
+    /// tensor-budget, or strict-planning failure.
+    pub fn plan_checkpoint(
+        &self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+    ) -> Result<T5CheckpointPlan, super::T5CheckpointLoadError> {
+        let dimensions = self.checked_dimensions()?;
+        let mut options = options.clone();
+        for alias in self.index_aliases() {
+            if !options.index_aliases.contains(&alias) {
+                options.index_aliases.push(alias);
+            }
+        }
+        let manifest = discover_checkpoint(root, &options)?;
+        // Validation bounds both depths by `MAX_LAYERS`, so the sum cannot overflow.
+        require_source_tensors(
+            &manifest,
+            &options,
+            self.num_layers.saturating_add(self.decoder_layers()),
+        )?;
+        let plan = self
+            .contract_for(dimensions)
+            .build_load_plan(&manifest, &options)?;
+        Ok(T5CheckpointPlan { manifest, plan })
+    }
+
+    /// Validates the topology and converts its extents to checkpoint shapes.
+    ///
+    /// Both steps take constant time and touch no file, so planning reports
+    /// every configuration error before discovery.
+    fn checked_dimensions(&self) -> Result<Dimensions, ConfigError> {
         self.validate()?;
-        let dimensions = Dimensions::try_from(self)?;
-        let mut builder = ContractBuilder::new();
+        Dimensions::try_from(self)
+    }
+
+    /// Builds the inventory of a validated configuration with checked `dimensions`.
+    ///
+    /// The contract holds one entry per parameter of every block, so its size
+    /// grows linearly with `num_layers` plus the decoder depth.
+    fn contract_for(&self, dimensions: Dimensions) -> T5CheckpointContract {
+        let mut builder = ContractBuilder::new(self.index_aliases());
 
         builder.tensor("shared.weight", vec![dimensions.vocab, dimensions.model]);
         builder.stack("encoder", self.num_layers, false, self, &dimensions);
@@ -182,23 +240,26 @@ impl T5Config {
                 vec![dimensions.vocab, dimensions.model],
             ));
             builder.mappings.alias("shared.weight", "lm_head.weight");
-            builder
-                .index_aliases
-                .push(IndexTensorAlias::new("lm_head.weight", "shared.weight"));
         } else {
             builder.linear("lm_head.weight", dimensions.model, dimensions.vocab);
         }
-        Ok(builder.finish())
+        builder.finish()
     }
 
-    /// Discovers and strictly plans a local SafeTensors checkpoint for this config.
-    pub fn plan_checkpoint(
-        &self,
-        root: impl AsRef<Path>,
-        options: &LoadOptions,
-    ) -> Result<T5CheckpointPlan, super::T5CheckpointLoadError> {
-        let contract = self.checkpoint_contract()?;
-        Ok(contract.plan_local(root, options)?)
+    /// Returns the exact embedding equivalences a T5 checkpoint index may deduplicate.
+    ///
+    /// Both stacks' `embed_tokens` are views of `shared.weight`, and so is the
+    /// LM head of an original tied T5. They depend only on the tie, so
+    /// discovery can use them before the per-block contract exists.
+    fn index_aliases(&self) -> Vec<IndexTensorAlias> {
+        let mut aliases = vec![
+            IndexTensorAlias::new("encoder.embed_tokens.weight", "shared.weight"),
+            IndexTensorAlias::new("decoder.embed_tokens.weight", "shared.weight"),
+        ];
+        if self.tie_word_embeddings {
+            aliases.push(IndexTensorAlias::new("lm_head.weight", "shared.weight"));
+        }
+        aliases
     }
 }
 
@@ -245,16 +306,13 @@ struct ContractBuilder {
 }
 
 impl ContractBuilder {
-    /// Creates an empty architecture contract.
-    fn new() -> Self {
+    /// Creates an empty architecture contract with the family's index aliases.
+    fn new(index_aliases: Vec<IndexTensorAlias>) -> Self {
         Self {
             expected: Vec::new(),
             mappings: MappingPlan::new(),
             allow_unexpected: Vec::new(),
-            index_aliases: vec![
-                IndexTensorAlias::new("encoder.embed_tokens.weight", "shared.weight"),
-                IndexTensorAlias::new("decoder.embed_tokens.weight", "shared.weight"),
-            ],
+            index_aliases,
         }
     }
 

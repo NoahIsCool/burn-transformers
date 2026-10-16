@@ -30,16 +30,14 @@
 
 use core::ops::Range;
 
+use crate::division::ceil_div_usize;
+#[cfg(verus_keep_ghost)]
+use crate::division::ceiling;
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
 verus! {
-
-/// `ceil(numerator / denominator)` over the integers.
-pub open spec fn ceiling(numerator: int, denominator: int) -> int {
-    numerator / denominator + if numerator % denominator == 0 { 0int } else { 1int }
-}
 
 /// First chunk of balanced block `i` among `blocks`: earlier blocks hold `chunks / blocks`
 /// chunks each, plus one for each of the first `chunks % blocks` blocks.
@@ -121,34 +119,6 @@ pub(super) fn prefers_recurrence(sequence: usize, state_elements: usize) -> bool
     }
 }
 
-/// Returns `ceil(numerator / denominator)`.
-///
-/// The proof shows the result `q` is the exact ceiling: `q * denominator`
-/// covers the numerator by less than one denominator.
-#[cfg_attr(verus_keep_ghost, verus_verify)]
-#[cfg_attr(verus_keep_ghost, verus_spec(quotient =>
-    requires
-        denominator > 0,
-    ensures
-        quotient == ceiling(numerator as int, denominator as int),
-        quotient * denominator >= numerator,
-        quotient * denominator < numerator + denominator,
-        quotient <= numerator,
-        numerator > 0 ==> quotient >= 1,
-))]
-pub(crate) fn ceiling_division(numerator: usize, denominator: usize) -> usize {
-    #[cfg(verus_keep_ghost)]
-    proof! {
-        lemma_ceiling(numerator as int, denominator as int);
-    }
-    let round_up = if numerator.is_multiple_of(denominator) {
-        0
-    } else {
-        1
-    };
-    numerator / denominator + round_up
-}
-
 /// Chunk width and count of one chunked prefill.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,7 +157,7 @@ pub(super) struct ChunkPlan {
 ))]
 pub(super) fn chunk_plan(sequence: usize, chunk_size: usize) -> ChunkPlan {
     let chunk = chunk_size.min(sequence);
-    let chunks = ceiling_division(sequence, chunk);
+    let chunks = ceil_div_usize(sequence, chunk);
     #[cfg(verus_keep_ghost)]
     proof! {
         assert((chunks - 1) * chunk == chunks * chunk - chunk) by (nonlinear_arith);
@@ -235,7 +205,7 @@ pub(super) fn chunk_plan(sequence: usize, chunk_size: usize) -> ChunkPlan {
 ))]
 pub(super) fn block_chunk_ranges(chunks: usize, limit: usize) -> Vec<Range<usize>> {
     let limit = limit.max(1);
-    let blocks = ceiling_division(chunks, limit);
+    let blocks = ceil_div_usize(chunks, limit);
     let mut ranges: Vec<Range<usize>> = Vec::with_capacity(blocks);
     if blocks == 0 {
         return ranges;
@@ -753,6 +723,12 @@ pub proof fn lemma_recurrence_choice_monotone(
 }
 
 /// The integer ceiling covers the numerator by less than one denominator and never exceeds it.
+///
+/// The shared `crate::division::lemma_ceiling_bounds` states the same facts
+/// about the same `ceiling`. This module keeps its own proof because
+/// replacing it with a call to the shared lemma perturbs the solver context
+/// of the unrelated `inverse_levels` proof here enough to make that proof
+/// fail (Verus 0.2026.10.04, Z3 4.16.0).
 proof fn lemma_ceiling(numerator: int, denominator: int)
     requires
         numerator >= 0,

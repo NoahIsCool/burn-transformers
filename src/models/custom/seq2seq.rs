@@ -42,7 +42,6 @@ use super::{
         validate_and_resolve_input_with, validate_forward_options, validate_stack_execution,
         validate_staged_positions,
     },
-    init::scaled_init_policy,
     layer::ModularLayer,
     norm::ModularNorm,
     pass::StackPass,
@@ -140,16 +139,11 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
 
     /// The recommended random-initialization policy for this topology.
     ///
-    /// As [`super::ModularCausalLm::scaled_init_policy`], with cross-attention output
-    /// projections included and depth `L` the larger of the two stacks' block counts.
+    /// The same policy as [`Seq2SeqSpec::scaled_init_policy`], which needs no
+    /// backend type parameter: `spec.scaled_init_policy(0.02)`.
     #[must_use]
     pub fn scaled_init_policy(spec: &Seq2SeqSpec, std: f64) -> InitPolicy {
-        scaled_init_policy(
-            [&spec.encoder, &spec.decoder],
-            spec.encoder.layers.len().max(spec.decoder.layers.len()),
-            true,
-            std,
-        )
+        spec.scaled_init_policy(std)
     }
 
     /// Selects numerical execution for conventional encoder, decoder, and cross-attention branches.

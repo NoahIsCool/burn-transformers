@@ -28,7 +28,7 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
-use crate::delta_net::plan::ceiling_division;
+use crate::division::ceil_div_usize;
 
 /// Selects the transparent recurrent loop or the chunked SSD scan.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -1025,7 +1025,7 @@ pub(super) fn scan_blocks(
     chunk_size: usize,
     block_chunks: usize,
 ) -> Vec<ScanBlock> {
-    let chunks = ceiling_division(sequence, chunk_size);
+    let chunks = ceil_div_usize(sequence, chunk_size);
     #[cfg(verus_keep_ghost)]
     proof! {
         lemma_padded_fits(sequence as int, chunk_size as int, chunks as int);
@@ -1134,7 +1134,7 @@ proof fn lemma_padded_fits(sequence: int, chunk_size: int, chunks: int)
     requires
         0 < sequence <= usize::MAX / 2,
         0 < chunk_size <= usize::MAX,
-        chunks == crate::delta_net::plan::ceiling(sequence, chunk_size),
+        chunks == crate::division::ceiling(sequence, chunk_size),
         chunks * chunk_size >= sequence,
         chunks * chunk_size < sequence + chunk_size,
         chunks >= 1,

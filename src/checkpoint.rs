@@ -36,11 +36,13 @@
 //! - a [`CheckpointError`] from discovery or strict planning. Qwen3.5 and Muse
 //!   also report a failed layout detection this way, as
 //!   [`CheckpointError::LanguageNamespaceNotFound`] or
-//!   [`CheckpointError::AmbiguousLanguageNamespace`];
-//! - family-specific preconditions: Gemma and GPT-2 report a failed layout
-//!   detection as `Namespace`, GPT-2 rejects non-floating storage as
-//!   `NonFloatParameter`, and Qwen3.5 rejects MTP options that disagree with
-//!   the model's MTP graph as `UnloadedMtpGraph` or `MissingMtpGraph`;
+//!   [`CheckpointError::AmbiguousLanguageNamespace`], and Gemma as
+//!   [`CheckpointError::LanguageEmbeddingNotFound`] or
+//!   [`CheckpointError::AmbiguousLanguageEmbedding`];
+//! - family-specific preconditions: GPT-2 reports a failed layout detection
+//!   as `Namespace` and rejects non-floating storage as `NonFloatParameter`,
+//!   and Qwen3.5 rejects MTP options that disagree with the model's MTP graph
+//!   as `UnloadedMtpGraph` or `MissingMtpGraph`;
 //! - an execution failure, whose partial report `execution_failure()` returns.
 //!
 //! Every variant except the execution failure is raised before any parameter
@@ -60,12 +62,15 @@
 //!
 //! Packed (quantized Burnpack) weights are loaded through
 //! [`crate::models::AutoCausalLm`] for the families whose packed path is
-//! certified; their sinks install each packed weight exactly or as its exact
-//! dequantized values (see [`install_packed_parameter`]).
+//! certified. Every family's sink, certified or not, installs each packed
+//! weight exactly or as its exact dequantized values (see
+//! [`install_packed_parameter`]), so driving a sink directly through
+//! [`quantization::execute_local_quantized_load_plan`] never stores a
+//! requantized approximation.
 
 pub(crate) mod accounting;
 mod artifact;
-mod division;
+mod budget;
 mod dtype;
 mod error;
 mod layout;
@@ -83,6 +88,7 @@ pub use artifact::{
     ArtifactSource, CheckpointManifest, ResolvedIndexTensorAlias, ShardInventory, TensorInventory,
     discover_checkpoint,
 };
+pub(crate) use budget::require_source_tensors;
 pub use dtype::TensorDType;
 pub use error::{CheckpointError, Result};
 pub(crate) use mapping::build_load_plan_with_index_total_size_policy;
@@ -99,6 +105,8 @@ pub use report::{
     AliasRecord, CheckpointEquivalenceRecord, DTypeConversion, LoadReport, MemoryEstimate,
     QuantizationRecord, TransformRecord,
 };
+#[cfg(test)]
+pub(crate) use runtime::packed_sink_support;
 pub use runtime::{
     ExecutionFailure, ExecutionFailureCause, ExecutionOutcome, ExecutionResult, ExecutionStats,
     LocalShardSource, PackedInstall, PackedLayoutPolicy, ParameterInstallError, SourceStats,

@@ -101,7 +101,7 @@ use burn::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Result, architecture::TokenMask, delta_net::plan::ceiling_division, delta_net::softplus,
+    Error, Result, architecture::TokenMask, delta_net::softplus, division::ceil_div_usize,
     operations,
 };
 
@@ -1403,7 +1403,7 @@ pub(crate) fn chunked_scan_with_budget<B: Backend>(
     let c = c.cast(DType::F32).swap_dims(1, 2);
     let a = a.reshape([1, heads, 1, 1]);
     let d = d.reshape([1, heads, 1, 1]);
-    let chunks = ceiling_division(sequence, chunk_size);
+    let chunks = ceil_div_usize(sequence, chunk_size);
     // `clamp(budget / plane, 1, chunks)` chunks per block, by the verified planners.
     let block_chunks = scan_block_chunks(batch, heads, chunk_size, budget, chunks);
     let masks = SegmentMasks::new(chunk_size, &device);

@@ -3,8 +3,9 @@
 //! A batched cache write appends `n_b` tokens to row `b` at absolute position
 //! `s_b`, reading them from columns `[c_b, c_b + n_b)` of a
 //! `[batch, heads, block, dim]` input. Adjacent rows with identical
-//! `(s_b, c_b, n_b)` map to identical physical slots, so one `slice_assign`
-//! over the row range `[first_row, end_row)` writes all of them. A uniform
+//! `(s_b, c_b, n_b)` map to identical physical slots, so one region
+//! assignment (`operations::assign_region`) over the row range
+//! `[first_row, end_row)` writes all of them. A uniform
 //! batch, such as single-token decode at equal lengths or an unpadded
 //! prefill, becomes a single run; fully ragged rows become one run each,
 //! which is exactly the per-row cost.

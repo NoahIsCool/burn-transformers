@@ -9,7 +9,11 @@
 //!   --test packed_metal_kernels -- --ignored --exact --nocapture
 //! ```
 
-#![cfg(all(feature = "kernel-tracing", target_os = "macos", not(feature = "rocm")))]
+#![cfg(all(
+    feature = "kernel-tracing",
+    target_os = "macos",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 
 #[path = "support/kernel_trace.rs"]
 mod kernel_trace;

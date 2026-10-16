@@ -19,8 +19,8 @@ library against an independent oracle:
 | `generation` | Every `GenerationConfig` rule (warpers, penalties, `min_new_tokens`, special and stop IDs, `logit_bias`, float controls representable in F32) for raw JSON and decoded configurations, bit-exact JSON round trips, and EOS/stop/length precedence with `min_new_tokens` against a scalar token tracker | Vocabulary ≤32, batch ≤4, output length ≤32, four stops of length ≤4, 128 pushes |
 | `logits_processing` | `LogitsProcessor` with `TokenHistory`: ragged and out-of-vocabulary rows, prompt boundaries, bias, EOS suppression, no-repeat n-grams, repetition/presence/frequency penalties, temperature, top-k (ties kept), top-p and min-p against an `f64` oracle; rebuilt, recorded, stateless and legacy masked histories must agree bit for bit; every valid configuration, including `f32`-boundary controls, keeps logits finite or `-inf` and selection defined | Vocabulary ≤8, batch ≤3, rows ≤6 tokens |
 | `rope_parameters` | Flat and per-layer-type `rope_parameters` (every algorithm and key, legacy `type`, boundary values, raw JSON) through the shared RoPE translator under arbitrary family contexts: contextual errors, finite `f32` frequencies, angles at the largest integer position, and amplitudes for every accepted configuration, `Ignore ⊇ Reject`, finite softmax multipliers, bit-exact round trips, layer-type validation | Head width and context from fixed tables |
-| `chat_templates` | Untrusted Jinja templates (Hugging Face idioms, sandbox escapes, raw bytes, huge repetition, padding and doubling counts) and messages through `LocalTokenizer::render_chat` on a word-level fixture: no panics, contextual errors for every documented precondition (all six shadowed message fields, all fifteen reserved variables), determinism with a pinned clock, unnamed template selection against Hugging Face's `get_chat_template` rule, `encode_chat` consistency, and time/output bounds | 24 fragments, three messages; 2 s and 64 MiB per render |
-| `modular_specs` | Typed modular `DecoderSpec`/`Seq2SeqSpec` with every mixer, feed-forward, routing, position, connectivity and normalization option: validation totality, JSON round trips, construction exactly for valid specs without documented capability gaps, finite logits, and prefill+decode parity with the stateless forward | Width ≤16, two layers, vocabulary ≤16, four tokens |
+| `chat_templates` | Untrusted Jinja templates (Hugging Face idioms, sandbox escapes, raw bytes, huge repetition, padding and doubling counts) and messages through `LocalTokenizer::render_chat` on a word-level fixture: no panics, contextual errors for every documented precondition (all six shadowed message fields, all fifteen reserved variables), determinism with a pinned clock, unnamed template selection against Hugging Face's `get_chat_template` rule, five template storage forms (including `chat_template.jinja` plus `additional_chat_templates/tool_use.jinja` replacing a decoy in `tokenizer_config.json`) with an exact loaded-templates oracle (Python universal newlines), `encode_chat` consistency, and time/output bounds | 24 fragments, three messages; 2 s and 64 MiB per render |
+| `modular_specs` | Typed modular `DecoderSpec`/`Seq2SeqSpec` with every mixer, feed-forward (clamped SwiGLU routed experts included), routing, position, connectivity and normalization option and the stack's embedding scale and final logit cap: validation totality, JSON round trips, construction exactly for valid specs without documented capability gaps, finite logits, and prefill+decode parity with the stateless forward | Width ≤16, two layers, vocabulary ≤16, four tokens |
 | `experiment_interfaces` | Semantic-axis selection, activation-mask broadcasting, parameter-transfer ties and failure atomicity, stable categorical losses against scalar oracles | 4 KiB input; tensor extents ≤4, at most four parameter owners, five classes; no model initialization |
 
 Accepted invalid input is not automatically a bug: the harness asserts the
@@ -32,27 +32,20 @@ giant model allocations occur.
 
 ## Open findings
 
-Fuzzing found behaviors that the harnesses deliberately avoid asserting while
-their fixes are open, because they live in files outside this package. Each has
-a minimized reproducer as an `#[ignore]`d unit test that fails today and should
-pass once fixed; run them with `cargo test --manifest-path fuzz/Cargo.toml --lib
--- --ignored`. [CAMPAIGNS.md](CAMPAIGNS.md) records how each was found.
+None. A finding the harnesses must avoid asserting while its fix is open gets a
+minimized reproducer as an `#[ignore]`d unit test that fails until the fix
+lands (run them with `cargo test --manifest-path fuzz/Cargo.toml --lib --
+--ignored`), and a tolerance in the harness that the fix removes;
+[CAMPAIGNS.md](CAMPAIGNS.md) records how each was found. Today the harnesses
+tolerate nothing beyond contextual validation errors: they require the absence
+of panics and every documented invariant.
 
-| ID | Test | Behavior |
-|---|---|---|
-| CHAT-4 | `chat_templates::tests::tools_select_the_tool_use_template` | With `tools` and no template name, a checkpoint's named `tool_use` template is ignored and `default` renders; Hugging Face 5.2 selects `tool_use` |
-
-The harnesses tolerate exactly this one: the selection check also accepts
-`default` where CHAT-4 should select `tool_use`. Otherwise they require the
-absence of panics and every documented invariant. Remove the tolerance when the
-finding is fixed.
-
-One further difference is pinned rather than ignored: `render_chat` rejects an
-unknown template name, while Hugging Face renders the name itself as template
-source (`get_chat_template` falls through to treating `chat_template` as Jinja).
-Rejection is the safer contract; it is a documentation request for the
-tokenization module's list of known differences, checked by
-`chat_templates::tests::documented_preconditions_are_rejected`.
+One difference is pinned rather than ignored: `render_chat` rejects an unknown
+template name, while Hugging Face renders the name itself as template source
+(`get_chat_template` falls through to treating `chat_template` as Jinja).
+Rejection is the safer contract; the tokenization module documentation now
+lists it among the deliberate differences, and
+`chat_templates::tests::documented_preconditions_are_rejected` checks it.
 
 ## Fixed findings
 
@@ -69,6 +62,7 @@ test, and a focused regression test in the owning library module.
 | ROPE-PARSE-1 | `rope_parameters::tests::arrays_are_not_rope_parameters` | `RopeParameters` deserializes only from a JSON object |
 | CHAT-5 | `namespace_cycles_do_not_outlive_the_render` (in the library's chat-template sandbox tests) | Found while investigating a campaign's peak RSS: a template could leak memory across renders through namespace reference cycles (`{% set ns.me = ns %}`); every namespace's reference-holding attributes are now cleared when the render ends, grouped by name so the clearing costs only what the render built (`namespace_cleanup_costs_only_what_the_render_built`; the first version cleared every name on every namespace, which a review showed could take seconds and gigabytes) |
 | CHAT-6 | `limits_follow_the_context_size` (same module) | Also from that investigation: the 16 MiB prompt floor let a template make `encode_chat` use about 2 GB (the tokenizer keeps over 100 bytes of state per prompt byte); the floor is now 1 MiB plus four times the context |
+| CHAT-4 | `chat_templates::tests::tools_select_the_tool_use_template` | `select_template` (now `src/tokenization/catalog.rs`) chooses the explicit name, then `tool_use` when `tools` is given (and not JSON null), then `default`, then the sole template, as Transformers 5.2's `get_chat_template` does; library regressions `tokenization::tests::unnamed_renders_select_tool_use_when_tools_are_given` and `tokenization::catalog::tests::selection_follows_get_chat_template_exhaustively` |
 | CHAT-7 | `divisibleby_never_panics` (same module) | Found by the library's typed differential property, not by a campaign: MiniJinja's `divisibleby` test computes `a % 0` unchecked and panics; a checked replacement reports Jinja2's `ZeroDivisionError` |
 | TOPP-TIE-1 | `logits_processing::tests::{top_p_ranks_by_logit_like_hugging_face, campaign_top_p_near_ties_may_split}` | `filter_top_p` sorts the logits and takes softmax and cumulative mass over the sorted row, as Hugging Face's `TopPLogitsWarper` does, so a logit one ulp above a kept one is never dropped (library regression `generation::tests::top_p_ranks_near_tied_logits_by_logit`); the top-set check and the `tests/generation_properties.rs` mode property no longer allow near-tie slack |
 

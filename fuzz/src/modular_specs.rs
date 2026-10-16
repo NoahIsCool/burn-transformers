@@ -6,11 +6,12 @@
 //! models build from. The harness generates typed specifications covering
 //! every mixer (grouped-query attention in all three forms, MLA, differential
 //! attention, Gated DeltaNet, Mamba2), every feed-forward operator (gated,
-//! ungated, clamped SwiGLU, routed experts with every routing policy, none),
-//! every position encoding and RoPE scaling rule, every connectivity, score
-//! scale, soft cap, sink, bias, norm-scope, gate, normalization, placement,
-//! and residual option, with small dimensions that are sometimes zero,
-//! non-divisible, or mismatched. It checks:
+//! ungated, clamped SwiGLU, routed experts with every routing policy, clamped
+//! SwiGLU routed experts, none), every position encoding and RoPE scaling
+//! rule, every connectivity, score scale, soft cap, sink, bias, norm-scope,
+//! gate, normalization, placement, and residual option, and the stack's
+//! embedding scale and final logit soft cap, with small dimensions that are
+//! sometimes zero, non-divisible, or mismatched. It checks:
 //!
 //! 1. **Totality.** Validation never panics and fails only with
 //!    [`Error::Configuration`].
@@ -19,14 +20,16 @@
 //!    validates.
 //! 3. **Construction.** [`ModularCausalLm::init`] (or
 //!    [`ModularSeq2SeqLm::init`]) succeeds exactly for valid specs without the
-//!    documented capability gaps (gated residuals, Mamba2, positions beyond
-//!    `i32`, and recurrent or sliding-window encoder layers), which fail with
-//!    [`Error::BackendCapability`] or a configuration error.
+//!    documented capability gaps (gated residuals, Mamba2 with a convolution
+//!    kernel below 2, positions beyond `i32`, and recurrent or sliding-window
+//!    encoder layers), which fail with [`Error::BackendCapability`] or a
+//!    configuration error.
 //! 4. **Execution.** A constructed model with moderate parameters evaluates a
 //!    padded two-row batch to finite logits of the expected shape.
-//! 5. **Cache parity.** For causal stacks without routed experts (whose top-k
-//!    may flip on rounding-level differences), a prefill of three tokens plus one
-//!    decode step reproduces the stateless forward's last logits.
+//! 5. **Cache parity.** For causal stacks without routed experts of either kind
+//!    (whose top-k may flip on rounding-level differences), a prefill of three
+//!    tokens plus one decode step reproduces the stateless forward's last
+//!    logits.
 
 use burn::{
     backend::Flex,
@@ -376,6 +379,28 @@ fn routing(draw: &mut Draw<'_, '_>) -> RoutingPolicy {
     }
 }
 
+/// Decodes the routed experts of either expert variant, with every routing policy.
+fn experts(
+    draw: &mut Draw<'_, '_>,
+    activation: impl Fn(&mut Draw<'_, '_>) -> Activation,
+) -> MixtureOfExpertsSpec {
+    let shared_experts = draw.size(&[0, 1]);
+    // A gate needs a shared expert; keep the invalid pairing rare.
+    let gate_allowed = shared_experts > 0 || !draw.typical();
+    MixtureOfExpertsSpec {
+        routed_experts: draw.size(&[4, 2, 0]),
+        experts_per_token: draw.size(&[2, 1, 3, 0]),
+        shared_experts,
+        expert_intermediate_size: draw.size(&[4, 0]),
+        activation: activation(draw),
+        renormalize_selected: draw.flag(),
+        routed_scale: draw.float(&[1.0, 2.5, 0.0]),
+        routing: routing(draw),
+        shared_expert_gate: gate_allowed && draw.flag(),
+        expert_bias: draw.flag(),
+    }
+}
+
 /// Decodes a feed-forward operator of any kind.
 fn feed_forward(draw: &mut Draw<'_, '_>) -> FeedForwardSpec {
     let activation = |draw: &mut Draw<'_, '_>| {
@@ -387,7 +412,7 @@ fn feed_forward(draw: &mut Draw<'_, '_>) -> FeedForwardSpec {
             Activation::ReluSquared,
         ])
     };
-    match draw.variant(6) {
+    match draw.variant(7) {
         0 => FeedForwardSpec::Dense(DenseFeedForwardSpec {
             intermediate_size: draw.size(&[8, 4, 0]),
             activation: activation(draw),
@@ -405,23 +430,20 @@ fn feed_forward(draw: &mut Draw<'_, '_>) -> FeedForwardSpec {
             alpha: draw.float(&[1.702, 1.0, 0.0]),
             up_offset: draw.float(&[1.0, 0.0]),
         }),
-        3 | 4 => {
-            let shared_experts = draw.size(&[0, 1]);
-            // A gate needs a shared expert; keep the invalid pairing rare.
-            let gate_allowed = shared_experts > 0 || !draw.typical();
-            FeedForwardSpec::MixtureOfExperts(MixtureOfExpertsSpec {
-                routed_experts: draw.size(&[4, 2, 0]),
-                experts_per_token: draw.size(&[2, 1, 3, 0]),
-                shared_experts,
-                expert_intermediate_size: draw.size(&[4, 0]),
-                activation: activation(draw),
-                renormalize_selected: draw.flag(),
-                routed_scale: draw.float(&[1.0, 2.5, 0.0]),
-                routing: routing(draw),
-                shared_expert_gate: gate_allowed && draw.flag(),
-                expert_bias: draw.flag(),
-            })
-        }
+        3 | 4 => FeedForwardSpec::MixtureOfExperts(experts(draw, activation)),
+        5 => FeedForwardSpec::ClampedMixtureOfExperts {
+            // The clamped unit requires SiLU experts; keep other activations rare.
+            experts: experts(draw, |draw: &mut Draw<'_, '_>| {
+                if draw.typical() {
+                    Activation::Silu
+                } else {
+                    activation(draw)
+                }
+            }),
+            limit: draw.float(&[7.0, 0.0, -1.0]),
+            alpha: draw.float(&[1.702, 1.0, 0.0]),
+            up_offset: draw.float(&[1.0, 0.0]),
+        },
         _ => FeedForwardSpec::None,
     }
 }
@@ -455,8 +477,20 @@ fn stack(draw: &mut Draw<'_, '_>, hidden_size: usize) -> DecoderSpec {
         final_norm: normalization(draw),
         tie_word_embeddings: draw.flag(),
         max_position_embeddings: draw.size(&[16, 8, 1 << 31, 0]),
-        embedding_scale: None,
-        final_logit_softcap: None,
+        embedding_scale: optional_positive(draw, &[8.0_f64.sqrt(), 1.0, 0.0, -1.0]),
+        final_logit_softcap: optional_positive(draw, &[30.0, 1.0, 0.0, -1.0]),
+    }
+}
+
+/// Absent (the serialized default) seven times in eight, else a float from `table`.
+///
+/// The table's first entry is valid; the later ones include the zero and
+/// negative values validation rejects.
+fn optional_positive(draw: &mut Draw<'_, '_>, table: &[f64]) -> Option<f64> {
+    if draw.typical() {
+        None
+    } else {
+        Some(draw.float(table))
     }
 }
 
@@ -470,11 +504,11 @@ fn layer_is_executable(layer: &DecoderLayerSpec) -> bool {
         && !matches!(&layer.mixer, MixerSpec::Mamba2(mamba) if mamba.convolution_kernel < 2)
 }
 
-/// Whether a layer uses routed experts, whose top-k may flip on rounding noise.
+/// Whether a layer uses routed experts of either kind, whose top-k may flip on rounding noise.
 fn has_routed_experts(spec: &DecoderSpec) -> bool {
     spec.layers
         .iter()
-        .any(|layer| matches!(layer.feed_forward, FeedForwardSpec::MixtureOfExperts(_)))
+        .any(|layer| layer.feed_forward.experts().is_some())
 }
 
 /// Builds a two-row causal input; row 1 is left-padded by one token.

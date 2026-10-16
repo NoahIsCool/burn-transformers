@@ -47,12 +47,8 @@ pub open spec fn sparse_spec(index: int, first_dense: int, frequency: int) -> bo
     ensures
         sparse == sparse_spec(index as int, first_dense as int, frequency as int),
 ))]
-#[allow(
-    clippy::manual_is_multiple_of,
-    reason = "Verus specifies `%` but has no specification for `usize::is_multiple_of`"
-)]
 pub(crate) fn sparse_layer(index: usize, first_dense: usize, frequency: usize) -> bool {
-    frequency != 0 && index >= first_dense && index % frequency == 0
+    frequency != 0 && index >= first_dense && index.is_multiple_of(frequency)
 }
 
 /// Returns whether any of the first `layers` layers owns routed experts.

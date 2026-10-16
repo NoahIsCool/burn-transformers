@@ -34,7 +34,7 @@ const QWEN3_4B: &str = r#"{
   "use_cache": true, "use_sliding_window": false, "vocab_size": 151936
 }"#;
 
-/// Llama-3.1-8B's RoPE block (revision d04e592b).
+/// The RoPE block of `meta-llama/Llama-3.1-8B` at `d04e592bb4f6aa9cfee91e2e20afa771667e1d4b`.
 const LLAMA_31_ROPE: &str = r#"{
   "factor": 8.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0,
   "original_max_position_embeddings": 8192, "rope_type": "llama3"

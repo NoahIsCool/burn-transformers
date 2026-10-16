@@ -42,7 +42,7 @@ use crate::models::config::ConfigError;
 
 use super::architecture::{GptOssArchitecture, GptOssWeightFormat};
 use super::config::{FAMILY, GptOssConfig};
-use super::plan::{ExtentError, checkpoint_extent, projection_extent};
+use crate::models::shared::decoder_plan::{ExtentError, checkpoint_extent, projection_extent};
 
 /// Reserved family-specific checkpoint policy.
 ///

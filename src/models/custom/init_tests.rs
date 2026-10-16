@@ -49,7 +49,12 @@ fn residual_projection_names_follow_the_blocks_present() {
     ];
     for (layers, expected) in cases {
         let spec = decoder(layers);
-        let policy = ModularCausalLm::<Flex>::scaled_init_policy(&spec, 0.02);
+        let policy = spec.scaled_init_policy(0.02);
+        // The model's associated function returns the same policy.
+        assert_eq!(
+            ModularCausalLm::<Flex>::scaled_init_policy(&spec, 0.02),
+            policy
+        );
         assert_eq!(names(&policy), expected);
         assert_eq!(
             policy.residual_scaling,
@@ -59,7 +64,11 @@ fn residual_projection_names_follow_the_blocks_present() {
         );
         ModularCausalLm::<Flex>::init_with(spec, &policy, &device).unwrap();
     }
-    let policy = ModularSeq2SeqLm::<Flex>::scaled_init_policy(&seq2seq_spec(), 0.02);
+    let policy = seq2seq_spec().scaled_init_policy(0.02);
+    assert_eq!(
+        ModularSeq2SeqLm::<Flex>::scaled_init_policy(&seq2seq_spec(), 0.02),
+        policy
+    );
     assert_eq!(names(&policy), vec!["down_proj", "o_proj"]);
     ModularSeq2SeqLm::<Flex>::init_with(seq2seq_spec(), &policy, &device).unwrap();
 }

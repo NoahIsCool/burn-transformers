@@ -340,11 +340,16 @@ milestones above or the advertised checkpoint support:
 - **Shared mechanisms.** Connectivity masks, sinks, soft caps, differential
   attention, every RoPE scaling rule, one router for softmax/sigmoid and
   grouped routing, clamped SwiGLU, a shared Mamba-2 mixer, MXFP4 decoding, and
-  explicit initialization policies, all usable from modular specs.
+  explicit initialization policies. Modular specs can use attention and
+  final-logit soft caps, the embedding scale, dense and routed clamped SwiGLU,
+  and the shared Mamba-2 mixer; Muse Glimmer's scale-free embedding norm and
+  bounded logit map, GPT-2 absolute positions, GPT-NeoX parallel residuals,
+  OLMo 2 output-only norms, and MTP heads remain family-only (see the
+  `architecture::spec` "Not expressible" table).
 - **Batched cached execution.** Every family decodes ragged batches in one
   pass per step through atomic cache step writes.
-- **Verification.** 25 Verus harnesses (1,877 verified, 0 errors at
-  `fbcdb12`), checked in CI on every source change, and twelve fuzz targets.
+- **Verification.** 25 Verus harnesses (2,035 verified, 0 errors at
+  `889a7ea`), checked in CI on every source change, and twelve fuzz targets.
 
 Open work carried forward: cached-state interventions, T5 staged views on the
 full encoder-decoder model, registering GPT-2 and GPT-NeoX in `AutoCausalLm`
