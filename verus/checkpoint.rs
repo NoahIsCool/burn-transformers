@@ -20,11 +20,15 @@
 //! - `tensor_file_offset` computes `8 + header + begin` or reports overflow, and
 //!   `data_section` places the data section at `8 + header`, ending exactly at
 //!   the end of the file, rejecting an empty or oversized header;
-//! - `axis_view` splits a shape into exact `[outer, axis, inner]` products
-//!   whose `outer * axis` and `outer * axis * inner` fit `usize` (exactly
-//!   `slice_block`'s preconditions) and whose product is the full shape
-//!   product, naming the first failed check otherwise; `axis_elements` and
-//!   `range_within` decide their products and ranges exactly;
+//! - `axis_view` has a complete specification: it succeeds exactly when every
+//!   running product before and after the axis fits `u64` (a later zero cannot
+//!   hide an overflowing prefix) and the host checks pass, returning exact
+//!   `[outer, axis, inner]` products whose `outer * axis` and
+//!   `outer * axis * inner` fit `usize` (exactly `slice_block`'s
+//!   preconditions) and whose product is the full shape product; each error
+//!   names the first failed check, with every earlier check proved to pass;
+//!   `axis_elements` and `range_within` decide their products and ranges
+//!   exactly;
 //! - `slice_block` keeps every slice and concatenation block inside its tensor
 //!   with overflow-free arithmetic, and consecutive target blocks partition the
 //!   output in order;
@@ -116,10 +120,9 @@
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
 //! driven by these plans, file I/O, error mapping, the string-keyed planner
 //! bookkeeping around the ledger (name lookups and the consumed-source set),
-//! and the bit assembly of the
-//! floating-point rounding encoder (sign, exponent field, NaN payload; checked
-//! exhaustively at every 16-bit midpoint and against independent oracles)
-//! remain covered by tests rather than proofs.
+//! and the bit assembly of the floating-point rounding encoder (sign, exponent
+//! field, NaN payload; checked exhaustively at every 16-bit midpoint and
+//! against independent oracles) remain covered by tests rather than proofs.
 
 // Loop invariants are attributes on `while` expressions, which rustc accepts
 // only with this feature; it applies solely under Verus.

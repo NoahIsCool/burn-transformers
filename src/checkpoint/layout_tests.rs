@@ -240,6 +240,35 @@ fn range_products_match_subslice_element_counts() {
     }
 }
 
+/// The axis-view check sequence written directly with `try_fold` and `try_from`.
+fn reference_axis_view(shape: &[u64], axis: usize) -> Result<AxisExtents, AxisViewError> {
+    if axis >= shape.len() {
+        return Err(AxisViewError::AxisOutOfBounds);
+    }
+    let fold = |dimensions: &[u64]| {
+        dimensions
+            .iter()
+            .try_fold(1_u64, |product, &dimension| product.checked_mul(dimension))
+    };
+    let outer = fold(&shape[..axis]).ok_or(AxisViewError::OuterOverflow)?;
+    let outer =
+        usize::try_from(outer).map_err(|_| AxisViewError::OuterTooLarge { value: outer })?;
+    let axis_len = usize::try_from(shape[axis])
+        .map_err(|_| AxisViewError::AxisTooLarge { value: shape[axis] })?;
+    let inner = fold(&shape[axis + 1..]).ok_or(AxisViewError::InnerOverflow)?;
+    let inner =
+        usize::try_from(inner).map_err(|_| AxisViewError::InnerTooLarge { value: inner })?;
+    outer
+        .checked_mul(axis_len)
+        .and_then(|rows| rows.checked_mul(inner))
+        .ok_or(AxisViewError::ElementsTooLarge)?;
+    Ok(AxisExtents {
+        outer,
+        axis: axis_len,
+        inner,
+    })
+}
+
 /// Axis views report exact extents and name the first failed check.
 #[test]
 fn axis_views_split_shapes_and_name_the_first_failure() {
@@ -266,6 +295,15 @@ fn axis_views_split_shapes_and_name_the_first_failure() {
     );
     assert_eq!(
         axis_view(&[1, 2, u64::MAX, 2], 1),
+        Err(AxisViewError::InnerOverflow)
+    );
+    // A later zero does not hide an overflowing running product on either side.
+    assert_eq!(
+        axis_view(&[1 << 40, 1 << 40, 0, 5], 3),
+        Err(AxisViewError::OuterOverflow)
+    );
+    assert_eq!(
+        axis_view(&[5, 1 << 40, 1 << 40, 0], 0),
         Err(AxisViewError::InnerOverflow)
     );
     // A zero inner extent keeps the element count at zero.
@@ -415,6 +453,18 @@ proptest! {
         prop_assert_eq!(view.axis as u64, shape[axis]);
         prop_assert_eq!(view.inner as u64, product(&shape[axis + 1..]));
         prop_assert_eq!((view.outer * view.axis * view.inner) as u64, product(&shape));
+    }
+
+    /// Axis views classify overflowing and zero-bearing shapes like a direct reference.
+    #[test]
+    fn axis_views_classify_like_the_reference(
+        shape in proptest::collection::vec(
+            prop::sample::select(vec![0_u64, 1, 3, 1 << 20, 1 << 32, 1 << 40, u64::MAX]),
+            0..6,
+        ),
+        axis in 0_usize..7,
+    ) {
+        prop_assert_eq!(axis_view(&shape, axis), reference_axis_view(&shape, axis));
     }
 
     /// Dense byte lengths match the original running-product fold.

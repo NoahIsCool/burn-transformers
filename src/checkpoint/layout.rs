@@ -699,17 +699,22 @@ pub(crate) enum AxisViewError {
 /// size, axis host size, inner product, inner host size, element count), and
 /// the first failure is returned.
 ///
-/// Verified: on success the extents are the exact products of the dimensions
-/// before and after the axis and the axis length itself, `outer * axis` and
-/// `outer * axis * inner` fit `usize` (exactly [`slice_block`]'s
-/// preconditions for this view), and `outer * axis * inner` is the shape's
-/// full product; each error names the first failed check.
+/// Verified, as a complete specification (exactly one outcome holds for every
+/// input): on success every running product before and after the axis fits
+/// `u64` (so a zero dimension cannot hide an overflowing prefix), the extents
+/// are the exact products of the dimensions before and after the axis and the
+/// axis length itself, `outer * axis` and `outer * axis * inner` fit `usize`
+/// (exactly [`slice_block`]'s preconditions for this view), and
+/// `outer * axis * inner` is the shape's full product. Each error names the
+/// first failed check, with every earlier check proved to have passed.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(view =>
     ensures
         match view {
             Ok(extents) => {
                 &&& axis < shape@.len()
+                &&& range_fits(shape@, 0, axis as int)
+                &&& range_fits(shape@, axis as int + 1, shape@.len() as int)
                 &&& extents.outer as int == range_product(shape@, 0, axis as int)
                 &&& extents.axis == shape@[axis as int]
                 &&& extents.inner as int
@@ -729,22 +734,34 @@ pub(crate) enum AxisViewError {
                 && value as int == range_product(shape@, 0, axis as int)
                 && value > usize::MAX,
             Err(AxisViewError::AxisTooLarge { value }) => axis < shape@.len()
+                && range_fits(shape@, 0, axis as int)
                 && range_product(shape@, 0, axis as int) <= usize::MAX
                 && value == shape@[axis as int]
                 && value > usize::MAX,
             Err(AxisViewError::InnerOverflow) => axis < shape@.len()
+                && range_fits(shape@, 0, axis as int)
                 && range_product(shape@, 0, axis as int) <= usize::MAX
                 && shape@[axis as int] <= usize::MAX
                 && !range_fits(shape@, axis as int + 1, shape@.len() as int),
             Err(AxisViewError::InnerTooLarge { value }) => axis < shape@.len()
+                && range_fits(shape@, 0, axis as int)
+                && range_product(shape@, 0, axis as int) <= usize::MAX
+                && shape@[axis as int] <= usize::MAX
+                && range_fits(shape@, axis as int + 1, shape@.len() as int)
                 && value as int == range_product(shape@, axis as int + 1, shape@.len() as int)
                 && value > usize::MAX,
-            Err(AxisViewError::ElementsTooLarge) => axis < shape@.len() && {
-                let outer = range_product(shape@, 0, axis as int);
-                let inner = range_product(shape@, axis as int + 1, shape@.len() as int);
-                ||| outer * shape@[axis as int] > usize::MAX
-                ||| outer * shape@[axis as int] * inner > usize::MAX
-            },
+            Err(AxisViewError::ElementsTooLarge) => axis < shape@.len()
+                && range_fits(shape@, 0, axis as int)
+                && range_fits(shape@, axis as int + 1, shape@.len() as int)
+                && {
+                    let outer = range_product(shape@, 0, axis as int);
+                    let inner = range_product(shape@, axis as int + 1, shape@.len() as int);
+                    &&& outer <= usize::MAX
+                    &&& shape@[axis as int] <= usize::MAX
+                    &&& inner <= usize::MAX
+                    &&& (outer * shape@[axis as int] > usize::MAX
+                        || outer * shape@[axis as int] * inner > usize::MAX)
+                },
         }
 ))]
 pub(crate) fn axis_view(shape: &[u64], axis: usize) -> Result<AxisExtents, AxisViewError> {
