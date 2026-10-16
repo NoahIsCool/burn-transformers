@@ -1534,16 +1534,22 @@ proptest::proptest! {
 /// Release-mode timing of the segment transitions against the former `mask_fill` form.
 ///
 /// Shapes are one Lightning Mamba-2 block (64 heads, 128-token chunks) with
-/// 4 and 16 chunks. Run with `cargo test --release --lib
+/// 4 and 16 chunks, a small batched block (batch 8, 8 heads, two 32-token
+/// chunks, as in the Nemotron-H batched decode benchmark), and a width-3
+/// chunk-carry matrix. Run with `cargo test --release --lib
 /// mamba2::tests::segment_transition_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "release-mode timing benchmark"]
 fn segment_transition_timing() {
     use std::time::Instant;
-    let (heads, width) = (64, 128);
-    let masks = SegmentMasks::<TestBackend>::new(width, &Default::default());
-    for chunks in [4, 16] {
-        let log_decay = -waves4([1, heads, chunks, width], 1.0, 0.05).abs();
+    for (batch, heads, chunks, width) in [
+        (1, 64, 4, 128),
+        (1, 64, 16, 128),
+        (8, 8, 2, 32),
+        (8, 64, 1, 3),
+    ] {
+        let masks = SegmentMasks::<TestBackend>::new(width, &Default::default());
+        let log_decay = -waves4([batch, heads, chunks, width], 1.0, 0.05).abs();
         let (mut legacy, mut tables) = (Vec::new(), Vec::new());
         for _ in 0..15 {
             let started = Instant::now();
@@ -1559,7 +1565,7 @@ fn segment_transition_timing() {
         };
         let (before, after) = (median(&mut legacy), median(&mut tables));
         eprintln!(
-            "mamba2 segment transitions [1, {heads}, {chunks}, {width}, {width}]: mask_fill {before:.1} ms, tables {after:.1} ms ({:.2}x)",
+            "mamba2 segment transitions [{batch}, {heads}, {chunks}, {width}, {width}]: mask_fill {before:.3} ms, tables {after:.3} ms ({:.2}x)",
             before / after
         );
     }

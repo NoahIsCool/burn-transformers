@@ -1617,8 +1617,8 @@ impl<B: Backend> SegmentMasks<B> {
 
     /// [`Self::transitions`] with an explicit operand layout.
     ///
-    /// `flattened` multiplies a repeated `[b, h, c, w·w]` term plane by the
-    /// flattened rows (the Flex layout); otherwise the `[b, h, c, w, 1]` terms
+    /// `flattened` multiplies a materialized `[b, h, c, w·w]` term plane by
+    /// the flattened rows (the Flex layout); otherwise the `[b, h, c, w, 1]` terms
     /// broadcast against `[1, 1, 1, w, w]` views of the same rows. Both
     /// evaluate the same elementwise operations in the same order, so they
     /// are bit-identical; tests compare them with the former masks.
@@ -1640,11 +1640,12 @@ impl<B: Backend> SegmentMasks<B> {
             let terms = log_decay.unsqueeze_dim::<5>(4) * table(&self.inside).reshape(square);
             return (terms.cumsum(3) + table(&self.future_bias).reshape(square)).exp();
         }
-        let terms = log_decay
-            .unsqueeze_dim::<5>(4)
-            .repeat_dim(4, width)
-            .reshape(flat)
-            * table(&self.inside);
+        // Reshaping the expanded `[.., w, 1 -> w]` view materializes it; Flex
+        // collapses that copy to a 2-D `[b·h·c·w, w]` tiled copy with a
+        // stride-zero column, several times faster than `repeat_dim`'s
+        // one-element chunks.
+        let terms =
+            log_decay.unsqueeze_dim::<5>(4).expand(shape).reshape(flat) * table(&self.inside);
         (terms.reshape(shape).cumsum(3).reshape(flat) + table(&self.future_bias))
             .exp()
             .reshape(shape)
