@@ -698,9 +698,17 @@ impl<B: Backend> GptNeoXForCausalLm<B> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Label {
     /// A model-level parameter, `gpt_neox.<name>`.
-    Model(&'static str),
+    Model(
+        /// Parameter path below `gpt_neox.`, such as `"embed_in.weight"`.
+        &'static str,
+    ),
     /// A layer parameter, `gpt_neox.layers.<index>.<name>` (or the layer itself for `""`).
-    Layer(usize, &'static str),
+    Layer(
+        /// Zero-based decoder layer index.
+        usize,
+        /// Parameter path below the layer, or `""` for the layer itself.
+        &'static str,
+    ),
 }
 
 impl Label {

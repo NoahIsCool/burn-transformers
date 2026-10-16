@@ -867,9 +867,17 @@ fn per_layer_original_context_ignores_the_top_level_value() {
 #[derive(Debug, Clone, Copy)]
 enum Amplitude {
     /// The translation succeeds with this amplitude.
-    Value(f64),
+    Value(
+        /// Expected `RopeConfig` amplitude (attention scaling factor).
+        f64,
+    ),
     /// Strict translation fails at this field; `Ignore` yields the value.
-    Unused(&'static str, f64),
+    Unused(
+        /// Field named by the strict error, such as `"mscale"`.
+        &'static str,
+        /// Amplitude produced when unused fields are ignored instead.
+        f64,
+    ),
 }
 
 /// One amplitude case: `(attention_factor, mscale, mscale_all_dim, expectations)`.
@@ -2548,10 +2556,16 @@ enum FamilyOutcome {
     /// Exactly the frozen translator's configuration.
     Frozen,
     /// A configuration error at `<family>.rope.<field>`.
-    Error(&'static str),
+    Error(
+        /// The rejected field, the `<field>` suffix of the error path.
+        &'static str,
+    ),
     /// The Transformers result, which differs from the frozen YaRN translation
     /// in its amplitude, its truncation, or both.
-    Transformers(RopeConfig),
+    Transformers(
+        /// The complete configuration Hugging Face Transformers would build.
+        RopeConfig,
+    ),
 }
 
 /// Predicts the Qwen/Muse recommended-context outcome from the documented rules.

@@ -948,9 +948,15 @@ enum TargetPadding<B: Backend> {
     /// Every token is valid.
     None,
     /// Each row's valid tokens form one run; the contiguous bias is exact.
-    Contiguous(TokenMask<B>),
+    Contiguous(
+        /// Target validity mask `[batch, sequence]`.
+        TokenMask<B>,
+    ),
     /// Interior padding, or an unknown layout: logical-position bias.
-    Logical(TokenMask<B>),
+    Logical(
+        /// Target validity mask `[batch, sequence]`, used to count logical positions.
+        TokenMask<B>,
+    ),
 }
 
 impl<B: Backend> TargetPadding<B> {

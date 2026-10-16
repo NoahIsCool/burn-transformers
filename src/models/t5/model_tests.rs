@@ -702,7 +702,10 @@ fn left_padded_targets_have_finite_gradients() {
     type AdBackend = Autodiff<TestBackend>;
 
     /// Collects every floating parameter ID of a module.
-    struct Ids(Vec<(ParamId, usize)>);
+    struct Ids(
+        /// `(parameter ID, tensor rank)` in visitation order.
+        Vec<(ParamId, usize)>,
+    );
 
     impl ModuleVisitor<AdBackend> for Ids {
         /// Records the parameter ID and rank of each floating tensor.

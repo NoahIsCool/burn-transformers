@@ -577,9 +577,15 @@ enum NeutralSetting {
     /// `null`, or an empty list (no banned, suppressed, or biased tokens).
     Absent,
     /// This number disables the feature, such as `num_beams: 1`.
-    Number(f64),
+    Number(
+        /// The neutral value; any other JSON number changes generation.
+        f64,
+    ),
     /// This boolean disables the feature.
-    Flag(bool),
+    Flag(
+        /// The neutral value, such as `false` for `renormalize_logits`.
+        bool,
+    ),
     /// Any present value differs from this crate's semantics (`max_length`).
     Never,
 }

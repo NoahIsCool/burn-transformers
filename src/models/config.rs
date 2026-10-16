@@ -437,7 +437,10 @@ struct RopeParametersRepr {
 /// default RoPE and `["yarn"]` would set `rope_type` positionally. Asking the
 /// deserializer for a map makes every non-object value (sequence, string,
 /// number, boolean, null) a type error before any field is read.
-struct RopeParametersMapping(RopeParametersRepr);
+struct RopeParametersMapping(
+    /// Fields read from the JSON object, before type-key reconciliation.
+    RopeParametersRepr,
+);
 
 impl<'de> Deserialize<'de> for RopeParametersMapping {
     /// Requests a map and reads its entries with the derived field rules.
@@ -446,6 +449,7 @@ impl<'de> Deserialize<'de> for RopeParametersMapping {
         struct MappingVisitor;
 
         impl<'de> Visitor<'de> for MappingVisitor {
+            /// A mapping is the only value this visitor produces.
             type Value = RopeParametersMapping;
 
             /// Names the expected shape in serde's `invalid type` message.
@@ -465,6 +469,7 @@ impl<'de> Deserialize<'de> for RopeParametersMapping {
 }
 
 impl TryFrom<RopeParametersMapping> for RopeParameters {
+    /// Serde custom-error text for conflicting `rope_type`/`type` keys.
     type Error = String;
 
     /// Reconciles the type keys and moves every other field unchanged.
