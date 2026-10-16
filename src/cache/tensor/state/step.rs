@@ -621,12 +621,13 @@ enum PreparedRecurrent<B: Backend> {
         /// Validated replacement of every active row's state in one layer.
         PreparedRecurrentBatchWrite<B>,
     ),
-    /// Snapshot staging.
+    /// Snapshot staging for one row, or for the whole batch at once.
     Stage(
         /// Cache group the snapshots target.
         usize,
-        /// Validated per-token proposal snapshots appended after the row's
-        /// current staged length.
+        /// Validated per-token proposal snapshots for a contiguous row range
+        /// (one row, or every row when all are active with equal staged
+        /// lengths), written from the rows' shared current staged length.
         PreparedRecurrentStage<B>,
     ),
 }

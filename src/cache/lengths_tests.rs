@@ -183,18 +183,24 @@ fn ledger_topology_transitions_outside_a_transaction() {
 }
 
 /// One lifecycle operation in the model-based property test.
+///
+/// The generator deliberately produces wrong-length vectors and out-of-range
+/// values, so each payload below states the rule under which `Model::apply`
+/// accepts it, not a property of the generated data.
 #[derive(Debug, Clone)]
 enum Operation {
     /// Advance the active cursor by per-row counts.
     Advance(
-        /// Tokens appended to each row; the length must equal the row count.
+        /// Tokens appended to each row; accepted only when there is one count
+        /// per row and no row's cursor passes capacity.
         Vec<usize>,
     ),
     /// Begin a transaction.
     Begin,
     /// Commit per-row accepted prefixes.
     Commit(
-        /// Accepted proposal tokens per row, each at most that row's staged
+        /// Accepted proposal tokens per row; accepted only inside a
+        /// transaction, with one count per row, each at most that row's staged
         /// `working - committed` suffix.
         Vec<usize>,
     ),
@@ -202,14 +208,16 @@ enum Operation {
     Rollback,
     /// Rewind committed rows.
     Truncate(
-        /// Requested committed length per row; each must not exceed the
-        /// current committed length.
+        /// Requested committed length per row; accepted only outside a
+        /// transaction, with one length per row, none above that row's current
+        /// committed length.
         Vec<usize>,
     ),
     /// Gather committed rows by source index.
     Reorder(
-        /// Source row for each destination row; duplicates are allowed and
-        /// every index must be below the row count.
+        /// Source row for each destination row; accepted only outside a
+        /// transaction, with one index per row, each below the row count
+        /// (duplicates allowed).
         Vec<usize>,
     ),
     /// Return every row to zero.
