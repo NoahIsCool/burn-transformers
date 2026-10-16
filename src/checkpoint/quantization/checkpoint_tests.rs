@@ -844,6 +844,38 @@ fn post_execution_hash_failure_records_its_partial_pass() {
     assert_eq!(post, super::super::ProvenanceHashStats::default());
 }
 
+/// Staging counters of the one-tensor identity conversion around provenance binding.
+///
+/// Returns `(unbound, bound)`. `unbound` comes from a conversion that a
+/// checkpoint edit stops after execution but before provenance binding;
+/// `bound` comes from a conversion that binds provenance and publishes. Each
+/// runs on its own fresh fixture, so neither touches the caller's directory.
+fn one_tensor_reference_staging() -> (BurnpackStagingStats, BurnpackStagingStats) {
+    let unbound_root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(unbound_root.path(), &["weight"]);
+    let unbound = quantize_with_post_execution_hook(
+        &manifest,
+        &plan,
+        &unbound_root.path().join("changed.bpk"),
+        QuantizedCheckpointOptions::default(),
+        || flip_last_payload_bit(&manifest),
+    )
+    .unwrap_err()
+    .staging;
+
+    let bound_root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(bound_root.path(), &["weight"]);
+    let bound = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        bound_root.path().join("published.bpk"),
+        QuantizedCheckpointOptions::default(),
+    )
+    .unwrap()
+    .staging;
+    (unbound, bound)
+}
+
 /// Publication stays create-only when the output appears during execution.
 ///
 /// Both hash passes agree and provenance binds, but the final create-only
@@ -871,8 +903,21 @@ fn output_created_during_execution_is_never_replaced() {
     ));
     assert!(failure.failed_target.is_none());
     assert_eq!(failure.report.applied, ["weight"]);
-    // Staging counters include the bound manifest estimate from provenance binding.
+    // Publication fails after provenance binding, so the reported staging
+    // counters are the bound ones: equal to a published conversion's, and
+    // with a larger manifest estimate than a conversion stopped before binding.
+    let (unbound, bound) = one_tensor_reference_staging();
+    assert_eq!(failure.staging, bound);
     assert_eq!(failure.staging.tensor_count, 1);
+    assert_eq!(
+        failure.staging.staged_payload_bytes,
+        unbound.staged_payload_bytes
+    );
+    assert!(
+        failure.staging.estimated_manifest_bytes > unbound.estimated_manifest_bytes,
+        "{:?} vs {unbound:?}",
+        failure.staging
+    );
     for stats in [
         failure.provenance.pre_execution.unwrap(),
         failure.provenance.post_execution.unwrap(),

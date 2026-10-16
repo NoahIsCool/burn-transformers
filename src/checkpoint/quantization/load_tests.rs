@@ -2299,6 +2299,7 @@ fn redirect_through_directory_symlink(checkpoint: &Path) {
 }
 
 /// Writes the executable fixture below `directory/checkpoint` with its sidecar beside it.
+#[cfg(unix)]
 fn nested_executable_sidecar(
     directory: &TempDir,
 ) -> (CheckpointManifest, LoadPlan, PathBuf, PathBuf) {
@@ -2331,6 +2332,7 @@ fn nested_executable_sidecar(
 }
 
 /// Asserts the provenance rejection of a shard reached through a moved parent.
+#[cfg(unix)]
 fn assert_redirected_shard(cause: &ExecutionFailureCause<QuantizedSinkError<SinkError>>) {
     assert!(
         matches!(cause,
