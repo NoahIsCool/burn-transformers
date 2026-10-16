@@ -105,8 +105,11 @@ Rules that follow from Verus's semantics:
   specification. Prefer `if`, index `while` loops, explicit comparisons, and
   `min`/`max`; the affected Clippy lints are allowed locally with a comment
   saying why. `is_multiple_of` does have one (`n.is_multiple_of(d)` is
-  `n % d == 0`, and `n == 0` for `d == 0`), so verified bodies use it instead
-  of a remainder comparison.
+  `n % d == 0`, and `n == 0` for `d == 0`), so new verified code can use it.
+  Older bodies, including the `ceil_div_u64` excerpt above, still compare a
+  remainder with zero, and some comments and three
+  `clippy::manual_is_multiple_of` allowances still claim it has no
+  specification. Those predate this correction and are being replaced.
 - Loop invariants are attributes on `while` statements, which needs
   `#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]` at the
   harness root. Only the Verus compiler sees it; ordinary builds are
