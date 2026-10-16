@@ -1,4 +1,4 @@
-//! Verus harness for the tokenizer's pure layout and calendar arithmetic.
+//! Verus harness for the tokenizer's pure layout, calendar, and decimal arithmetic.
 //!
 //! Verifies, in place, the specifications attached to
 //! `src/tokenization/layout.rs`:
@@ -39,6 +39,18 @@
 //! every day of an era from its monotonicity plus a `by (compute_only)`
 //! evaluation of each of the 400 years' first and last days.
 //!
+//! and to `src/tokenization/pycompat/decimal.rs`, the integer core of
+//! Python's `round`:
+//!
+//! - `checked_power_of_ten` is exactly `10^places`, or `None` exactly when it
+//!   exceeds `i128::MAX` (`i128::checked_pow`);
+//! - `round_integer_half_even` returns the multiple of `10^places` nearest to
+//!   the value, ties to the even quotient (a multiple at most half a unit
+//!   away, exactly half only with an even quotient), or `None` exactly when
+//!   that multiple lies outside `i128`;
+//! - `increment_decimal_digits` adds exactly one to the number its ASCII
+//!   digits spell, growing by a digit only when every digit was `9`.
+//!
 //! Tokenizer encoding, special-token insertion, and the Burn tensor
 //! constructors are outside the proof and remain covered by the Rust tests. See
 //! `verus/README.md` for the method, toolchain, and command.
@@ -52,3 +64,5 @@
 pub mod calendar;
 #[path = "../src/tokenization/layout.rs"]
 pub mod layout;
+#[path = "../src/tokenization/pycompat/decimal.rs"]
+pub mod decimal;

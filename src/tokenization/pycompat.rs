@@ -64,6 +64,11 @@ use minijinja::{
 
 use super::chat_template::sandbox::{self, LimitedText, RenderBudget};
 
+// Documents itself with `//!`; an outer `///` here would change its link scope.
+mod decimal; // Integer rounding and decimal increments for `round` (Verus-verified).
+
+use decimal::{increment_decimal_digits, round_integer_half_even};
+
 /// Deepest container nesting printed or serialized before failing.
 pub(crate) const MAX_NESTING: usize = 256;
 
@@ -833,28 +838,6 @@ impl RoundOperand {
     }
 }
 
-/// Rounds an integer to a multiple of `10^places`, ties to the even multiple.
-///
-/// Returns `None` only when the rounded value overflows `i128`. A unit larger
-/// than any `i128` rounds every value to zero.
-fn round_integer_half_even(value: i128, places: u32) -> Option<i128> {
-    let Some(unit) = 10_i128.checked_pow(places) else {
-        return Some(0);
-    };
-    let remainder = value.rem_euclid(unit);
-    let below = value - remainder;
-    let round_up = match remainder.cmp(&(unit - remainder)) {
-        core::cmp::Ordering::Less => false,
-        core::cmp::Ordering::Greater => true,
-        core::cmp::Ordering::Equal => (below / unit) % 2 != 0,
-    };
-    if round_up {
-        below.checked_add(unit)
-    } else {
-        Some(below)
-    }
-}
-
 /// CPython's `round(float, ndigits)`: correctly rounded, ties to even.
 ///
 /// CPython rounds the exact binary value through `dtoa`. For `ndigits >= 0`,
@@ -927,22 +910,11 @@ fn round_float_to_tens(value: f64, places: usize) -> f64 {
 }
 
 /// Adds one to a non-empty string of ASCII decimal digits.
+///
+/// The carry itself is the verified [`increment_decimal_digits`].
 fn increment_decimal(digits: &mut String) {
     let mut bytes = core::mem::take(digits).into_bytes();
-    let mut index = bytes.len();
-    loop {
-        if index == 0 {
-            bytes.insert(0, b'1');
-            break;
-        }
-        index -= 1;
-        if bytes[index] == b'9' {
-            bytes[index] = b'0';
-        } else {
-            bytes[index] += 1;
-            break;
-        }
-    }
+    increment_decimal_digits(&mut bytes);
     *digits = String::from_utf8(bytes).expect("ASCII digits stay valid UTF-8");
 }
 
