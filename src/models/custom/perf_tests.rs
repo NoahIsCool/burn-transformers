@@ -14,7 +14,11 @@
 //! tied-vocabulary decoders (tiny and small modular stacks and a small
 //! Qwen3.5 hybrid with the released vocabulary) and prints one JSON line per
 //! configuration. Build it from two source revisions and compare the lines;
-//! `TRANSFORMERS_BENCH_SOURCE_LABEL` names the revision in the output.
+//! `TRANSFORMERS_BENCH_SOURCE_LABEL` names the revision in the output. Each
+//! model is drawn from a fixed backend seed, so run the test alone
+//! (`--exact --test-threads=1`) and the final-logit checksums of two revisions
+//! must agree up to F32 reassociation (the FNV-1a hash of their bits shows
+//! whether they are bit-identical).
 //!
 //! Each comparison times the former algorithm (kept here verbatim as an
 //! oracle) and the new one on identical inputs, checks that both produce the
@@ -432,16 +436,17 @@ fn time_cached_decode<M: CausalLanguageModel<TestBackend>>(
                     .logits,
             );
         }
-        let checksum = logits
-            .unwrap()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .iter()
-            .map(|&value| f64::from(value))
-            .sum::<f64>();
+        let values = logits.unwrap().into_data().to_vec::<f32>().unwrap();
         let decode = started.elapsed().as_secs_f64();
-        (prefill * 1e3, steps as f64 / decode, checksum)
+        let checksum = values.iter().map(|&value| f64::from(value)).sum::<f64>();
+        // FNV-1a over the little-endian bits of every final logit.
+        let bits = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        (prefill * 1e3, steps as f64 / decode, checksum, bits)
     };
     run();
     run();
@@ -452,8 +457,8 @@ fn time_cached_decode<M: CausalLanguageModel<TestBackend>>(
         spread(samples.iter().map(|sample| sample.1).collect());
     let label = std::env::var("TRANSFORMERS_BENCH_SOURCE_LABEL").unwrap_or_default();
     println!(
-        "TIED_DECODE_JSON={{\"source\":\"{label}\",\"config\":\"{name}\",\"vocabulary\":{vocabulary},\"prompt_tokens\":32,\"decode_steps\":32,\"repetitions\":{repetitions},\"prefill_ms\":[{prefill_min:.3},{prefill_median:.3},{prefill_max:.3}],\"decode_tokens_per_second\":[{decode_min:.2},{decode_median:.2},{decode_max:.2}],\"final_logit_sum\":{:.6}}}",
-        samples[0].2
+        "TIED_DECODE_JSON={{\"source\":\"{label}\",\"config\":\"{name}\",\"vocabulary\":{vocabulary},\"prompt_tokens\":32,\"decode_steps\":32,\"repetitions\":{repetitions},\"prefill_ms\":[{prefill_min:.3},{prefill_median:.3},{prefill_max:.3}],\"decode_tokens_per_second\":[{decode_min:.2},{decode_median:.2},{decode_max:.2}],\"final_logit_sum\":{:.6},\"final_logits_fnv1a\":\"{:016x}\"}}",
+        samples[0].2, samples[0].3
     );
 }
 
@@ -501,23 +506,29 @@ fn tied_modular_decoder(
 /// `tiny` (width 64, vocabulary 1,024) is dominated by per-call overhead;
 /// `small` (width 576, vocabulary 49,152, SmolLM-135M's table) and
 /// `qwen3.5-small` (width 1,024, vocabulary 248,320, four hybrid layers) are
-/// dominated by the tied readout and the projections.
+/// dominated by the tied readout and the projections. Every model is drawn
+/// from the same backend seed, so checksums are comparable across revisions.
 #[test]
 #[ignore = "timing measurement; run in release with --ignored --nocapture"]
 fn tied_vocabulary_decode_throughput() {
+    use burn::tensor::backend::Backend;
+
     let device: Device = Default::default();
+    TestBackend::seed(&device, 2026);
     let tiny = ModularCausalLm::<TestBackend>::init(
         tied_modular_decoder(64, 1_024, 2, (4, 2, 16), 128),
         &device,
     )
     .unwrap();
     time_cached_decode("modular-tiny", &tiny, 1_024, 9);
+    TestBackend::seed(&device, 2027);
     let small = ModularCausalLm::<TestBackend>::init(
         tied_modular_decoder(576, 49_152, 4, (9, 3, 64), 1_536),
         &device,
     )
     .unwrap();
     time_cached_decode("modular-small", &small, 49_152, 9);
+    TestBackend::seed(&device, 2028);
     let qwen = crate::models::qwen3_5::Qwen3_5ForCausalLm::<TestBackend>::init(
         crate::models::qwen3_5::Qwen3_5TextConfig {
             vocab_size: 248_320,
