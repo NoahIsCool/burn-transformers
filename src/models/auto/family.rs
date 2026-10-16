@@ -24,7 +24,7 @@ use burn::tensor::backend::Backend;
 
 use crate::{
     Error, Result,
-    checkpoint::{CheckpointManifest, LoadPlan, TensorSink},
+    checkpoint::{CheckpointError, CheckpointManifest, LanguageNamespace, LoadPlan, TensorSink},
     models::{
         config::{ModelConfig, TokenIds},
         deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
@@ -104,8 +104,12 @@ pub(super) trait CausalFamily<B: Backend>: Sized + TensorSink {
 
 // Shared planning helpers.
 
-/// Maps a checkpoint discovery or planning failure to a checkpoint error.
-fn checkpoint_error(error: impl core::fmt::Display) -> Error {
+/// Maps a checkpoint discovery, namespace, or planning failure to a crate error.
+///
+/// Every typed [`CheckpointError`] of automatic planning passes through this
+/// one function. [`Error`] has no typed checkpoint variant yet, so the error is
+/// rendered into [`Error::Checkpoint`] with its complete message.
+fn checkpoint_error(error: CheckpointError) -> Error {
     Error::Checkpoint(error.to_string())
 }
 
@@ -114,46 +118,15 @@ fn discover(root: &Path, options: &AutoLoadOptions) -> Result<CheckpointManifest
     CheckpointManifest::discover(root, &options.checkpoint).map_err(checkpoint_error)
 }
 
-/// Parameter namespace holding a checkpoint's language model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LanguageNamespace {
-    /// Released multimodal layout: `model.language_model.*`.
-    Wrapped,
-    /// Standalone text layout: `model.embed_tokens.weight` and siblings.
-    TextOnly,
-}
-
-/// Classifies a validated tensor-name set into exactly one language namespace.
+/// Classifies a discovered manifest's language namespace for `family`.
 ///
-/// The classification is total and exclusive: a name set with only wrapped
-/// names is [`LanguageNamespace::Wrapped`], one with only the text-only
-/// embedding is [`LanguageNamespace::TextOnly`], and having neither or both is
-/// an error naming `family`. No filename heuristics are involved.
-pub(super) fn classify_language_namespace<'a>(
-    names: impl IntoIterator<Item = &'a str>,
-    family: &str,
+/// Uses the crate's shared, total and exclusive classifier, so automatic and
+/// concrete-family loading choose the same Qwen3.5 or Muse layout.
+fn manifest_namespace(
+    manifest: &CheckpointManifest,
+    family: &'static str,
 ) -> Result<LanguageNamespace> {
-    let mut wrapped = false;
-    let mut text_only = false;
-    for name in names {
-        wrapped |= name.starts_with("model.language_model.");
-        text_only |= name == "model.embed_tokens.weight";
-    }
-    match (wrapped, text_only) {
-        (true, false) => Ok(LanguageNamespace::Wrapped),
-        (false, true) => Ok(LanguageNamespace::TextOnly),
-        (false, false) => Err(Error::Checkpoint(format!(
-            "{family} checkpoint contains neither official language parameter namespace"
-        ))),
-        (true, true) => Err(Error::Checkpoint(format!(
-            "{family} checkpoint ambiguously contains wrapped and text-only language namespaces"
-        ))),
-    }
-}
-
-/// Classifies a discovered manifest's language namespace.
-fn manifest_namespace(manifest: &CheckpointManifest, family: &str) -> Result<LanguageNamespace> {
-    classify_language_namespace(manifest.tensors.keys().map(String::as_str), family)
+    LanguageNamespace::of_manifest(manifest, family).map_err(checkpoint_error)
 }
 
 // Registered families.

@@ -42,6 +42,19 @@ pub enum CheckpointError {
         /// Candidate filenames, sorted for deterministic diagnostics.
         candidates: Vec<String>,
     },
+    /// A checkpoint of a family published in a multimodal (`model.language_model.*`)
+    /// and a text-only (`model.embed_tokens.weight`) layout contains neither.
+    #[error("{family} checkpoint contains neither official language parameter namespace")]
+    LanguageNamespaceNotFound {
+        /// Model family whose namespaces were probed, such as `Qwen`.
+        family: &'static str,
+    },
+    /// A checkpoint contains both the multimodal and the text-only language namespace.
+    #[error("{family} checkpoint ambiguously contains wrapped and text-only language namespaces")]
+    AmbiguousLanguageNamespace {
+        /// Model family whose namespaces were probed, such as `Muse`.
+        family: &'static str,
+    },
     /// A user- or index-supplied relative path was unsafe.
     #[error("unsafe checkpoint-relative path `{path}`: {reason}")]
     UnsafeRelativePath {

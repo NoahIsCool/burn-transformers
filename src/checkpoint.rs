@@ -26,6 +26,7 @@ mod layout;
 mod lexical;
 mod mapping;
 mod mxfp4;
+mod namespace;
 mod options;
 pub mod quantization;
 mod report;
@@ -43,6 +44,7 @@ pub use mapping::{
     ExpectedTensor, KeyMatcher, LoadPlan, MappingPlan, PlannedSource, PlannedTensor,
     PlannedTensorEquivalence, PlannedTransform, TensorOperation, TensorTransform, build_load_plan,
 };
+pub(crate) use namespace::LanguageNamespace;
 pub use options::{
     ArtifactLimits, ArtifactSelection, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias,
     LoadOptions,
