@@ -330,6 +330,155 @@ fn python_methods_are_bounded() {
     );
 }
 
+/// Renders `source` on a plain MiniJinja environment with only the Python-compatibility layer.
+///
+/// This is the reference for the bounded replacements: the same builtins
+/// without any charge, and no operator guard.
+fn render_plain(source: &str) -> Result<String, Error> {
+    let mut environment = Environment::new();
+    environment.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
+    let budget = Arc::new(RenderBudget::new(RenderLimits::for_context_bytes(0)));
+    super::super::super::pycompat::install(&mut environment, &budget);
+    environment.render_str(source, ())
+}
+
+/// Builtins and methods that copy their input are charged, so retained copies stay within the budget.
+///
+/// Review finding CHAT-UNCHARGED-RETENTION: `s | list` (one 24-byte `Value`
+/// per character) or `s | reverse` kept alive in a namespace in a loop
+/// reached 467 MiB against a 16 MiB budget, and the render succeeded. Every
+/// copying builtin, function, and Python method now charges its result before
+/// it is built, while its output stays exactly MiniJinja's.
+#[test]
+fn copying_builtins_are_charged() {
+    let prelude = "{% set s = 'abcdefgh' %}{% set m = {'a': 1, 'b': 2, 'c': 3} %}";
+    let copies = [
+        ("s | list", "['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']"),
+        ("s | reverse", "hgfedcba"),
+        ("s | sort | join", "abcdefgh"),
+        ("s | unique | list | length", "8"),
+        ("s | map('upper') | join", "ABCDEFGH"),
+        ("s | select('in', 'aeiou') | join", "ae"),
+        ("s | reject('in', 'aeiou') | join", "bcdfgh"),
+        ("[m] | selectattr('a') | length", "1"),
+        ("[m] | rejectattr('a') | length", "0"),
+        ("m | dictsort", "[['a', 1], ['b', 2], ['c', 3]]"),
+        ("[m, m] | groupby('a') | length", "1"),
+        ("'a\nb' | lines", "['a', 'b']"),
+        ("dict(m, d=4) | length", "4"),
+        ("m.items() | length", "3"),
+        ("m.keys()", "['a', 'b', 'c']"),
+        ("m.values()", "[1, 2, 3]"),
+        ("(' ' ~ s ~ ' ').strip()", "abcdefgh"),
+        ("s.split('d')", "['abc', 'efgh']"),
+        ("'a\nb'.splitlines()", "['a', 'b']"),
+        ("s.removeprefix('ab')", "cdefgh"),
+        ("range(3) | reverse | list", "[2, 1, 0]"),
+        ("(s | list)[::-1] | reverse | join", "abcdefgh"),
+    ];
+    for (copy, expected) in copies {
+        let source = format!("{prelude}{{{{ {copy} }}}}");
+        assert_eq!(render(&source).unwrap(), expected, "{copy}");
+        assert_eq!(
+            render(&source).unwrap(),
+            render_plain(&source).unwrap(),
+            "{copy}"
+        );
+        // 200 retained copies of at least 6 bytes or one item exceed 1 024 bytes.
+        let retained = format!(
+            "{prelude}{{% set ns = namespace(l=none) %}}{{% for i in range(200) %}}{{% set ns.l = [ns.l, {copy}] %}}{{% endfor %}}ok"
+        );
+        assert_limited(&retained, SMALL);
+    }
+    // A collected lazy iterable is charged for the collection, too.
+    assert_eq!(
+        render("{{ 'a b' | split | list }}|{{ 'a b' | split | reverse | list }}").unwrap(),
+        "['a', 'b']|['b', 'a']"
+    );
+    // `debug()` would print the whole engine state without a limit; it is not a global.
+    assert_eq!(render("{{ debug is defined }}").unwrap(), "False");
+    assert!(render("{{ debug() }}").is_err());
+}
+
+/// Slices and splatted call arguments, which the engine copies, are charged; lazy views are free.
+///
+/// The guard rewrites `value[a:b:c]` into the bounded slice filter and
+/// `f(*x, **y)` into charged arguments; the results stay exactly MiniJinja's.
+#[test]
+fn slices_and_splats_are_charged() {
+    let prelude = "{% set s = 'abcdefgh' %}{% set l = [1, 2, 3, 4, 5, 6, 7, 8] %}{% set m = {'a': 1, 'b': 2} %}";
+    let cases = [
+        ("s[1:]", "bcdefgh"),
+        ("s[::-1]", "hgfedcba"),
+        ("s[1:6:2]", "bdf"),
+        ("s[-3:]", "fgh"),
+        ("s[none:2]", "ab"),
+        ("l[2:4] | list", "[3, 4]"),
+        ("l[::-3] | list", "[8, 5, 2]"),
+        ("range(*[1, 3]) | list", "[1, 2]"),
+        ("dict(**m) | length", "2"),
+        ("[s[1:]] | first", "bcdefgh"),
+    ];
+    for (copy, expected) in cases {
+        let source = format!("{prelude}{{{{ {copy} }}}}");
+        assert_eq!(render(&source).unwrap(), expected, "{copy}");
+        assert_eq!(render_plain(&source).unwrap(), expected, "{copy}");
+    }
+    for copy in [
+        "s[1:]",
+        "s[::-1]",
+        "'%s%s%s%s%s%s%s%s' | format(*l)",
+        "dict(**m) | length",
+    ] {
+        let retained = format!(
+            "{prelude}{{% set ns = namespace(l=none) %}}{{% for i in range(200) %}}{{% set ns.l = [ns.l, {copy}] %}}{{% endfor %}}ok"
+        );
+        assert_limited(&retained, SMALL);
+    }
+    // A sequence slice is a lazy view of the same items and costs nothing.
+    let views = format!(
+        "{prelude}{{% set ns = namespace(l=none) %}}{{% for i in range(200) %}}{{% set ns.l = [ns.l, l[1:]] %}}{{% endfor %}}ok"
+    );
+    assert_eq!(render_with(&views, SMALL).unwrap(), "ok");
+    // Engine errors keep MiniJinja's message.
+    let error = render(&format!("{prelude}{{{{ s[::0] }}}}")).unwrap_err();
+    assert_eq!(error.detail(), Some("cannot slice by step size of 0"));
+    let error = render(&format!("{prelude}{{{{ 3[1:] }}}}")).unwrap_err();
+    assert_eq!(
+        error.detail(),
+        Some("value of type number cannot be sliced")
+    );
+}
+
+/// `strftime_now` checks its largest possible result before formatting and charges its result.
+#[test]
+fn strftime_is_bounded() {
+    assert_limited("{{ strftime_now('%c' * 30) }}", SMALL);
+    assert_eq!(
+        render("{{ strftime_now('%Y-%m-%d') }}").unwrap(),
+        "1970-01-01"
+    );
+    // SMALL allows 64-byte values: a 4-byte format may expand to 48 bytes,
+    // a 6-byte one to 72, which is refused before formatting.
+    assert_eq!(
+        render_with("{{ strftime_now('%c%c') }}", SMALL).unwrap(),
+        "Thu Jan  1 00:00:00 1970Thu Jan  1 00:00:00 1970"
+    );
+    assert_limited("{{ strftime_now('%c%c%c') }}", SMALL);
+    // No directive expands by more than `STRFTIME_EXPANSION`.
+    let civil = super::super::calendar::civil_time(253_402_300_799).unwrap();
+    for directive in (b'A'..=b'Z').chain(b'a'..=b'z').map(char::from) {
+        for format in [format!("%{directive}"), format!("%-{directive}")] {
+            if let Ok(text) = super::super::strftime(&format, &civil) {
+                assert!(
+                    text.len() <= 2 * super::super::STRFTIME_EXPANSION,
+                    "{format}: {text}"
+                );
+            }
+        }
+    }
+}
+
 /// A panic inside the engine or a callback becomes a contextual error.
 #[test]
 fn panics_never_escape_rendering() {
@@ -532,8 +681,8 @@ fn namespace_cleanup_clears_every_reference_holder() {
 /// `namespace()` charges the namespace and every attribute it copies, which the registry keeps alive.
 #[test]
 fn namespaces_are_charged_to_the_budget() {
-    // Each namespace copies seven attributes: eight items (192 bytes) plus
-    // seven bytes of keys.
+    // `dict()` copies seven entries (336 bytes); each namespace copies them
+    // again as eight items (192 bytes) plus seven bytes of keys.
     assert_limited(
         "{% set d = dict(a=1, b=2, c=3, d=4, e=5, f=6, g=7) %}{% for i in range(6) %}{% set x = namespace(d) %}{% endfor %}",
         SMALL,

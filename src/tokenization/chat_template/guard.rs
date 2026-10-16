@@ -147,7 +147,7 @@ fn guard_tag(kind: TagKind, tag: &str) -> Result<Option<String>, String> {
         Ok(tokens) => tokens,
         // MiniJinja's lexer fails on the same input, unless it only skipped a
         // guarded byte inside text this lexer misread; refuse those.
-        Err(reason) if body.contains(['+', '~', '*']) => return Err(reason),
+        Err(reason) if body.contains(['+', '~', '*', ':']) => return Err(reason),
         Err(_) => return Ok(None),
     };
     let mut parser = Parser {
@@ -176,7 +176,7 @@ fn guard_tag(kind: TagKind, tag: &str) -> Result<Option<String>, String> {
         }
         Ok(_) => Ok(None),
         Err(Refusal::Limit(reason)) => Err(reason),
-        Err(Refusal::Syntax(reason)) if tokens.iter().any(Token::is_guarded) => Err(reason),
+        Err(Refusal::Syntax(reason)) if tokens.iter().any(Token::needs_guard) => Err(reason),
         Err(Refusal::Syntax(_)) => Ok(None),
     }
 }
@@ -215,6 +215,16 @@ impl Token<'_> {
     /// Whether this is a `+`, `~`, or `*` symbol (an operator or a `*` splat).
     fn is_guarded(&self) -> bool {
         self.kind == Kind::Symbol && matches!(self.text, "+" | "~" | "*")
+    }
+
+    /// Whether a tag holding this token may need a rewrite: a guarded operator,
+    /// a `**` splat (or power), or the `:` of a slice (or map entry).
+    ///
+    /// A tag the parser cannot read is refused if it holds one of these, so
+    /// syntax the parser misreads can never carry an unbounded operation past
+    /// the guard.
+    fn needs_guard(&self) -> bool {
+        self.is_guarded() || (self.kind == Kind::Symbol && matches!(self.text, "**" | ":"))
     }
 }
 
@@ -356,6 +366,9 @@ struct Fragment {
     unary: bool,
     /// Whether the expression is a bare variable name (a keyword-argument key).
     name: bool,
+    /// Whether the text ends in a filter added by a slice rewrite, which must
+    /// be parenthesized before postfix syntax or as a test argument.
+    open_filter: bool,
 }
 
 /// Rebuilds a construct's text from the source between its child expressions.
@@ -385,6 +398,19 @@ impl<'a> Splice<'a> {
         self.cursor = child.end;
     }
 
+    /// Copies source up to `end` and moves the text built so far out, leaving the splice at `end`.
+    fn take(&mut self, end: usize) -> String {
+        self.text.push_str(&self.source[self.cursor..end]);
+        self.cursor = end;
+        std::mem::take(&mut self.text)
+    }
+
+    /// Replaces the text built so far with `text` and resumes copying source at `cursor`.
+    fn restart(&mut self, text: String, cursor: usize) {
+        self.text = text;
+        self.cursor = cursor;
+    }
+
     /// Copies the remaining source up to `end` and returns the construct's text.
     fn finish(mut self, end: usize) -> String {
         self.text.push_str(&self.source[self.cursor..end]);
@@ -412,6 +438,10 @@ const PRODUCT: Level = &[
 ];
 /// `**`.
 const POWER: Level = &[("**", None)];
+/// The filter call appended to a splatted call argument (see `sandbox::SPLAT_FILTER`).
+///
+/// An argument that already ends in it is left alone, so rewriting is idempotent.
+const SPLAT_SUFFIX: &str = "|__bounded_splat";
 /// Comparison symbols; `in` and `not in` are handled by name.
 const COMPARISONS: [&str; 6] = ["==", "!=", "<", "<=", ">", ">="];
 /// Names that are constants rather than variables.
@@ -556,6 +586,7 @@ impl<'a> Parser<'a> {
             text: self.source[start..end].to_owned(),
             unary,
             name: false,
+            open_filter: false,
         }
     }
 
@@ -831,6 +862,7 @@ impl<'a> Parser<'a> {
             text: splice.finish(end),
             unary: false,
             name: false,
+            open_filter: false,
         })
     }
 
@@ -886,6 +918,7 @@ impl<'a> Parser<'a> {
             text,
             unary,
             name,
+            open_filter: false,
         })
     }
 
@@ -909,6 +942,7 @@ impl<'a> Parser<'a> {
             text: splice.finish(operand.end),
             unary: false,
             name: false,
+            open_filter: false,
         })
     }
 
@@ -945,6 +979,7 @@ impl<'a> Parser<'a> {
             text: splice.finish(end),
             unary: false,
             name: false,
+            open_filter: false,
         })
     }
 
@@ -987,7 +1022,15 @@ impl<'a> Parser<'a> {
                         splice.child(&argument);
                     }
                 } else if self.starts_test_argument() {
-                    splice.child(&self.unary_postfix()?);
+                    let argument = self.unary_postfix()?;
+                    if argument.open_filter {
+                        // `x is t y|f` would filter the test's result;
+                        // `x is t (y|f)` passes the one argument instead.
+                        let text = format!("({})", argument.text);
+                        splice.child(&Fragment { text, ..argument });
+                    } else {
+                        splice.child(&argument);
+                    }
                 }
             } else {
                 break;
@@ -1003,6 +1046,7 @@ impl<'a> Parser<'a> {
             text: splice.finish(end),
             unary: true,
             name,
+            open_filter: false,
         })
     }
 
@@ -1019,6 +1063,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses leading minus signs, a primary, and postfix syntax (no filters).
+    ///
+    /// Slices are rewritten into the bounded slice filter (see
+    /// [`Self::subscript`]); a filter cannot take further postfix syntax, so
+    /// the text so far is parenthesized before the next `.`, `[`, or `(`.
     fn unary_postfix(&mut self) -> Parse<Fragment> {
         let start = self.offset();
         let mut minus = 0;
@@ -1030,34 +1078,38 @@ impl<'a> Parser<'a> {
         let mut splice = Splice::new(self.source, start);
         splice.child(&primary);
         let mut name = primary.name && minus == 0;
+        let mut open_filter = false;
         let mut links = 0;
-        loop {
-            if self.eat_symbol(".") {
-                match self.peek() {
-                    Some(token) if matches!(token.kind, Kind::Name | Kind::Integer) => {
-                        self.position += 1;
+        while let Some(token) = self
+            .peek()
+            .filter(|token| token.kind == Kind::Symbol && matches!(token.text, "." | "[" | "("))
+        {
+            if open_filter {
+                let text = splice.take(token.start);
+                splice.restart(format!("({text})"), token.start);
+                open_filter = false;
+            }
+            match token.text {
+                "." => {
+                    self.position += 1;
+                    match self.peek() {
+                        Some(token) if matches!(token.kind, Kind::Name | Kind::Integer) => {
+                            self.position += 1;
+                        }
+                        other => {
+                            return Err(self.unexpected(other, "an attribute or index").into());
+                        }
                     }
-                    other => return Err(self.unexpected(other, "an attribute or index").into()),
                 }
-            } else if self.eat_symbol("[") {
-                if !self.at_symbol(":") {
-                    splice.child(&self.expression()?);
+                "[" => {
+                    self.position += 1;
+                    open_filter = self.subscript(&mut splice, token)?;
                 }
-                if self.eat_symbol(":") {
-                    if !self.at_symbol("]") && !self.at_symbol(":") {
-                        splice.child(&self.expression()?);
-                    }
-                    if self.eat_symbol(":") && !self.at_symbol("]") {
-                        splice.child(&self.expression()?);
+                _ => {
+                    for argument in self.call_arguments()? {
+                        splice.child(&argument);
                     }
                 }
-                self.expect_symbol("]")?;
-            } else if self.at_symbol("(") {
-                for argument in self.call_arguments()? {
-                    splice.child(&argument);
-                }
-            } else {
-                break;
             }
             name = false;
             links += 1;
@@ -1070,7 +1122,61 @@ impl<'a> Parser<'a> {
             text: splice.finish(end),
             unary: true,
             name,
+            open_filter,
         })
+    }
+
+    /// Parses a subscript or slice after its `[` token `open`.
+    ///
+    /// A subscript `value[index]` keeps its source. A slice
+    /// `value[start:stop:step]` becomes
+    /// `value|__bounded_slice(start, stop, step)` on the text built so far,
+    /// with `none` for an omitted bound (MiniJinja compiles an omitted bound
+    /// as the constant `none`, so this is exact). Slicing a string copies it,
+    /// and the engine has no hook for that. Line breaks inside the brackets
+    /// move inside the call. Returns whether the text now ends in the filter.
+    fn subscript(&mut self, splice: &mut Splice<'_>, open: Token<'a>) -> Parse<bool> {
+        let mut bounds: [Option<Fragment>; 3] = [None, None, None];
+        if !self.at_symbol(":") {
+            bounds[0] = Some(self.expression()?);
+        }
+        let slice = self.eat_symbol(":");
+        if slice {
+            if !self.at_symbol("]") && !self.at_symbol(":") {
+                bounds[1] = Some(self.expression()?);
+            }
+            if self.eat_symbol(":") && !self.at_symbol("]") {
+                bounds[2] = Some(self.expression()?);
+            }
+        }
+        let close = self.expect_symbol("]")?;
+        if !slice {
+            if let Some(index) = &bounds[0] {
+                splice.child(index);
+            }
+            return Ok(false);
+        }
+        let operand = splice.take(open.start);
+        let mut inner_newlines = 0;
+        let arguments = bounds
+            .iter()
+            .map(|bound| match bound {
+                Some(bound) => {
+                    inner_newlines += newline_count(&self.source[bound.start..bound.end]);
+                    bound.text.as_str()
+                }
+                None => "none",
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let newlines =
+            "\n".repeat(newline_count(&self.source[open.start..close.end]) - inner_newlines);
+        splice.restart(
+            format!("{operand}|{}({arguments}{newlines})", sandbox::SLICE_FILTER),
+            close.end,
+        );
+        self.rewrites += 1;
+        Ok(true)
     }
 
     /// Parses a filter or test name: `name` or `name.name...`.
@@ -1105,6 +1211,22 @@ impl<'a> Parser<'a> {
             let argument = self.expression()?;
             if !splat && argument.name && self.eat_symbol("=") {
                 arguments.push(self.expression_without_conditional()?);
+            } else if splat && !argument.text.ends_with(SPLAT_SUFFIX) {
+                // MiniJinja copies a splatted operand into the call's
+                // arguments; the bounded splat filter charges that copy.
+                let operand = if argument.unary {
+                    argument.text
+                } else {
+                    format!("({})", argument.text)
+                };
+                self.rewrites += 1;
+                arguments.push(Fragment {
+                    text: format!("{operand}{SPLAT_SUFFIX}"),
+                    unary: true,
+                    name: false,
+                    open_filter: false,
+                    ..argument
+                });
             } else {
                 arguments.push(argument);
             }
@@ -1185,6 +1307,7 @@ impl<'a> Parser<'a> {
             text: splice.finish(end),
             unary: true,
             name,
+            open_filter: false,
         })
     }
 
@@ -1216,6 +1339,7 @@ impl<'a> Parser<'a> {
             text: splice.finish(end),
             unary: true,
             name: false,
+            open_filter: false,
         })
     }
 }

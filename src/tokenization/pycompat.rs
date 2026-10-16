@@ -47,10 +47,12 @@
 //!
 //! Recursive printing and serialization stop at [`MAX_NESTING`] levels:
 //! templates are untrusted programs and could otherwise build a structure deep
-//! enough to exhaust the native stack. Every text this module produces is
-//! also bounded by the render's [`RenderBudget`] while it is built: printing
-//! stops at the first item past the allowance, and `str.replace` and
-//! `str.join` check their result size before allocating.
+//! enough to exhaust the native stack. Every text and list this module
+//! produces is also bounded by the render's [`RenderBudget`] while it is
+//! built: printing stops at the first item past the allowance, and the
+//! methods that copy (`str.replace`, `str.join`, `strip`, `split`,
+//! `splitlines`, `removeprefix`, case changes, `dict.items`, `keys`, and
+//! `values`) charge their result size before allocating it.
 
 use core::fmt::Write as _;
 use std::sync::Arc;
@@ -999,7 +1001,7 @@ pub(crate) fn python_method(
             arguments,
             budget,
         ),
-        ValueKind::Map => map_method(value, method, arguments),
+        ValueKind::Map => map_method(value, method, arguments, budget),
         _ => Err(Error::from(ErrorKind::UnknownMethod)),
     }
 }
@@ -1087,7 +1089,7 @@ impl<'a> Arguments<'a> {
     }
 }
 
-/// Dispatches one Python `str` method; methods that can grow text check `budget` first.
+/// Dispatches one Python `str` method; every method that builds a string or list charges `budget` first.
 fn string_method(
     text: &str,
     method: &str,
@@ -1095,24 +1097,34 @@ fn string_method(
     budget: &RenderBudget,
 ) -> Result<Value, Error> {
     let arguments = Arguments::new("str", method, values);
-    let strings =
-        |parts: Vec<&str>| Value::from(parts.into_iter().map(Value::from).collect::<Vec<_>>());
+    // Copies are charged before they are made: one value per part plus the parts' text.
+    let strings = |parts: Vec<&str>| -> Result<Value, Error> {
+        budget.reserve_items(parts.len(), &arguments.method)?;
+        let bytes = parts.iter().map(|part| part.len()).sum::<usize>();
+        budget.reserve_text(bytes, &arguments.method)?;
+        Ok(Value::from(
+            parts.into_iter().map(Value::from).collect::<Vec<_>>(),
+        ))
+    };
+    let substring = |part: &str| -> Result<Value, Error> {
+        budget.reserve_text(part.len(), &arguments.method)?;
+        Ok(Value::from(part))
+    };
     match method {
         "strip" | "lstrip" | "rstrip" => {
             arguments.arity(0, 1)?;
             let characters = arguments.optional_str(0)?;
-            Ok(Value::from(strip(text, method, characters)))
+            substring(strip(text, method, characters))
         }
         "split" | "rsplit" => {
             arguments.arity(0, 2)?;
             let separator = arguments.optional_str(0)?;
             let limit = arguments.limit(1)?;
-            let parts = split(text, separator, limit, method == "rsplit")?;
-            Ok(strings(parts))
+            strings(split(text, separator, limit, method == "rsplit")?)
         }
         "splitlines" => {
             arguments.arity(0, 0)?;
-            Ok(strings(splitlines(text)))
+            strings(splitlines(text))
         }
         "startswith" | "endswith" => {
             arguments.arity(1, 1)?;
@@ -1147,7 +1159,7 @@ fn string_method(
             } else {
                 text.strip_suffix(affix)
             };
-            Ok(Value::from(stripped.unwrap_or(text)))
+            substring(stripped.unwrap_or(text))
         }
         "lower" | "upper" | "title" | "capitalize" | "swapcase" => {
             arguments.arity(0, 0)?;
@@ -1403,12 +1415,22 @@ fn classify(text: &str, method: &str) -> bool {
 }
 
 /// Dispatches one Python `dict` method: `items`, `keys`, `values`, or `get`.
-fn map_method(map: &Value, method: &str, values: &[Value]) -> Result<Value, Error> {
+///
+/// The three list-building methods charge `budget` before they copy.
+fn map_method(
+    map: &Value,
+    method: &str,
+    values: &[Value],
+    budget: &RenderBudget,
+) -> Result<Value, Error> {
     let arguments = Arguments::new("dict", method, values);
+    let entries = map.len().unwrap_or(0);
     let keys = || map.try_iter().map(Iterator::collect::<Vec<_>>);
     match method {
         "items" => {
             arguments.arity(0, 0)?;
+            // A two-item list per entry, inside the outer list.
+            budget.reserve_copies(entries, 3, &arguments.method)?;
             let pairs = keys()?
                 .into_iter()
                 .map(|key| Ok(Value::from(vec![key.clone(), map.get_item(&key)?])))
@@ -1417,10 +1439,12 @@ fn map_method(map: &Value, method: &str, values: &[Value]) -> Result<Value, Erro
         }
         "keys" => {
             arguments.arity(0, 0)?;
+            budget.reserve_items(entries, &arguments.method)?;
             Ok(Value::from(keys()?))
         }
         "values" => {
             arguments.arity(0, 0)?;
+            budget.reserve_items(entries, &arguments.method)?;
             let values = keys()?
                 .iter()
                 .map(|key| map.get_item(key))

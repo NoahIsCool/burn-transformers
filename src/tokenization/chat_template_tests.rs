@@ -413,6 +413,36 @@ fn oversized_values_and_prompts_fail_contextually() {
     }
 }
 
+/// Retaining input-sized copies in a loop fails within the budget, quickly.
+///
+/// Review finding CHAT-UNCHARGED-RETENTION: with a 1 MB string, keeping
+/// `s | list` alive 20 times reached 467 MiB and `s | reverse` 300 times
+/// 299 MiB, against a documented 16 MiB budget, and both renders succeeded.
+/// Every copy is now charged before it is made.
+#[test]
+fn retained_copies_fail_within_the_budget() {
+    for copy in [
+        "s | list",
+        "s | reverse",
+        "s[1:]",
+        "s.strip()",
+        "s.split('b')",
+        "[s] | map('lower') | list",
+        "range(*[0, 100000]) | list",
+    ] {
+        let source = format!(
+            "{{% set s = 'a' * 1000000 %}}{{% set ns = namespace(l=none) %}}{{% for i in range(300) %}}{{% set ns.l = [ns.l, {copy}] %}}{{% endfor %}}ok"
+        );
+        let started = std::time::Instant::now();
+        let error = render_template(&source, &json!({}), None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("resource limit"),
+            "{copy}: {error:#}"
+        );
+        assert!(started.elapsed().as_secs_f64() < 10.0, "{copy}");
+    }
+}
+
 /// CHAT-3: doubling a list materializes it within the item limit instead of chaining lazily.
 ///
 /// MiniJinja's `seq + seq` is a lazy chain: 24 doublings cost about 100 units

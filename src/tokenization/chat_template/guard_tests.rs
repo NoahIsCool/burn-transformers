@@ -58,18 +58,49 @@ fn operators_become_bounded_filters_with_minijinja_precedence() {
             "{{ a + 1 > b and not c ~ d in e if f else g * 2 }}",
             "{{ a|__bounded_add(1) > b and not c|__bounded_concat(d) in e if f else g|__bounded_mul(2) }}",
         ),
-        // Containers, subscripts, slices, and call arguments are rewritten inside.
+        // Containers, subscripts, and call arguments are rewritten inside.
         (
             "{{ [a + b, {'k': c * 2}, (d ~ e, f)] }}",
             "{{ [a|__bounded_add(b), {'k': c|__bounded_mul(2)}, (d|__bounded_concat(e), f)] }}",
         ),
+        ("{{ x[a + 1] }}", "{{ x[a|__bounded_add(1)] }}"),
+        // Slices become the bounded slice filter, with `none` for omitted bounds.
         (
             "{{ x[a + 1:b * 2:c] }}",
-            "{{ x[a|__bounded_add(1):b|__bounded_mul(2):c] }}",
+            "{{ x|__bounded_slice(a|__bounded_add(1), b|__bounded_mul(2), c) }}",
+        ),
+        ("{{ x[1:] }}", "{{ x|__bounded_slice(1, none, none) }}"),
+        ("{{ x[:2] }}", "{{ x|__bounded_slice(none, 2, none) }}"),
+        ("{{ x[::-1] }}", "{{ x|__bounded_slice(none, none, -1) }}"),
+        ("{{ x[:] }}", "{{ x|__bounded_slice(none, none, none) }}"),
+        // A filter takes no postfix syntax, so a following one parenthesizes it.
+        (
+            "{{ x[1:].a[0](b)[::2] }}",
+            "{{ (x|__bounded_slice(1, none, none)).a[0](b)|__bounded_slice(none, none, 2) }}",
         ),
         (
+            "{{ x[1:][2:] }}",
+            "{{ (x|__bounded_slice(1, none, none))|__bounded_slice(2, none, none) }}",
+        ),
+        // Unary minus applies before postfix syntax, as in MiniJinja.
+        ("{{ -x[1:] }}", "{{ -x|__bounded_slice(1, none, none) }}"),
+        // A sliced test argument is parenthesized, so the filter binds to it.
+        (
+            "{{ a is sameas b[1:] }}",
+            "{{ a is sameas (b|__bounded_slice(1, none, none)) }}",
+        ),
+        (
+            "{{ x[1:] is string and x[1:] + y }}",
+            "{{ x|__bounded_slice(1, none, none) is string and x|__bounded_slice(1, none, none)|__bounded_add(y) }}",
+        ),
+        // Splatted call arguments are charged.
+        (
             "{{ f(a ~ b, *rest, k=c + d, **more) }}",
-            "{{ f(a|__bounded_concat(b), *rest, k=c|__bounded_add(d), **more) }}",
+            "{{ f(a|__bounded_concat(b), *rest|__bounded_splat, k=c|__bounded_add(d), **more|__bounded_splat) }}",
+        ),
+        (
+            "{{ f(*(a if b else c), **m[1:]) }}",
+            "{{ f(*(a if b else c)|__bounded_splat, **m|__bounded_slice(1, none, none)|__bounded_splat) }}",
         ),
         // Whitespace markers survive.
         ("{{- a + b -}}", "{{- a|__bounded_add(b) -}}"),
@@ -150,7 +181,7 @@ fn statements_rewrite_their_expressions() {
     }
 }
 
-/// Text, comments, raw sections, string literals, splats, and exponents are never rewritten.
+/// Text, comments, raw sections, string literals, subscripts, and exponents are never rewritten.
 #[test]
 fn non_operators_are_left_alone() {
     for source in [
@@ -159,7 +190,8 @@ fn non_operators_are_left_alone() {
         "{% raw %}{{ a + b }}{% endraw %}",
         "{{ 'a + b ~ c * d' }}",
         "{{ \"it's \\\" + \" }}",
-        "{{ f(*args, **kwargs) }}",
+        "{{ x[0] }}{{ m['a'] }}{{ x.0 }}",
+        "{{ f(*args|__bounded_splat, **kwargs|__bounded_splat) }}",
         "{{ 1e+5 }}{{ 2E-3 }}",
         "{{ x - y // z % w ** v }}",
         "{% endfor %}{% else %}{% break %}{% endmacro %}",
@@ -192,13 +224,23 @@ fn unreadable_tags_with_guarded_operators_are_refused() {
         // operator once the operand is re-read inside filter arguments.
         "{{ 0 * not (0) }}",
         "{{ 1 + not.x * 3 }}",
+        // Slices (`:`) and `**` splats are guarded too.
+        "{{ a[1: b] c }}",
+        "{{ f(**k) b }}",
+        "{{ a ! b[1:] }}",
     ] {
         let error = guard_operators(source).expect_err(source);
         assert!(error.to_string().contains("cannot be bounded"), "{error}");
         assert_eq!(error.offset, 0, "{source}");
     }
     // The same mistakes without guarded operators are MiniJinja's to report.
-    for source in ["{{ a b }}", "{{ }}", "{% for x in %}", "{{ a ! b }}"] {
+    for source in [
+        "{{ a b }}",
+        "{{ }}",
+        "{% for x in %}",
+        "{{ a ! b }}",
+        "{{ a[1] b }}",
+    ] {
         assert!(
             matches!(guard_operators(source), Ok(Cow::Borrowed(_))),
             "{source}"
@@ -343,7 +385,7 @@ prop_compose! {
     fn token_soup()(pieces in prop::collection::vec(prop::sample::select(vec![
         "a", "1", "'s'", "+", "-", "*", "~", "**", "//", "(", ")", "[", "]", "{", "}",
         ",", ":", "|", "upper", "is", "not", "in", "and", "if", "else", "=", ".", "x",
-        "f(", "-1", "%", "== ", "*rest", "**kw",
+        "f(", "-1", "%", "== ", "*rest", "**kw", "[1:]", "[::-1]", "sameas", "divisibleby",
     ]), 0..24)) -> String {
         pieces.join(" ")
     }

@@ -37,32 +37,57 @@
 //!
 //! - **Capabilities.** The environment has no loader, so `include`,
 //!   `import`, and `extends` fail; the only globals are `raise_exception`,
-//!   `strftime_now`, and MiniJinja's `range`, `dict`, and `namespace`.
+//!   `strftime_now`, and MiniJinja's `range`, `dict`, and `namespace`
+//!   (MiniJinja's `debug()`, which prints the whole engine state without a
+//!   limit and which Hugging Face's environment lacks, is removed).
 //! - **Instructions.** At most 250 000 units of fuel (one per VM
 //!   instruction); macro and call recursion at most 64 levels; `range` at most
 //!   100 000 items (MiniJinja's own limit).
 //! - **Parsing.** The `guard` module refuses expressions nested deeper than
-//!   200 levels or chaining more than 1 024 operators, which would otherwise
+//!   200 levels or chaining more than 1 024 operators (unary, binary,
+//!   comparison, conditional, postfix, or filter), which would otherwise
 //!   overflow MiniJinja's recursive parser, code generator, or syntax-tree
-//!   destructor (a native stack overflow aborts the process).
+//!   destructor (a native stack overflow aborts the process). Flat lists
+//!   (literal items, call arguments, macro parameters) are not limited.
 //! - **Output.** The rendered prompt streams into a buffer of at most
 //!   `1 MiB + 4c` bytes, where `c` is the size of the template context
 //!   (`messages`, `tools`, ...) serialized as JSON; the write that crosses it
 //!   fails the render.
-//! - **Values.** Every value the following produce is checked *before* it is
-//!   built against the same per-value limit (and a sequence against 2^20
-//!   items), and charged to a cumulative budget of 16 times the output limit:
-//!   the binary operators `+`, `~`, and `*` (rewritten into bounded filters
-//!   by the `guard` module, so constant operands are not folded at compile
-//!   time either); every `{{ }}` print, including prints into `{% set %}`
-//!   blocks, macros, and `caller()`; the Python-compatible filters and
-//!   methods (`string`, `join`, `trim`, `safe`, `tojson`, `str.replace`,
-//!   `str.join`, case changes); and the builtins whose size an argument
-//!   controls or that print arbitrary values (`indent`, `replace`, `format`,
-//!   `batch`, `slice`, `chain`, `upper`, `lower`, `title`, `capitalize`,
-//!   `escape`, `pprint`, and the `startingwith`/`endingwith` tests).
+//! - **Values.** Every operation that builds a new string or container is
+//!   checked against the same per-value limit (and a sequence against as
+//!   many items as a value may hold bytes, at least 2^20), and charged to a
+//!   cumulative budget of 16 times the output limit, counting sequence items
+//!   as 24 bytes. Since every copy is charged when it is made, the budget also
+//!   bounds what a template can keep alive (in namespaces, lists, or
+//!   captures). The charged operations are:
+//!   - the binary operators `+`, `~`, and `*`, string and byte slices
+//!     (`s[a:b:c]`), and `*sequence` / `**mapping` call arguments, all
+//!     rewritten into bounded filters by the `guard` module (so constant
+//!     operands are not folded at compile time either);
+//!   - every `{{ }}` print, including prints into `{% set %}` blocks,
+//!     macros, and `caller()`;
+//!   - the Python-compatible filters and methods (`string`, `join`, `trim`,
+//!     `safe`, `tojson`, and the `str` methods `replace`, `join`, `strip`,
+//!     `split`, `splitlines`, `removeprefix`, `removesuffix`, and case
+//!     changes, and the `dict` methods `items`, `keys`, and `values`);
+//!   - the builtins whose size an argument controls or that print arbitrary
+//!     values (`indent`, `replace`, `format`, `batch`, `slice`, `chain`,
+//!     `upper`, `lower`, `title`, `capitalize`, `escape`, `pprint`, and the
+//!     `startingwith`/`endingwith` tests);
+//!   - the builtins that copy their input (`list`, `sort`, `unique`, `map`,
+//!     `select`, `reject`, `selectattr`, `rejectattr`, `dictsort`, `groupby`,
+//!     `reverse`, `lines`), the `dict()` and `namespace()` functions, and
+//!     `strftime_now`, whose format is checked against its largest possible
+//!     expansion before it is formatted.
+//!
+//!   Checks happen before the value is built, except for string slices,
+//!   which the engine builds (at most one input-sized copy) before the
+//!   result is charged. Sequence slices, `split`, `items`, and `zip` are
+//!   lazy views that copy nothing.
 //! - **Panics.** A panic inside MiniJinja is caught and reported as a
-//!   rendering error; it never unwinds into the caller.
+//!   rendering error; it never unwinds into the caller. Some negative-step
+//!   slices of empty or short values panic inside MiniJinja (`''[::-1]`);
+//!   those become rendering errors, not crashes.
 //! - **Cycles.** Namespaces are MiniJinja's only mutable values, so a
 //!   template can make one reference itself (`{% set ns.me = ns %}`), and the
 //!   cycle would outlive the render and leak everything it reaches. Every
@@ -85,6 +110,12 @@
 //!   print, so a capture can grow by the template's size per instruction (at
 //!   most fuel times template size); only the rendered prompt itself is
 //!   bounded.
+//! - **Constant-size work per instruction.** Each instruction may still
+//!   allocate a small constant amount that is not charged (a two-item list
+//!   literal, a loop frame, a macro call's argument list); the fuel limit
+//!   bounds the total. Peak memory is therefore about the cumulative budget
+//!   times a small copy factor (MiniJinja's transient copies and Rust's
+//!   string growth) plus fuel times that constant.
 //! - **Allocation failure.** An allocation MiniJinja cannot satisfy aborts
 //!   the process (Rust's allocation-failure behavior), rather than panicking;
 //!   the bounds above keep every allocation they cover below the limits.
@@ -190,8 +221,9 @@ fn render_bounded(
     sandbox::install(&mut environment, &budget);
     sandbox::install_namespace_registry(&mut environment, &registry, &budget);
     environment.add_function("raise_exception", raise_exception);
+    let shared = Arc::clone(&budget);
     environment.add_function("strftime_now", move |format: &str| {
-        strftime_now(format, fixed_time)
+        strftime_now(format, fixed_time, &shared)
     });
     extend(&mut environment);
     let template = environment.template_from_str(&source)?;
@@ -592,8 +624,34 @@ fn conditional_value_span(
 
 // `strftime_now`.
 
+/// Most bytes [`strftime`] writes per byte of its format.
+///
+/// The longest directive, `%c`, writes 24 bytes (`Fri Jul 26 13:05:09 2024`,
+/// years have at most four digits) for its two format bytes; every other
+/// directive writes less, and literal text is copied byte for byte.
+const STRFTIME_EXPANSION: usize = 12;
+
 /// Formats the current (or caller-fixed) UTC instant like Python's `strftime`.
-fn strftime_now(format: &str, fixed_time: Option<i64>) -> Result<String, Error> {
+///
+/// The result is at most [`STRFTIME_EXPANSION`] times the format's length.
+/// That bound must fit the render's remaining text allowance before
+/// formatting starts, and the actual result is charged to `budget`.
+fn strftime_now(
+    format: &str,
+    fixed_time: Option<i64>,
+    budget: &RenderBudget,
+) -> Result<String, Error> {
+    let bound = format.len().saturating_mul(STRFTIME_EXPANSION);
+    if bound > budget.text_allowance() {
+        return Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!(
+                "chat template resource limit: strftime_now with a {}-byte format could produce {bound} bytes, above the {} bytes this render may still produce",
+                format.len(),
+                budget.text_allowance()
+            ),
+        ));
+    }
     let seconds = match fixed_time {
         Some(seconds) => seconds,
         None => host_unix_seconds()?,
@@ -604,7 +662,9 @@ fn strftime_now(format: &str, fixed_time: Option<i64>) -> Result<String, Error> 
             format!("strftime_now instant {seconds} is outside years 1 through 9999"),
         )
     })?;
-    strftime(format, &civil)
+    let text = strftime(format, &civil)?;
+    budget.reserve_text(text.len(), "strftime_now")?;
+    Ok(text)
 }
 
 /// Reads the host clock as whole Unix seconds, rounding toward negative infinity.

@@ -16,16 +16,21 @@
 //!   counts *production*, not live memory (MiniJinja does not report frees),
 //!   so it bounds what they can keep alive; transient copies inside MiniJinja
 //!   and Rust's string growth add a small constant factor on top.
-//! - The `__bounded_*` filters implement `+`, `~`, and `*` with MiniJinja's
-//!   exact semantics plus those checks. The source rewrite in the `guard`
-//!   module routes every binary use of the operators to them. Sequences are
+//! - The `__bounded_*` filters implement `+`, `~`, `*`, and slicing
+//!   (`value[a:b:c]`) with MiniJinja's exact semantics plus those checks, and
+//!   charge `*sequence` / `**mapping` call arguments, which the engine copies.
+//!   The source rewrite in the `guard` module routes every binary use of the
+//!   operators, every slice, and every splat to them. Sequences are
 //!   materialized as lists instead of MiniJinja's lazy chains, which is also
 //!   what Python's Jinja2 (and so Hugging Face) produces.
 //! - [`install`] also replaces the builtin filters whose output size is set by
 //!   an argument (`indent`, `replace`, `format`, `batch`, `slice`, `chain`) or
 //!   that print arbitrary values with MiniJinja's `Display` (`upper`, `lower`,
 //!   `title`, `capitalize`, `escape`, `pprint`, and the `startingwith` and
-//!   `endingwith` tests) with bounded versions.
+//!   `endingwith` tests) with bounded versions, charges the builtins that
+//!   copy their input (`list`, `sort`, `unique`, `map`, `select`, `reject`,
+//!   `selectattr`, `rejectattr`, `dictsort`, `groupby`, `reverse`, `lines`,
+//!   and `dict()`), and removes `debug()`.
 //! - [`NamespaceRegistry`] records (and charges) every namespace a render
 //!   creates and, through [`CycleBreaker`], clears their reference-holding
 //!   attributes when the render ends, so reference cycles
@@ -59,12 +64,18 @@ pub(crate) const ADD_FILTER: &str = "__bounded_add";
 pub(crate) const CONCAT_FILTER: &str = "__bounded_concat";
 /// Filter that implements `left * right` (see [`bounded_multiply`]).
 pub(crate) const MULTIPLY_FILTER: &str = "__bounded_mul";
+/// Filter that implements `value[start:stop:step]` (see [`bounded_slice`]).
+pub(crate) const SLICE_FILTER: &str = "__bounded_slice";
+/// Filter that charges a `*sequence` or `**mapping` call argument (see [`bounded_splat`]).
+pub(crate) const SPLAT_FILTER: &str = "__bounded_splat";
 
-/// Longest sequence one bounded operation may build.
+/// Fewest items one sequence may always hold, `2^20` (24 MiB of `Value`s).
 ///
-/// A chat has at most a few thousand messages; a million items costs 24 MiB
-/// of `Value`s.
-const SEQUENCE_ITEMS: usize = 1 << 20;
+/// A sequence may hold as many items as one value may hold bytes, so a list
+/// of the characters (or the split parts) of any string a render may build
+/// fits; for an empty context that is exactly this floor, the size of the
+/// smallest output limit. A chat has at most a few thousand messages.
+const MIN_SEQUENCE_ITEMS: usize = 1 << 20;
 /// Bytes charged per sequence item: one MiniJinja `Value`.
 const ITEM_BYTES: usize = size_of::<Value>();
 
@@ -72,9 +83,10 @@ const ITEM_BYTES: usize = size_of::<Value>();
 ///
 /// With `c` the serialized context bytes, the rendered prompt may hold
 /// `1 MiB + 4c` bytes ([`Self::output_bytes`]), and so may any single string
-/// ([`Self::value_bytes`]); a sequence may hold `2^20` items; and every
-/// bounded operation together may produce `16` times the prompt limit
-/// ([`Self::total_bytes`]), counting sequence items as 24 bytes each.
+/// ([`Self::value_bytes`]); a sequence may hold as many items as a string may
+/// hold bytes (at least `2^20`); and every bounded operation together may
+/// produce `16` times the prompt limit ([`Self::total_bytes`]), counting
+/// sequence items as 24 bytes each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RenderLimits {
     /// Largest rendered prompt, in bytes.
@@ -97,7 +109,7 @@ impl RenderLimits {
         Self {
             output_bytes,
             value_bytes: output_bytes,
-            sequence_items: SEQUENCE_ITEMS,
+            sequence_items: output_bytes.max(MIN_SEQUENCE_ITEMS),
             total_bytes: limits::total_budget(output_bytes),
         }
     }
@@ -178,13 +190,32 @@ impl RenderBudget {
 
     /// Charges a sequence of `items` produced by `operation`, or explains which limit it exceeds.
     pub(crate) fn reserve_items(&self, items: usize, operation: &str) -> Result<(), Error> {
+        self.reserve_copies(items, 1, operation)
+    }
+
+    /// Charges `items` new items of `values_per_item` values each, produced by `operation`.
+    ///
+    /// The per-sequence limit applies to `items`, the length of the longest
+    /// sequence the operation builds; the cumulative budget is charged for
+    /// every value (`items * values_per_item * 24` bytes).
+    pub(crate) fn reserve_copies(
+        &self,
+        items: usize,
+        values_per_item: usize,
+        operation: &str,
+    ) -> Result<(), Error> {
         if items > self.limits.sequence_items {
             return Err(limit_error(format!(
                 "{operation} would produce {items} items, above the {}-item limit for one sequence",
                 self.limits.sequence_items
             )));
         }
-        self.charge(items.saturating_mul(ITEM_BYTES), operation)
+        self.charge(
+            items
+                .saturating_mul(values_per_item)
+                .saturating_mul(ITEM_BYTES),
+            operation,
+        )
     }
 
     /// Adds `bytes` to the cumulative counter unless that would exceed the total budget.
@@ -502,6 +533,44 @@ pub(crate) fn bounded_multiply(
     engine_operation(state, Operator::Multiply, left, right)
 }
 
+/// `value[start:stop:step]` with MiniJinja's semantics and a charged result.
+///
+/// The engine slices, so results and error messages are exactly MiniJinja's
+/// (an omitted bound arrives as `none`, which is how MiniJinja compiles it).
+/// Slicing a string or bytes builds a new copy of at most the input's size,
+/// which is charged before the filter returns it; sequences and iterables are
+/// sliced as lazy views of the same items and cost nothing.
+pub(crate) fn bounded_slice(
+    state: &State<'_, '_>,
+    budget: &RenderBudget,
+    value: Value,
+    bounds: [Value; 3],
+) -> Result<Value, Error> {
+    let [start, stop, step] = bounds;
+    let sliced = state
+        .env()
+        .compile_expression("value[start:stop:step]")
+        .and_then(|expression| expression.eval(minijinja::context! { value, start, stop, step }))
+        .map_err(|error| without_location(&error))?;
+    let copied = match sliced.kind() {
+        ValueKind::String => sliced.as_str().map_or(0, str::len),
+        ValueKind::Bytes => sliced.as_bytes().map_or(0, <[u8]>::len),
+        _ => 0,
+    };
+    budget.reserve_text(copied, "slice `[:]`")?;
+    Ok(sliced)
+}
+
+/// Charges a `*sequence` or `**mapping` call argument, which MiniJinja copies into the call.
+///
+/// A sized operand is charged one value per item (or entry) and passed on
+/// unchanged; a lazy iterable of unknown length is collected into a list
+/// within the limits, which the call would have collected anyway; anything
+/// else passes through for the call to reject as MiniJinja does.
+pub(crate) fn bounded_splat(budget: &RenderBudget, value: Value) -> Result<Value, Error> {
+    charge_copy(budget, value, 1, "argument unpacking")
+}
+
 /// Repeats the items of `sequence` `count` times into one bounded list.
 fn repeat_sequence(budget: &RenderBudget, sequence: &Value, count: &Value) -> Result<Value, Error> {
     const OPERATION: &str = "sequence repetition `*`";
@@ -556,8 +625,20 @@ pub(crate) fn install(environment: &mut Environment<'_>, budget: &Arc<RenderBudg
             bounded_multiply(state, &shared, left, right)
         },
     );
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        SLICE_FILTER,
+        move |state: &State<'_, '_>, value: Value, start: Value, stop: Value, step: Value| {
+            bounded_slice(state, &shared, value, [start, stop, step])
+        },
+    );
+    let shared = Arc::clone(budget);
+    environment.add_filter(SPLAT_FILTER, move |value: Value| {
+        bounded_splat(&shared, value)
+    });
     install_text_filters(environment, budget);
     install_sized_filters(environment, budget);
+    install_copying_builtins(environment, budget);
 }
 
 /// Replaces the builtins that print arbitrary values: case changes, `escape`, `pprint`, and two tests.
@@ -715,6 +796,172 @@ fn install_sized_filters(environment: &mut Environment<'_>, budget: &Arc<RenderB
             collect_items(&shared, all, "chain").map(Value::from)
         },
     );
+}
+
+/// Replaces the builtins that copy their input into a new container or string.
+///
+/// Each replacement charges its result before the builtin runs (see
+/// [`charge_copy`]) and then calls MiniJinja's own implementation, so results
+/// and error messages are unchanged. Without the charge, a template could
+/// keep one input-sized copy per instruction alive (`{% set ns.l = [ns.l,
+/// s|list] %}` in a loop), which no other limit bounds.
+///
+/// | Builtin | Values charged per input item |
+/// |---|---|
+/// | `list`, `sort`, `unique`, `map`, `select`, `reject`, `selectattr`, `rejectattr` | 1 |
+/// | `dictsort` (a two-item list per entry), `groupby` (items, groups, and their lists) | 3 |
+/// | `reverse` | text bytes for strings; 1 for iterables it collects; none for sequences, which it views lazily |
+/// | `lines` | one string per line plus the text's bytes |
+/// | `dict(map, **kwargs)` | 2 (a key and a value) per entry |
+///
+/// `debug()` is removed: it prints the whole engine state, or its
+/// arguments, with Rust's `Debug` without any limit, and Hugging Face's
+/// Jinja2 environment has no such global.
+fn install_copying_builtins(environment: &mut Environment<'_>, budget: &Arc<RenderBudget>) {
+    let shared = Arc::clone(budget);
+    environment.add_filter("list", move |state: &State<'_, '_>, value: Value| {
+        filters::list(state, charge_copy(&shared, value, 1, "list")?)
+    });
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        "sort",
+        move |state: &State<'_, '_>, value: Value, kwargs: Kwargs| {
+            filters::sort(state, charge_copy(&shared, value, 1, "sort")?, kwargs)
+        },
+    );
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        "unique",
+        move |state: &State<'_, '_>, value: Value, kwargs: Kwargs| {
+            filters::unique(state, charge_copy(&shared, value, 1, "unique")?, kwargs)
+        },
+    );
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        "map",
+        move |state: &State<'_, '_>, value: Value, arguments: Rest<Value>| {
+            filters::map(state, charge_copy(&shared, value, 1, "map")?, arguments)
+        },
+    );
+    for (name, reject) in [("select", false), ("reject", true)] {
+        let shared = Arc::clone(budget);
+        environment.add_filter(
+            name,
+            move |state: &State<'_, '_>,
+                  value: Value,
+                  test: Option<Cow<'_, str>>,
+                  arguments: Rest<Value>| {
+                let value = charge_copy(&shared, value, 1, name)?;
+                if reject {
+                    filters::reject(state, value, test, arguments)
+                } else {
+                    filters::select(state, value, test, arguments)
+                }
+            },
+        );
+    }
+    for (name, reject) in [("selectattr", false), ("rejectattr", true)] {
+        let shared = Arc::clone(budget);
+        environment.add_filter(
+            name,
+            move |state: &State<'_, '_>,
+                  value: Value,
+                  attribute: Cow<'_, str>,
+                  test: Option<Cow<'_, str>>,
+                  arguments: Rest<Value>| {
+                let value = charge_copy(&shared, value, 1, name)?;
+                if reject {
+                    filters::rejectattr(state, value, attribute, test, arguments)
+                } else {
+                    filters::selectattr(state, value, attribute, test, arguments)
+                }
+            },
+        );
+    }
+    let shared = Arc::clone(budget);
+    environment.add_filter("dictsort", move |value: Value, kwargs: Kwargs| {
+        // Non-maps are MiniJinja's error, reported by the builtin.
+        if value.kind() == ValueKind::Map {
+            shared.reserve_copies(value.len().unwrap_or(0), 3, "dictsort")?;
+        }
+        filters::dictsort(&value, kwargs)
+    });
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        "groupby",
+        move |value: Value, attribute: Option<Cow<'_, str>>, kwargs: Kwargs| {
+            let value = charge_copy(&shared, value, 3, "groupby")?;
+            filters::groupby(value, attribute.as_deref(), kwargs)
+        },
+    );
+    let shared = Arc::clone(budget);
+    environment.add_filter("reverse", move |value: Value| {
+        match value.kind() {
+            ValueKind::String | ValueKind::Bytes => {
+                let bytes = value
+                    .as_str()
+                    .map(str::len)
+                    .or_else(|| value.as_bytes().map(<[u8]>::len))
+                    .unwrap_or(0);
+                shared.reserve_text(bytes, "reverse")?;
+                filters::reverse(&value)
+            }
+            // A sequence is reversed as a lazy view of the same items.
+            ValueKind::Seq => filters::reverse(&value),
+            _ => filters::reverse(&charge_copy(&shared, value, 1, "reverse")?),
+        }
+    });
+    let shared = Arc::clone(budget);
+    environment.add_filter("lines", move |text: Arc<str>| -> Result<Value, Error> {
+        shared.reserve_copies(text.lines().count(), 1, "lines")?;
+        shared.reserve_text(text.len(), "lines")?;
+        Ok(filters::lines(text))
+    });
+    let shared = Arc::clone(budget);
+    environment.add_function(
+        "dict",
+        move |value: Option<Value>, update: Kwargs| -> Result<Value, Error> {
+            let copied = value
+                .as_ref()
+                .filter(|value| value.kind() == ValueKind::Map)
+                .and_then(Value::len)
+                .unwrap_or(0);
+            let entries = copied.saturating_add(update.args().count());
+            shared.reserve_copies(entries, 2, "dict()")?;
+            functions::dict(value, update)
+        },
+    );
+    environment.remove_global("debug");
+}
+
+/// Charges a builtin that builds `values_per_item` values per item of `value`, before it runs.
+///
+/// Returns the value to hand to the builtin:
+///
+/// - unchanged when its length is known (a string counts its characters,
+///   which is what MiniJinja iterates; a map counts its keys);
+/// - for a lazy iterable of unknown length, its items collected into a list
+///   within the sequence limit, which the builtin would have collected anyway
+///   (this collection is charged as one value per item, on top of the
+///   builtin's own charge);
+/// - anything else unchanged and uncharged, for the builtin to handle or
+///   reject exactly as MiniJinja does (`none`, undefined, numbers, ...).
+fn charge_copy(
+    budget: &RenderBudget,
+    value: Value,
+    values_per_item: usize,
+    operation: &str,
+) -> Result<Value, Error> {
+    if let Some(items) = value.len() {
+        budget.reserve_copies(items, values_per_item, operation)?;
+        return Ok(value);
+    }
+    if value.kind() == ValueKind::Iterable {
+        let items = collect_items(budget, [&value], operation)?;
+        budget.reserve_copies(items.len(), values_per_item, operation)?;
+        return Ok(Value::from(items));
+    }
+    Ok(value)
 }
 
 /// Upper bound of `text.replace(from, to)` (or `replacen` with `count`) in bytes.
