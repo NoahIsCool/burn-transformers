@@ -24,6 +24,7 @@ pub mod attention;
 pub mod cache;
 pub mod checkpoint;
 pub mod delta_net;
+pub(crate) mod division;
 pub mod error;
 pub mod experiment;
 pub mod feed_forward;

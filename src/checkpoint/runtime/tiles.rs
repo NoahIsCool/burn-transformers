@@ -39,9 +39,9 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
-use crate::checkpoint::division::ceil_div_usize;
+use crate::division::ceil_div_usize;
 #[cfg(verus_keep_ghost)]
-use crate::checkpoint::division::ceiling;
+use crate::division::ceiling;
 
 /// Maximum tile edge in scalars, independent of byte width.
 #[cfg_attr(verus_keep_ghost, verus_verify)]

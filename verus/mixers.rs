@@ -5,8 +5,9 @@
 //! - `src/delta_net/plan.rs`: Gated DeltaNet prefill planning. `chunk_plan`
 //!   returns a chunk width `C = min(chunk_size, L)` and count
 //!   `n = ceil(L / C)` that cover the tokens (`(n - 1) * C < L <= n * C`) with
-//!   less than one chunk of padding and no overflow, using the exact ceiling
-//!   `ceiling_division`; `block_chunk_ranges` returns balanced chunk blocks
+//!   less than one chunk of padding and no overflow, using the shared exact
+//!   ceiling `ceil_div_usize` (`src/division.rs`, included here at its crate
+//!   path and re-verified); `block_chunk_ranges` returns balanced chunk blocks
 //!   that are consecutive, start at zero, end at the chunk count, hold between
 //!   one and the limit of chunks, and follow the exact balanced size formula;
 //!   the doubling-inverse schedule (`inverse_block_sizes`, `inverse_levels`)
@@ -51,6 +52,9 @@
 
 #![allow(unused)]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+
+#[path = "../src/division.rs"]
+pub mod division;
 
 #[path = "../src/delta_net/plan.rs"]
 pub mod delta_net_plan;

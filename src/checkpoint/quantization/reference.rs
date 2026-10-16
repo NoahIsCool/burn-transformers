@@ -29,7 +29,7 @@ use super::{
     packing::{CodeViolation, first_code_violation, push_code, read_code},
     provenance::quantized_payload_sha256,
 };
-use crate::checkpoint::division::ceil_div_usize;
+use crate::division::ceil_div_usize;
 
 /// Bytes of little-endian scales encoded per staging write or digest update.
 ///

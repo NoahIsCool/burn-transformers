@@ -361,7 +361,7 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
 
 ### Verification
 
-- 25 Verus harnesses (1,877 verified, 0 errors, over 87 source files) prove
+- 25 Verus harnesses (2,035 verified, 0 errors, over 88 source files) prove
   the integer planning of the cache ledger and rings, attention chunking and
   projection widths, checkpoint layout, naming, and MXFP4 decoding (including
   its thread partition), generation bookkeeping and speculative commits, MoE

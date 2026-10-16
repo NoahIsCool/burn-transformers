@@ -6,10 +6,11 @@
 //! Verifies, in place, the specifications attached to
 //! `src/checkpoint/runtime/tiles.rs` and the division core it uses:
 //!
-//! - the shared `ceil_div_usize` and `ceil_div_u64`
-//!   (`src/checkpoint/division.rs`, also checked by `verus/checkpoint.rs`)
-//!   return exactly `⌈n / d⌉` without forming `n + d - 1`: the least `q`
-//!   with `n <= q · d`, never above `n`, and positive for positive `n`;
+//! - the shared `ceil_div_usize` and `ceil_div_u64` (`src/division.rs`,
+//!   also checked by `verus/checkpoint.rs`, `verus/gpt_oss.rs`, and
+//!   `verus/mixers.rs`) return exactly `⌈n / d⌉` without forming
+//!   `n + d - 1`: the least `q` with `n <= q · d < n + d`, never above `n`,
+//!   and positive for positive `n`;
 //! - `transpose_plan` equals its documented formulas exactly: `t = 1` below the
 //!   parallel threshold and `min(available, ⌈columns / b⌉)` above it,
 //!   `w = ⌈⌈columns / b⌉ / t⌉ · b` (or every column when that covers all blocks),
@@ -39,7 +40,7 @@
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #![allow(unused)]
 
-#[path = "../src/checkpoint/division.rs"]
+#[path = "../src/division.rs"]
 pub mod division;
 
 #[path = "../src/checkpoint/runtime/tiles.rs"]
@@ -47,8 +48,3 @@ pub mod tiles;
 
 #[path = "../src/checkpoint/quantization/hash_workers.rs"]
 pub mod hash_workers;
-
-/// Mirrors the crate path `crate::checkpoint::division` used by the planners.
-pub mod checkpoint {
-    pub use crate::division;
-}

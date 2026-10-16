@@ -312,9 +312,7 @@ pub(crate) fn push_code(width: CodeWidth, output: &mut Vec<u8>, index: usize, co
         CodeWidth::Byte => output.push(encode_byte(code)),
         CodeWidth::Nibble => {
             let nibble = encode_nibble(code);
-            // A named parity keeps this Verus-checkable (`is_multiple_of` has no spec).
-            let parity = index % 2;
-            if parity == 0 {
+            if index.is_multiple_of(2) {
                 output.push(join_nibbles(nibble, 0));
             } else {
                 let length = output.len();

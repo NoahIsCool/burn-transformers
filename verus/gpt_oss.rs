@@ -56,7 +56,9 @@
 //!   and `chunk_bytes == k · unit_bytes` never exceeds the output; the
 //!   `n = ⌈E · G / k⌉` chunks number at most `threads` and cover every unit
 //!   exactly once (`(n - 1) · k < E · G <= n · k`), with every product
-//!   overflow-free (`lemma_unit_sizes`, `lemma_chunk_cover`).
+//!   overflow-free (`lemma_unit_sizes`, `lemma_chunk_cover`). The ceilings in
+//!   these statements are the shared `ceiling` of `src/division.rs`, which is
+//!   included at its crate path and re-verified here.
 //! - `unit_coordinates` maps unit `u` to `(e, g)` with `e < E`, `g < G`, and
 //!   `u == e · G + g`, and proves that decoded column `32 g + j` of row `r`
 //!   (`j < 32`, `r < R`) sits at output element `u · 32 R + j · R + r`, so
@@ -128,6 +130,9 @@
 // Loop invariants are attributes on `while` statements, which Verus parses as
 // expression attributes; ordinary builds never see these attributes.
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+
+#[path = "../src/division.rs"]
+pub mod division;
 
 #[path = "../src/checkpoint/mxfp4.rs"]
 pub mod mxfp4;

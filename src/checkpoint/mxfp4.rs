@@ -698,18 +698,7 @@ pub(crate) struct DecodePartition {
 }
 
 #[cfg(verus_keep_ghost)]
-verus! {
-
-/// Specification: the exact rounded-up quotient `⌈dividend / divisor⌉` for `divisor > 0`.
-pub open spec fn ceiling(dividend: int, divisor: int) -> int {
-    if dividend % divisor == 0 {
-        dividend / divisor
-    } else {
-        dividend / divisor + 1
-    }
-}
-
-} // verus!
+use crate::division::ceiling;
 
 /// Splits a decode of `geometry` into per-thread chunks of whole units.
 ///
@@ -795,10 +784,8 @@ pub(crate) fn decode_partition(
                 requires quotient * threads <= units, threads >= 2, units >= 1;
         }
     }
-    // A named remainder keeps this Verus-checkable (`div_ceil` and
-    // `is_multiple_of` have no specification).
-    let remainder = units % threads;
-    let units_per_thread = if remainder == 0 {
+    // `div_ceil` has no Verus specification; `is_multiple_of` has one.
+    let units_per_thread = if units.is_multiple_of(threads) {
         quotient
     } else {
         quotient + 1

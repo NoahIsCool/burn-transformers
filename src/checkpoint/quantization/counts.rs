@@ -17,9 +17,9 @@
 use vstd::prelude::*;
 
 use super::packing::CodeWidth;
-use crate::checkpoint::division::ceil_div_u64;
+use crate::division::ceil_div_u64;
 #[cfg(verus_keep_ghost)]
-use crate::checkpoint::division::{ceiling, lemma_ceiling_bounds};
+use crate::division::{ceiling, lemma_ceiling_bounds};
 
 /// Persisted counts derived from a tensor's element count and quantization layout.
 #[cfg_attr(verus_keep_ghost, verus_verify)]

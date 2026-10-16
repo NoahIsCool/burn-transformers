@@ -68,8 +68,8 @@ PROPTEST_CASES=20000 cargo test --locked --release \
 
 **Verus.** Every harness must verify with the pinned release, and each
 harness's verified count must equal the one recorded in the
-[harness table](verus/README.md#harnesses): 25 harnesses, 1,877 verified,
-0 errors at `fbcdb12`. The gate checks the prover version, runs every harness
+[harness table](verus/README.md#harnesses): 25 harnesses, 2,035 verified,
+0 errors at the table's source revision. The gate checks the prover version, runs every harness
 with `--no-cheating`, compares the counts, and writes `verus.json` with the
 per-harness counts and the SHA-256 of every harness and included source:
 

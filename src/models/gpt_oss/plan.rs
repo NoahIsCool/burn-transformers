@@ -114,10 +114,8 @@ pub proof fn lemma_deinterleaved_source(
     ensures
         slides == ((layer as int + 1) % 2 != 0),
 ))]
-// `usize::is_multiple_of` has no Verus specification; the remainder is checked directly.
-#[allow(clippy::manual_is_multiple_of)]
 pub(crate) const fn default_layer_slides(layer: usize) -> bool {
-    layer % 2 == 0
+    layer.is_multiple_of(2)
 }
 
 /// Returns the reference's default sliding flag of each of `layers` layers.
