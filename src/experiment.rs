@@ -26,8 +26,10 @@ use crate::{
 
 mod block;
 pub(crate) mod bounds;
+pub(crate) mod precedence;
 mod rotary;
 pub use block::{ResidualBlock, WidthAdapter};
+use bounds::PositionExtrema;
 pub use rotary::RotaryAttention;
 
 /// Attention connectivity and additive bias for a stateless operation.
@@ -308,12 +310,11 @@ impl<B: Backend> ExecutionContext<B> {
     }
 
     /// Resolve one layer's policy while preserving its default when no override exists.
+    ///
+    /// The most recent override for `layer` wins (the Verus-verified
+    /// `precedence::last_match`), then the pass-wide override, then the default.
     pub fn attention_for(&self, layer: Layer, default_causal: bool) -> AttentionPolicy<B> {
-        self.layer_attention
-            .iter()
-            .rev()
-            .find(|(candidate, _)| *candidate == layer)
-            .map(|(_, policy)| policy.clone())
+        latest_override(&self.layer_attention, layer)
             .or_else(|| self.attention.clone())
             .unwrap_or_else(|| {
                 if default_causal {
@@ -339,12 +340,10 @@ impl<B: Backend> ExecutionContext<B> {
     }
 
     /// Resolve cross-attention connectivity; its default permits every valid source token.
+    ///
+    /// The most recent per-layer override wins, then the decoder-wide override.
     pub fn cross_attention_for(&self, layer: Layer) -> AttentionPolicy<B> {
-        self.layer_cross_attention
-            .iter()
-            .rev()
-            .find(|(candidate, _)| *candidate == layer)
-            .map(|(_, policy)| policy.clone())
+        latest_override(&self.layer_cross_attention, layer)
             .or_else(|| self.cross_attention.clone())
             .unwrap_or_else(AttentionPolicy::bidirectional)
     }
@@ -362,30 +361,32 @@ impl<B: Backend> ExecutionContext<B> {
     /// Checks that target positions lie in `0..evaluated_context` and source positions are nonnegative.
     ///
     /// All extrema are concatenated and read back together: one synchronization
-    /// regardless of whether an encoder is attached.
+    /// regardless of whether an encoder is attached. The verified
+    /// `bounds::position_extrema` classifies the readback, checking the target
+    /// range before the source minimum.
     fn validate_position_values(&self) -> Result<()> {
         let mut extrema = vec![self.positions.clone().min(), self.positions.clone().max()];
         if let Some(encoder) = &self.encoder {
             extrema.push(encoder.positions.clone().min());
         }
         let values = read_int_scalars(extrema, "execution positions")?;
-        let (low, high) = (values[0], values[1]);
-        if !bounds::range_within(low, high, self.evaluated_context) {
-            return Err(Error::configuration(
+        match bounds::position_extrema(&values, self.evaluated_context, self.encoder.is_some()) {
+            PositionExtrema::Incomplete => Err(Error::BackendCapability(
+                "position range readback is incomplete".into(),
+            )),
+            PositionExtrema::OutOfRange { low, high } => Err(Error::configuration(
                 "execution.positions",
                 format!(
                     "positions must lie within the nonnegative evaluated context 0..{}, found {low}..={high}",
                     self.evaluated_context
                 ),
-            ));
-        }
-        if values.get(2).is_some_and(|source_low| *source_low < 0) {
-            return Err(Error::configuration(
+            )),
+            PositionExtrema::NegativeSource => Err(Error::configuration(
                 "execution.encoder.positions",
                 "source positions must be nonnegative",
-            ));
+            )),
+            PositionExtrema::Valid => Ok(()),
         }
-        Ok(())
     }
 
     /// Validate shapes, devices, and the evaluated extent without reading device values.
@@ -458,6 +459,18 @@ impl<B: Backend> ExecutionContext<B> {
         }
         Ok(())
     }
+}
+
+/// Returns the most recently registered policy for `layer`, if any.
+fn latest_override<B: Backend>(
+    overrides: &[(Layer, AttentionPolicy<B>)],
+    layer: Layer,
+) -> Option<AttentionPolicy<B>> {
+    let matches = overrides
+        .iter()
+        .map(|(candidate, _)| *candidate == layer)
+        .collect::<Vec<_>>();
+    precedence::last_match(&matches).map(|index| overrides[index].1.clone())
 }
 
 // Host readback of device-side integer extrema.

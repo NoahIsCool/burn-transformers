@@ -64,7 +64,9 @@ use crate::{Error, Result};
 
 mod selection;
 mod validity;
-use selection::{ResolvedSlice, first_ill_formed_slice, selection_ranges, unit_range};
+use selection::{
+    ResolvedSlice, first_ill_formed_slice, resolve_slice, selection_ranges, unit_range,
+};
 pub use validity::PointValidity;
 
 // Semantic tensor coordinates and rank-preserving selections.
@@ -616,23 +618,20 @@ struct Entry<'a, B: Backend> {
 impl<'a, B: Backend> Entry<'a, B> {
     /// Registers an action, resolving each semantic axis to its tensor dimension once.
     ///
-    /// An axis absent from the point resolves to zero occurrences and is
-    /// rejected by preflight; its placeholder dimension is never used.
+    /// The verified [`resolve_slice`] picks the first dimension declaring the
+    /// axis and counts every declaration. An axis absent from the point resolves
+    /// to zero occurrences and is rejected by preflight; its placeholder
+    /// dimension is never used.
     fn new(point: PointInfo, slices: Vec<(Axis, Range<usize>)>, action: Action<'a, B>) -> Self {
         let resolved = slices
             .iter()
-            .map(|(axis, range)| ResolvedSlice {
-                dimension: point
+            .map(|(axis, range)| {
+                let matches = point
                     .axes
                     .iter()
-                    .position(|candidate| candidate == axis)
-                    .unwrap_or(point.axes.len()),
-                occurrences: point
-                    .axes
-                    .iter()
-                    .filter(|candidate| *candidate == axis)
-                    .count(),
-                range: range.clone(),
+                    .map(|candidate| candidate == axis)
+                    .collect::<Vec<_>>();
+                resolve_slice(&matches, range.clone())
             })
             .collect();
         Self {

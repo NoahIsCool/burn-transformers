@@ -8,6 +8,7 @@
 //! token-validity semantics explicit; family implementations validate the
 //! requested capabilities before applying their numerical graph.
 
+mod constraints;
 mod spec;
 mod traits;
 mod types;

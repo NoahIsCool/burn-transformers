@@ -57,7 +57,7 @@ use burn::{
 use crate::{
     Error, Result,
     experiment::{
-        bounds::{fold_widths, range_within},
+        bounds::{fold_level, range_within, reduction_rows},
         read_int_scalars,
     },
 };
@@ -219,11 +219,12 @@ pub fn cross_entropy<B: Backend>(
         ));
     }
     // One fallible readback of both extrema: a single device synchronization.
-    let range = read_int_scalars(
+    let [minimum, maximum] = read_int_scalars(
         vec![targets.clone().min(), targets.clone().max()],
         "training target labels",
-    )?;
-    let (minimum, maximum) = (range[0], range[1]);
+    )?
+    .try_into()
+    .map_err(|_| Error::BackendCapability("label range readback is incomplete".into()))?;
     if !range_within(minimum, maximum, classes) {
         return Err(Error::configuration(
             "training.targets",
@@ -293,12 +294,25 @@ fn validate_logits<B: Backend, const D: usize>(logits: &Tensor<B, D>, field: &st
 /// Reduces one axis with a balanced tree while retaining its length-one dimension.
 ///
 /// Moves `dim` last, flattens the other axes into independent rows, and sums
-/// each row with [`pairwise_row_sums`]. The caller supplies a nonempty valid axis.
+/// each row with [`pairwise_row_sums`]. The caller supplies a nonempty valid
+/// axis of a tensor without zero extents (every loss runs [`validate_logits`]
+/// first); the verified [`reduction_rows`] then proves `rows * width` is
+/// exactly the element count. Debug builds assert that precondition, which
+/// Verus cannot check at this unverified call site.
 fn sum_dim<B: Backend, const D: usize>(input: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
     let mut shape = input.dims();
+    debug_assert!(
+        dim < D
+            && shape.iter().all(|&extent| extent > 0)
+            && shape
+                .iter()
+                .try_fold(1usize, |count, &extent| count.checked_mul(extent))
+                .is_some(),
+        "sum_dim requires a valid axis of a nonempty shape, found axis {dim} of {shape:?}"
+    );
+    let rows = reduction_rows(&shape, dim);
     shape.swap(dim, D - 1);
     let width = shape[D - 1];
-    let rows = shape[..D - 1].iter().product::<usize>();
     let sums = pairwise_row_sums(input.swap_dims(dim, D - 1).reshape([rows, width]));
     shape[D - 1] = 1;
     sums.reshape(shape).swap_dims(dim, D - 1)
@@ -320,16 +334,17 @@ fn sum_dim<B: Backend, const D: usize>(input: Tensor<B, D>, dim: usize) -> Tenso
 fn pairwise_row_sums<B: Backend>(mut values: Tensor<B, 2>) -> Tensor<B, 2> {
     let mut width = values.dims()[1];
     while width > 1 {
-        let (half, next) = fold_widths(width);
+        let level = fold_level(width);
+        let half = level.pairs;
         let folded =
-            values.clone().narrow(1, 0, half) + values.clone().narrow(1, width - half, half);
-        values = if next == half {
+            values.clone().narrow(1, 0, half) + values.clone().narrow(1, level.partner_start, half);
+        values = if level.next == half {
             folded
         } else {
             // Odd width: the middle column has no partner at this level.
             Tensor::cat(vec![folded, values.narrow(1, half, 1)], 1)
         };
-        width = next;
+        width = level.next;
     }
     values
 }

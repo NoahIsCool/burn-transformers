@@ -11,6 +11,18 @@ fn slice(dimension: usize, occurrences: usize, range: Range<usize>) -> ResolvedS
     }
 }
 
+/// Axes resolve to their first declaring dimension and count every declaration.
+#[test]
+fn axes_resolve_to_their_first_declaration() {
+    assert_eq!(resolve_slice(&[], 0..1), slice(0, 0, 0..1));
+    assert_eq!(
+        resolve_slice(&[false, true, false], 2..5),
+        slice(1, 1, 2..5)
+    );
+    assert_eq!(resolve_slice(&[false, false], 0..1), slice(2, 0, 0..1));
+    assert_eq!(resolve_slice(&[true, false, true], 0..1), slice(0, 2, 0..1));
+}
+
 /// Length-one ranges never overflow and saturate to an empty range at the maximum index.
 #[test]
 fn unit_ranges_select_one_index_or_saturate_empty() {
@@ -64,6 +76,19 @@ fn selection_ranges_expand_and_bound_each_dimension() {
 }
 
 proptest::proptest! {
+    /// Axis resolution agrees with the iterator `position` and `filter().count()` reference.
+    #[test]
+    fn resolve_slice_matches_iterator_reference(
+        matches in proptest::collection::vec(proptest::bool::ANY, 0..8),
+        start in 0usize..4,
+        end in 0usize..4,
+    ) {
+        let resolved = resolve_slice(&matches, start..end);
+        let first = matches.iter().position(|&matched| matched).unwrap_or(matches.len());
+        let count = matches.iter().filter(|&&matched| matched).count();
+        proptest::prop_assert_eq!(resolved, slice(first, count, start..end));
+    }
+
     /// Well-formedness agrees with its definition: one occurrence, nonempty, distinct dimensions.
     #[test]
     fn first_ill_formed_slice_matches_its_definition(
