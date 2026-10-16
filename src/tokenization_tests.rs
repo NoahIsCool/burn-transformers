@@ -345,7 +345,7 @@ fn validates_encoding_limits_and_right_padding_boundaries() {
     assert_eq!(tokenizer.decode(&[4, 5], false).unwrap(), "hello world");
 }
 
-/// Empty host encodings fail before tensor allocation and empty vocabularies fail validation.
+/// Empty or mask-mismatched host encodings fail before tensor allocation and empty vocabularies fail validation.
 #[test]
 fn rejects_empty_host_batches_and_tokenizer_vocabulary() {
     for token_ids in [vec![], vec![vec![]]] {
@@ -361,6 +361,17 @@ fn rejects_empty_host_batches_and_tokenizer_vocabulary() {
                 .contains("empty token batch")
         );
     }
+    let missing_masks = BatchEncoding {
+        token_ids: vec![vec![1, 2], vec![3, 4]],
+        valid_tokens: vec![vec![true, true]],
+    };
+    assert!(
+        missing_masks
+            .to_causal_input::<Flex>(&Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("2 token rows but 1 mask rows")
+    );
     let directory = fixture(base_config());
     let mut tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
     tokenizer.tokenizer = Tokenizer::new(WordLevel::default());

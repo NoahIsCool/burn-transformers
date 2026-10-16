@@ -333,10 +333,10 @@ pub(crate) fn replacement_bound(
 /// Upper bound in bytes of indenting `lines` lines of `length`-byte text by `width` spaces.
 ///
 /// Every line gains at most `width` spaces and a newline. Saturates at `usize::MAX`.
-#[cfg_attr(verus_keep_ghost, verus_verify)]
 ///
 /// Verified: the bound is exactly `lines * (width + 1) + length`, saturated
 /// (and `usize::MAX` for a width of `usize::MAX`), so never below `length`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(bound =>
     ensures
         bound >= length,

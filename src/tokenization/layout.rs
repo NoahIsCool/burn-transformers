@@ -481,8 +481,10 @@ pub(crate) fn unpadded_masks(rows: &[Vec<u32>]) -> Vec<Vec<bool>> {
 /// Index of the first row whose token row or mask is not exactly `width` long.
 ///
 /// Rows are paired like `zip`: only the first `min(token_ids.len(),
-/// valid_tokens.len())` pairs are examined. Verified: `None` means every
-/// examined pair has width `width`; `Some(r)` is the first pair that does not.
+/// valid_tokens.len())` pairs are examined, so `BatchEncoding::to_causal_input`
+/// first checks that both hold the same number of rows. Verified: `None`
+/// means every examined pair has width `width`; `Some(r)` is the first pair
+/// that does not.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(ragged =>
     ensures

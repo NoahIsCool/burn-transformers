@@ -480,6 +480,12 @@ impl BatchEncoding {
                 "cannot create model input from an empty token batch".into(),
             ));
         }
+        if self.valid_tokens.len() != batch {
+            return Err(Error::Tokenizer(format!(
+                "batch has {batch} token rows but {} mask rows",
+                self.valid_tokens.len()
+            )));
+        }
         if let Some(row) = first_ragged_row(&self.token_ids, &self.valid_tokens, sequence) {
             return Err(Error::Tokenizer(format!(
                 "batch row {row} is not rectangular: expected {sequence} tokens, found {} tokens and {} mask entries",
@@ -487,7 +493,11 @@ impl BatchEncoding {
                 self.valid_tokens[row].len()
             )));
         }
-        // Verified row-major layouts: entry `r * sequence + c` is row `r`, column `c`.
+        // Equal row counts plus `first_ragged_row`'s verified `None` (every one
+        // of the `batch` pairs has width `sequence`) establish the flatteners'
+        // preconditions; `batch * sequence` fits `usize` because those rows
+        // already hold that many entries. Verified row-major layouts: entry
+        // `r * sequence + c` is row `r`, column `c`.
         let ids = flatten_token_rows(&self.token_ids, sequence);
         let valid = flatten_mask_rows(&self.valid_tokens, sequence);
         Ok(CausalLmInput {
