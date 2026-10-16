@@ -439,6 +439,30 @@ fn local_artifacts_reject_escaping_symlinks() {
     );
 }
 
+/// A dangling optional metadata symlink is absent, as a missing file is.
+///
+/// The lstat fast path sees the link itself, so resolving it decides: its
+/// `NotFound` means "absent" for an optional artifact.
+#[cfg(unix)]
+#[test]
+fn dangling_optional_metadata_artifacts_are_absent() {
+    let directory = fixture(base_config());
+    let root = directory.path().canonicalize().unwrap();
+    let dangling = root.join("special_tokens_map.json");
+    std::os::unix::fs::symlink(root.join("missing.json"), &dangling).unwrap();
+    assert!(!is_absent(&dangling));
+    assert!(
+        contained_file(&root, "special_tokens_map.json", false, MAX_METADATA_BYTES)
+            .unwrap()
+            .is_none()
+    );
+    let tokenizer = LocalTokenizer::from_directory(&root).unwrap();
+    assert_eq!(
+        tokenizer.metadata().tokenizer_class.as_deref(),
+        Some("FixtureTokenizer")
+    );
+}
+
 /// An optional artifact that cannot be resolved is an I/O error, not a missing file.
 ///
 /// Only `NotFound` means "absent"; a symlink loop names the unreadable path.
