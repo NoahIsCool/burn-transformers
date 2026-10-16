@@ -82,7 +82,7 @@ use crate::{
     },
     feed_forward::GatedFeedForwardConfig,
     models::config::{
-        ConfigError, PartialRotary, RopeContext, divisible, nonzero, positive_finite,
+        ConfigError, PartialRotary, RopeContext, divisible, layer_count, nonzero, positive_finite,
     },
     normalization::{RmsNormConfig, RmsNormRootMode},
     position::RopeConfig,
@@ -310,7 +310,10 @@ impl LlamaArchitecture {
     }
 }
 
-/// Checks the positive extents and grouped-query divisibility.
+/// Checks the positive extents, the layer bound, and grouped-query divisibility.
+///
+/// The layer bound ([`crate::models::config::MAX_LAYERS`]) runs before
+/// [`layer_schedule`] builds its per-layer rotary and sliding flags.
 fn validate_geometry(config: &LlamaFamilyConfig, family: &'static str) -> Result<(), ConfigError> {
     for (field, value) in [
         ("vocab_size", config.vocab_size),
@@ -322,6 +325,7 @@ fn validate_geometry(config: &LlamaFamilyConfig, family: &'static str) -> Result
     ] {
         nonzero(family, field, value)?;
     }
+    layer_count(family, "num_hidden_layers", config.num_hidden_layers)?;
     divisible(
         family,
         "num_attention_heads",

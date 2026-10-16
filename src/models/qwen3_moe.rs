@@ -36,7 +36,8 @@ pub use model::{
 
 use super::config::{
     ConfigError, ModelConfig, PartialRotary, RopeContext, RopeParameters, TokenIds, Validate,
-    divisible, model_type, nonzero, positive_finite, probability, token_ids,
+    checkpoint_tensor_count, divisible, expert_count, layer_count, model_type, nonzero,
+    positive_finite, probability, token_ids,
 };
 use crate::position::RopeConfig;
 
@@ -171,6 +172,30 @@ impl Qwen3MoeConfig {
         )
     }
 
+    /// Returns [`Self::is_moe_layer`] for every block, in `O(L + M)` time.
+    ///
+    /// `L` is `num_hidden_layers` and `M` the length of `mlp_only_layers`.
+    /// Asking [`Self::is_moe_layer`] once per block scans the override list
+    /// each time, `O(L · M)`; this marks the listed blocks once and then
+    /// applies the same verified predicate. Indices at or beyond `L` (which
+    /// validation rejects) are ignored.
+    pub(crate) fn moe_layer_flags(&self) -> Vec<bool> {
+        let layers = self.num_hidden_layers;
+        let mut dense = vec![false; layers];
+        for &index in &self.mlp_only_layers {
+            if let Some(flag) = dense.get_mut(index) {
+                *flag = true;
+            }
+        }
+        dense
+            .into_iter()
+            .enumerate()
+            .map(|(index, dense)| {
+                plan::sparse_layer(index, self.decoder_sparse_step, self.num_experts, dense)
+            })
+            .collect()
+    }
+
     /// Translates the serialized RoPE metadata into the executable rotary configuration.
     ///
     /// Qwen3-MoE rotates whole heads, so a partial factor other than one is
@@ -216,6 +241,9 @@ impl Validate for Qwen3MoeConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before any per-layer or per-expert work below.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
+        expert_count(FAMILY, "num_experts", self.num_experts)?;
         divisible(
             FAMILY,
             "num_attention_heads",
@@ -288,6 +316,9 @@ impl Validate for Qwen3MoeConfig {
                 "schedule does not contain an MoE layer",
             ));
         }
+        // The contract and the graph hold one tensor set per routed expert of
+        // every MoE block, so their product is bounded as a whole.
+        checkpoint_tensor_count(FAMILY, "num_experts", self.checkpoint_tensor_count())?;
 
         self.rope_parameters
             .clone()

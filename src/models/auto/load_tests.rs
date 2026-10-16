@@ -729,6 +729,87 @@ fn every_registered_family_reaches_its_strict_loader() {
     }
 }
 
+/// Absurd counts in an untrusted `config.json` are contextual errors before any planning.
+///
+/// Regression for CFG-COUNT-1: a directory holding only a Llama
+/// `config.json` with `num_hidden_layers = 2^64 - 1` panicked with
+/// `capacity overflow`, and a one-tensor Qwen3-MoE checkpoint declaring
+/// `2^32` experts was killed while its tensor contract was being listed.
+#[test]
+fn absurd_counts_fail_before_checkpoint_planning() {
+    use crate::models::config::{MAX_EXPERTS, MAX_LAYERS};
+
+    let tiny_moe = |experts: usize| {
+        let mut config = serde_json::to_value(Qwen3MoeConfig {
+            num_hidden_layers: 48,
+            num_experts: experts,
+            ..Qwen3MoeConfig::default()
+        })
+        .unwrap();
+        config["moe_intermediate_size"] = json!(1_u64 << 32);
+        config
+    };
+    let cases = [
+        (
+            json!({"model_type": "llama", "num_hidden_layers": u64::MAX}),
+            "llama.num_hidden_layers",
+        ),
+        (
+            json!({"model_type": "llama", "num_hidden_layers": MAX_LAYERS + 1}),
+            "llama.num_hidden_layers",
+        ),
+        (tiny_moe(1 << 32), "qwen3_moe.num_experts"),
+        // Within the per-field bound, but 48 layers of it exceed the
+        // ten-million-tensor artifact limit.
+        (tiny_moe(MAX_EXPERTS), "qwen3_moe.num_experts"),
+    ];
+    for (config, field) in cases {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+        // One real tensor, so discovery would succeed if planning were reached.
+        let mut mappings = MappingPlan::new();
+        mappings.map("model.embed_tokens.weight", "model.embed_tokens.weight");
+        write_contract_checkpoint(
+            root.path(),
+            &[ExpectedTensor::new("model.embed_tokens.weight", vec![2, 2])],
+            &mappings,
+        );
+        let options = AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        };
+        let outcome = std::panic::catch_unwind(|| {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+        });
+        let error = outcome
+            .unwrap_or_else(|_| panic!("{field} panicked"))
+            .expect_err("absurd counts must not load");
+        assert!(
+            matches!(&error, Error::Configuration { field: actual, .. } if actual == field),
+            "{field}: {error}"
+        );
+    }
+
+    let root = tempfile::tempdir().expect("temporary model root");
+    std::fs::write(
+        root.path().join("config.json"),
+        json!({"model_type": "t5", "num_layers": u64::MAX}).to_string(),
+    )
+    .unwrap();
+    let error = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .expect_err("absurd T5 depth must not load");
+    assert!(error.to_string().contains("t5.num_layers"), "{error}");
+}
+
 /// Packed-sidecar certification names only registered causal families.
 #[test]
 fn packed_certification_names_registered_families() {

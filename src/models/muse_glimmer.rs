@@ -44,8 +44,8 @@ pub use model::{
 use serde::{Deserialize, Serialize};
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
-    positive_finite, probability, token_ids,
+    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, layer_count,
+    model_type, nonzero, positive_finite, probability, token_ids,
 };
 
 /// Attention implementation selected for a Muse Glimmer decoder layer.
@@ -254,6 +254,9 @@ impl Validate for MuseGlimmerTextConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before `resolved_layer_types` and `resolved_layer_rope_theta`
+        // derive one entry per layer.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         divisible(
             FAMILY,
             "num_attention_heads",

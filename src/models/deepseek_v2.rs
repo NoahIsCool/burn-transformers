@@ -29,8 +29,9 @@ pub use model::{
 };
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
-    positive_finite, probability, token_ids,
+    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, checkpoint_tensor_count,
+    divisible, expert_count, layer_count, model_type, nonzero, positive_finite, probability,
+    token_ids,
 };
 
 /// Function used to convert router logits into expert weights.
@@ -250,6 +251,8 @@ impl Validate for DeepseekV2Config {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before any per-layer work below.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         if !self.qk_rope_head_dim.is_multiple_of(2) {
             return Err(ConfigError::new(
                 FAMILY,
@@ -290,6 +293,7 @@ impl Validate for DeepseekV2Config {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        expert_count(FAMILY, "n_routed_experts", self.n_routed_experts)?;
         divisible(
             FAMILY,
             "n_routed_experts",
@@ -346,6 +350,9 @@ impl Validate for DeepseekV2Config {
                 "schedule does not contain an MoE layer",
             ));
         }
+        // The contract and the graph hold one tensor set per routed expert of
+        // every MoE layer, so their product is bounded as a whole.
+        checkpoint_tensor_count(FAMILY, "n_routed_experts", self.checkpoint_tensor_count())?;
         if self.hidden_act != "silu" {
             return Err(ConfigError::new(
                 FAMILY,

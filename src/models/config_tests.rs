@@ -760,3 +760,263 @@ fn load_errors_display_sources_and_back_architecture_validation() {
     assert!(error.to_string().contains("qwen3_moe.head_dim"), "{error}");
     ArchitectureConfig::validate(&crate::models::qwen3_moe::Qwen3MoeConfig::default()).unwrap();
 }
+
+// Resource bounds for untrusted counts (review findings CFG-COUNT-1 and LAYER-BOUND).
+
+/// The count helpers accept exactly `1..=bound` and name the field with the bound.
+#[test]
+fn count_bounds_accept_exactly_one_through_the_maximum() {
+    for (check, bound, unit) in [
+        (
+            layer_count as fn(&'static str, &'static str, usize) -> Result<(), ConfigError>,
+            MAX_LAYERS,
+            "layers",
+        ),
+        (expert_count, MAX_EXPERTS, "experts"),
+    ] {
+        check("test", "count", 1).unwrap();
+        check("test", "count", bound).unwrap();
+        assert_eq!(
+            check("test", "count", 0).unwrap_err().reason,
+            "must be nonzero"
+        );
+        for value in [bound + 1, usize::MAX] {
+            let error = check("test", "count", value).unwrap_err();
+            assert_eq!(error.field, "count");
+            assert_eq!(
+                error.reason,
+                format!("{value} exceeds the supported maximum of {bound} {unit}")
+            );
+        }
+    }
+}
+
+/// A contract inventory is accepted up to the artifact limit and rejected beyond it or on overflow.
+#[test]
+fn checkpoint_tensor_counts_are_bounded_by_the_artifact_limit() {
+    checkpoint_tensor_count("test", "experts", Some(0)).unwrap();
+    checkpoint_tensor_count("test", "experts", Some(MAX_CHECKPOINT_TENSORS)).unwrap();
+    let error =
+        checkpoint_tensor_count("test", "experts", Some(MAX_CHECKPOINT_TENSORS + 1)).unwrap_err();
+    assert_eq!(error.field, "experts");
+    assert!(
+        error.reason.contains("10000001 tensors"),
+        "{}",
+        error.reason
+    );
+    let error = checkpoint_tensor_count("test", "experts", None).unwrap_err();
+    assert!(error.reason.contains("overflows usize"), "{}", error.reason);
+}
+
+/// The shared tensor bound is the default artifact limit it is documented to equal.
+#[test]
+fn the_tensor_bound_equals_the_default_artifact_limit() {
+    assert_eq!(
+        MAX_CHECKPOINT_TENSORS,
+        crate::checkpoint::ArtifactLimits::default().max_tensors
+    );
+    assert_eq!(crate::models::gemma::MAX_LAYERS, MAX_LAYERS);
+}
+
+/// One registered family parser, a valid document for it, and its bounded count fields.
+struct CountCase {
+    /// Fixture name used in assertion messages.
+    name: &'static str,
+    /// A valid configuration document of the family.
+    json: String,
+    /// The family's `ModelConfig::from_json_str`, with the parsed value dropped.
+    parse: fn(&str) -> Result<(), ConfigLoadError>,
+    /// Layer-count fields, each bounded by [`MAX_LAYERS`].
+    layers: &'static [&'static str],
+    /// Routed-expert-count fields, each bounded by [`MAX_EXPERTS`].
+    experts: &'static [&'static str],
+}
+
+/// Parses and validates `json` as `T`, keeping only the outcome.
+fn parses<T: ModelConfig>(json: &str) -> Result<(), ConfigLoadError> {
+    T::from_json_str(json).map(drop)
+}
+
+/// Returns the text-model object of `document`: its `text_config` when present, else itself.
+fn text_object(
+    document: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    if document.get("text_config").is_some() {
+        document["text_config"].as_object_mut().unwrap()
+    } else {
+        document.as_object_mut().unwrap()
+    }
+}
+
+/// Every registered family parser with a valid document (fixtures or reference defaults).
+fn count_cases() -> Vec<CountCase> {
+    use crate::models::{
+        deepseek_v2::DeepseekV2Config, gemma::GemmaConfig, gpt_neox::GptNeoXConfig,
+        gpt_oss::GptOssConfig, gpt2::Gpt2Config, llama::LlamaFamilyConfig,
+        muse_glimmer::MuseGlimmerTextConfig, nemotron_h::NemotronHConfig,
+        qwen3_5::Qwen3_5TextConfig, qwen3_moe::Qwen3MoeConfig, t5::T5Config,
+    };
+    /// Reads a fixture below `tests/fixtures`.
+    fn fixture(path: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(path),
+        )
+        .unwrap()
+    }
+    let mut cases = Vec::new();
+    for variant in [
+        "llama3",
+        "llama-bias-tied",
+        "mistral-sliding",
+        "qwen2",
+        "qwen3",
+        "smollm3",
+        "olmo2",
+    ] {
+        cases.push(CountCase {
+            name: variant,
+            json: fixture(&format!("tiny_goldens/{variant}/config.json")),
+            parse: parses::<LlamaFamilyConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        });
+    }
+    for variant in ["gemma2", "gemma3-text"] {
+        cases.push(CountCase {
+            name: variant,
+            json: fixture(&format!("tiny_goldens/{variant}/config.json")),
+            parse: parses::<GemmaConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        });
+    }
+    cases.extend([
+        CountCase {
+            name: "gpt_oss",
+            json: fixture("tiny_goldens/gpt-oss/config.json"),
+            parse: parses::<GptOssConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &["num_local_experts"],
+        },
+        CountCase {
+            name: "qwen3_5",
+            json: fixture("qwen3_5_0_8b.json"),
+            parse: parses::<Qwen3_5TextConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "muse_glimmer",
+            json: fixture("muse_glimmer.json"),
+            parse: parses::<MuseGlimmerTextConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "qwen3_moe",
+            json: fixture("qwen3_30b_a3b.json"),
+            parse: parses::<Qwen3MoeConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &["num_experts"],
+        },
+        CountCase {
+            name: "deepseek_v2",
+            json: fixture("deepseek_v2_lite.json"),
+            parse: parses::<DeepseekV2Config>,
+            layers: &["num_hidden_layers"],
+            experts: &["n_routed_experts"],
+        },
+        CountCase {
+            // The declared depth must equal the schedule's length, which
+            // `nemotron_h_tests` bounds directly.
+            name: "nemotron_h",
+            json: fixture("nemotron_h_8b.json"),
+            parse: parses::<NemotronHConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "t5",
+            json: fixture("flan_t5_xl.json"),
+            parse: parses::<T5Config>,
+            layers: &["num_layers", "num_decoder_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "gpt2",
+            json: serde_json::to_string(&Gpt2Config::default()).unwrap(),
+            parse: parses::<Gpt2Config>,
+            layers: &["n_layer"],
+            experts: &[],
+        },
+        CountCase {
+            name: "gpt_neox",
+            json: serde_json::to_string(&GptNeoXConfig::default()).unwrap(),
+            parse: parses::<GptNeoXConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+    ]);
+    cases
+}
+
+/// Absurd layer and expert counts are contextual errors in every family, never panics or allocations.
+///
+/// Regression for CFG-COUNT-1/LAYER-BOUND: at `usize::MAX` the Llama,
+/// gpt-oss, Qwen3.5, and Muse validators panicked with `capacity overflow`
+/// while building per-layer schedules, and Qwen3-MoE, DeepSeek-V2, T5, and
+/// GPT-2/NeoX (up to the `i32` range) accepted counts whose contracts and
+/// graphs then grew without bound.
+#[test]
+fn absurd_layer_and_expert_counts_are_rejected_in_every_family() {
+    let cases = count_cases();
+    assert_eq!(cases.len(), 18, "one case per registered family or variant");
+    for case in cases {
+        (case.parse)(&case.json).unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        for (fields, bound) in [(case.layers, MAX_LAYERS), (case.experts, MAX_EXPERTS)] {
+            for &field in fields {
+                for value in [usize::MAX, bound + 1] {
+                    // The Nemotron fixture keeps NVIDIA's bare `Infinity`.
+                    let mut document: serde_json::Value =
+                        serde_json::from_str(&normalize_positive_infinity(&case.json)).unwrap();
+                    text_object(&mut document).insert(field.into(), value.into());
+                    let result = std::panic::catch_unwind(|| (case.parse)(&document.to_string()));
+                    match result {
+                        Ok(Err(ConfigLoadError::Validation(error))) => {
+                            assert_eq!(error.field, field, "{} {field}={value}", case.name);
+                        }
+                        Ok(other) => panic!("{} {field}={value}: {other:?}", case.name),
+                        Err(_) => panic!("{} {field}={value} panicked", case.name),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Dense families accept exactly [`MAX_LAYERS`] layers, so the bound is not off by one.
+#[test]
+fn dense_families_accept_exactly_the_layer_bound() {
+    for case in count_cases() {
+        if matches!(case.name, "qwen3_moe" | "deepseek_v2" | "nemotron_h") {
+            // MoE inventories at this depth exceed the tensor budget (tested
+            // with the families); Nemotron derives its depth from its schedule.
+            continue;
+        }
+        let mut document: serde_json::Value =
+            serde_json::from_str(&normalize_positive_infinity(&case.json)).unwrap();
+        let text = text_object(&mut document);
+        // Per-layer lists would no longer match the depth; the families'
+        // derived schedules take their place.
+        for key in ["layer_types", "no_rope_layers", "max_window_layers"] {
+            text.remove(key);
+        }
+        for &field in case.layers {
+            text.insert(field.into(), MAX_LAYERS.into());
+        }
+        (case.parse)(&document.to_string())
+            .unwrap_or_else(|error| panic!("{} at MAX_LAYERS: {error}", case.name));
+    }
+}

@@ -31,7 +31,7 @@ use crate::{
     Error, Result,
     initialization::InitPolicy,
     models::{
-        config::{ConfigError, ModelConfig, Validate, model_type, positive_finite},
+        config::{ConfigError, ModelConfig, Validate, layer_count, model_type, positive_finite},
         gpt2::extents::{first_invalid_extent, product_fits},
     },
     position::{RopeConfig, RopeScaling},
@@ -162,6 +162,7 @@ impl Validate for GptNeoXConfig {
                 "must be nonzero and fit a signed 32-bit tensor index",
             ));
         }
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(ConfigError::new(
                 FAMILY,

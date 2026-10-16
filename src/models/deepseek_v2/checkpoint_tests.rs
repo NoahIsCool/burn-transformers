@@ -182,3 +182,87 @@ fn overflowing_fused_widths_are_contract_errors() {
     assert_eq!(error.field, "num_attention_heads * qk_head_dim");
     assert_eq!(error.reason, "dimension product overflows usize");
 }
+
+/// The validation-time count equals the contract's length for every optional branch.
+///
+/// Validation bounds the inventory with [`DeepseekV2Config::checkpoint_tensor_count`]
+/// before building it, so the formula must track the builder exactly.
+#[test]
+fn tensor_count_matches_the_contract_for_every_branch() {
+    let base = DeepseekV2Config {
+        num_hidden_layers: 3,
+        n_routed_experts: 4,
+        num_experts_per_tok: 2,
+        first_k_dense_replace: 1,
+        max_position_embeddings: 32,
+        rope_scaling: None,
+        ..Default::default()
+    };
+    let mut noaux = base.clone();
+    noaux.scoring_func = super::super::DeepseekScoringFunction::Sigmoid;
+    noaux.topk_method = DeepseekTopKMethod::NoAuxTc;
+    let configs = [
+        base.clone(),
+        DeepseekV2Config {
+            q_lora_rank: Some(6),
+            ..base.clone()
+        },
+        DeepseekV2Config {
+            attention_bias: true,
+            q_lora_rank: Some(6),
+            ..base.clone()
+        },
+        DeepseekV2Config {
+            attention_bias: true,
+            moe_layer_freq: 2,
+            ..base.clone()
+        },
+        noaux,
+        DeepseekV2Config::default(),
+    ];
+    for config in configs {
+        let Ok(contract) = config.checkpoint_contract(Default::default()) else {
+            panic!("{config:?}");
+        };
+        assert_eq!(
+            config.checkpoint_tensor_count(),
+            Some(contract.expected_tensors().len())
+        );
+    }
+}
+
+/// Layers times experts beyond the artifact limit fail validation before any contract exists.
+///
+/// Regression for CFG-COUNT-1: `n_routed_experts = 2^40` and
+/// `num_hidden_layers = 2^40` both passed validation.
+#[test]
+fn expert_inventories_beyond_the_artifact_limit_are_rejected_before_listing() {
+    use crate::models::config::{MAX_CHECKPOINT_TENSORS, MAX_EXPERTS, MAX_LAYERS};
+
+    let config = DeepseekV2Config {
+        n_routed_experts: MAX_EXPERTS,
+        n_group: 1,
+        topk_group: 1,
+        ..Default::default()
+    };
+    assert!(config.checkpoint_tensor_count().unwrap() > MAX_CHECKPOINT_TENSORS);
+    let error = config.checkpoint_contract(Default::default()).unwrap_err();
+    assert_eq!(error.field, "n_routed_experts");
+    for (layers, experts, field) in [
+        (1 << 40, 64, "num_hidden_layers"),
+        (MAX_LAYERS + 1, 64, "num_hidden_layers"),
+        (27, 1 << 40, "n_routed_experts"),
+        (27, usize::MAX, "n_routed_experts"),
+    ] {
+        let error = DeepseekV2Config {
+            num_hidden_layers: layers,
+            n_routed_experts: experts,
+            n_group: 1,
+            topk_group: 1,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(error.field, field, "{layers} {experts}");
+    }
+}

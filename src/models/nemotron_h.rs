@@ -28,8 +28,8 @@ pub use model::{
 };
 
 use super::config::{
-    ConfigError, ModelConfig, TokenIds, Validate, divisible, model_type, nonzero, positive_finite,
-    probability, token_ids,
+    ConfigError, ModelConfig, TokenIds, Validate, checkpoint_tensor_count, divisible, expert_count,
+    layer_count, model_type, nonzero, positive_finite, probability, token_ids,
 };
 
 /// Mixer/FFN operation owned by one Nemotron-H residual block.
@@ -387,6 +387,9 @@ impl Validate for NemotronHConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // The schedule's length is its own JSON size, but every block becomes
+        // contract entries and graph modules, so it is bounded like a count.
+        layer_count(FAMILY, "layers_block_type", self.block_count())?;
         if let Some(declared) = self.num_hidden_layers
             && declared != self.block_count()
         {
@@ -560,6 +563,7 @@ impl Validate for NemotronHConfig {
             ] {
                 nonzero(FAMILY, field, value)?;
             }
+            expert_count(FAMILY, "n_routed_experts", self.n_routed_experts)?;
             if self.n_shared_experts != 1 {
                 return Err(ConfigError::new(
                     FAMILY,
@@ -627,6 +631,17 @@ impl Validate for NemotronHConfig {
                 )
             })?;
         }
+        // The contract and the graph hold one tensor set per routed expert of
+        // every MoE block, so the whole inventory is bounded.
+        checkpoint_tensor_count(
+            FAMILY,
+            if has_moe {
+                "n_routed_experts"
+            } else {
+                "layers_block_type"
+            },
+            self.checkpoint_tensor_count(),
+        )?;
         positive_finite(FAMILY, "initializer_range", self.initializer_range)?;
         positive_finite(FAMILY, "layer_norm_epsilon", self.layer_norm_epsilon)?;
         probability(FAMILY, "attention_dropout", self.attention_dropout)?;

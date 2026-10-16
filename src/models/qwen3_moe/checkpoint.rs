@@ -63,22 +63,62 @@ impl Qwen3MoeCheckpointContract {
 }
 
 impl Qwen3MoeConfig {
+    /// Returns the exact length of [`Self::checkpoint_contract`]'s inventory, or `None` on overflow.
+    ///
+    /// With `L` blocks of which `S` are sparse, `E` routed experts, and
+    /// `b = 4` attention biases when `attention_bias` (else `0`), the
+    /// contract lists
+    ///
+    /// ```text
+    /// 3 + L · (8 + b) + S · (1 + 3E) + (L - S) · 3
+    /// ```
+    ///
+    /// tensors: the embedding, final norm, and LM head; two norms, four
+    /// projections, and two query/key norms per block; a router and three
+    /// matrices per expert in a sparse block; three dense-MLP matrices
+    /// otherwise. Validation bounds it by
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)
+    /// before any contract or graph is built, using checked arithmetic
+    /// because `L` and `E` come from untrusted metadata.
+    pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
+        let layers = self.num_hidden_layers;
+        let sparse = self
+            .moe_layer_flags()
+            .into_iter()
+            .filter(|&sparse| sparse)
+            .count();
+        let per_layer = if self.attention_bias { 12 } else { 8 };
+        let per_sparse_layer = self.num_experts.checked_mul(3)?.checked_add(1)?;
+        layers
+            .checked_mul(per_layer)?
+            .checked_add(sparse.checked_mul(per_sparse_layer)?)?
+            .checked_add((layers - sparse).checked_mul(3)?)?
+            .checked_add(3)
+    }
+
     /// Derives the full parameter contract from validated topology metadata.
+    ///
+    /// Validation first bounds the inventory (see
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)),
+    /// so an absurd layer or expert count is an error rather than an
+    /// allocation proportional to it.
     pub fn checkpoint_contract(
         &self,
         _options: Qwen3MoeCheckpointOptions,
     ) -> Result<Qwen3MoeCheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
-        let mut expected = Vec::new();
+        // Validation proved the count fits the artifact limit.
+        let mut expected = Vec::with_capacity(self.checkpoint_tensor_count().unwrap_or(0));
         let mut mappings = MappingPlan::new();
+        let sparse_layers = self.moe_layer_flags();
         add(
             &mut expected,
             &mut mappings,
             "model.embed_tokens.weight",
             vec![dimensions.vocab, dimensions.hidden],
         );
-        for layer_index in 0..self.num_hidden_layers {
+        for (layer_index, &sparse) in sparse_layers.iter().enumerate() {
             let layer = format!("model.layers.{layer_index}");
             add(
                 &mut expected,
@@ -130,7 +170,7 @@ impl Qwen3MoeConfig {
                 }
             }
             let mlp = format!("{layer}.mlp");
-            if self.is_moe_layer(layer_index) {
+            if sparse {
                 add_mapped(
                     &mut expected,
                     &mut mappings,

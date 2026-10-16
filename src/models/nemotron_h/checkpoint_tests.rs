@@ -635,3 +635,81 @@ fn mamba_block_maps_exactly_the_enabled_biases() {
         .build_load_plan(&manifest(&contract), &LoadOptions::default())
         .unwrap();
 }
+
+/// The validation-time count equals the contract's length for every optional branch.
+///
+/// Validation bounds the inventory with [`NemotronHConfig::checkpoint_tensor_count`]
+/// before building it, so the formula must track the builder exactly.
+#[test]
+fn tensor_count_matches_the_contract_for_every_branch() {
+    for (use_bias, conv_bias, attention_bias, mlp_bias, latent, mtp) in [
+        (false, true, false, false, None, 1),
+        (true, false, true, true, None, 1),
+        (true, true, false, true, Some(4), 0),
+        (false, false, true, false, Some(4), 1),
+    ] {
+        let config = NemotronHConfig {
+            use_bias,
+            use_conv_bias: conv_bias,
+            attention_bias,
+            mlp_bias,
+            moe_latent_size: latent,
+            num_nextn_predict_layers: mtp,
+            ..tiny_config()
+        };
+        let contract = config
+            .checkpoint_contract(NemotronHCheckpointOptions::default())
+            .unwrap();
+        assert_eq!(
+            config.checkpoint_tensor_count(),
+            Some(contract.expected_tensors().len()),
+            "{use_bias} {conv_bias} {attention_bias} {mlp_bias} {latent:?} {mtp}"
+        );
+    }
+}
+
+/// Oversized schedules and expert banks fail validation before any contract exists.
+///
+/// Regression for CFG-COUNT-1: `n_routed_experts = 2^40` passed validation,
+/// and a schedule string of a few megabytes became millions of blocks.
+#[test]
+fn oversized_schedules_and_expert_banks_are_rejected_before_listing() {
+    use crate::models::config::{MAX_CHECKPOINT_TENSORS, MAX_EXPERTS, MAX_LAYERS};
+
+    let mut deep = tiny_config();
+    deep.layers_block_type = vec![NemotronHBlockType::Mlp; MAX_LAYERS + 1];
+    deep.num_hidden_layers = None;
+    deep.num_nextn_predict_layers = 0;
+    assert_eq!(deep.validate().unwrap_err().field, "layers_block_type");
+
+    for experts in [MAX_EXPERTS + 1, 1 << 40, usize::MAX] {
+        let config = NemotronHConfig {
+            n_routed_experts: experts,
+            n_group: 1,
+            ..tiny_config()
+        };
+        assert_eq!(config.validate().unwrap_err().field, "n_routed_experts");
+    }
+    // Within both count bounds, the product still exceeds the artifact limit.
+    let mut wide = NemotronHConfig {
+        n_routed_experts: MAX_EXPERTS,
+        n_group: 1,
+        ..tiny_config()
+    };
+    wide.layers_block_type = vec![NemotronHBlockType::Moe; 8];
+    wide.num_hidden_layers = None;
+    assert!(wide.checkpoint_tensor_count().unwrap() > MAX_CHECKPOINT_TENSORS);
+    let error = wide
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap_err();
+    assert_eq!(error.field, "n_routed_experts");
+    // A dense schedule never evaluates the unused expert fields.
+    let dense = NemotronHConfig {
+        layers_block_type: vec![NemotronHBlockType::Mlp; 2],
+        num_hidden_layers: None,
+        num_nextn_predict_layers: 0,
+        n_routed_experts: usize::MAX,
+        ..tiny_config()
+    };
+    assert_eq!(dense.checkpoint_tensor_count(), Some(3 + 2 * 3));
+}

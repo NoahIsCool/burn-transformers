@@ -90,6 +90,52 @@ fn default_layer_types_alternate_sliding_and_full() {
     assert!(GptOssConfig::default_layer_types(0).is_empty());
 }
 
+/// An absent schedule is derived only for depths validation can accept.
+///
+/// Regression for CFG-COUNT-1: deserialization derived the default
+/// `layer_types` eagerly, so `num_hidden_layers = 2^64 - 1` panicked with
+/// `capacity overflow` before validation could report the field.
+#[test]
+fn absent_schedules_are_not_derived_for_absurd_depths() {
+    use crate::models::config::MAX_LAYERS;
+
+    for layers in [usize::MAX, MAX_LAYERS + 1] {
+        let config: GptOssConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "gpt_oss",
+            "num_hidden_layers": layers,
+        }))
+        .unwrap();
+        assert!(config.layer_types.is_empty());
+        let error = config.architecture().unwrap_err();
+        assert_eq!(error.field, "num_hidden_layers");
+        let error = parse(serde_json::json!({
+            "model_type": "gpt_oss",
+            "num_hidden_layers": layers,
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(&error, ConfigLoadError::Validation(error) if error.field == "num_hidden_layers"),
+            "{error}"
+        );
+    }
+    for experts in [usize::MAX, crate::models::config::MAX_EXPERTS + 1] {
+        let error = GptOssConfig {
+            num_local_experts: experts,
+            ..GptOssConfig::default()
+        }
+        .architecture()
+        .unwrap_err();
+        assert_eq!(error.field, "num_local_experts");
+    }
+    let config: GptOssConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "gpt_oss",
+        "num_hidden_layers": MAX_LAYERS,
+    }))
+    .unwrap();
+    assert_eq!(config.layer_types.len(), MAX_LAYERS);
+    assert_eq!(config.architecture().unwrap().num_layers(), MAX_LAYERS);
+}
+
 /// The default RoPE parameters are the reference's untruncated YaRN.
 #[test]
 fn default_rope_parameters_are_untruncated_yarn() {

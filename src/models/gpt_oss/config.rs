@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use super::architecture::GptOssArchitecture;
 use crate::models::config::{
-    ConfigError, ModelConfig, RopeParameters, RopeType, TokenIds, Validate,
+    ConfigError, MAX_LAYERS, ModelConfig, RopeParameters, RopeType, TokenIds, Validate,
 };
 
 /// Family name used in configuration errors.
@@ -153,7 +153,10 @@ impl GptOssConfig {
     /// Returns the reference default `layer_types` for `layers` blocks.
     ///
     /// Transformers writes `sliding_attention` when `(l + 1) mod 2 != 0`,
-    /// i.e. for even `l`, and `full_attention` otherwise.
+    /// i.e. for even `l`, and `full_attention` otherwise. The result holds
+    /// one string per layer: deserialization calls this only for counts up to
+    /// [`MAX_LAYERS`](crate::models::config::MAX_LAYERS), which validation
+    /// enforces.
     #[must_use]
     pub fn default_layer_types(layers: usize) -> Vec<String> {
         super::plan::default_schedule(layers)
@@ -310,9 +313,16 @@ impl SerializedGptOssConfig {
             num_local_experts: self.num_local_experts.unwrap_or(128),
             num_experts_per_tok: self.num_experts_per_tok.unwrap_or(4),
             sliding_window: self.sliding_window.unwrap_or(Some(128)),
-            layer_types: self
-                .layer_types
-                .unwrap_or_else(|| GptOssConfig::default_layer_types(num_hidden_layers)),
+            // Deserialization cannot fail, so an over-bound count gets an
+            // empty schedule instead of one entry per layer; validation then
+            // reports `num_hidden_layers` before it ever reads the schedule.
+            layer_types: self.layer_types.unwrap_or_else(|| {
+                if num_hidden_layers <= MAX_LAYERS {
+                    GptOssConfig::default_layer_types(num_hidden_layers)
+                } else {
+                    Vec::new()
+                }
+            }),
             tie_word_embeddings: self.tie_word_embeddings.unwrap_or(false),
             hidden_act: self.hidden_act.unwrap_or_else(|| "silu".into()),
             initializer_range: self.initializer_range.unwrap_or(0.02),

@@ -137,14 +137,63 @@ impl NemotronHCheckpointContract {
 }
 
 impl NemotronHConfig {
+    /// Returns the exact length of [`Self::checkpoint_contract`]'s inventory, or `None` on overflow.
+    ///
+    /// Every block lists its norm and its mixer: a Mamba-2 mixer `7` tensors
+    /// (`+2` projection biases with `use_bias`, `+1` with `use_conv_bias`),
+    /// attention `4` (`+4` with `attention_bias`), a dense MLP `d = 2`
+    /// (`+2` with `mlp_bias`), and an MoE `2 + d·E + d` (router, correction
+    /// bias, `E` routed experts, the shared expert; `+d` latent projections
+    /// with `moe_latent_size`). The embedding, final norm, and LM head add
+    /// `3`, and an enabled MTP stage adds five norms, its fusion projection,
+    /// one attention mixer, and one MoE mixer. Validation bounds the total by
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)
+    /// with checked arithmetic before any contract or graph is built.
+    pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
+        let dense = 2 + 2 * usize::from(self.mlp_bias);
+        let attention = 4 + 4 * usize::from(self.attention_bias);
+        let mamba = 7 + 2 * usize::from(self.use_bias) + usize::from(self.use_conv_bias);
+        let latent = if self.moe_latent_size.is_some() {
+            dense
+        } else {
+            0
+        };
+        // Evaluated only where an MoE mixer exists: without one, the expert
+        // fields are unused (and unvalidated) metadata.
+        let moe = self
+            .n_routed_experts
+            .checked_mul(dense)
+            .and_then(|routed| routed.checked_add(2 + dense + latent));
+        let mut total: usize = 3;
+        for kind in &self.layers_block_type {
+            let mixer = match kind {
+                NemotronHBlockType::LinearAttention => mamba,
+                NemotronHBlockType::FullAttention => attention,
+                NemotronHBlockType::Mlp => dense,
+                NemotronHBlockType::Moe => moe?,
+            };
+            total = total.checked_add(mixer)?.checked_add(1)?;
+        }
+        if self.num_nextn_predict_layers > 0 {
+            total = total.checked_add(6 + attention)?.checked_add(moe?)?;
+        }
+        Some(total)
+    }
+
     /// Derives the exact base and optional MTP parameter contract.
+    ///
+    /// Validation first bounds the inventory (see
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)),
+    /// so an absurd block or expert count is an error rather than an
+    /// allocation proportional to it.
     pub fn checkpoint_contract(
         &self,
         options: NemotronHCheckpointOptions,
     ) -> Result<NemotronHCheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
-        let mut expected = Vec::new();
+        // Validation proved the count fits the artifact limit.
+        let mut expected = Vec::with_capacity(self.checkpoint_tensor_count().unwrap_or(0));
         let mut mappings = MappingPlan::new();
         add_mapped(
             &mut expected,

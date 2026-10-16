@@ -16,6 +16,11 @@
 //! divisibility, token-ID ranges, the trained context and its precedence, and
 //! the lexer of the legacy `Infinity` normalization) live in the private
 //! `plan` module, which Verus verifies in place through `verus/config.rs`.
+//!
+//! Counts read from an untrusted `config.json` are bounded before anything
+//! proportional to them is allocated: [`MAX_LAYERS`] per stack,
+//! [`MAX_EXPERTS`] per MoE layer, and, for checkpoint layouts with one tensor
+//! set per routed expert, [`MAX_CHECKPOINT_TENSORS`] for the whole contract.
 
 mod plan;
 pub mod rope;
@@ -743,6 +748,129 @@ pub(crate) fn nonzero(
 ) -> Result<(), ConfigError> {
     if value == 0 {
         Err(ConfigError::new(architecture, field, "must be nonzero"))
+    } else {
+        Ok(())
+    }
+}
+
+// Resource bounds for untrusted counts.
+//
+// A `config.json` is untrusted input: a few hundred bytes can declare
+// `num_hidden_layers = 2^64 - 1` or a million routed experts. Validation,
+// checkpoint contracts, and model construction each hold host structures with
+// one entry per layer (and, in per-expert checkpoint layouts, one entry per
+// routed expert of every MoE layer), so an unchecked count makes them overflow
+// a vector's capacity (a panic) or allocate until the process is killed,
+// instead of returning an error. Every family therefore checks its counts
+// against the bounds below before it builds anything proportional to them.
+//
+// The bounds follow from the default artifact tensor limit
+// [`MAX_CHECKPOINT_TENSORS`]: a configuration is only useful if some checkpoint
+// can satisfy it, and its checkpoint contract lists every parameter tensor.
+
+/// The default artifact tensor limit, ten million tensors.
+///
+/// Equal to [`ArtifactLimits::default`](crate::checkpoint::ArtifactLimits)'s
+/// `max_tensors`, the largest inventory that default checkpoint discovery
+/// accepts. A configuration whose complete checkpoint contract would list
+/// more tensors than this describes a checkpoint that no default-limited load
+/// can accept. Families whose contracts grow with a product of two counts
+/// (one tensor set per routed expert of every MoE layer) reject such a
+/// configuration during validation, before a contract or graph exists.
+pub const MAX_CHECKPOINT_TENSORS: usize = 10_000_000;
+
+/// The largest accepted layer count of one stack, `2^20`.
+///
+/// Validation, checkpoint contracts, and graph construction keep one entry
+/// per layer, so an absurd count in an untrusted `config.json` would exhaust
+/// memory (or overflow a vector's capacity) before any error could be
+/// reported. A dense family's contract lists roughly ten to twenty tensors
+/// per layer, so `2^20` layers already describe a checkpoint at the
+/// [`MAX_CHECKPOINT_TENSORS`] artifact limit, about four thousand times the
+/// depth of any released checkpoint (all below `2^8` layers). At the bound,
+/// a per-layer schedule takes a few megabytes.
+pub const MAX_LAYERS: usize = 1 << 20;
+
+/// The largest accepted routed-expert count of one MoE layer, `2^20`.
+///
+/// Released routers choose among at most a few hundred experts (DeepSeek-V3
+/// 256, Kimi K2 384). Per-expert checkpoint layouts store at least two
+/// tensors per expert, so `2^20` experts in a single MoE layer already
+/// approach the [`MAX_CHECKPOINT_TENSORS`] artifact limit. The bound keeps
+/// every per-expert table (router rows, routing groups, dispatch counts)
+/// small; the product of MoE layers and experts is bounded separately by the
+/// families that store experts as separate tensors.
+pub const MAX_EXPERTS: usize = 1 << 20;
+
+/// Validates a stack depth: nonzero and at most [`MAX_LAYERS`].
+///
+/// Call it before building anything with one entry per layer.
+pub(crate) fn layer_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+) -> Result<(), ConfigError> {
+    nonzero(architecture, field, value)?;
+    at_most(architecture, field, value, MAX_LAYERS, "layers")
+}
+
+/// Validates a routed-expert count: nonzero and at most [`MAX_EXPERTS`].
+///
+/// Call it before building anything with one entry per expert.
+pub(crate) fn expert_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+) -> Result<(), ConfigError> {
+    nonzero(architecture, field, value)?;
+    at_most(architecture, field, value, MAX_EXPERTS, "experts")
+}
+
+/// Validates the size of a complete checkpoint contract.
+///
+/// `count` is the exact number of tensors the family's contract lists, or
+/// `None` when that number overflows `usize`; either way an inventory beyond
+/// [`MAX_CHECKPOINT_TENSORS`] is reported at `field`, the count that drives it.
+pub(crate) fn checkpoint_tensor_count(
+    architecture: &'static str,
+    field: &'static str,
+    count: Option<usize>,
+) -> Result<(), ConfigError> {
+    match count {
+        Some(count) if count <= MAX_CHECKPOINT_TENSORS => Ok(()),
+        Some(count) => Err(ConfigError::new(
+            architecture,
+            field,
+            format!(
+                "the checkpoint would list {count} tensors, more than the \
+                 {MAX_CHECKPOINT_TENSORS}-tensor artifact limit"
+            ),
+        )),
+        None => Err(ConfigError::new(
+            architecture,
+            field,
+            format!(
+                "the checkpoint tensor count overflows usize, far beyond the \
+                 {MAX_CHECKPOINT_TENSORS}-tensor artifact limit"
+            ),
+        )),
+    }
+}
+
+/// Rejects `value` above `maximum`, naming the bounded quantity (`layers`, `experts`).
+fn at_most(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+    maximum: usize,
+    unit: &str,
+) -> Result<(), ConfigError> {
+    if value > maximum {
+        Err(ConfigError::new(
+            architecture,
+            field,
+            format!("{value} exceeds the supported maximum of {maximum} {unit}"),
+        ))
     } else {
         Ok(())
     }

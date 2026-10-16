@@ -58,7 +58,9 @@ use crate::{
     Error, Result,
     architecture::Activation,
     initialization::{InitPolicy, ResidualScaling},
-    models::config::{ConfigError, ModelConfig, Validate, model_type, positive_finite},
+    models::config::{
+        ConfigError, ModelConfig, Validate, layer_count, model_type, positive_finite,
+    },
 };
 
 mod checkpoint;
@@ -247,6 +249,7 @@ impl Validate for Gpt2Config {
                 "must be positive and fit the portable integer index range",
             ));
         }
+        layer_count(FAMILY, "n_layer", self.n_layer)?;
         if !self.n_embd.is_multiple_of(self.n_head) {
             return Err(ConfigError::new(FAMILY, "n_head", "must divide n_embd"));
         }

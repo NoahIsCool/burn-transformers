@@ -615,13 +615,19 @@ fn moe_fields_are_rejected_with_their_exact_diagnostics() {
             "each router group must contain at least two experts for top-2 group scoring",
         ),
         (
-            // (usize::MAX - 1) experts in one group, two groups kept.
+            // (usize::MAX - 1) experts in one group, two groups kept: the
+            // expert bound now rejects the count before routing groups would
+            // overflow their eligible-expert product.
             edited(|c| {
                 c.n_routed_experts = usize::MAX - 1;
                 c.topk_group = 2;
             }),
-            "topk_group",
-            "eligible expert count overflows usize",
+            "n_routed_experts",
+            String::leak(format!(
+                "{} exceeds the supported maximum of {} experts",
+                usize::MAX - 1,
+                crate::models::config::MAX_EXPERTS
+            )),
         ),
         (
             // Two groups of four keep one group: four eligible experts < five.
