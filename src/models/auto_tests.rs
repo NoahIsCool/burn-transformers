@@ -666,10 +666,12 @@ const WINDOW_REJECTED: &[&str] = &["DeepSeek-V2"];
 /// Families derive per-layer windows from their architecture; the cache-level
 /// window only sizes raw cache-bank rings that have no window of their own.
 /// Allocating with a window of two and decoding past it must therefore give
-/// exactly the logits of the same cache without a window, for every family,
-/// T5, and the modular model.
+/// exactly the logits of the same cache without a window, for T5, the modular
+/// model and every registered causal family except those in
+/// [`WINDOW_REJECTED`], which must refuse the windowed configuration with
+/// `Error::BackendCapability` instead of allocating.
 #[test]
-fn cache_sliding_window_is_ignored_by_model_families() {
+fn cache_sliding_window_never_changes_model_family_retention() {
     let device = Default::default();
     let plain = CacheConfig::new(2, 8).unwrap();
     let windowed = plain.with_sliding_window(2).unwrap();
