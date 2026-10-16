@@ -32,10 +32,20 @@
 //! and installed weights (see `support/linear_layout_benchmark.rs`), and
 //! `causal_lm_flex_decode_benchmark` times warm prefill and 128-step cached decode
 //! of any local `AutoCausalLm` checkpoint named by `TRANSFORMERS_CAUSAL_LM_BENCH_DIR`
-//! (see `support/causal_decode_benchmark.rs`).
+//! (see `support/causal_decode_benchmark.rs`). Their reports carry the
+//! source, toolchain and host identity of `support/benchmark_identity.rs`; set
+//! `TRANSFORMERS_BENCH_SOURCE_LABEL` to name the source revision of a prebuilt
+//! binary, and optionally `TRANSFORMERS_BENCH_METADATA_JSON` as above.
 
 #[path = "support/benchmark_metrics.rs"]
 mod benchmark_metrics;
+
+#[cfg(any(
+    feature = "flex",
+    all(feature = "metal", target_os = "macos", not(feature = "rocm"))
+))]
+#[path = "support/benchmark_identity.rs"]
+mod benchmark_identity;
 
 #[cfg(all(
     feature = "tokenizers",
@@ -50,9 +60,8 @@ mod flan {
     use std::{
         collections::BTreeSet,
         fs,
-        io::{Read, Write},
+        io::Write,
         path::{Path, PathBuf},
-        process::Command,
         time::Instant,
     };
 
@@ -68,6 +77,9 @@ mod flan {
         },
     };
 
+    use super::benchmark_identity::{
+        cargo_features, command_text, compiler_identity, file_sha256 as file_hash,
+    };
     use super::benchmark_metrics::{
         DECODE_STEPS, MEASURED_REPETITIONS, MemoryPhase, RunEnvironment, WARMUP_REPETITIONS,
         memory_profiling_enabled, summarize, t5_cache_accounting, token_hash,
@@ -88,22 +100,6 @@ mod flan {
         std::env::var_os(name)
             .map(PathBuf::from)
             .unwrap_or_else(|| panic!("set {name} before running the benchmark"))
-    }
-
-    /// Streams an artifact hash without staging the full checkpoint in host memory.
-    fn file_hash(path: &Path) -> String {
-        let mut file =
-            fs::File::open(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-        let mut digest = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer).expect("read artifact for SHA-256");
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
-        format!("{:x}", digest.finalize())
     }
 
     /// Authenticates the exact artifact set using the committed acceptance hash table.
@@ -176,23 +172,6 @@ mod flan {
                 (actual - reference).abs() <= 1.0e-4 + 1.0e-4 * reference.abs(),
                 "reference mismatch at {index}: {actual} vs {reference}"
             );
-        }
-    }
-
-    /// Executes a small metadata command and preserves failure as evidence instead of guessing.
-    fn command_text(program: &str, arguments: &[&str], directory: &Path) -> Value {
-        match Command::new(program)
-            .args(arguments)
-            .current_dir(directory)
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                json!({"value": String::from_utf8_lossy(&output.stdout).trim(), "error": null})
-            }
-            Ok(output) => {
-                json!({"value": null, "error": String::from_utf8_lossy(&output.stderr).trim()})
-            }
-            Err(error) => json!({"value": null, "error": error.to_string()}),
         }
     }
 
@@ -455,6 +434,15 @@ mod flan {
             metric_helper_sha256,
             "metric helper changed after compilation"
         );
+        let identity_helper_sha256 = format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("support/benchmark_identity.rs"))
+        );
+        assert_eq!(
+            file_hash(&manifest_dir.join("tests/support/benchmark_identity.rs")),
+            identity_helper_sha256,
+            "identity helper changed after compilation"
+        );
         let accepted: Value = serde_json::from_str(ACCEPTANCE).unwrap();
         assert_eq!(accepted["repository"], REPOSITORY);
         assert_eq!(accepted["revision"], REVISION);
@@ -622,17 +610,7 @@ mod flan {
             "token_ids":natural_tokens,"tokens_u32le_sha256":token_hash(&natural_tokens),"finish_reason":natural_finish,
             "total_time":summarize(&natural_samples,None,MEASURED_REPETITIONS).unwrap()
         });
-        let compiled_toolchain = option_env!("RUSTUP_TOOLCHAIN");
-        let compiler = match compiled_toolchain {
-            Some(toolchain) => command_text(
-                "rustc",
-                &[&format!("+{toolchain}"), "--version", "--verbose"],
-                manifest_dir,
-            ),
-            None => {
-                json!({"value":null,"error":"RUSTUP_TOOLCHAIN was not present when this executable was compiled"})
-            }
-        };
+        let (compiler, compiled_toolchain) = compiler_identity(manifest_dir);
         let provenance = json!({
             "repository":REPOSITORY, "revision":REVISION,
             "artifact_sha256":accepted["sha256"], "reference_bundle_sha256":accepted["reference_acceptance"]["oracle"]["bundle_manifest_sha256"],
@@ -640,6 +618,7 @@ mod flan {
             "cargo_lock_sha256":file_hash(&manifest_dir.join("Cargo.lock")),
             "benchmark_source_sha256":benchmark_source_sha256,
             "metric_helper_sha256":metric_helper_sha256,
+            "identity_helper_sha256":identity_helper_sha256,
             "benchmark_executable_sha256":file_hash(&std::env::current_exe().unwrap()),
             "burn_version":"0.21.0", "profile":"release (debug assertions disabled)", "backend_profile":backend_profile,
             "backend_name":B::name(device), "parameter_dtype":"F32", "quantization":null,
@@ -674,29 +653,6 @@ mod flan {
         } else {
             println!("BENCHMARK_JSON={}", String::from_utf8(encoded).unwrap());
         }
-    }
-
-    /// Records every runtime-affecting crate feature so incompatible series cannot be merged.
-    fn cargo_features() -> Vec<&'static str> {
-        [
-            ("std", cfg!(feature = "std")),
-            ("flex", cfg!(feature = "flex")),
-            ("metal", cfg!(feature = "metal")),
-            ("cpu", cfg!(feature = "cpu")),
-            ("cuda", cfg!(feature = "cuda")),
-            ("rocm", cfg!(feature = "rocm")),
-            ("autodiff", cfg!(feature = "autodiff")),
-            ("tokenizers", cfg!(feature = "tokenizers")),
-            ("chat-templates", cfg!(feature = "chat-templates")),
-            ("kernel-tracing", cfg!(feature = "kernel-tracing")),
-            (
-                "attention-kernel-tracing",
-                cfg!(feature = "attention-kernel-tracing"),
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(name, enabled)| enabled.then_some(name))
-        .collect()
     }
 
     /// Runs the CPU/F32 profile with exact local checkpoint and oracle identities.

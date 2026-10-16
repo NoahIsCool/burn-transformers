@@ -28,6 +28,11 @@
 //! alike. Before timing, every variant's output is checked against `contiguous`
 //! with a tolerance of `1e-5` (F32) or `1e-2` (half precision) relative to the
 //! largest reference magnitude, which admits only matmul reassociation.
+//!
+//! Each report's `provenance` field records the compiled harness sources,
+//! executable, toolchain, features, build tree and host load (see
+//! `benchmark_identity.rs`); `TRANSFORMERS_BENCH_SOURCE_LABEL` names the source
+//! revision of a prebuilt binary.
 
 use std::time::Instant;
 
@@ -38,6 +43,8 @@ use burn::{
 };
 use serde_json::{Value, json};
 use transformers::{checkpoint::install_float_parameter, operations::linear};
+
+use super::benchmark_identity::{host_load, source_identity};
 
 /// Untimed calls per variant and shape before sampling.
 const WARMUP_CALLS: usize = 3;
@@ -227,6 +234,20 @@ pub fn run<B: Backend>(
     backend_profile: &str,
     repetitions: usize,
 ) -> Value {
+    let provenance = source_identity(&[
+        (
+            "tests/small_model_benchmarks.rs",
+            include_bytes!("../small_model_benchmarks.rs"),
+        ),
+        (
+            "tests/support/linear_layout_benchmark.rs",
+            include_bytes!("linear_layout_benchmark.rs"),
+        ),
+        (
+            "tests/support/benchmark_identity.rs",
+            include_bytes!("benchmark_identity.rs"),
+        ),
+    ]);
     let mut results = Vec::new();
     for shape in &SHAPES {
         let operands = operands::<B>(shape, dtype, device);
@@ -281,6 +302,8 @@ pub fn run<B: Backend>(
     }
     json!({
         "benchmark": "linear weight storage order",
+        "provenance": provenance,
+        "load_average_after": host_load(),
         "backend_profile": backend_profile,
         "backend": B::name(device),
         "dtype": format!("{dtype:?}"),

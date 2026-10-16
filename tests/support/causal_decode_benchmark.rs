@@ -22,24 +22,28 @@
 //!
 //! Because the checkpoint carries no committed acceptance record, the report
 //! identifies it by the SHA-256 of `config.json` and of every `*.safetensors`
-//! file instead of authenticating it against an allowlist.
+//! file instead of authenticating it against an allowlist. Its `provenance`
+//! field records the compiled harness sources, executable, toolchain, features,
+//! build tree and host load (see `benchmark_identity.rs`); set
+//! `TRANSFORMERS_BENCH_SOURCE_LABEL` to name the source revision of a prebuilt
+//! binary and `TRANSFORMERS_BENCH_METADATA_JSON` to attach an operator
+//! `RunEnvironment` record.
 
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions,
     cache::CacheConfig,
     checkpoint::{DTypePolicy, LoadOptions, TensorDType},
 };
 
+use super::benchmark_identity::{file_sha256, host_load, source_identity};
 use super::benchmark_metrics::{DECODE_STEPS, MEASURED_REPETITIONS, WARMUP_REPETITIONS, summarize};
 
 /// Timed `(label, rows, source tokens per row)` shapes; see the module documentation.
@@ -48,22 +52,6 @@ const SHAPES: [(&str, usize, usize); 3] = [
     ("batch1_source128", 1, 128),
     ("batch8_source32", 8, 32),
 ];
-
-/// Streams one file's SHA-256 without staging it in memory.
-fn file_hash(path: &Path) -> String {
-    let mut file =
-        fs::File::open(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer).expect("read checkpoint file");
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    format!("{:x}", digest.finalize())
-}
 
 /// Hashes `config.json` and every SafeTensors shard in name order.
 fn identity(root: &Path) -> Value {
@@ -76,7 +64,7 @@ fn identity(root: &Path) -> Value {
     names
         .into_iter()
         .map(|name| {
-            let hash = file_hash(&root.join(&name));
+            let hash = file_sha256(&root.join(&name));
             (name, Value::from(hash))
         })
         .collect::<serde_json::Map<_, _>>()
@@ -185,6 +173,24 @@ pub fn run<B: Backend>(device: &B::Device, backend_profile: &str) -> Value {
     let root: PathBuf = std::env::var_os("TRANSFORMERS_CAUSAL_LM_BENCH_DIR")
         .map(PathBuf::from)
         .expect("set TRANSFORMERS_CAUSAL_LM_BENCH_DIR to a local causal LM checkpoint");
+    let provenance = source_identity(&[
+        (
+            "tests/small_model_benchmarks.rs",
+            include_bytes!("../small_model_benchmarks.rs"),
+        ),
+        (
+            "tests/support/causal_decode_benchmark.rs",
+            include_bytes!("causal_decode_benchmark.rs"),
+        ),
+        (
+            "tests/support/benchmark_metrics.rs",
+            include_bytes!("benchmark_metrics.rs"),
+        ),
+        (
+            "tests/support/benchmark_identity.rs",
+            include_bytes!("benchmark_identity.rs"),
+        ),
+    ]);
     let identity = identity(&root);
     let options = AutoLoadOptions {
         checkpoint: LoadOptions {
@@ -234,6 +240,8 @@ pub fn run<B: Backend>(device: &B::Device, backend_profile: &str) -> Value {
     }
     json!({
         "benchmark": "causal LM warm prefill and cached decode",
+        "provenance": provenance,
+        "load_average_after": host_load(),
         "backend_profile": backend_profile,
         "backend": B::name(device),
         "parameter_dtype": "F32",
