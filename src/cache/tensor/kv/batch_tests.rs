@@ -1099,3 +1099,153 @@ fn batched_decode_step_timing() {
          per-row {per_row:?}, batched + cat {concatenated:?}, batched write-ahead {written_ahead:?}"
     );
 }
+
+/// Appending a segment joins validity explicitly and requires the read's batch size.
+///
+/// A padded history carries an explicit validity mask while a step's new
+/// tokens are all valid implicitly; concatenation must materialize `true`
+/// for the implicit part so every key keeps its own flag. A segment with a
+/// different row count is rejected before it is joined.
+#[test]
+fn appended_segments_join_validity_and_require_the_batch_size() {
+    let mut cache = cache(2, 4, KvCacheStorage::Full, 0, 0, false);
+    let history = block(2, 2, 1.0);
+    let prefill = KvBatchAppend::right_padded(&[0, 0], &[2, 1], 2).expect("layout");
+    cache
+        .write_batch(0, &prefill, history.clone(), history)
+        .expect("prefill");
+    let plan = cache.plan_batch_read(&[2, 1]).expect("plan");
+    let read = cache.read_batch(0, &plan).expect("read");
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[2], [1]], &device());
+    let token = block(2, 1, 2.0);
+    let new_tokens = KvBatchSegment::from_parts(token.clone(), token.clone(), positions, None);
+    let joined = read
+        .clone()
+        .with_segment(new_tokens)
+        .expect("same batch")
+        .materialize()
+        .expect("keys");
+    assert_eq!(host_int(joined.key_positions()), [0, 1, 2, 0, 1, 1]);
+    assert_eq!(
+        host_bool(joined.key_valid().expect("explicit validity")),
+        [true, true, true, true, false, true]
+    );
+
+    let one_row = KvBatchSegment::from_parts(
+        block(1, 1, 3.0),
+        block(1, 1, 3.0),
+        Tensor::<TestBackend, 2, Int>::from_ints([[3]], &device()),
+        None,
+    );
+    assert!(matches!(
+        read.with_segment(one_row),
+        Err(TensorCacheError::BatchSizeMismatch {
+            configured: 2,
+            requested: 1
+        })
+    ));
+}
+
+/// Key positions and slot counts beyond the portable index ranges are named errors.
+#[test]
+fn index_conversions_reject_out_of_range_values() {
+    let beyond = i32::MAX as usize + 1;
+    assert!(matches!(
+        key_positions(&[0, 5, beyond]),
+        Err(TensorCacheError::TensorIndexOverflow {
+            axis: "key position",
+            index,
+        }) if index == beyond
+    ));
+    assert_eq!(key_positions(&[0, 5]).expect("in range"), [0, 5]);
+    assert!(matches!(
+        to_i64(usize::MAX),
+        Err(TensorCacheError::TensorIndexOverflow {
+            axis: "key slot",
+            index: usize::MAX,
+        })
+    ));
+    assert_eq!(to_i64(7).expect("in range"), 7);
+}
+
+/// Staging defenses reject states that public transitions never create.
+///
+/// Each case breaks one private invariant directly: in-place staging without
+/// a committed baseline, a working plan whose staged lengths outgrow the
+/// capacity, and a ring whose window was cleared. The checks must report a
+/// contextual error rather than write or read outside the planned slots. A
+/// transaction begun without a baseline (unit tests only) trusts any
+/// proposal start.
+#[test]
+fn staging_defenses_reject_broken_private_invariants() {
+    let mut in_place = cache(1, 4, KvCacheStorage::Full, 0, 2, true);
+    in_place.staging_active = true;
+    let append = KvBatchAppend::right_padded(&[0], &[1], 1).expect("layout");
+    assert!(matches!(
+        in_place.prepare_batch_stage(0, &append, vec![block(1, 1, 1.0), block(1, 1, 2.0)]),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+
+    let mut overgrown = cache(1, 4, KvCacheStorage::Full, 0, 2, false);
+    overgrown.begin_staging_from(&[3]).expect("begin staging");
+    overgrown.staged_lengths[0][0] = 2;
+    assert!(matches!(
+        overgrown.plan_working_batch_read(&[3]),
+        Err(TensorCacheError::WriteExceedsCapacity {
+            start: 3,
+            end: 5,
+            capacity: 4
+        })
+    ));
+
+    let mut ring = cache(1, 6, KvCacheStorage::SlidingRing, 2, 0, false);
+    ring.window = None;
+    let append = KvBatchAppend::right_padded(&[0], &[1], 1).expect("layout");
+    assert!(matches!(
+        ring.write_batch(0, &append, block(1, 1, 1.0), block(1, 1, 2.0)),
+        Err(TensorCacheError::SlidingWindowRequired {
+            storage: "sliding ring"
+        })
+    ));
+
+    let mut unanchored = cache(2, 4, KvCacheStorage::Full, 0, 2, false);
+    unanchored.begin_staging().expect("begin staging");
+    unanchored
+        .check_proposal_start(0, 1, 3)
+        .expect("no baseline to compare against");
+}
+
+/// Exclusion masks need at least one query per row of the segment's batch.
+#[test]
+fn exclusion_masks_reject_empty_or_mismatched_queries() {
+    let segment = KvBatchSegment::from_parts(
+        block(2, 1, 1.0),
+        block(2, 1, 1.0),
+        Tensor::<TestBackend, 2, Int>::from_ints([[0], [0]], &device()),
+        None,
+    );
+    let empty = Tensor::<TestBackend, 2, Int>::from_data(
+        TensorData::new(Vec::<i32>::new(), [2, 0]),
+        &device(),
+    );
+    assert!(matches!(
+        segment.exclusion_mask(&empty, 1, None),
+        Err(TensorCacheError::ShapeMismatch {
+            tensor: "query positions",
+            expected,
+            actual,
+        }) if expected == [2, 1] && actual == [2, 0]
+    ));
+    let one_row = Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device());
+    assert!(matches!(
+        segment.exclusion_mask(&one_row, 1, None),
+        Err(TensorCacheError::ShapeMismatch {
+            tensor: "query positions",
+            ..
+        })
+    ));
+    assert!(matches!(
+        segment.exclusion_mask(&one_row.repeat_dim(0, 2), 0, None),
+        Err(TensorCacheError::ZeroDimension { field: "heads" })
+    ));
+}

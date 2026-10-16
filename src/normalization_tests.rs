@@ -170,11 +170,25 @@ fn invalid_config_is_rejected() {
         .expect_err("zero width must fail");
     assert!(error.to_string().contains("rms_norm.size"));
 
-    let error = RmsNormConfig::new(4)
-        .with_epsilon(f64::NAN)
-        .validate()
-        .expect_err("NaN epsilon must fail");
-    assert!(error.to_string().contains("rms_norm.epsilon"));
+    // Non-finite, zero, and negative epsilons can make the denominator
+    // sqrt(mean(x^2) + eps) zero, NaN, or infinite.
+    for epsilon in [f64::NAN, f64::INFINITY, 0.0, -1e-6] {
+        let error = RmsNormConfig::new(4)
+            .with_epsilon(epsilon)
+            .validate()
+            .expect_err("invalid epsilon must fail");
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, reason }
+                if field == "rms_norm.epsilon" && reason == "must be finite and greater than zero"),
+            "{epsilon}: {error:?}"
+        );
+    }
+    assert!(
+        RmsNormConfig::new(4)
+            .with_epsilon(f64::MIN_POSITIVE)
+            .validate()
+            .is_ok()
+    );
 }
 
 /// Scale-free normalization equals a unit-scale RmsNorm and the closed form, in every root graph.

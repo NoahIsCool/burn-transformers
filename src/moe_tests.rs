@@ -1152,3 +1152,53 @@ fn dispatch_peak_memory() {
     let sum = dispatch.hidden_state.sum().into_scalar();
     println!("budget={budget} checksum={sum}");
 }
+
+/// Expert IDs in a non-default integer dtype are contextual errors, never panics.
+///
+/// Both the load-balancing diagnostics and sparse dispatch read expert IDs
+/// to the host as the backend's integer element (`i32` on this Flex
+/// instantiation). An `I64` ID tensor cannot be decoded as that element, so
+/// each reader reports a backend-capability error naming the failed read
+/// before any indexing kernel sees the IDs.
+#[test]
+fn expert_ids_in_a_foreign_integer_dtype_are_rejected() {
+    use burn::tensor::{IntDType, TensorData};
+
+    let device = Default::default();
+    let wide_ids = |shape: [usize; 2]| {
+        Tensor::<Flex, 2, Int>::from_data(
+            TensorData::new(vec![0_i64; shape[0] * shape[1]], shape),
+            &device,
+        )
+        .cast(IntDType::I64)
+    };
+    assert_eq!(wide_ids([1, 1]).dtype(), DType::I64);
+
+    let error = load_balancing_loss(
+        Tensor::<Flex, 3>::zeros([1, 2, 2], &device),
+        wide_ids([2, 1]).reshape([1, 2, 1]),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::BackendCapability(message)
+            if message.starts_with("failed to validate routed expert IDs")),
+        "{error:?}"
+    );
+
+    let error = super::dispatch_routed_experts(
+        Tensor::<Flex, 2>::ones([2, 3], &device),
+        Tensor::<Flex, 2>::ones([2, 1], &device),
+        wide_ids([2, 1]),
+        None,
+        2,
+        RoutedExpertPrecision::uniform(DType::F32),
+        |_, rows| Ok(rows),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::BackendCapability(message)
+            if message.starts_with("failed to decode selected expert IDs")),
+        "{error:?}"
+    );
+}

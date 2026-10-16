@@ -224,6 +224,7 @@ fn visibility_faults_check_window_then_extents() {
         ([2, 2], [1, 4], None, None, vec![2, 3]),
         ([2, 2], [1, 3], Some([1, 2]), None, vec![2, 3]),
         ([2, 2], [1, 3], None, Some([2, 2]), vec![2, 3]),
+        ([2, 2], [1, 3], None, Some([1, 3]), vec![2, 3]),
         ([2, 2], [1, 3], None, None, vec![3, 2]),
         ([2, 2], [1, 3], None, None, vec![2]),
     ] {
@@ -261,6 +262,9 @@ fn projection_extents_match_the_configured_layout() {
         (content, [1, 2, 6, 2], latent, key),
         (content, rotary, latent, [1, 2, 7, 4]),
         (content, rotary, latent, [1, 1, 6, 4]),
+        (content, [2, 2, 6, 4], latent, key),
+        (content, rotary, latent, [2, 1, 7, 4]),
+        (content, rotary, latent, [1, 1, 7, 3]),
     ] {
         assert!(!projection_matches(layout, content, rotary, latent, key));
     }

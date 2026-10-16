@@ -96,28 +96,57 @@ enum Finish {
     Abandon,
     /// Run a lifecycle operation first (selected by the value); publication
     /// must then be refused as stale.
-    Interfere(u8),
+    Interfere(
+        /// Selector read as `choice % 3`: 0 begins and 1 resets outside a
+        /// transaction (both roll back inside one), and 2 publishes an empty
+        /// step.
+        u8,
+    ),
 }
 
 /// One lifecycle operation; vectors may have the wrong length on purpose.
 #[derive(Debug, Clone)]
 enum Operation {
     /// Append (or, inside a transaction, stage) per-row token counts.
-    Append(Vec<usize>),
+    Append(
+        /// New tokens per row; a wrong length or an overflowing count must be
+        /// rejected without changing the cache.
+        Vec<usize>,
+    ),
     /// Publish one step write set, batched or per row, in or out of a transaction.
-    Step(Vec<usize>, bool),
+    Step(
+        /// New tokens per row.
+        Vec<usize>,
+        /// Whether the step records one batched plane per layer (`true`) or
+        /// one plane per active row (`false`).
+        bool,
+    ),
     /// Write the full-storage groups ahead, read through them, then finish.
-    WriteAhead(Vec<usize>, Finish),
+    WriteAhead(
+        /// New tokens per row written ahead before the step is finished.
+        Vec<usize>,
+        /// How the step ends after the write-ahead.
+        Finish,
+    ),
     /// Begin a transaction.
     Begin,
     /// Commit per-row accepted prefixes.
-    Commit(Vec<usize>),
+    Commit(
+        /// Accepted proposal tokens per row.
+        Vec<usize>,
+    ),
     /// Roll the transaction back.
     Rollback,
     /// Gather rows by source index.
-    Reorder(Vec<usize>),
+    Reorder(
+        /// Source row of each destination row; duplicates are allowed.
+        Vec<usize>,
+    ),
     /// Rewind committed rows.
-    Truncate(Vec<usize>),
+    Truncate(
+        /// Requested committed length per row.
+        Vec<usize>,
+    ),
     /// Clear every row.
     Reset,
 }

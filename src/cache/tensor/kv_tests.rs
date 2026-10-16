@@ -406,3 +406,193 @@ fn latent_groups_share_ring_batch_and_staging_paths() {
 fn cache_kv() -> NativeKvCache<TestBackend> {
     cache()
 }
+
+/// Byte totals across every layer and plane are checked before any allocation.
+///
+/// Each plane here holds a handful of elements, so per-tensor checks pass;
+/// only the product with `2 * layers` planes overflows. Committed storage is
+/// checked first, and staging is checked on its own wider extent, so a cache
+/// whose committed planes fit can still be rejected for its proposal buffers.
+#[test]
+fn repeated_plane_allocations_reject_byte_overflow_before_allocating() {
+    let config = CacheConfig::new(1, 1).expect("config");
+    let device = Default::default();
+    let committed =
+        NativeKvCacheSpec::new(1 << 62, 1, 1, KvCacheStorage::Full, DType::F32).expect("spec");
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(config, 1, committed, &device),
+        Err(TensorCacheError::AllocationSizeOverflow {
+            tensor: "committed KV planes",
+            elements,
+            element_size: 4,
+        }) if elements == 1 << 63
+    ));
+    // 2^60 one-slot planes take 2^62 bytes; four proposal slots each take 2^64.
+    let staged = NativeKvCacheSpec::new(1 << 59, 1, 1, KvCacheStorage::Full, DType::F32)
+        .expect("spec")
+        .with_staging_capacity(4);
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(config, 1, staged, &device),
+        Err(TensorCacheError::AllocationSizeOverflow {
+            tensor: "staged KV planes",
+            elements,
+            element_size: 4,
+        }) if elements == 1 << 62
+    ));
+}
+
+/// Segment-planning violations name the storage, the write end, or the ring error.
+#[test]
+fn segment_violations_map_to_contextual_cache_errors() {
+    use crate::cache::tensor::plan::WriteEndViolation;
+
+    assert!(matches!(
+        segment_error(
+            KvCacheStorage::MirroredSlidingRing,
+            3,
+            2,
+            8,
+            SegmentViolation::WindowRequired
+        ),
+        TensorCacheError::SlidingWindowRequired {
+            storage: "mirrored sliding ring"
+        }
+    ));
+    // A write end past capacity keeps the start, the end, and the capacity.
+    assert!(matches!(
+        segment_error(
+            KvCacheStorage::Full,
+            7,
+            3,
+            8,
+            SegmentViolation::WriteEnd(WriteEndViolation::ExceedsCapacity { end: 10 }),
+        ),
+        TensorCacheError::WriteExceedsCapacity {
+            start: 7,
+            end: 10,
+            capacity: 8
+        }
+    ));
+    // An unrepresentable write end keeps the start and the token count.
+    assert!(matches!(
+        segment_error(
+            KvCacheStorage::Full,
+            7,
+            3,
+            8,
+            SegmentViolation::WriteEnd(WriteEndViolation::Overflow),
+        ),
+        TensorCacheError::WritePositionOverflow {
+            start: 7,
+            tokens: 3
+        }
+    ));
+    let ring = crate::cache::RingPlanError::WindowExceedsCapacity {
+        window: 5,
+        capacity: 4,
+    };
+    assert!(matches!(
+        segment_error(
+            KvCacheStorage::SlidingRing,
+            0,
+            5,
+            8,
+            SegmentViolation::Ring(ring)
+        ),
+        TensorCacheError::Ring(error) if error == ring
+    ));
+}
+
+/// A ring cache that lost its window reports it on reads and writes instead of panicking.
+///
+/// Constructors always resolve a ring's window; clearing it breaks that
+/// private invariant to exercise the defensive mapping of the verified
+/// planners' `WindowRequired` rejection in both the read and the write path.
+#[test]
+fn ring_without_a_resolved_window_is_a_contextual_error() {
+    let config = CacheConfig::new(1, 4).expect("config");
+    let spec = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::SlidingRing, DType::F32)
+        .expect("spec")
+        .with_sliding_window(NonZeroUsize::new(2).expect("non-zero"));
+    let mut cache =
+        NativeKvCache::<TestBackend>::new(config, 1, spec, &Default::default()).expect("cache");
+    cache
+        .write_sequence(0, 0, 0, token(1.0), token(2.0))
+        .expect("write");
+    cache.window = None;
+    assert!(matches!(
+        cache.read_sequence(0, 0, 1),
+        Err(TensorCacheError::SlidingWindowRequired {
+            storage: "sliding ring"
+        })
+    ));
+    assert!(matches!(
+        cache.write_sequence(0, 0, 1, token(3.0), token(4.0)),
+        Err(TensorCacheError::SlidingWindowRequired {
+            storage: "sliding ring"
+        })
+    ));
+}
+
+/// Staging needs one baseline per row, and pair caches reject latent inputs by name.
+#[test]
+fn staging_baselines_and_plane_kinds_are_validated() {
+    let mut cache = cache();
+    assert!(matches!(
+        cache.begin_staging_from(&[0, 0]),
+        Err(TensorCacheError::Metadata(
+            DecodeStateError::SequenceCountMismatch {
+                expected: 1,
+                actual: 2
+            }
+        ))
+    ));
+    assert!(!cache.staging_active);
+    let latent = Tensor::<TestBackend, 3>::zeros([1, 1, 1], &Default::default());
+    assert!(matches!(
+        cache.write_latent_sequence(0, 0, 0, latent),
+        Err(TensorCacheError::PlaneKindMismatch {
+            expected: "a key/value pair; use the key/value methods"
+        })
+    ));
+}
+
+/// A working read of staged proposals needs every staging plane.
+#[test]
+fn working_reads_reject_incomplete_staging_planes() {
+    let mut cache = cache();
+    cache.begin_staging().expect("begin staging");
+    cache
+        .stage_sequence(0, 0, token(7.0), token(9.0))
+        .expect("stage one proposal");
+    cache.layers[0]
+        .staged
+        .as_mut()
+        .expect("staging planes")
+        .pop();
+    assert!(matches!(
+        cache.read_working_sequence(0, 0, 0),
+        Err(TensorCacheError::StagingDisabled)
+    ));
+}
+
+/// Input plane counts must match the group kind, and the error names the right methods.
+#[test]
+fn plane_counts_name_the_methods_of_the_group_kind() {
+    let pair = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::Full, DType::F32).expect("pair");
+    let latent = NativeKvCacheSpec::latent(1, 4, KvCacheStorage::Full, DType::F32).expect("latent");
+    assert!(validate_plane_count(pair, 2).is_ok());
+    assert!(validate_plane_count(latent, 1).is_ok());
+    assert!(matches!(
+        validate_plane_count(pair, 1),
+        Err(TensorCacheError::PlaneKindMismatch {
+            expected: "a key/value pair; use the key/value methods"
+        })
+    ));
+    assert!(matches!(
+        validate_plane_count(latent, 2),
+        Err(TensorCacheError::PlaneKindMismatch {
+            expected: "one latent tensor; use the latent methods"
+        })
+    ));
+}

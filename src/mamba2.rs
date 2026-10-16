@@ -582,7 +582,12 @@ pub struct Mamba2<B: Backend> {
 }
 
 impl<B: Backend> Mamba2<B> {
-    /// Reconstructs the validated allocation configuration.
+    /// Reconstructs the allocation configuration from the topology fields.
+    ///
+    /// The result is not validated here: a module built by
+    /// [`Mamba2Config::init`] reproduces its valid configuration, while a
+    /// manually edited module can yield one that [`Mamba2Config::validate`]
+    /// rejects.
     pub fn config(&self) -> Mamba2Config {
         Mamba2Config {
             hidden_size: self.hidden_size,
@@ -603,7 +608,11 @@ impl<B: Backend> Mamba2<B> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::forward_with_state`].
+    /// Returns a configuration error when the zero state cannot be allocated:
+    /// an empty batch, a topology reconstructed by [`Self::config`] that fails
+    /// validation (for example a manually set zero chunk size), or an
+    /// activation dtype that is not floating-point. Otherwise returns the
+    /// errors of [`Self::forward_with_state`].
     pub fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -629,7 +638,11 @@ impl<B: Backend> Mamba2<B> {
     /// # Errors
     ///
     /// Returns shape errors for mismatched inputs or state, and a backend
-    /// capability error for tensors on different devices.
+    /// capability error for tensors on different devices. A manually
+    /// assembled module can also return projection or gated-norm shape
+    /// errors, a configuration error for a non-positive gated-norm epsilon,
+    /// and, in chunked prefill, a `mamba2.chunk` configuration error for a
+    /// zero `chunk_size`.
     pub fn forward_with_state(
         &self,
         hidden: Tensor<B, 3>,

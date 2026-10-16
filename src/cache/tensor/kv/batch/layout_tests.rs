@@ -90,6 +90,11 @@ fn stage_updates_check_cursor_staging_and_capacity() {
         plan_stage_updates(&[99, usize::MAX], &[1, 0], &[0, 9], None, 4, 128),
         Ok(vec![(0, 1)])
     );
+    // Only rows present in both slices are planned, whichever is longer.
+    assert_eq!(
+        plan_stage_updates(&[5, 9, 10], &[2], &staged, Some(&baseline), 4, 16),
+        Ok(vec![(0, 3)])
+    );
     // A saturated cursor is reported rather than overflowing.
     assert_eq!(
         plan_stage_updates(&[0], &[1], &[1], Some(&[usize::MAX]), 4, 16),

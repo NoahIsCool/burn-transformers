@@ -9,7 +9,7 @@ use crate::architecture::TokenMask;
 
 use super::{
     CHUNKS_PER_BLOCK, ChunkBlock, ChunkOperands, DeltaNetMode, DeltaRuleConfig, DeltaRuleInput,
-    GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, block_chunk_ranges,
+    GatedDeltaNet, GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, block_chunk_ranges,
     causal_decay_matrix, chunked_gated_delta_rule, mask_hidden, prefers_recurrence,
     recurrent_gated_delta_rule, recurrent_gated_delta_rule_with_snapshots, softplus,
     unit_lower_inverse,
@@ -1102,6 +1102,7 @@ fn query_key_and_output_norm_epsilons_are_independent() {
 #[test]
 fn chunked_rule_and_mixer_are_differentiable() {
     use burn::backend::Autodiff;
+    /// Reverse-mode wrapper of the Flex test backend that records the graph.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let base = long_fixture(9);
@@ -1736,4 +1737,238 @@ fn mixer_snapshots_match_column_by_column_states() {
                 .unwrap()
         );
     }
+}
+
+/// Every non-finite or non-positive key normalization epsilon is rejected.
+#[test]
+fn rule_config_rejects_each_invalid_epsilon() {
+    for normalization_epsilon in [f64::NAN, f64::INFINITY, 0.0, -1e-6] {
+        let error = DeltaRuleConfig {
+            normalization_epsilon,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, .. }
+                if field == "delta_net.normalization_epsilon"),
+            "{normalization_epsilon}: {error:?}"
+        );
+    }
+}
+
+/// Without a token mask, snapshots and state equal those of an all-valid mask.
+///
+/// The unmasked path counts valid columns as `1..=sequence` instead of a
+/// cumulative sum over the mask, and equal key and value head counts skip
+/// the key-head repetition; both must reproduce the masked computation.
+#[test]
+fn unmasked_snapshots_equal_all_valid_masked_snapshots() {
+    let device = Default::default();
+    TestBackend::seed(&device, 21);
+    let mut config = GatedDeltaNetConfig::new(4, 2, 2, 2, 2);
+    config.convolution_kernel = 3;
+    let mixer = config.init::<TestBackend>(&device).unwrap();
+    let hidden = smooth_hidden(2, 4, 4);
+    let all_valid = TokenMask::new(Tensor::<TestBackend, 2, Int>::ones([2, 4], &device).bool());
+    let mut start = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+    start.convolution = start.convolution.clone() + 0.25;
+    start.recurrent = start.recurrent.clone() - 0.125;
+
+    let mut unmasked_state = start.clone();
+    let (unmasked, unmasked_snapshots) = mixer
+        .forward_with_snapshots(hidden.clone(), None, &mut unmasked_state)
+        .unwrap();
+    let mut masked_state = start;
+    let (masked, masked_snapshots) = mixer
+        .forward_with_snapshots(hidden, Some(&all_valid), &mut masked_state)
+        .unwrap();
+    let tolerance = Tolerance::absolute(1e-6);
+    unmasked
+        .into_data()
+        .assert_approx_eq::<f32>(&masked.into_data(), tolerance);
+    unmasked_snapshots
+        .recurrent
+        .into_data()
+        .assert_approx_eq::<f32>(&masked_snapshots.recurrent.into_data(), tolerance);
+    unmasked_snapshots
+        .convolution
+        .into_data()
+        .assert_approx_eq::<f32>(&masked_snapshots.convolution.into_data(), tolerance);
+    unmasked_state
+        .recurrent
+        .into_data()
+        .assert_approx_eq::<f32>(&masked_state.recurrent.into_data(), tolerance);
+}
+
+/// One stateful mixer entry point together with the delta-rule kernel it selects.
+#[derive(Clone, Copy, Debug)]
+enum StatefulCall {
+    /// `GatedDeltaNet::forward_with_state` with the given mode and segment length.
+    State(
+        /// Requested execution mode.
+        DeltaNetMode,
+        /// Tokens in the single-row segment, which decides the prefill kernel.
+        usize,
+    ),
+    /// `GatedDeltaNet::forward_with_snapshots` over a segment of this many tokens.
+    Snapshots(
+        /// Tokens in the single-row segment.
+        usize,
+    ),
+}
+
+impl StatefulCall {
+    /// Runs this entry point on a smooth single-row input and returns only its error.
+    fn error(
+        self,
+        mixer: &GatedDeltaNet<TestBackend>,
+        state: &mut GatedDeltaNetState<TestBackend>,
+    ) -> crate::Error {
+        match self {
+            Self::State(mode, tokens) => mixer
+                .forward_with_state(smooth_hidden(1, tokens, 4), None, state, mode)
+                .unwrap_err(),
+            Self::Snapshots(tokens) => mixer
+                .forward_with_snapshots(smooth_hidden(1, tokens, 4), None, state)
+                .unwrap_err(),
+        }
+    }
+}
+
+/// Every stateful kernel path of the `[4, 1, 2, 2, 2]` test mixer.
+///
+/// With `2 * 2 * 2 = 8` state elements, chunked prefill keeps the recurrence
+/// for 3 tokens and switches to the chunked rule at 16; the snapshot kernel
+/// always runs the recurrence. The test asserts that kernel choice so a
+/// later cost-model change cannot silently drop the chunked case.
+fn stateful_calls() -> [StatefulCall; 4] {
+    assert!(prefers_recurrence(3, 8));
+    assert!(!prefers_recurrence(16, 8));
+    [
+        StatefulCall::State(DeltaNetMode::Recurrent, 3),
+        StatefulCall::State(DeltaNetMode::ChunkedPrefill, 3),
+        StatefulCall::State(DeltaNetMode::ChunkedPrefill, 16),
+        StatefulCall::Snapshots(3),
+    ]
+}
+
+/// Asserts that `call` fails as `expected` describes and leaves `state` as supplied.
+fn assert_failure_preserves_state(
+    mixer: &GatedDeltaNet<TestBackend>,
+    config: &GatedDeltaNetConfig,
+    call: StatefulCall,
+    expected: impl Fn(&crate::Error) -> bool,
+) {
+    let device = Default::default();
+    let mut state = GatedDeltaNetState::zeros(config, 1, &device).unwrap();
+    state.convolution = state.convolution.clone() + 0.25;
+    state.recurrent = state.recurrent.clone() - 0.5;
+    let convolution_before = state.convolution.clone().into_data();
+    let recurrent_before = state.recurrent.clone().into_data();
+    let error = call.error(mixer, &mut state);
+    assert!(expected(&error), "{call:?}: {error:?}");
+    state
+        .convolution
+        .into_data()
+        .assert_eq(&convolution_before, true);
+    state
+        .recurrent
+        .into_data()
+        .assert_eq(&recurrent_before, true);
+}
+
+/// A failing output projection leaves both caller state buffers untouched.
+///
+/// The output projection is the last fallible step of the mixer. A manually
+/// assembled module whose `out_proj` does not accept the value width must
+/// report the projection error without having published the advanced
+/// convolution history or recurrent state, so a caller can retry or roll
+/// back from exactly the state it supplied. The guarantee is checked on the
+/// recurrent kernel, on chunked prefill at a length that keeps the
+/// recurrence and at one that selects the chunked rule, and on the snapshot
+/// kernel that speculative rollback depends on.
+#[test]
+fn failing_output_projection_preserves_caller_state() {
+    use burn::{module::Param, nn::LinearConfig};
+
+    let device = Default::default();
+    let config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    let mut mixer = config.init::<TestBackend>(&device).unwrap();
+    mixer.out_proj = LinearConfig::new(3, 4).init(&device);
+    mixer.out_proj.weight = Param::from_tensor(Tensor::ones([3, 4], &device));
+    for call in stateful_calls() {
+        assert_failure_preserves_state(
+            &mixer,
+            &config,
+            call,
+            |error| matches!(error, crate::Error::Shape { tensor, .. } if tensor == "linear.weight"),
+        );
+    }
+}
+
+/// An invalid manually set `rule_config` fails in every kernel without touching state.
+///
+/// The delta-rule kernels validate their controls before any tensor work, so
+/// a zero chunk size or a non-positive query/key epsilon is reported as a
+/// configuration error on every path, the recurrent ones included, and the
+/// caller's buffers stay as supplied.
+#[test]
+fn invalid_rule_config_fails_every_kernel_and_preserves_state() {
+    let device = Default::default();
+    let config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    // The kernels name the `DeltaRuleConfig` field; the stateless forward
+    // validates the rebuilt `GatedDeltaNetConfig`, which names its own field.
+    for (rule_config, kernel_field, kernel_reason, config_field) in [
+        (
+            DeltaRuleConfig {
+                chunk_size: 0,
+                ..DeltaRuleConfig::default()
+            },
+            "delta_net.chunk_size",
+            "must be non-zero",
+            "delta_net.chunk_size",
+        ),
+        (
+            DeltaRuleConfig {
+                normalization_epsilon: 0.0,
+                ..DeltaRuleConfig::default()
+            },
+            "delta_net.normalization_epsilon",
+            "must be finite and greater than zero",
+            "delta_net.qk_l2_epsilon",
+        ),
+    ] {
+        let mut mixer = config.init::<TestBackend>(&device).unwrap();
+        mixer.rule_config = rule_config;
+        for call in stateful_calls() {
+            assert_failure_preserves_state(&mixer, &config, call, |error| {
+                matches!(error, crate::Error::Configuration { field, reason }
+                    if field == kernel_field && reason == kernel_reason)
+            });
+        }
+        // The stateless forward rejects the rebuilt configuration while
+        // allocating its zero state.
+        let error = mixer.forward(smooth_hidden(1, 3, 4), None).unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, .. } if field == config_field),
+            "{error:?}"
+        );
+    }
+}
+
+/// The stateless forward reports an empty batch while allocating its zero state.
+#[test]
+fn stateless_forward_rejects_an_empty_batch() {
+    let device = Default::default();
+    let mixer = GatedDeltaNetConfig::new(4, 1, 2, 2, 2)
+        .init::<TestBackend>(&device)
+        .unwrap();
+    let error = mixer
+        .forward(Tensor::zeros([0, 2, 4], &device), None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, .. } if field == "delta_net.batch_size"),
+        "{error:?}"
+    );
 }

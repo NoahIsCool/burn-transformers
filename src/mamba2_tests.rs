@@ -584,18 +584,21 @@ fn grouped_norm_rejects_invalid_geometry() {
             .is_err()
     );
 
-    let norm = GatedGroupRmsNorm::<TestBackend> {
-        weight: Param::from_tensor(Tensor::ones([4], &device)),
-        groups: 2,
-        epsilon: f64::NAN,
-    };
-    assert!(
-        norm.forward(
-            Tensor::ones([1, 2, 4], &device),
-            Tensor::ones([1, 2, 4], &device),
-        )
-        .is_err()
-    );
+    for epsilon in [f64::NAN, 0.0, -1e-6] {
+        let norm = GatedGroupRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(Tensor::ones([4], &device)),
+            groups: 2,
+            epsilon,
+        };
+        assert_configuration(
+            norm.forward(
+                Tensor::ones([1, 2, 4], &device),
+                Tensor::ones([1, 2, 4], &device),
+            ),
+            "mamba2.gated_norm.epsilon",
+            "greater than zero",
+        );
+    }
 }
 
 /// Invalid groups and state dtypes return contextual errors before kernels.
@@ -1301,4 +1304,393 @@ fn block_scan_timing() {
         .0
     });
     eprintln!("mamba2 scan timing: speedup {:.2}x", legacy / blocked);
+}
+
+/// Asserts that `result` is a configuration error for `field` whose reason contains `reason`.
+fn assert_configuration<T: core::fmt::Debug>(result: Result<T>, field: &str, reason: &str) {
+    match result {
+        Err(Error::Configuration {
+            field: actual,
+            reason: message,
+        }) => {
+            assert_eq!(actual, field);
+            assert!(message.contains(reason), "{field}: {message}");
+        }
+        other => panic!("expected a {field} configuration error, got {other:?}"),
+    }
+}
+
+/// Asserts that `result` is a shape error for `tensor`.
+fn assert_shape<T: core::fmt::Debug>(result: Result<T>, tensor: &str) {
+    match result {
+        Err(Error::Shape { tensor: actual, .. }) => assert_eq!(actual, tensor),
+        other => panic!("expected a {tensor} shape error, got {other:?}"),
+    }
+}
+
+/// Clamp constructors select the documented paths and every invalid interval is named.
+///
+/// `unclamped` leaves both paths free, `both` clamps both, and validation
+/// checks each configured path independently: a non-finite or negative lower
+/// bound, and a non-finite or inverted upper bound, are rejected under the
+/// field of the path that carries them.
+#[test]
+fn time_step_clamps_select_paths_and_reject_invalid_intervals() {
+    let limits = TimeStepLimits {
+        lower: 0.001,
+        upper: Some(0.1),
+    };
+    let unclamped = TimeStepClamp::unclamped();
+    assert_eq!(unclamped.for_mode(Mamba2Mode::Recurrent), None);
+    assert_eq!(unclamped.for_mode(Mamba2Mode::ChunkedPrefill), None);
+    let both = TimeStepClamp::both(limits);
+    assert_eq!(both.for_mode(Mamba2Mode::Recurrent), Some(limits));
+    assert_eq!(both.for_mode(Mamba2Mode::ChunkedPrefill), Some(limits));
+    for clamp in [unclamped, both] {
+        let mut valid = config();
+        valid.time_step_clamp = clamp;
+        valid.validate().expect("valid clamp");
+    }
+
+    let invalid = [
+        (
+            TimeStepLimits::at_least(f64::NAN),
+            "lower discretization bound",
+        ),
+        (
+            TimeStepLimits::at_least(-1e-3),
+            "lower discretization bound",
+        ),
+        (
+            TimeStepLimits {
+                lower: 0.0,
+                upper: Some(f64::INFINITY),
+            },
+            "upper discretization bound",
+        ),
+        (
+            TimeStepLimits {
+                lower: 0.5,
+                upper: Some(0.25),
+            },
+            "upper discretization bound",
+        ),
+    ];
+    for (bad, reason) in invalid {
+        for (clamp, field) in [
+            (
+                TimeStepClamp::chunked_only(bad),
+                "mamba2.time_step_clamp.chunked",
+            ),
+            (
+                TimeStepClamp {
+                    chunked: None,
+                    recurrent: Some(bad),
+                },
+                "mamba2.time_step_clamp.recurrent",
+            ),
+        ] {
+            let mut config = config();
+            config.time_step_clamp = clamp;
+            assert_configuration(config.validate(), field, reason);
+        }
+    }
+}
+
+/// Zero widths, a short kernel, a bad epsilon, and every overflowing width are rejected.
+#[test]
+fn configuration_validation_names_each_invalid_geometry() {
+    for change in [
+        (|config: &mut Mamba2Config| config.hidden_size = 0) as fn(&mut Mamba2Config),
+        |config| config.num_heads = 0,
+        |config| config.head_dim = 0,
+        |config| config.state_size = 0,
+        |config| config.groups = 0,
+        |config| config.convolution_kernel = 1,
+        |config| config.chunk_size = 0,
+    ] {
+        let mut invalid = config();
+        change(&mut invalid);
+        assert_configuration(invalid.validate(), "mamba2", "must be non-zero");
+    }
+    for epsilon in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
+        let mut invalid = config();
+        invalid.normalization_epsilon = epsilon;
+        assert_configuration(
+            invalid.validate(),
+            "mamba2.normalization_epsilon",
+            "greater than zero",
+        );
+    }
+    // One head group keeps the geometry valid while each width overflows in turn.
+    for (heads, head_dim, state_size, width) in [
+        (2, usize::MAX / 2 + 1, 1, "intermediate width"),
+        (1, 1, usize::MAX / 2 + 1, "B/C channel width"),
+        (1, usize::MAX - 1, 1, "convolution width"),
+        (1, usize::MAX / 2, 1, "projection width"),
+    ] {
+        let mut invalid = config();
+        invalid.num_heads = heads;
+        invalid.head_dim = head_dim;
+        invalid.state_size = state_size;
+        invalid.groups = 1;
+        assert_configuration(
+            invalid.validate(),
+            "mamba2",
+            &format!("{width} overflows usize"),
+        );
+    }
+}
+
+/// State allocation rejects an empty batch and non-floating convolution storage.
+#[test]
+fn state_allocation_rejects_empty_batches_and_integer_storage() {
+    let device = Default::default();
+    assert_configuration(
+        Mamba2State::<TestBackend>::zeros(&config(), 0, DType::F32, &device),
+        "mamba2.batch_size",
+        "must be non-zero",
+    );
+    assert_configuration(
+        Mamba2State::<TestBackend>::zeros(&config(), 1, DType::I32, &device),
+        "mamba2.state_dtype",
+        "convolution storage must be floating-point",
+    );
+    // The stateless entry point allocates zero state, so an empty batch fails there.
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let empty = Tensor::<TestBackend, 3>::zeros([0, 2, 8], &device);
+    assert_configuration(
+        mixer.forward(empty, None, Mamba2Mode::Recurrent),
+        "mamba2.batch_size",
+        "must be non-zero",
+    );
+}
+
+/// A manually zeroed chunk size fails stateless allocation and chunked prefill, not decode.
+///
+/// `Mamba2::config` reconstructs the topology without validating it, so the
+/// stateless forward rejects the zero chunk size while allocating its zero
+/// state. With supplied state only chunked prefill uses the chunk width: it
+/// reports the scan's `mamba2.chunk` error, while the recurrent path, which
+/// never chunks, still runs.
+#[test]
+fn manual_zero_chunk_size_fails_only_where_chunks_are_used() {
+    let device = Default::default();
+    let mut mixer = config().init::<TestBackend>(&device).unwrap();
+    mixer.chunk_size = 0;
+    let state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    let hidden = waves([1, 3, 8], 0.5, 0.4);
+    assert_configuration(
+        mixer.forward(hidden.clone(), None, Mamba2Mode::Recurrent),
+        "mamba2",
+        "must be non-zero",
+    );
+    assert_configuration(
+        mixer.forward_with_state(hidden.clone(), None, &state, Mamba2Mode::ChunkedPrefill),
+        "mamba2.chunk",
+        "non-zero chunk width",
+    );
+    let (output, _) = mixer
+        .forward_with_state(hidden, None, &state, Mamba2Mode::Recurrent)
+        .expect("the recurrent path never chunks");
+    assert_eq!(output.dims(), [1, 3, 8]);
+}
+
+/// Row-wise entry points reject mismatched external state on every grouping path.
+///
+/// `forward_rows` validates the hidden tensor and the row counts itself and
+/// leaves the state check to each mixer pass, so a state whose matrix has the
+/// wrong `state_size` must surface the pass's `mamba2.state.recurrent` shape
+/// error whether all rows share one mode (one pass), the modes differ (one
+/// pass per mode group over the selected state rows), or the snapshot entry
+/// point runs. A matching state then succeeds on the same rows.
+#[test]
+fn row_entry_points_reject_mismatched_state_on_every_grouping_path() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let hidden = waves([2, 3, 8], 2.0, 0.4);
+    let mut state = Mamba2State::zeros(&config(), 2, DType::F32, &device).unwrap();
+    state.recurrent = Tensor::zeros([2, 4, 2, 4], &device);
+    let row = |tokens, mode| Mamba2Row { tokens, mode };
+    let uniform = [row(3, Mamba2Mode::Recurrent), row(2, Mamba2Mode::Recurrent)];
+    let mixed = [
+        row(3, Mamba2Mode::ChunkedPrefill),
+        row(2, Mamba2Mode::Recurrent),
+    ];
+    for rows in [uniform, mixed] {
+        assert_shape(
+            mixer.forward_rows(hidden.clone(), &rows, &state),
+            "mamba2.state.recurrent",
+        );
+    }
+    assert_shape(
+        mixer.forward_rows_with_snapshots(hidden.clone(), &[3, 2], &state),
+        "mamba2.state.recurrent",
+    );
+    let valid = Mamba2State::zeros(&config(), 2, DType::F32, &device).unwrap();
+    let (output, _) = mixer
+        .forward_rows(hidden, &mixed, &valid)
+        .expect("matching state");
+    assert_eq!(output.dims(), [2, 3, 8]);
+}
+
+/// Hidden states, token masks, and external state must match the mixer geometry.
+#[test]
+fn mismatched_inputs_and_state_are_shape_errors() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    for shape in [[0, 2, 8], [1, 0, 8], [1, 2, 7]] {
+        assert_shape(
+            mixer.forward_with_state(
+                Tensor::zeros(shape, &device),
+                None,
+                &state,
+                Mamba2Mode::Recurrent,
+            ),
+            "mamba2.hidden",
+        );
+    }
+    let hidden = waves([1, 3, 8], 0.5, 0.4);
+    let short_mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        TensorData::new(vec![true; 2], [1, 2]),
+        &device,
+    ));
+    assert_shape(
+        mixer.forward_with_state(
+            hidden.clone(),
+            Some(&short_mask),
+            &state,
+            Mamba2Mode::ChunkedPrefill,
+        ),
+        "mamba2.token_mask",
+    );
+    let mut wrong_matrix = state.clone();
+    wrong_matrix.recurrent = Tensor::zeros([1, 4, 2, 2], &device);
+    assert_shape(
+        mixer.forward_with_state(hidden.clone(), None, &wrong_matrix, Mamba2Mode::Recurrent),
+        "mamba2.state.recurrent",
+    );
+    let mut short_history = state.clone();
+    short_history.convolution = Tensor::zeros([1, 20, 1], &device);
+    assert_shape(
+        mixer.forward_with_state(hidden.clone(), None, &short_history, Mamba2Mode::Recurrent),
+        "mamba2.state.convolution",
+    );
+    // The history must use the activation dtype, since it is concatenated with the inputs.
+    let mut reduced_history = state;
+    reduced_history.convolution = reduced_history.convolution.cast(DType::F16);
+    assert_shape(
+        mixer.forward_with_state(hidden, None, &reduced_history, Mamba2Mode::Recurrent),
+        "mamba2.state.convolution",
+    );
+}
+
+/// Trailing masked tokens are identity transitions and do not change earlier outputs.
+///
+/// A token mask zeroes the masked inputs, their convolution outputs, and their
+/// discretization steps, so the selective state decays by `exp(0) = 1` and
+/// receives no update. The terminal matrix state of a padded segment therefore
+/// equals the state after only its valid prefix, and causality keeps the
+/// valid outputs identical, in both execution modes. The convolution history
+/// is the physical tail, which includes the zeroed padding.
+#[test]
+fn masked_suffix_tokens_leave_state_and_valid_outputs_unchanged() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let mut state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    state.recurrent = waves4([1, 4, 2, 3], 0.3, 0.2);
+    let hidden = waves([1, 5, 8], 2.0, 0.5);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        TensorData::new(vec![true, true, true, false, false], [1, 5]),
+        &device,
+    ));
+    for mode in [Mamba2Mode::Recurrent, Mamba2Mode::ChunkedPrefill] {
+        let (padded, padded_state) = mixer
+            .forward_with_state(hidden.clone(), Some(&mask), &state, mode)
+            .unwrap();
+        let (prefix, prefix_state) = mixer
+            .forward_with_state(hidden.clone().narrow(1, 0, 3), None, &state, mode)
+            .unwrap();
+        padded
+            .narrow(1, 0, 3)
+            .into_data()
+            .assert_approx_eq::<f32>(&prefix.into_data(), Tolerance::absolute(1e-6));
+        padded_state.recurrent.into_data().assert_approx_eq::<f32>(
+            &prefix_state.recurrent.into_data(),
+            Tolerance::absolute(1e-6),
+        );
+        // The physical history ends in two zeroed padding columns.
+        let history = padded_state
+            .convolution
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(history.iter().all(|&value| value == 0.0), "{mode:?}");
+    }
+}
+
+/// The scan kernels reject operands that the mixer would never pass them.
+///
+/// `recurrent_scan` checks its terminal state against the operand geometry,
+/// which catches a mismatched initial state when no token updates it, and
+/// `chunked_scan_with_budget` needs tokens, a non-zero chunk, and groups that
+/// divide the heads.
+#[test]
+fn scan_kernels_reject_inconsistent_operands() {
+    let device = Default::default();
+    let empty = |shape: [usize; 4]| {
+        Tensor::<TestBackend, 4>::from_data(TensorData::new(Vec::<f32>::new(), shape), &device)
+    };
+    let result = recurrent_scan(
+        empty([1, 0, 2, 2]),
+        empty([1, 0, 1, 3]),
+        empty([1, 0, 1, 3]),
+        Tensor::from_data(TensorData::new(Vec::<f32>::new(), [1, 0, 2]), &device),
+        Tensor::from_floats([-1.0, -1.0], &device),
+        Tensor::ones([2], &device),
+        Tensor::zeros([1, 2, 2, 2], &device),
+        false,
+    );
+    assert_shape(
+        result.map(|(output, _, _)| output.dims()),
+        "mamba2.scan_state",
+    );
+
+    let operands = |tokens: usize, groups: usize| {
+        (
+            waves4([1, tokens, 4, 2], 0.1, 0.3),
+            waves4([1, tokens, groups, 3], 0.2, 0.3),
+            waves4([1, tokens, groups, 3], 0.3, 0.3),
+            waves([1, tokens, 4], 0.4, 0.1).abs(),
+        )
+    };
+    for (tokens, groups, chunk) in [(0, 2, 2), (3, 2, 0), (3, 3, 2)] {
+        let (x, b, c, dt) = if tokens == 0 {
+            (
+                empty([1, 0, 4, 2]),
+                empty([1, 0, groups, 3]),
+                empty([1, 0, groups, 3]),
+                Tensor::from_data(TensorData::new(Vec::<f32>::new(), [1, 0, 4]), &device),
+            )
+        } else {
+            operands(tokens, groups)
+        };
+        let result = chunked_scan_with_budget(
+            x,
+            b,
+            c,
+            dt,
+            Tensor::from_floats([-1.0, -0.5, -0.25, -2.0], &device),
+            Tensor::ones([4], &device),
+            Tensor::zeros([1, 4, 2, 3], &device),
+            chunk,
+            SCAN_BLOCK_ELEMENTS,
+        );
+        assert_configuration(
+            result.map(|(output, _)| output.dims()),
+            "mamba2.chunk",
+            "groups dividing the heads",
+        );
+    }
 }

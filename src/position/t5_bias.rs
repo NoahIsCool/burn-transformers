@@ -106,7 +106,21 @@ impl T5RelativePositionBiasConfig {
     /// The integer shape checks (non-zero heads, `i64` bucket IDs, and a
     /// representable `buckets * heads` table) are the Verus-verified
     /// `relative_bias_shape_fault`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error naming the first invalid field: zero
+    /// heads, a bucket count beyond `i64`, an overflowing table, an invalid
+    /// bucket geometry, or a non-finite or negative initialization scale.
     pub fn validate(&self) -> Result<()> {
+        self.validated_buckets().map(|_| ())
+    }
+
+    /// Validates the configuration and returns the bucket mapping it describes.
+    ///
+    /// [`Self::validate`] and [`Self::init`] share this single pass, so
+    /// initialization cannot disagree with validation about the geometry.
+    fn validated_buckets(&self) -> Result<T5RelativePositionBuckets> {
         match relative_bias_shape_fault(self.num_heads, self.num_buckets) {
             Some(RelativeBiasShapeFault::ZeroHeads) => {
                 return Err(Error::configuration(
@@ -128,25 +142,27 @@ impl T5RelativePositionBiasConfig {
             }
             None => {}
         }
-        T5RelativePositionBuckets::new(self.num_buckets, self.max_distance, self.bidirectional)
-            .map_err(|error| Error::configuration("t5_relative_bias.buckets", error.to_string()))?;
+        let buckets =
+            T5RelativePositionBuckets::new(self.num_buckets, self.max_distance, self.bidirectional)
+                .map_err(|error| {
+                    Error::configuration("t5_relative_bias.buckets", error.to_string())
+                })?;
         if !self.initializer_std.is_finite() || self.initializer_std < 0.0 {
             return Err(Error::configuration(
                 "t5_relative_bias.initializer_std",
                 "must be finite and non-negative",
             ));
         }
-        Ok(())
+        Ok(buckets)
     }
 
     /// Initializes the trainable `[buckets, heads]` scalar table.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::validate`].
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<T5RelativePositionBias<B>> {
-        self.validate()?;
-        let buckets =
-            T5RelativePositionBuckets::new(self.num_buckets, self.max_distance, self.bidirectional)
-                .map_err(|error| {
-                    Error::configuration("t5_relative_bias.buckets", error.to_string())
-                })?;
+        let buckets = self.validated_buckets()?;
         Ok(T5RelativePositionBias {
             weight: Initializer::Normal {
                 mean: 0.0,

@@ -174,3 +174,163 @@ fn groups_are_refused_after_tokens_are_committed() {
         .add_native_kv(kv)
         .expect("reset unlocks the auxiliary bank");
 }
+
+/// Without an auxiliary bank, a paired truncate fails before rewinding the main bank.
+#[test]
+fn paired_truncate_requires_an_auxiliary_bank() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let mut state =
+        TensorDecodeState::<TestBackend>::new(config, 1, &Default::default()).expect("state");
+    state.advance(&[3]).expect("main lengths");
+    assert!(matches!(
+        state.truncate_prefixes(&[1], &[0]),
+        Err(TensorCacheError::MtpNotEnabled)
+    ));
+    assert_eq!(state.lengths(), &[3]);
+}
+
+/// A mark must agree with the state on whether an auxiliary bank exists.
+///
+/// Each forged mark carries the state's own main-bank identity, so only the
+/// auxiliary half disagrees: the paired state receives a mark without an
+/// auxiliary identity, and the plain state receives one with an auxiliary
+/// identity. The presence check alone must reject both as stale, leave each
+/// transaction active, and let the genuine marks recover.
+#[test]
+fn marks_must_match_the_auxiliary_bank_topology() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let device = Default::default();
+    let mut paired = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    paired.enable_mtp().expect("auxiliary bank");
+    let mut plain = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    let paired_mark = paired.begin_transaction().expect("paired transaction");
+    let plain_mark = plain.begin_transaction().expect("plain transaction");
+    let paired_without_auxiliary = TensorCacheMark {
+        main: paired_mark.main.clone(),
+        mtp: None,
+    };
+    assert!(matches!(
+        paired.rollback(paired_without_auxiliary),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    assert!(paired.has_active_transaction());
+    let plain_with_auxiliary = TensorCacheMark {
+        main: plain_mark.main.clone(),
+        mtp: paired_mark.mtp.clone(),
+    };
+    assert!(matches!(
+        plain.rollback(plain_with_auxiliary),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    assert!(plain.has_active_transaction());
+    paired
+        .rollback(paired_mark)
+        .expect("the genuine mark recovers");
+    assert!(!paired.has_active_transaction());
+    plain
+        .rollback(plain_mark)
+        .expect("the genuine mark recovers");
+    assert!(!plain.has_active_transaction());
+}
+
+/// Bank staging transitions reject a second begin and a commit without a transaction.
+///
+/// The decode state checks its own transaction first, so these bank-level
+/// guards are defensive; each test drives the bank directly.
+#[test]
+fn bank_staging_guards_reject_out_of_order_transitions() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let mut bank = TensorCacheBank::<TestBackend>::with_config(config, &Default::default());
+    assert!(matches!(
+        bank.prepare_staging_commit(&[0], &[0], &[0]),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    bank.begin_staging(&[0]).expect("an empty bank can stage");
+    assert!(matches!(
+        bank.validate_can_begin_staging(),
+        Err(TensorCacheError::TransactionAlreadyActive)
+    ));
+}
+
+/// Commit violations keep their transaction-specific names, and others map through metadata.
+#[test]
+fn commit_violations_map_to_tensor_cache_errors() {
+    assert!(matches!(
+        commit_error(LengthViolation::TransactionInactive),
+        TensorCacheError::TransactionNotActive
+    ));
+    assert!(matches!(
+        commit_error(LengthViolation::PrefixExceedsProposal {
+            sequence: 1,
+            accepted: 3,
+            proposed: 2
+        }),
+        TensorCacheError::AcceptedPrefixExceedsProposal {
+            sequence: 1,
+            accepted: 3,
+            proposed: 2
+        }
+    ));
+    assert!(matches!(
+        commit_error(LengthViolation::CountMismatch {
+            expected: 2,
+            actual: 1
+        }),
+        TensorCacheError::Metadata(DecodeStateError::SequenceCountMismatch {
+            expected: 2,
+            actual: 1
+        })
+    ));
+}
+
+/// A transaction needs proposal storage in every recurrent group as well as every KV group.
+#[test]
+fn transactions_require_recurrent_staging_storage() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let mut state =
+        TensorDecodeState::<TestBackend>::new(config, 1, &Default::default()).expect("state");
+    let recurrent = crate::cache::RecurrentStateSpec::new(1, 1, 1, 1, 1, 1, DType::F32)
+        .expect("recurrent geometry");
+    state
+        .main_mut()
+        .add_recurrent(recurrent)
+        .expect("recurrent group");
+    assert!(matches!(
+        state.begin_transaction(),
+        Err(TensorCacheError::StagingDisabled)
+    ));
+    assert!(!state.has_active_transaction());
+}
+
+/// Both halves of a mark must name this state's transactions.
+///
+/// A mark that pairs this state's main identity with another state's
+/// auxiliary identity is stale even though its main half matches.
+#[test]
+fn marks_need_matching_main_and_auxiliary_identities() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let device = Default::default();
+    let paired = || {
+        let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+        state.enable_mtp().expect("auxiliary bank");
+        state
+    };
+    let mut first = paired();
+    let mut second = paired();
+    let first_mark = first.begin_transaction().expect("transaction");
+    let second_mark = second.begin_transaction().expect("transaction");
+    let hybrid = TensorCacheMark {
+        main: first_mark.main.clone(),
+        mtp: second_mark.mtp.clone(),
+    };
+    assert!(matches!(
+        first.rollback(hybrid),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    first
+        .rollback(first_mark)
+        .expect("the genuine mark recovers");
+    second
+        .rollback(second_mark)
+        .expect("the genuine mark recovers");
+}

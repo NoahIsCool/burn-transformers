@@ -179,7 +179,12 @@ pub enum TokenAlignment {
     /// Row `b` occupies the last `n_b` columns (padding on the left).
     LeftPadded,
     /// Row `b` starts at the given column.
-    Columns(Vec<usize>),
+    Columns(
+        /// First input column of each row, one entry per row; row `b` reads
+        /// columns `columns[b]..columns[b] + n_b`, which must lie inside the
+        /// block or the publication fails with `AppendOutsideBlock`.
+        Vec<usize>,
+    ),
 }
 
 /// One recorded KV update.
@@ -575,21 +580,56 @@ const fn coverage_error(
 /// A prepared KV publication of one group.
 enum PreparedKv<B: Backend> {
     /// Per-row direct write.
-    Row(usize, PreparedNativeKvWrite<B>),
+    Row(
+        /// Cache group the write targets.
+        usize,
+        /// Validated committed-plane write of one row.
+        PreparedNativeKvWrite<B>,
+    ),
     /// Batched write or staging.
-    Batch(usize, PreparedNativeKvBatchWrite<B>),
+    Batch(
+        /// Cache group the write targets.
+        usize,
+        /// Validated batched direct write or proposal staging of one layer.
+        PreparedNativeKvBatchWrite<B>,
+    ),
     /// Staged-length updates for a layer written ahead inside a transaction.
-    StagedLengths(usize, usize, Vec<(usize, usize)>),
+    StagedLengths(
+        /// Cache group of the written-ahead layer.
+        usize,
+        /// Layer within the group.
+        usize,
+        /// `(row, staged length)` pairs to publish; empty outside a
+        /// transaction, where the write-ahead already wrote committed slots.
+        Vec<(usize, usize)>,
+    ),
 }
 
 /// A prepared recurrent publication of one group.
 enum PreparedRecurrent<B: Backend> {
     /// Per-row direct terminal state.
-    Row(usize, PreparedRecurrentStateWrite<B>),
+    Row(
+        /// Cache group the write targets.
+        usize,
+        /// Validated replacement of one row's matrix and convolution state.
+        PreparedRecurrentStateWrite<B>,
+    ),
     /// Whole-batch direct terminal state.
-    Batch(usize, PreparedRecurrentBatchWrite<B>),
-    /// Snapshot staging.
-    Stage(usize, PreparedRecurrentStage<B>),
+    Batch(
+        /// Cache group the write targets.
+        usize,
+        /// Validated replacement of every active row's state in one layer.
+        PreparedRecurrentBatchWrite<B>,
+    ),
+    /// Snapshot staging for one row, or for the whole batch at once.
+    Stage(
+        /// Cache group the snapshots target.
+        usize,
+        /// Validated per-token proposal snapshots for a contiguous row range
+        /// (one row, or every row when all are active with equal staged
+        /// lengths), written from the rows' shared current staged length.
+        PreparedRecurrentStage<B>,
+    ),
 }
 
 impl<B: Backend> TensorDecodeState<B> {

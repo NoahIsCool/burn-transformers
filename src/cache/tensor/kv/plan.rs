@@ -632,11 +632,17 @@ pub(crate) enum SegmentViolation {
     /// Ring storage has no resolved width.
     WindowRequired,
     /// A full-storage commit leaves the logical capacity.
-    WriteEnd(WriteEndViolation),
+    WriteEnd(
+        /// Whether `start + tokens` overflowed or exceeded the capacity.
+        WriteEndViolation,
+    ),
     /// Ring planning rejected the request: an unrepresentable end, a doubled
     /// mirrored extent, a commit beyond the staged proposals, or a read wider
     /// than the ring.
-    Ring(RingPlanError),
+    Ring(
+        /// The ring planner's exact rejection, forwarded unchanged.
+        RingPlanError,
+    ),
 }
 
 /// One run of rows written by the same committed segments.

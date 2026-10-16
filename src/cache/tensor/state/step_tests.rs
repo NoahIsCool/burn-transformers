@@ -925,6 +925,7 @@ fn steps_cannot_be_published_into_another_state() {
 /// Every operation that can move a bank's cursors or tensors invalidates its outstanding steps.
 #[test]
 fn lifecycle_operations_invalidate_outstanding_steps() {
+    /// A named lifecycle mutation that must bump the bank's step version.
     type Operation = fn(&mut TensorDecodeState<TestBackend>);
     let operations: [(&str, Operation); 8] = [
         ("advance", |state| {
@@ -1141,4 +1142,226 @@ fn bank_versions_are_independent() {
         .expect("MTP step survives main operations");
     assert_eq!(state.lengths(), &[1, 1, 1]);
     assert_eq!(state.mtp_lengths(), Some([1, 0, 1].as_slice()));
+}
+
+/// Explicit token columns place rows exactly as the equivalent padded layouts do.
+///
+/// `Columns(vec![0; rows])` is right padding and the columns that left
+/// padding resolves to are left padding, so both pairs of steps must publish
+/// identical tensors. A left-padded row longer than the block, and an
+/// explicit column that pushes a row past the block, are rejected before any
+/// write.
+#[test]
+fn explicit_token_columns_match_padded_layouts() {
+    let counts = [1, 0, 2];
+    for (columns, alignment) in [
+        (vec![0, 0, 0], TokenAlignment::RightPadded),
+        (vec![1, 2, 0], TokenAlignment::LeftPadded),
+    ] {
+        let mut explicit = state(0, false);
+        let mut padded = state(0, false);
+        explicit
+            .publish_step(
+                batched_step(&explicit, &counts, 2, 1.0)
+                    .with_alignment(TokenAlignment::Columns(columns.clone())),
+            )
+            .expect("explicit columns");
+        padded
+            .publish_step(batched_step(&padded, &counts, 2, 1.0).with_alignment(alignment))
+            .expect("padded layout");
+        assert_eq!(explicit.lengths(), &[1, 0, 2]);
+        assert_eq!(snapshot(&explicit), snapshot(&padded), "{columns:?}");
+    }
+
+    let mut state = state(0, false);
+    let before = snapshot(&state);
+    let too_wide =
+        batched_step(&state, &[1, 0, 3], 2, 1.0).with_alignment(TokenAlignment::LeftPadded);
+    assert!(matches!(
+        state.publish_step(too_wide),
+        Err(TensorCacheError::AppendOutsideBlock {
+            sequence: 2,
+            column: 0,
+            count: 3,
+            block: 2
+        })
+    ));
+    let shifted = batched_step(&state, &counts, 2, 1.0)
+        .with_alignment(TokenAlignment::Columns(vec![0, 0, 1]));
+    assert!(matches!(
+        state.publish_step(shifted),
+        Err(TensorCacheError::AppendOutsideBlock {
+            sequence: 2,
+            column: 1,
+            count: 2,
+            block: 2
+        })
+    ));
+    assert_eq!(snapshot(&state), before);
+    assert_eq!(state.lengths(), &[0, 0, 0]);
+}
+
+/// A row index beyond the batch is reported as such, not as a coverage problem.
+#[test]
+fn row_writes_beyond_the_batch_are_rejected() {
+    let mut state = state(0, false);
+    let mut step = batched_step(&state, &[1, 1, 1], 1, 1.0);
+    step.push_kv_row(0, 0, ROWS, kv_block(1, 1, 2.0), kv_block(1, 1, 2.0));
+    assert!(matches!(
+        state.publish_step(step),
+        Err(TensorCacheError::SequenceOutOfBounds {
+            sequence: 3,
+            batch_size: 3
+        })
+    ));
+    assert_eq!(state.lengths(), &[0, 0, 0]);
+}
+
+/// Planning a read through a step rejects rings and unrepresentable ends.
+#[test]
+fn read_plans_through_a_step_reject_rings_and_overflow() {
+    let mut state = state(0, false);
+    state
+        .publish_step(batched_step(&state, &[1, 1, 1], 1, 1.0))
+        .expect("prefill");
+    let step = state.step(&[1, 0, 0]).expect("step");
+    assert!(matches!(
+        state.kv_read_plan_through(&step, 1),
+        Err(TensorCacheError::WriteAheadUnsupported {
+            storage: "sliding ring",
+            ..
+        })
+    ));
+    let overflowing = state.step(&[usize::MAX, 0, 0]).expect("step");
+    assert!(matches!(
+        state.kv_read_plan_through(&overflowing, 0),
+        Err(TensorCacheError::WritePositionOverflow {
+            start: 1,
+            tokens: usize::MAX
+        })
+    ));
+}
+
+/// Recurrent entries must match the step's counts and the cache geometry before publication.
+///
+/// Per-token snapshots must cover exactly the row's tokens; a terminal row
+/// state can stage only a one-token proposal; and a tensor of the wrong
+/// geometry is rejected by the cache whether it is committed from the last
+/// snapshot, staged for one row, staged for the whole batch, or staged for
+/// the active rows of a ragged batch. Every rejection leaves lengths,
+/// tensors, and staged lengths unchanged.
+#[test]
+fn recurrent_entries_are_checked_against_counts_and_geometry() {
+    /// Records every KV layer of a step batched, leaving recurrent entries to the caller.
+    fn kv_only(
+        state: &TensorDecodeState<TestBackend>,
+        counts: &[usize],
+    ) -> TensorStepWrites<TestBackend> {
+        let block = counts.iter().copied().max().unwrap_or(0).max(1);
+        let mut step = state.step(counts).expect("step");
+        for (group, layer) in [(0, 0), (0, 1), (1, 0)] {
+            step.push_kv_batch(
+                group,
+                layer,
+                kv_block(ROWS, block, 1.0),
+                kv_block(ROWS, block, 2.0),
+            );
+        }
+        step
+    }
+    let wrong_matrix = |rows: usize, tokens: usize| {
+        Tensor::<TestBackend, 5>::ones([rows, tokens, 1, 3, 2], &device())
+    };
+
+    // Committed publication: snapshots whose token count differs, and a
+    // last snapshot of the wrong geometry.
+    let mut committed = state(0, false);
+    let before = snapshot(&committed);
+    let mut short = kv_only(&committed, &[2, 0, 0]);
+    short.push_recurrent_row_snapshots(
+        0,
+        0,
+        0,
+        Tensor::ones([1, 1, 1, 2, 2], &device()),
+        Tensor::ones([1, 1, 2, 2], &device()),
+    );
+    let mut misshapen = kv_only(&committed, &[2, 0, 0]);
+    misshapen.push_recurrent_row_snapshots(
+        0,
+        0,
+        0,
+        wrong_matrix(1, 2),
+        Tensor::ones([1, 2, 2, 2], &device()),
+    );
+    for (case, step) in [("token count", short), ("geometry", misshapen)] {
+        let error = committed.publish_step(step).expect_err(case);
+        if case == "token count" {
+            assert!(
+                matches!(&error, TensorCacheError::StepWriteCoverage { kind: "recurrent", problem, .. }
+                    if problem.contains("token count differs")),
+                "{error}"
+            );
+        } else {
+            // The misshapen matrix has three state rows where the cache has two.
+            assert!(
+                matches!(&error, TensorCacheError::ShapeMismatch { actual, .. } if actual.contains(&3)),
+                "{error}"
+            );
+        }
+        assert_eq!(committed.lengths(), &[0, 0, 0], "{case}");
+        assert_eq!(snapshot(&committed), before, "{case}");
+    }
+
+    // Transactional staging: a multi-token terminal row, and misshapen
+    // terminal states for one row, the whole batch, and a ragged batch.
+    let mut staging = state(3, false);
+    let mark = staging.begin_transaction().expect("transaction");
+    let before = (snapshot(&staging), staged(&staging));
+    let mut multi_token = kv_only(&staging, &[2, 0, 0]);
+    multi_token.push_recurrent_row(0, 0, 0, matrices(1, 1.0), convolutions(1, 1.0));
+    let mut row_terminal = kv_only(&staging, &[1, 0, 0]);
+    row_terminal.push_recurrent_row(
+        0,
+        0,
+        0,
+        Tensor::ones([1, 1, 3, 2], &device()),
+        convolutions(1, 1.0),
+    );
+    let mut uniform = kv_only(&staging, &[1, 1, 1]);
+    uniform.push_recurrent_batch(
+        0,
+        0,
+        Tensor::ones([ROWS, 1, 3, 2], &device()),
+        convolutions(ROWS, 1.0),
+    );
+    let mut ragged = kv_only(&staging, &[1, 0, 1]);
+    ragged.push_recurrent_batch(
+        0,
+        0,
+        Tensor::ones([ROWS, 1, 3, 2], &device()),
+        convolutions(ROWS, 1.0),
+    );
+    for (case, step) in [
+        ("multi-token terminal", multi_token),
+        ("row terminal", row_terminal),
+        ("uniform batch", uniform),
+        ("ragged batch", ragged),
+    ] {
+        let error = staging.publish_step(step).expect_err(case);
+        if case == "multi-token terminal" {
+            assert!(
+                matches!(&error, TensorCacheError::StepWriteCoverage { problem, .. }
+                    if problem.contains("per-token snapshots")),
+                "{error}"
+            );
+        } else {
+            assert!(
+                matches!(&error, TensorCacheError::ShapeMismatch { actual, .. } if actual.contains(&3)),
+                "{case}: {error}"
+            );
+        }
+        assert_eq!(staging.working_lengths(), &[0, 0, 0], "{case}");
+        assert_eq!((snapshot(&staging), staged(&staging)), before, "{case}");
+    }
+    staging.rollback(mark).expect("rollback");
 }

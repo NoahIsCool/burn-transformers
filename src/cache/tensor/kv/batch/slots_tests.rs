@@ -22,6 +22,19 @@ fn full_tables_mark_visible_windows() {
     assert!(full_slots_all_valid(&[3, 3], &[3, 3], 3));
     assert!(!full_slots_all_valid(&[3, 2], &[3, 2], 3));
     assert!(!full_slots_all_valid(&[3, 3], &[3, 2], 3));
+    // Only zipped rows are compared, whichever slice is longer.
+    assert!(full_slots_all_valid(&[3, 3, 1], &[3, 3], 3));
+    assert!(full_slots_all_valid(&[3], &[3, 0], 3));
+}
+
+/// Table reservations never overflow: an unrepresentable size reserves nothing.
+#[test]
+fn table_reservations_saturate_to_empty() {
+    let table = table_with_capacity::<u8>(3, 4);
+    assert!(table.is_empty() && table.capacity() >= 12);
+    let unrepresentable = table_with_capacity::<u8>(usize::MAX, 2);
+    assert!(unrepresentable.is_empty());
+    assert_eq!(unrepresentable.capacity(), 0);
 }
 
 /// Ring tables hold each slot's newest position and its window membership.
@@ -64,6 +77,8 @@ fn staged_tables_number_proposals_from_committed_length() {
     );
     assert!(!staged_slots_all_valid(&[3, 3], &windows, 3));
     assert!(staged_slots_all_valid(&[3], &windows[1..], 3));
+    // Extra staged lengths beyond the windows are not compared.
+    assert!(staged_slots_all_valid(&[3, 0], &windows[1..], 3));
 }
 
 /// Vector scans report the first layer whose lengths differ.

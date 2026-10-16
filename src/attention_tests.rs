@@ -1266,3 +1266,142 @@ fn bounded_attention_refuses_multi_chunk_autodiff() {
     let gradients = output.sum().backward();
     assert!(module.q_proj.weight.grad(&gradients).is_some());
 }
+
+/// Validation accepts the unbounded policy and every positive limit, and planning names zero limits.
+///
+/// `plan` re-checks the limits through the verified planner, so a zero limit
+/// that skipped `validate` still reports the same field instead of planning
+/// an empty chunk.
+#[test]
+fn execution_policy_validation_and_planning_agree_on_limits() {
+    AttentionExecutionPolicy::Unbounded
+        .validate()
+        .expect("unbounded execution has no limits");
+    AttentionExecutionPolicy::query_chunked(1, 1)
+        .validate()
+        .expect("unit limits are valid");
+    AttentionExecutionPolicy::default()
+        .validate()
+        .expect("the production default is valid");
+    for (policy, field) in [
+        (
+            AttentionExecutionPolicy::query_chunked(0, 64),
+            "attention.execution.max_query_tokens",
+        ),
+        (
+            AttentionExecutionPolicy::query_chunked(4, 0),
+            "attention.execution.max_score_elements",
+        ),
+    ] {
+        let error = policy.plan(1, 1, 4, 4).unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Configuration { field: actual, reason }
+                if actual == field && reason == "must be greater than zero"),
+            "{error:?}"
+        );
+    }
+}
+
+/// A token mask whose shape disagrees with the hidden states is rejected before attention.
+#[test]
+fn position_free_forward_rejects_mismatched_token_masks() {
+    let device = Default::default();
+    let attention = GroupedQueryAttentionConfig::new(8, 2, 1, 4)
+        .init::<Flex>(&device)
+        .unwrap();
+    let hidden = Tensor::<Flex, 3>::ones([1, 3, 8], &device);
+    let mask = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        burn::tensor::TensorData::new(vec![true; 2], [1, 2]),
+        &device,
+    ));
+    let error = attention
+        .forward_without_position_encoding(hidden.clone(), Some(&mask), true)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::Error::Shape { tensor, expected, actual }
+                if tensor == "query_mask" && expected == "[1, 3]" && actual == "[1, 2]"
+        ),
+        "{error:?}"
+    );
+    let full = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        burn::tensor::TensorData::new(vec![true; 3], [1, 3]),
+        &device,
+    ));
+    assert_eq!(
+        attention
+            .forward_without_position_encoding(hidden, Some(&full), true)
+            .unwrap()
+            .dims(),
+        [1, 3, 8]
+    );
+}
+
+/// Packed query tensors are rejected: only projection weights may stay quantized.
+#[test]
+fn quantized_projected_queries_are_rejected() {
+    use crate::checkpoint::quantization::{
+        QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
+        quantize_tensor_data,
+    };
+
+    let device = Default::default();
+    let attention = GroupedQueryAttentionConfig::new(64, 2, 1, 32)
+        .init::<Flex>(&device)
+        .unwrap();
+    let packed = quantize_tensor_data(
+        &burn::tensor::TensorData::new(vec![0.25_f32; 64], [2, 32]),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q8,
+            group_size: QuantizationGroupSize::new(32).expect("supported group"),
+        },
+    )
+    .expect("reference quantization")
+    .into_burn_qfloat_data()
+    .expect("Burn-compatible tensor");
+    let projection = AttentionProjection {
+        query: Tensor::<Flex, 2>::from_data(packed, &device).reshape([1, 2, 1, 32]),
+        key: Tensor::zeros([1, 1, 1, 32], &device),
+        value: Tensor::zeros([1, 1, 1, 32], &device),
+        gate: None,
+    };
+    let error = attention.attend(projection, None, None, false).unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::BackendCapability(message)
+            if message.contains("must be dense floating tensors")),
+        "{error:?}"
+    );
+}
+
+/// The output gate must be present exactly when a gating convention is configured.
+#[test]
+fn output_gate_payload_must_match_its_convention() {
+    let device = Default::default();
+    let context = Tensor::<Flex, 3>::ones([1, 2, 4], &device);
+    let gate = Tensor::<Flex, 3>::zeros([1, 2, 4], &device);
+    for (kind, payload) in [
+        (AttentionOutputGate::None, Some(gate.clone())),
+        (AttentionOutputGate::Sigmoid, None),
+        (AttentionOutputGate::Silu, None),
+    ] {
+        let error = super::apply_output_gate(context.clone(), payload, kind).unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Shape { tensor, expected, actual }
+                if tensor == "attention.gate"
+                    && expected == &format!("a gate matching {kind:?}")
+                    && actual == "a mismatched gate payload"),
+            "{error:?}"
+        );
+    }
+    // A zero gate halves the context under the sigmoid and removes it under SiLU.
+    let halved = super::apply_output_gate(
+        context.clone(),
+        Some(gate.clone()),
+        AttentionOutputGate::Sigmoid,
+    )
+    .unwrap();
+    assert_eq!(halved.into_data().to_vec::<f32>().unwrap(), vec![0.5; 8]);
+    let removed = super::apply_output_gate(context, Some(gate), AttentionOutputGate::Silu).unwrap();
+    assert_eq!(removed.into_data().to_vec::<f32>().unwrap(), vec![0.0; 8]);
+}

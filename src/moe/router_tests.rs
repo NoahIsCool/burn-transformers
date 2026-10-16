@@ -37,6 +37,7 @@ type TestBackend = Flex<f32, i32>;
 
 /// Absolute tolerance between this crate's and PyTorch's F32 routing weights.
 const TOLERANCE: f32 = 2e-6;
+/// Mixtral router logits `[4 tokens, 8 experts]`, row-major (seed 1, scaled by 1.5).
 const MIXTRAL_LOGITS: [f32; 32] = [
     -2.288394,
     -1.1253477,
@@ -71,10 +72,13 @@ const MIXTRAL_LOGITS: [f32; 32] = [
     -1.1971042,
     -0.19743481,
 ];
+/// Reference top-2 expert IDs `[4, 2]` in Hugging Face's descending-score order.
 const MIXTRAL_IDS: [i64; 8] = [4, 5, 5, 7, 4, 7, 0, 4];
+/// Reference renormalized top-2 softmax weights `[4, 2]`; each token's pair sums to 1.
 const MIXTRAL_WEIGHTS: [f32; 8] = [
     0.6821202, 0.31787977, 0.8616684, 0.13833158, 0.52188003, 0.4781199, 0.82646644, 0.17353359,
 ];
+/// Qwen3-MoE router logits `[4 tokens, 8 experts]`, row-major (seed 2, scaled by 1.5).
 const QWEN_LOGITS: [f32; 32] = [
     -1.5612018,
     1.3749063,
@@ -109,7 +113,9 @@ const QWEN_LOGITS: [f32; 32] = [
     0.47284734,
     2.6291647,
 ];
+/// Reference top-3 expert IDs `[4, 3]` with `norm_topk_prob = false`.
 const QWEN_NORM_FALSE_IDS: [i64; 12] = [5, 1, 7, 4, 1, 6, 6, 7, 3, 3, 7, 5];
+/// Reference top-3 full-softmax probabilities `[4, 3]`, not renormalized.
 const QWEN_NORM_FALSE_WEIGHTS: [f32; 12] = [
     0.50284404,
     0.34508744,
@@ -124,7 +130,10 @@ const QWEN_NORM_FALSE_WEIGHTS: [f32; 12] = [
     0.15602776,
     0.060311425,
 ];
+/// Reference top-3 expert IDs `[4, 3]` with `norm_topk_prob = true`; renormalization
+/// cannot change the selection, so these equal [`QWEN_NORM_FALSE_IDS`].
 const QWEN_NORM_TRUE_IDS: [i64; 12] = [5, 1, 7, 4, 1, 6, 6, 7, 3, 3, 7, 5];
+/// Reference top-3 weights `[4, 3]` renormalized to sum to 1 per token.
 const QWEN_NORM_TRUE_WEIGHTS: [f32; 12] = [
     0.54600924,
     0.3747105,
@@ -139,6 +148,7 @@ const QWEN_NORM_TRUE_WEIGHTS: [f32; 12] = [
     0.16840844,
     0.065097086,
 ];
+/// DeepSeek-V3 router logits `[5 tokens, 16 experts]`, row-major (seed 3, scaled by 1.5).
 const DSV3_LOGITS: [f32; 80] = [
     -0.11496647,
     0.5398223,
@@ -221,18 +231,24 @@ const DSV3_LOGITS: [f32; 80] = [
     -1.3465996,
     -2.8313587,
 ];
+/// Selection-only correction bias `((e mod 5) - 2) * 0.07` for experts `e = 0..16`.
 const DSV3_BIAS: [f32; 16] = [
     -0.14, -0.07, 0.0, 0.07, 0.14, -0.14, -0.07, 0.0, 0.07, 0.14, -0.14, -0.07, 0.0, 0.07, 0.14,
     -0.14,
 ];
+/// Reference `noaux_tc` top-4 expert IDs `[5, 4]`, sorted by ID within each token
+/// because Hugging Face selects with `topk(sorted=False)`.
 const DSV3_IDS_SORTED: [i64; 20] = [
     4, 6, 12, 14, 9, 10, 12, 14, 9, 11, 14, 15, 4, 6, 14, 15, 5, 7, 8, 9,
 ];
+/// Reference `noaux_tc` weights `[5, 4]` (unbiased sigmoid scores renormalized with
+/// `+1e-20` and scaled by 2.5), permuted with [`DSV3_IDS_SORTED`].
 const DSV3_WEIGHTS_SORTED: [f32; 20] = [
     0.57980156, 0.72951305, 0.632833, 0.5578525, 0.6531784, 0.6367403, 0.55180216, 0.6582792,
     0.4953095, 0.65877235, 0.6528432, 0.69307494, 0.5386385, 0.6460303, 0.65635204, 0.6589791,
     0.76415086, 0.7266768, 0.58641547, 0.42275694,
 ];
+/// DeepSeek-V2 router logits `[5 tokens, 16 experts]`, row-major (seed 4, scaled by 1.5).
 const DSV2_LOGITS: [f32; 80] = [
     -1.4121246,
     1.89487,
@@ -315,11 +331,16 @@ const DSV2_LOGITS: [f32; 80] = [
     1.5799209,
     0.3003106,
 ];
+/// Reference `group_limited_greedy` top-3 expert IDs `[5, 3]`, sorted by ID per token.
 const DSV2_IDS_SORTED: [i64; 15] = [1, 10, 11, 0, 4, 6, 1, 2, 5, 1, 3, 12, 8, 9, 10];
+/// Reference softmax weights `[5, 3]` scaled by 1.5 without renormalization,
+/// permuted with [`DSV2_IDS_SORTED`].
 const DSV2_WEIGHTS_SORTED: [f32; 15] = [
     0.475692, 0.12983204, 0.19534937, 0.43033528, 0.24355486, 0.26178354, 0.13026142, 0.70512146,
     0.25422934, 1.0295098, 0.07647235, 0.1407712, 0.20897958, 0.4702497, 0.30911344,
 ];
+/// gpt-oss router inputs `[4 tokens, 8 experts]` (seed 5, scaled by 1.5); with the
+/// identity projection they are the unbiased router logits.
 const GPTOSS_HIDDEN: [f32; 32] = [
     2.7634947,
     0.77833074,
@@ -354,6 +375,7 @@ const GPTOSS_HIDDEN: [f32; 32] = [
     0.37382817,
     2.6205473,
 ];
+/// gpt-oss router bias `linspace(-0.3, 0.4, 8)` as rounded by F32 arithmetic.
 const GPTOSS_ROUTER_BIAS: [f32; 8] = [
     -0.3,
     -0.2,
@@ -364,7 +386,9 @@ const GPTOSS_ROUTER_BIAS: [f32; 8] = [
     0.3,
     0.4,
 ];
+/// Reference top-2 expert IDs `[4, 2]` chosen on the biased logits.
 const GPTOSS_IDS: [i64; 8] = [4, 0, 4, 0, 0, 1, 7, 4];
+/// Reference weights `[4, 2]`: a softmax over each token's two selected biased logits.
 const GPTOSS_WEIGHTS: [f32; 8] = [
     0.6605249, 0.33947513, 0.78511566, 0.21488436, 0.90350205, 0.09649798, 0.66733336, 0.3326666,
 ];
@@ -796,6 +820,16 @@ fn route_checks_bias_presence_and_logit_shape() {
             RouterConfig::new(4, 1).route(logits(&[0.0; 6], 3), None),
             "moe.router.logits",
         ),
+        (
+            RouterConfig::new(4, 1).route(
+                Tensor::<TestBackend, 2>::from_data(
+                    TensorData::new(Vec::<f32>::new(), [0, 4]),
+                    &device,
+                ),
+                None,
+            ),
+            "moe.router.logits",
+        ),
     ];
     for (result, field) in cases {
         let error = result.expect_err(field);
@@ -841,6 +875,36 @@ fn router_projection_precision_controls_logit_dtype() {
     )
     .expect_err("width mismatch");
     assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "moe.router.weight"));
+}
+
+/// Keeping every group is the identity, so group-limited routing then equals greedy routing.
+///
+/// Nemotron-H configures `n_group = topk_group = 1`; any `top_groups ==
+/// groups` keeps every expert, so the pruning step must return the scores
+/// unchanged (Burn cannot one-hot a single class) and selection must match the
+/// greedy policy exactly, including tie order.
+#[test]
+fn keeping_every_group_matches_greedy_routing() {
+    let values = [0.5_f32, -1.0, 2.0, 2.0, 0.25, 3.0, -0.5, 1.0];
+    let mut greedy = RouterConfig::new(4, 2);
+    greedy.policy.scoring = RouterScoring::Sigmoid;
+    let expected = host(greedy.route(logits(&values, 4), None).unwrap());
+    for (groups, group_score) in [(1, GroupScore::Max), (2, GroupScore::TopTwoSum)] {
+        let mut grouped = greedy;
+        grouped.policy.selection = ExpertSelection::GroupLimited(GroupLimitedSelection {
+            groups,
+            top_groups: groups,
+            group_score,
+            pruned_score: PrunedExpertScore::Zero,
+        });
+        assert_eq!(
+            host(grouped.route(logits(&values, 4), None).unwrap()),
+            expected,
+            "{groups} groups"
+        );
+    }
+    // The tie between experts 2 and 3 resolves to the smaller index first.
+    assert_eq!(expected.0[..2], [2, 3]);
 }
 
 /// Policies round-trip through serde and default when omitted.

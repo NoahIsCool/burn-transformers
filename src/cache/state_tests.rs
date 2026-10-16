@@ -285,3 +285,22 @@ fn legacy_decode_state_name_aliases_sequence_lengths() {
     let state: SequenceLengths = DecodeState::new(config());
     assert_eq!(state, SequenceLengths::new(config()));
 }
+
+/// Ledger transaction violations map to the lifecycle errors callers match on.
+///
+/// Topology operations check the transaction before consulting the ledger,
+/// so these two arms are the ledger's own defense; the mapping must still
+/// name the rejected operation and the missing transaction exactly.
+#[test]
+fn ledger_transaction_violations_map_to_lifecycle_errors() {
+    assert_eq!(
+        length_error(LengthViolation::TransactionActive, "truncate"),
+        DecodeStateError::TransactionActive {
+            operation: "truncate"
+        }
+    );
+    assert_eq!(
+        length_error(LengthViolation::TransactionInactive, "commit"),
+        DecodeStateError::Transaction(crate::cache::TransactionError::NoActiveTransaction)
+    );
+}
