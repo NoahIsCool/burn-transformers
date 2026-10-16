@@ -8,8 +8,12 @@
 //!   `listed_rotary_flags`, `suffix_sliding_flags`, `nope_sliding_flags`,
 //!   and `first_set` for the first sliding layer without a window);
 //! * `derived_head_dim`, the head width of a config that omits it;
-//! * `cache_slots`, which numbers layers inside their KV cache group (full
-//!   storage or sliding ring);
+//! * the cache layout: `plan_ring`, which assigns sliding layers below the
+//!   capacity to one ring group of one window, `cache_slots`, which numbers
+//!   layers inside their KV cache group (full storage or sliding ring),
+//!   `group_indices`, which numbers the allocated groups, and
+//!   `truncation_leaves_bytes`, which decides whether a truncation keeps the
+//!   state's clean tails;
 //! * the batched-step layout of one row of a `[batch, block]` token block:
 //!   whether its valid columns form one run (`is_one_run`), the cache
 //!   positions of its slots (`slot_positions`), the gather that compacts
@@ -57,6 +61,11 @@ pub open spec fn count_equal(flags: Seq<bool>, end: int, flag: bool) -> int
     } else {
         count_equal(flags, end - 1, flag) + if flags[end - 1] == flag { 1int } else { 0int }
     }
+}
+
+/// Some layer of group `flag` (sliding ring or full storage) holds slot `s`.
+pub open spec fn numbered(slots: Seq<usize>, ring: Seq<bool>, flag: bool, s: int) -> bool {
+    exists|l: int| 0 <= l < slots.len() && l < ring.len() && ring[l] == flag && slots[l] == s
 }
 
 /// The fill position of a row with cache cursor `start` and `count` new tokens.
@@ -407,6 +416,11 @@ pub(crate) struct CacheSlots {
 /// is the number of earlier layers in the same group, so each group's layers
 /// are numbered `0, 1, …` in model order and the two counts partition the
 /// layers.
+///
+/// Proved: within each group the slots strictly increase in model order and
+/// every slot below the group's size belongs to exactly one of its layers,
+/// so each group's layers map bijectively, in order, onto `0..size` and no
+/// two layers of one group ever share cache storage.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(plan =>
     ensures
@@ -418,6 +432,10 @@ pub(crate) struct CacheSlots {
             #[trigger] plan.slots[l] == count_equal(ring@, l, ring[l]),
         forall|l: int| 0 <= l < ring.len() && !ring[l] ==> #[trigger] plan.slots[l] < plan.full_layers,
         forall|l: int| 0 <= l < ring.len() && ring[l] ==> #[trigger] plan.slots[l] < plan.ring_layers,
+        forall|i: int, j: int| 0 <= i < j < ring.len() && ring[i] == ring[j] ==>
+            plan.slots[i] < plan.slots[j],
+        forall|s: int| 0 <= s < plan.full_layers ==> #[trigger] numbered(plan.slots@, ring@, false, s),
+        forall|s: int| 0 <= s < plan.ring_layers ==> #[trigger] numbered(plan.slots@, ring@, true, s),
 ))]
 pub(crate) fn cache_slots(ring: &[bool]) -> CacheSlots {
     let mut slots: Vec<usize> = Vec::with_capacity(ring.len());
@@ -433,6 +451,8 @@ pub(crate) fn cache_slots(ring: &[bool]) -> CacheSlots {
             full_layers + ring_layers == layer,
             forall|l: int| 0 <= l < layer ==>
                 #[trigger] slots[l] == count_equal(ring@, l, ring[l]),
+            forall|s: int| 0 <= s < full_layers ==> #[trigger] numbered(slots@, ring@, false, s),
+            forall|s: int| 0 <= s < ring_layers ==> #[trigger] numbered(slots@, ring@, true, s),
         decreases ring.len() - layer,
     ))]
     while layer < ring.len() {
@@ -440,6 +460,8 @@ pub(crate) fn cache_slots(ring: &[bool]) -> CacheSlots {
         proof! {
             count_equal_partition(ring@, layer as int);
         }
+        #[cfg(verus_keep_ghost)]
+        proof_decl! { let ghost before = slots@; }
         if ring[layer] {
             slots.push(ring_layers);
             ring_layers += 1;
@@ -447,9 +469,34 @@ pub(crate) fn cache_slots(ring: &[bool]) -> CacheSlots {
             slots.push(full_layers);
             full_layers += 1;
         }
+        // Earlier slots keep their witnesses; the new slot is its group's next number.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|s: int| 0 <= s < full_layers implies
+                #[trigger] numbered(slots@, ring@, false, s) by {
+                if s < full_layers - 1 || ring[layer as int] {
+                    assert(numbered(before, ring@, false, s));
+                    let l = choose|l: int| 0 <= l < before.len() && l < ring.len() && ring[l] == false && before[l] == s;
+                    assert(slots@[l] == s);
+                } else {
+                    assert(slots@[layer as int] == s);
+                }
+            }
+            assert forall|s: int| 0 <= s < ring_layers implies
+                #[trigger] numbered(slots@, ring@, true, s) by {
+                if s < ring_layers - 1 || !ring[layer as int] {
+                    assert(numbered(before, ring@, true, s));
+                    let l = choose|l: int| 0 <= l < before.len() && l < ring.len() && ring[l] == true && before[l] == s;
+                    assert(slots@[l] == s);
+                } else {
+                    assert(slots@[layer as int] == s);
+                }
+            }
+        }
         layer += 1;
     }
-    // Monotone prefix counts bound every slot by its group's final size.
+    // Monotone prefix counts bound every slot by its group's final size and
+    // order the slots of one group.
     #[cfg(verus_keep_ghost)]
     proof! {
         assert forall|l: int| 0 <= l < ring.len() && !ring[l]
@@ -460,12 +507,260 @@ pub(crate) fn cache_slots(ring: &[bool]) -> CacheSlots {
             implies #[trigger] slots[l] < ring_layers by {
             count_prefix_grows(ring@, l, ring.len() as int, true);
         }
+        assert forall|i: int, j: int| 0 <= i < j < ring.len() && ring[i] == ring[j]
+            implies slots[i] < slots[j] by {
+            count_prefix_grows(ring@, i, j, ring[i]);
+        }
     }
     CacheSlots {
         slots,
         full_layers,
         ring_layers,
     }
+}
+
+// Cache layout: which layers share the sliding ring.
+
+/// How far back one layer's queries see, as the cache layout needs it.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerReach {
+    /// Every earlier key (global attention).
+    Global,
+    /// The `window` newest keys (sliding-window attention).
+    Sliding(
+        /// Window width `W`.
+        usize,
+    ),
+    /// Chunked-local attention, which this cache cannot store.
+    Chunked,
+}
+
+/// The sliding-ring assignment of a cache layout.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RingPlan {
+    /// Whether each layer lives in the sliding ring (else in full storage).
+    pub(crate) in_ring: Vec<bool>,
+    /// The ring's window, or zero when no layer lives in the ring.
+    pub(crate) window: usize,
+}
+
+/// Why no cache layout holds a schedule, at the first offending layer.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RingPlanError {
+    /// The layer uses chunked-local attention.
+    Chunked {
+        /// The offending layer.
+        layer: usize,
+    },
+    /// The layer needs a ring window other than an earlier ring layer's.
+    Conflict {
+        /// The offending layer.
+        layer: usize,
+        /// Its window.
+        window: usize,
+        /// The window of the earlier ring layers.
+        earlier: usize,
+    },
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// A layer lives in the ring exactly when it slides over `0 < W < capacity` keys.
+pub(crate) open spec fn ring_member(reach: LayerReach, capacity: int) -> bool {
+    match reach {
+        LayerReach::Sliding(window) => 0 < window && window < capacity,
+        _ => false,
+    }
+}
+
+/// The window of a sliding layer, zero otherwise.
+pub(crate) open spec fn reach_window(reach: LayerReach) -> int {
+    match reach {
+        LayerReach::Sliding(window) => window as int,
+        _ => 0,
+    }
+}
+
+/// Layers `0..end` are storable: none is chunked and all ring layers share one window.
+pub(crate) open spec fn storable_prefix(reach: Seq<LayerReach>, end: int, capacity: int) -> bool {
+    &&& forall|l: int| 0 <= l < end ==> #[trigger] reach[l] != LayerReach::Chunked
+    &&& forall|i: int, j: int|
+        0 <= i < end && 0 <= j < end && #[trigger] ring_member(reach[i], capacity)
+            && #[trigger] ring_member(reach[j], capacity)
+            ==> reach_window(reach[i]) == reach_window(reach[j])
+}
+
+} // verus!
+
+/// Assigns every layer to full storage or the sliding ring, in model order.
+///
+/// A sliding layer whose window `W` is nonzero and below the capacity lives
+/// in the ring; a wider window can never exclude a cached key, so such a
+/// layer lives in full storage like a global one. One ring holds one
+/// window. Proved: `Ok` exactly when no layer is chunked and every ring
+/// layer has the same window, which is then the plan's window (zero exactly
+/// when no layer lives in the ring), and each layer's flag is exactly its
+/// ring membership; an error names the first offending layer, every earlier
+/// layer being storable, and a conflict reports a genuinely different
+/// window of an earlier ring layer.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(plan =>
+    ensures
+        plan.is_ok() == storable_prefix(reach@, reach.len() as int, capacity as int),
+        match plan {
+            Ok(plan) => {
+                &&& plan.in_ring.len() == reach.len()
+                &&& forall|l: int| 0 <= l < reach.len() ==>
+                    #[trigger] plan.in_ring@[l] == ring_member(reach@[l], capacity as int)
+                &&& forall|l: int| 0 <= l < reach.len() && #[trigger] ring_member(reach@[l], capacity as int)
+                    ==> reach_window(reach@[l]) == plan.window
+                &&& (plan.window > 0) == exists|l: int| 0 <= l < reach.len()
+                    && #[trigger] ring_member(reach@[l], capacity as int)
+            },
+            Err(RingPlanError::Chunked { layer }) => {
+                &&& layer < reach.len()
+                &&& reach@[layer as int] == LayerReach::Chunked
+                &&& storable_prefix(reach@, layer as int, capacity as int)
+            },
+            Err(RingPlanError::Conflict { layer, window, earlier }) => {
+                &&& layer < reach.len()
+                &&& reach@[layer as int] == LayerReach::Sliding(window)
+                &&& ring_member(reach@[layer as int], capacity as int)
+                &&& earlier != window
+                &&& exists|l: int| 0 <= l < layer && #[trigger] ring_member(reach@[l], capacity as int)
+                    && reach_window(reach@[l]) == earlier
+                &&& storable_prefix(reach@, layer as int, capacity as int)
+            },
+        },
+))]
+pub(crate) fn plan_ring(reach: &[LayerReach], capacity: usize) -> Result<RingPlan, RingPlanError> {
+    let mut in_ring: Vec<bool> = Vec::with_capacity(reach.len());
+    let mut window: usize = 0;
+    let mut layer: usize = 0;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! { let ghost mut witness: int = 0; }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= reach.len(),
+            in_ring.len() == layer,
+            storable_prefix(reach@, layer as int, capacity as int),
+            forall|l: int| 0 <= l < layer ==>
+                #[trigger] in_ring@[l] == ring_member(reach@[l], capacity as int),
+            forall|l: int| 0 <= l < layer && #[trigger] ring_member(reach@[l], capacity as int)
+                ==> reach_window(reach@[l]) == window,
+            window > 0 ==> 0 <= witness < layer && ring_member(reach@[witness], capacity as int),
+            window == 0 ==> forall|l: int| 0 <= l < layer ==>
+                !#[trigger] ring_member(reach@[l], capacity as int),
+        decreases reach.len() - layer,
+    ))]
+    while layer < reach.len() {
+        match reach[layer] {
+            LayerReach::Chunked => {
+                return Err(RingPlanError::Chunked { layer });
+            }
+            LayerReach::Global => in_ring.push(false),
+            LayerReach::Sliding(width) => {
+                if width > 0 && width < capacity {
+                    if window != 0 && window != width {
+                        // The earlier ring layer and this one disagree, so no layout exists.
+                        #[cfg(verus_keep_ghost)]
+                        proof! {
+                            assert(ring_member(reach@[witness], capacity as int));
+                            assert(ring_member(reach@[layer as int], capacity as int));
+                            assert(reach_window(reach@[witness]) != reach_window(reach@[layer as int]));
+                        }
+                        return Err(RingPlanError::Conflict {
+                            layer,
+                            window: width,
+                            earlier: window,
+                        });
+                    }
+                    window = width;
+                    #[cfg(verus_keep_ghost)]
+                    proof! {
+                        witness = layer as int;
+                    }
+                    in_ring.push(true);
+                } else {
+                    in_ring.push(false);
+                }
+            }
+        }
+        layer += 1;
+    }
+    Ok(RingPlan { in_ring, window })
+}
+
+/// Bank indices of a layout's two KV groups.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GroupIndices {
+    /// Index of the full-storage group, when any layer uses it.
+    pub(crate) full: Option<usize>,
+    /// Index of the sliding-ring group, when any layer uses it.
+    pub(crate) ring: Option<usize>,
+}
+
+/// Numbers the allocated KV groups: full storage first, then the ring.
+///
+/// Proved: a group exists exactly when it has layers, the full group (if
+/// any) is bank group 0, and the ring follows it, so the allocated groups
+/// are numbered densely `0..groups` in allocation order.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(groups =>
+    ensures
+        groups.full == if full_layers > 0 { Some(0usize) } else { None },
+        groups.ring == if ring_layers > 0 {
+            Some(if full_layers > 0 { 1usize } else { 0usize })
+        } else {
+            None
+        },
+))]
+pub(crate) fn group_indices(full_layers: usize, ring_layers: usize) -> GroupIndices {
+    let full = if full_layers > 0 { Some(0) } else { None };
+    let ring = if ring_layers > 0 {
+        Some(if full_layers > 0 { 1 } else { 0 })
+    } else {
+        None
+    };
+    GroupIndices { full, ring }
+}
+
+/// Returns whether truncating rows from `from` to `to` tokens leaves stale bytes.
+///
+/// A row shortened to a nonzero length keeps its later keys and values
+/// beyond the new end; truncation to zero zeroes the row, and an unchanged
+/// or longer target writes nothing. Proved: the result is exactly whether
+/// some row (of the common prefix of both lists) is shortened to a nonzero
+/// length, so the decode state's clean-tail flag survives a truncation
+/// exactly when no row keeps stale bytes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(stale =>
+    ensures
+        stale == exists|r: int| 0 <= r < from.len() && r < to.len()
+            && #[trigger] to@[r] != 0 && to@[r] < from@[r],
+))]
+pub(crate) fn truncation_leaves_bytes(from: &[usize], to: &[usize]) -> bool {
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= from.len(),
+            forall|r: int| 0 <= r < row && r < to.len() ==>
+                !(#[trigger] to@[r] != 0 && to@[r] < from@[r]),
+        decreases from.len() - row,
+    ))]
+    while row < from.len() && row < to.len() {
+        if to[row] != 0 && to[row] < from[row] {
+            return true;
+        }
+        row += 1;
+    }
+    false
 }
 
 #[cfg(verus_keep_ghost)]

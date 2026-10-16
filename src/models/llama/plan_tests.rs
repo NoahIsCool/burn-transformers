@@ -212,3 +212,107 @@ proptest! {
         }
     }
 }
+
+/// Ring planning: windows below the capacity share the ring; conflicts and chunks are rejected.
+#[test]
+fn ring_plans_assign_narrow_windows_and_reject_conflicts() {
+    use LayerReach::{Chunked, Global, Sliding};
+    let plan = plan_ring(&[Global, Sliding(4), Sliding(64), Sliding(4)], 16).unwrap();
+    assert_eq!(plan.in_ring, [false, true, false, true]);
+    assert_eq!(plan.window, 4);
+    let none = plan_ring(&[Global, Sliding(0), Sliding(16)], 16).unwrap();
+    assert_eq!(none.in_ring, [false, false, false]);
+    assert_eq!(none.window, 0);
+    assert_eq!(
+        plan_ring(&[Sliding(4), Global, Sliding(8)], 16),
+        Err(RingPlanError::Conflict {
+            layer: 2,
+            window: 8,
+            earlier: 4
+        })
+    );
+    assert_eq!(
+        plan_ring(&[Global, Chunked, Sliding(8), Sliding(4)], 16),
+        Err(RingPlanError::Chunked { layer: 1 })
+    );
+    assert_eq!(
+        plan_ring(&[Sliding(4), Sliding(8), Chunked], 16),
+        Err(RingPlanError::Conflict {
+            layer: 1,
+            window: 8,
+            earlier: 4
+        })
+    );
+}
+
+/// Allocated groups are numbered densely, full storage first.
+#[test]
+fn group_indices_number_allocated_groups_densely() {
+    let both = group_indices(2, 3);
+    assert_eq!((both.full, both.ring), (Some(0), Some(1)));
+    let ring_only = group_indices(0, 3);
+    assert_eq!((ring_only.full, ring_only.ring), (None, Some(0)));
+    let full_only = group_indices(2, 0);
+    assert_eq!((full_only.full, full_only.ring), (Some(0), None));
+    let none = group_indices(0, 0);
+    assert_eq!((none.full, none.ring), (None, None));
+}
+
+/// Only a truncation to a shorter nonzero length leaves stale bytes.
+#[test]
+fn truncation_leaves_bytes_only_when_shortening_to_nonzero() {
+    assert!(truncation_leaves_bytes(&[5, 3], &[5, 2]));
+    assert!(!truncation_leaves_bytes(&[5, 3], &[0, 3]));
+    assert!(!truncation_leaves_bytes(&[5, 3], &[5, 4]));
+    assert!(!truncation_leaves_bytes(&[5], &[]));
+    assert!(truncation_leaves_bytes(&[5, 3], &[4]));
+}
+
+proptest! {
+    /// Ring plans equal a direct statement of the rule.
+    #[test]
+    fn ring_plans_match_the_rule(
+        reach in prop::collection::vec(
+            prop_oneof![
+                Just(LayerReach::Global),
+                (0usize..6).prop_map(LayerReach::Sliding),
+                Just(LayerReach::Chunked),
+            ],
+            0..10,
+        ),
+        capacity in 0usize..8,
+    ) {
+        let member = |reach: &LayerReach| matches!(*reach, LayerReach::Sliding(w) if w > 0 && w < capacity);
+        let mut windows = reach.iter().filter(|r| member(r)).map(|r| match r {
+            LayerReach::Sliding(w) => *w,
+            _ => unreachable!(),
+        });
+        let first = windows.next();
+        let storable = !reach.contains(&LayerReach::Chunked)
+            && windows.all(|w| Some(w) == first);
+        match plan_ring(&reach, capacity) {
+            Ok(plan) => {
+                prop_assert!(storable);
+                prop_assert_eq!(plan.in_ring, reach.iter().map(member).collect::<Vec<_>>());
+                prop_assert_eq!(plan.window, first.unwrap_or(0));
+            }
+            Err(_) => prop_assert!(!storable),
+        }
+    }
+
+    /// Each group's slots are an order-preserving bijection onto `0..size`.
+    #[test]
+    fn cache_slots_biject_each_group_in_order(ring in prop::collection::vec(any::<bool>(), 0..24)) {
+        let plan = cache_slots(&ring);
+        for flag in [false, true] {
+            let slots: Vec<usize> = ring
+                .iter()
+                .zip(&plan.slots)
+                .filter(|&(&in_ring, _)| in_ring == flag)
+                .map(|(_, &slot)| slot)
+                .collect();
+            let size = if flag { plan.ring_layers } else { plan.full_layers };
+            prop_assert_eq!(slots, (0..size).collect::<Vec<_>>());
+        }
+    }
+}
