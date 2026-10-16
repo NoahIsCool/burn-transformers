@@ -603,6 +603,18 @@ reassociates the Qwen hybrid's projections (103.546148 versus 103.541986 over
 248,320 logits). Every family's new unit test bounds the readout difference
 against the former `module::linear` formulation by `1e-6`.
 
+On the real tied checkpoint, Qwen3.5-0.8B (`2fc06364`) loaded on Flex/F32,
+a load-and-decode probe built against `ac07281` and `ce602d1` (sources and
+executables in the evidence manifest; two interleaved processes each,
+22:32–22:33 local time, load averages 21–28) prefilled the official 23-token
+reference prompt and decoded 16 greedy tokens three times per process:
+prefill took 314–380 ms at `ac07281` and 215–227 ms at `ce602d1`, and decode
+ran at 5.0–5.5 and 11.8–12.1 tok/s (2.2x). Both matched the official
+Transformers prompt logits at cosine `0.999999169` (maximum absolute error
+`0.019312` and `0.019309`) and all 17 reference greedy tokens; their own
+last-position logits differ by at most `2.5e-5` (largest logit magnitude 21.1).
+Peak footprint was 4.74–4.77 GB in both.
+
 The existing gpt-oss batched-versus-row-by-row timing test (width 1,024, eight
 rows, 32 steps) ran in the same binaries: the row-by-row path, which runs
 single-row products, took 1.41 s (1.32–3.92), 1.31 s (1.27–1.36) and 1.09 s
@@ -649,12 +661,13 @@ any tensor this crate keeps alive.
 Every report, log, supervisor sample file, probe source and timed executable
 behind this section is listed with its SHA-256 in `SHA256SUMS` in the
 raw-evidence directory named above; that manifest itself has SHA-256
-`d872e094007da7fff944f6b4bc3132d4c3b51edf244381c57bfe95964124b902`.
+`127fbc75a1bd37dc57d66a85d3177b6fb6e27c4ff05ae5478085d7b097038250`.
 Executables of note: FLAN Flex `ac07281` `6c79ea31…9bdb` and `dc6a91f`
 `7cd9c072…3069`; library timing binaries
 `26fefbbb…4e7f` (`ac07281` + harness), `1c8e918f…6f47` (`bba1f70` + harness)
 and `f7eafb90…af4a` (`dc6a91f` + harness); Qwen Metal `103c6ff`
-`f2517245…4663`, `5ab1fa6` `ad783adc…2bcf` and `ac07281` `ad1e4c5f…444b`.
+`f2517245…4663`, `5ab1fa6` `ad783adc…2bcf` and `ac07281` `ad1e4c5f…444b`;
+Qwen Flex probe `ac07281` `0fdd0d03…d077` and `ce602d1` `8938eac6…db5b`.
 
 ## Current smoke evidence
 
