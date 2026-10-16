@@ -180,8 +180,7 @@ impl<B: Backend> Classifier<B> {
 /// Build a width-eight Llama-style block: RMS pre-norm, rotary GQA, and SwiGLU.
 fn llama_block<B: Backend>(device: &B::Device) -> Result<LlamaBlock<B>> {
     // Two query heads share one key/value head; RoPE rotates all four channels of each head.
-    let rope = RopeConfig::new(4, 4, 10_000.0, RopeScaling::None)
-        .map_err(|error| transformers::Error::configuration("rope", error.to_string()))?;
+    let rope = RopeConfig::new(4, 4, 10_000.0, RopeScaling::None)?;
     ResidualBlock::new(
         8,
         RotaryAttention::init(&GroupedQueryAttentionConfig::new(8, 2, 1, 4), rope, device)?,
