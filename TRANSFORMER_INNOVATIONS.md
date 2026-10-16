@@ -891,19 +891,36 @@ Token-by-token recurrence is poor at exploiting accelerator parallelism over a
 long prompt. DeltaNet algebraically resolves the within-chunk updates as a
 causal triangular system followed by batched matrix products. Mamba2 constructs
 a masked semiseparable transfer matrix within each chunk and carries only the
-terminal state between chunks. Both paths are mathematically equivalent to the
-transparent recurrence up to floating-point reassociation.
+terminal state between chunks. Each chunked form equals the transparent
+recurrence up to floating-point reassociation only when both apply the same
+$\Delta$ interval and the same precision policy. DeltaNet always does. The
+pinned Mamba-2 references do not: at `cfa309…` Nemotron-H's chunk scan clamps
+$\Delta$ to $[\Delta_{min},\infty)$ while its single-token update is
+unclamped (see the $\Delta$ clamp above), and in F16 the recurrent update keeps
+$(\Delta B)x$, the $C$ contraction, and the $D$ skip in the activation dtype
+while the chunk scan works in FP32. Prefill and multi-token decode steps run
+the clamped scan; single-token decode steps and transactional verification
+steps run the unclamped update. Whenever
+$\operatorname{softplus}(dt+dt_{bias})<\Delta_{min}$, the same tokens therefore
+give semantically different outputs depending on how they are grouped into
+calls. The crate reproduces each reference path separately (`TimeStepClamp`
+states the choice), and the Nemotron-H decode tests pin the disagreement with
+a model whose steps fall below $\Delta_{min}$.
 
-That qualification is operationally important for sparse hybrids. In the
-authenticated Lightning F16 oracle, cached recurrent and teacher-forced chunked
-execution retained identical top-1 tokens for 32 decisions but reached logit
-cosine `0.9215047947571176` at decision 22. Hidden localization at decision 14
-first moved from cosine 1.0 to `0.8920338531579629` after Mamba layer 0, then to
+The difference is visible in sparse hybrids. In the authenticated Lightning
+F16 oracle, cached recurrent and teacher-forced chunked execution retained
+identical top-1 tokens for 32 decisions but reached logit cosine
+`0.9215047947571176` at decision 22. Hidden localization at decision 14 first
+moved from cosine 1.0 to `0.8920338531579629` after Mamba layer 0, then to
 `0.4418906779817166` after the following MoE layer. The trace proves that the
 path difference begins in Mamba and is amplified across the next sparse block;
 it does not prove different expert IDs because the oracle did not capture router
-selections. Corresponding-path Burn comparisons therefore keep the 0.999 gate,
-while the two official paths remain separate reference streams.
+selections. Its candidate causes are the clamp asymmetry and the F16 precision
+policy, not reassociation alone. Counting the heads and tokens with
+$\operatorname{softplus}(dt+dt_{bias})<\Delta_{min}$ at Mamba layer 0 for
+decision 14, which the existing hooks can measure, would separate the two; that
+diagnostic has not been run. Corresponding-path Burn comparisons therefore keep
+the 0.999 gate, while the two official paths remain separate reference streams.
 
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
 chunked mode in [`mamba2.rs`](src/mamba2.rs).
