@@ -120,8 +120,10 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   and `InvalidTensorName`, `QuantizedCheckpointOptions::unaligned`, and
   `BurnpackArtifactSummary::packed_execution`.
 - Tooling: `scripts/generate_causal_lm_reference.py` (local Transformers
-  references for any causal checkpoint, with `--dtype` and
-  `--num-hidden-layers`) and `scripts/generate_tiny_goldens.py`.
+  references for any causal checkpoint, with `--dtype {float32,float64,bfloat16}`
+  and `--num-hidden-layers`; a `float64` reference measures this crate's
+  error alone when an F32 reference's own rounding is as large as the
+  tolerance, as for Qwen2-7B) and `scripts/generate_tiny_goldens.py`.
 
 #### Earlier in this cycle (v0.2 and v0.3)
 
@@ -312,9 +314,9 @@ code written against unreleased sources.
 
 ### Performance
 
-Measured on Flex CPU in release builds with small random models, on a host
-shared with other builds; ratios are against the earlier row-by-row or
-per-chunk algorithm, which each test keeps as an oracle.
+Unless a bullet says otherwise, measured on Flex CPU in release builds with
+small random models, on a host shared with other builds; ratios are against the
+earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
 
 - Batched cached decoding, eight rows: Qwen3.5 3.1× to 3.6×; Gemma 2.9×
   (ragged) and 3.2× (uniform); DeepSeek 2.5× to 2.7×; Muse 2.2×; Nemotron-H
@@ -336,6 +338,13 @@ per-chunk algorithm, which each test keeps as an oracle.
   sliding attention slices window unions (13.6× fewer score elements at 32K);
   input validation and generation bookkeeping read back to the host once per
   step.
+- On Metal, checkpoint weights upload as persistent allocations (`45ac457`),
+  so CubeCL gives each weight an exact-size page instead of carving it from
+  the pool meant for activations. Loading Qwen2-7B with F32 casts (30.5 GB of
+  weights) on the Apple M3 Max (96 GB) development host: peak footprint 57.0 GB
+  to 45.5 GB and load time 25.6 s to 10.7 s, with the same first-token argmax.
+  Values, layouts, and Flex are unchanged. This is a one-run measurement from
+  the commit, not yet an acceptance record.
 
 ### Verification
 
