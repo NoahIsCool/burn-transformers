@@ -4,11 +4,13 @@ This document defines the artifact and numerical gates for
 `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at immutable revision
 `a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The exact local artifact has passed
 full-payload authentication, strict source-ordered F16 application, and a short
-Burn Metal base-model smoke. That smoke is internal-consistency evidence; the
-separately pinned official oracle has not yet been compared with Burn. A
-path-safe ignored Burn-versus-official gate is now implemented and compiles,
-but it has deliberately not been executed as part of that smoke. Real-weight
-MTP parity and the remaining release gates are also incomplete, so the model is
+Burn Metal base-model smoke. That smoke is internal-consistency evidence. The
+path-safe ignored Burn-versus-official gate first ran on source `4f9502a`
+([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json))
+and **failed**: the cached path matched all 32 official cached rows, but two of
+the 32 teacher-forced rows fell below the gate's 0.999 cosine floor (see
+[the first official comparison](#first-official-comparison)). Real-weight MTP
+parity and the remaining release gates are also incomplete, so the model is
 not advertised as supported. The committed machine-readable state remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
 An external, authenticated seven-file base-model oracle now proves the official
@@ -250,10 +252,18 @@ MoE block; expert-ID hooks were not captured, so it does not by itself prove
 that different experts were selected. The difference is semantic, not only
 floating-point reassociation: the pinned reference clamps $\Delta$ to
 `time_step_min` in the chunk scan but not in the single-token update, and its
-F16 recurrent update keeps several products in the activation dtype. Which of
-the two dominates here is not yet measured; the fraction of Mamba layer 0 heads
-and tokens with `softplus(dt + dt_bias) < time_step_min` at decision 14 would
-decide it (see [chunk-parallel recurrent prefill](TRANSFORMER_INNOVATIONS.md#innovation-chunked-prefill)).
+F16 recurrent update keeps several products in the activation dtype. The
+clamp dominates. The ignored diagnostic
+`diagnoses_pinned_nemotron_decision_14_time_step_clamp` (source `1b48b81`,
+[large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json))
+found that the clamp changes 278 of the 2,368 Mamba layer 0 steps of the 37-token
+teacher sequence (6 to 8 of 64 heads at every token; the smallest step is
+`1.76e-5`, 57 times below `time_step_min = 1e-3`). Burn reproduces the official
+split: its cached-versus-teacher hidden cosine at decision 14 is `0.8919` after
+Mamba layer 0 and `0.4418` after MoE layer 1. Enabling the clamp in Burn's
+one-token update, while keeping its F16 precision policy, raises those to
+`0.99999986` and `0.9999994` and the decision-14 logit cosine from `0.9669` to
+`0.99998` (see [chunk-parallel recurrent prefill](TRANSFORMER_INNOVATIONS.md#innovation-chunked-prefill)).
 
 This source self-divergence is diagnostic, not a relaxed parity threshold. A
 Burn cached run must match the official cached rows, and a Burn stateless run
@@ -270,9 +280,41 @@ Separately, it compares Burn cached prefill plus 31 recurrent updates with all
 in the stateless-prompt, cached-prefill, and first recurrent-decode hidden traces
 also requires row-wise cosine at least 0.999 at the same semantic point. A
 stateless/cached path or hidden-phase mismatch fails before numerical
-comparison. This gate has passed compile-only and pure contract tests; until its
-ignored 30B Metal run completes, it is executable policy rather than acceptance
-evidence.
+comparison.
+
+### First official comparison
+
+The gate's first real run (source `4f9502a`, Metal/F16, recorded in the
+[large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json))
+passed the dedicated stateless prompt row and its 54-boundary hidden trace,
+then failed at teacher-forced decision 18 with cosine `0.994340` (floor
+`0.999`). The gate stops at its first failing row, so the diagnostic above
+profiles every decision against both official streams (source `1b48b81`):
+
+- Burn teacher versus official teacher: 30 of 32 rows at least `0.999123`;
+  decision 18 at `0.994340` and decision 30 at `0.997652`; 32/32 top-1.
+- Burn cached versus official cached: every row at least `0.999299`
+  (decision 25); 32/32 top-1.
+- The crossed comparisons reproduce the official split (Burn teacher versus
+  official cached `0.921665` at decision 22, against the oracle's own
+  `0.921505`).
+
+No implementation defect has been found. The failing rows are this model's
+F16-sensitive rows: Burn's own chunked teacher pass and its one-token path with
+the clamp enabled compute the same recurrence, yet differ by up to cosine
+`0.994053` (decision 24), below the failing official row. Every MoE block's gap
+between its sixth and seventh router selection scores lies between `7.6e-6`
+and `1.9e-3` on the teacher sequence (`8.7e-4` at decision 18's position),
+comparable to F16 rounding (`2^-11`), so an expert choice can differ between
+two faithful F16 implementations. The oracle records no expert IDs, so a
+flipped selection is consistent with, not proven by, this evidence.
+
+The 0.999 per-row floor therefore sits above the F16 floor at sensitive rows.
+It is not relaxed here. Resolving the gate needs a reviewed decision: qualify
+the teacher stream against a higher-precision oracle (an F32 Transformers run
+needs about 126 GB, beyond this host), calibrate each row's floor from
+measured F16 self-consistency, or record expert selections in a new oracle.
+Until then the gate is a recorded failure, not acceptance evidence.
 
 The exact official cache has physical batch one while `DynamicCache.batch_size`
 reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution

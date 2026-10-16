@@ -113,8 +113,18 @@
 //! by `7.6e-5`, and all 32 greedy tokens match. The half-precision rows of
 //! the table above come from the same four-block F32 bundle and a four-block
 //! BF16 bundle generated from the same prompts
-//! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`). The
-//! full-model BF16 bundle and the Metal runs are the integrator's.
+//! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`).
+//!
+//! Against the full 24-block BF16 bundle of the same four prompts (source
+//! `8a4404a`, `acceptance/measurements/large-checkpoint-replay-20261016.json`),
+//! Flex/BF16 deviates by at most `1.62` (mean at most `0.064`), its batched
+//! rows by `0.5`, and the cached long-prompt decode by `1.32`. Metal/F16
+//! deviates by `2.66` at prompt 0 (mean `0.109`) and at most `1.74` elsewhere,
+//! above the provisional [`HALF_TOLERANCE`]; yet against the four-block F32
+//! bundle Metal/F16 stays within `0.122`, so the full-model gap is the BF16
+//! reference's own rounding. The reference's first greedy margin is `3.06`,
+//! below twice [`HALF_TOLERANCE`], so its greedy check compares no tokens and
+//! needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0` like the truncated bundles.
 
 #![cfg(feature = "flex")]
 

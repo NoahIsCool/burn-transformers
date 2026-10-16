@@ -257,21 +257,23 @@ acceptance record for an exact checkpoint, backend, and dtype
 
 | Family | `model_type` | Validation status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
-| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
-| Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16. |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). Qwen3.8-27B matches official logits on Metal/F16 (experimental). The public example and the Qwen3.8 gates passed again at `8a4404a` ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)). |
+| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). FLAN-T5-XXL matches official references on Metal (experimental; passed again at `8a4404a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)); UL2 pending. |
+| Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16 (passed again at `4f9502a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)). |
 | Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference; on Metal under the documented `2.5e-3` tolerance). |
 | Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window. |
-| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex and Metal F32 parity with exact MXFP4 decoding. |
-| Qwen3-MoE | `qwen3_moe` | Experimental: strict real-weight loading and Metal smokes. |
+| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex and Metal F32 parity with exact MXFP4 decoding; full-model Flex/BF16 parity, while Metal/F16 exceeds the provisional half-precision bound at one prompt ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)). |
+| Qwen3-MoE | `qwen3_moe` | Experimental: strict real-weight loading and Metal smokes (passed again at `8a4404a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)). |
 | DeepSeek-V2 | `deepseek_v2` | Experimental: strict real-weight loading and an internal Metal smoke; tiny goldens for V2 and V3-style routing. |
-| Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading and an internal Metal smoke. |
+| Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading and an internal Metal smoke; the first official-reference comparison failed two of 32 teacher-forced rows ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json), [analysis](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)). |
 | GPT-2, GPT-NeoX / Pythia | concrete types only | Experimental stateless modules for interpretability studies. |
 | Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
 
 The two supported profiles were qualified on the v0.1.0 source. Later work
 changed their execution paths; their gates passed again on source `f4c56c4`,
-as recorded in the [real-checkpoint replay](acceptance/measurements/real-checkpoint-replay-20261016.json); see
+as recorded in the [real-checkpoint replay](acceptance/measurements/real-checkpoint-replay-20261016.json),
+and the larger experimental checkpoints were replayed afterwards in the
+[large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json); see
 [v0.1 release qualification](ARCHITECTURE_COMPATIBILITY.md#v01-release-qualification)
 and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
 

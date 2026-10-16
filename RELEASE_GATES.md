@@ -143,11 +143,12 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 The Gemma long-context bundle and the gpt-oss truncated bundles are described
 in each test's module documentation, which also records the measured results.
 Qualify half-precision gpt-oss runs (including Metal F16, with
-`TRANSFORMERS_GPT_OSS_DTYPE=f16`) against a truncated F32 bundle; the full
-24-block BF16 bundle needs about 55 GiB of host memory to generate. These
-gates establish experimental validation only; none promotes a checkpoint.
-The Flex and Metal F32 runs at `f4c56c4` (below) are experimental evidence on
-the same terms.
+`TRANSFORMERS_GPT_OSS_DTYPE=f16`) against a truncated F32 bundle. The full
+24-block BF16 bundle took 358 s to generate at a 29 GB peak footprint (the
+checkpoint is memory-mapped); its Flex/BF16 and Metal/F16 results are below.
+These gates establish experimental validation only; none promotes a
+checkpoint. The Flex and Metal F32 runs at `f4c56c4` (below) are experimental
+evidence on the same terms.
 
 ### Artifact-gated tokenizer and chat-template parity
 
@@ -208,18 +209,69 @@ and full log; the numerics are identical to the earlier runs at `ade8696` and
 The record is experimental evidence, not a support declaration: no checkpoint
 above is advertised as supported.
 
-Still to replay on the integrated source:
+The larger replays ran afterwards on source `8a4404a` (two later commits,
+`4f9502a` and `1b48b81`, add only an ignored Nemotron diagnostic), each test in
+its own process under a memory watchdog. The
+[large-checkpoint replay record](acceptance/measurements/large-checkpoint-replay-20261016.json)
+keeps every source, binary, artifact and bundle identity, the tolerance
+overrides, three superseded harness attempts with their diagnoses, and the
+full log:
 
-- the Qwen3.5-0.8B public example; Qwen3.8 and Qwen3-MoE Metal smokes,
-  including packed Q4/Q8 (Qwen3.5 packed overrides now install exactly);
-- FLAN-T5-XXL;
-- Nemotron 3.5 Lightning Metal stateless, cached-prefill, one-token decode, and
-  official-reference gates (the Mamba-2 scan, `dt` softplus, and cached
-  attention changed); real-weight MTP parity remains open;
-- Muse Glimmer's Metal gates (batched decoding, shared router, bounded
-  attention);
-- the full gpt-oss-20b BF16 reference, F16/BF16 runs of the Llama-family and
-  Gemma gates, and real Mistral and OLMo 2 checkpoints (tiny goldens only).
+- The Qwen3.5-0.8B public example printed the same 32-token text as the
+  [September record](acceptance/measurements/public-examples-20260909.json)
+  (stdout SHA-256 `44ffd45f…`).
+- FLAN-T5-XXL on Metal/F32: minimum cosine `0.999999999998`, 32/32 greedy
+  tokens, exact four-beam continuation; all seven output digests are bitwise
+  identical to the earlier record.
+- Qwen3.8-27B on Metal/F16: official prompt cosine `0.999999873` with exact
+  top-1 and 32/32 greedy tokens; the text-plus-MTP smoke; and fresh
+  create-only Q8 and Q4 Burnpacks (497 packed tensors each) that installed
+  exactly and ran (top-1 `271`, cached cosine `1.0`).
+- Qwen3-30B-A3B F16, Q8 and Q4 Metal smokes from the existing v2 sidecars
+  (top-1 `1096`, cached and stateless bitwise equal); both traced decodes
+  launched all 1,345 packed matmuls and no whole-weight dequantization.
+- Muse-Glimmer-30B on Metal/F16: official parity identical to its earlier
+  record (minimum hidden cosine `0.999943377`, 32/32 greedy tokens), the strict
+  streaming audit, and Q8/Q4 packed smokes with kernel audits.
+- Nemotron 3.5 Lightning: the Metal stateless, cached-prefill and one-token
+  decode smoke passed (decode/teacher cosine `0.999370862`). The official
+  corresponding-path gate ran for the first time and **failed**: the cached
+  path matches all 32 official rows (at least `0.999299`), but teacher-forced
+  decisions 18 and 30 reach `0.994340` and `0.997652` against the `0.999`
+  floor. No defect was found; Burn's own two clamp-equivalent paths differ by
+  up to `0.994053` at these sparse-routing rows, so the floor needs a reviewed
+  calibration decision ([analysis](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)).
+  The decision-14 diagnostic shows that the `time_step_min` clamp asymmetry,
+  not the F16 precision policy, causes the official recurrent/chunked split.
+- gpt-oss-20b, all 24 blocks: the BF16 Transformers reference now exists
+  (`gpt-oss-20b-6cee5e81-bf16-reference.bundle`, generated in 358 s at a
+  29 GB peak footprint). Flex/BF16 passes every gate (prompt logits within
+  `1.62`, mean at most `0.064`; batched rows within `0.5`; the 183-token
+  cached decode within `1.32`). Metal/F16 passes the cached, batched and
+  greedy gates but **fails** prompt logits: prompt 0 deviates by `2.66`
+  against the provisional `2.5` half-precision bound (mean `0.109`). Against
+  the four-block F32 bundle Metal/F16 stays within `0.122`, while
+  Transformers' own BF16 run is `1.73` away there, so the gap is the BF16
+  reference's rounding; the bound needs a reviewed full-model calibration or
+  an F32 reference. Both greedy tests compare no tokens: the reference's
+  first-step margin (`3.06`) is below twice the half-precision tolerance.
+
+The Qwen3.8 and Qwen3-30B-A3B F32 logit digests differ from their pre-polish
+records (top-1 tokens and cosines do not): the polish cycle reordered
+reductions. The Qwen3.8 smoke's
+peak footprint rose from 63.3 GB to 68.3 GB; timings on this shared host are
+not performance measurements. None of these replays advertises a checkpoint.
+
+Still open after these replays:
+
+- the Nemotron official-gate calibration decision above, and real-weight
+  Nemotron MTP parity;
+- Q8/Q4 quantized-reference and quality gates (Qwen3.8, Qwen3-30B-A3B, Muse),
+  and an official reference for Qwen3-30B-A3B (no bundle exists);
+- the gpt-oss full-model half-precision bound (above) and a full F32
+  reference;
+- F16/BF16 runs of the Llama-family and Gemma gates, and real Mistral and
+  OLMo 2 checkpoints (tiny goldens only).
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
