@@ -160,7 +160,7 @@ impl BurnpackSessionLimits {
     /// Validates limits against Burn Store 0.21's documented reader bounds.
     ///
     /// Each limit must be positive and at most its cap; the verified
-    /// [`first_limit_violation`] names the first field that is not, checking
+    /// `first_limit_violation` names the first field that is not, checking
     /// fields in declaration order and each for zero before its cap.
     pub fn validate(self) -> Result<Self> {
         validate_session_limits(

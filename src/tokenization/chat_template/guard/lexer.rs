@@ -21,20 +21,20 @@
 //! - [`lex_spans`] decides the body's tokenization. On success its spans are
 //!   non-empty, ordered, and disjoint, every byte outside them is ASCII
 //!   whitespace, and each span is of its kind's lexical class: a quoted
-//!   string closed exactly where the string scan closes it ([`string_close`]),
+//!   string closed exactly where the string scan closes it (`string_close`),
 //!   a number ending exactly where MiniJinja's number state machine stops
-//!   ([`number_stops_at`]), a maximal identifier, or a one- or two-byte symbol
+//!   (`number_stops_at`), a maximal identifier, or a one- or two-byte symbol
 //!   from the tables above, two-byte symbols first. These classes leave no
 //!   choice, so the result is the body's only tokenization
-//!   ([`lemma_tokenization_unique`]) and the guard sees exactly the operator
+//!   (`lemma_tokenization_unique`) and the guard sees exactly the operator
 //!   tokens of that tokenization: no operator byte can hide inside a name, a
 //!   string, or a number, and none can be invented by splitting one. An error
-//!   means the body has no tokenization at all ([`lemma_no_tokenization`]);
+//!   means the body has no tokenization at all (`lemma_no_tokenization`);
 //!   it names an unterminated quote or a byte no token can start with;
-//! - [`string_end`] returns exactly [`string_close`]: just past the first
+//! - [`string_end`] returns exactly `string_close`: just past the first
 //!   quote equal to the opening one that no backslash escapes, or `None`;
 //! - [`number_end`] stops exactly where the transcribed state machine
-//!   ([`number_step`]) stops and reports a float exactly for a fraction or
+//!   (`number_step`) stops and reports a float exactly for a fraction or
 //!   exponent final state. Consequently the number consumes at least the
 //!   leading digit and only number characters, accepts a sign only after an
 //!   exponent letter, a point only once and before any exponent (and never
@@ -455,7 +455,7 @@ fn is_double_symbol(bytes: &[u8], index: usize) -> bool {
 /// Returns the index just past the string literal opened at `start`, or `None` if unterminated.
 ///
 /// A backslash escapes the next byte. Verified: the result is exactly
-/// [`string_close`] of the body, so the literal closes at the first quote
+/// `string_close` of the body, so the literal closes at the first quote
 /// equal to the opening one that no backslash escapes, and `None` means no
 /// such quote exists; a returned end is at least two past `start` and inside
 /// the buffer.
@@ -504,8 +504,8 @@ pub(crate) fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// hexadecimal letters for `0x`); a decimal number allows one fraction, then
 /// an exponent whose first character may be a sign; `_` is allowed anywhere.
 /// Verified: the end is exactly where MiniJinja's state machine
-/// ([`number_step`]) stops, so every byte before it is accepted and the byte
-/// at it is not ([`number_stops_at`], which at most one end satisfies), and
+/// (`number_step`) stops, so every byte before it is accepted and the byte
+/// at it is not (`number_stops_at`, which at most one end satisfies), and
 /// the float flag is exactly whether the final state is a fraction or
 /// exponent. Consequently the number covers at least its leading digit and
 /// contains only number characters, with a sign only after an exponent
@@ -721,7 +721,7 @@ pub(crate) proof fn lemma_number_end_unique(bytes: Seq<u8>, start: int, first: i
 /// Verified: on success the spans tokenize the whole body (see the module
 /// documentation): ordered, disjoint, non-empty tokens of their kinds'
 /// lexical classes, separated only by ASCII whitespace, and they are the
-/// body's only tokenization ([`lemma_tokenization_unique`]). An error means
+/// body's only tokenization (`lemma_tokenization_unique`). An error means
 /// the body has no tokenization at all; it names an unterminated string's
 /// opening quote or a byte no token starts with.
 #[cfg_attr(verus_keep_ghost, verus_verify)]

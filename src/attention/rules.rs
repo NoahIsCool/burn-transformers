@@ -44,7 +44,7 @@
 //! [`rejects_short_keys`] and [`position_source`] decide which position
 //! vectors a mask needs. Queries are the bottom-right suffix of the keys, so
 //! valid-token ordinals of the queries start `K - Q` columns into the keys;
-//! [`lemma_alignment_admits_ordinals`] proves that this offset never
+//! `lemma_alignment_admits_ordinals` proves that this offset never
 //! underflows once the alignment check has passed.
 //!
 //! # Verified properties

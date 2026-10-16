@@ -33,7 +33,7 @@
 //! of 1, 2, 3, 7, 14 and 64 threads, for identity and dtype-converting copies.
 //!
 //! The module depends only on the shared, verified
-//! [`ceil_div_usize`](crate::checkpoint::division::ceil_div_usize), with no
+//! [`ceil_div_usize`], with no
 //! Burn or allocator dependencies, so that Verus can check it in place.
 
 #[cfg(verus_keep_ghost)]

@@ -17,7 +17,8 @@ mod load;
 pub mod mla;
 /// Executable DeepSeek decoder blocks, language-model graph, and compressed decode state.
 pub mod model;
-/// Dependency-free schedule, routing, and latent-cache arithmetic (Verus-verified).
+// Dependency-free schedule, routing, and latent-cache arithmetic (Verus-verified);
+// the module documents itself with `//!` so its intra-doc links resolve there.
 pub(crate) mod plan;
 
 pub use checkpoint::{DeepseekV2CheckpointContract, DeepseekV2CheckpointOptions};

@@ -511,7 +511,7 @@ pub(crate) proof fn lemma_time_of_day(unix_seconds: int, shifted: int, days: int
 /// Converts an in-range Unix second to civil fields with Hinnant's algorithm.
 ///
 /// Verified: every field equals Python's `datetime` reading of the instant in
-/// UTC, as [`is_civil_time_of`] states: the date is valid and its proleptic
+/// UTC, as `is_civil_time_of` states: the date is valid and its proleptic
 /// Gregorian ordinal is the floor day number plus the epoch's ordinal, the
 /// time of day decomposes the floor remainder, the weekday is Python's
 /// `weekday()`, and the day of year is Python's `tm_yday`.
@@ -592,7 +592,7 @@ fn civil_time_in_supported_range(unix_seconds: i64) -> CivilTime {
 
 /// Gregorian leap-year rule: divisible by 4, except centuries not divisible by 400.
 ///
-/// Verified: equals Python's `_is_leap` ([`gregorian_leap`]) for every
+/// Verified: equals Python's `_is_leap` (`gregorian_leap`) for every
 /// non-negative year.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(leap =>

@@ -219,7 +219,7 @@ pub(crate) fn checked_power_of_ten(places: u32) -> Option<i128> {
 /// `i128::MIN` whose lower multiple does not fit still round up correctly.
 ///
 /// Verified: the result is the nearest multiple of `10^places`, ties to the
-/// multiple with an even quotient ([`half_even_multiple`]), or `None` exactly
+/// multiple with an even quotient (`half_even_multiple`), or `None` exactly
 /// when that multiple lies outside `i128`. A returned value is a multiple of
 /// the unit at most half a unit from `value`, and exactly half a unit only
 /// when its quotient is even.
@@ -790,7 +790,7 @@ fn compare_dropped_with_half(digits: &[u8], split: usize, places: usize) -> core
 /// is the digit arithmetic of Python's `round(x, -places)` on a float's exact
 /// decimal expansion. Verified: the result spells `q + up`, where `q` and
 /// `r` are the quotient and remainder of the value by `10^places` and `up`
-/// is [`rounds_up`] (the value with its fraction is above half a unit, or
+/// is `rounds_up` (the value with its fraction is above half a unit, or
 /// exactly half with an odd quotient).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(kept =>

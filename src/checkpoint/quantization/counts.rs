@@ -8,7 +8,7 @@
 //! `rows · (columns / G)` of them, which equals `⌈rows · columns / G⌉`.
 //!
 //! The module depends only on the packed code widths and the shared
-//! [`ceil_div_u64`](crate::checkpoint::division::ceil_div_u64) core, with no
+//! [`ceil_div_u64`] core, with no
 //! Burn or allocator dependencies, so that Verus can check it in place through
 //! `verus/checkpoint.rs`; callers map its `None` results to contextual
 //! quantization errors.
