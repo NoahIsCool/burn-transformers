@@ -1435,12 +1435,12 @@ fn serialized_sliding_window_never_changes_outputs() {
 
 /// The opted-in experiment window keeps cached MTP attention equal to the windowed stateless head.
 ///
-/// Since NUM-1 made the serialized `sliding_window` inert,
-/// `mtp_tests::windowed_cached_mtp_matches_the_stateless_head` (which still
-/// sets that field) compares two unwindowed heads. Here
-/// [`NemotronHConfig::attention_window`] drives both paths, and the windowed
-/// stateless head must differ from the unwindowed one on the same weights,
-/// so the comparison cannot pass vacuously.
+/// The serialized `sliding_window` is inert, so only
+/// [`NemotronHConfig::attention_window`] opts the head into a window. It
+/// drives both paths here, and the windowed stateless head must differ from
+/// the unwindowed one on the same weights, so the comparison cannot pass
+/// vacuously. Three pairs are cached at once (the window active at the
+/// step's end), then one more.
 #[test]
 fn attention_window_keeps_cached_mtp_equal_to_the_stateless_head() {
     use crate::{CausalLanguageModel, cache::CacheConfig};

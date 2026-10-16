@@ -2,10 +2,12 @@
 //!
 //! The schedule decides, for every decoder block, whether its feed-forward
 //! branch is a routed expert bank: a pure integer predicate over the
-//! configuration ([`sparse_layer`]), the `mlp_only_layers` membership test
-//! ([`listed`]), and the validation that the schedule contains a sparse
-//! block at all ([`any_sparse_layer`]), all checked by `verus/qwen.rs` for
-//! every input (see `verus/README.md`). The sliding window needs no
+//! configuration ([`sparse_layer`]) and the `mlp_only_layers` membership test
+//! ([`listed`]), both checked by `verus/qwen.rs` for every input (see
+//! `verus/README.md`). [`any_sparse_layer`], the verified statement that the
+//! schedule contains a sparse block at all, is the test oracle for the
+//! `O(L + M)` check in `Qwen3MoeConfig::validate`, which marks the overrides
+//! once instead of scanning them for every block. The sliding window needs no
 //! schedule: the pinned reference applies an enabled window to every block.
 
 #[cfg(verus_keep_ghost)]
@@ -75,6 +77,13 @@ pub(crate) fn listed(indices: &[usize], index: usize) -> bool {
 /// configuration validation always has. Proved: exactly when some block
 /// `i < layers` satisfies [`sparse_layer`] with its `mlp_only_layers`
 /// membership.
+#[cfg_attr(
+    all(not(test), not(verus_keep_ghost)),
+    expect(
+        dead_code,
+        reason = "verified oracle for the O(L + M) schedule check of validate; only tests call it"
+    )
+)]
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(any =>
     ensures

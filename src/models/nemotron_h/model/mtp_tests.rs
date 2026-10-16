@@ -896,66 +896,6 @@ fn mtp_step_beyond_capacity_is_rejected() {
     assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
 }
 
-/// With an active window, cached MTP attention equals the windowed stateless head.
-#[test]
-fn windowed_cached_mtp_matches_the_stateless_head() {
-    let device = Default::default();
-    let model = NemotronHForCausalLm::<TestBackend>::init(
-        crate::models::nemotron_h::NemotronHConfig {
-            sliding_window: Some(2),
-            ..tiny_config(true)
-        },
-        &device,
-    )
-    .unwrap();
-    let mut state = model
-        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
-        .unwrap();
-    let target = model
-        .prefill(
-            CausalLmInput {
-                token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
-                token_mask: None,
-                position_ids: None,
-            },
-            &mut state,
-            &ForwardOptions {
-                logits: LogitsSelection::All,
-                hidden_states: true,
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .final_hidden_state
-        .unwrap();
-    let shifted = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3, 4, 5]], &device);
-    let hidden = target.narrow(1, 0, 4);
-    let stateless = model
-        .predict_next_token_logits(shifted.clone(), hidden.clone())
-        .unwrap();
-    // Three pairs at once (window active at the step's end), then one more.
-    let chunk = model
-        .forward_mtp_cached(
-            shifted.clone().narrow(1, 0, 3),
-            hidden.clone().narrow(1, 0, 3),
-            None,
-            &mut state,
-        )
-        .unwrap();
-    let last = model
-        .forward_mtp_cached(
-            shifted.narrow(1, 3, 1),
-            hidden.narrow(1, 3, 1),
-            None,
-            &mut state,
-        )
-        .unwrap();
-    assert_eq!(state.tensor_state().mtp_lengths(), Some([4].as_slice()));
-    Tensor::cat(vec![chunk.logits, last.logits], 1)
-        .into_data()
-        .assert_approx_eq::<f32>(&stateless.into_data(), Tolerance::absolute(3e-5));
-}
-
 /// The key/value-only projection refuses a head with key normalization.
 #[test]
 fn pair_projection_refuses_key_normalization() {

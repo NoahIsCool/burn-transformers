@@ -396,6 +396,31 @@ fn dense_override_uses_exactly_one_feed_forward_kind() {
     assert!(model.model.layers[1].dense_mlp.is_some());
 }
 
+/// Every block's feed-forward kind follows the schedule, overrides and step included.
+///
+/// The model reads the whole schedule once (`moe_layer_flags`); each block
+/// must still own exactly the kind `is_moe_layer` reports for it.
+#[test]
+fn every_block_follows_the_sparse_schedule() {
+    let device = Default::default();
+    for (step, overrides) in [(1, vec![]), (2, vec![]), (1, vec![2, 0]), (2, vec![3])] {
+        let mut config = tiny_config();
+        config.num_hidden_layers = 4;
+        config.max_window_layers = 4;
+        config.decoder_sparse_step = step;
+        config.mlp_only_layers = overrides.clone();
+        let model = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+        for (index, layer) in model.model.layers.iter().enumerate() {
+            let sparse = config.is_moe_layer(index);
+            assert_eq!(
+                (layer.sparse_mlp.is_some(), layer.dense_mlp.is_some()),
+                (sparse, !sparse),
+                "step {step}, overrides {overrides:?}, layer {index}"
+            );
+        }
+    }
+}
+
 /// Serialized router-output policy is honored in addition to call-site options.
 #[test]
 fn config_can_enable_router_logits_by_default() {

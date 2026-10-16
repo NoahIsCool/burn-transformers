@@ -112,7 +112,10 @@ pub struct Qwen3MoeDecoderLayer<B: Backend> {
 
 impl<B: Backend> Qwen3MoeDecoderLayer<B> {
     /// Allocates one layer whose feed-forward kind follows the validated schedule.
-    fn init(config: &Qwen3MoeConfig, layer_index: usize, device: &B::Device) -> Result<Self> {
+    ///
+    /// `sparse` is the layer's entry of [`Qwen3MoeConfig::moe_layer_flags`],
+    /// computed once for the whole stack.
+    fn init(config: &Qwen3MoeConfig, sparse: bool, device: &B::Device) -> Result<Self> {
         let mut attention = GroupedQueryAttentionConfig::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -127,7 +130,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
                 .with_round_before_scale(true)
                 .init(device)
         };
-        let (sparse_mlp, dense_mlp) = if config.is_moe_layer(layer_index) {
+        let (sparse_mlp, dense_mlp) = if sparse {
             let mut sparse = SparseMoeConfig::new(
                 config.hidden_size,
                 config.moe_intermediate_size,
@@ -511,8 +514,12 @@ impl<B: Backend> Qwen3MoeModel<B> {
             ));
         }
         let rope = config.rope_config()?;
-        let layers = (0..config.num_hidden_layers)
-            .map(|index| Qwen3MoeDecoderLayer::init(&config, index, device))
+        // One O(L + M) pass over the schedule; asking `is_moe_layer` per
+        // block would rescan `mlp_only_layers` (M entries) L times.
+        let layers = config
+            .moe_layer_flags()
+            .into_iter()
+            .map(|sparse| Qwen3MoeDecoderLayer::init(&config, sparse, device))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
