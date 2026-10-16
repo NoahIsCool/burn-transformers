@@ -2122,3 +2122,154 @@ fn cross_projection_rejects_mismatched_weight_dtypes_contextually() {
     );
     assert!(!state.has_encoder_cache());
 }
+
+/// Returns whether a Flex tensor occupies contiguous row-major storage.
+fn is_contiguous<const D: usize>(tensor: Tensor<TestBackend, D>) -> bool {
+    let primitive: burn::backend::flex::FlexTensor = tensor.into_primitive().tensor();
+    primitive.is_contiguous()
+}
+
+/// Projects one layer's cross keys or values as the strided head view decode used to cache.
+fn strided_cross_heads(
+    model: &T5ForConditionalGeneration<TestBackend>,
+    encoder: &EncoderOutput<TestBackend>,
+    layer: usize,
+    keys: bool,
+) -> Tensor<TestBackend, 4> {
+    let attention = &model.decoder.block[layer]
+        .cross_attention
+        .as_ref()
+        .unwrap()
+        .enc_dec_attention
+        .attention;
+    let projection = if keys {
+        &attention.k_proj
+    } else {
+        &attention.v_proj
+    };
+    let [batch, source, _] = encoder.hidden_state.dims();
+    operations::linear(encoder.hidden_state.clone(), projection)
+        .unwrap()
+        .reshape([batch, source, attention.key_value_heads, attention.head_dim])
+        .swap_dims(1, 2)
+}
+
+/// Prefill stores cross keys and values contiguously on Flex with exactly the projected values.
+///
+/// Flex's attention copied the former strided head view on every decode
+/// step; the cache now holds attention-ready storage from prefill on, and a
+/// beam reorder keeps it contiguous.
+#[test]
+fn cached_cross_projections_are_attention_ready_and_exact() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = model
+        .encode(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[8, 9, 10], [11, 12, 13]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0], [0]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let cross = state.cross.as_ref().unwrap();
+    for layer in 0..2 {
+        for (cached, keys) in [(&cross.keys[layer], true), (&cross.values[layer], false)] {
+            let strided = strided_cross_heads(&model, &encoder, layer, keys);
+            assert!(!is_contiguous(strided.clone()));
+            assert!(is_contiguous(cached.clone()), "layer {layer} keys={keys}");
+            assert_eq!(cached.clone().into_data(), strided.into_data());
+        }
+    }
+    let before = state.cross.as_ref().unwrap().values[1].clone();
+    state.reorder(&[1, 1]).unwrap();
+    let after = state.cross.as_ref().unwrap().values[1].clone();
+    assert!(is_contiguous(after.clone()));
+    assert_eq!(
+        after.narrow(0, 0, 1).into_data(),
+        before.narrow(0, 1, 1).into_data()
+    );
+}
+
+/// Decoding from attention-ready cross storage is bit-identical to decoding from the strided view.
+///
+/// The layout change is a pure permutation of storage, and Flex's attention
+/// made the same contiguous copy itself before, so every logit must match
+/// exactly, not merely within tolerance.
+#[test]
+fn attention_ready_cross_storage_leaves_decode_logits_bit_identical() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    let mut contiguous = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut contiguous,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mut strided = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut strided,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let cross = strided.cross.as_mut().unwrap();
+    for layer in 0..2 {
+        cross.keys[layer] = strided_cross_heads(&model, &encoder, layer, true);
+        cross.values[layer] = strided_cross_heads(&model, &encoder, layer, false);
+    }
+    for token in [5, 7, 2] {
+        let step = |state: &mut T5DecodeState<TestBackend>| {
+            model
+                .decode(
+                    &encoder,
+                    DecodeInput {
+                        token_ids: target(&[token], &device).token_ids,
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap()
+                .decoder
+                .logits
+                .into_data()
+        };
+        assert_eq!(step(&mut contiguous), step(&mut strided));
+    }
+}

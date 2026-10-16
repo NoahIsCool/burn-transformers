@@ -30,6 +30,20 @@
 //! - cross-attention reads the projected `[batch, heads, source, d_kv]`
 //!   encoder keys and values of all rows at once.
 //!
+//! # Attention-ready cross keys and values
+//!
+//! A projection produces `[batch, source, heads * d_kv]` rows, so splitting
+//! heads (`reshape` then `swap_dims(1, 2)`) yields a strided view. CubeCL
+//! kernels read that view directly, but Burn Flex's attention copies every
+//! non-contiguous key and value operand on every call: with the view cached,
+//! each decode step re-copied all `2 * layers * batch * source * d_model`
+//! cached elements (about two thirds of FLAN-T5-small's Flex decode time at
+//! 512 source tokens). The cache therefore stores both tensors contiguously
+//! once at prefill on backends that prefer it
+//! ([`operations::contiguous_where_preferred`]), a one-time copy of the same
+//! size as one decode step used to make. Values are unchanged; only the
+//! physical layout differs.
+//!
 //! Values of invalid key slots are zeroed before attention (they may hold
 //! stale bytes), and scores of excluded keys are replaced, never offset.
 //! Scores remain `Q K^T + b + M` without the usual `1 / sqrt(d_kv)` factor.
@@ -112,8 +126,11 @@ struct T5CrossAttentionCache<B: Backend> {
     /// Bound source hidden states, mask, and optional encoder diagnostics.
     encoder: EncoderOutput<B>,
     /// Per-layer projected keys with axes `[batch, heads, source, d_kv]`.
+    ///
+    /// Contiguous on backends that prefer contiguous attention operands (see
+    /// the module documentation); a strided head view elsewhere.
     keys: Vec<Tensor<B, 4>>,
-    /// Per-layer projected values with the same axes as the keys.
+    /// Per-layer projected values with the same axes and layout as the keys.
     values: Vec<Tensor<B, 4>>,
 }
 
@@ -125,6 +142,9 @@ impl<B: Backend> T5CrossAttentionCache<B> {
     /// only guards the projection reshapes. Projections go through
     /// [`operations::linear`], the same contract as the stateless
     /// cross-attention projection (dtype/device agreement, packed weights).
+    /// Each split-head result is stored attention-ready
+    /// ([`operations::contiguous_where_preferred`]), so decode steps never
+    /// re-layout it.
     fn project(model: &T5ForConditionalGeneration<B>, encoder: &EncoderOutput<B>) -> Result<Self> {
         let [batch, source_sequence, _] = encoder.hidden_state.dims();
         validate_encoder_layout(
@@ -144,16 +164,15 @@ impl<B: Backend> T5CrossAttentionCache<B> {
             })?;
             let attention = &cross.enc_dec_attention.attention;
             let heads = |projection| -> Result<Tensor<B, 4>> {
-                Ok(
-                    operations::linear(encoder.hidden_state.clone(), projection)?
-                        .reshape([
-                            batch,
-                            source_sequence,
-                            attention.key_value_heads,
-                            attention.head_dim,
-                        ])
-                        .swap_dims(1, 2),
-                )
+                let split = operations::linear(encoder.hidden_state.clone(), projection)?
+                    .reshape([
+                        batch,
+                        source_sequence,
+                        attention.key_value_heads,
+                        attention.head_dim,
+                    ])
+                    .swap_dims(1, 2);
+                Ok(operations::contiguous_where_preferred(split))
             };
             keys.push(heads(&attention.k_proj)?);
             values.push(heads(&attention.v_proj)?);
