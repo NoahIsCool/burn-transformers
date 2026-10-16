@@ -11,6 +11,7 @@
 //! |-------------------------------------------|-----------------------------------------------|
 //! | `\r\n` and `\r` in the source lexed as `\n` | normalized before compiling                   |
 //! | `trim_blocks`, `lstrip_blocks`            | the same MiniJinja whitespace switches        |
+//! | no `trim_blocks` after `{% raw %}`        | the next newline is doubled before compiling  |
 //! | lenient `Undefined` (`{% if x %}` is falsy) | [`UndefinedBehavior::Lenient`]                |
 //! | `loopcontrols` (`break`, `continue`)      | MiniJinja's `loop_controls` feature           |
 //! | `{% generation %}` (assistant masks)      | rewritten to a transparent `{% if true %}`    |
@@ -24,7 +25,6 @@
 //! | dict insertion order                      | **not matched**: keys arrive sorted           |
 //! | `'x' ~ value` with a bool or `None`       | **not matched**: prints `true`/`none`         |
 //! | `'%s' % value` string formatting          | **not supported**: rendering fails            |
-//! | no `trim_blocks` after `{% raw %}`        | **not matched**: the next newline is dropped  |
 //!
 //! The unmatched rows, and smaller Unicode-class approximations, are
 //! described in the `pycompat` module documentation. Official templates
@@ -142,7 +142,10 @@ pub(crate) mod sandbox;
 mod scan;
 
 use sandbox::{BoundedOutput, CycleBreaker, NamespaceRegistry, RenderBudget, RenderLimits};
-use scan::{TagKind, TagSpan, marker_widths, next_tag, skip_string};
+use scan::{
+    TagKind, TagOpening, TagSpan, basic_tag_end, find_pattern, find_tag_end, marker_widths,
+    next_tag, next_tag_opening, raw_section_end, skip_string,
+};
 
 /// Instruction budget limiting each chat-template evaluation.
 const CHAT_TEMPLATE_FUEL: u64 = 250_000;
@@ -210,6 +213,7 @@ fn render_bounded(
     // Jinja2 rejoins the source's lines with `\n` before lexing; MiniJinja
     // keeps raw `\r\n` and `\r` in text, tags, and literals.
     let source = universal_newlines(source);
+    let source = keep_raw_opening_newlines(&source);
     let rewritten = parenthesize_conditional_keyword_arguments(&rewrite_generation_blocks(&source))
         .into_owned();
     let source = guard::guard_operators(&rewritten)
@@ -326,6 +330,66 @@ fn statement_parts(tag: &str) -> (&str, &str, &str) {
     let (open, close) = marker_widths(inner.as_bytes());
     let body = &inner[open..inner.len() - close];
     (&inner[..open], body.trim(), &inner[inner.len() - close..])
+}
+
+// Raw sections.
+
+/// Keeps the newline that Jinja2 keeps right after a `{% raw %}` tag.
+///
+/// With `trim_blocks`, Jinja2 drops the first newline after a block tag, but
+/// its lexer matches a raw section's opening tag separately and applies no
+/// `trim_blocks` there: `{% raw %}\n{{ x }}{% endraw %}` renders
+/// `"\n{{ x }}"` in Hugging Face. MiniJinja trims after the opening tag too,
+/// so this rewrite doubles a newline that directly follows an opening tag
+/// closed by a plain `%}`; MiniJinja then drops one and keeps the other. A
+/// `-%}` closing strips the following whitespace in both engines and is left
+/// alone. Raw sections are found with the verified scanner primitives in the
+/// order MiniJinja's lexer applies them, exactly as [`next_tag`] does, so
+/// `{% raw %}` inside a comment, another raw section, or a string literal is
+/// data and never rewritten. Templates without the word `raw` are borrowed
+/// unchanged; an unterminated tag or section ends the scan.
+pub(crate) fn keep_raw_opening_newlines(source: &str) -> Cow<'_, str> {
+    if !source.contains("raw") {
+        return Cow::Borrowed(source);
+    }
+    let bytes = source.as_bytes();
+    let mut insertions = Vec::new();
+    let mut search = 0;
+    while let Some((start, opening)) = next_tag_opening(bytes, search) {
+        let body = start + 2;
+        let resume = match opening {
+            TagOpening::Comment => find_pattern(bytes, body, b"#}").map(|close| close + 2),
+            TagOpening::Expression => find_tag_end(bytes, body, b"}}").map(|close| close + 2),
+            TagOpening::Statement => match basic_tag_end(bytes, body, b"raw") {
+                Some(after) => {
+                    // `after` follows the closing `%}`; the byte before it is a
+                    // whitespace-control marker or part of the tag body.
+                    let plain_close = !matches!(bytes[after - 3], b'-' | b'+');
+                    if plain_close && bytes.get(after) == Some(&b'\n') {
+                        insertions.push(after);
+                    }
+                    raw_section_end(bytes, after)
+                }
+                None => find_tag_end(bytes, body, b"%}").map(|close| close + 2),
+            },
+        };
+        match resume {
+            Some(next) => search = next,
+            None => break,
+        }
+    }
+    if insertions.is_empty() {
+        return Cow::Borrowed(source);
+    }
+    let mut kept = String::with_capacity(source.len() + insertions.len());
+    let mut copied = 0;
+    for at in insertions {
+        kept.push_str(&source[copied..at]);
+        kept.push('\n');
+        copied = at;
+    }
+    kept.push_str(&source[copied..]);
+    Cow::Owned(kept)
 }
 
 // Assistant-mask blocks.

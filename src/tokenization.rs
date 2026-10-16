@@ -54,9 +54,6 @@
 //!   Python prints `True`/`None`. Official templates convert values with
 //!   `| string` first, which matches Python exactly.
 //! - **`'%s' % value` string formatting is unsupported** and fails rendering.
-//! - **A newline right after `{% raw %}` is dropped.** MiniJinja applies
-//!   `trim_blocks` to the `raw` tag; Jinja2 does not, so Python keeps that
-//!   newline (`{% raw %}\n{{ x }}{% endraw %}` renders `\n{{ x }}` there).
 //! - **Resource limits.** A template that builds a value or prompt beyond the
 //!   sandbox's limits (below) fails where Python might still render. The
 //!   limits scale with the conversation, so only adversarial templates reach
