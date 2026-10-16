@@ -301,6 +301,15 @@ fn explicit_independent_vocabulary_head_starts_equal_and_then_can_diverge() {
     let hidden = Tensor::<B, 3>::ones([1, 2, 8], &device);
     let head = model.independent_vocabulary_head();
     assert_ne!(head.weight.id, model.embed_tokens.weight.id);
+    let storage: burn::backend::flex::FlexTensor = head.weight.val().into_primitive().tensor();
+    assert!(
+        storage.is_contiguous(),
+        "inference Flex stores the head contiguously"
+    );
+    assert_eq!(
+        head.weight.val().into_data(),
+        model.embed_tokens.weight.val().transpose().into_data()
+    );
     let original = operations::linear(hidden.clone(), &head).unwrap().to_data();
     assert_eq!(
         model

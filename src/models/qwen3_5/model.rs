@@ -634,9 +634,17 @@ impl<B: Backend> Qwen3_5TextModel<B> {
     /// The new parameter has a distinct identity and autodiff leaf, so future
     /// updates to this head and the embedding are independent. Own it in your
     /// experiment's `Module` tree to include it in saving and optimization.
+    ///
+    /// The `[hidden, vocabulary]` weight is `Eᵀ`. On backends that multiply
+    /// single rows faster by contiguous matrices (inference Flex) it is copied
+    /// once into contiguous storage, so the head never shares the table's
+    /// buffer and its readout avoids a strided right-hand side; elsewhere it is
+    /// the zero-copy transposed view. Values are identical either way.
     pub fn independent_vocabulary_head(&self) -> Linear<B> {
         Linear {
-            weight: Param::from_tensor(self.embed_tokens.weight.val().transpose().detach()),
+            weight: Param::from_tensor(operations::contiguous_where_preferred(
+                self.embed_tokens.weight.val().transpose().detach(),
+            )),
             bias: None,
         }
     }
