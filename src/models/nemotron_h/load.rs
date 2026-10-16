@@ -286,7 +286,7 @@ fn install_block_tensor<B: Backend>(
                         target: target.into(),
                         component: "Mamba2 mixer selected by the block schedule",
                     })?;
-            install_mamba_tensor(mamba, target, &suffix[6..], data)
+            install_mamba_tensor(mamba, target, &suffix["mamba.".len()..], data)
         }
         suffix if suffix.starts_with("attention.") => {
             let attention =
@@ -297,7 +297,7 @@ fn install_block_tensor<B: Backend>(
                         target: target.into(),
                         component: "attention mixer selected by the block schedule",
                     })?;
-            install_attention_tensor(attention, target, &suffix[10..], data)
+            install_attention_tensor(attention, target, &suffix["attention.".len()..], data)
         }
         suffix if suffix.starts_with("mlp.") => {
             let mlp = block
@@ -307,7 +307,7 @@ fn install_block_tensor<B: Backend>(
                     target: target.into(),
                     component: "dense MLP selected by the block schedule",
                 })?;
-            install_dense_tensor(mlp, target, &suffix[4..], data)
+            install_dense_tensor(mlp, target, &suffix["mlp.".len()..], data)
         }
         suffix if suffix.starts_with("moe.") => {
             let moe = block
@@ -317,7 +317,7 @@ fn install_block_tensor<B: Backend>(
                     target: target.into(),
                     component: "routed MoE selected by the block schedule",
                 })?;
-            install_moe_tensor(moe, target, &suffix[4..], data)
+            install_moe_tensor(moe, target, &suffix["moe.".len()..], data)
         }
         _ => Err(NemotronHLoadError::UnknownTarget {
             target: target.into(),
@@ -422,7 +422,7 @@ fn install_moe_tensor<B: Backend>(
             install_dense_tensor(expert, target, projection, data)
         }
         suffix if suffix.starts_with("shared.") => {
-            install_dense_tensor(&mut moe.shared, target, &suffix[7..], data)
+            install_dense_tensor(&mut moe.shared, target, &suffix["shared.".len()..], data)
         }
         suffix if suffix.starts_with("fc1_latent_proj.") => {
             let projection = moe.fc1_latent_proj.as_mut().ok_or_else(|| {
@@ -431,7 +431,12 @@ fn install_moe_tensor<B: Backend>(
                     component: "first routed-expert latent projection",
                 }
             })?;
-            install_linear_tensor(projection, target, &suffix[16..], data)
+            install_linear_tensor(
+                projection,
+                target,
+                &suffix["fc1_latent_proj.".len()..],
+                data,
+            )
         }
         suffix if suffix.starts_with("fc2_latent_proj.") => {
             let projection = moe.fc2_latent_proj.as_mut().ok_or_else(|| {
@@ -440,7 +445,12 @@ fn install_moe_tensor<B: Backend>(
                     component: "second routed-expert latent projection",
                 }
             })?;
-            install_linear_tensor(projection, target, &suffix[16..], data)
+            install_linear_tensor(
+                projection,
+                target,
+                &suffix["fc2_latent_proj.".len()..],
+                data,
+            )
         }
         _ => Err(NemotronHLoadError::UnknownTarget {
             target: target.into(),
@@ -504,12 +514,15 @@ fn install_next_token_tensor<B: Backend>(
         "hidden_norm.weight" => install_norm(target, &mut head.hidden_norm, data),
         "eh_proj.weight" => install_linear_weight(target, &mut head.eh_proj, data),
         "attention_norm.weight" => install_norm(target, &mut head.attention_norm, data),
-        suffix if suffix.starts_with("attention.") => {
-            install_attention_tensor(&mut head.attention, target, &suffix[10..], data)
-        }
+        suffix if suffix.starts_with("attention.") => install_attention_tensor(
+            &mut head.attention,
+            target,
+            &suffix["attention.".len()..],
+            data,
+        ),
         "moe_norm.weight" => install_norm(target, &mut head.moe_norm, data),
         suffix if suffix.starts_with("moe.") => {
-            install_moe_tensor(&mut head.moe, target, &suffix[4..], data)
+            install_moe_tensor(&mut head.moe, target, &suffix["moe.".len()..], data)
         }
         "final_layer_norm.weight" => install_norm(target, &mut head.final_layer_norm, data),
         _ => Err(NemotronHLoadError::UnknownTarget {
