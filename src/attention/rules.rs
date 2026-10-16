@@ -163,7 +163,10 @@ pub enum LocalRule {
     /// The rule excludes no link inside the span.
     Unrestricted,
     /// Exclude `key + window <= query`, with `window < span`.
-    Window(usize),
+    Window(
+        /// Visible positions per query, below the span.
+        usize,
+    ),
     /// Exclude links whose `floor((position + phase) / width)` differ.
     Chunk {
         /// Frame width, `1 <= width <= span`.

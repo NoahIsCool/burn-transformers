@@ -82,7 +82,10 @@ pub(crate) enum MlaAxis {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MlaAxisFault {
     /// A required extent is zero.
-    Zero(MlaAxis),
+    Zero(
+        /// The first zero extent in field order.
+        MlaAxis,
+    ),
     /// The rotary width is odd, but RoPE rotates channel pairs.
     OddRotary,
     /// A present query rank is zero.

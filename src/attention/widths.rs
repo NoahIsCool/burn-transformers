@@ -153,7 +153,10 @@ pub fn projection_widths(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairedWidthError {
     /// The grouped-query widths themselves are invalid.
-    Widths(WidthError),
+    Widths(
+        /// The first failed grouped-query width check.
+        WidthError,
+    ),
     /// Query heads are used in pairs, so their count must be even.
     OddQueryHeads,
 }
