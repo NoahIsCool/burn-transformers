@@ -3,6 +3,7 @@
 
 use proptest::prelude::*;
 
+use super::super::plan::rotary_by_interval;
 use super::*;
 use crate::{models::config::TokenIds, position::RopeScaling};
 

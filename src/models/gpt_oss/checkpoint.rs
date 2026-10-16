@@ -42,6 +42,7 @@ use crate::models::config::ConfigError;
 
 use super::architecture::{GptOssArchitecture, GptOssWeightFormat};
 use super::config::{FAMILY, GptOssConfig};
+use super::plan::{ExtentError, checkpoint_extent, projection_extent};
 
 /// Reserved family-specific checkpoint policy.
 ///
@@ -121,6 +122,8 @@ struct Dimensions {
     hidden: u64,
     /// Expert width `f`.
     intermediate: u64,
+    /// Fused gate/up width `2f`.
+    fused: u64,
     /// Query projection width `H·h`.
     query: u64,
     /// Key/value projection width `K·h`.
@@ -134,21 +137,36 @@ struct Dimensions {
 impl Dimensions {
     /// Converts and multiplies the architecture's extents without overflow.
     fn of(architecture: &GptOssArchitecture) -> Result<Self, ConfigError> {
+        let format = |field: &'static str| {
+            ConfigError::new(FAMILY, field, "dimension exceeds the checkpoint format")
+        };
         let extent = |field: &'static str, value: usize| {
-            u64::try_from(value).map_err(|_| {
-                ConfigError::new(FAMILY, field, "dimension exceeds the checkpoint format")
-            })
+            checkpoint_extent(value).ok_or_else(|| format(field))
         };
         let product = |field: &'static str, heads: usize| {
-            heads
-                .checked_mul(architecture.head_dim)
-                .ok_or_else(|| ConfigError::new(FAMILY, field, "projection width overflows usize"))
-                .and_then(|width| extent(field, width))
+            projection_extent(heads, architecture.head_dim).map_err(|error| match error {
+                ExtentError::Overflow => {
+                    ConfigError::new(FAMILY, field, "projection width overflows usize")
+                }
+                ExtentError::Format => format(field),
+            })
         };
         Ok(Self {
             vocab: extent("vocab_size", architecture.vocab_size)?,
             hidden: extent("hidden_size", architecture.hidden_size)?,
             intermediate: extent("intermediate_size", architecture.intermediate_size)?,
+            // The fused gate/up width `2 · f` is the same checked product as
+            // a projection width: two "heads" of width `f`.
+            fused: projection_extent(2, architecture.intermediate_size).map_err(
+                |error| match error {
+                    ExtentError::Overflow => ConfigError::new(
+                        FAMILY,
+                        "intermediate_size",
+                        "the stacked expert projections overflow usize",
+                    ),
+                    ExtentError::Format => format("intermediate_size"),
+                },
+            )?,
             query: product("num_attention_heads", architecture.query_heads)?,
             key_value: product("num_key_value_heads", architecture.key_value_heads)?,
             heads: extent("num_attention_heads", architecture.query_heads)?,
@@ -219,13 +237,12 @@ impl ContractBuilder {
         let Dimensions {
             hidden,
             intermediate,
+            fused,
             experts,
             ..
         } = self.dimensions;
         self.same(&format!("{prefix}.router.weight"), vec![experts, hidden]);
         self.same(&format!("{prefix}.router.bias"), vec![experts]);
-        // `2 · f` cannot overflow: the configuration bounds `E · d · 2f` in usize.
-        let fused = 2 * intermediate;
         for (name, shape) in [
             ("gate_up_proj", vec![experts, hidden, fused]),
             ("down_proj", vec![experts, intermediate, hidden]),

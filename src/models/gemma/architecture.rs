@@ -81,7 +81,7 @@ use burn::tensor::{DType, bf16, f16};
 use serde::{Deserialize, Serialize};
 
 use super::config::{FAMILY, GemmaConfig, GemmaVariant};
-use super::plan::{rotary_sets, sliding_by_pattern};
+use super::plan::{default_period, rotary_set_table, rotary_sets, sliding_schedule};
 use crate::{
     architecture::Activation,
     attention::{
@@ -315,17 +315,11 @@ impl GemmaArchitecture {
             .iter()
             .map(|layer| layer.layer_type == GemmaLayerType::SlidingAttention)
             .collect();
-        let sets = if shared {
-            vec![self.sliding_rope]
-        } else {
-            vec![self.sliding_rope, self.full_rope]
-        };
+        // The verified table holds set 0 (sliding) and, unless shared, set 1
+        // (global), exactly the sets the verified `rotary_sets` indexes.
         RotarySchedule {
-            sets,
-            layers: rotary_sets(&sliding, shared)
-                .into_iter()
-                .map(Some)
-                .collect(),
+            sets: rotary_set_table(self.sliding_rope, self.full_rope, shared),
+            layers: rotary_sets(&sliding, shared),
             precision: RotaryPrecision::ActivationDtype,
         }
     }
@@ -472,13 +466,14 @@ fn layer_schedule(
     let types = match &config.layer_types {
         Some(types) => parse_layer_types(types, layers, family)?,
         None => {
-            let pattern = match variant {
-                GemmaVariant::Gemma2 => 2,
-                GemmaVariant::Gemma3Text => config.sliding_window_pattern.unwrap_or(6),
-            };
-            (0..layers)
-                .map(|layer| {
-                    if sliding_by_pattern(layer, pattern) {
+            let pattern = default_period(
+                variant == GemmaVariant::Gemma2,
+                config.sliding_window_pattern,
+            );
+            sliding_schedule(layers, pattern)
+                .into_iter()
+                .map(|sliding| {
+                    if sliding {
                         GemmaLayerType::SlidingAttention
                     } else {
                         GemmaLayerType::FullAttention

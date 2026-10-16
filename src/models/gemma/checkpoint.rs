@@ -69,6 +69,7 @@ use crate::models::config::ConfigError;
 
 use super::architecture::GemmaArchitecture;
 use super::config::GemmaConfig;
+use super::plan::{ExtentError, UniqueFlag, checkpoint_extent, projection_extent, unique_flag};
 
 /// The published SafeTensors namespace a Gemma checkpoint uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -135,19 +136,21 @@ impl GemmaCheckpointSource {
                 found[index] = true;
             }
         }
-        let present: Vec<Self> = Self::ALL
-            .into_iter()
-            .zip(found)
-            .filter_map(|(source, found)| found.then_some(source))
-            .collect();
-        match present.as_slice() {
-            [source] => Ok(*source),
-            [] => Err(format!(
+        match unique_flag(&found) {
+            UniqueFlag::Unique(index) => Ok(Self::ALL[index]),
+            UniqueFlag::Absent => Err(format!(
                 "Gemma checkpoint contains none of the embeddings {embeddings:?}"
             )),
-            _ => Err(format!(
-                "Gemma checkpoint ambiguously contains several language namespaces: {present:?}"
-            )),
+            UniqueFlag::Ambiguous => {
+                let present: Vec<Self> = Self::ALL
+                    .into_iter()
+                    .zip(found)
+                    .filter_map(|(source, found)| found.then_some(source))
+                    .collect();
+                Err(format!(
+                    "Gemma checkpoint ambiguously contains several language namespaces: {present:?}"
+                ))
+            }
         }
     }
 }
@@ -282,16 +285,19 @@ impl Dimensions {
     /// Converts and multiplies the architecture's extents without overflow.
     fn of(architecture: &GemmaArchitecture) -> Result<Self, ConfigError> {
         let family = architecture.variant.model_type();
+        let format = |field: &'static str| {
+            ConfigError::new(family, field, "dimension exceeds the checkpoint format")
+        };
         let extent = |field: &'static str, value: usize| {
-            u64::try_from(value).map_err(|_| {
-                ConfigError::new(family, field, "dimension exceeds the checkpoint format")
-            })
+            checkpoint_extent(value).ok_or_else(|| format(field))
         };
         let product = |field: &'static str, heads: usize| {
-            heads
-                .checked_mul(architecture.head_dim)
-                .ok_or_else(|| ConfigError::new(family, field, "projection width overflows usize"))
-                .and_then(|width| extent(field, width))
+            projection_extent(heads, architecture.head_dim).map_err(|error| match error {
+                ExtentError::Overflow => {
+                    ConfigError::new(family, field, "projection width overflows usize")
+                }
+                ExtentError::Format => format(field),
+            })
         };
         Ok(Self {
             vocab: extent("vocab_size", architecture.vocab_size)?,

@@ -57,7 +57,10 @@ use crate::{
     },
 };
 
-use super::super::RotaryPrecision;
+use super::super::{
+    RotaryPrecision,
+    plan::{tightest_limit, used_rotary_sets},
+};
 
 // Family identity.
 
@@ -115,14 +118,11 @@ pub(crate) struct RotarySchedule {
 
 impl RotarySchedule {
     /// Returns, per set, whether at least one layer rotates with it.
+    ///
+    /// The Verus-verified `used_rotary_sets` marks exactly the sets some
+    /// layer names, so a call evaluates no unused set's tables.
     fn used_sets(&self) -> Vec<bool> {
-        let mut used = vec![false; self.sets.len()];
-        for set in self.layers.iter().flatten() {
-            if let Some(flag) = used.get_mut(*set) {
-                *flag = true;
-            }
-        }
-        used
+        used_rotary_sets(self.sets.len(), &self.layers)
     }
 
     /// Returns the tightest original context of a used context-dependent set.
@@ -131,16 +131,17 @@ impl RotarySchedule {
     /// the time they were written; a policy whose frequencies change past its
     /// original context (dynamic NTK, LongRoPE) therefore cannot extend a
     /// cache beyond it. Returns that limit and the scaling that imposes it.
+    ///
+    /// The Verus-verified `tightest_limit` picks the first used set with the
+    /// smallest limit, as `Iterator::min_by_key` would.
     pub(crate) fn cached_context_limit(&self) -> Option<(usize, RopeScaling)> {
-        self.sets
+        let scalings: Vec<RopeScaling> = self.sets.iter().map(|set| set.scaling()).collect();
+        let limits: Vec<Option<usize>> = scalings
             .iter()
-            .zip(self.used_sets())
-            .filter(|(_, used)| *used)
-            .filter_map(|(set, _)| {
-                let scaling = set.scaling();
-                scaling.cached_context_limit().map(|limit| (limit, scaling))
-            })
-            .min_by_key(|(limit, _)| *limit)
+            .map(RopeScaling::cached_context_limit)
+            .collect();
+        let set = tightest_limit(&limits, &self.used_sets())?;
+        Some((limits[set]?, scalings[set]))
     }
 }
 

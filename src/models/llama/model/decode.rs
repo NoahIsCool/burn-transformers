@@ -102,7 +102,13 @@ use crate::{
     position::RotaryAngles,
 };
 
-use super::super::{LlamaFamilyConfig, plan::cache_slots};
+use super::super::{
+    LlamaFamilyConfig,
+    plan::{
+        LayerReach, RingPlanError, cache_slots, group_indices, plan_ring, truncation_leaves_bytes,
+        widest_context,
+    },
+};
 use super::{
     LlamaForCausalLm,
     graph::{DecoderBlock, DecoderGraph, GraphLabels, LayerKeys, RotaryTables},
@@ -153,7 +159,9 @@ impl CacheLayout {
     ///
     /// Sliding layers whose window is below the capacity share one ring
     /// group; a wider window can never exclude a cached key, so such layers
-    /// live in full storage like global layers.
+    /// live in full storage like global layers. The assignment, the slot
+    /// numbering, and the group indices are the Verus-verified `plan_ring`,
+    /// `cache_slots`, and `group_indices`.
     ///
     /// # Errors
     ///
@@ -163,38 +171,37 @@ impl CacheLayout {
     fn plan<B: Backend, G: DecoderGraph<B>>(graph: &G, capacity: usize) -> Result<Self> {
         let labels = G::LABELS;
         let geometry = graph.geometry();
-        let mut ring_window: Option<NonZeroUsize> = None;
-        let mut in_ring = Vec::with_capacity(graph.blocks().len());
-        for (index, block) in graph.blocks().iter().enumerate() {
-            let window = match block.connectivity() {
-                AttentionConnectivity::Global => None,
-                AttentionConnectivity::SlidingWindow { window } => {
-                    NonZeroUsize::new(window).filter(|window| window.get() < capacity)
-                }
-                AttentionConnectivity::ChunkedLocal { .. } => {
-                    return Err(Error::configuration(
-                        labels.field("decode_state.layers"),
-                        format!(
-                            "layer {index} uses chunked-local attention, which this cache cannot store"
-                        ),
-                    ));
-                }
-            };
-            if let Some(window) = window {
-                if ring_window.is_some_and(|ring| ring != window) {
-                    return Err(Error::configuration(
-                        labels.field("decode_state.layers"),
-                        format!(
-                            "layer {index} slides over {window} keys, but an earlier layer over {}; one ring group holds one window",
-                            ring_window.map_or(0, NonZeroUsize::get)
-                        ),
-                    ));
-                }
-                ring_window = Some(window);
-            }
-            in_ring.push(window.is_some());
-        }
+        let reach: Vec<LayerReach> = graph
+            .blocks()
+            .iter()
+            .map(|block| match block.connectivity() {
+                AttentionConnectivity::Global => LayerReach::Global,
+                AttentionConnectivity::SlidingWindow { window } => LayerReach::Sliding(window),
+                AttentionConnectivity::ChunkedLocal { .. } => LayerReach::Chunked,
+            })
+            .collect();
+        let ring_plan = plan_ring(&reach, capacity).map_err(|error| match error {
+            RingPlanError::Chunked { layer } => Error::configuration(
+                labels.field("decode_state.layers"),
+                format!(
+                    "layer {layer} uses chunked-local attention, which this cache cannot store"
+                ),
+            ),
+            RingPlanError::Conflict {
+                layer,
+                window,
+                earlier,
+            } => Error::configuration(
+                labels.field("decode_state.layers"),
+                format!(
+                    "layer {layer} slides over {window} keys, but an earlier layer over {earlier}; one ring group holds one window"
+                ),
+            ),
+        })?;
+        let ring_window = NonZeroUsize::new(ring_plan.window);
+        let in_ring = ring_plan.in_ring;
         let numbering = cache_slots(&in_ring);
+        let groups = group_indices(numbering.full_layers, numbering.ring_layers);
         let dtype = graph.activation_dtype();
         let spec = |layers, storage| {
             NativeKvCacheSpec::new(
@@ -205,13 +212,16 @@ impl CacheLayout {
                 dtype,
             )
         };
-        let full = (numbering.full_layers > 0)
-            .then(|| spec(numbering.full_layers, KvCacheStorage::Full))
-            .transpose()?
-            .map(|spec| CacheGroup { index: 0, spec });
-        let ring = match ring_window {
-            Some(window) if numbering.ring_layers > 0 => Some(CacheGroup {
-                index: usize::from(full.is_some()),
+        let full = groups
+            .full
+            .map(|index| {
+                spec(numbering.full_layers, KvCacheStorage::Full)
+                    .map(|spec| CacheGroup { index, spec })
+            })
+            .transpose()?;
+        let ring = match (ring_window, groups.ring) {
+            (Some(window), Some(index)) => Some(CacheGroup {
+                index,
                 spec: spec(numbering.ring_layers, KvCacheStorage::SlidingRing)?
                     .with_sliding_window(window),
             }),
@@ -378,12 +388,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for LlamaDecodeState<B> {
     /// A row shortened to a non-zero length keeps its later bytes beyond the
     /// new end, so tails are no longer known to be clean.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
-        let leaves_bytes = self
-            .tensors
-            .lengths()
-            .iter()
-            .zip(lengths)
-            .any(|(&from, &to)| to != 0 && to < from);
+        let leaves_bytes = truncation_leaves_bytes(self.tensors.lengths(), lengths);
         self.tensors.truncate(lengths)?;
         self.clean_tail &= !leaves_bytes;
         Ok(())
@@ -710,11 +715,8 @@ fn cached_rotary_context<B: Backend, G: DecoderGraph<B>>(
     graph: &G,
     rows: &StatefulRows,
 ) -> Result<usize> {
-    let context = rows
-        .active_contexts()
-        .map(|(_, context)| context)
-        .max()
-        .unwrap_or(1);
+    let contexts: Vec<usize> = rows.active_contexts().map(|(_, context)| context).collect();
+    let context = widest_context(&contexts);
     match graph.rotary_schedule().cached_context_limit() {
         Some((limit, scaling)) if context > limit => Err(Error::BackendCapability(format!(
             "{} cached decoding with context-dependent RoPE ({scaling:?}) is limited to the original context {limit}; this call reaches {context}",

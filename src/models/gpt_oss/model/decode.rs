@@ -98,7 +98,10 @@ use crate::{
     position::RotaryAngles,
 };
 
-use super::super::{GptOssArchitecture, GptOssConfig, plan::cache_slots};
+use super::super::{
+    GptOssArchitecture, GptOssConfig,
+    plan::{cache_slots, group_indices, ring_assignment, truncation_leaves_bytes, widest_context},
+};
 use super::{GptOssForCausalLm, INPUT_NAMES, LayerKeys};
 
 /// Owner named when an input lives on another device than the cache.
@@ -145,17 +148,20 @@ struct CacheLayout {
 
 impl CacheLayout {
     /// Derives the layout of `architecture` for `capacity` tokens stored in `dtype`.
+    ///
+    /// The ring assignment, slot numbering, and group indices are the
+    /// Verus-verified `ring_assignment`, `cache_slots`, and `group_indices`.
     fn plan(architecture: &GptOssArchitecture, capacity: usize, dtype: DType) -> Result<Self> {
-        let ring_window = architecture
-            .sliding_window()
-            .filter(|&window| window < capacity)
-            .and_then(NonZeroUsize::new);
-        let in_ring: Vec<bool> = architecture
+        let sliding: Vec<bool> = architecture
             .layers
             .iter()
-            .map(|layer| ring_window.is_some() && *layer != AttentionConnectivity::Global)
+            .map(|layer| *layer != AttentionConnectivity::Global)
             .collect();
+        let assignment = ring_assignment(&sliding, architecture.sliding_window(), capacity);
+        let ring_window = NonZeroUsize::new(assignment.window);
+        let in_ring = assignment.in_ring;
         let numbering = cache_slots(&in_ring);
+        let groups = group_indices(numbering.full_layers, numbering.ring_layers);
         let spec = |layers, storage| {
             NativeKvCacheSpec::new(
                 layers,
@@ -165,13 +171,16 @@ impl CacheLayout {
                 dtype,
             )
         };
-        let full = (numbering.full_layers > 0)
-            .then(|| spec(numbering.full_layers, KvCacheStorage::Full))
-            .transpose()?
-            .map(|spec| CacheGroup { index: 0, spec });
-        let ring = match ring_window {
-            Some(window) if numbering.ring_layers > 0 => Some(CacheGroup {
-                index: usize::from(full.is_some()),
+        let full = groups
+            .full
+            .map(|index| {
+                spec(numbering.full_layers, KvCacheStorage::Full)
+                    .map(|spec| CacheGroup { index, spec })
+            })
+            .transpose()?;
+        let ring = match (ring_window, groups.ring) {
+            (Some(window), Some(index)) => Some(CacheGroup {
+                index,
                 spec: spec(numbering.ring_layers, KvCacheStorage::SlidingRing)?
                     .with_sliding_window(window),
             }),
@@ -331,12 +340,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for GptOssDecodeState<B> {
     /// A row shortened to a non-zero length keeps its later bytes beyond the
     /// new end, so tails are no longer known to be clean.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
-        let leaves_bytes = self
-            .tensors
-            .lengths()
-            .iter()
-            .zip(lengths)
-            .any(|(&from, &to)| to != 0 && to < from);
+        let leaves_bytes = truncation_leaves_bytes(self.tensors.lengths(), lengths);
         self.tensors.truncate(lengths)?;
         self.clean_tail &= !leaves_bytes;
         Ok(())
@@ -569,11 +573,8 @@ impl<B: Backend> GptOssForCausalLm<B> {
         }
         let rows = self.prepare_rows(&input, state, phase)?;
         validate_logits_selection(&options.logits, rows.sequence)?;
-        let context = rows
-            .active_contexts()
-            .map(|(_, context)| context)
-            .max()
-            .unwrap_or(1);
+        let contexts: Vec<usize> = rows.active_contexts().map(|(_, context)| context).collect();
+        let context = widest_context(&contexts);
         ensure_cacheable_rotary_context(self.architecture().rope, context, "gpt-oss")?;
         let retain_router_logits = self.retains_router_logits(options);
         if rows.token_counts.iter().all(|&count| count == 0) {

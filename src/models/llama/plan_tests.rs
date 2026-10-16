@@ -148,3 +148,380 @@ fn schedule_rules_match_the_reference_formulas() {
     assert!(rotary_by_interval(0, 2) && !rotary_by_interval(1, 1));
     assert!(sliding_from_layer(28, 28) && !sliding_from_layer(27, 28));
 }
+
+/// Whole schedules: SmolLM3's NoPE interval, explicit lists, Qwen suffixes, and NoPE sliding.
+#[test]
+fn whole_schedules_follow_their_rules() {
+    assert_eq!(
+        interval_rotary_flags(8, 4),
+        [true, true, true, false, true, true, true, false]
+    );
+    assert!(interval_rotary_flags(0, 3).is_empty());
+    assert_eq!(
+        listed_rotary_flags(&[1, 0, 1]),
+        Some(vec![true, false, true])
+    );
+    assert_eq!(listed_rotary_flags(&[]), Some(Vec::new()));
+    assert_eq!(listed_rotary_flags(&[1, 2, 0]), None);
+    assert_eq!(suffix_sliding_flags(4, 2, true), [false, false, true, true]);
+    assert_eq!(suffix_sliding_flags(3, 0, false), [false, false, false]);
+    assert_eq!(
+        nope_sliding_flags(&[true, false, true, false], true),
+        [false, true, false, true]
+    );
+    assert_eq!(nope_sliding_flags(&[false], false), [false]);
+}
+
+/// The first set flag is found; an all-clear list has none.
+#[test]
+fn first_set_finds_the_earliest_flag() {
+    assert_eq!(first_set(&[false, true, true]), Some(1));
+    assert_eq!(first_set(&[false, false]), None);
+    assert_eq!(first_set(&[]), None);
+}
+
+/// The derived head width divides, and is zero without heads.
+#[test]
+fn derived_head_dim_divides_or_is_zero() {
+    assert_eq!(derived_head_dim(4096, 32), 128);
+    assert_eq!(derived_head_dim(10, 3), 3);
+    assert_eq!(derived_head_dim(64, 0), 0);
+}
+
+proptest! {
+    /// NoPE schedules match the reference formula and count `⌊L / k⌋` NoPE layers.
+    #[test]
+    fn interval_schedules_count_their_nope_layers(layers in 0usize..200, interval in 1usize..40) {
+        let flags = interval_rotary_flags(layers, interval);
+        prop_assert_eq!(flags.len(), layers);
+        for (layer, &rotates) in flags.iter().enumerate() {
+            prop_assert_eq!(rotates, (layer + 1) % interval != 0);
+        }
+        prop_assert_eq!(flags.iter().filter(|&&rotates| !rotates).count(), layers / interval);
+    }
+
+    /// Explicit lists are accepted exactly when every entry is 0 or 1.
+    #[test]
+    fn listed_flags_accept_exactly_binary_lists(listed in prop::collection::vec(0usize..3, 0..12)) {
+        let parsed = listed_rotary_flags(&listed);
+        if listed.iter().all(|&flag| flag <= 1) {
+            let expected: Vec<bool> = listed.iter().map(|&flag| flag == 1).collect();
+            prop_assert_eq!(parsed, Some(expected));
+        } else {
+            prop_assert_eq!(parsed, None);
+        }
+    }
+}
+
+/// Ring planning: windows below the capacity share the ring; conflicts and chunks are rejected.
+#[test]
+fn ring_plans_assign_narrow_windows_and_reject_conflicts() {
+    use LayerReach::{Chunked, Global, Sliding};
+    let plan = plan_ring(&[Global, Sliding(4), Sliding(64), Sliding(4)], 16).unwrap();
+    assert_eq!(plan.in_ring, [false, true, false, true]);
+    assert_eq!(plan.window, 4);
+    let none = plan_ring(&[Global, Sliding(0), Sliding(16)], 16).unwrap();
+    assert_eq!(none.in_ring, [false, false, false]);
+    assert_eq!(none.window, 0);
+    assert_eq!(
+        plan_ring(&[Sliding(4), Global, Sliding(8)], 16),
+        Err(RingPlanError::Conflict {
+            layer: 2,
+            window: 8,
+            earlier: 4
+        })
+    );
+    assert_eq!(
+        plan_ring(&[Global, Chunked, Sliding(8), Sliding(4)], 16),
+        Err(RingPlanError::Chunked { layer: 1 })
+    );
+    assert_eq!(
+        plan_ring(&[Sliding(4), Sliding(8), Chunked], 16),
+        Err(RingPlanError::Conflict {
+            layer: 1,
+            window: 8,
+            earlier: 4
+        })
+    );
+}
+
+/// Allocated groups are numbered densely, full storage first.
+#[test]
+fn group_indices_number_allocated_groups_densely() {
+    let both = group_indices(2, 3);
+    assert_eq!((both.full, both.ring), (Some(0), Some(1)));
+    let ring_only = group_indices(0, 3);
+    assert_eq!((ring_only.full, ring_only.ring), (None, Some(0)));
+    let full_only = group_indices(2, 0);
+    assert_eq!((full_only.full, full_only.ring), (Some(0), None));
+    let none = group_indices(0, 0);
+    assert_eq!((none.full, none.ring), (None, None));
+}
+
+/// Only a truncation to a shorter nonzero length leaves stale bytes.
+#[test]
+fn truncation_leaves_bytes_only_when_shortening_to_nonzero() {
+    assert!(truncation_leaves_bytes(&[5, 3], &[5, 2]));
+    assert!(!truncation_leaves_bytes(&[5, 3], &[0, 3]));
+    assert!(!truncation_leaves_bytes(&[5, 3], &[5, 4]));
+    assert!(!truncation_leaves_bytes(&[5], &[]));
+    assert!(truncation_leaves_bytes(&[5, 3], &[4]));
+}
+
+proptest! {
+    /// Ring plans equal a direct statement of the rule.
+    #[test]
+    fn ring_plans_match_the_rule(
+        reach in prop::collection::vec(
+            prop_oneof![
+                Just(LayerReach::Global),
+                (0usize..6).prop_map(LayerReach::Sliding),
+                Just(LayerReach::Chunked),
+            ],
+            0..10,
+        ),
+        capacity in 0usize..8,
+    ) {
+        let member = |reach: &LayerReach| matches!(*reach, LayerReach::Sliding(w) if w > 0 && w < capacity);
+        let mut windows = reach.iter().filter(|r| member(r)).map(|r| match r {
+            LayerReach::Sliding(w) => *w,
+            _ => unreachable!(),
+        });
+        let first = windows.next();
+        let storable = !reach.contains(&LayerReach::Chunked)
+            && windows.all(|w| Some(w) == first);
+        match plan_ring(&reach, capacity) {
+            Ok(plan) => {
+                prop_assert!(storable);
+                prop_assert_eq!(plan.in_ring, reach.iter().map(member).collect::<Vec<_>>());
+                prop_assert_eq!(plan.window, first.unwrap_or(0));
+            }
+            Err(_) => prop_assert!(!storable),
+        }
+    }
+
+    /// Each group's slots are an order-preserving bijection onto `0..size`.
+    #[test]
+    fn cache_slots_biject_each_group_in_order(ring in prop::collection::vec(any::<bool>(), 0..24)) {
+        let plan = cache_slots(&ring);
+        for flag in [false, true] {
+            let slots: Vec<usize> = ring
+                .iter()
+                .zip(&plan.slots)
+                .filter(|&(&in_ring, _)| in_ring == flag)
+                .map(|(_, &slot)| slot)
+                .collect();
+            let size = if flag { plan.ring_layers } else { plan.full_layers };
+            prop_assert_eq!(slots, (0..size).collect::<Vec<_>>());
+        }
+    }
+}
+
+/// Runs are sliced from their narrowest common window; interior padding is gathered.
+#[test]
+fn step_plans_slice_runs_and_gather_interior_padding() {
+    let plan = plan_step(&[vec![2, 3], vec![1, 2]], &[5, 0], 4).unwrap();
+    assert_eq!(plan.offset, Some(1));
+    assert_eq!(plan.block, 3);
+    assert_eq!(plan.columns, [1, 0]);
+    assert_eq!(plan.rows[0].positions, [6, 5, 6]);
+    assert_eq!(plan.rows[0].valid, [false, true, true]);
+    assert_eq!(plan.rows[0].restore, [3, 3, 1, 2]);
+    assert!(plan.rows[0].sources.is_empty());
+    assert_eq!((plan.rows[0].last, plan.rows[1].last), (2, 1));
+
+    let gathered = plan_step(&[vec![0, 2], vec![], vec![3]], &[1, 4, 0], 4).unwrap();
+    assert_eq!(gathered.offset, None);
+    assert_eq!(gathered.block, 2);
+    assert_eq!(gathered.columns, [0, 0, 0]);
+    assert_eq!(gathered.rows[0].sources, [0, 2]);
+    assert_eq!(gathered.rows[1].sources, [0, 0]);
+    assert_eq!(gathered.rows[1].positions, [3, 3]);
+    assert_eq!(gathered.rows[1].valid, [false, false]);
+    assert_eq!(gathered.rows[2].sources, [3, 3]);
+    assert_eq!(gathered.rows[2].restore, [2, 2, 2, 0]);
+}
+
+/// Steps without active rows and positions beyond `usize` or `i64` are rejected.
+#[test]
+fn step_plans_reject_idle_batches_and_overflowing_positions() {
+    assert_eq!(
+        plan_step(&[vec![], vec![]], &[3, 0], 2),
+        Err(StepPlanError::NoActiveRow)
+    );
+    assert_eq!(
+        plan_step(&[vec![0], vec![0]], &[0, usize::MAX], 1),
+        Err(StepPlanError::PositionOverflow)
+    );
+    let beyond = usize::try_from(i64::MAX).unwrap();
+    assert_eq!(
+        plan_step(&[vec![0, 1]], &[beyond], 2),
+        Err(StepPlanError::PositionBeyondI64)
+    );
+    assert!(plan_step(&[vec![0]], &[beyond], 1).is_ok());
+}
+
+/// Only the fill position must fit `i64`, and the first unrepresentable row picks the error.
+#[test]
+fn step_plans_accept_representable_fills_and_report_the_first_bad_row() {
+    let past = usize::try_from(i64::MAX).unwrap() + 1;
+    // An idle row at cursor 2^63 pads with position 2^63 - 1, which fits.
+    let plan = plan_step(&[vec![0], vec![]], &[0, past], 1).unwrap();
+    assert_eq!(plan.rows[1].positions, [i64::MAX]);
+    // An idle batch is idle however far its cursors are.
+    assert_eq!(
+        plan_step(&[vec![], vec![]], &[past, usize::MAX], 1),
+        Err(StepPlanError::NoActiveRow)
+    );
+    // Rows fail in batch order: the earlier row's error wins.
+    assert_eq!(
+        plan_step(&[vec![0, 1], vec![0]], &[past, usize::MAX], 2),
+        Err(StepPlanError::PositionBeyondI64)
+    );
+    assert_eq!(
+        plan_step(&[vec![0], vec![0, 1]], &[usize::MAX, past], 2),
+        Err(StepPlanError::PositionOverflow)
+    );
+}
+
+proptest! {
+    /// Step plans reproduce every row's tokens, positions, and restoration.
+    #[test]
+    fn step_plans_match_a_direct_layout(
+        rows in prop::collection::vec((sorted_columns(8), 0usize..20), 1..5),
+    ) {
+        let columns: Vec<Vec<usize>> = rows.iter().map(|(columns, _)| columns.clone()).collect();
+        let starts: Vec<usize> = rows.iter().map(|&(_, start)| start).collect();
+        let plan = plan_step(&columns, &starts, 8);
+        if columns.iter().all(Vec::is_empty) {
+            prop_assert_eq!(plan, Err(StepPlanError::NoActiveRow));
+            return Ok(());
+        }
+        let plan = plan.unwrap();
+        let widest = columns.iter().map(Vec::len).max().unwrap();
+        for (row, valid) in columns.iter().enumerate() {
+            let (column, count, step) = (plan.columns[row], valid.len(), &plan.rows[row]);
+            prop_assert!(column + count <= plan.block);
+            for slot in 0..plan.block {
+                // The block's slot holds input column `source` of this row.
+                let source = match plan.offset {
+                    Some(offset) => offset + slot,
+                    None => step.sources[slot],
+                };
+                let inside = (column..column + count).contains(&slot);
+                prop_assert_eq!(step.valid[slot], inside);
+                if inside {
+                    prop_assert_eq!(source, valid[slot - column]);
+                    prop_assert_eq!(step.positions[slot] as usize, starts[row] + slot - column);
+                }
+            }
+            for (input, &slot) in step.restore.iter().enumerate() {
+                let expected = valid.iter().position(|&c| c == input).map_or(plan.block, |k| column + k);
+                prop_assert_eq!(slot, expected);
+            }
+            prop_assert_eq!(step.last, (column + count).saturating_sub(1));
+        }
+        match plan.offset {
+            Some(offset) => {
+                let lo = columns.iter().filter_map(|c| c.first()).min().unwrap();
+                let hi = columns.iter().filter_map(|c| c.last()).max().unwrap() + 1;
+                prop_assert_eq!((offset, plan.block), (*lo, hi - lo));
+            }
+            None => {
+                prop_assert_eq!(plan.block, widest);
+                prop_assert!(!columns.iter().all(|c| is_one_run(c)));
+            }
+        }
+    }
+}
+
+/// A set is used exactly when some layer names it; NoPE and out-of-range layers mark nothing.
+#[test]
+fn used_rotary_sets_mark_exactly_the_named_sets() {
+    assert_eq!(
+        used_rotary_sets(3, &[Some(0), None, Some(2), Some(0)]),
+        [true, false, true]
+    );
+    assert_eq!(used_rotary_sets(2, &[None, Some(5)]), [false, false]);
+    assert!(used_rotary_sets(0, &[Some(0)]).is_empty());
+}
+
+proptest! {
+    /// Used sets equal a direct membership test.
+    #[test]
+    fn used_rotary_sets_match_membership(
+        count in 0usize..5,
+        layers in prop::collection::vec(prop::option::of(0usize..6), 0..10),
+    ) {
+        let used = used_rotary_sets(count, &layers);
+        prop_assert_eq!(used.len(), count);
+        for (set, &flag) in used.iter().enumerate() {
+            prop_assert_eq!(flag, layers.contains(&Some(set)));
+        }
+    }
+}
+
+/// Projection widths are exact checkpoint extents, or report usize overflow.
+#[test]
+fn projection_extents_are_exact_or_report_overflow() {
+    assert_eq!(projection_extent(8, 128), Ok(1024));
+    assert_eq!(projection_extent(0, usize::MAX), Ok(0));
+    assert_eq!(projection_extent(usize::MAX, 2), Err(ExtentError::Overflow));
+    assert_eq!(
+        checkpoint_extent(usize::MAX),
+        u64::try_from(usize::MAX).ok()
+    );
+    assert_eq!(checkpoint_extent(7), Some(7));
+}
+
+/// The widest context is the maximum, or 1 without active rows.
+#[test]
+fn widest_context_is_the_maximum_or_one() {
+    assert_eq!(widest_context(&[]), 1);
+    assert_eq!(widest_context(&[3, 9, 4]), 9);
+    assert_eq!(widest_context(&[0]), 0);
+}
+
+/// The tightest limit is the first used set with the smallest limit.
+#[test]
+fn tightest_limit_picks_the_first_used_minimum() {
+    assert_eq!(
+        tightest_limit(&[Some(8), Some(4), Some(4)], &[true, true, true]),
+        Some(1)
+    );
+    assert_eq!(
+        tightest_limit(&[Some(2), None, Some(5)], &[false, true, true]),
+        Some(2)
+    );
+    assert_eq!(tightest_limit(&[None, Some(3)], &[true, false]), None);
+    assert_eq!(tightest_limit(&[Some(3)], &[]), None);
+}
+
+proptest! {
+    /// The tightest limit equals `Iterator::min_by_key` over the used sets.
+    #[test]
+    fn tightest_limit_matches_min_by_key(
+        sets in prop::collection::vec((prop::option::of(0usize..6), any::<bool>()), 0..8),
+    ) {
+        let limits: Vec<Option<usize>> = sets.iter().map(|&(limit, _)| limit).collect();
+        let used: Vec<bool> = sets.iter().map(|&(_, used)| used).collect();
+        let expected = limits
+            .iter()
+            .zip(&used)
+            .enumerate()
+            .filter(|(_, (_, used))| **used)
+            .filter_map(|(set, (limit, _))| limit.map(|limit| (set, limit)))
+            .min_by_key(|&(_, limit)| limit)
+            .map(|(set, _)| set);
+        prop_assert_eq!(tightest_limit(&limits, &used), expected);
+    }
+}
+
+/// Indices convert to `i64` exactly, and any index beyond `i64` rejects the batch.
+#[test]
+fn signed_indices_convert_exactly_or_reject() {
+    assert_eq!(signed_indices(&[0, 3, 7]), Some(vec![0, 3, 7]));
+    assert_eq!(signed_indices(&[]), Some(Vec::new()));
+    let beyond = usize::try_from(i64::MAX).unwrap() + 1;
+    assert_eq!(signed_indices(&[1, beyond]), None);
+}

@@ -49,6 +49,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::architecture::LlamaArchitecture;
+use super::plan::derived_head_dim;
 use crate::models::config::{
     ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, token_ids,
 };
@@ -484,7 +485,7 @@ impl SerializedLlamaFamilyConfig {
         let head_dim = self
             .head_dim
             .unwrap_or(defaults.head_dim)
-            .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0));
+            .unwrap_or_else(|| derived_head_dim(hidden_size, num_attention_heads));
         let num_key_value_heads = self
             .num_key_value_heads
             .unwrap_or(defaults.num_key_value_heads)
