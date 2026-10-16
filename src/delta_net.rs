@@ -532,7 +532,9 @@ impl<B: Backend> GatedDeltaNet<B> {
     /// # Errors
     ///
     /// Returns a shape error for an empty or wrongly sized hidden tensor, a
-    /// mismatched mask, or state buffers that do not match this layer.
+    /// mismatched mask, or state buffers that do not match this layer, and
+    /// the projection errors of a manually assembled module. On any error
+    /// `state` is left exactly as supplied.
     pub fn forward_with_state(
         &self,
         hidden: Tensor<B, 3>,
@@ -710,12 +712,14 @@ impl<B: Backend> GatedDeltaNet<B> {
             }
         };
         let gated = gated_delta_norm(values, z, &self.norm);
-        state.convolution = convolution.history;
-        state.recurrent = final_state;
         let output = operations::linear(
             gated.reshape([batch, sequence, value_width]),
             &self.out_proj,
         )?;
+        // Publish the advanced state only after the last fallible step, so a
+        // failed call leaves the caller's buffers exactly as supplied.
+        state.convolution = convolution.history;
+        state.recurrent = final_state;
         Ok((output, snapshots))
     }
 

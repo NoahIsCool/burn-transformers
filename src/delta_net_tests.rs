@@ -1738,3 +1738,105 @@ fn mixer_snapshots_match_column_by_column_states() {
         );
     }
 }
+
+/// Every non-finite or non-positive key normalization epsilon is rejected.
+#[test]
+fn rule_config_rejects_each_invalid_epsilon() {
+    for normalization_epsilon in [f64::NAN, f64::INFINITY, 0.0, -1e-6] {
+        let error = DeltaRuleConfig {
+            normalization_epsilon,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, .. }
+                if field == "delta_net.normalization_epsilon"),
+            "{normalization_epsilon}: {error:?}"
+        );
+    }
+}
+
+/// Without a token mask, snapshots and state equal those of an all-valid mask.
+///
+/// The unmasked path counts valid columns as `1..=sequence` instead of a
+/// cumulative sum over the mask, and equal key and value head counts skip
+/// the key-head repetition; both must reproduce the masked computation.
+#[test]
+fn unmasked_snapshots_equal_all_valid_masked_snapshots() {
+    let device = Default::default();
+    TestBackend::seed(&device, 21);
+    let mut config = GatedDeltaNetConfig::new(4, 2, 2, 2, 2);
+    config.convolution_kernel = 3;
+    let mixer = config.init::<TestBackend>(&device).unwrap();
+    let hidden = smooth_hidden(2, 4, 4);
+    let all_valid = TokenMask::new(Tensor::<TestBackend, 2, Int>::ones([2, 4], &device).bool());
+    let mut start = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+    start.convolution = start.convolution.clone() + 0.25;
+    start.recurrent = start.recurrent.clone() - 0.125;
+
+    let mut unmasked_state = start.clone();
+    let (unmasked, unmasked_snapshots) = mixer
+        .forward_with_snapshots(hidden.clone(), None, &mut unmasked_state)
+        .unwrap();
+    let mut masked_state = start;
+    let (masked, masked_snapshots) = mixer
+        .forward_with_snapshots(hidden, Some(&all_valid), &mut masked_state)
+        .unwrap();
+    let tolerance = Tolerance::absolute(1e-6);
+    unmasked
+        .into_data()
+        .assert_approx_eq::<f32>(&masked.into_data(), tolerance);
+    unmasked_snapshots
+        .recurrent
+        .into_data()
+        .assert_approx_eq::<f32>(&masked_snapshots.recurrent.into_data(), tolerance);
+    unmasked_snapshots
+        .convolution
+        .into_data()
+        .assert_approx_eq::<f32>(&masked_snapshots.convolution.into_data(), tolerance);
+    unmasked_state
+        .recurrent
+        .into_data()
+        .assert_approx_eq::<f32>(&masked_state.recurrent.into_data(), tolerance);
+}
+
+/// A failing output projection leaves both caller state buffers untouched.
+///
+/// The output projection is the last fallible step of the mixer. A manually
+/// assembled module whose `out_proj` does not accept the value width must
+/// report the projection error without having published the advanced
+/// convolution history or recurrent state, so a caller can retry or roll
+/// back from exactly the state it supplied.
+#[test]
+fn failing_output_projection_preserves_caller_state() {
+    use burn::{module::Param, nn::LinearConfig};
+
+    let device = Default::default();
+    let config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    let mut mixer = config.init::<TestBackend>(&device).unwrap();
+    mixer.out_proj = LinearConfig::new(3, 4).init(&device);
+    mixer.out_proj.weight = Param::from_tensor(Tensor::ones([3, 4], &device));
+    for mode in [DeltaNetMode::Recurrent, DeltaNetMode::ChunkedPrefill] {
+        let mut state = GatedDeltaNetState::zeros(&config, 1, &device).unwrap();
+        state.convolution = state.convolution.clone() + 0.25;
+        state.recurrent = state.recurrent.clone() - 0.5;
+        let convolution_before = state.convolution.clone().into_data();
+        let recurrent_before = state.recurrent.clone().into_data();
+        let error = mixer
+            .forward_with_state(smooth_hidden(1, 3, 4), None, &mut state, mode)
+            .unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Shape { tensor, .. } if tensor == "linear.weight"),
+            "{mode:?}: {error:?}"
+        );
+        state
+            .convolution
+            .into_data()
+            .assert_eq(&convolution_before, true);
+        state
+            .recurrent
+            .into_data()
+            .assert_eq(&recurrent_before, true);
+    }
+}
