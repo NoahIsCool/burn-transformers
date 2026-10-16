@@ -279,6 +279,12 @@ where
 
 impl<B: Backend> AutoSeq2SeqLm<B> {
     /// Strictly loads one supported encoder-decoder model from a local directory.
+    ///
+    /// Like the causal pipeline, it parses the configuration, resolves
+    /// generation defaults, records provenance, loads the optional tokenizer,
+    /// and discovers and strictly plans the checkpoint before it allocates the
+    /// graph, so a checkpoint that cannot satisfy the configuration costs no
+    /// per-block module allocation.
     pub fn load_local(
         root: impl AsRef<Path>,
         options: &AutoLoadOptions,
@@ -311,9 +317,14 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         )?;
         let source = source_metadata(&root, &model_type, options)?;
         let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+        // Plan before building the graph, as the causal pipeline does: a
+        // configuration that the discovered checkpoint cannot satisfy fails
+        // here, before one module per encoder and decoder block is allocated.
+        let planned = config
+            .plan_checkpoint(&root, &options.checkpoint)
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
         let mut model = T5ForConditionalGeneration::init(config, device)?;
-        let outcome = model
-            .load_checkpoint(&root, &options.checkpoint)
+        let outcome = execute_local_load_plan(planned.manifest(), planned.load_plan(), &mut model)
             .map_err(|error| Error::Checkpoint(error.to_string()))?;
         LoadedModel::new_with_execution_stats(
             Self::T5(model),
