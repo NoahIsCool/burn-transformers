@@ -1623,6 +1623,65 @@ impl DecoderLayerSpec {
 ///
 /// [`Seq2SeqSpec`] reuses this type for its bidirectional encoder stack; the
 /// vocabulary then describes the source tokens.
+///
+/// # Example
+///
+/// The README's two-block grouped-query decoder with RoPE, Q/K norms, and
+/// SwiGLU. Its readout multipliers stay `None`; a Gemma 2 recipe sets
+/// `embedding_scale: Some((hidden_size as f64).sqrt())` and
+/// `final_logit_softcap: Some(30.0)`.
+///
+/// ```
+/// use burn::backend::Flex;
+/// use transformers::{
+///     architecture::{
+///         Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+///         FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+///         ResidualTopology, RopeScaling,
+///     },
+///     models::custom::ModularCausalLm,
+/// };
+///
+/// let norm = NormalizationSpec::Rms { epsilon: 1e-6, zero_centered: false };
+/// let block = DecoderLayerSpec {
+///     mixer: MixerSpec::Attention(AttentionSpec {
+///         query_heads: 4,
+///         key_value_heads: 2,
+///         head_dim: 16,
+///         query_key_norm: true,
+///         output_gate: false,
+///         position: PositionEncodingSpec::Rope {
+///             theta: 10_000.0,
+///             rotary_dim: 16,
+///             scaling: RopeScaling::None,
+///         },
+///     }),
+///     feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+///         intermediate_size: 128,
+///         activation: Activation::Silu,
+///         bias: false,
+///     }),
+///     mixer_norm: norm,
+///     feed_forward_norm: norm,
+///     norm_placement: NormPlacement::Pre,
+///     residual: ResidualTopology::Add,
+/// };
+/// let spec = DecoderSpec {
+///     vocabulary_size: 256,
+///     hidden_size: 64,
+///     layers: vec![block; 2],
+///     final_norm: norm,
+///     tie_word_embeddings: true,
+///     max_position_embeddings: 128,
+///     embedding_scale: None,
+///     final_logit_softcap: None,
+/// };
+/// // N(0, 0.02^2) weights with GPT-2 depth scaling of the residual writers.
+/// let policy = ModularCausalLm::<Flex>::scaled_init_policy(&spec, 0.02);
+/// let model = ModularCausalLm::<Flex>::init_with(spec, &policy, &Default::default())?;
+/// assert_eq!(model.spec().layers.len(), 2);
+/// # Ok::<(), transformers::Error>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DecoderSpec {
     /// Token vocabulary cardinality.
@@ -1640,9 +1699,11 @@ pub struct DecoderSpec {
     /// Optional multiplier `s` on looked-up token embeddings: `h_0 = s · E[token]`.
     ///
     /// Gemma 2 and 3 use `s = sqrt(hidden_size)`. The product runs in the
-    /// embedding dtype with `s` rounded to that dtype (through F32 for half
-    /// precisions), as Gemma's references round their normalizer, so a BF16
-    /// stack with `hidden_size = 3072` scales by `55.5`. The scaled embedding
+    /// embedding dtype with `s` rounded to that dtype through F32 (F64 keeps
+    /// it exact), as the Gemma family and Gemma 3's F32 normalizer buffer
+    /// round it, so a BF16 stack with `hidden_size = 3072` scales by `55.5`.
+    /// For every shipped Gemma width this also equals Gemma 2's direct
+    /// rounding of the `f64` root. The scaled embedding
     /// is the stack's `embedding` activation point and the input of block 0;
     /// a tied vocabulary projection still reads the unscaled table. `None`,
     /// the default and the form of every earlier serialized spec, leaves
