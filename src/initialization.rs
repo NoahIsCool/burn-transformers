@@ -97,6 +97,12 @@
 //! happen in first-read order, and clones taken before the first read draw
 //! independently. Tied identities are therefore always drawn at application
 //! time, so every alias holds the same tensor.
+//!
+//! On inference Flex, the crate's column-layout projections copy Burn's
+//! constructed value (a transposed view) into contiguous storage when it is
+//! first computed, which briefly holds two copies of that one matrix before the
+//! replacement is drawn. Replacements are always drawn directly in contiguous
+//! storage, so a policy never leaves a strided weight behind.
 
 use std::{
     any::Any,

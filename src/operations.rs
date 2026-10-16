@@ -28,6 +28,22 @@
 //! but Burn 0.21 cannot differentiate those operations, including a frozen packed
 //! suffix. The autodiff path rejects packed values contextually; callers needing
 //! input gradients must explicitly dequantize before constructing the float graph.
+//!
+//! # Storage order of initialized and cached tensors
+//!
+//! Transposes, axis swaps and head splits are metadata-only views on every Burn
+//! backend. CubeCL kernels read such strided views natively, but Burn Flex 0.21
+//! does not: its GEMM multiplies a single row by a strided right-hand matrix
+//! about twice as slowly as by contiguous storage, and its attention kernels copy
+//! every non-contiguous query, key and value operand on **every** call (see
+//! `BENCHMARKS.md`). The crate-internal `contiguous_where_preferred` therefore
+//! materializes contiguous row-major storage exactly on the backends that
+//! `prefers_contiguous_storage` names (inference Flex) and returns the view
+//! unchanged everywhere else. It is a pure permutation of elements: values,
+//! shape and dtype are identical, and only the physical layout changes. Model
+//! constructors apply it to randomly initialized column-layout projection
+//! weights, and cached decoders apply it to tensors that every later decode
+//! step reads (for example T5's projected cross-attention keys and values).
 
 use burn::{
     module::Param,
@@ -52,10 +68,26 @@ use crate::{Error, Result};
 /// tensors before applying the checkpoint-layout transpose, so the load mapper
 /// detaches that layout transformation before Burn restores the target's
 /// gradient policy. This does not detach any model forward computation.
-/// Ordinary inference backends retain exactly Burn's original initialization.
+///
+/// Inference backends retain exactly Burn's original initialization values.
+/// A column-layout weight is drawn as `[out, in]` and exposed as its transposed
+/// view, so on backends that [`prefer contiguous storage`](prefers_contiguous_storage)
+/// the lazy initializer additionally copies that view once into contiguous
+/// `[in, out]` storage ([`contiguous_where_preferred`]). The copy runs at the
+/// weight's first read (a checkpoint load that replaces the weight first never
+/// runs it), consumes no random numbers, keeps every value bit for bit, and
+/// transiently holds two copies of that one matrix. Row-layout weights are
+/// already contiguous and are left untouched.
 pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device) -> Linear<B> {
     let mut projection = config.init::<B>(device);
-    if B::ad_enabled(device) && matches!(config.layout, LinearLayout::Col) {
+    if !matches!(config.layout, LinearLayout::Col) {
+        return projection;
+    }
+    if prefers_contiguous_storage::<B>(device) {
+        projection.weight = projection
+            .weight
+            .init_mapper(contiguous_where_preferred::<B, 2>);
+    } else if B::ad_enabled(device) {
         let initialized_weight = projection.weight.set_require_grad(false);
         let shape = initialized_weight.lazy_shape();
         projection.weight = Param::uninitialized(
@@ -74,6 +106,59 @@ pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device)
         .load_mapper(|tensor| tensor.transpose().detach());
     }
     projection
+}
+
+/// Whether `B` runs matrix products and attention markedly faster on contiguous storage.
+///
+/// True exactly for the inference Burn Flex backend, identified by its float
+/// tensor primitive so every `Flex<F, I>` instantiation qualifies. Autodiff
+/// backends (including `Autodiff<Flex>`) answer `false`: a copy made outside the
+/// autodiff graph would detach the copied tensor from its gradient. CubeCL
+/// backends answer `false` because they read strided views natively (see the
+/// module documentation and `BENCHMARKS.md`).
+///
+/// The checkpoint installer's `prefers_contiguous_matrices` applies the same
+/// rule to loaded weights.
+pub(crate) fn prefers_contiguous_storage<B: Backend>(device: &B::Device) -> bool {
+    !B::ad_enabled(device) && is_flex_primitive::<B::FloatTensorPrimitive>()
+}
+
+/// Whether `P` is the float tensor primitive of the Burn Flex CPU backend.
+#[cfg(feature = "flex")]
+fn is_flex_primitive<P: 'static>() -> bool {
+    core::any::TypeId::of::<P>() == core::any::TypeId::of::<burn::backend::flex::FlexTensor>()
+}
+
+/// Without this crate's `flex` feature, no backend is known to prefer contiguous storage.
+#[cfg(not(feature = "flex"))]
+fn is_flex_primitive<P: 'static>() -> bool {
+    false
+}
+
+/// Returns `tensor` in contiguous row-major storage on backends that prefer it.
+///
+/// On a backend for which [`prefers_contiguous_storage`] holds, a floating
+/// tensor is copied once into row-major order: Flex keeps tensors in host
+/// memory, so reading the data materializes a strided view in logical order
+/// and wrapping that buffer again is free (a contiguous, uniquely owned
+/// tensor is moved through without copying). Every other backend, and every
+/// non-floating or packed tensor, is returned unchanged. The result always has
+/// the input's shape, dtype and element values; only its physical layout can
+/// differ, so downstream products round differently at most through F32
+/// reassociation inside the backend's kernels.
+///
+/// Use it for tensors that are read many times after being computed once,
+/// such as cached cross-attention keys or a weight, never in a per-step hot
+/// path: the copy costs one pass over the tensor.
+pub(crate) fn contiguous_where_preferred<B: Backend, const D: usize>(
+    tensor: Tensor<B, D>,
+) -> Tensor<B, D> {
+    let device = tensor.device();
+    let dtype = tensor.dtype();
+    if !dtype.is_float() || !prefers_contiguous_storage::<B>(&device) {
+        return tensor;
+    }
+    Tensor::from_data(tensor.into_data(), (&device, dtype))
 }
 
 /// Applies a Burn linear module without dequantizing a packed weight up front.

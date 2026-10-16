@@ -1,5 +1,6 @@
 //! Linear-operation tests for dense and packed execution, record layouts, and gradient ownership,
-//! plus the tied-readout product [`super::matmul_transposed`].
+//! plus the tied-readout product [`super::matmul_transposed`] and the storage-order helpers
+//! behind contiguous random initialization ([`super::contiguous_where_preferred`]).
 
 use burn::{
     backend::Flex,
@@ -646,4 +647,165 @@ fn matmul_transposed_differentiates_both_operands() {
         input.grad(&gradients).unwrap().to_data(),
         TensorData::from([[column_sums, column_sums]])
     );
+}
+
+// ---------------------------------------------------------------------------
+// Storage order of initialized and cached tensors
+// ---------------------------------------------------------------------------
+
+/// Returns the Flex primitive of `tensor` to inspect its physical layout.
+fn flex_primitive<const D: usize>(tensor: Tensor<Flex, D>) -> burn::backend::flex::FlexTensor {
+    tensor.into_primitive().tensor()
+}
+
+/// Irregular F32 values `sin(0.37 i)` laid out row-major in `shape`.
+fn irregular<const D: usize>(shape: [usize; D]) -> Tensor<Flex, D> {
+    let elements = shape.iter().product::<usize>();
+    Tensor::<Flex, 1, burn::tensor::Int>::arange(0..elements as i64, &Default::default())
+        .float()
+        .mul_scalar(0.37)
+        .sin()
+        .reshape(shape)
+}
+
+/// Only the inference Flex backend asks for contiguous copies; autodiff never does.
+#[test]
+fn only_inference_flex_prefers_contiguous_storage() {
+    let device = Default::default();
+    assert!(super::prefers_contiguous_storage::<Flex>(&device));
+    #[cfg(feature = "autodiff")]
+    assert!(!super::prefers_contiguous_storage::<
+        burn::backend::Autodiff<Flex>,
+    >(&device));
+}
+
+/// Materialization is an exact permutation: shape, dtype and every bit survive.
+#[test]
+fn contiguous_materialization_preserves_every_value_and_dtype() {
+    for dtype in [DType::F32, DType::F64, DType::F16, DType::BF16] {
+        let view = irregular([2, 3, 4, 5]).cast(dtype).swap_dims(1, 2);
+        assert!(!flex_primitive(view.clone()).is_contiguous(), "{dtype:?}");
+        let stored = super::contiguous_where_preferred(view.clone());
+        assert!(flex_primitive(stored.clone()).is_contiguous(), "{dtype:?}");
+        assert_eq!(stored.dims(), [2, 4, 3, 5]);
+        assert_eq!(stored.dtype(), dtype);
+        assert_eq!(stored.into_data(), view.into_data(), "{dtype:?}");
+    }
+}
+
+/// Already contiguous tensors and transposed matrices take the same exact path.
+#[test]
+fn contiguous_materialization_handles_contiguous_and_matrix_views() {
+    let contiguous = irregular([3, 4]);
+    let stored = super::contiguous_where_preferred(contiguous.clone());
+    assert!(flex_primitive(stored.clone()).is_contiguous());
+    assert_eq!(stored.into_data(), contiguous.clone().into_data());
+
+    let transposed = contiguous.transpose();
+    let stored = super::contiguous_where_preferred(transposed.clone());
+    assert!(flex_primitive(stored.clone()).is_contiguous());
+    assert_eq!(stored.dims(), [4, 3]);
+    assert_eq!(stored.into_data(), transposed.into_data());
+}
+
+/// Packed tensors are returned untouched: their block scales are layout-bound.
+#[test]
+fn contiguous_materialization_leaves_packed_tensors_unchanged() {
+    let device = Default::default();
+    let data = quantize_tensor_data(
+        &small_integers(2, 32, 1),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q8,
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+        },
+    )
+    .unwrap();
+    let packed = Tensor::<Flex, 2>::from_data(data.into_burn_qfloat_data().unwrap(), &device);
+    let dtype = packed.dtype();
+    assert!(matches!(dtype, DType::QFloat(_)));
+    let returned = super::contiguous_where_preferred(packed.clone());
+    assert_eq!(returned.dtype(), dtype);
+    assert_eq!(returned.into_data(), packed.into_data());
+}
+
+/// Autodiff tensors keep their view and therefore their gradient path.
+#[cfg(feature = "autodiff")]
+#[test]
+fn contiguous_materialization_keeps_autodiff_graphs_connected() {
+    /// Differentiable CPU backend whose tensors must never be copied off the graph.
+    type AdBackend = burn::backend::Autodiff<Flex>;
+    let device = Default::default();
+    let input = Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], &device)
+        .require_grad();
+    let weights =
+        Tensor::<AdBackend, 2>::from_floats([[1.0, 10.0], [100.0, 1000.0], [0.5, 2.0]], &device);
+    let gradients = (super::contiguous_where_preferred(input.clone().transpose()) * weights)
+        .sum()
+        .backward();
+    assert_eq!(
+        input.grad(&gradients).expect("connected").to_data(),
+        TensorData::from([[1.0_f32, 100.0, 0.5], [10.0, 1000.0, 2.0]])
+    );
+}
+
+/// A lazy initializer chained with the materialization keeps its exact values.
+///
+/// This is the composition `init_linear` installs on inference Flex: Burn's
+/// column-layout initializer yields the transposed view of an `[out, in]`
+/// draw, and the chained mapper stores it contiguously at the first read.
+#[test]
+fn chained_materialization_preserves_lazy_initializer_values() {
+    let device = Default::default();
+    let drawn = irregular([3, 5]);
+    let source = drawn.clone();
+    let lazy = Param::uninitialized(
+        burn::module::ParamId::new(),
+        move |_, _| source.clone().transpose(),
+        device,
+        false,
+        [5, 3].into(),
+    )
+    .init_mapper(super::contiguous_where_preferred::<Flex, 2>);
+    assert!(!lazy.is_initialized());
+    let value = lazy.val();
+    assert!(flex_primitive(value.clone()).is_contiguous());
+    assert_eq!(value.into_data(), drawn.transpose().into_data());
+}
+
+/// Random column-layout weights are contiguous on inference Flex and keep Burn's distribution.
+///
+/// Burn draws a column-layout weight as `[out, in]` with Kaiming-uniform bound
+/// `1/sqrt(out)` (Burn 0.21 passes `d_output` as the fan-in of that layout) and
+/// exposes its transposed view. The installed weight must be contiguous,
+/// remain lazy until read, stay inside that bound, and round-trip its record
+/// through the unchanged save/load mappers. Row layouts are already contiguous.
+#[test]
+fn inference_flex_random_column_projections_are_contiguous() {
+    use burn::{module::Module, nn::LinearLayout};
+
+    let device = Default::default();
+    let (input, output) = (24, 40);
+    let config = LinearConfig::new(input, output)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col);
+    let projection = super::init_linear::<Flex>(&config, &device);
+    assert!(!projection.weight.is_initialized());
+    let weight = projection.weight.val();
+    assert_eq!(weight.dims(), [input, output]);
+    assert!(flex_primitive(weight.clone()).is_contiguous());
+    let bound = 1.0 / (output as f32).sqrt();
+    let values = weight.to_data().to_vec::<f32>().unwrap();
+    assert!(values.iter().all(|value| value.abs() <= bound));
+    assert!(values.iter().any(|&value| value != values[0]));
+
+    let probe = irregular([2, input]);
+    let expected = linear(probe.clone(), &projection).unwrap().into_data();
+    let record = projection.into_record();
+    assert_eq!(record.weight.val().dims(), [output, input]);
+    let restored = super::init_linear::<Flex>(&config, &device).load_record(record);
+    assert!(flex_primitive(restored.weight.val()).is_contiguous());
+    assert_eq!(linear(probe, &restored).unwrap().into_data(), expected);
+
+    let row = super::init_linear::<Flex>(&config.clone().with_layout(LinearLayout::Row), &device);
+    assert!(flex_primitive(row.weight.val()).is_contiguous());
 }
