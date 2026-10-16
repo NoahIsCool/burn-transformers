@@ -961,6 +961,59 @@ fn planning_rejects_invalid_mxfp4_sources() {
     ));
 }
 
+/// Planning names both stored dtypes when blocks or scales are not byte codes.
+///
+/// Shape validation alone would accept these tensors: the dtype check is what
+/// keeps float payloads from being reinterpreted as packed FP4 codes or E8M0
+/// exponents.
+#[test]
+fn planning_rejects_non_byte_mxfp4_source_dtypes() {
+    for (blocks_dtype, scales_dtype, found) in [
+        (TensorDType::F32, TensorDType::U8, "F32 and U8"),
+        (TensorDType::U8, TensorDType::BF16, "U8 and BF16"),
+        (TensorDType::I8, TensorDType::F8_E8M0, "I8 and F8_E8M0"),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let blocks_bytes = blocks_dtype.storage_bytes(16).unwrap() as usize;
+        let scales_bytes = scales_dtype.storage_bytes(1).unwrap() as usize;
+        write_shard(
+            directory.path(),
+            &[
+                (
+                    "experts.down_proj_blocks",
+                    blocks_dtype,
+                    vec![1, 1, 1, 16],
+                    vec![0; blocks_bytes],
+                ),
+                (
+                    "experts.down_proj_scales",
+                    scales_dtype,
+                    vec![1, 1, 1],
+                    vec![0; scales_bytes],
+                ),
+            ],
+        );
+        let options = LoadOptions::default();
+        let manifest = CheckpointManifest::discover(directory.path(), &options).unwrap();
+        let mut mappings = MappingPlan::new();
+        mappings.dequantize_mxfp4(
+            "experts.down_proj_blocks",
+            "experts.down_proj_scales",
+            "experts.down_proj",
+        );
+        let expected = [ExpectedTensor::new("experts.down_proj", vec![1, 32, 1])];
+        let error = crate::checkpoint::build_load_plan(&manifest, &expected, &mappings, &options)
+            .unwrap_err();
+        let reason = format!(
+            "MXFP4 target `experts.down_proj` needs U8 blocks and U8/F8_E8M0 scales, found {found}"
+        );
+        assert!(
+            matches!(&error, CheckpointError::InvalidMapping { message } if *message == reason),
+            "{error}"
+        );
+    }
+}
+
 /// Runtime validation rejects a hand-edited MXFP4 work item before any read.
 #[test]
 fn runtime_rejects_tampered_mxfp4_work_items() {

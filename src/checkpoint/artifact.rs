@@ -1325,3 +1325,7 @@ fn classify_json_error(
         message,
     }
 }
+
+#[cfg(test)]
+#[path = "artifact_tests.rs"]
+mod tests;

@@ -216,6 +216,7 @@ fn lowercase_digests_match_the_original_rule() {
 
 /// Spells `bytes` with the original nibble-table encoder.
 fn reference_spelling(bytes: &[u8]) -> Vec<u8> {
+    /// Lowercase hexadecimal digit for each nibble value `0..16`, indexed by nibble.
     const HEX: &[u8; 16] = b"0123456789abcdef";
     bytes
         .iter()
@@ -268,5 +269,35 @@ proptest! {
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)));
         prop_assert_eq!(normal_components(path.as_bytes()), std_normal);
+    }
+}
+
+/// `equal_at` is true exactly for an in-bounds window equal to `expected`.
+///
+/// Its only production caller checks the anchors' total length first, so the
+/// out-of-range answers are pinned here directly: an offset past the end, or a
+/// window that would run past the end, never matches and never panics.
+#[test]
+fn equal_at_matches_only_in_bounds_windows() {
+    let bytes = b"layers.12.mlp";
+    assert!(equal_at(bytes, 0, b"layers."));
+    assert!(equal_at(bytes, 10, b"mlp"));
+    assert!(equal_at(bytes, bytes.len(), b""));
+    assert!(!equal_at(bytes, 1, b"layers."));
+    assert!(!equal_at(bytes, 11, b"mlp"));
+    assert!(!equal_at(bytes, bytes.len() + 1, b""));
+    assert!(!equal_at(bytes, usize::MAX, b"m"));
+    for offset in 0..=bytes.len() + 2 {
+        for length in 0..=bytes.len() + 2 {
+            let expected = &b"layers.12.mlp.extra"[..length.min(19)];
+            let reference = offset
+                .checked_add(expected.len())
+                .is_some_and(|end| end <= bytes.len() && &bytes[offset..end] == expected);
+            assert_eq!(
+                equal_at(bytes, offset, expected),
+                reference,
+                "{offset} {length}"
+            );
+        }
     }
 }

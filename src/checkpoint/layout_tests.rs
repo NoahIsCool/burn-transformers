@@ -545,3 +545,54 @@ proptest! {
         prop_assert_eq!(dense_byte_len(&shape, width), reference);
     }
 }
+
+/// Section starts are exclusive prefix sums, and failures name the exact total.
+#[test]
+fn section_starts_partition_the_axis_or_name_the_failure() {
+    assert_eq!(section_starts(&[2, 0, 3], 5), Ok(vec![0, 2, 2]));
+    assert_eq!(section_starts(&[], 0), Ok(Vec::new()));
+    assert_eq!(
+        section_starts(&[], 4),
+        Err(SectionError::LengthMismatch { total: 0 })
+    );
+    assert_eq!(
+        section_starts(&[1, 2], 4),
+        Err(SectionError::LengthMismatch { total: 3 })
+    );
+    // A wrapped sum would equal the axis length; it must overflow instead.
+    assert_eq!(
+        section_starts(&[u64::MAX, 3], 2),
+        Err(SectionError::Overflow)
+    );
+    assert_eq!(
+        section_starts(&[u64::MAX, 0], u64::MAX),
+        Ok(vec![0, u64::MAX])
+    );
+}
+
+proptest! {
+    /// Every outcome agrees with exact 128-bit prefix sums of the lengths.
+    #[test]
+    fn section_starts_match_wide_prefix_sums(
+        lengths in proptest::collection::vec(
+            prop_oneof![0_u64..8, (u64::MAX - 8)..=u64::MAX],
+            0..5,
+        ),
+        axis_len in prop_oneof![0_u64..32, (u64::MAX - 8)..=u64::MAX],
+    ) {
+        let mut sums = Vec::with_capacity(lengths.len());
+        let mut total = 0_u128;
+        for &length in &lengths {
+            sums.push(total);
+            total += u128::from(length);
+        }
+        let expected = if total > u128::from(u64::MAX) {
+            Err(SectionError::Overflow)
+        } else if total != u128::from(axis_len) {
+            Err(SectionError::LengthMismatch { total: total as u64 })
+        } else {
+            Ok(sums.into_iter().map(|start| start as u64).collect())
+        };
+        prop_assert_eq!(section_starts(&lengths, axis_len), expected);
+    }
+}

@@ -86,9 +86,11 @@ impl Default for ArtifactLimits {
 pub enum ArtifactSelection {
     /// Use whichever of `model.safetensors.index.json` and `model.safetensors`
     /// exists, and only then fall back to an unambiguous nonstandard filename in
-    /// the root. When both standard artifacts exist, discovery reports
-    /// [`super::CheckpointError::AmbiguousArtifacts`] instead of guessing which
-    /// one describes the intended weights; select one with [`Self::Index`] or
+    /// the root. When both standard artifacts exist, discovery loads through
+    /// the index only if it parses and its `weight_map` names nothing but
+    /// `model.safetensors` (so both provably describe the same weights);
+    /// otherwise it reports [`super::CheckpointError::AmbiguousArtifacts`]
+    /// instead of guessing, and the caller selects one with [`Self::Index`] or
     /// [`Self::Single`].
     #[default]
     Auto,
