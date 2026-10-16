@@ -130,6 +130,29 @@ pub open spec fn rows_below(rows: Seq<Vec<usize>>, sequence: int) -> bool {
     forall|b: int, k: int| 0 <= b < rows.len() && 0 <= k < rows[b]@.len() ==> rows[b]@[k] < sequence
 }
 
+/// Prefix rows below `sequence` hold at most `sequence` columns.
+///
+/// When every row is the prefix `0..n_b` and every column lies below `S`,
+/// column `n_b - 1 < S`, so `n_b <= S`; hence the compact width `N` of a
+/// prefix layout never exceeds `S` and restoring it appends `S - N >= 0`
+/// zero columns.
+pub proof fn lemma_prefix_rows_fit(rows: Seq<Vec<usize>>, sequence: int)
+    requires
+        sequence >= 0,
+        rows_below(rows, sequence),
+        forall|b: int, k: int| 0 <= b < rows.len() && 0 <= k < rows[b]@.len() ==> rows[b]@[k] == k,
+    ensures
+        forall|b: int| 0 <= b < rows.len() ==> rows[b]@.len() <= sequence,
+{
+    assert forall|b: int| 0 <= b < rows.len() implies rows[b]@.len() <= sequence by {
+        if rows[b]@.len() > 0 {
+            let last = rows[b]@.len() - 1;
+            assert(rows[b]@[last] == last);
+            assert(rows[b]@[last] < sequence);
+        }
+    }
+}
+
 /// The MTP cursor kept after truncating the target to `target` tokens.
 ///
 /// `min(mtp, target - 1)`, and zero for an empty target.

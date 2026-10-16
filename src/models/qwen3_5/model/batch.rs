@@ -263,6 +263,7 @@ impl<B: Backend> CompactBatch<B> {
                 )
             }
             None if width == self.sequence => compact,
+            // A prefix layout has `N <= S` (`plan::lemma_prefix_rows_fit`).
             None => Tensor::cat(vec![compact.clone(), zeros(self.sequence - width)], 1),
         }
     }

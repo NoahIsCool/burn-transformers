@@ -323,7 +323,10 @@ pub(crate) fn group_slots(global: &[bool]) -> Vec<usize> {
 /// the whole history (its slots are in ring order, so no narrower contiguous
 /// slice is exact); and every slice ends at the chunk's last fresh entry.
 /// Requires `start < end` and `window > 0`; returns `None` only when
-/// `history + end` overflows `usize`.
+/// `history + end` overflows `usize`. Proved: the slice contains every
+/// visible fresh key, starts exactly at `ring_lo`, is at most
+/// `H + W - 1 + (end - start)` keys wide, and every fresh key it covers is
+/// visible to some row of the chunk (the window union is tight).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(range =>
     requires

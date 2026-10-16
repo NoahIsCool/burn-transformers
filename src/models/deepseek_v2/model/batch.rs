@@ -108,7 +108,8 @@ pub(crate) struct RowMaps {
 /// that index with gathered values (token IDs, positions) must overwrite
 /// padding entries (`BlockLayout::compact_inert`), and every other consumer
 /// masks them. Column `c_k` scatters entry `k`, and every other column
-/// scatters the zero row `T`.
+/// scatters the zero row `T`. Proved: exactly these gather and scatter
+/// entries, including the padding gathers.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(maps =>
     requires
@@ -357,6 +358,7 @@ pub(crate) fn key_limits(
 ///
 /// Entry `k < n_b` of row `b` sits at slot `L_b + k`; padding entries report
 /// `L_b`, an in-range placeholder for queries that every consumer masks.
+/// Proved: exactly these slots, all within the key extent.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(slots =>
     requires
