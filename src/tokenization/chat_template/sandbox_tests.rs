@@ -765,7 +765,7 @@ fn namespace_registry_clears_identifier_attributes() {
     );
 }
 
-/// Asserts that rendering `source` under generous limits fails with exactly `detail`.
+/// Asserts that rendering `source` under generous limits fails with an error whose detail contains `detail`.
 fn assert_render_error(source: &str, detail: &str) {
     let error = render(source).expect_err(source);
     assert!(format!("{error:#}").contains(detail), "{source}: {error:#}");
@@ -776,7 +776,8 @@ fn assert_render_error(source: &str, detail: &str) {
 fn repetition_accepts_either_operand_order_and_refuses_overflowing_counts() {
     assert_eq!(render("{{ 3 * [1, 2] }}").unwrap(), "[1, 2, 1, 2, 1, 2]");
     assert_eq!(render("{{ 2 * 'ab' }}").unwrap(), "abab");
-    // `usize::MAX / 2 < 9223372036854775807 * 3`, so the byte and item counts overflow.
+    // 3 * 9223372036854775807 exceeds usize::MAX (2 * 9223372036854775807 + 1),
+    // so the byte and item counts overflow.
     assert_render_error(
         "{{ 'abc' * 9223372036854775807 }}",
         "string repetition `*` of 3 bytes 9223372036854775807 times overflows",

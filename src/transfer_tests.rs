@@ -1226,17 +1226,24 @@ fn duplicate_module_parameter_paths_are_rejected_in_sources_and_targets() {
     }
 }
 
-/// A target whose `map` disagrees with its `visit` leaves no partially installed clone.
+/// A target whose `map` disagrees with its `visit` fails instead of returning a partial transfer.
+///
+/// Validation plans against `visit`; installation runs through `map`. When
+/// `map` offers the planned parameter at another rank, the error names that
+/// parameter; when it never offers it, the error names the target module.
+/// Either way `apply` returns only the error, never the staged clone.
 #[test]
 fn inconsistent_target_traversals_fail_closed() {
     let source = inconsistent(Defect::Consistent, 7.0);
-    for (defect, reason) in [
+    for (defect, expected_field, expected_reason) in [
         (
             Defect::RankShift,
+            "w",
             "module mapper rank changed after transfer validation",
         ),
         (
             Defect::SkippedParameter,
+            "transfer.target",
             "module mapper did not visit all planned parameters",
         ),
     ] {
@@ -1245,9 +1252,11 @@ fn inconsistent_target_traversals_fail_closed() {
             .copy("w", "w")
             .apply(&source, &target)
             .unwrap_err();
-        assert!(error.to_string().contains(reason), "{defect:?}: {error}");
-        assert_eq!(values(target.matrix.val()), vec![2.0; 4]);
-        assert_eq!(values(target.flat.val()), vec![2.0; 4]);
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == expected_field && reason == expected_reason),
+            "{defect:?}: {error}"
+        );
     }
     let (copied, report) = TransferPlan::new()
         .copy("w", "w")

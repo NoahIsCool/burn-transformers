@@ -545,7 +545,7 @@ pub(crate) fn bounded_splat(budget: &RenderBudget, value: Value) -> Result<Value
 
 /// Repeats the items of `sequence` `count` times into one bounded list.
 fn repeat_sequence(budget: &RenderBudget, sequence: &Value, count: &Value) -> Result<Value, Error> {
-    /// Operation name quoted by limit and type errors.
+    /// Operation name quoted by the overflow and budget limit errors.
     const OPERATION: &str = "sequence repetition `*`";
     let count = count.as_usize().ok_or_else(|| {
         Error::new(

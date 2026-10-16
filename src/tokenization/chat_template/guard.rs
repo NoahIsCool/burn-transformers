@@ -145,7 +145,8 @@ fn newline_count(text: &str) -> usize {
     text.bytes().filter(|&byte| byte == b'\n').count()
 }
 
-/// Shortens a tag to at most 80 bytes on a character boundary for an error message.
+/// Shortens a tag for an error message: tags over 80 bytes keep their longest
+/// prefix of at most 80 bytes that ends on a character boundary, followed by `...`.
 fn shorten(tag: &str) -> String {
     /// Largest retained byte length; longer tags keep a prefix and gain a `...` suffix.
     const LIMIT: usize = 80;
