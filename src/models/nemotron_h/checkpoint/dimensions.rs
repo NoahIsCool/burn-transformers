@@ -20,10 +20,11 @@
 //!
 //! Verus checks [`checkpoint_dimensions`] in place through `verus/loaders.rs`
 //! (see `verus/README.md`): every width is exact, every extent is copied
-//! unchanged, an overflowing width is reported by the first term that does
-//! not fit (in the order the contract has always checked them), and the MTP
-//! fusion width is `2 h` or `None` exactly when that overflows `u64`. A
-//! `usize` extent always fits `u64`, so the conversions cannot fail.
+//! unchanged, the dimensions are returned exactly when every term fits its
+//! representation, and otherwise the error is the first term that does not
+//! fit (in the order the contract has always checked them); the MTP fusion
+//! width is `2 h` or `None` exactly when that overflows `u64`. A `usize`
+//! extent always fits `u64`, so the conversions cannot fail.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -160,12 +161,42 @@ pub open spec fn fits_u64(value: int) -> bool {
     value <= u64::MAX
 }
 
+/// The first fused width that does not fit, in the contract's checking order
+/// (the order of [`DimensionError`]), or `None` exactly when every term fits:
+/// `I`, `G N`, `q d`, and `kv d` in `usize`, and `2 G N`, `C_conv`, and the
+/// input projection in `u64`.
+pub(super) open spec fn first_overflow(inputs: DimensionInputs) -> Option<DimensionError> {
+    let values = inputs.mamba_heads * inputs.mamba_head_dim;
+    let states = inputs.groups * inputs.state_size;
+    let convolution = values + 2 * states;
+    if !fits_usize(values) {
+        Some(DimensionError::MambaIntermediate)
+    } else if !fits_usize(states) {
+        Some(DimensionError::StateGroups)
+    } else if !fits_u64(2 * states) {
+        Some(DimensionError::ConvolutionStates)
+    } else if !fits_u64(convolution) {
+        Some(DimensionError::Convolution)
+    } else if !fits_u64(values + convolution + inputs.mamba_heads) {
+        Some(DimensionError::Projection)
+    } else if !fits_usize(inputs.attention_heads * inputs.head_dim) {
+        Some(DimensionError::AttentionQuery)
+    } else if !fits_usize(inputs.key_value_heads * inputs.head_dim) {
+        Some(DimensionError::AttentionKeyValue)
+    } else {
+        None
+    }
+}
+
 } // verus!
 
 /// Computes every Nemotron-H checkpoint width from configuration extents.
 ///
-/// Returns the exact widths listed in the module documentation, or the first
-/// fused width (in the order of [`DimensionError`]) that does not fit.
+/// Succeeds exactly when every term fits its representation (`I`, `G N`,
+/// `q d`, and `kv d` in `usize`; `2 G N`, `C_conv`, and the input projection
+/// in `u64`), and then returns the exact widths listed in the module
+/// documentation; otherwise reports the first term (in the order of
+/// [`DimensionError`]) that does not fit.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(dimensions =>
     ensures
@@ -178,6 +209,7 @@ pub open spec fn fits_u64(value: int) -> bool {
             let key_value = inputs.key_value_heads * inputs.head_dim;
             match dimensions {
                 Ok(dimensions) => {
+                    &&& first_overflow(inputs) is None
                     &&& dimensions.vocab == inputs.vocab
                     &&& dimensions.hidden == inputs.hidden
                     &&& dimensions.intermediate == inputs.intermediate
@@ -201,18 +233,7 @@ pub open spec fn fits_u64(value: int) -> bool {
                         None => !fits_u64(2 * inputs.hidden),
                     }
                 },
-                Err(DimensionError::MambaIntermediate) => !fits_usize(values),
-                Err(DimensionError::StateGroups) => fits_usize(values) && !fits_usize(states),
-                Err(DimensionError::ConvolutionStates) => fits_usize(values) && fits_usize(states)
-                    && !fits_u64(2 * states),
-                Err(DimensionError::Convolution) => fits_usize(values) && fits_u64(2 * states)
-                    && !fits_u64(convolution),
-                Err(DimensionError::Projection) => fits_usize(values) && fits_u64(convolution)
-                    && !fits_u64(projection),
-                Err(DimensionError::AttentionQuery) => fits_usize(values) && fits_u64(projection)
-                    && !fits_usize(query),
-                Err(DimensionError::AttentionKeyValue) => fits_usize(values)
-                    && fits_u64(projection) && fits_usize(query) && !fits_usize(key_value),
+                Err(error) => first_overflow(inputs) == Some(error),
             }
         }),
 ))]

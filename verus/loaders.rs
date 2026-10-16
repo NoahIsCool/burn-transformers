@@ -20,8 +20,11 @@
 //!   widths `H (n + r)`, `c + r`, `H (n + v)`, `H v` and shared expert `m s`,
 //!   Nemotron-H's Mamba split `C_conv = I + 2 G N` and fused input
 //!   projection `2 I + 2 G N + H`, the MTP fusion width `2 h`, and every
-//!   family's query and key/value widths — or names the first term that
-//!   overflows, in each contract's original checking order. Qwen3.5's
+//!   family's query and key/value widths. Each succeeds exactly when every
+//!   term, including intermediates such as DeepSeek-V2's per-head `n + r`
+//!   and Nemotron-H's `usize` products `I` and `G N`, fits its
+//!   representation; otherwise the error is `first_overflow`, the first term
+//!   that does not fit in each contract's original checking order. Qwen3.5's
 //!   `query_projection` selects the gated width exactly when the output gate
 //!   is fused, and T5's `feed_forward_sublayer` (shared by the contract and
 //!   the tensor sink) numbers the feed-forward network after the block's

@@ -16,10 +16,11 @@
 //!
 //! Verus checks [`checkpoint_dimensions`] and [`query_projection`] in place
 //! through `verus/loaders.rs` (see `verus/README.md`): every width is exact,
-//! every plain extent is copied unchanged, and an overflowing width is
-//! reported by the first term that exceeds `u64::MAX`, in the order the
-//! contract has always checked them. A `usize` extent always fits `u64`, so
-//! the conversions cannot fail.
+//! every plain extent is copied unchanged, the dimensions are returned
+//! exactly when every fused width fits `u64`, and otherwise the error is the
+//! first term that exceeds `u64::MAX`, in the order the contract has always
+//! checked them. A `usize` extent always fits `u64`, so the conversions
+//! cannot fail.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -127,12 +128,40 @@ pub open spec fn fits(value: int) -> bool {
     value <= u64::MAX
 }
 
+/// The first fused width that does not fit `u64`, in the contract's checking
+/// order (the order of [`DimensionError`]), or `None` exactly when every
+/// product and sum fits.
+pub(super) open spec fn first_overflow(inputs: DimensionInputs) -> Option<DimensionError> {
+    let query = inputs.attention_heads * inputs.head_dim;
+    let delta_key = inputs.delta_key_heads * inputs.delta_key_head_dim;
+    let delta_value = inputs.delta_value_heads * inputs.delta_value_head_dim;
+    if !fits(query) {
+        Some(DimensionError::Query)
+    } else if !fits(inputs.key_value_heads * inputs.head_dim) {
+        Some(DimensionError::KeyValue)
+    } else if !fits(delta_key) {
+        Some(DimensionError::DeltaKey)
+    } else if !fits(delta_value) {
+        Some(DimensionError::DeltaValue)
+    } else if !fits(2 * delta_key + delta_value) {
+        Some(DimensionError::DeltaConv)
+    } else if !fits(2 * query) {
+        Some(DimensionError::GatedQuery)
+    } else if !fits(2 * inputs.hidden) {
+        Some(DimensionError::DoubleHidden)
+    } else {
+        None
+    }
+}
+
 } // verus!
 
 /// Computes every Qwen3.5 checkpoint width from configuration extents.
 ///
-/// Returns the exact widths listed in the module documentation, or the first
-/// fused width (in the order of [`DimensionError`]) that exceeds `u64::MAX`.
+/// Succeeds exactly when every fused width fits `u64`, and then returns the
+/// exact widths listed in the module documentation; otherwise reports the
+/// first fused width (in the order of [`DimensionError`]) that exceeds
+/// `u64::MAX`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(dimensions =>
     ensures
@@ -143,6 +172,7 @@ pub open spec fn fits(value: int) -> bool {
             let delta_value = inputs.delta_value_heads * inputs.delta_value_head_dim;
             match dimensions {
                 Ok(dimensions) => {
+                    &&& first_overflow(inputs) is None
                     &&& dimensions.vocab == inputs.vocab
                     &&& dimensions.hidden == inputs.hidden
                     &&& dimensions.intermediate == inputs.intermediate
@@ -157,18 +187,7 @@ pub open spec fn fits(value: int) -> bool {
                     &&& dimensions.delta_conv == 2 * delta_key + delta_value
                     &&& dimensions.double_hidden == 2 * inputs.hidden
                 },
-                Err(DimensionError::Query) => !fits(query),
-                Err(DimensionError::KeyValue) => fits(query) && !fits(key_value),
-                Err(DimensionError::DeltaKey) => fits(query) && fits(key_value) && !fits(delta_key),
-                Err(DimensionError::DeltaValue) => fits(query) && fits(key_value) && fits(delta_key)
-                    && !fits(delta_value),
-                Err(DimensionError::DeltaConv) => fits(query) && fits(key_value) && fits(delta_key)
-                    && fits(delta_value) && !fits(2 * delta_key + delta_value),
-                Err(DimensionError::GatedQuery) => fits(query) && fits(key_value) && fits(delta_key)
-                    && fits(2 * delta_key + delta_value) && !fits(2 * query),
-                Err(DimensionError::DoubleHidden) => fits(query) && fits(key_value)
-                    && fits(delta_key) && fits(2 * delta_key + delta_value) && fits(2 * query)
-                    && !fits(2 * inputs.hidden),
+                Err(error) => first_overflow(inputs) == Some(error),
             }
         }),
 ))]

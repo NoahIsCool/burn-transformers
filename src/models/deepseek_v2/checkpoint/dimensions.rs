@@ -16,10 +16,11 @@
 //!
 //! Verus checks [`checkpoint_dimensions`] in place through `verus/loaders.rs`
 //! (see `verus/README.md`): every width is exact, every extent (including the
-//! optional query rank) is copied unchanged, and an overflowing width is
-//! reported by the first sum or product that exceeds `usize::MAX`, in the
-//! order the contract has always checked them. A `usize` extent always fits
-//! `u64`, so the conversions cannot fail.
+//! optional query rank) is copied unchanged, the dimensions are returned
+//! exactly when every sum and product (including the per-head intermediates)
+//! fits `usize`, and otherwise the error is the first sum or product that
+//! exceeds `usize::MAX`, in the order the contract has always checked them.
+//! A `usize` extent always fits `u64`, so the conversions cannot fail.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -139,13 +140,40 @@ pub open spec fn fits(value: int) -> bool {
     value <= usize::MAX
 }
 
+/// The first sum or product that does not fit `usize`, in the contract's
+/// checking order (the order of [`DimensionError`]), or `None` exactly when
+/// every term, including the per-head intermediates `n + r` and `n + v`, fits.
+pub(super) open spec fn first_overflow(inputs: DimensionInputs) -> Option<DimensionError> {
+    let query_head = inputs.qk_nope + inputs.qk_rope;
+    let expanded_head = inputs.qk_nope + inputs.value_head_dim;
+    if !fits(query_head) {
+        Some(DimensionError::QueryHead)
+    } else if !fits(expanded_head) {
+        Some(DimensionError::ExpandedHead)
+    } else if !fits(inputs.moe_intermediate * inputs.shared_experts) {
+        Some(DimensionError::SharedIntermediate)
+    } else if !fits(inputs.attention_heads * query_head) {
+        Some(DimensionError::Query)
+    } else if !fits(inputs.kv_rank + inputs.qk_rope) {
+        Some(DimensionError::Compressed)
+    } else if !fits(inputs.attention_heads * expanded_head) {
+        Some(DimensionError::ExpandedKeyValue)
+    } else if !fits(inputs.attention_heads * inputs.value_head_dim) {
+        Some(DimensionError::OutputHeads)
+    } else {
+        None
+    }
+}
+
 } // verus!
 
 /// Computes every DeepSeek-V2 checkpoint width from configuration extents.
 ///
-/// Returns the exact widths listed in the module documentation, or the first
-/// sum or product (in the order of [`DimensionError`]) that exceeds
-/// `usize::MAX`.
+/// Succeeds exactly when every sum and product fits `usize`, including the
+/// per-head intermediates `n + r` and `n + v` even when `H = 0` makes the
+/// stored products zero, and then returns the exact widths listed in the
+/// module documentation; otherwise reports the first sum or product (in the
+/// order of [`DimensionError`]) that exceeds `usize::MAX`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(dimensions =>
     ensures
@@ -159,6 +187,7 @@ pub open spec fn fits(value: int) -> bool {
             let output = inputs.attention_heads * inputs.value_head_dim;
             match dimensions {
                 Ok(dimensions) => {
+                    &&& first_overflow(inputs) is None
                     &&& dimensions.vocab == inputs.vocab
                     &&& dimensions.hidden == inputs.hidden
                     &&& dimensions.intermediate == inputs.intermediate
@@ -176,19 +205,7 @@ pub open spec fn fits(value: int) -> bool {
                     &&& dimensions.expanded_kv == expanded
                     &&& dimensions.output_heads == output
                 },
-                Err(DimensionError::QueryHead) => !fits(query_head),
-                Err(DimensionError::ExpandedHead) => fits(query_head) && !fits(expanded_head),
-                Err(DimensionError::SharedIntermediate) => fits(query_head)
-                    && fits(expanded_head) && !fits(shared),
-                Err(DimensionError::Query) => fits(query_head) && fits(expanded_head)
-                    && fits(shared) && !fits(query),
-                Err(DimensionError::Compressed) => fits(query_head) && fits(expanded_head)
-                    && fits(shared) && fits(query) && !fits(compressed),
-                Err(DimensionError::ExpandedKeyValue) => fits(query_head) && fits(expanded_head)
-                    && fits(shared) && fits(query) && fits(compressed) && !fits(expanded),
-                Err(DimensionError::OutputHeads) => fits(query_head) && fits(expanded_head)
-                    && fits(shared) && fits(query) && fits(compressed) && fits(expanded)
-                    && !fits(output),
+                Err(error) => first_overflow(inputs) == Some(error),
             }
         }),
 ))]

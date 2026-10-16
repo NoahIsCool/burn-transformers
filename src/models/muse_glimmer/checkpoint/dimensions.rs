@@ -10,9 +10,10 @@
 //!
 //! Verus checks [`checkpoint_dimensions`] in place through `verus/loaders.rs`
 //! (see `verus/README.md`): every width is exact, every extent is copied
-//! unchanged, and an overflowing width is reported by the first product that
-//! exceeds `usize::MAX` (query before key/value). A `usize` extent always
-//! fits `u64`, so the conversions cannot fail.
+//! unchanged, the dimensions are returned exactly when both products fit
+//! `usize`, and otherwise the error is the first product that exceeds
+//! `usize::MAX` (query before key/value). A `usize` extent always fits
+//! `u64`, so the conversions cannot fail.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -71,9 +72,32 @@ impl DimensionError {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// `value` is representable as a `usize` extent.
+pub open spec fn fits(value: int) -> bool {
+    value <= usize::MAX
+}
+
+/// The first attention product that does not fit `usize` (query before
+/// key/value), or `None` exactly when both `q d` and `kv d` fit.
+pub(super) open spec fn first_overflow(inputs: DimensionInputs) -> Option<DimensionError> {
+    if !fits(inputs.attention_heads * inputs.head_dim) {
+        Some(DimensionError::Query)
+    } else if !fits(inputs.key_value_heads * inputs.head_dim) {
+        Some(DimensionError::KeyValue)
+    } else {
+        None
+    }
+}
+
+} // verus!
+
 /// Computes every Muse-Glimmer checkpoint width from configuration extents.
 ///
-/// Returns `q d` and `kv d` exactly with every extent unchanged, or the first
+/// Succeeds exactly when both `q d` and `kv d` fit `usize`, and then returns
+/// them exactly with every extent unchanged; otherwise reports the first
 /// product that exceeds `usize::MAX`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(dimensions =>
@@ -83,14 +107,14 @@ impl DimensionError {
             let key_value = inputs.key_value_heads * inputs.head_dim;
             match dimensions {
                 Ok(dimensions) => {
+                    &&& first_overflow(inputs) is None
                     &&& dimensions.vocab == inputs.vocab
                     &&& dimensions.hidden == inputs.hidden
                     &&& dimensions.intermediate == inputs.intermediate
                     &&& dimensions.query == query
                     &&& dimensions.key_value == key_value
                 },
-                Err(DimensionError::Query) => query > usize::MAX,
-                Err(DimensionError::KeyValue) => query <= usize::MAX && key_value > usize::MAX,
+                Err(error) => first_overflow(inputs) == Some(error),
             }
         }),
 ))]
