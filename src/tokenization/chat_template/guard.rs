@@ -647,13 +647,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Skips an assignment target: names (dotted for `set`), commas, and parenthesized groups.
+    ///
+    /// Elements are separated by commas; a trailing comma before `)`, `in`, or
+    /// the end of the tag is accepted, as in a one-element tuple `(a,)`.
     fn assignment_target(&mut self, dotted: bool) -> Parse<()> {
-        let mut first = true;
         loop {
-            if !first && !self.eat_symbol(",") {
-                return Ok(());
-            }
-            first = false;
             if self.at_symbol(")") || self.at_end() || self.at_name("in") {
                 return Ok(());
             }
@@ -666,7 +664,7 @@ impl<'a> Parser<'a> {
                     self.expect_name()?;
                 }
             }
-            if !self.at_symbol(",") {
+            if !self.eat_symbol(",") {
                 return Ok(());
             }
         }

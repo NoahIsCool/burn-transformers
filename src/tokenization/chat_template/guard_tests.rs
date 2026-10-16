@@ -552,3 +552,68 @@ proptest! {
         prop_assert!(environment.template_from_str(&rewritten).is_ok(), "{}", rewritten);
     }
 }
+
+/// Less common statement shapes, trailing commas, and dotted filter names still rewrite.
+#[test]
+fn uncommon_statement_shapes_rewrite_their_expressions() {
+    let cases = [
+        ("{% call m(u + 1) %}", "{% call m(u|__bounded_add(1)) %}"),
+        (
+            "{% include 'a' ~ b %}",
+            "{% include 'a'|__bounded_concat(b) %}",
+        ),
+        (
+            "{% from 'a' ~ b import x %}",
+            "{% from 'a'|__bounded_concat(b) import x %}",
+        ),
+        (
+            "{% set a, b = c * 2, %}",
+            "{% set a, b = c|__bounded_mul(2), %}",
+        ),
+        (
+            "{% set a, b, c = d * 2, e, f %}",
+            "{% set a, b, c = d|__bounded_mul(2), e, f %}",
+        ),
+        (
+            "{% for a, in x + y %}",
+            "{% for a, in x|__bounded_add(y) %}",
+        ),
+        (
+            "{% for (a,) in x + y %}",
+            "{% for (a,) in x|__bounded_add(y) %}",
+        ),
+        (
+            "{% macro m(x, y=1 + 2,) %}",
+            "{% macro m(x, y=1|__bounded_add(2),) %}",
+        ),
+        (
+            "{% filter a.b('x' ~ y) %}",
+            "{% filter a.b('x'|__bounded_concat(y)) %}",
+        ),
+        ("{{ f(a + 1,) }}", "{{ f(a|__bounded_add(1),) }}"),
+        ("{{ [a + 1,] }}", "{{ [a|__bounded_add(1),] }}"),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(guarded(source), expected, "{source}");
+    }
+}
+
+/// Statements missing a required keyword are refused when they hold a guarded operator.
+#[test]
+fn malformed_statements_with_guarded_operators_are_refused() {
+    for source in [
+        "{% (a + b) %}",
+        "{% for x of a + b %}",
+        "{% include 'a' ~ b ignore x %}",
+        "{% include 'a' ~ b with x %}",
+        "{% import 'a' ~ b %}",
+        "{% from 'a' ~ b %}",
+        "{% filter a.('x' ~ y) %}",
+    ] {
+        let error = guard_operators(source).expect_err(source);
+        assert!(
+            error.to_string().contains("cannot be bounded"),
+            "{source}: {error}"
+        );
+    }
+}
