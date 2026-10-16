@@ -14,7 +14,10 @@
 //!   unsigned decimal layer: nonempty ASCII digits without a leading zero,
 //!   except `0` itself ([`decimal_layer_between`]);
 //! - an index byte total is an unsigned decimal integer, optionally followed by
-//!   `.` and one or more zeros ([`integral_lexeme_digits`]).
+//!   `.` and one or more zeros ([`integral_lexeme_digits`]);
+//! - a provenance shard key is canonical: every component is nonempty and
+//!   neither `.` nor `..` ([`canonical_components`]), and a digest is exactly 64
+//!   lowercase hexadecimal characters ([`is_lowercase_sha256`]).
 //!
 //! The module has no crate, Burn, or allocator dependencies so that Verus can
 //! check it in place through `verus/checkpoint.rs`. Callers keep the
@@ -65,6 +68,35 @@ pub open spec fn all_normal(path: Seq<u8>) -> bool {
     &&& !(path.len() > 0 && path[0] == 47)
     &&& !(path.len() > 0 && path[0] == 46 && (path.len() == 1 || path[1] == 47))
     &&& forall|i: int| !#[trigger] parent_component_at(path, i)
+}
+
+/// Specification: a `.` component begins at byte `i` of `path`.
+pub open spec fn dot_component_at(path: Seq<u8>, i: int) -> bool {
+    &&& 0 <= i < path.len()
+    &&& path[i] == 46
+    &&& (i == 0 || path[i - 1] == 47)
+    &&& (i + 1 == path.len() || path[i + 1] == 47)
+}
+
+/// Specification: an empty component lies between bytes `i` and `i + 1` (`//`).
+pub open spec fn empty_component_at(path: Seq<u8>, i: int) -> bool {
+    0 <= i && i + 1 < path.len() && path[i] == 47 && path[i + 1] == 47
+}
+
+/// Specification: every `/`-separated component of `path` is nonempty and
+/// neither `.` nor `..`, so `path` is the one canonical spelling of itself.
+pub open spec fn canonical_segments(path: Seq<u8>) -> bool {
+    &&& path.len() > 0
+    &&& path[0] != 47
+    &&& path[path.len() - 1] != 47
+    &&& forall|i: int| !#[trigger] empty_component_at(path, i)
+    &&& forall|i: int| !#[trigger] dot_component_at(path, i)
+    &&& forall|i: int| !#[trigger] parent_component_at(path, i)
+}
+
+/// Specification: `byte` is a lowercase hexadecimal digit.
+pub open spec fn is_lower_hex(byte: u8) -> bool {
+    (48 <= byte <= 57) || (97 <= byte <= 102)
 }
 
 /// Specification: `digits` is a canonical unsigned decimal: nonempty ASCII
@@ -230,6 +262,127 @@ pub(crate) fn normal_components(path: &[u8]) -> bool {
         }
     }
     true
+}
+
+/// Returns whether every `/`-separated component of `path` is nonempty and neither `.` nor `..`.
+///
+/// This is stricter than [`normal_components`]: it also rejects the empty and
+/// `.` components that `Path::components` silently drops, so two spellings of
+/// one file (`a/b` and `a//./b`) cannot both pass.
+///
+/// Verified: true exactly when [`canonical_segments`] holds.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(canonical =>
+    ensures
+        canonical == canonical_segments(path@),
+))]
+pub(crate) fn canonical_components(path: &[u8]) -> bool {
+    let length = path.len();
+    if length == 0 || path[0] == b'/' || path[length - 1] == b'/' {
+        return false;
+    }
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= length,
+            length == path@.len(),
+            forall|i: int| 0 <= i < index ==> !#[trigger] empty_component_at(path@, i),
+            forall|i: int| 0 <= i < index ==> !#[trigger] dot_component_at(path@, i),
+            forall|i: int| 0 <= i < index ==> !#[trigger] parent_component_at(path@, i),
+        decreases length - index,
+    ))]
+    while index < length {
+        let starts_component = index == 0 || path[index - 1] == b'/';
+        let next_is_separator = index + 1 < length && path[index + 1] == b'/';
+        if path[index] == b'/' && next_is_separator {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(empty_component_at(path@, index as int));
+            }
+            return false;
+        }
+        if starts_component && path[index] == b'.' && (index + 1 == length || next_is_separator) {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(dot_component_at(path@, index as int));
+            }
+            return false;
+        }
+        if starts_component
+            && index + 1 < length
+            && path[index] == b'.'
+            && path[index + 1] == b'.'
+            && (index + 2 == length || path[index + 2] == b'/')
+        {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(parent_component_at(path@, index as int));
+            }
+            return false;
+        }
+        index += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|i: int| !#[trigger] empty_component_at(path@, i) by {
+            if !(0 <= i < length) {
+                assert(!empty_component_at(path@, i));
+            }
+        }
+        assert forall|i: int| !#[trigger] dot_component_at(path@, i) by {
+            if !(0 <= i < length) {
+                assert(!dot_component_at(path@, i));
+            }
+        }
+        assert forall|i: int| !#[trigger] parent_component_at(path@, i) by {
+            if !(0 <= i < length) {
+                assert(!parent_component_at(path@, i));
+            }
+        }
+    }
+    true
+}
+
+/// Returns whether `digest` is exactly 64 lowercase hexadecimal characters.
+///
+/// Verified: true exactly for length 64 with every byte in `0-9` or `a-f`, the
+/// one canonical spelling of a SHA-256 digest.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(canonical =>
+    ensures
+        canonical == (digest@.len() == 64
+            && forall|i: int| 0 <= i < digest@.len() ==> is_lower_hex(#[trigger] digest@[i])),
+))]
+pub(crate) fn is_lowercase_sha256(digest: &[u8]) -> bool {
+    if digest.len() != 64 {
+        return false;
+    }
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= digest@.len(),
+            forall|i: int| 0 <= i < index ==> is_lower_hex(#[trigger] digest@[i]),
+        decreases digest@.len() - index,
+    ))]
+    while index < digest.len() {
+        if !is_lowercase_hex_digit(digest[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Returns whether `byte` is `0-9` or `a-f`.
+///
+/// Verified: true exactly for the sixteen lowercase hexadecimal digits.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(hex =>
+    ensures
+        hex == is_lower_hex(byte),
+))]
+const fn is_lowercase_hex_digit(byte: u8) -> bool {
+    (byte >= b'0' && byte <= b'9') || (byte >= b'a' && byte <= b'f')
 }
 
 /// Returns whether `bytes[start..end]` contains only ASCII digits.

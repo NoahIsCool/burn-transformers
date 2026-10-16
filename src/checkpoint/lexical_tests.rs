@@ -169,6 +169,51 @@ fn integral_lexemes_match_the_original_rule() {
     assert_eq!(integral_lexeme_digits(b"1.00.0"), None);
 }
 
+/// The original split-based canonical shard key rule, as an independent oracle.
+fn reference_canonical(path: &str) -> bool {
+    !path
+        .split('/')
+        .any(|component| matches!(component, "" | "." | ".."))
+}
+
+/// Canonical components match the original split rule on every short path.
+#[test]
+fn canonical_components_match_the_split_rule() {
+    for bytes in all_strings(b"a./", 7) {
+        let path = std::str::from_utf8(&bytes).expect("ASCII");
+        assert_eq!(
+            canonical_components(&bytes),
+            reference_canonical(path),
+            "{path:?}"
+        );
+    }
+}
+
+/// Digest spelling matches the original lowercase-hex rule.
+#[test]
+fn lowercase_digests_match_the_original_rule() {
+    let reference = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let valid = "0123456789abcdef".repeat(4);
+    assert!(is_lowercase_sha256(valid.as_bytes()));
+    for byte in 0..=u8::MAX {
+        let mut digest = valid.clone().into_bytes();
+        digest[17] = byte;
+        let text = String::from_utf8_lossy(&digest).into_owned();
+        assert_eq!(
+            is_lowercase_sha256(&digest),
+            digest.len() == 64 && reference(&text),
+            "byte {byte}"
+        );
+    }
+    assert!(!is_lowercase_sha256(&valid.as_bytes()[1..]));
+    assert!(!is_lowercase_sha256(format!("{valid}0").as_bytes()));
+}
+
 proptest! {
     /// Arbitrary byte strings get the same path verdict as the original rules.
     #[test]

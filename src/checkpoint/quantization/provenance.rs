@@ -40,20 +40,19 @@ use std::os::unix::fs::MetadataExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{QuantizationError, Result};
+pub use super::hash_workers::PROVENANCE_HASH_BUFFER_BYTES;
+use super::{
+    QuantizationError, Result,
+    hash_workers::{hash_worker_count, worker_share},
+};
 use crate::checkpoint::{
     CheckpointManifest, LoadPlan, PlannedSource, PlannedTensor, PlannedTransform,
     artifact::deserialize_unique_map,
+    lexical::{canonical_components, is_lowercase_sha256, lexical_path_violation},
 };
 
 /// Domain separator for the canonical v2 load-plan digest.
 const PLAN_DOMAIN: &[u8] = b"transformers.burnpack.load-plan.v2\0";
-/// Total streaming-buffer budget of one provenance hash pass.
-///
-/// Concurrent shard workers split this budget evenly, so a pass never owns more
-/// hash-buffer memory than this, however many workers run.
-pub const PROVENANCE_HASH_BUFFER_BYTES: usize = 1024 * 1024;
-
 /// SHA-256 identity and exact length of one complete SafeTensors shard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,14 +92,10 @@ impl BurnpackProvenance {
         }
         for (relative_path, shard) in &self.checkpoint_shards {
             // Path::components removes internal `.` segments. Check the original
-            // spelling as well, so one shard cannot have multiple lexical keys.
-            if relative_path.is_empty()
-                || relative_path.contains('\0')
-                || relative_path.contains('\\')
-                || has_windows_drive_prefix(relative_path)
-                || relative_path
-                    .split('/')
-                    .any(|component| matches!(component, "" | "." | ".."))
+            // spelling as well, so one shard cannot have multiple lexical keys;
+            // the verified byte rules reject every empty, `.`, or `..` component.
+            if lexical_path_violation(relative_path.as_bytes()).is_some()
+                || !canonical_components(relative_path.as_bytes())
                 || Path::new(relative_path).is_absolute()
                 || Path::new(relative_path)
                     .components()
@@ -298,24 +293,9 @@ pub(crate) fn hash_local_checkpoint_provenance_audited(
     Ok((provenance, stats))
 }
 
-/// Upper bound on concurrent shard-hashing workers.
-const MAX_HASH_WORKERS: usize = 8;
-
 /// One claimed shard's digest, `None` when cancelled, or its failure, plus the
 /// counters of that shard's own hash attempt.
 type ShardHashOutcome = (Result<Option<BurnpackShardProvenance>>, ProvenanceHashStats);
-
-/// Chooses how many workers hash `shards` shards on `parallelism` hardware threads.
-///
-/// The count is the largest power of two not above `min(parallelism, 8, shards)`
-/// (and at least one), so it divides [`PROVENANCE_HASH_BUFFER_BYTES`] exactly and
-/// the workers' buffer shares sum to the budget with no remainder. Rounding down
-/// gives up less than half of the usable workers, and only when the shard or
-/// thread count is not a power of two (three shards hash on two workers).
-fn hash_worker_count(shards: usize, parallelism: usize) -> usize {
-    let usable = parallelism.min(MAX_HASH_WORKERS).min(shards).max(1);
-    1 << usable.ilog2()
-}
 
 /// Hashes shards on `workers` threads, returning each shard's outcome by index.
 ///
@@ -333,7 +313,8 @@ fn hash_shards_concurrently(
     workers: usize,
 ) -> Vec<Option<ShardHashOutcome>> {
     let shard_count = manifest.shards.len();
-    let share = PROVENANCE_HASH_BUFFER_BYTES / workers.max(1);
+    // Verified: power-of-two worker counts split the budget exactly.
+    let share = worker_share(workers);
     let next = AtomicUsize::new(0);
     let first_failure = AtomicUsize::new(usize::MAX);
     // Claims and hashes shards in order until none remain before a failure.
@@ -854,23 +835,15 @@ impl<W: std::io::Write> std::io::Write for DigestingWriter<W> {
 }
 
 /// Enforces canonical lowercase SHA-256 spelling.
+///
+/// The verified [`is_lowercase_sha256`] accepts exactly 64 bytes of `0-9a-f`.
 pub(crate) fn validate_sha256(digest: &str, subject: &str) -> Result<()> {
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !is_lowercase_sha256(digest.as_bytes()) {
         return Err(QuantizationError::InvalidProvenance {
             reason: format!("{subject} SHA-256 must be 64 lowercase hexadecimal characters"),
         });
     }
     Ok(())
-}
-
-/// Detects portable Windows drive prefixes even when running on Unix.
-fn has_windows_drive_prefix(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 #[cfg(test)]

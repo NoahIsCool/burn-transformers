@@ -50,7 +50,16 @@
 //!   `0`), with non-overlapping anchors;
 //! - `integral_lexeme_digits` accepts exactly the lexemes whose part before the
 //!   first `.` is nonempty digits and whose fraction, if any, is nonempty zeros,
-//!   returning the integer digits' length.
+//!   returning the integer digits' length;
+//! - `canonical_components` accepts exactly the paths whose every component is
+//!   nonempty and neither `.` nor `..`, so a provenance shard has one key, and
+//!   `is_lowercase_sha256` accepts exactly 64 lowercase hexadecimal bytes.
+//!
+//! It verifies `src/checkpoint/runtime/permutation.rs`: `probe_dimension`
+//! lengths strictly increase with the axis (so probe axes are pairwise
+//! distinct), and for distinct input lengths `permutation_of` succeeds exactly
+//! when the mapped shape is a rearrangement of the probe, recovering a
+//! bijection `axes` with `output[k] == input[axes[k]]`.
 //!
 //! It also verifies `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed
 //! lengths (`n` and `ceil(n / 2)`, never above `n`), the two's-complement nibble
@@ -86,6 +95,9 @@ pub mod layout;
 
 #[path = "../src/checkpoint/lexical.rs"]
 pub mod lexical;
+
+#[path = "../src/checkpoint/runtime/permutation.rs"]
+pub mod permutation;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;

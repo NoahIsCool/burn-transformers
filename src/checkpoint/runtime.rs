@@ -16,6 +16,7 @@
 
 mod convert;
 mod packed_install;
+mod permutation;
 mod rounding;
 mod source;
 mod storage_order;

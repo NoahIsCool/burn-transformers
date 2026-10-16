@@ -25,6 +25,7 @@ mod checkpoint;
 mod config;
 mod counts;
 mod error;
+mod hash_workers;
 mod load;
 mod manifest;
 mod packing;
