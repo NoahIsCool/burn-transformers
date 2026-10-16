@@ -30,12 +30,23 @@
 //!
 //! Both perform no network access and return an [`ExecutionOutcome`] (the
 //! audited [`LoadReport`] and [`ExecutionStats`]) or the family's
-//! `…CheckpointLoadError`. That error separates an invalid configuration, a
-//! [`CheckpointError`] from discovery, layout detection, or strict planning
-//! (all raised before any parameter is written), and an execution failure,
-//! whose partial report `execution_failure()` returns; after an execution
-//! failure the model must be discarded. The family's `…LoadError` is the
-//! per-tensor error its [`TensorSink`] raises inside that execution failure.
+//! `…CheckpointLoadError`. Every such error has variants for:
+//!
+//! - an invalid configuration;
+//! - a [`CheckpointError`] from discovery or strict planning. Qwen3.5 and Muse
+//!   also report a failed layout detection this way, as
+//!   [`CheckpointError::LanguageNamespaceNotFound`] or
+//!   [`CheckpointError::AmbiguousLanguageNamespace`];
+//! - family-specific preconditions: Gemma and GPT-2 report a failed layout
+//!   detection as `Namespace`, GPT-2 rejects non-floating storage as
+//!   `NonFloatParameter`, and Qwen3.5 rejects MTP options that disagree with
+//!   the model's MTP graph as `UnloadedMtpGraph` or `MissingMtpGraph`;
+//! - an execution failure, whose partial report `execution_failure()` returns.
+//!
+//! Every variant except the execution failure is raised before any parameter
+//! is written; after an execution failure the model must be discarded. The
+//! family's `…LoadError` is the per-tensor error its [`TensorSink`] raises
+//! inside that execution failure.
 //!
 //! | Family model | `load_checkpoint` detects | `load_checkpoint_with` options |
 //! | --- | --- | --- |
