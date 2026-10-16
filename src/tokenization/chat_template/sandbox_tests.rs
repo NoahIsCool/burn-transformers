@@ -587,7 +587,10 @@ fn format_widths_follow_printf() {
 /// Each test owns its counter, so tests running in parallel cannot disturb
 /// one another's counts.
 #[derive(Debug)]
-struct Probe(Arc<AtomicUsize>);
+struct Probe(
+    /// Drop counter shared with the test, incremented once per destroyed probe.
+    Arc<AtomicUsize>,
+);
 
 impl minijinja::value::Object for Probe {}
 

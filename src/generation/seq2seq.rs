@@ -176,9 +176,15 @@ impl<'de> Deserialize<'de> for EarlyStopping {
         #[serde(untagged)]
         enum Representation {
             /// `true` or `false`.
-            Flag(bool),
+            Flag(
+                /// `true` selects [`EarlyStopping::Eager`], `false` the heuristic rule.
+                bool,
+            ),
             /// The only accepted string, `"never"`.
-            Text(String),
+            Text(
+                /// Raw string value; anything other than `"never"` is rejected.
+                String,
+            ),
         }
         match Representation::deserialize(deserializer)? {
             Representation::Flag(eager) => Ok(eager.into()),
@@ -834,7 +840,10 @@ fn empty_completed(batch: usize) -> Result<Vec<Vec<BeamHypothesis>>> {
 /// `candidate_order` ranks better candidates first (`Less`), so a max-heap of
 /// this wrapper exposes the candidate that the next better one should evict.
 #[derive(Clone, Copy, Debug)]
-struct WorstFirst(Candidate);
+struct WorstFirst(
+    /// Wrapped expansion ranked by cumulative log probability, then parent slot, then token ID.
+    Candidate,
+);
 
 impl PartialEq for WorstFirst {
     /// Candidates are equal only when the total order ties, i.e. never for distinct pairs.

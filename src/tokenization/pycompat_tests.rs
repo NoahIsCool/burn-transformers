@@ -296,7 +296,7 @@ fn casing_and_whitespace_follow_python() {
 /// The whitespace class equals CPython 3.11's `str.isspace()` over every scalar value.
 #[test]
 fn python_whitespace_matches_cpython_exhaustively() {
-    // `[c for c in map(chr, range(0x110000)) if c.isspace()]` in CPython 3.11.
+    /// `[c for c in map(chr, range(0x110000)) if c.isspace()]` in CPython 3.11.
     const CPYTHON: [u32; 29] = [
         0x9, 0xa, 0xb, 0xc, 0xd, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001,
         0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029,

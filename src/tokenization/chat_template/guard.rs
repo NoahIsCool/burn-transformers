@@ -147,6 +147,7 @@ fn newline_count(text: &str) -> usize {
 
 /// Shortens a tag to at most 80 bytes on a character boundary for an error message.
 fn shorten(tag: &str) -> String {
+    /// Largest retained byte length; longer tags keep a prefix and gain a `...` suffix.
     const LIMIT: usize = 80;
     if tag.len() <= LIMIT {
         return tag.to_owned();
@@ -372,9 +373,15 @@ struct Parser<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Refusal {
     /// Syntax this parser does not read; refused only if the tag has a guarded operator.
-    Syntax(String),
+    Syntax(
+        /// Human-readable description of the unsupported construct.
+        String,
+    ),
     /// Nesting or a chain past the limits; always refused, to protect MiniJinja's stack.
-    Limit(String),
+    Limit(
+        /// Human-readable description naming the exceeded limit.
+        String,
+    ),
 }
 
 impl From<String> for Refusal {

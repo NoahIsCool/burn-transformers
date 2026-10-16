@@ -777,9 +777,15 @@ fn integer_argument(value: &Value) -> Option<i128> {
 /// A number accepted by [`round`], keeping Python's int/float distinction.
 enum RoundOperand {
     /// An integer or boolean.
-    Integer(i128),
+    Integer(
+        /// Exact value; `True` and `False` read as 1 and 0, as Python's `bool` is an `int`.
+        i128,
+    ),
     /// A floating-point number.
-    Float(f64),
+    Float(
+        /// IEEE-754 binary64 value, Python's `float`.
+        f64,
+    ),
 }
 
 impl RoundOperand {

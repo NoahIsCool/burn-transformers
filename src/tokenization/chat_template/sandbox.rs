@@ -93,7 +93,10 @@ impl RenderLimits {
 }
 
 /// An [`io::Write`] sink that only counts bytes, for sizing a serialization without storing it.
-struct ByteCounter(usize);
+struct ByteCounter(
+    /// Total bytes written so far; saturates instead of overflowing.
+    usize,
+);
 
 impl io::Write for ByteCounter {
     /// Counts `buffer` and discards it.
@@ -440,6 +443,7 @@ pub(crate) fn bounded_concat(
     left: &Value,
     right: &Value,
 ) -> Result<Value, Error> {
+    /// Operation name quoted by limit and printing errors.
     const OPERATION: &str = "string concatenation `~`";
     let mut text = LimitedText::new(budget.text_allowance());
     if fmt::Write::write_fmt(&mut text, format_args!("{left}{right}")).is_err() {
@@ -541,6 +545,7 @@ pub(crate) fn bounded_splat(budget: &RenderBudget, value: Value) -> Result<Value
 
 /// Repeats the items of `sequence` `count` times into one bounded list.
 fn repeat_sequence(budget: &RenderBudget, sequence: &Value, count: &Value) -> Result<Value, Error> {
+    /// Operation name quoted by limit and type errors.
     const OPERATION: &str = "sequence repetition `*`";
     let count = count.as_usize().ok_or_else(|| {
         Error::new(
@@ -1193,7 +1198,10 @@ fn is_identifier(name: &str) -> bool {
 
 /// Clears a render's namespaces when dropped, including while a panic unwinds.
 #[derive(Debug)]
-pub(crate) struct CycleBreaker(pub(crate) Arc<NamespaceRegistry>);
+pub(crate) struct CycleBreaker(
+    /// Registry shared with the render's `namespace()` function; cleared on drop.
+    pub(crate) Arc<NamespaceRegistry>,
+);
 
 impl Drop for CycleBreaker {
     /// Breaks every namespace cycle the render built.
@@ -1219,6 +1227,7 @@ pub(crate) fn install_namespace_registry(
     environment.add_function(
         "namespace",
         move |defaults: Option<Value>| -> Result<Value, Error> {
+            /// Operation name quoted by the namespace charge's limit errors.
             const OPERATION: &str = "namespace()";
             let (attributes, key_bytes) = match &defaults {
                 // Other values are MiniJinja's error, reported by the call below.
