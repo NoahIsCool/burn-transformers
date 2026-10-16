@@ -11,7 +11,13 @@
 //! ([`RopeParameters`], or a per-layer-type [`RopeParameterSet`]) together with
 //! the surrounding config fields ([`RopeContext`]) into the executable
 //! [`crate::position::RopeConfig`], so every family shares one precedence policy.
+//!
+//! The integer verdicts behind these checks (multimodal RoPE sections, head
+//! divisibility, token-ID ranges, the trained context and its precedence, and
+//! the lexer of the legacy `Infinity` normalization) live in the private
+//! `plan` module, which Verus verifies in place through `verus/config.rs`.
 
+mod plan;
 pub mod rope;
 
 use std::error::Error;
@@ -20,6 +26,11 @@ use std::fmt::{self, Display, Formatter};
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+
+use plan::{
+    DivisibilityFault, INFINITY_TOKEN_LENGTH, MropeSectionFault, TokenIdFault, divisibility_fault,
+    infinity_token_starts, mrope_section_fault, original_context_fits, token_id_fault,
+};
 
 pub use rope::{
     DEFAULT_ROPE_THETA, DynamicNtkContext, MropeHandling, PartialRotary, RopeContext,
@@ -201,42 +212,22 @@ where
 /// used Python's extension in `time_step_limit`. A small lexical pass is preferable
 /// to adopting a permissive JSON dialect for every model. Quoted text is copied
 /// byte-for-byte, including escaped quotes, so metadata strings cannot be changed.
+///
+/// The Verus-verified `infinity_token_starts` finds exactly the tokens outside
+/// strings, in increasing order and at least one token length apart. Each
+/// token is ASCII, so every start and end is a character boundary of `input`
+/// and the slices below cannot panic.
 fn normalize_positive_infinity(input: &str) -> String {
-    /// Legacy non-JSON numeric literal accepted outside quoted metadata.
-    const TOKEN: &[u8] = b"Infinity";
+    /// JSON literal written in place of each legacy token.
+    const REPLACEMENT: &str = "null";
     let mut normalized = String::with_capacity(input.len());
-    let mut remaining = input;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while let Some(character) = remaining.chars().next() {
-        if in_string {
-            normalized.push(character);
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            remaining = &remaining[character.len_utf8()..];
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-            normalized.push('"');
-            remaining = &remaining[character.len_utf8()..];
-        } else if remaining.as_bytes().starts_with(TOKEN) {
-            normalized.push_str("null");
-            // The matched token is ASCII, so its end is a UTF-8 boundary.
-            remaining = &remaining[TOKEN.len()..];
-        } else {
-            normalized.push(character);
-            remaining = &remaining[character.len_utf8()..];
-        }
+    let mut copied = 0;
+    for start in infinity_token_starts(input.as_bytes()) {
+        normalized.push_str(&input[copied..start]);
+        normalized.push_str(REPLACEMENT);
+        copied = start + INFINITY_TOKEN_LENGTH;
     }
-
+    normalized.push_str(&input[copied..]);
     normalized
 }
 
@@ -613,23 +604,22 @@ impl RopeParameters {
         }
 
         if let Some(sections) = &self.mrope_section {
-            if sections.is_empty() || sections.contains(&0) {
-                return Err(ConfigError::new(
-                    architecture,
-                    "mrope_section",
-                    "sections must be non-empty and contain only positive widths",
-                ));
-            }
-            let section_width = sections
-                .iter()
-                .try_fold(0usize, |sum, width| sum.checked_add(*width))
-                .and_then(|sum| sum.checked_mul(2));
-            if section_width != Some(rotary_width) {
-                return Err(ConfigError::new(
-                    architecture,
-                    "mrope_section",
-                    "twice the complex-pair section sum must equal the rotary width",
-                ));
+            match mrope_section_fault(sections, rotary_width) {
+                Some(MropeSectionFault::EmptyOrZero) => {
+                    return Err(ConfigError::new(
+                        architecture,
+                        "mrope_section",
+                        "sections must be non-empty and contain only positive widths",
+                    ));
+                }
+                Some(MropeSectionFault::WidthMismatch) => {
+                    return Err(ConfigError::new(
+                        architecture,
+                        "mrope_section",
+                        "twice the complex-pair section sum must equal the rotary width",
+                    ));
+                }
+                None => {}
             }
         }
 
@@ -788,6 +778,9 @@ pub(crate) fn probability(
 }
 
 /// Validates the quotient needed when query heads share key/value heads.
+///
+/// The verdict is the Verus-verified `divisibility_fault`: both counts must be
+/// non-zero (numerator first) and the denominator must divide the numerator.
 pub(crate) fn divisible(
     architecture: &'static str,
     numerator_field: &'static str,
@@ -795,20 +788,31 @@ pub(crate) fn divisible(
     denominator_field: &'static str,
     denominator: usize,
 ) -> Result<(), ConfigError> {
-    nonzero(architecture, numerator_field, numerator)?;
-    nonzero(architecture, denominator_field, denominator)?;
-    if numerator.is_multiple_of(denominator) {
-        Ok(())
-    } else {
-        Err(ConfigError::new(
+    match divisibility_fault(numerator, denominator) {
+        None => Ok(()),
+        // The verified fault names the zero count; the message matches `nonzero`.
+        Some(DivisibilityFault::ZeroNumerator) => Err(ConfigError::new(
+            architecture,
+            numerator_field,
+            "must be nonzero",
+        )),
+        Some(DivisibilityFault::ZeroDenominator) => Err(ConfigError::new(
+            architecture,
+            denominator_field,
+            "must be nonzero",
+        )),
+        Some(DivisibilityFault::Indivisible) => Err(ConfigError::new(
             architecture,
             numerator_field,
             format!("must be divisible by {denominator_field}"),
-        ))
+        )),
     }
 }
 
 /// Validates that token IDs index rows in the embedding table.
+///
+/// The verdict is the Verus-verified `token_id_fault`: a present field must
+/// list at least one ID, and every ID must be below `vocab_size`.
 pub(crate) fn token_ids(
     architecture: &'static str,
     field: &'static str,
@@ -817,19 +821,22 @@ pub(crate) fn token_ids(
 ) -> Result<(), ConfigError> {
     if let Some(ids) = ids {
         let values = ids.iter().collect::<Vec<_>>();
-        if values.is_empty() {
-            return Err(ConfigError::new(
-                architecture,
-                field,
-                "must contain at least one token ID",
-            ));
-        }
-        if values.iter().any(|id| *id >= vocab_size) {
-            return Err(ConfigError::new(
-                architecture,
-                field,
-                "contains an ID outside the vocabulary",
-            ));
+        match token_id_fault(&values, vocab_size) {
+            Some(TokenIdFault::Empty) => {
+                return Err(ConfigError::new(
+                    architecture,
+                    field,
+                    "must contain at least one token ID",
+                ));
+            }
+            Some(TokenIdFault::OutOfVocabulary) => {
+                return Err(ConfigError::new(
+                    architecture,
+                    field,
+                    "contains an ID outside the vocabulary",
+                ));
+            }
+            None => {}
         }
     }
     Ok(())
@@ -885,7 +892,7 @@ fn original_context(
             "is required by the selected scaling algorithm",
         )
     })?;
-    if original == 0 || original > max_position_embeddings {
+    if !original_context_fits(original, max_position_embeddings) {
         Err(ConfigError::new(
             architecture,
             "rope.original_max_position_embeddings",

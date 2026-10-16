@@ -424,3 +424,40 @@ fn new_errors_have_actionable_messages() {
         assert!(message.contains(fragment), "{message}");
     }
 }
+
+/// Table lengths must agree before their shared count is range-checked.
+#[test]
+fn long_rope_counts_check_agreement_then_range() {
+    assert_eq!(long_rope_frequency_count(3, 3), Ok(3));
+    assert_eq!(long_rope_frequency_count(1, 1), Ok(1));
+    assert_eq!(
+        long_rope_frequency_count(MAX_LONG_ROPE_FREQUENCIES, MAX_LONG_ROPE_FREQUENCIES),
+        Ok(MAX_LONG_ROPE_FREQUENCIES)
+    );
+    assert_eq!(
+        long_rope_frequency_count(0, 200),
+        Err(RopeConfigError::LongRopeFactorLengthMismatch {
+            short: 0,
+            long: 200
+        })
+    );
+    for count in [0, MAX_LONG_ROPE_FREQUENCIES + 1] {
+        assert_eq!(
+            long_rope_frequency_count(count, count),
+            Err(RopeConfigError::LongRopeFactorCountOutOfRange {
+                count,
+                maximum: MAX_LONG_ROPE_FREQUENCIES,
+            })
+        );
+    }
+}
+
+/// Proportional pair counts never exceed the head's split-half pairs.
+#[test]
+fn rotated_pair_counts_are_clamped_to_half_the_head() {
+    assert_eq!(clamp_rotated_pairs(3, 8), 3);
+    assert_eq!(clamp_rotated_pairs(4, 8), 4);
+    assert_eq!(clamp_rotated_pairs(usize::MAX, 8), 4);
+    assert_eq!(clamp_rotated_pairs(usize::MAX, 7), 3);
+    assert_eq!(clamp_rotated_pairs(0, 0), 0);
+}

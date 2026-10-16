@@ -354,3 +354,78 @@ fn validation_errors_have_actionable_messages() {
         assert!(!message.is_empty());
     }
 }
+
+/// Dimension checks report the first failed condition, even when later ones fail too.
+#[test]
+fn dimension_checks_report_the_first_failure() {
+    assert_eq!(
+        validate_dimensions(0, 0),
+        Err(RopeConfigError::ZeroHeadDimension)
+    );
+    assert_eq!(
+        validate_dimensions(4, 0),
+        Err(RopeConfigError::ZeroRotaryDimension)
+    );
+    // Odd and too wide: the width check comes first.
+    assert_eq!(
+        validate_dimensions(4, 5),
+        Err(RopeConfigError::RotaryDimensionExceedsHead {
+            rotary_dimension: 5,
+            head_dimension: 4,
+        })
+    );
+    assert_eq!(
+        validate_dimensions(5, 5),
+        Err(RopeConfigError::OddRotaryDimension {
+            rotary_dimension: 5
+        })
+    );
+    assert_eq!(validate_dimensions(5, 4), Ok(()));
+    assert_eq!(validate_dimensions(usize::MAX, usize::MAX - 1), Ok(()));
+}
+
+/// Each scaling policy adds exactly its own width rule.
+#[test]
+fn scaling_width_rules_match_each_policy() {
+    assert_eq!(
+        check_scaling_width(2, 2, ScalingWidthRule::Unconstrained),
+        Ok(())
+    );
+    assert_eq!(
+        check_scaling_width(8, 2, ScalingWidthRule::DynamicNtk),
+        Err(RopeConfigError::DynamicNtkDimensionTooSmall {
+            rotary_dimension: 2
+        })
+    );
+    assert_eq!(
+        check_scaling_width(8, 4, ScalingWidthRule::DynamicNtk),
+        Ok(())
+    );
+    assert_eq!(
+        check_scaling_width(8, 6, ScalingWidthRule::LongRope { factor_count: 4 }),
+        Err(RopeConfigError::LongRopeFactorCount {
+            expected: 3,
+            actual: 4,
+        })
+    );
+    assert_eq!(
+        check_scaling_width(8, 6, ScalingWidthRule::LongRope { factor_count: 3 }),
+        Ok(())
+    );
+    assert_eq!(
+        check_scaling_width(8, 6, ScalingWidthRule::FullHead),
+        Err(RopeConfigError::ProportionalRequiresFullRotation {
+            rotary_dimension: 6,
+            head_dimension: 8,
+        })
+    );
+    assert_eq!(
+        check_scaling_width(8, 8, ScalingWidthRule::FullHead),
+        Ok(())
+    );
+    assert_eq!(
+        validate_original_context("test", 0),
+        Err(RopeConfigError::ZeroOriginalContext { kind: "test" })
+    );
+    assert_eq!(validate_original_context("test", 1), Ok(()));
+}

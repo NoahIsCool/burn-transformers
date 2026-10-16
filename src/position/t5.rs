@@ -12,17 +12,136 @@
 //!
 //! # Verified bucket assembly
 //!
-//! The floating-point logarithm only proposes a logarithmic offset. The integer
-//! assembly in [`combine_bucket`] is checked in place by Verus through
-//! `verus/position.rs`: for every validated bucket geometry and *any* proposed
-//! offset, the result is a valid table index, bidirectional future keys use the
-//! upper half and past keys the lower half, causal future keys map to bucket
-//! zero, and exact-region distances map to `direction_offset + distance`.
+//! The floating-point logarithm only proposes a logarithmic offset. Every
+//! integer step around it is checked in place by Verus through
+//! `verus/position.rs`:
+//!
+//! * [`checked_bucket_geometry`] (behind [`T5RelativePositionBuckets::new`])
+//!   accepts exactly the geometries satisfying `valid_bucket_geometry` and
+//!   otherwise returns the first failed check in order;
+//! * [`signed_direction_distance`] and [`position_direction_distance`] split a
+//!   signed displacement or a pair of absolute positions into the direction
+//!   `key > query` and the exact distance `|key - query|`, including
+//!   `i64::MIN` and the full `usize` range;
+//! * [`combine_bucket`] equals the reference formula `spec_bucket` for every
+//!   validated geometry and *any* proposed offset, so the result is a valid
+//!   table index, bidirectional future keys use the upper half and past keys
+//!   the lower half, causal future keys map to bucket zero, exact-region
+//!   distances map to `direction_offset + distance`, and the logarithmic
+//!   region is `min(E + offset, B - 1)`; `lemma_bucket_monotone` shows that
+//!   within one direction buckets never decrease with distance whenever the
+//!   proposed offsets do not.
 
 use core::fmt;
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Buckets per direction `B`: half the table when bidirectional, all of it otherwise.
+pub open spec fn spec_buckets_per_direction(num_buckets: int, bidirectional: bool) -> int {
+    if bidirectional {
+        num_buckets / 2
+    } else {
+        num_buckets
+    }
+}
+
+/// The geometry [`T5RelativePositionBuckets::new`] accepts.
+///
+/// A causal table needs two buckets, a bidirectional one an even count of at
+/// least four, and the saturation distance must exceed the exact-region size
+/// `E = B / 2`.
+pub open spec fn valid_bucket_geometry(
+    num_buckets: int,
+    max_distance: int,
+    bidirectional: bool,
+) -> bool {
+    &&& if bidirectional {
+        num_buckets >= 4 && num_buckets % 2 == 0
+    } else {
+        num_buckets >= 2
+    }
+    &&& max_distance > spec_buckets_per_direction(num_buckets, bidirectional) / 2
+}
+
+/// Reference T5 bucket for a direction, distance, and proposed logarithmic offset.
+///
+/// With `B` buckets per direction and `E = B / 2`, the within-direction index
+/// is the distance below `E` and `min(E + offset, B - 1)` from `E` on;
+/// bidirectional future keys add `B`, and causal future keys use distance zero.
+pub open spec fn spec_bucket(
+    num_buckets: int,
+    bidirectional: bool,
+    key_is_future: bool,
+    distance: int,
+    logarithmic_offset: int,
+) -> int {
+    let per_direction = spec_buckets_per_direction(num_buckets, bidirectional);
+    let max_exact = per_direction / 2;
+    let direction_offset = if bidirectional && key_is_future {
+        per_direction
+    } else {
+        0
+    };
+    let distance = if !bidirectional && key_is_future {
+        0
+    } else {
+        distance
+    };
+    let within_direction = if distance < max_exact {
+        distance
+    } else if max_exact + logarithmic_offset < per_direction - 1 {
+        max_exact + logarithmic_offset
+    } else {
+        per_direction - 1
+    };
+    direction_offset + within_direction
+}
+
+/// Within one direction, buckets never decrease with distance when the offsets do not.
+///
+/// The exact region `d < E` maps below `E`, the logarithmic region maps to
+/// `min(E + offset, B - 1) >= E`, and both pieces are monotone, so a
+/// monotone logarithmic proposal (the floating-point logarithm, covered by
+/// the unit tests) yields monotone buckets that saturate at `B - 1`.
+pub proof fn lemma_bucket_monotone(
+    num_buckets: int,
+    bidirectional: bool,
+    key_is_future: bool,
+    near: int,
+    far: int,
+    near_offset: int,
+    far_offset: int,
+)
+    requires
+        bidirectional ==> num_buckets >= 4 && num_buckets % 2 == 0,
+        !bidirectional ==> num_buckets >= 2,
+        0 <= near <= far,
+        0 <= near_offset <= far_offset,
+    ensures
+        spec_bucket(num_buckets, bidirectional, key_is_future, near, near_offset) <= spec_bucket(
+            num_buckets,
+            bidirectional,
+            key_is_future,
+            far,
+            far_offset,
+        ),
+{
+}
+
+/// Absolute value of a signed displacement.
+pub open spec fn spec_abs(value: int) -> int {
+    if value >= 0 {
+        value
+    } else {
+        -value
+    }
+}
+
+} // verus!
 
 /// Validated T5 relative-position bucketing parameters.
 ///
@@ -32,6 +151,7 @@ use vstd::prelude::*;
 /// until all distances at or beyond `max_distance` share the final bucket.
 /// Bidirectional attention splits the table evenly between past and future;
 /// causal attention maps every future key to distance zero.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct T5RelativePositionBuckets {
     /// Total learned bias-table entries across both directions, when bidirectional.
@@ -56,35 +176,7 @@ impl T5RelativePositionBuckets {
         max_distance: usize,
         bidirectional: bool,
     ) -> Result<Self, T5BucketError> {
-        let minimum = if bidirectional { 4 } else { 2 };
-        if num_buckets < minimum {
-            return Err(T5BucketError::TooFewBuckets {
-                num_buckets,
-                bidirectional,
-                minimum,
-            });
-        }
-        if bidirectional && !num_buckets.is_multiple_of(2) {
-            return Err(T5BucketError::OddBidirectionalBucketCount { num_buckets });
-        }
-        let buckets_per_direction = if bidirectional {
-            num_buckets / 2
-        } else {
-            num_buckets
-        };
-        let max_exact = buckets_per_direction / 2;
-        if max_distance <= max_exact {
-            return Err(T5BucketError::MaxDistanceNotBeyondExact {
-                max_distance,
-                max_exact,
-            });
-        }
-
-        Ok(Self {
-            num_buckets,
-            max_distance,
-            bidirectional,
-        })
+        checked_bucket_geometry(num_buckets, max_distance, bidirectional)
     }
 
     /// Returns the total learned relative-bias bucket count.
@@ -112,8 +204,7 @@ impl T5RelativePositionBuckets {
     /// `i64::MIN` without signed-absolute-value overflow.
     #[must_use]
     pub fn bucket(self, relative_position: i64) -> usize {
-        let key_is_future = relative_position > 0;
-        let distance = relative_position.unsigned_abs();
+        let (key_is_future, distance) = signed_direction_distance(relative_position);
         self.bucket_parts(key_is_future, distance)
     }
 
@@ -123,14 +214,8 @@ impl T5RelativePositionBuckets {
     /// `usize` position range.
     #[must_use]
     pub fn bucket_for_positions(self, query_position: usize, key_position: usize) -> usize {
-        if key_position >= query_position {
-            self.bucket_parts(
-                key_position > query_position,
-                (key_position - query_position) as u64,
-            )
-        } else {
-            self.bucket_parts(false, (query_position - key_position) as u64)
-        }
+        let (key_is_future, distance) = position_direction_distance(query_position, key_position);
+        self.bucket_parts(key_is_future, distance)
     }
 
     /// Maps a direction and unsigned distance to exact or logarithmic T5 buckets.
@@ -177,6 +262,127 @@ impl T5RelativePositionBuckets {
     }
 }
 
+/// Validates a bucket geometry and builds the mapping, or reports the first failed check.
+///
+/// Verified: the result is `Ok` exactly for geometries satisfying
+/// `valid_bucket_geometry`, and then stores the inputs unchanged. Otherwise it
+/// is the first failure in the order too few buckets, odd bidirectional count,
+/// saturation distance not beyond the exact region, each carrying the
+/// offending values.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(buckets) => {
+                &&& buckets.num_buckets == num_buckets
+                &&& buckets.max_distance == max_distance
+                &&& buckets.bidirectional == bidirectional
+                &&& valid_bucket_geometry(num_buckets as int, max_distance as int, bidirectional)
+            },
+            Err(T5BucketError::TooFewBuckets { num_buckets: count, bidirectional: mode, minimum }) => {
+                &&& count == num_buckets
+                &&& mode == bidirectional
+                &&& minimum == if bidirectional { 4usize } else { 2usize }
+                &&& num_buckets < minimum
+            },
+            Err(T5BucketError::OddBidirectionalBucketCount { num_buckets: count }) => {
+                &&& count == num_buckets
+                &&& bidirectional
+                &&& num_buckets >= 4
+                &&& num_buckets % 2 == 1
+            },
+            Err(T5BucketError::MaxDistanceNotBeyondExact { max_distance: distance, max_exact }) => {
+                &&& distance == max_distance
+                &&& max_exact == spec_buckets_per_direction(num_buckets as int, bidirectional) / 2
+                &&& if bidirectional {
+                    num_buckets >= 4 && num_buckets % 2 == 0
+                } else {
+                    num_buckets >= 2
+                }
+                &&& max_distance <= max_exact
+            },
+        }
+))]
+fn checked_bucket_geometry(
+    num_buckets: usize,
+    max_distance: usize,
+    bidirectional: bool,
+) -> Result<T5RelativePositionBuckets, T5BucketError> {
+    let minimum = if bidirectional { 4 } else { 2 };
+    if num_buckets < minimum {
+        return Err(T5BucketError::TooFewBuckets {
+            num_buckets,
+            bidirectional,
+            minimum,
+        });
+    }
+    if bidirectional && !num_buckets.is_multiple_of(2) {
+        return Err(T5BucketError::OddBidirectionalBucketCount { num_buckets });
+    }
+    let buckets_per_direction = if bidirectional {
+        num_buckets / 2
+    } else {
+        num_buckets
+    };
+    let max_exact = buckets_per_direction / 2;
+    if max_distance <= max_exact {
+        return Err(T5BucketError::MaxDistanceNotBeyondExact {
+            max_distance,
+            max_exact,
+        });
+    }
+
+    Ok(T5RelativePositionBuckets {
+        num_buckets,
+        max_distance,
+        bidirectional,
+    })
+}
+
+/// Splits a signed key-minus-query displacement into direction and distance.
+///
+/// Verified: the direction is `relative_position > 0` and the distance is
+/// exactly `|relative_position|`, including `2^63` for `i64::MIN`, without
+/// signed overflow (the magnitude of a negative value is formed as
+/// `-(value + 1) + 1`).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(parts =>
+    ensures
+        parts.0 == (relative_position > 0),
+        parts.1 as int == spec_abs(relative_position as int),
+))]
+fn signed_direction_distance(relative_position: i64) -> (bool, u64) {
+    if relative_position >= 0 {
+        (relative_position > 0, relative_position as u64)
+    } else {
+        // `-(relative_position + 1)` is at most `i64::MAX`, so it cannot overflow.
+        (false, (-(relative_position + 1)) as u64 + 1)
+    }
+}
+
+/// Splits absolute query and key positions into direction and distance.
+///
+/// Verified: the direction is `key_position > query_position` and the
+/// distance is exactly `|key_position - query_position|` for every pair of
+/// `usize` positions, so it agrees with [`signed_direction_distance`] of the
+/// signed displacement whenever that displacement fits in `i64`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(parts =>
+    ensures
+        parts.0 == (key_position > query_position),
+        parts.1 as int == spec_abs(key_position as int - query_position as int),
+))]
+fn position_direction_distance(query_position: usize, key_position: usize) -> (bool, u64) {
+    if key_position >= query_position {
+        (
+            key_position > query_position,
+            (key_position - query_position) as u64,
+        )
+    } else {
+        (false, (query_position - key_position) as u64)
+    }
+}
+
 /// Assembles a table index from direction, distance, and a proposed logarithmic offset.
 ///
 /// With `B` buckets per direction and `E = B/2` exact buckets, the
@@ -185,12 +391,23 @@ impl T5RelativePositionBuckets {
 /// add `B`. Causal future keys use distance zero, matching the reference,
 /// because the causal mask—not the bias—excludes them. The minimum is computed
 /// without forming `E + logarithmic_offset`, so arbitrary offsets cannot overflow.
+///
+/// Verified: the result equals the reference formula `spec_bucket` exactly
+/// for every validated bucket count and every distance and offset, which
+/// implies the listed range, direction, and exact-region properties.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(bucket =>
     requires
         bidirectional ==> num_buckets >= 4 && num_buckets % 2 == 0,
         !bidirectional ==> num_buckets >= 2,
     ensures
+        bucket == spec_bucket(
+            num_buckets as int,
+            bidirectional,
+            key_is_future,
+            distance as int,
+            logarithmic_offset as int,
+        ),
         bucket < num_buckets,
         bidirectional && key_is_future ==> bucket >= num_buckets / 2,
         bidirectional && !key_is_future ==> bucket < num_buckets / 2,
@@ -238,6 +455,7 @@ fn combine_bucket(
 }
 
 /// Invalid parameters for [`T5RelativePositionBuckets`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum T5BucketError {
     /// There are not enough buckets to divide exact and logarithmic regions.

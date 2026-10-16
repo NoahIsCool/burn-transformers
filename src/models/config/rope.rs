@@ -112,6 +112,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::plan::{OriginalContextFault, resolve_original_context};
 use super::{RopeParameters, RopeType};
 use crate::position::{
     DynamicNtkScaling, LinearRopeScaling, Llama3RopeScaling, LongRopeScaling,
@@ -448,14 +449,19 @@ impl Scope<'_> {
     /// Applies the unused-field policy: an error under `Reject`, `Ok` under `Ignore`.
     fn unused(&self, field: &str, reason: &str) -> Result<()> {
         match self.context.unused_fields {
-            UnusedRopeFields::Reject => Err(self.error(
-                field,
-                format!(
-                    "{reason}; remove it, or select UnusedRopeFields::Ignore to resolve it as Transformers 5.2 does"
-                ),
-            )),
+            UnusedRopeFields::Reject => Err(self.unused_error(field, reason)),
             UnusedRopeFields::Ignore => Ok(()),
         }
+    }
+
+    /// Builds the error [`Self::unused`] returns under [`UnusedRopeFields::Reject`].
+    fn unused_error(&self, field: &str, reason: &str) -> Error {
+        self.error(
+            field,
+            format!(
+                "{reason}; remove it, or select UnusedRopeFields::Ignore to resolve it as Transformers 5.2 does"
+            ),
+        )
     }
 
     /// Reports a field the selected algorithm requires but the config omits.
@@ -866,41 +872,36 @@ fn translate(parameters: &RopeParameters, scope: &Scope<'_>) -> Result<RopeConfi
     )?
     .unwrap_or(1.0);
     // Only algorithms with a trained context read the original length, so its
-    // sources are resolved (and checked for agreement) on demand.
+    // sources are resolved (and checked for agreement) on demand. The
+    // precedence is the Verus-verified `resolve_original_context`.
     let original_or_max = || -> Result<usize> {
-        if parameters.original_max_position_embeddings == Some(0) {
-            return Err(scope.error("original_max_position_embeddings", "must be nonzero"));
-        }
-        let original = if scope.per_layer_type {
-            // `standardize_rope_params` (per-layer branch) only `setdefault`s
-            // `max_position_embeddings`; the top-level value is never read.
-            let resolved = parameters
-                .original_max_position_embeddings
-                .unwrap_or(context.max_position_embeddings);
-            if let Some(top_level) = context.original_max_position_embeddings
-                && top_level != resolved
-            {
-                scope.unused(
-                    "original_max_position_embeddings",
-                    &format!(
-                        "top-level value {top_level} is not read for a per-layer-type mapping, whose layer uses {resolved} (Transformers 5.2 standardize_rope_params)"
-                    ),
-                )?;
+        resolve_original_context(
+            parameters.original_max_position_embeddings,
+            context.original_max_position_embeddings,
+            context.max_position_embeddings,
+            scope.per_layer_type,
+            context.unused_fields == UnusedRopeFields::Reject,
+        )
+        .map_err(|fault| match fault {
+            OriginalContextFault::NestedZero | OriginalContextFault::Zero => {
+                scope.error("original_max_position_embeddings", "must be nonzero")
             }
-            Some(resolved)
-        } else {
-            resolve_duplicate(
-                scope,
+            OriginalContextFault::LayerConflict {
+                top_level,
+                resolved,
+            } => scope.unused_error(
                 "original_max_position_embeddings",
-                parameters.original_max_position_embeddings,
-                context.original_max_position_embeddings,
-                false,
-            )?
-        };
-        match original {
-            Some(0) => Err(scope.error("original_max_position_embeddings", "must be nonzero")),
-            original => Ok(original.unwrap_or(context.max_position_embeddings)),
-        }
+                &format!(
+                    "top-level value {top_level} is not read for a per-layer-type mapping, whose layer uses {resolved} (Transformers 5.2 standardize_rope_params)"
+                ),
+            ),
+            OriginalContextFault::FlatConflict { nested, top_level } => scope.unused_error(
+                "original_max_position_embeddings",
+                &format!(
+                    "rope_parameters value {nested} disagrees with top-level value {top_level}"
+                ),
+            ),
+        })
     };
 
     let rotary_dimension = if rope_type == RopeType::Proportional {

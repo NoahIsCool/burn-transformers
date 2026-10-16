@@ -27,8 +27,20 @@
 //! materializes them, inside a fixed-capacity inline array. The inline storage
 //! keeps [`super::RopeConfig`] `Copy`—it is passed by value through every
 //! attention layer—at the cost of a constant 1 KiB per configuration value.
+//!
+//! # Verified counts
+//!
+//! The integer steps are checked in place by Verus through
+//! `verus/position.rs`: [`long_rope_frequency_count`] accepts exactly equal
+//! table lengths in `1..=MAX_LONG_ROPE_FREQUENCIES` (the invariant that keeps
+//! [`LongRopeScaling::short_factors`] and [`LongRopeScaling::long_factors`]
+//! inside their inline arrays), and [`clamp_rotated_pairs`] bounds the
+//! proportional pair count by `head_dimension / 2`.
 
 use core::fmt;
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
 
 use super::rope::{
     RopeConfigError, is_normal_positive_f32, validate_original_context, validate_scaling_factor,
@@ -40,6 +52,7 @@ use super::rope::{
 /// LongRoPE checkpoint (Phi-3, Phi-3.5, Phi-4-mini, MiniCPM) uses at most 64
 /// pairs; wider tables are rejected with
 /// [`RopeConfigError::LongRopeFactorCountOutOfRange`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub const MAX_LONG_ROPE_FREQUENCIES: usize = 128;
 
 /// Validated Llama 3 smooth low/high-frequency RoPE interpolation.
@@ -202,19 +215,7 @@ impl LongRopeScaling {
     ) -> Result<Self, RopeConfigError> {
         validate_scaling_factor("LongRoPE", factor)?;
         validate_original_context("LongRoPE", original_max_position_embeddings)?;
-        if short_factor.len() != long_factor.len() {
-            return Err(RopeConfigError::LongRopeFactorLengthMismatch {
-                short: short_factor.len(),
-                long: long_factor.len(),
-            });
-        }
-        let frequency_count = short_factor.len();
-        if frequency_count == 0 || frequency_count > MAX_LONG_ROPE_FREQUENCIES {
-            return Err(RopeConfigError::LongRopeFactorCountOutOfRange {
-                count: frequency_count,
-                maximum: MAX_LONG_ROPE_FREQUENCIES,
-            });
-        }
+        let frequency_count = long_rope_frequency_count(short_factor.len(), long_factor.len())?;
         Ok(Self {
             short_factors: factor_table("short_factor", short_factor)?,
             long_factors: factor_table("long_factor", long_factor)?,
@@ -413,8 +414,68 @@ impl ProportionalRopeScaling {
     #[must_use]
     pub fn rotated_pairs(self, head_dimension: usize) -> usize {
         let pairs = (self.rotated_fraction * head_dimension as f64 / 2.0).floor() as usize;
-        pairs.min(head_dimension / 2)
+        clamp_rotated_pairs(pairs, head_dimension)
     }
+}
+
+/// Validates the LongRoPE table lengths and returns the shared frequency count.
+///
+/// Verified: `Ok(count)` exactly when both tables have the same length
+/// `count` in `1..=MAX_LONG_ROPE_FREQUENCIES`, so every accessor slice
+/// `[..count]` of the inline arrays is in bounds; otherwise the length
+/// mismatch is reported before the count range.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(count) => {
+                &&& count == short_length
+                &&& short_length == long_length
+                &&& 1 <= count <= MAX_LONG_ROPE_FREQUENCIES
+            },
+            Err(RopeConfigError::LongRopeFactorLengthMismatch { short, long }) => {
+                short == short_length && long == long_length && short != long
+            },
+            Err(RopeConfigError::LongRopeFactorCountOutOfRange { count, maximum }) => {
+                &&& short_length == long_length
+                &&& count == short_length
+                &&& maximum == MAX_LONG_ROPE_FREQUENCIES
+                &&& (count == 0 || count > MAX_LONG_ROPE_FREQUENCIES)
+            },
+            Err(_) => false,
+        }
+))]
+fn long_rope_frequency_count(
+    short_length: usize,
+    long_length: usize,
+) -> Result<usize, RopeConfigError> {
+    if short_length != long_length {
+        return Err(RopeConfigError::LongRopeFactorLengthMismatch {
+            short: short_length,
+            long: long_length,
+        });
+    }
+    if short_length == 0 || short_length > MAX_LONG_ROPE_FREQUENCIES {
+        return Err(RopeConfigError::LongRopeFactorCountOutOfRange {
+            count: short_length,
+            maximum: MAX_LONG_ROPE_FREQUENCIES,
+        });
+    }
+    Ok(short_length)
+}
+
+/// Clamps a proposed proportional pair count to the `head_dimension / 2` pairs of a head.
+///
+/// Verified: the result is exactly `min(pairs, head_dimension / 2)`, so the
+/// rotated pairs never exceed the head's split-half pairs.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(rotated =>
+    ensures
+        rotated == if pairs <= head_dimension / 2 { pairs } else { head_dimension / 2 },
+        2 * rotated <= head_dimension,
+))]
+fn clamp_rotated_pairs(pairs: usize, head_dimension: usize) -> usize {
+    pairs.min(head_dimension / 2)
 }
 
 #[cfg(test)]

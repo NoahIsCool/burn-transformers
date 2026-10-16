@@ -11,16 +11,22 @@
 //! evaluates those on the host in `O(query + key)` with the overflow-safe
 //! reference algorithm of [`T5RelativePositionBuckets`] and uploads one short
 //! vector. The device then builds the `[query, key]` table index
-//! `j + (query - 1 - i)` as the broadcast sum of the key range and the
-//! reversed query range, gathers bucket IDs, and looks up the learned table.
-//! No per-element host work or quadratic upload remains, and the learned
-//! lookup stays an autodiff-safe embedding.
+//! `j + (query - 1 - i)` as the broadcast sum of the key range and a column
+//! of row starts `query - 1 - i`, gathers bucket IDs, and looks up the
+//! learned table. Host work and uploads stay linear in the lengths, and the
+//! learned lookup stays an autodiff-safe embedding.
 //!
-//! The index formula is specified by [`super::relative_table_index`], whose
-//! host implementation Verus proves overflow-free, in bounds, and
-//! displacement-preserving (given the bounds [`T5RelativePositionBias::bucket_table`]
-//! checks). The proof covers that scalar function, not the device kernel; a
-//! unit test compares every device entry with it.
+//! The row starts are computed on the host by [`super::relative_table_index`]
+//! with key zero, which Verus proves overflow-free and equal to the
+//! displacement-preserving index of every pair once the key is added. The
+//! integer checks of [`T5RelativePositionBias::bucket_table`] and
+//! [`T5RelativePositionBiasConfig::validate`] are the verified plans
+//! `plan_relative_table` and `relative_bias_shape_fault`: an accepted geometry
+//! has the exact anchor and table length, and every `(query, key)` pair reads
+//! the entry whose displacement from the anchor equals its true key-minus-query
+//! displacement, including a query offset. The proofs cover those scalar
+//! functions; the device broadcast addition and gather are Burn operations,
+//! and a unit test compares every device entry with the scalar index.
 
 use burn::{
     module::{Initializer, Module, Param},
@@ -29,7 +35,11 @@ use burn::{
 
 use crate::{Error, Result};
 
-use super::{T5RelativePositionBuckets, relative_table_length};
+use super::T5RelativePositionBuckets;
+use super::index_plan::{
+    RelativeBiasShapeFault, RelativeTableFault, plan_relative_table, relative_bias_shape_fault,
+    relative_table_index,
+};
 
 /// Configuration for a learned T5 relative-attention bias table.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -92,24 +102,31 @@ impl T5RelativePositionBiasConfig {
     }
 
     /// Validates table dimensions, bucket geometry, and initialization values.
+    ///
+    /// The integer shape checks (non-zero heads, `i64` bucket IDs, and a
+    /// representable `buckets * heads` table) are the Verus-verified
+    /// `relative_bias_shape_fault`.
     pub fn validate(&self) -> Result<()> {
-        if self.num_heads == 0 {
-            return Err(Error::configuration(
-                "t5_relative_bias.num_heads",
-                "must be non-zero",
-            ));
-        }
-        if self.num_buckets > i64::MAX as usize {
-            return Err(Error::configuration(
-                "t5_relative_bias.num_buckets",
-                "must fit in the signed integer index representation",
-            ));
-        }
-        if self.num_buckets.checked_mul(self.num_heads).is_none() {
-            return Err(Error::configuration(
-                "t5_relative_bias.shape",
-                "bucket count times head count overflows usize",
-            ));
+        match relative_bias_shape_fault(self.num_heads, self.num_buckets) {
+            Some(RelativeBiasShapeFault::ZeroHeads) => {
+                return Err(Error::configuration(
+                    "t5_relative_bias.num_heads",
+                    "must be non-zero",
+                ));
+            }
+            Some(RelativeBiasShapeFault::BucketIndexRange) => {
+                return Err(Error::configuration(
+                    "t5_relative_bias.num_buckets",
+                    "must fit in the signed integer index representation",
+                ));
+            }
+            Some(RelativeBiasShapeFault::TableOverflow) => {
+                return Err(Error::configuration(
+                    "t5_relative_bias.shape",
+                    "bucket count times head count overflows usize",
+                ));
+            }
+            None => {}
         }
         T5RelativePositionBuckets::new(self.num_buckets, self.max_distance, self.bidirectional)
             .map_err(|error| Error::configuration("t5_relative_bias.buckets", error.to_string()))?;
@@ -193,47 +210,34 @@ impl<B: Backend> T5RelativePositionBias<B> {
         key_length: usize,
         query_offset: usize,
     ) -> Result<T5RelativeBucketTable> {
-        if query_length == 0 || key_length == 0 {
-            return Err(Error::shape(
-                "t5_relative_bias",
-                "non-zero query and key lengths",
-                format!("query={query_length}, key={key_length}"),
-            ));
-        }
-        // The bias itself has `query * key` entries per head; reject geometries
-        // whose output cannot exist before doing any host work.
-        if query_length.checked_mul(key_length).is_none() {
-            return Err(Error::configuration(
-                "t5_relative_bias.shape",
-                "query length times key length overflows usize",
-            ));
-        }
-        // `q + k - 1 <= q * k` for positive lengths, so this cannot fail once
-        // the product fits; the error path only guards the invariant.
-        let table_length = relative_table_length(query_length, key_length).ok_or_else(|| {
-            Error::configuration(
-                "t5_relative_bias.shape",
-                "query length plus key length overflows usize",
-            )
-        })?;
-        // The anchor is the last query; checking `query_offset + query_length`
-        // makes the anchor and every query position representable.
-        let anchor = query_offset
-            .checked_add(query_length)
-            .map(|end| end - 1)
-            .ok_or_else(|| {
-                Error::configuration(
+        // The verified plan rejects, in order: an empty axis; a `query * key`
+        // output that cannot exist; a query block whose last position
+        // `query_offset + query_length - 1` is unrepresentable; and a table
+        // whose indices exceed the device's `i64` range. The table length
+        // `q + k - 1 <= q * k` needs no separate check.
+        let plan = plan_relative_table(query_length, key_length, query_offset).map_err(
+            |fault| match fault {
+                RelativeTableFault::EmptyAxis => Error::shape(
+                    "t5_relative_bias",
+                    "non-zero query and key lengths",
+                    format!("query={query_length}, key={key_length}"),
+                ),
+                RelativeTableFault::OutputOverflow => Error::configuration(
+                    "t5_relative_bias.shape",
+                    "query length times key length overflows usize",
+                ),
+                RelativeTableFault::OffsetOverflow => Error::configuration(
                     "t5_relative_bias.query_offset",
                     "offset plus query length overflows usize",
-                )
-            })?;
-        // Device index arithmetic uses i64, so every table index must fit.
-        if i64::try_from(table_length).is_err() {
-            return Err(Error::configuration(
-                "t5_relative_bias.shape",
-                "query length plus key length exceeds the i64 index range",
-            ));
-        }
+                ),
+                RelativeTableFault::IndexRange => Error::configuration(
+                    "t5_relative_bias.shape",
+                    "query length plus key length exceeds the i64 index range",
+                ),
+            },
+        )?;
+        let table_length = plan.length;
+        let anchor = plan.anchor;
         let mut buckets = Vec::new();
         buckets.try_reserve_exact(table_length).map_err(|_| {
             Error::BackendCapability(format!(
@@ -261,7 +265,7 @@ impl<B: Backend> T5RelativePositionBias<B> {
     /// Looks up the learned bias for a precomputed displacement table.
     ///
     /// Gathers bucket IDs from the uploaded `query + key - 1` table with the
-    /// device index `j + (query_length - 1 - i)` (the formula of
+    /// device index `j + (query_length - 1 - i)` (the value of
     /// [`super::relative_table_index`]) and passes them through the learned
     /// `[buckets, heads]` embedding, giving `[1, heads, query_length,
     /// key_length]`. The bucket IDs are identical to a pairwise evaluation, so
@@ -315,10 +319,13 @@ impl<B: Backend> T5RelativePositionBias<B> {
 /// Builds the `[query, key]` displacement-table index on the device.
 ///
 /// Entry `(i, j)` is [`super::relative_table_index`]`(i, j, query_length) =
-/// j + (query_length - 1 - i)`: the key range broadcast against the reversed
-/// query range `query_length - 1, ..., 0`. Callers pass lengths accepted by
-/// [`T5RelativePositionBias::bucket_table`], which guarantees every entry is
-/// below `query_length + key_length - 1` and fits in `i64`.
+/// j + (query_length - 1 - i)`. The host computes each row start
+/// `relative_table_index(i, 0, query_length) = query_length - 1 - i` with the
+/// verified function (`query_length` values), and the device broadcasts the
+/// key range `0..key_length` against that column. Callers pass lengths
+/// accepted by [`T5RelativePositionBias::bucket_table`], which guarantees every
+/// entry is below `query_length + key_length - 1` and fits in `i64`, so the
+/// row-start conversions are exact.
 fn table_entries<B: Backend>(
     query_length: usize,
     key_length: usize,
@@ -327,11 +334,14 @@ fn table_entries<B: Backend>(
     let keys = Tensor::<B, 1, Int>::arange(0..key_length as i64, device)
         .reshape([1, key_length])
         .expand([query_length, key_length]);
-    let reversed_queries = Tensor::<B, 1, Int>::arange(0..query_length as i64, device)
-        .flip([0])
-        .reshape([query_length, 1])
-        .expand([query_length, key_length]);
-    keys + reversed_queries
+    let row_starts = (0..query_length)
+        .map(|query| relative_table_index(query, 0, query_length) as i64)
+        .collect::<Vec<_>>();
+    let row_starts =
+        Tensor::<B, 1, Int>::from_data(TensorData::new(row_starts, [query_length]), device)
+            .reshape([query_length, 1])
+            .expand([query_length, key_length]);
+    keys + row_starts
 }
 
 /// Host displacement buckets for one `[query, key]` relative-bias geometry.
