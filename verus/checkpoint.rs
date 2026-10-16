@@ -93,11 +93,17 @@
 //! Burn block count `rows · (columns / G)`, proved equal to the flat group count
 //! `⌈rows · columns / G⌉` whenever `G` divides the width.
 //!
+//! It verifies the rounding step of `src/checkpoint/runtime/rounding.rs`:
+//! `round_shifted` returns the integer nearest `significand / 2^shift` with ties
+//! to even (within half a unit, an exact tie gives an even result), bounded by
+//! `2^(53 - shift)`, for every shift the binary64-to-16-bit narrowing uses.
+//!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
-//! driven by these plans, file I/O, error mapping, and the floating-point
-//! rounding encoder in `src/checkpoint/runtime/rounding.rs` (checked
-//! exhaustively at every 16-bit midpoint and against independent oracles) remain
-//! covered by tests rather than proofs.
+//! driven by these plans, file I/O, error mapping, and the bit assembly of the
+//! floating-point rounding encoder in `src/checkpoint/runtime/rounding.rs`
+//! (sign, exponent field, NaN payload; checked exhaustively at every 16-bit
+//! midpoint and against independent oracles) remain covered by tests rather
+//! than proofs.
 
 // Loop invariants are attributes on `while` expressions, which rustc accepts
 // only with this feature; it applies solely under Verus.
@@ -115,6 +121,9 @@ pub mod permutation;
 
 #[path = "../src/checkpoint/runtime/schedule.rs"]
 pub mod schedule;
+
+#[path = "../src/checkpoint/runtime/rounding.rs"]
+pub mod rounding;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;

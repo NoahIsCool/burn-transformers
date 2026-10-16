@@ -25,6 +25,40 @@
 //! `half` crate's `from_f64`, which discards the low 32 binary64 fraction bits
 //! (or double-rounds through `f32` on some targets), every discarded bit
 //! participates in the sticky remainder here.
+//!
+//! # Verification
+//!
+//! The rounding step itself, [`round_shifted`], is verified in place by Verus
+//! through `verus/checkpoint.rs`: it returns the integer nearest to
+//! `significand / 2^shift`, rounding ties to even, without overflow. The bit
+//! assembly around it (sign, exponent field, NaN payload) is checked by tests at
+//! every 16-bit midpoint and against independent oracles.
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: `2^exponent`.
+pub open spec fn power_of_two(exponent: nat) -> nat {
+    vstd::arithmetic::power2::pow2(exponent)
+}
+
+/// Specification: the round-to-nearest, ties-to-even quotient of `value / 2^shift`.
+pub open spec fn nearest_even_quotient(value: nat, shift: nat) -> nat {
+    let unit = power_of_two(shift);
+    let half = power_of_two((shift - 1) as nat);
+    let quotient = value / unit;
+    let remainder = value % unit;
+    if remainder > half || (remainder == half && quotient % 2 == 1) {
+        quotient + 1
+    } else {
+        quotient
+    }
+}
+
+} // verus!
 
 /// Bit layout of a 16-bit binary floating-point storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +82,7 @@ pub(crate) const BFLOAT16: HalfWidthFormat = HalfWidthFormat {
 };
 
 /// Number of stored fraction bits in IEEE binary64.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 const F64_FRACTION_BITS: u32 = 52;
 /// Exponent bias of IEEE binary64.
 const F64_EXPONENT_BIAS: i32 = 1023;
@@ -101,11 +136,7 @@ pub(crate) fn round_f64_bits(bits: u64, format: HalfWidthFormat) -> u16 {
         return sign;
     }
 
-    let quotient = significand >> shift;
-    let remainder = significand & ((1_u64 << shift) - 1);
-    let halfway = 1_u64 << (shift - 1);
-    let round_up = remainder > halfway || (remainder == halfway && quotient & 1 == 1);
-    let rounded = quotient + u64::from(round_up);
+    let rounded = round_shifted(significand, shift);
     let magnitude = if target_exponent >= 1 {
         // `rounded` includes the implicit bit, so a carry to `2^(M + 1)` moves
         // into the exponent field (and reaches exactly `infinity` at the top).
@@ -115,6 +146,125 @@ pub(crate) fn round_f64_bits(bits: u64, format: HalfWidthFormat) -> u16 {
     };
     sign | magnitude as u16
 }
+
+/// Rounds `significand / 2^shift` to the nearest integer, ties to even.
+///
+/// The kept quotient is incremented when the discarded remainder exceeds half
+/// an output unit `2^(shift - 1)`, or equals it while the quotient is odd.
+///
+/// Verified: the result is exactly [`nearest_even_quotient`]; it lies within
+/// half a unit of the exact quotient (`|r · 2^shift - significand| <= 2^(shift
+/// - 1)`), an exact tie rounds to an even result, and the result never exceeds
+/// `2^(53 - shift)`, so the caller's exponent arithmetic cannot overflow.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(rounded =>
+    requires
+        1 <= shift <= F64_FRACTION_BITS + 1,
+        significand < 0x20_0000_0000_0000,
+    ensures
+        rounded as nat == nearest_even_quotient(significand as nat, shift as nat),
+        significand as nat <= rounded as nat * power_of_two(shift as nat)
+            + power_of_two((shift - 1) as nat),
+        rounded as nat * power_of_two(shift as nat)
+            <= significand as nat + power_of_two((shift - 1) as nat),
+        rounded as nat * power_of_two(shift as nat) + power_of_two((shift - 1) as nat)
+            == significand as nat
+            || rounded as nat * power_of_two(shift as nat)
+                == significand as nat + power_of_two((shift - 1) as nat)
+            ==> rounded % 2 == 0,
+        rounded as nat <= power_of_two((53 - shift) as nat),
+))]
+fn round_shifted(significand: u64, shift: u32) -> u64 {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::bits::lemma_u64_shr_is_div(significand, shift as u64);
+        vstd::bits::lemma_u64_pow2_no_overflow(shift as nat);
+        vstd::bits::lemma_u64_pow2_no_overflow((shift - 1) as nat);
+        vstd::bits::lemma_u64_shl_is_mul(1, shift as u64);
+        vstd::bits::lemma_u64_shl_is_mul(1, (shift - 1) as u64);
+        vstd::bits::lemma_u64_low_bits_mask_is_mod(significand, shift as nat);
+        vstd::bits::lemma_low_bits_mask_values();
+    }
+    let quotient = significand >> shift;
+    let remainder = significand & ((1_u64 << shift) - 1);
+    let halfway = 1_u64 << (shift - 1);
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let unit = power_of_two(shift as nat);
+        let half = power_of_two((shift - 1) as nat);
+        assert(quotient as nat == significand as nat / unit);
+        assert(halfway as nat == half);
+        assert((1_u64 << shift) as nat == unit);
+        assert(((1_u64 << shift) - 1) as nat == vstd::bits::low_bits_mask(shift as nat));
+        assert(remainder as nat == significand as nat % unit);
+        assert(quotient & 1 == quotient % 2) by (bit_vector);
+        lemma_round_shifted_bounds(significand as nat, shift as nat);
+    }
+    let round_up = remainder > halfway || (remainder == halfway && quotient & 1 == 1);
+    quotient + if round_up { 1 } else { 0 }
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// The nearest-even quotient is within half a unit, even on ties, and at most `2^(53 - shift)`.
+proof fn lemma_round_shifted_bounds(value: nat, shift: nat)
+    requires
+        1 <= shift <= 53,
+        value < 0x20_0000_0000_0000,
+    ensures
+        ({
+            let unit = power_of_two(shift);
+            let half = power_of_two((shift - 1) as nat);
+            let rounded = nearest_even_quotient(value, shift);
+            &&& unit == 2 * half
+            &&& half >= 1
+            &&& value / unit < 0x20_0000_0000_0000
+            &&& value <= rounded * unit + half
+            &&& rounded * unit <= value + half
+            &&& (rounded * unit + half == value || rounded * unit == value + half)
+                ==> rounded % 2 == 0
+            &&& rounded <= power_of_two((53 - shift) as nat)
+        }),
+{
+    let unit = power_of_two(shift);
+    let half = power_of_two((shift - 1) as nat);
+    vstd::arithmetic::power2::lemma_pow2_unfold(shift);
+    vstd::arithmetic::power2::lemma_pow2_pos((shift - 1) as nat);
+    vstd::arithmetic::power2::lemma_pow2_adds(shift, (53 - shift) as nat);
+    vstd::arithmetic::power2::lemma2_to64();
+    vstd::arithmetic::power2::lemma2_to64_rest();
+    assert(unit == 2 * half);
+    let quotient = value / unit;
+    let remainder = value % unit;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(value as int, unit as int);
+    assert(value == unit * quotient + remainder);
+    assert(remainder < unit);
+    let top = power_of_two((53 - shift) as nat);
+    assert(unit * top == 0x20_0000_0000_0000);
+    // value < unit * top, so quotient < top.
+    assert(quotient < top) by (nonlinear_arith)
+        requires
+            value == unit * quotient + remainder,
+            remainder >= 0,
+            value < unit * top,
+            unit >= 1,
+    ;
+    assert(quotient < 0x20_0000_0000_0000) by (nonlinear_arith)
+        requires quotient < top, unit * top == 0x20_0000_0000_0000, unit >= 1;
+    let rounded = nearest_even_quotient(value, shift);
+    if remainder > half || (remainder == half && quotient % 2 == 1) {
+        assert(rounded == quotient + 1);
+        assert(rounded * unit == quotient * unit + unit) by (nonlinear_arith)
+            requires rounded == quotient + 1;
+        assert(quotient * unit == unit * quotient) by (nonlinear_arith);
+    } else {
+        assert(rounded == quotient);
+        assert(quotient * unit == unit * quotient) by (nonlinear_arith);
+    }
+}
+
+} // verus!
 
 #[cfg(test)]
 #[path = "rounding_tests.rs"]
