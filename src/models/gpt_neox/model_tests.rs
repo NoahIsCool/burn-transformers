@@ -482,15 +482,47 @@ fn bidirectional_forward_reads_future_tokens() {
     assert!(gap(last(bidirectional.logits), last(causal.logits)) < 1e-5);
 }
 
-/// Attention probabilities, router logits, and auxiliary losses are rejected before any work.
+/// Attention-probability requests fail like GPT-2's: a backend capability pointing at pattern hooks.
+///
+/// GPT-NeoX's attention kernel never materializes probabilities, so the request
+/// is rejected before any work in every pass direction, with the same error
+/// variant GPT-2 uses for the same request.
 #[test]
-fn unsupported_forward_diagnostics_are_rejected() {
+fn attention_probability_requests_point_to_pattern_hooks() {
     let model = two_layer(true);
+    let options = ForwardOptions {
+        attentions: true,
+        ..ForwardOptions::default()
+    };
+    for error in [
+        model.forward(padded_input(), &options).unwrap_err(),
+        model
+            .forward_bidirectional(padded_input(), &options)
+            .unwrap_err(),
+    ] {
+        match error {
+            Error::BackendCapability(message) => assert_eq!(
+                message,
+                "GPT-NeoX attention probabilities are available through \
+                 self_attention().pattern() hooks"
+            ),
+            other => panic!("expected Error::BackendCapability, found {other:?}"),
+        }
+    }
+}
+
+/// Router-logit and auxiliary-loss requests on the dense model succeed with empty diagnostics.
+///
+/// Every GPT-NeoX block is dense, so there is nothing to route: the request
+/// leaves `routers` empty and `load_balancing_loss` absent, and the logits equal
+/// those of a default pass, as for every other dense family.
+#[test]
+fn router_requests_return_empty_dense_diagnostics() {
+    let model = two_layer(true);
+    let plain = model
+        .forward(padded_input(), &ForwardOptions::default())
+        .unwrap();
     for options in [
-        ForwardOptions {
-            attentions: true,
-            ..ForwardOptions::default()
-        },
         ForwardOptions {
             router_logits: true,
             ..ForwardOptions::default()
@@ -499,12 +531,188 @@ fn unsupported_forward_diagnostics_are_rejected() {
             auxiliary_losses: true,
             ..ForwardOptions::default()
         },
+        ForwardOptions {
+            router_logits: true,
+            auxiliary_losses: true,
+            ..ForwardOptions::default()
+        },
     ] {
-        let (field, reason) =
-            configuration_parts(model.forward(padded_input(), &options).unwrap_err());
-        assert_eq!(field, "gpt_neox.forward_options");
-        assert!(reason.contains("attention pattern hooks"), "{reason}");
+        let output = model.forward(padded_input(), &options).unwrap();
+        assert!(output.routers.is_empty());
+        assert!(output.load_balancing_loss.is_none());
+        assert!(output.attentions.is_empty());
+        assert_eq!(output.logits.to_data(), plain.logits.to_data());
     }
+}
+
+/// One family-generic router request succeeds on every dense family with empty diagnostics.
+///
+/// A [`HookedModel`] experiment written once must not fail on one dense family
+/// and succeed on another: GPT-2, GPT-NeoX, Llama, Gemma, Qwen3.5 (one
+/// full-attention block), and a modular dense decoder all accept
+/// `router_logits` and `auxiliary_losses`, return no router entries, and no
+/// load-balancing loss.
+#[test]
+fn dense_families_answer_router_requests_identically() {
+    use crate::{
+        architecture::{
+            Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+            FeedForwardSpec, HookedModel, MixerSpec, NormPlacement, NormalizationSpec,
+            PositionEncodingSpec, ResidualTopology,
+        },
+        models::{
+            custom::ModularCausalLm,
+            gemma::{GemmaConfig, GemmaForCausalLm, GemmaVariant},
+            gpt2::{Gpt2Config, Gpt2ForCausalLm},
+            llama::{LlamaFamilyConfig, LlamaForCausalLm, LlamaVariant},
+            qwen3_5::{Qwen3_5ForCausalLm, Qwen3_5LayerType, Qwen3_5TextConfig},
+        },
+    };
+
+    /// Runs the shared router request and checks the dense-model answer.
+    fn assert_empty_routers<M>(family: &str, model: &M)
+    where
+        M: HookedModel<B, Input = CausalLmInput<B>, Output = CausalLmOutput<B>>,
+    {
+        let options = ForwardOptions {
+            router_logits: true,
+            auxiliary_losses: true,
+            ..ForwardOptions::default()
+        };
+        let input = CausalLmInput {
+            token_ids: Tensor::<B, 2, Int>::from_ints([[1, 4, 2]], &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        };
+        let output = model
+            .forward_with_hooks(input, &options, &mut Hooks::new())
+            .unwrap_or_else(|error| panic!("{family} rejected a dense router request: {error}"));
+        assert!(output.routers.is_empty(), "{family} invented routers");
+        assert!(
+            output.load_balancing_loss.is_none(),
+            "{family} invented a load-balancing loss"
+        );
+    }
+
+    let device = Default::default();
+    assert_empty_routers("GPT-NeoX", &two_layer(false));
+    let gpt2 = Gpt2ForCausalLm::<B>::init(
+        Gpt2Config {
+            vocab_size: 13,
+            n_embd: 8,
+            n_layer: 1,
+            n_head: 2,
+            n_positions: 16,
+            ..Gpt2Config::default()
+        },
+        &device,
+    )
+    .unwrap();
+    assert_empty_routers("GPT-2", &gpt2);
+    let llama = LlamaForCausalLm::<B>::init(
+        LlamaFamilyConfig {
+            vocab_size: 13,
+            hidden_size: 8,
+            intermediate_size: 12,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 16,
+            pad_token_id: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            ..LlamaFamilyConfig::new(LlamaVariant::Llama)
+        },
+        &device,
+    )
+    .unwrap();
+    assert_empty_routers("Llama", &llama);
+    let gemma = GemmaForCausalLm::<B>::init(
+        GemmaConfig {
+            vocab_size: 13,
+            hidden_size: 8,
+            intermediate_size: 12,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 16,
+            query_pre_attn_scalar: 4.0,
+            sliding_window: 2,
+            pad_token_id: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            ..GemmaConfig::new(GemmaVariant::Gemma2)
+        },
+        &device,
+    )
+    .unwrap();
+    assert_empty_routers("Gemma", &gemma);
+    let qwen = Qwen3_5ForCausalLm::<B>::init(
+        Qwen3_5TextConfig {
+            vocab_size: 13,
+            hidden_size: 8,
+            intermediate_size: 12,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 16,
+            layer_types: vec![Qwen3_5LayerType::FullAttention],
+            linear_key_head_dim: 4,
+            linear_value_head_dim: 4,
+            linear_num_key_heads: 1,
+            linear_num_value_heads: 2,
+            linear_conv_kernel_dim: 3,
+            partial_rotary_factor: Some(1.0),
+            rope_theta: Some(10_000.0),
+            mtp_num_hidden_layers: 0,
+            tie_word_embeddings: false,
+            bos_token_id: None,
+            eos_token_id: None,
+            pad_token_id: None,
+            ..Qwen3_5TextConfig::default()
+        },
+        &device,
+    )
+    .unwrap();
+    assert_empty_routers("Qwen3.5", &qwen);
+    let rms = NormalizationSpec::Rms {
+        epsilon: 1e-6,
+        zero_centered: false,
+    };
+    let modular = ModularCausalLm::<B>::init(
+        DecoderSpec {
+            vocabulary_size: 13,
+            hidden_size: 8,
+            layers: vec![DecoderLayerSpec {
+                mixer: MixerSpec::Attention(AttentionSpec {
+                    query_heads: 2,
+                    key_value_heads: 1,
+                    head_dim: 4,
+                    query_key_norm: false,
+                    output_gate: false,
+                    position: PositionEncodingSpec::None,
+                }),
+                feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+                    intermediate_size: 12,
+                    activation: Activation::Silu,
+                    bias: false,
+                }),
+                mixer_norm: rms.clone(),
+                feed_forward_norm: rms.clone(),
+                norm_placement: NormPlacement::Pre,
+                residual: ResidualTopology::Add,
+            }],
+            final_norm: rms,
+            tie_word_embeddings: false,
+            max_position_embeddings: 16,
+        },
+        &device,
+    )
+    .unwrap();
+    assert_empty_routers("modular", &modular);
 }
 
 /// Inputs longer than the position table or with no rows fail before embedding lookup.
