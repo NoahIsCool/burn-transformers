@@ -30,9 +30,9 @@
 //!
 //! Templates are found and chosen as in Hugging Face 5.2. `chat_template.jinja`
 //! (the `default` template) and `additional_chat_templates/<name>.jinja`
-//! replace any `chat_template` entry in `tokenizer_config.json`, and template
-//! files are read with Python's universal newlines (`\r\n` and `\r` become
-//! `\n`). A render without [`ChatTemplateOptions::template_name`] uses the
+//! replace any `chat_template` entry in `tokenizer_config.json`, and, as in
+//! Jinja2, every `\r\n` and `\r` line ending of a template's source renders
+//! as `\n`. A render without [`ChatTemplateOptions::template_name`] uses the
 //! checkpoint's `tool_use` template when [`ChatTemplateOptions::tools`] is
 //! set, otherwise `default`, otherwise the only template.
 //!

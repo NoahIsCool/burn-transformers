@@ -24,7 +24,8 @@
 //! [`TokenizerMetadata::chat_templates`](super::TokenizerMetadata::chat_templates)
 //! holds the text Hugging Face's `tokenizer.chat_template` holds. Strings
 //! inside `tokenizer_config.json` are JSON and keep their carriage returns,
-//! as in Python.
+//! as in Python; the renderer then lexes every source's line endings as `\n`,
+//! as Jinja2 does, so both render the same prompt.
 //!
 //! Template files are untrusted checkpoint data. Each must be a regular,
 //! UTF-8 file inside the canonical tokenizer root (symlinks are followed but
@@ -277,9 +278,11 @@ fn read_template_file(path: &Path, remaining_bytes: &mut u64, total_bytes: u64) 
 
 /// Turns every `\r\n` and lone `\r` into `\n`, borrowing text that has neither.
 ///
-/// This is Python's universal-newline translation, which its text-mode
-/// `open` applies to the template files Hugging Face reads.
-fn universal_newlines(source: &str) -> Cow<'_, str> {
+/// This is both Python's universal-newline translation (text-mode `open`,
+/// which reads template files) and Jinja2's lexer normalization (every line
+/// ending of a template's source becomes `newline_sequence`, `\n`), so the
+/// renderer applies it to every template source as well.
+pub(super) fn universal_newlines(source: &str) -> Cow<'_, str> {
     if source.contains('\r') {
         Cow::Owned(source.replace("\r\n", "\n").replace('\r', "\n"))
     } else {

@@ -59,12 +59,13 @@ fn every_template_storage_selects_by_name() {
     check(&blank_tool_file);
 }
 
-/// Template files replace the config template and are read with universal newlines.
+/// Template files replace the config template, and every source's line endings render as `\n`.
 ///
 /// Hugging Face 5.2 `_from_pretrained` lets `chat_template.jinja` and
 /// `additional_chat_templates/*.jinja` replace `tokenizer_config.json`'s
-/// `chat_template` and reads them with Python's universal newlines, which
-/// turn `\r\n` and `\r` into `\n` (the harness also checks the loaded text).
+/// `chat_template` and reads them with Python's universal newlines (the
+/// harness checks the loaded text); Jinja2's lexer then turns `\r\n` and
+/// `\r` in any template source, config strings included, into `\n`.
 #[test]
 fn template_files_replace_the_config_template() {
     let mut files = problem("D\r\n{{ messages | length }}\rE");
@@ -73,6 +74,12 @@ fn template_files_replace_the_config_template() {
     assert_eq!(render(&files).unwrap(), "D\n1\nE");
     files.options.tools = Some(json!([]));
     assert_eq!(render(&files).unwrap(), "T\nU");
+    let mut config = problem("C\r\nX\r");
+    config.storage = Storage::Map;
+    config.tool_template = "T\rU".to_owned();
+    assert_eq!(render(&config).unwrap(), "C\nX");
+    config.options.tools = Some(json!([]));
+    assert_eq!(render(&config).unwrap(), "T\nU");
 }
 
 /// Each documented argument check fails, whatever the template.
