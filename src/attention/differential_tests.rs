@@ -244,6 +244,24 @@ fn lambda_follows_reparameterization_and_depth_schedule() {
     assert!((f64::from(lambda) - expected).abs() < 1e-6);
 }
 
+/// Initialization allocates every projection with exactly the validated widths.
+#[test]
+fn init_allocates_every_projection_from_the_validated_widths() {
+    let device = Default::default();
+    for (query_heads, key_value_heads) in [(4, 2), (6, 3), (4, 1), (4, 4)] {
+        let config = DifferentialAttentionConfig::new(8, query_heads, key_value_heads, 2, 1);
+        let widths = config.validated_widths().unwrap();
+        assert_eq!(widths.query_width, query_heads * 2);
+        assert_eq!(widths.key_value_width, key_value_heads * 2);
+        let layer = config.init::<TestBackend>(&device).unwrap();
+        let dims = |linear: &Linear<TestBackend>| linear.weight.val().dims();
+        assert_eq!(dims(&layer.q_proj), [8, widths.query_width]);
+        assert_eq!(dims(&layer.k_proj), [8, widths.key_value_width]);
+        assert_eq!(dims(&layer.v_proj), [8, widths.key_value_width]);
+        assert_eq!(dims(&layer.o_proj), [widths.query_width, 8]);
+    }
+}
+
 /// Invalid configurations and projections fail with context.
 #[test]
 fn invalid_differential_layers_fail_with_context() {

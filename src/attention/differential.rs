@@ -34,7 +34,7 @@ use super::{
     AttentionPrecisionMode, AttentionProjection,
     dispatch::{Operands, evaluate, repeat_key_value},
     grouping::{ValuePairing, value_pairing},
-    widths::{PairedWidthError, paired_projection_widths},
+    widths::{PairedWidthError, ProjectionWidths, paired_projection_widths},
 };
 use crate::{
     Error, Result,
@@ -106,7 +106,15 @@ impl DifferentialAttentionConfig {
     /// success implies representable projections, grouped heads, and an even
     /// query-head count, which the pairing plan of [`Self::init`]'s layer needs.
     pub fn validate(&self) -> Result<()> {
-        paired_projection_widths(
+        self.validated_widths().map(|_| ())
+    }
+
+    /// Validates the configuration and returns the verified projection widths.
+    ///
+    /// The checks and their order are those documented on [`Self::validate`];
+    /// [`Self::init`] allocates every projection from the returned widths.
+    fn validated_widths(&self) -> Result<ProjectionWidths> {
+        let widths = paired_projection_widths(
             self.hidden_size,
             self.query_heads,
             self.key_value_heads,
@@ -134,14 +142,18 @@ impl DifferentialAttentionConfig {
                 "must be finite and greater than zero",
             ));
         }
-        Ok(())
+        Ok(widths)
     }
 
     /// Initializes `[out, in]` checkpoint-layout projections and zero lambda vectors.
+    ///
+    /// Every projection width comes from the verified widths of validation.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<DifferentialAttention<B>> {
-        self.validate()?;
-        let query_width = self.query_heads * self.head_dim;
-        let key_value_width = self.key_value_heads * self.head_dim;
+        let ProjectionWidths {
+            query_width,
+            key_value_width,
+            ..
+        } = self.validated_widths()?;
         let linear = |input, output| {
             operations::init_linear(
                 &LinearConfig::new(input, output)

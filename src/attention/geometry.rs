@@ -115,7 +115,36 @@ pub(crate) struct HeadGeometry {
 
 impl HeadGeometry {
     /// Query heads that share one key/value head.
+    ///
+    /// Verified exact for every geometry [`operand_geometry`] returns (it
+    /// guarantees non-empty, grouped heads): `groups * key_value_heads ==
+    /// query_heads` with at least one query head per group.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(groups =>
+        requires
+            self.key_value_heads >= 1,
+            self.query_heads % self.key_value_heads == 0,
+        ensures
+            groups == self.query_heads / self.key_value_heads,
+            groups * self.key_value_heads == self.query_heads,
+            self.query_heads >= 1 ==> groups >= 1,
+    ))]
     pub(crate) const fn groups(self) -> usize {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            let heads = self.query_heads as int;
+            let shared = self.key_value_heads as int;
+            let groups = heads / shared;
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(heads, shared);
+            assert(groups * shared == shared * groups) by (nonlinear_arith);
+            if heads >= 1 {
+                assert(groups >= 1) by (nonlinear_arith)
+                    requires
+                        heads == shared * groups,
+                        heads >= 1,
+                        shared >= 1;
+            }
+        }
         self.query_heads / self.key_value_heads
     }
 }
