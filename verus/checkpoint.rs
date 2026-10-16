@@ -61,6 +61,13 @@
 //! when the mapped shape is a rearrangement of the probe, recovering a
 //! bijection `axes` with `output[k] == input[axes[k]]`.
 //!
+//! It verifies `src/checkpoint/runtime/schedule.rs`: `execution_group_indices`
+//! returns exactly the group of each leader (a classless target, or the first
+//! target of its shared-source class) in index order, and those groups
+//! partition the plan: every target lies in exactly one group, each group is
+//! nonempty and strictly increasing, and a group's targets share one class, so
+//! the executor installs every primary target exactly once.
+//!
 //! It also verifies `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed
 //! lengths (`n` and `ceil(n / 2)`, never above `n`), the two's-complement nibble
 //! and byte encodings and their inverses, nibble joining and splitting, and code
@@ -105,6 +112,9 @@ pub mod lexical;
 
 #[path = "../src/checkpoint/runtime/permutation.rs"]
 pub mod permutation;
+
+#[path = "../src/checkpoint/runtime/schedule.rs"]
+pub mod schedule;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;
