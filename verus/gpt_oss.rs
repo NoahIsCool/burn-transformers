@@ -48,7 +48,8 @@
 //!   coordinates and the tensor's elements, so the gate and up halves of all
 //!   experts partition the stacked weights;
 //! - `stacked_layout` computes one expert's and the whole tensor's byte
-//!   counts exactly or reports overflow; `expert_slab` copies exactly bytes
+//!   counts exactly when the element count and both byte counts fit
+//!   `usize`, and reports overflow otherwise; `expert_slab` copies exactly bytes
 //!   `[e · span, (e + 1) · span)`; and `deinterleave` copies, for every
 //!   output byte, exactly the matching byte of column `2j` (gate) or
 //!   `2j + 1` (up) of the stacked row, with every read in bounds, so the

@@ -155,6 +155,8 @@ impl Dimensions {
             vocab: extent("vocab_size", architecture.vocab_size)?,
             hidden: extent("hidden_size", architecture.hidden_size)?,
             intermediate: extent("intermediate_size", architecture.intermediate_size)?,
+            // The fused gate/up width `2 · f` is the same checked product as
+            // a projection width: two "heads" of width `f`.
             fused: projection_extent(2, architecture.intermediate_size).map_err(
                 |error| match error {
                     ExtentError::Overflow => ConfigError::new(

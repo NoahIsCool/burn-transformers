@@ -563,6 +563,7 @@ pub(crate) fn fused_expert_elements(
     ensures
         match layout {
             Some((span, total)) => {
+                &&& rows * columns <= usize::MAX
                 &&& span == rows * columns * element
                 &&& total == experts * span
             },
@@ -910,11 +911,6 @@ pub(crate) open spec fn is_up(half: GluHalf) -> bool {
     half == GluHalf::Up
 }
 
-/// The interleaved index of row `row`'s last pair stays below the stacked tensor's size.
-pub open spec fn interleaved_offset_bound(expert: int, experts: int, rows: int, row: int, width: int) -> bool {
-    (expert * rows + row) * (2 * width) + 2 * width <= experts * rows * (2 * width)
-}
-
 /// Scaling a row's first offset by `element` stays inside the byte buffer.
 pub proof fn lemma_row_start(expert: int, experts: int, rows: int, row: int, width: int, element: int, up: bool)
     requires
@@ -923,7 +919,6 @@ pub proof fn lemma_row_start(expert: int, experts: int, rows: int, row: int, wid
         width > 0,
         element > 0,
     ensures
-        interleaved_offset_bound(expert, experts, rows, row, width),
         0 <= interleaved_index(expert, rows, row, width, 0, up) * element,
         interleaved_index(expert, rows, row, width, 0, up) * element + element
             <= experts * rows * (2 * width) * element,

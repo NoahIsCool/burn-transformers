@@ -129,6 +129,8 @@ fn group_indices_tails_and_expert_bounds() {
     assert_eq!(stacked_layout(2, 3, 4, 2), Some((24, 48)));
     assert_eq!(stacked_layout(2, usize::MAX, 2, 1), None);
     assert_eq!(stacked_layout(3, 1, 1, usize::MAX), None);
+    // A zero-byte scalar does not hide an overflowing element count.
+    assert_eq!(stacked_layout(1, usize::MAX, 2, 0), None);
 }
 
 /// Expert slabs are contiguous; halves take even (gate) and odd (up) columns bytewise.
