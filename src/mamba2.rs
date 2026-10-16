@@ -80,6 +80,15 @@
 //! that persist convolution state must not leave interior holes. Every path
 //! returns a new [`Mamba2State`] instead of mutating its input, which lets an
 //! architecture publish all cache layers atomically.
+//!
+//! # Verified planning
+//!
+//! The integer bookkeeping (projection widths and the channel slices of the
+//! fused projection and convolution, geometry and row-count checks, validity
+//! flags, convolution-history and window gather indices, the mode grouping of
+//! batched rows with its restore permutation, and the SSD scan's chunk
+//! blocks) lives in the dependency-free `plan` submodule, whose functions
+//! Verus proves exact through `verus/mixers.rs`.
 
 use burn::{
     module::{Module, Param},
@@ -94,7 +103,20 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, architecture::TokenMask, delta_net::softplus, operations};
+use crate::{
+    Error, Result, architecture::TokenMask, delta_net::plan::ceiling_division, delta_net::softplus,
+    operations,
+};
+
+mod plan;
+
+use plan::{
+    ConvolutionSlices, Mamba2GeometryViolation, ModePartition, ProjectionSlices, ScanBlock,
+    WidthOverflow, check_mamba2_geometry, convolution_slices, heads_per_group, partition_modes,
+    projection_slices, right_padded_flags, row_counts_fit, row_end_columns, rows_full,
+    scan_block_chunks, scan_blocks, signed_rows, window_columns,
+};
+pub use plan::{Mamba2Mode, Mamba2Row};
 
 /// Closed interval `[lower, upper]` for discretization steps; `upper = None` is `+inf`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -256,14 +278,8 @@ impl Mamba2Config {
     ///
     /// Returns a configuration error when a product or sum overflows `usize`.
     pub fn convolution_channels(&self) -> Result<usize> {
-        let state_channels = self
-            .groups
-            .checked_mul(self.state_size)
-            .and_then(|value| value.checked_mul(2))
-            .ok_or_else(|| Error::configuration("mamba2", "B/C channel width overflows usize"))?;
-        self.intermediate_size()?
-            .checked_add(state_channels)
-            .ok_or_else(|| Error::configuration("mamba2", "convolution width overflows usize"))
+        plan::convolution_width(self.num_heads, self.head_dim, self.groups, self.state_size)
+            .map_err(width_overflow)
     }
 
     /// Returns the fused projection width of `[z, x, B, C, dt]`.
@@ -272,10 +288,8 @@ impl Mamba2Config {
     ///
     /// Returns a configuration error when a sum overflows `usize`.
     pub fn projection_size(&self) -> Result<usize> {
-        self.intermediate_size()?
-            .checked_add(self.convolution_channels()?)
-            .and_then(|value| value.checked_add(self.num_heads))
-            .ok_or_else(|| Error::configuration("mamba2", "projection width overflows usize"))
+        plan::projection_width(self.num_heads, self.head_dim, self.groups, self.state_size)
+            .map_err(width_overflow)
     }
 
     /// Validates every divisibility, extent, and numerical invariant.
@@ -286,24 +300,28 @@ impl Mamba2Config {
     /// below two, groups that do not divide the heads, an invalid clamp, a
     /// non-positive epsilon, or overflowing projection widths.
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_size == 0
-            || self.num_heads == 0
-            || self.head_dim == 0
-            || self.state_size == 0
-            || self.groups == 0
-            || self.convolution_kernel < 2
-            || self.chunk_size == 0
-        {
-            return Err(Error::configuration(
-                "mamba2",
-                "all widths must be non-zero and convolution_kernel must be at least two",
-            ));
-        }
-        if !self.num_heads.is_multiple_of(self.groups) {
-            return Err(Error::configuration(
-                "mamba2.groups",
-                "must divide num_heads exactly",
-            ));
+        match check_mamba2_geometry(
+            self.hidden_size,
+            self.num_heads,
+            self.head_dim,
+            self.state_size,
+            self.groups,
+            self.convolution_kernel,
+            self.chunk_size,
+        ) {
+            Ok(()) => {}
+            Err(Mamba2GeometryViolation::ZeroWidth) => {
+                return Err(Error::configuration(
+                    "mamba2",
+                    "all widths must be non-zero and convolution_kernel must be at least two",
+                ));
+            }
+            Err(Mamba2GeometryViolation::Groups) => {
+                return Err(Error::configuration(
+                    "mamba2.groups",
+                    "must divide num_heads exactly",
+                ));
+            }
         }
         self.time_step_clamp.validate()?;
         if !self.normalization_epsilon.is_finite() || self.normalization_epsilon <= 0.0 {
@@ -379,13 +397,15 @@ impl Mamba2Config {
     }
 }
 
-/// Selects the transparent recurrent loop or the chunked SSD scan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mamba2Mode {
-    /// One explicit state update per token (the reference decode step).
-    Recurrent,
-    /// Masked semiseparable scan inside bounded chunks (the reference prefill).
-    ChunkedPrefill,
+/// Describes a width overflow of the fused projection layout.
+fn width_overflow(overflow: WidthOverflow) -> Error {
+    let width = match overflow {
+        WidthOverflow::Intermediate => "intermediate width",
+        WidthOverflow::StateChannels => "B/C channel width",
+        WidthOverflow::Convolution => "convolution width",
+        WidthOverflow::Projection => "projection width",
+    };
+    Error::configuration("mamba2", format!("{width} overflows usize"))
 }
 
 /// External terminal state of one Mamba-2 layer.
@@ -494,19 +514,23 @@ impl<B: Backend> GatedGroupRmsNorm<B> {
                 "must be finite and greater than zero",
             ));
         }
-        if gate.dims() != [batch, sequence, width]
-            || self.groups == 0
-            || !width.is_multiple_of(self.groups)
-            || self.weight.shape().dims() != [width]
-        {
-            return Err(Error::shape(
-                "mamba2.gated_norm",
-                format!("matching [batch, sequence, {width}] tensors and {width} scale values"),
-                format!("values={:?}, gate={:?}", values.dims(), gate.dims()),
-            ));
-        }
+        // The verified width exists exactly when the groups divide `width`.
+        let group_width = match plan::group_width(width, self.groups) {
+            Some(group_width)
+                if gate.dims() == [batch, sequence, width]
+                    && self.weight.shape().dims() == [width] =>
+            {
+                group_width
+            }
+            _ => {
+                return Err(Error::shape(
+                    "mamba2.gated_norm",
+                    format!("matching [batch, sequence, {width}] tensors and {width} scale values"),
+                    format!("values={:?}, gate={:?}", values.dims(), gate.dims()),
+                ));
+            }
+        };
         let dtype = values.dtype();
-        let group_width = width / self.groups;
         let gated = values.cast(DType::F32) * activation::silu(gate.cast(DType::F32));
         let grouped = gated.reshape([batch, sequence, self.groups, group_width]);
         let inverse_rms = (grouped.clone().square().mean_dim(3) + self.epsilon)
@@ -667,7 +691,7 @@ impl<B: Backend> Mamba2<B> {
         let [batch, sequence, _] = self.validate_hidden(&hidden)?;
         let counts = rows.iter().map(|row| row.tokens).collect::<Vec<_>>();
         validate_row_counts(&counts, batch, sequence)?;
-        let groups = mode_groups(rows);
+        let RowGroups { groups, restore } = mode_groups(rows);
         let device = hidden.device();
         if let [(mode, _)] = groups.as_slice() {
             let valid = right_padded_validity::<B>(&counts, sequence, &device);
@@ -684,7 +708,6 @@ impl<B: Backend> Mamba2<B> {
         let mut outputs = Vec::with_capacity(groups.len());
         let mut matrices = Vec::with_capacity(groups.len());
         let mut convolutions = Vec::with_capacity(groups.len());
-        let mut order = Vec::with_capacity(batch);
         for (mode, members) in groups {
             let selector = row_selector::<B>(&members, &device)?;
             let group_counts = members.iter().map(|&row| counts[row]).collect::<Vec<_>>();
@@ -703,14 +726,9 @@ impl<B: Backend> Mamba2<B> {
             outputs.push(run.output);
             matrices.push(run.state.recurrent);
             convolutions.push(run.state.convolution);
-            order.extend(members);
         }
-        // `order[i]` is the batch row at concatenated position `i`; invert it.
-        let mut inverse = vec![0; batch];
-        for (position, &row) in order.iter().enumerate() {
-            inverse[row] = position;
-        }
-        let restore = row_selector::<B>(&inverse, &device)?;
+        // Batch row `b` sits at concatenated position `restore[b]`.
+        let restore = row_selector::<B>(&restore, &device)?;
         Ok((
             Tensor::cat(outputs, 0).select(0, restore.clone()),
             Mamba2State {
@@ -798,13 +816,18 @@ impl<B: Backend> Mamba2<B> {
         let invalid = valid.as_ref().map(|valid| valid.clone().bool_not());
         let masked = zero_invalid(hidden, invalid.as_ref());
         let projected = operations::linear(masked, &self.in_proj)?;
-        let intermediate = self.num_heads * self.head_dim;
+        // Verified tiling of `[z | xBC | dt]`: `0..I`, `I..I + channels`, then
+        // `heads` steps; a validated configuration's projection width fits.
+        let ProjectionSlices {
+            intermediate,
+            dt_start,
+        } = projection_slices(self.num_heads, self.head_dim, self.convolution_channels);
         let gate = projected.clone().narrow(2, 0, intermediate);
         let xbc = projected
             .clone()
             .narrow(2, intermediate, self.convolution_channels)
             .swap_dims(1, 2);
-        let dt = projected.narrow(2, intermediate + self.convolution_channels, self.num_heads);
+        let dt = projected.narrow(2, dt_start, self.num_heads);
 
         // `joined` is `[batch, channels, (K - 1) + sequence]`: history, then inputs.
         let history = state.convolution.clone().cast(xbc.dtype());
@@ -819,7 +842,11 @@ impl<B: Backend> Mamba2<B> {
             activation::silu(convolved).swap_dims(1, 2),
             invalid.as_ref(),
         );
-        let group_state_width = self.groups * self.state_size;
+        // Verified tiling of `[x | B | C]`: `0..I`, then two `G * N` slices.
+        let ConvolutionSlices {
+            group_state_width,
+            c_start,
+        } = convolution_slices(intermediate, self.groups, self.state_size);
         let x = convolved.clone().narrow(2, 0, intermediate).reshape([
             batch,
             sequence,
@@ -830,9 +857,12 @@ impl<B: Backend> Mamba2<B> {
             .clone()
             .narrow(2, intermediate, group_state_width)
             .reshape([batch, sequence, self.groups, self.state_size]);
-        let c = convolved
-            .narrow(2, intermediate + group_state_width, group_state_width)
-            .reshape([batch, sequence, self.groups, self.state_size]);
+        let c = convolved.narrow(2, c_start, group_state_width).reshape([
+            batch,
+            sequence,
+            self.groups,
+            self.state_size,
+        ]);
 
         let dt = zero_invalid(
             discretization_steps(dt, self.dt_bias.val(), self.time_step_clamp.for_mode(mode)),
@@ -932,15 +962,6 @@ impl<B: Backend> Mamba2<B> {
     }
 }
 
-/// One right-padded batch row of [`Mamba2::forward_rows`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mamba2Row {
-    /// Number of valid tokens at the start of the row; zero leaves its state unchanged.
-    pub tokens: usize,
-    /// Execution mode of the row's segment.
-    pub mode: Mamba2Mode,
-}
-
 /// The state of every row after each token of a recurrent segment.
 #[derive(Clone, Debug)]
 pub struct Mamba2Snapshots<B: Backend> {
@@ -981,19 +1002,15 @@ impl ConvolutionTail {
         width: usize,
     ) -> Result<Tensor<B, 3>> {
         let counts = match self {
-            Self::RowEnds(counts) if counts.iter().any(|&count| count != sequence) => counts,
+            Self::RowEnds(counts) if !rows_full(counts, sequence) => counts,
             // Every row ends at the last column: the physical tail is the row tail.
             Self::Physical | Self::RowEnds(_) => {
                 return Ok(joined.narrow(2, sequence, width));
             }
         };
         let [batch, channels, _] = joined.dims();
-        let mut starts = Vec::with_capacity(batch * width);
-        for &count in counts {
-            for offset in 0..width {
-                starts.push(signed_index(count + offset)?);
-            }
-        }
+        // Row `b` reads joined columns `counts[b] .. counts[b] + width`.
+        let starts = row_end_columns(counts, width).ok_or_else(index_range_error)?;
         let index = Tensor::<B, 3, Int>::from_data(
             TensorData::new(starts, [batch, 1, width]),
             &joined.device(),
@@ -1013,34 +1030,25 @@ fn convolution_windows<B: Backend>(
     width: usize,
 ) -> Result<Tensor<B, 4>> {
     let [batch, channels, _] = joined.dims();
-    let mut columns = Vec::with_capacity(sequence * width);
-    for token in 0..sequence {
-        for offset in 0..width {
-            columns.push(signed_index(token + 1 + offset)?);
-        }
-    }
-    let index = Tensor::<B, 1, Int>::from_data(
-        TensorData::new(columns, [sequence * width]),
-        &joined.device(),
-    );
+    // Token `t` reads joined columns `t + 1 .. t + 1 + width`.
+    let columns = window_columns(sequence, width).ok_or_else(index_range_error)?;
+    // The verified columns number exactly `sequence * width`.
+    let count = columns.len();
+    let index = Tensor::<B, 1, Int>::from_data(TensorData::new(columns, [count]), &joined.device());
     Ok(joined
         .select(2, index)
         .reshape([batch, channels, sequence, width])
         .swap_dims(1, 2))
 }
 
-/// Converts a host index to Burn's signed index representation.
-fn signed_index(index: usize) -> Result<i64> {
-    i64::try_from(index)
-        .map_err(|_| Error::configuration("mamba2.index", "index exceeds the signed index range"))
+/// Reports a host index beyond Burn's signed `i64` index range.
+fn index_range_error() -> Error {
+    Error::configuration("mamba2.index", "index exceeds the signed index range")
 }
 
 /// Uploads batch-row indices as a `[rows]` selector.
 fn row_selector<B: Backend>(rows: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
-    let values = rows
-        .iter()
-        .map(|&row| signed_index(row))
-        .collect::<Result<Vec<_>>>()?;
+    let values = signed_rows(rows).ok_or_else(index_range_error)?;
     Ok(Tensor::from_data(
         TensorData::new(values, [rows.len()]),
         device,
@@ -1049,7 +1057,7 @@ fn row_selector<B: Backend>(rows: &[usize], device: &B::Device) -> Result<Tensor
 
 /// Checks one token count per row, none above the padded width.
 fn validate_row_counts(counts: &[usize], batch: usize, sequence: usize) -> Result<()> {
-    if counts.len() != batch || counts.iter().any(|&count| count > sequence) {
+    if !row_counts_fit(counts, batch, sequence) {
         return Err(Error::shape(
             "mamba2.rows",
             format!("{batch} token counts of at most {sequence}"),
@@ -1065,37 +1073,45 @@ fn right_padded_validity<B: Backend>(
     sequence: usize,
     device: &B::Device,
 ) -> Option<Tensor<B, 2, Bool>> {
-    if counts.iter().all(|&count| count == sequence) {
+    if rows_full(counts, sequence) {
         return None;
     }
-    let flags = counts
-        .iter()
-        .flat_map(|&count| (0..sequence).map(move |column| column < count))
-        .collect::<Vec<_>>();
+    // Row-major: column `c` of row `b` is valid exactly when `c < counts[b]`.
+    let flags = right_padded_flags(counts, sequence);
     Some(Tensor::from_data(
         TensorData::new(flags, [counts.len(), sequence]),
         device,
     ))
 }
 
+/// Rows grouped by execution mode, and the permutation that restores batch order.
+#[derive(Debug, PartialEq, Eq)]
+struct RowGroups {
+    /// Non-empty `(mode, ascending rows)` groups in first-appearance order of the modes.
+    groups: Vec<(Mamba2Mode, Vec<usize>)>,
+    /// `restore[b]` is row `b`'s position in the concatenation of the groups.
+    restore: Vec<usize>,
+}
+
 /// Partitions rows by execution mode, in first-appearance order of the modes.
 ///
 /// Inactive rows (zero tokens) are identity transitions under either mode, so
 /// they join the first active row's group instead of forcing a second pass.
-fn mode_groups(rows: &[Mamba2Row]) -> Vec<(Mamba2Mode, Vec<usize>)> {
-    let fallback = rows
-        .iter()
-        .find(|row| row.tokens > 0)
-        .map_or(Mamba2Mode::ChunkedPrefill, |row| row.mode);
-    let mut groups: Vec<(Mamba2Mode, Vec<usize>)> = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        let mode = if row.tokens > 0 { row.mode } else { fallback };
-        match groups.iter_mut().find(|(group, _)| *group == mode) {
-            Some((_, members)) => members.push(index),
-            None => groups.push((mode, vec![index])),
-        }
-    }
-    groups
+/// The verified [`partition_modes`] decides the groups and their inverse
+/// permutation; this only drops an empty second group.
+fn mode_groups(rows: &[Mamba2Row]) -> RowGroups {
+    let ModePartition {
+        first_mode,
+        first,
+        second_mode,
+        second,
+        restore,
+    } = partition_modes(rows);
+    let groups = [(first_mode, first), (second_mode, second)]
+        .into_iter()
+        .filter(|(_, members)| !members.is_empty())
+        .collect();
+    RowGroups { groups, restore }
 }
 
 /// Applies the learned discretization bias, the positive-step transform, and the clamp.
@@ -1154,9 +1170,10 @@ fn heads_from_groups<B: Backend>(grouped: Tensor<B, 3>, heads: usize) -> Tensor<
     if groups == heads {
         return grouped;
     }
+    // The validated geometry makes `groups` divide `heads`.
     grouped
         .unsqueeze_dim::<4>(2)
-        .expand([batch, groups, heads / groups, state])
+        .expand([batch, groups, heads_per_group(heads, groups), state])
         .reshape([batch, heads, state])
 }
 
@@ -1294,7 +1311,9 @@ pub(crate) fn chunked_scan_with_budget<B: Backend>(
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
     let [batch, sequence, heads, head_dim] = x.dims();
     let [_, _, groups, state_size] = b.dims();
-    if sequence == 0 || chunk_size == 0 || groups == 0 || !heads.is_multiple_of(groups) {
+    // `group_width` exists exactly when `groups > 0` divides `heads`, which is
+    // `heads_per_group`'s precondition in every block.
+    if sequence == 0 || chunk_size == 0 || plan::group_width(heads, groups).is_none() {
         return Err(Error::configuration(
             "mamba2.chunk",
             "the scan needs tokens, a non-zero chunk width, and groups dividing the heads",
@@ -1308,21 +1327,19 @@ pub(crate) fn chunked_scan_with_budget<B: Backend>(
     let c = c.cast(DType::F32).swap_dims(1, 2);
     let a = a.reshape([1, heads, 1, 1]);
     let d = d.reshape([1, heads, 1, 1]);
-    let chunks = sequence.div_ceil(chunk_size);
-    let plane = batch
-        .saturating_mul(heads)
-        .saturating_mul(chunk_size)
-        .saturating_mul(chunk_size)
-        .max(1);
-    let block_chunks = (budget / plane).clamp(1, chunks);
+    let chunks = ceiling_division(sequence, chunk_size);
+    // `clamp(budget / plane, 1, chunks)` chunks per block, by the verified planners.
+    let block_chunks = scan_block_chunks(batch, heads, chunk_size, budget, chunks);
     let masks = SegmentMasks::new(chunk_size, &device);
-    let mut outputs = Vec::with_capacity(chunks.div_ceil(block_chunks));
-    let mut first_chunk = 0;
-    while first_chunk < chunks {
-        let count = block_chunks.min(chunks - first_chunk);
-        let start = first_chunk * chunk_size;
-        let width = (count * chunk_size).min(sequence - start);
-        let padding = count * chunk_size - width;
+    let blocks = scan_blocks(sequence, chunk_size, block_chunks);
+    let mut outputs = Vec::with_capacity(blocks.len());
+    for ScanBlock {
+        start,
+        width,
+        chunks: count,
+        padding,
+    } in blocks
+    {
         let operands = BlockOperands {
             x: pad_time(x.clone().narrow(2, start, width), padding)
                 .reshape([batch, heads, count, chunk_size, head_dim]),
@@ -1338,12 +1355,12 @@ pub(crate) fn chunked_scan_with_budget<B: Backend>(
         };
         let x_block = operands.x.clone();
         let (output, next) = scan_block(operands, a.clone(), state, &masks)?;
+        // `width + padding == count * chunk_size`, the block's padded length.
         let output = (output + x_block * d.clone().unsqueeze_dim::<5>(4))
-            .reshape([batch, heads, count * chunk_size, head_dim])
+            .reshape([batch, heads, width + padding, head_dim])
             .narrow(2, 0, width);
         outputs.push(output);
         state = next;
-        first_chunk += count;
     }
     Ok((Tensor::cat(outputs, 2).swap_dims(1, 2), state))
 }
@@ -1402,7 +1419,8 @@ fn scan_block<B: Backend>(
     let BlockOperands { x, dt, b, c } = operands;
     let [batch, heads, chunks, width, head_dim] = x.dims();
     let [_, groups, _, _, state_size] = b.dims();
-    let per_group = heads / groups;
+    // `chunked_scan_with_budget` checked that the groups split the heads.
+    let per_group = heads_per_group(heads, groups);
     let log_decay = dt.clone() * a;
     let cumulative = log_decay.clone().cumsum(3);
     let transitions = masks.transitions(log_decay);
