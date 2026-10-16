@@ -1400,3 +1400,434 @@ fn tied_readout_matches_reshaping_linear_oracle() {
         .into_data()
         .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
 }
+
+/// Message carried by the deliberately failing hook callbacks below.
+const HOOK_FAILURE: &str = "deliberate hook failure";
+
+/// Registers one edit at `point` whose callback fails with [`HOOK_FAILURE`].
+///
+/// The edit is addressed by a custom point equal to the catalog entry, so it
+/// is accepted by the scope's catalog check and fires when the point is emitted.
+fn failing_hooks(point: &PointInfo) -> Hooks<'static, TestBackend> {
+    /// Builds the callback error returned at every point.
+    fn failure() -> Error {
+        Error::configuration("test.hook", HOOK_FAILURE)
+    }
+    let mut hooks = Hooks::new();
+    match point.rank() {
+        3 => hooks.try_edit(
+            Point::<3>::custom(point.name.clone(), point.axes.clone().try_into().unwrap()),
+            |_| Err(failure()),
+        ),
+        4 => hooks.try_edit(
+            Point::<4>::custom(point.name.clone(), point.axes.clone().try_into().unwrap()),
+            |_| Err(failure()),
+        ),
+        rank => panic!("{}: unexpected rank {rank}", point.name),
+    }
+    hooks
+}
+
+/// Asserts that a hooked call failed with the deliberate callback error.
+fn assert_hook_failure<T: core::fmt::Debug>(result: Result<T>, point: &PointInfo) {
+    let error = result.expect_err(&point.name);
+    assert!(
+        error.to_string().contains(HOOK_FAILURE),
+        "{}: {error}",
+        point.name
+    );
+}
+
+/// A failing callback at any catalog point aborts the fused and staged passes with its error.
+///
+/// Every point of the dense and both routed blocks (including the eager
+/// scores and pattern of layer 1) is emitted on both execution paths, and the
+/// user's error is returned unchanged rather than swallowed or replaced.
+#[test]
+fn a_failing_edit_at_any_point_aborts_with_its_error() {
+    let (mut model, device) = experiment_model();
+    model.model.layers[1].self_attn.precision_mode = AttentionPrecisionMode::EagerFp32Softmax;
+    let input = experiment_input(&device);
+    let points = model.activation_points();
+    assert!(
+        points
+            .iter()
+            .any(|point| point.name == "decoder.layers.1.attention.pattern")
+    );
+    for point in &points {
+        let mut hooks = failing_hooks(point);
+        assert_hook_failure(
+            model.forward_with_hooks(input.clone(), &ForwardOptions::default(), &mut hooks),
+            point,
+        );
+    }
+    for point in &points {
+        let mut hooks = failing_hooks(point);
+        let staged = if *point == Stack::Decoder.embedding().info() {
+            model.model.embed_with_hooks(&input, &mut hooks).map(|_| ())
+        } else if *point == Stack::Decoder.final_norm().info() {
+            let state = model.model.embed(&input).unwrap();
+            let state = model.model.run_layers(state, 0..3).unwrap();
+            model
+                .model
+                .normalize_with_hooks(state, &mut hooks)
+                .map(|_| ())
+        } else {
+            let state = model.model.embed(&input).unwrap();
+            model
+                .model
+                .run_layers_with_hooks(state, 0..3, &mut hooks)
+                .map(|_| ())
+        };
+        assert_hook_failure(staged, point);
+    }
+}
+
+/// Eager-softmax blocks add score and pattern points whose rows are probability distributions.
+///
+/// The captured `[batch, heads, query, key]` pattern normalizes over keys for
+/// every query that sees at least one valid key: all four queries of the
+/// unpadded row and queries 1..3 of the row whose first column is padding.
+/// Those padded-row queries give the padded key exactly zero weight, and no
+/// query of either row attends to a strictly later key.
+#[test]
+fn eager_softmax_blocks_expose_scores_and_patterns() {
+    let (mut model, device) = experiment_model();
+    let fused_points = model.activation_points().len();
+    model.model.layers[2].self_attn.precision_mode = AttentionPrecisionMode::EagerFp32Softmax;
+    let names = model
+        .activation_points()
+        .into_iter()
+        .map(|point| point.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), fused_points + 2);
+    let key = names
+        .iter()
+        .position(|name| name == "decoder.layers.2.attention.key")
+        .unwrap();
+    assert_eq!(
+        names[key + 2..key + 5],
+        [
+            "decoder.layers.2.attention.scores".to_string(),
+            "decoder.layers.2.attention.pattern".to_string(),
+            "decoder.layers.2.attention.head_context".to_string(),
+        ]
+    );
+    let mut hooks = Hooks::new();
+    let pattern = hooks.capture(Layer::decoder(2).self_attention().pattern());
+    model
+        .forward_with_hooks(
+            experiment_input(&device),
+            &ForwardOptions::default(),
+            &mut hooks,
+        )
+        .unwrap();
+    let pattern = hooks.get(&pattern).unwrap();
+    assert_eq!(pattern.dims(), [2, 2, 4, 4]);
+    // Row 0 has a padded first column: its first query attends to nothing
+    // valid, so it is the only query without a normalization requirement.
+    pattern
+        .clone()
+        .slice([1..2, 0..2, 0..4, 0..4])
+        .sum_dim(3)
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &Tensor::<TestBackend, 4>::ones([1, 2, 4, 1], &device).into_data(),
+            Tolerance::absolute(1e-5),
+        );
+    pattern
+        .clone()
+        .slice([0..1, 0..2, 1..4, 0..4])
+        .sum_dim(3)
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &Tensor::<TestBackend, 4>::ones([1, 2, 3, 1], &device).into_data(),
+            Tolerance::absolute(1e-5),
+        );
+    let weights = pattern.into_data().to_vec::<f32>().unwrap();
+    let weight = |row: usize, head: usize, query: usize, key: usize| {
+        weights[((row * 2 + head) * 4 + query) * 4 + key]
+    };
+    for head in 0..2 {
+        for query in 1..4 {
+            assert_eq!(weight(0, head, query, 0), 0.0, "padded key, query {query}");
+        }
+        for row in 0..2 {
+            for query in 0..4 {
+                for key in query + 1..4 {
+                    assert_eq!(
+                        weight(row, head, query, key),
+                        0.0,
+                        "future key {key} of query {query} in row {row}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Step-wise routing with no hook action equals the fused sparse module under both precisions.
+#[test]
+fn stepwise_routing_matches_the_fused_module_for_both_weighting_precisions() {
+    let (mut model, device) = experiment_model();
+    let input = readout_hidden(8, &device);
+    for precision in [
+        RoutedWeightingPrecision::Fp32ThenResidual,
+        RoutedWeightingPrecision::Residual,
+    ] {
+        let moe = model.model.layers[1].sparse_mlp.as_mut().unwrap();
+        moe.weighting_precision = precision;
+        let fused = moe.forward(input.clone()).unwrap();
+        let (hidden, logits) =
+            routed_with_hooks(moe, input.clone(), Layer::decoder(1), &mut Hooks::new()).unwrap();
+        assert_eq!(
+            hidden.to_data(),
+            fused.hidden_state.to_data(),
+            "{precision:?}"
+        );
+        assert_eq!(
+            logits.to_data(),
+            fused.router_logits.to_data(),
+            "{precision:?}"
+        );
+    }
+}
+
+/// Step-wise routing rejects shared experts it cannot expose and inputs of the wrong extent.
+#[test]
+fn stepwise_routing_rejects_shared_experts_and_malformed_inputs() {
+    let (mut model, device) = experiment_model();
+    let layer = Layer::decoder(1);
+    let moe = model.model.layers[1].sparse_mlp.as_mut().unwrap();
+    for shape in [[0, 2, 8], [1, 0, 8], [1, 2, 7]] {
+        let error = routed_with_hooks(moe, Tensor::zeros(shape, &device), layer, &mut Hooks::new())
+            .expect_err("malformed router input");
+        assert!(error.to_string().contains("moe.input"), "{error}");
+    }
+    let shared = moe.routed[0].clone();
+    moe.shared.push(shared);
+    let error = routed_with_hooks(moe, readout_hidden(8, &device), layer, &mut Hooks::new())
+        .expect_err("shared experts have no router point");
+    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(error.to_string().contains("shared experts"), "{error}");
+}
+
+/// The runtime implements only the released zero-dropout attention.
+#[test]
+fn initialization_rejects_attention_dropout() {
+    let config = Qwen3MoeConfig {
+        attention_dropout: 0.1,
+        ..tiny_config()
+    };
+    config
+        .validate()
+        .expect("a dropout probability is a valid config");
+    let error = Qwen3MoeForCausalLm::<TestBackend>::init(config, &Default::default())
+        .expect_err("dropout is not implemented");
+    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(error.to_string().contains("zero-dropout"), "{error}");
+}
+
+/// The hooked headless backbone equals the plain backbone and records its traces.
+#[test]
+fn hooked_backbone_matches_the_plain_backbone() {
+    let (model, device) = experiment_model();
+    let input = experiment_input(&device);
+    let plain = model.model.forward(&input, true, true).unwrap();
+    let mut hooks = Hooks::new();
+    let residual = hooks.capture(Layer::decoder(2).residual_post());
+    let hooked = model
+        .model
+        .forward_with_hooks(&input, true, true, &mut hooks)
+        .unwrap();
+    assert_eq!(hooked.hidden.to_data(), plain.hidden.to_data());
+    assert_eq!(hooked.hidden_states.len(), plain.hidden_states.len());
+    assert_eq!(hooked.router_logits.len(), 2);
+    for (left, right) in hooked.router_logits.iter().zip(&plain.router_logits) {
+        assert_eq!(left.to_data(), right.to_data());
+    }
+    assert_eq!(
+        hooks.get(&residual).unwrap().to_data(),
+        plain.hidden_states[3].to_data()
+    );
+    let without = model.model.forward(&input, false, false).unwrap();
+    assert!(without.hidden_states.is_empty() && without.router_logits.is_empty());
+    assert_eq!(without.hidden.to_data(), plain.hidden.to_data());
+}
+
+/// Staged execution rejects states the blocks cannot evaluate before any block runs.
+#[test]
+fn staged_execution_rejects_invalid_states_and_policies() {
+    let (model, device) = experiment_model();
+    let input = experiment_input(&device);
+    let fresh = || model.model.embed(&input).unwrap();
+    let message = |result: Result<HiddenState<TestBackend>>| {
+        result.expect_err("the staged call must fail").to_string()
+    };
+
+    // Final normalization happens exactly once, at a valid block boundary.
+    let normalized = model.model.normalize(fresh()).unwrap();
+    assert!(message(model.model.normalize(normalized)).contains("unnormalized"));
+    let mut beyond = fresh();
+    beyond.next_layer = 4;
+    assert!(message(model.model.normalize(beyond)).contains("valid block boundary"));
+
+    // Latents must keep the parameters' dtype.
+    let mut half = fresh();
+    half.hidden = half.hidden.cast(DType::F16);
+    assert!(message(model.model.run_layers(half.clone(), 0..1)).contains("dtype must match"));
+    assert!(message(model.model.normalize(half)).contains("dtype must match"));
+
+    // Decoder-only blocks have no cross-attention source, default or per layer.
+    let mut cross = fresh();
+    cross.context.cross_attention = Some(AttentionPolicy::causal());
+    assert!(message(model.model.run_layers(cross, 0..1)).contains("cross-attention"));
+    let mut layer_cross = fresh();
+    layer_cross
+        .context
+        .layer_cross_attention
+        .push((Layer::decoder(0), AttentionPolicy::causal()));
+    assert!(message(model.model.run_layers(layer_cross, 0..1)).contains("cross-attention"));
+    let mut encoded = fresh();
+    encoded.context.encoder = Some(crate::experiment::EncoderContext {
+        hidden: Tensor::zeros([2, 3, 8], &device),
+        positions: Tensor::<TestBackend, 1, Int>::arange(0..3, &device)
+            .reshape([1, 3])
+            .expand([2, 3]),
+        token_mask: None,
+    });
+    assert!(message(model.model.run_layers(encoded, 0..1)).contains("cross-attention"));
+
+    // Overrides must name an existing block.
+    let mut stray = fresh();
+    stray.context = stray
+        .context
+        .with_layer_attention(Layer::decoder(3), AttentionPolicy::bidirectional());
+    assert!(message(model.model.run_layers(stray, 0..1)).contains("unavailable"));
+
+    // A score bias must match the activation dtype.
+    let mut biased = fresh();
+    biased.context = biased.context.with_layer_attention(
+        Layer::decoder(0),
+        AttentionPolicy::causal()
+            .with_bias(Tensor::<TestBackend, 4>::zeros([1, 1, 4, 4], &device).cast(DType::F16)),
+    );
+    assert!(message(model.model.run_layers(biased, 0..1)).contains("bias dtype"));
+
+    // A matching bias of zeros leaves the block unchanged.
+    let mut zero_bias = fresh();
+    zero_bias.context = zero_bias.context.with_layer_attention(
+        Layer::decoder(0),
+        AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &device)),
+    );
+    assert_eq!(
+        model
+            .model
+            .run_layers(zero_bias, 0..1)
+            .unwrap()
+            .hidden
+            .to_data(),
+        model
+            .model
+            .run_layers(fresh(), 0..1)
+            .unwrap()
+            .hidden
+            .to_data()
+    );
+}
+
+/// Attention-probability capture is unavailable on the fused stateless paths.
+#[test]
+fn attention_probability_capture_is_rejected() {
+    let (model, device) = experiment_model();
+    let options = ForwardOptions {
+        attentions: true,
+        ..Default::default()
+    };
+    let plain = model
+        .forward(experiment_input(&device), &options)
+        .expect_err("fused attention returns no probabilities");
+    let hooked = model
+        .forward_with_hooks(experiment_input(&device), &options, &mut Hooks::new())
+        .expect_err("hooked attention returns no probabilities");
+    for error in [plain, hooked] {
+        assert!(matches!(error, Error::BackendCapability(_)));
+        assert!(
+            error.to_string().contains("attention-probability"),
+            "{error}"
+        );
+    }
+}
+
+/// The generic hooked and staged traits delegate to the family methods.
+#[test]
+fn generic_traits_delegate_to_the_family_methods() {
+    use crate::architecture::{HookedModel, StagedModel};
+
+    let (model, device) = experiment_model();
+    let options = ForwardOptions {
+        router_logits: true,
+        ..Default::default()
+    };
+    let direct = model.forward(experiment_input(&device), &options).unwrap();
+    let mut hooks = Hooks::new();
+    let embedding = hooks.capture(Stack::Decoder.embedding());
+    let generic =
+        HookedModel::forward_with_hooks(&model, experiment_input(&device), &options, &mut hooks)
+            .unwrap();
+    assert_eq!(generic.logits.to_data(), direct.logits.to_data());
+    assert_eq!(generic.routers.len(), 2);
+    assert_eq!(hooks.get(&embedding).unwrap().dims(), [2, 4, 8]);
+    assert_eq!(StagedModel::stack(&model), Stack::Decoder);
+    assert_eq!(StagedModel::stack(&model.model), Stack::Decoder);
+    assert_eq!(StagedModel::num_layers(&model.model), 3);
+}
+
+/// The stack-wide loss rejects empty router tensors and layers whose extents disagree.
+#[test]
+fn auxiliary_loss_rejects_empty_and_disagreeing_layers() {
+    let device = Default::default();
+    for shape in [[0, 2, 3], [1, 0, 3], [1, 2, 0]] {
+        let error = qwen3_moe_load_balancing_loss(
+            &[Tensor::<TestBackend, 3>::zeros(shape, &device)],
+            1,
+            None,
+        )
+        .expect_err("an empty router tensor has no objective");
+        assert!(error.to_string().contains("router_logits[0]"), "{error}");
+    }
+    let error = qwen3_moe_load_balancing_loss(
+        &[
+            Tensor::<TestBackend, 3>::zeros([1, 2, 3], &device),
+            Tensor::<TestBackend, 3>::zeros([1, 3, 3], &device),
+        ],
+        1,
+        None,
+    )
+    .expect_err("every sparse layer must share the token grid");
+    assert!(error.to_string().contains("router_logits[1]"), "{error}");
+    let error = qwen3_moe_load_balancing_loss(
+        &[Tensor::<TestBackend, 3>::zeros([1, 2, 3], &device)],
+        0,
+        None,
+    )
+    .expect_err("zero experts per token is invalid");
+    assert!(error.to_string().contains("experts_per_token"), "{error}");
+}
+
+/// A NaN activation makes step-wise routing fail with a contextual error instead of indexing.
+#[test]
+fn stepwise_routing_rejects_non_finite_router_scores() {
+    let (model, device) = experiment_model();
+    let moe = model.model.layers[1].sparse_mlp.as_ref().unwrap();
+    let mut values = vec![0.25_f32; 2 * 8];
+    values[8] = f32::NAN;
+    let input = Tensor::<TestBackend, 3>::from_data(TensorData::new(values, [1, 2, 8]), &device);
+    let stepwise = routed_with_hooks(moe, input.clone(), Layer::decoder(1), &mut Hooks::new())
+        .expect_err("a NaN token has no expert ranking");
+    let fused = moe
+        .forward(input)
+        .expect_err("the fused module rejects it too");
+    assert_eq!(stepwise.to_string(), fused.to_string());
+    assert!(stepwise.to_string().contains("token 1"), "{stepwise}");
+}

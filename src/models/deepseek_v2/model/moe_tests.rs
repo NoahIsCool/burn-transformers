@@ -529,3 +529,122 @@ fn auxiliary_loss_gradient_reaches_the_router() {
         );
     }
 }
+
+/// A shared-expert width `moe_intermediate_size * n_shared_experts` beyond `usize` is rejected.
+#[test]
+fn overflowing_shared_expert_width_is_a_configuration_error() {
+    let config = DeepseekV2Config {
+        n_shared_experts: usize::MAX,
+        ..tests_support::tiny_config()
+    };
+    let error = DeepseekV2Moe::<TestBackend>::init(&config, &Default::default())
+        .expect_err("the widened shared network cannot be allocated");
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "deepseek_v2.shared_experts"),
+        "{error}"
+    );
+}
+
+/// Empty or mis-sized activations are rejected before routing.
+#[test]
+fn malformed_block_inputs_are_shape_errors() {
+    let device = Default::default();
+    let moe = DeepseekV2Moe::<TestBackend>::init(&tests_support::tiny_config(), &device).unwrap();
+    for shape in [[0, 2, 8], [1, 0, 8], [1, 2, 7]] {
+        let error = moe
+            .forward(Tensor::zeros(shape, &device))
+            .expect_err("malformed block input");
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "deepseek_v2.moe.input"),
+            "{error}"
+        );
+    }
+}
+
+/// Sigmoid-scored diagnostics scale the sigmoid-normalized balance loss by `alpha`.
+///
+/// The configuration selects the scoring function, so DeepSeek-V3-style
+/// sigmoid routers normalize their scores per token (`s / sum(s)`) before the
+/// balance product, exactly as [`auxiliary_loss`] does with
+/// [`RouterScoring::Sigmoid`]; logits are omitted when not requested.
+#[test]
+fn sigmoid_router_diagnostics_use_the_sigmoid_balance_loss() {
+    let config = DeepseekV2Config {
+        scoring_func: DeepseekScoringFunction::Sigmoid,
+        seq_aux: false,
+        aux_loss_alpha: 0.25,
+        ..tests_support::tiny_config()
+    };
+    let router = logits(&goldens::V2_ROUTER_LOGITS, [2, 6, 8]);
+    let ids = selections(&goldens::V2_IDS_SORTED, [2, 6, 3]);
+    let options = ForwardOptions {
+        auxiliary_losses: true,
+        ..ForwardOptions::default()
+    };
+    let diagnostics =
+        router_diagnostics(router.clone(), ids.clone(), None, &options, &config).unwrap();
+    assert!(diagnostics.logits.is_none());
+    let unscaled = scalar(
+        auxiliary_loss(
+            router.clone(),
+            ids.clone(),
+            None,
+            RouterScoring::Sigmoid,
+            false,
+        )
+        .unwrap(),
+    );
+    let host = host_loss(
+        &goldens::V2_ROUTER_LOGITS,
+        &goldens::V2_IDS_SORTED,
+        &[true; 12],
+        [2, 6, 8, 3],
+        RouterScoring::Sigmoid,
+        false,
+    );
+    assert_loss(unscaled, host as f32);
+    assert_loss(
+        scalar(diagnostics.load_balancing_loss.unwrap()),
+        unscaled * 0.25,
+    );
+}
+
+/// With one routed expert every assignment and probability is one, so both loss forms equal one.
+///
+/// Burn's one-hot encoding needs two classes; the single-expert path builds
+/// the assignment tensor directly. Padding still leaves the value at one.
+#[test]
+fn single_expert_balance_loss_is_exactly_one() {
+    let router = logits(&[0.3, -1.2, 4.0, 0.0, 2.5, -0.7], [2, 3, 1]);
+    let ids = selections(&[0; 6], [2, 3, 1]);
+    let mask = token_mask(vec![true, true, false, false, true, true], [2, 3]);
+    for sequence_wise in [false, true] {
+        for scoring in [RouterScoring::Softmax, RouterScoring::Sigmoid] {
+            for padding in [None, Some(&mask)] {
+                let loss = scalar(
+                    auxiliary_loss(router.clone(), ids.clone(), padding, scoring, sequence_wise)
+                        .unwrap(),
+                );
+                assert_loss(loss, 1.0);
+            }
+        }
+    }
+}
+
+/// Empty logits or an empty top-k selection have no balance objective.
+#[test]
+fn empty_router_tensors_are_shape_errors() {
+    for (router, ids) in [
+        (logits(&[], [0, 2, 4]), selections(&[], [0, 2, 1])),
+        (logits(&[], [1, 0, 4]), selections(&[], [1, 0, 1])),
+        (logits(&[], [1, 2, 0]), selections(&[0, 0], [1, 2, 1])),
+        (logits(&[0.0; 8], [1, 2, 4]), selections(&[], [1, 2, 0])),
+    ] {
+        let error = auxiliary_loss(router, ids, None, RouterScoring::Softmax, true)
+            .expect_err("an empty routing tensor");
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "deepseek_v2.router_aux"),
+            "{error}"
+        );
+    }
+}

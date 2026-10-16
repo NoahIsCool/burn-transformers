@@ -562,3 +562,64 @@ fn tied_readout_matches_reshaping_linear_oracle() {
         .into_data()
         .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
 }
+
+/// A block owning both or neither feed-forward branch is rejected rather than guessed.
+#[test]
+fn layers_require_exactly_one_feed_forward_branch() {
+    let (mut model, device) = tiny_model();
+    let input = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    // Block 0 is dense; adding block 1's expert bank gives it both branches.
+    model.model.layers[0].sparse_mlp = model.model.layers[1].sparse_mlp.clone();
+    let both = model
+        .forward(input(), &ForwardOptions::default())
+        .expect_err("a dense and sparse block is ambiguous");
+    model.model.layers[0].sparse_mlp = None;
+    model.model.layers[0].dense_mlp = None;
+    let neither = model
+        .forward(input(), &ForwardOptions::default())
+        .expect_err("a block without a feed-forward branch is incomplete");
+    for error in [both, neither] {
+        assert!(matches!(error, Error::Checkpoint(_)));
+        assert!(error.to_string().contains("dense/MoE topology"), "{error}");
+    }
+}
+
+/// Custom staged connectivity is evaluated only inside a hook scope.
+///
+/// The staged API always supplies a scope; calling a block with custom
+/// connectivity and no scope is a private-contract violation that must fail
+/// rather than silently fall back to causal attention.
+#[test]
+fn custom_connectivity_outside_a_hook_scope_is_rejected() {
+    let (model, device) = tiny_model();
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1]], &device);
+    let angles = model.model.rotary_tables(positions, 2).unwrap();
+    let visibility = PositionalVisibility::causal_columns(2, None, &device).unwrap();
+    let inputs = AttentionInputs {
+        angles: &angles,
+        visibility: &visibility,
+        policy: model.model.execution_policy,
+        retain_attention: false,
+    };
+    let custom = CustomConnectivity {
+        causal: false,
+        exclusion: None,
+        bias: None,
+    };
+    let hidden = model
+        .model
+        .embed_tokens
+        .forward(Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device));
+    let error = model.model.layers[0]
+        .forward(hidden, &inputs, Some(&custom), Layer::decoder(0), None)
+        .err()
+        .expect("custom connectivity requires hooks");
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "deepseek_v2.execution.attention"),
+        "{error}"
+    );
+}

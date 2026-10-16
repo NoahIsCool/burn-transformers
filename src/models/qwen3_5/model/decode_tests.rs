@@ -2037,3 +2037,643 @@ fn oversized_transactional_decode_is_rejected_up_front() {
     assert_eq!(contract_snapshot(&state), before);
     state.rollback(mark).unwrap();
 }
+
+/// Each cache slot reports its dense group index and the mixer family it serves.
+#[test]
+fn layer_cache_slots_report_their_group_and_family() {
+    for (slot, group, family) in [
+        (
+            Qwen3_5LayerCache::DeltaNet(2),
+            2,
+            Qwen3_5LayerType::LinearAttention,
+        ),
+        (
+            Qwen3_5LayerCache::FullAttention(0),
+            0,
+            Qwen3_5LayerType::FullAttention,
+        ),
+    ] {
+        assert_eq!(slot.group_layer(), group);
+        assert_eq!(slot.layer_type(), family);
+    }
+}
+
+/// The wrapper's accessors and lifecycle calls delegate to the shared tensor state.
+#[test]
+fn state_accessors_and_reset_delegate_to_the_tensor_state() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 8).unwrap(), 1, 2, &device)
+        .unwrap();
+    assert_eq!(state.batch_size(), 1);
+    assert_eq!(state.capacity(), 8);
+    assert_eq!(state.device(), &device);
+    assert_eq!(state.mtp_layer_count(), 1);
+    assert_eq!(state.staging_capacity(), 3);
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2]);
+    state.reset().unwrap();
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+    let plain = tiny_model(&device)
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    assert_eq!(plain.mtp_layer_count(), 0);
+}
+
+/// Prefills one token so a stateful call must validate the state against the model.
+fn prefill_once(
+    model: &Qwen3_5ForCausalLm<TestBackend>,
+    state: &mut Qwen3_5DecodeState<TestBackend>,
+) -> Result<CausalLmOutput<TestBackend>> {
+    model.prefill(
+        CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1]], &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        },
+        state,
+        &ForwardOptions::default(),
+    )
+}
+
+/// Corrupted cache banks are rejected even when the recorded layout still matches.
+///
+/// The layout is checked first; the physical banks are checked next, so a
+/// bank with an extra group, foreign attention or DeltaNet geometry, or a
+/// missing MTP group cannot be used, and no length changes.
+#[test]
+fn stateful_calls_reject_corrupted_cache_banks() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let state = |model: &Qwen3_5ForCausalLm<TestBackend>| {
+        model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap()
+    };
+    let message = |state: &mut Qwen3_5DecodeState<TestBackend>| {
+        let error = prefill_once(&model, state).expect_err("corrupted bank");
+        assert_eq!(state.lengths(), &[0]);
+        error.to_string()
+    };
+
+    let mut extra = state(&model);
+    let spec = extra.layout.native_kv.unwrap();
+    extra.tensors.main_mut().add_native_kv(spec).unwrap();
+    assert!(message(&mut extra).contains("cache-group count"));
+
+    let variant = |edit: fn(&mut Qwen3_5TextConfig)| {
+        let mut config = model.config().clone();
+        edit(&mut config);
+        Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap()
+    };
+    let mut attention = state(&model);
+    attention.tensors = state(&variant(|config| config.num_key_value_heads = 2)).tensors;
+    assert!(message(&mut attention).contains("native-KV cache geometry"));
+
+    let mut recurrent = state(&model);
+    recurrent.tensors = state(&variant(|config| config.linear_value_head_dim = 2)).tensors;
+    assert!(message(&mut recurrent).contains("recurrent cache geometry"));
+
+    let mut no_mtp = state(&model);
+    no_mtp.tensors = state(&variant(|config| config.mtp_num_hidden_layers = 0)).tensors;
+    assert!(message(&mut no_mtp).contains("MTP cache geometry"));
+}
+
+/// Speculative allocation rejects zero drafts, multi-layer MTP, and an unrepresentable suffix.
+#[test]
+fn speculative_allocation_rejects_unsupported_requests() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let config = CacheConfig::new(1, 8).unwrap();
+    let error = model
+        .new_speculative_decode_state(config, 1, 0, &device)
+        .unwrap_err();
+    assert!(error.to_string().contains("greater than zero"), "{error}");
+    let error = model
+        .new_speculative_decode_state(config, 1, usize::MAX, &device)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("staging capacity overflows"),
+        "{error}"
+    );
+
+    let mut two_layer = model.config().clone();
+    two_layer.mtp_num_hidden_layers = 2;
+    let two_layer = Qwen3_5ForCausalLm::<TestBackend>::init(two_layer, &device).unwrap();
+    let error = two_layer
+        .new_speculative_decode_state(config, 1, 2, &device)
+        .unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(error.to_string().contains("single-layer"), "{error}");
+}
+
+/// Cached MTP requires its graph, room in the auxiliary cache, and the single-layer graph.
+#[test]
+fn cached_mtp_rejects_missing_graphs_full_caches_and_multiple_layers() {
+    let device = Default::default();
+    let hidden = |tokens: usize| Tensor::<TestBackend, 3>::zeros([1, tokens, 8], &device);
+    let tokens = |count: usize| {
+        Tensor::<TestBackend, 1, Int>::arange(1..count as i64 + 1, &device).reshape([1, count])
+    };
+
+    let base = tiny_model(&device);
+    let mut state = base
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let error = base
+        .forward_mtp_cached(tokens(1), hidden(1), None, 0, &mut state)
+        .unwrap_err();
+    assert!(error.to_string().contains("no configured MTP"), "{error}");
+
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .forward_mtp_cached(tokens(5), hidden(5), None, 0, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::TensorCache(TensorCacheError::Metadata(
+                DecodeStateError::CapacityExceeded {
+                    requested: 5,
+                    capacity: 4,
+                    ..
+                }
+            ))
+        ),
+        "{error}"
+    );
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+
+    let mut two_layer = model.config().clone();
+    two_layer.mtp_num_hidden_layers = 2;
+    let two_layer = Qwen3_5ForCausalLm::<TestBackend>::init(two_layer, &device).unwrap();
+    let mut state = two_layer
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    assert_eq!(state.mtp_layer_count(), 2);
+    let error = two_layer
+        .forward_mtp_cached(tokens(1), hidden(1), None, 0, &mut state)
+        .unwrap_err();
+    assert!(error.to_string().contains("single-layer"), "{error}");
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
+
+/// A finished-only step without requested traces returns zero logits and no traces.
+#[test]
+fn all_inactive_decode_without_traces_returns_only_logits() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    prefill_once(&model, &mut state).unwrap();
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert!(output.hidden_states.is_empty());
+    assert!(output.final_hidden_state.is_none());
+    assert_zero(output.logits);
+    assert_eq!(state.lengths(), &[1]);
+}
+
+/// A staged multi-token step keeps per-token DeltaNet snapshots only for rows that advance.
+///
+/// Row 0 stages two tokens while row 1 is finished. Committing row 0's whole
+/// proposal and none of row 1 must equal decoding row 0 alone, and leave row
+/// 1's readable state untouched.
+#[test]
+fn transactional_ragged_step_snapshots_only_active_rows() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = Qwen3_5DecodeState::new_with_staging(
+        &model,
+        CacheConfig::new(2, 8).unwrap(),
+        2,
+        2,
+        &device,
+    )
+    .unwrap();
+    let prompt = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2], [3, 4]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    model
+        .prefill(prompt, &mut state, &ForwardOptions::default())
+        .unwrap();
+    let finished_before = cache_row_snapshot(&state, 1);
+    let mark = state.mark().unwrap();
+    let staged = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[5, 6], [0, 0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[true, true], [false, false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(state.tensors.working_lengths(), &[4, 2]);
+    state.tensors.commit_prefixes(mark, &[2, 0], None).unwrap();
+    assert_eq!(state.lengths(), &[4, 2]);
+    assert_eq!(cache_row_snapshot(&state, 1), finished_before);
+
+    let mut single = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut single,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let expected = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[5, 6]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut single,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    assert_close(staged.slice([0..1, 0..2]), expected);
+    let (batched, alone) = (
+        cache_row_snapshot(&state, 0),
+        cache_row_snapshot(&single, 0),
+    );
+    assert_eq!(batched.tensors.len(), alone.tensors.len());
+    for (left, right) in batched.tensors.iter().zip(&alone.tensors) {
+        left.assert_approx_eq::<f32>(right, Tolerance::rel_abs(2e-4, 2e-5));
+    }
+}
+
+/// A schedule whose DeltaNet blocks lost their modules cannot allocate recurrent state.
+#[test]
+fn delta_net_schedule_without_a_module_cannot_allocate_state() {
+    let device = Default::default();
+    let mut model = tiny_model(&device);
+    for layer in &mut model.model.layers {
+        layer.linear_attn = None;
+    }
+    let error = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap_err();
+    assert!(matches!(error, Error::Checkpoint(_)));
+    assert!(
+        error.to_string().contains("DeltaNet without a module"),
+        "{error}"
+    );
+}
+
+/// Without an MTP bank, truncation shortens only the target history.
+#[test]
+fn truncation_without_mtp_shortens_only_the_target_history() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    // DeltaNet keeps only its terminal state, so an unsnapshotted truncate is refused.
+    assert!(state.truncate(&[2]).is_err());
+    assert_eq!(state.lengths(), &[3]);
+    state.truncate(&[0]).unwrap();
+    assert_eq!(state.lengths(), &[0]);
+    assert!(state.tensors.mtp_lengths().is_none());
+}
+
+/// MTP prefill of a one-token prompt has no shifted pair and leaves the auxiliary cache empty.
+#[test]
+fn single_token_mtp_prefill_has_no_shifted_pair() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device);
+    let hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: prompt.clone(),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    model.prefill_mtp_cache(prompt, hidden, &mut state).unwrap();
+    assert_eq!(state.lengths(), &[1]);
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
+
+/// Shifted MTP prompt tokens are range-checked, and a failure leaves the auxiliary cache empty.
+///
+/// The prompt `[1, 32]` shifts to the single MTP token 32, one past the
+/// 32-token vocabulary, so the deferred range check reports a shape error at
+/// `qwen.input_ids` naming the bound `0..32` and the observed value 32. The
+/// target cache keeps its committed prompt and the MTP cache stays fresh.
+#[test]
+fn mtp_prefill_rejects_out_of_vocabulary_shifted_tokens() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    let hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    let error = model
+        .prefill_mtp_cache(
+            Tensor::<TestBackend, 2, Int>::from_ints([[1, 32]], &device),
+            hidden,
+            &mut state,
+        )
+        .unwrap_err();
+    match &error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => {
+            assert_eq!(tensor, "qwen.input_ids", "{error}");
+            assert_eq!(expected, "token values in 0..32", "{error}");
+            assert_eq!(actual, "observed range 32..=32", "{error}");
+        }
+        other => panic!("expected an out-of-vocabulary shape error, got {other:?}"),
+    }
+    assert_eq!(state.lengths(), &[2]);
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
+
+/// Cached MTP requires one non-empty row matching the state's batch.
+#[test]
+fn cached_mtp_rejects_batch_mismatches_and_empty_rows() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut wide = model
+        .new_decode_state(CacheConfig::new(2, 6).unwrap(), 2, &device)
+        .unwrap();
+    let mut narrow = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, &device)
+        .unwrap();
+    for (state, tokens) in [
+        (
+            &mut wide,
+            Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device),
+        ),
+        (
+            &mut narrow,
+            Tensor::<TestBackend, 2, Int>::zeros([1, 0], &device),
+        ),
+    ] {
+        let sequence = tokens.dims()[1];
+        let error = model
+            .forward_mtp_cached(
+                tokens,
+                Tensor::zeros([1, sequence, 8], &device),
+                None,
+                0,
+                state,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.next_token_ids"),
+            "{error}"
+        );
+    }
+}
+
+/// An MTP bank whose attention geometry differs from the MTP layer is rejected.
+///
+/// The main bank matches the model, so only the auxiliary-bank comparison
+/// can catch the corruption.
+#[test]
+fn stateful_calls_reject_a_foreign_mtp_bank() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let base = tiny_model(&device);
+    let mut donor = base
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let foreign = NativeKvCacheSpec::new(1, 2, 4, KvCacheStorage::Full, DType::F32).unwrap();
+    donor
+        .tensors
+        .enable_mtp()
+        .unwrap()
+        .add_native_kv(foreign)
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    state.tensors = donor.tensors;
+    let error = prefill_once(&model, &mut state).expect_err("foreign MTP bank");
+    assert!(error.to_string().contains("MTP cache geometry"), "{error}");
+}
+
+/// The cached pass refuses schedules and slots that disagree with its blocks.
+///
+/// Public calls validate the state layout first, so these are the private
+/// invariants behind it: a schedule shorter than the stack must not silently
+/// skip blocks, a block must not read another family's cache slot, and a
+/// full-attention block needs both its module and the step's attention plan.
+#[test]
+fn cached_steps_reject_mismatched_schedules_and_slots() {
+    let device = Default::default();
+    let mut model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let layout = CompactBatch::<TestBackend>::new(&[vec![0]], 1, &[0], &device).unwrap();
+    let tokens = || Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device);
+    let schedule = state.layout.schedule.clone();
+    let error = model
+        .model
+        .run_cached(
+            tokens(),
+            Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+            1,
+            &layout,
+            &mut state.tensors,
+            &schedule[..3],
+            StatefulPhase::Prefill,
+            false,
+        )
+        .err()
+        .expect("a short schedule");
+    assert!(
+        error.to_string().contains("3 entries for 4 model layers"),
+        "{error}"
+    );
+
+    let hidden = model.model.embed_tokens.forward(tokens());
+    let mut writes = state.tensors.step(layout.counts()).unwrap();
+    let terminal = DeltaStep::Terminal(DeltaNetMode::Recurrent);
+    let mut step = |layer: &Qwen3_5DecoderLayer<TestBackend>, slot| {
+        layer
+            .cached_step(
+                hidden.clone(),
+                slot,
+                &layout,
+                &mut state.tensors,
+                &mut writes,
+                None,
+                terminal,
+            )
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        step(&model.model.layers[0], Qwen3_5LayerCache::FullAttention(0))
+            .contains("incompatible cache slot")
+    );
+    assert!(
+        step(&model.model.layers[3], Qwen3_5LayerCache::FullAttention(0))
+            .contains("no cached attention step")
+    );
+    model.model.layers[3].self_attn = None;
+    assert!(
+        step(&model.model.layers[3], Qwen3_5LayerCache::FullAttention(0))
+            .contains("no attention module")
+    );
+    assert_eq!(state.lengths(), &[0]);
+}
+
+/// Group-count corruption is detected in the main bank and in the auxiliary MTP bank.
+///
+/// Each case keeps every recorded geometry and only adds a group, so only
+/// the count comparisons can reject it: an extra recurrent group in the main
+/// bank, and an extra native or recurrent group beside the MTP layer's.
+#[test]
+fn stateful_calls_reject_extra_cache_groups() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let fresh = || {
+        model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap()
+    };
+
+    let mut recurrent = fresh();
+    let spec = recurrent.layout.recurrent.unwrap();
+    recurrent.tensors.main_mut().add_recurrent(spec).unwrap();
+    let error = prefill_once(&model, &mut recurrent).expect_err("extra recurrent group");
+    assert!(error.to_string().contains("cache-group count"), "{error}");
+
+    let base = tiny_model(&device);
+    let mtp_spec = fresh().layout.mtp_native_kv.unwrap();
+    let recurrent_spec = fresh().layout.recurrent.unwrap();
+    for extra_recurrent in [false, true] {
+        let mut donor = base
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let bank = donor.tensors.enable_mtp().unwrap();
+        bank.add_native_kv(mtp_spec).unwrap();
+        if extra_recurrent {
+            bank.add_recurrent(recurrent_spec).unwrap();
+        } else {
+            bank.add_native_kv(mtp_spec).unwrap();
+        }
+        let mut state = fresh();
+        state.tensors = donor.tensors;
+        let error = prefill_once(&model, &mut state).expect_err("extra MTP group");
+        assert!(error.to_string().contains("MTP cache geometry"), "{error}");
+        assert_eq!(state.lengths(), &[0]);
+    }
+}
+
+/// MTP prefill requires one non-empty prompt row whose hidden states match it.
+#[test]
+fn mtp_prefill_rejects_batched_or_empty_prompts() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    for (tokens, hidden) in [
+        (
+            Tensor::<TestBackend, 2, Int>::from_ints([[1], [2]], &device),
+            Tensor::<TestBackend, 3>::zeros([2, 1, 8], &device),
+        ),
+        (
+            Tensor::<TestBackend, 2, Int>::zeros([1, 0], &device),
+            Tensor::<TestBackend, 3>::zeros([1, 0, 8], &device),
+        ),
+    ] {
+        let error = model
+            .prefill_mtp_cache(tokens, hidden, &mut state)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.prefill"),
+            "{error}"
+        );
+    }
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}

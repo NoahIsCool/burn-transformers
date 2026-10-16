@@ -244,3 +244,49 @@ proptest! {
         prop_assert_eq!(flat(layout.last(hidden)), expected_last(&mask));
     }
 }
+
+/// Cached rotary contexts pass a context-dependent policy only up to its limit.
+///
+/// LongRoPE switches from short to long factors past its original context,
+/// so keys cached at or below the limit cannot be extended beyond it, while
+/// static RoPE never limits the context.
+#[test]
+fn cacheable_rotary_context_stops_at_the_policy_limit() {
+    use crate::models::{
+        config::{RopeParameters, RopeType},
+        qwen3_5::Qwen3_5TextConfig,
+    };
+
+    let long = Qwen3_5TextConfig {
+        head_dim: 4,
+        partial_rotary_factor: Some(1.0),
+        rope_parameters: Some(RopeParameters {
+            rope_type: RopeType::LongRope,
+            factor: Some(2.0),
+            original_max_position_embeddings: Some(2),
+            short_factor: Some(vec![1.0, 1.0]),
+            long_factor: Some(vec![1.5, 2.0]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .rope_config()
+    .unwrap();
+    super::ensure_cacheable_rotary_context(long, 2, "Qwen").unwrap();
+    let error = super::ensure_cacheable_rotary_context(long, 3, "Qwen").unwrap_err();
+    assert!(matches!(error, crate::Error::BackendCapability(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("cannot extend the evaluated context to 3 beyond 2"),
+        "{error}"
+    );
+    let plain = Qwen3_5TextConfig {
+        head_dim: 4,
+        partial_rotary_factor: Some(1.0),
+        ..Default::default()
+    }
+    .rope_config()
+    .unwrap();
+    super::ensure_cacheable_rotary_context(plain, usize::MAX, "Qwen").unwrap();
+}

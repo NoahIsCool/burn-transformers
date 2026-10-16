@@ -290,7 +290,8 @@ fn install_layer_tensor<B: Backend>(
                         target: target.into(),
                         component: "routed MoE",
                     })?;
-            let (expert, projection) = parse_expert_target(target, suffix)?;
+            let (expert, projection) =
+                parse_expert_target(target, &suffix["sparse_mlp.routed.".len()..])?;
             let expert_count = moe.routed.len();
             let expert =
                 moe.routed
@@ -318,16 +319,11 @@ fn install_layer_tensor<B: Backend>(
     }
 }
 
-/// Parses `sparse_mlp.routed.<decimal>.<projection>`.
+/// Parses `<decimal>.<projection>`, the part of a target after `sparse_mlp.routed.`.
 fn parse_expert_target<'a>(
     target: &str,
-    suffix: &'a str,
+    remainder: &'a str,
 ) -> Result<(usize, &'a str), Qwen3MoeLoadError> {
-    let remainder = suffix.strip_prefix("sparse_mlp.routed.").ok_or_else(|| {
-        Qwen3MoeLoadError::UnknownTarget {
-            target: target.into(),
-        }
-    })?;
     let (index, projection) =
         remainder
             .split_once('.')

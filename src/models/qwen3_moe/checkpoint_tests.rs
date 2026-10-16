@@ -218,3 +218,28 @@ fn tied_head_contract_uses_storage_alias() {
     assert_eq!(plan.aliases.len(), 1);
     assert_eq!(plan.aliases[0].target, "lm_head.weight");
 }
+
+/// A validated topology whose query width `heads * head_dim` overflows fails contract derivation.
+///
+/// Validation checks each extent but not the fused projection product, so
+/// the checked dimension conversion is the gate that keeps an unrepresentable
+/// `[heads * head_dim, hidden]` shape out of the tensor inventory.
+#[test]
+fn overflowing_attention_width_is_a_contract_error() {
+    let config = Qwen3MoeConfig {
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 1 << (usize::BITS - 2),
+        max_position_embeddings: 32,
+        ..tiny_config()
+    };
+    config
+        .validate()
+        .expect("each extent is individually valid");
+    let error = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .expect_err("the query width does not fit usize");
+    assert_eq!(error.architecture, "qwen3_moe");
+    assert_eq!(error.field, "num_attention_heads * head_dim");
+    assert_eq!(error.reason, "dimension product overflows usize");
+}

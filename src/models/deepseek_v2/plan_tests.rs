@@ -133,3 +133,18 @@ proptest! {
         );
     }
 }
+
+/// An empty cache's per-token bytes also saturate when only the scalar-byte factor overflows.
+///
+/// `width * layers = 2^60` fits, but multiplying by 32-byte scalars does not;
+/// the proptest reaches this branch only by chance, so it is pinned here.
+#[test]
+fn empty_cache_per_token_bytes_saturate_at_the_scalar_factor() {
+    assert_eq!(
+        latent_cache_bytes(0, 4, 1 << 40, 1 << 20, 32),
+        Ok(LatentBytes {
+            total: 0,
+            per_token: usize::MAX,
+        })
+    );
+}

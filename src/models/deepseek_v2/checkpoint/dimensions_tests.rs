@@ -190,3 +190,52 @@ proptest! {
         prop_assert_eq!(checkpoint_dimensions(inputs).map(widths), reference(inputs));
     }
 }
+
+/// Every overflow names its configuration expression and the failing operation.
+#[test]
+fn every_dimension_error_names_its_expression() {
+    let cases = [
+        (
+            DimensionError::QueryHead,
+            "qk_nope_head_dim + qk_rope_head_dim",
+            "dimension sum overflows usize",
+        ),
+        (
+            DimensionError::ExpandedHead,
+            "qk_nope_head_dim + v_head_dim",
+            "dimension sum overflows usize",
+        ),
+        (
+            DimensionError::SharedIntermediate,
+            "moe_intermediate_size * n_shared_experts",
+            "dimension product overflows usize",
+        ),
+        (
+            DimensionError::Query,
+            "num_attention_heads * qk_head_dim",
+            "dimension product overflows usize",
+        ),
+        (
+            DimensionError::Compressed,
+            "kv_lora_rank + qk_rope_head_dim",
+            "dimension sum overflows usize",
+        ),
+        (
+            DimensionError::ExpandedKeyValue,
+            "num_attention_heads * expanded_kv_head_dim",
+            "dimension product overflows usize",
+        ),
+        (
+            DimensionError::OutputHeads,
+            "num_attention_heads * v_head_dim",
+            "dimension product overflows usize",
+        ),
+    ];
+    for (error, field, reason) in cases {
+        assert_eq!(
+            (error.field(), error.reason()),
+            (field, reason),
+            "{error:?}"
+        );
+    }
+}

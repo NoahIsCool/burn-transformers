@@ -126,17 +126,17 @@ impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {
                         })?;
                 install_linear_weight(target, head, data)
             }
-            target if target.starts_with("mtp.") => {
-                let mtp = self
-                    .mtp
-                    .as_mut()
-                    .ok_or_else(|| Qwen3_5LoadError::MissingComponent {
-                        target: target.into(),
-                        component: "configured multi-token-prediction graph",
-                    })?;
-                install_mtp_tensor(mtp, target, data)
-            }
             _ => {
+                if let Some(suffix) = target.strip_prefix("mtp.") {
+                    let mtp =
+                        self.mtp
+                            .as_mut()
+                            .ok_or_else(|| Qwen3_5LoadError::MissingComponent {
+                                target: target.into(),
+                                component: "configured multi-token-prediction graph",
+                            })?;
+                    return install_mtp_tensor(mtp, target, suffix, data);
+                }
                 let (index, suffix) = parse_layer_target(target)?;
                 let layer_count = self.model.layers.len();
                 let layer = self.model.layers.get_mut(index).ok_or_else(|| {
@@ -183,16 +183,15 @@ impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {
 }
 
 /// Dispatches one of the official `mtp.*` tensors into its concrete Burn field.
+///
+/// `suffix` is `target` without its `mtp.` namespace; `target` is kept whole
+/// for diagnostics.
 fn install_mtp_tensor<B: Backend>(
     mtp: &mut Qwen3_5Mtp<B>,
     target: &str,
+    suffix: &str,
     data: TensorData,
 ) -> Result<(), Qwen3_5LoadError> {
-    let suffix = target
-        .strip_prefix("mtp.")
-        .ok_or_else(|| Qwen3_5LoadError::UnknownTarget {
-            target: target.into(),
-        })?;
     match suffix {
         "fc.weight" => install_linear_weight(target, &mut mtp.fc, data),
         "norm.weight" => install_norm(target, &mut mtp.norm, data),

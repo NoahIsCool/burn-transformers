@@ -224,3 +224,169 @@ fn partial_rotary_factor_resolution_follows_transformers_precedence() {
     let error = resolve(Some(0.5), Some(0.25)).expect_err("serialized disagreement");
     assert_eq!(error.field, "partial_rotary_factor");
 }
+
+/// Every independent topology rule reports its own serialized field and reason.
+///
+/// Each case perturbs the valid default topology in one place, so the error
+/// proves that rule (not an earlier one) rejected it.
+#[test]
+fn each_topology_rule_names_its_field_and_reason() {
+    let base = Qwen3_5TextConfig::default;
+    base().validate().expect("the default topology validates");
+    let cases: Vec<(Qwen3_5TextConfig, &str, &str)> = vec![
+        (
+            Qwen3_5TextConfig {
+                model_type: "qwen3_5".into(),
+                ..base()
+            },
+            "model_type",
+            "expected one of [\"qwen3_5_text\"], found \"qwen3_5\"",
+        ),
+        (
+            Qwen3_5TextConfig {
+                linear_conv_kernel_dim: 0,
+                ..base()
+            },
+            "linear_conv_kernel_dim",
+            "must be nonzero",
+        ),
+        (
+            Qwen3_5TextConfig {
+                num_attention_heads: 6,
+                ..base()
+            },
+            "num_attention_heads",
+            "must be divisible by num_key_value_heads",
+        ),
+        (
+            Qwen3_5TextConfig {
+                linear_num_value_heads: 24,
+                linear_num_key_heads: 16,
+                ..base()
+            },
+            "linear_num_value_heads",
+            "must be divisible by linear_num_key_heads",
+        ),
+        (
+            Qwen3_5TextConfig {
+                initializer_range: f64::NAN,
+                ..base()
+            },
+            "initializer_range",
+            "must be finite and greater than zero",
+        ),
+        (
+            Qwen3_5TextConfig {
+                hidden_act: "gelu".into(),
+                ..base()
+            },
+            "hidden_act",
+            "only the released SiLU/SwiGLU topology is supported",
+        ),
+        (
+            Qwen3_5TextConfig {
+                rope_theta: Some(0.5),
+                ..base()
+            },
+            "rope_theta",
+            "must be finite and at least one",
+        ),
+        (
+            Qwen3_5TextConfig {
+                rope_parameters: Some(RopeParameters {
+                    mrope_section: Some(vec![16, 16]),
+                    ..RopeParameters::default()
+                }),
+                ..base()
+            },
+            "mrope_section",
+            "Qwen multimodal RoPE requires temporal, height, and width sections",
+        ),
+        (
+            Qwen3_5TextConfig {
+                num_hidden_layers: 4,
+                mtp_num_hidden_layers: 5,
+                ..base()
+            },
+            "mtp_num_hidden_layers",
+            "cannot exceed the target decoder depth",
+        ),
+        (
+            Qwen3_5TextConfig {
+                pad_token_id: Some(TokenIds::One(248_320)),
+                ..base()
+            },
+            "pad_token_id",
+            "contains an ID outside the vocabulary",
+        ),
+        (
+            Qwen3_5TextConfig {
+                bos_token_id: Some(TokenIds::Many(Vec::new())),
+                ..base()
+            },
+            "bos_token_id",
+            "must contain at least one token ID",
+        ),
+        (
+            Qwen3_5TextConfig {
+                eos_token_id: Some(TokenIds::Many(vec![0, 248_320])),
+                ..base()
+            },
+            "eos_token_id",
+            "contains an ID outside the vocabulary",
+        ),
+    ];
+    for (config, field, reason) in cases {
+        let error = config
+            .validate()
+            .expect_err("the mutated configuration must fail validation");
+        assert_eq!(error.architecture, "qwen3_5");
+        assert_eq!((error.field, error.reason), (field, reason.to_owned()));
+    }
+}
+
+/// Three multimodal sections whose doubled sum is the rotary width validate as text RoPE.
+///
+/// Two checks govern `mrope_section`: the shared `RopeParameters::validate_for`
+/// requires `2 * sum(sections)` to equal the rotary width (`256 * 0.25 = 64`
+/// channels here), and the family requires exactly three (temporal, height,
+/// width) sections. The released `[11, 11, 10]` layout satisfies both, while
+/// three sections with the wrong sum, `[1, 1, 1]`, fail the width relation.
+/// Text tokens repeat one position across all three axes, so the split does
+/// not change the 64-channel partial rotation. Token IDs at the last
+/// vocabulary index also validate.
+#[test]
+fn three_rotary_sections_and_in_vocabulary_tokens_validate() {
+    let config = Qwen3_5TextConfig {
+        rope_parameters: Some(RopeParameters {
+            mrope_section: Some(vec![11, 11, 10]),
+            ..RopeParameters::default()
+        }),
+        num_hidden_layers: 4,
+        mtp_num_hidden_layers: 4,
+        pad_token_id: Some(TokenIds::One(248_319)),
+        eos_token_id: Some(TokenIds::Many(vec![0, 248_319])),
+        ..Qwen3_5TextConfig::default()
+    };
+    config.validate().expect("boundary values validate");
+    assert_eq!(config.rope_config().unwrap().rotary_dimension(), 64);
+
+    let short_sum = Qwen3_5TextConfig {
+        rope_parameters: Some(RopeParameters {
+            mrope_section: Some(vec![1, 1, 1]),
+            ..RopeParameters::default()
+        }),
+        ..config
+    };
+    let error = short_sum
+        .validate()
+        .expect_err("2 * (1 + 1 + 1) is not the 64-channel rotary width");
+    assert_eq!(error.architecture, "qwen3_5");
+    assert_eq!(
+        (error.field, error.reason.as_str()),
+        (
+            "mrope_section",
+            "twice the complex-pair section sum must equal the rotary width"
+        )
+    );
+}

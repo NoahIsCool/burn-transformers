@@ -1572,3 +1572,269 @@ fn batched_decode_benchmark() {
         );
     }
 }
+
+/// Allocation rejects unaddressable capacities, overflowing widths, and oversized layers.
+///
+/// Every check runs before any cache tensor is allocated, so even a
+/// `2^24`-row request fails without reserving memory.
+#[test]
+fn decode_state_preflight_rejects_unaddressable_geometry() {
+    let (model, device) = tiny_model();
+    let state = model
+        .new_decode_state(CacheConfig::new(2, 32).unwrap(), 2, &device)
+        .expect("capacity equal to the position table");
+    assert_eq!(state.batch_size(), 2);
+    assert_eq!(state.capacity(), 32);
+    assert_eq!(state.device(), &device);
+    assert_eq!(state.tensor_state().batch_size(), 2);
+    assert_eq!(state.working_lengths(), &[0, 0]);
+
+    let rows = 1 << 24;
+    let error = model
+        .new_decode_state(CacheConfig::new(rows, 32).unwrap(), rows, &device)
+        .expect_err("one layer exceeds the signed tensor-index range");
+    assert!(
+        error.to_string().contains("portable signed tensor-index"),
+        "{error}"
+    );
+
+    let mut wide = initialized_model::<TestBackend>(tiny_config(), &device);
+    wide.model.config.max_position_embeddings = i32::MAX as usize + 1;
+    let error = wide
+        .new_decode_state(
+            CacheConfig::new(1, i32::MAX as usize + 1).unwrap(),
+            1,
+            &device,
+        )
+        .expect_err("capacity beyond the signed position range");
+    assert!(
+        error.to_string().contains("portable signed position-index"),
+        "{error}"
+    );
+
+    let mut overflowing = initialized_model::<TestBackend>(tiny_config(), &device);
+    overflowing.model.config.kv_lora_rank = usize::MAX;
+    let error = overflowing
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .expect_err("latent plus rotary width overflows");
+    assert!(
+        error.to_string().contains("cache width overflows"),
+        "{error}"
+    );
+}
+
+/// A finished-only step without requested traces returns logits and nothing else.
+#[test]
+fn all_inactive_decode_without_diagnostics_returns_only_logits() {
+    let (model, device) = tiny_model();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            input(Tensor::from_ints([[1, 2]], &device)),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2]);
+    assert!(output.hidden_states.is_empty());
+    assert!(output.routers.is_empty());
+    assert!(output.final_hidden_state.is_none());
+    assert_eq!(output.logits.dims(), [1, 1, 32]);
+    assert!(
+        output
+            .logits
+            .into_data()
+            .iter::<f32>()
+            .all(|value| value == 0.0)
+    );
+}
+
+/// Tiny model whose LongRoPE switches to long factors past an original context of two.
+fn long_rope_model(
+    device: &<TestBackend as BackendTypes>::Device,
+) -> DeepseekV2ForCausalLm<TestBackend> {
+    let mut config = tiny_config();
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        rope_type: crate::models::config::RopeType::LongRope,
+        factor: Some(2.0),
+        original_max_position_embeddings: Some(2),
+        short_factor: Some(vec![1.0]),
+        long_factor: Some(vec![3.0]),
+        ..Default::default()
+    });
+    initialized_model(config, device)
+}
+
+/// Context-dependent rotary tables are built per row, matching batch-one prefills.
+///
+/// Under LongRoPE row 0 (three tokens) runs past the original two-token
+/// context and rotates with the long factors, while row 1 (two tokens) keeps
+/// the short factors. A fresh prefill has no cached keys to invalidate, so
+/// the ragged batch is accepted and must reproduce each row's own prefill.
+/// Extending row 1 past the limit afterwards would re-rotate its cached keys
+/// and is rejected without changing any length.
+#[test]
+fn context_dependent_rotary_tables_are_built_per_row() {
+    let device = Default::default();
+    let model = long_rope_model(&device);
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    let batched = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[3, 5, 7], [9, 11, 0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[true, true, true], [true, true, false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(state.lengths(), &[3, 2]);
+    for (row, tokens) in [vec![3, 5, 7], vec![9, 11]].into_iter().enumerate() {
+        let count = tokens.len();
+        let mut single = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let expected = model
+            .prefill(
+                input(Tensor::from_data(
+                    TensorData::new(tokens, [1, count]),
+                    &device,
+                )),
+                &mut single,
+                &options,
+            )
+            .unwrap()
+            .logits;
+        batched
+            .clone()
+            .slice([row..row + 1, 0..count])
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-6));
+    }
+
+    let error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[0], [4]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false], [true]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect_err("row 1 would re-rotate its cached keys");
+    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(error.to_string().contains("2-token limit"), "{error}");
+    assert_eq!(state.lengths(), &[3, 2]);
+}
+
+/// A state allocated for another rotary width or activation dtype is rejected atomically.
+#[test]
+fn decode_state_rejects_foreign_rotary_width_and_dtype() {
+    use burn::module::Module;
+
+    let (model, device) = tiny_model();
+    let mut wide_rope = tiny_config();
+    wide_rope.qk_rope_head_dim = 4;
+    let wide_rope = initialized_model::<TestBackend>(wide_rope, &device);
+    let half = model.clone().map(&mut HalfPrecision);
+    for other in [&wide_rope, &half] {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let error = other
+            .prefill(
+                input(Tensor::from_ints([[1]], &device)),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect_err("the state belongs to a different geometry or dtype");
+        assert!(
+            matches!(
+                &error,
+                Error::Cache(message)
+                    if message == "DeepSeek decode state is incompatible with the model"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(state.lengths(), &[0]);
+    }
+}
+
+/// A finished-only step that requests only the auxiliary loss still returns router diagnostics.
+///
+/// The sparse layer reports no logits and a `[1]` load-balancing loss of
+/// exactly zero: the fully masked row contributes no selections or
+/// probability mass, and the clamped token and active-row denominators turn
+/// `0 / 0` into `0 / 1`, so finished rows can neither add loss nor produce
+/// NaN. The committed length is unchanged.
+#[test]
+fn all_inactive_decode_reports_auxiliary_losses_without_router_logits() {
+    let (model, device) = tiny_model();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            input(Tensor::from_ints([[1, 2]], &device)),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                auxiliary_losses: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(output.routers.len(), 1);
+    assert!(output.routers[0].logits.is_none());
+    let loss = output.routers[0]
+        .load_balancing_loss
+        .clone()
+        .expect("the auxiliary loss was requested");
+    assert_eq!(loss.dims(), [1]);
+    assert_eq!(loss.into_data().to_vec::<f32>().unwrap(), [0.0]);
+    assert_eq!(state.lengths(), &[2]);
+}

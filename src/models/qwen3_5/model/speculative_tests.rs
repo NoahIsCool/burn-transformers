@@ -1049,3 +1049,246 @@ fn verification_timing() {
         sequential[4].as_secs_f64() / batched[4].as_secs_f64()
     );
 }
+
+/// A proposal count whose `K + 1` staging width overflows is rejected, and controls are exposed.
+#[test]
+fn unrepresentable_proposal_counts_are_rejected() {
+    let config = Qwen3_5SpeculativeConfig {
+        max_draft_tokens: usize::MAX,
+        ..Default::default()
+    };
+    let error = config.validate(8).unwrap_err();
+    assert!(
+        error.to_string().contains("proposal capacity overflows"),
+        "{error}"
+    );
+    let decoder = Qwen3_5SpeculativeDecoder::<TestBackend>::new(
+        Qwen3_5SpeculativeConfig::default(),
+        8,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(decoder.config(), &Qwen3_5SpeculativeConfig::default());
+}
+
+/// A cycle whose target verification fails restores both caches and every random stream.
+///
+/// Drafting succeeds (the MTP head has its own final norm), but a NaN target
+/// final norm makes the stochastic verification distribution invalid. The
+/// staged suffix must be rolled back, and once the norm is repaired the same
+/// decoder must reproduce exactly what a fresh decoder with the same seed
+/// produces, proving no random draw of the failed cycle leaked.
+#[test]
+fn verification_failure_restores_caches_and_random_streams() {
+    let device = Default::default();
+    let mut model = zero_model(&device);
+    let config = Qwen3_5SpeculativeConfig {
+        generation: GenerationConfig {
+            strategy: SamplingStrategy::Sample,
+            seed: 0xfa11,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut state, hidden) = aligned_state(&model, &device);
+    let mut decoder =
+        Qwen3_5SpeculativeDecoder::new(config.clone(), model.config().vocab_size, &device).unwrap();
+    let norm = model.model.norm.weight.val();
+    model.model.norm.weight = burn::module::Param::from_tensor(norm.clone() * f32::NAN);
+    let error = decoder
+        .speculate(&model, 1, hidden.clone(), &[2, 3], 2, &mut state)
+        .expect_err("NaN verification logits cannot be sampled");
+    assert!(error.to_string().contains("NaN"), "{error}");
+    assert!(!state.tensor_state().has_active_transaction());
+    assert_eq!(state.tensor_state().lengths(), &[2]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+
+    model.model.norm.weight = burn::module::Param::from_tensor(norm);
+    let retried = decoder
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
+        .unwrap();
+    let (mut fresh_state, fresh_hidden) = aligned_state(&model, &device);
+    let fresh = Qwen3_5SpeculativeDecoder::new(config, model.config().vocab_size, &device)
+        .unwrap()
+        .speculate(&model, 1, fresh_hidden, &[2, 3], 2, &mut fresh_state)
+        .unwrap();
+    assert_eq!(retried.token_ids, fresh.token_ids);
+    assert_eq!(retried.accepted_draft_tokens, fresh.accepted_draft_tokens);
+    assert_eq!(
+        state.tensor_state().lengths(),
+        fresh_state.tensor_state().lengths()
+    );
+}
+
+/// Each cycle preflight fault is reported with its own diagnostic before any cache changes.
+#[test]
+fn cycle_preflight_reports_each_fault() {
+    let device = Default::default();
+    let model = zero_model(&device);
+    let (mut state, hidden) = aligned_state(&model, &device);
+    let mut decoder = Qwen3_5SpeculativeDecoder::new(
+        Qwen3_5SpeculativeConfig::default(),
+        model.config().vocab_size,
+        &device,
+    )
+    .unwrap();
+    let check = |decoder: &mut Qwen3_5SpeculativeDecoder<TestBackend>,
+                 state: &mut Qwen3_5DecodeState<TestBackend>,
+                 history: &[u32],
+                 prompt_length: usize,
+                 expected: &str| {
+        let lengths = state.tensor_state().lengths().to_vec();
+        let error = decoder
+            .speculate(&model, 1, hidden.clone(), history, prompt_length, state)
+            .expect_err(expected);
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(state.tensor_state().lengths(), lengths);
+    };
+    check(
+        &mut decoder,
+        &mut state,
+        &[2, 8],
+        2,
+        "qwen.speculative.history",
+    );
+    check(
+        &mut decoder,
+        &mut state,
+        &[2, 3],
+        3,
+        "qwen.speculative.prompt_length",
+    );
+
+    // Test-only corruption: public construction validates the proposal count.
+    let mut overflowing = Qwen3_5SpeculativeDecoder::new(
+        Qwen3_5SpeculativeConfig::default(),
+        model.config().vocab_size,
+        &device,
+    )
+    .unwrap();
+    overflowing.config.max_draft_tokens = usize::MAX;
+    check(
+        &mut overflowing,
+        &mut state,
+        &[2, 3],
+        2,
+        "proposal capacity overflows",
+    );
+    let mut greedy_three = Qwen3_5SpeculativeDecoder::new(
+        Qwen3_5SpeculativeConfig {
+            max_draft_tokens: 3,
+            ..Default::default()
+        },
+        model.config().vocab_size,
+        &device,
+    )
+    .unwrap();
+    check(
+        &mut greedy_three,
+        &mut state,
+        &[2, 3],
+        2,
+        "staging capacity 3 is below required 4",
+    );
+
+    // A target prompt without the shifted MTP prefill is misaligned.
+    let mut misaligned = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut misaligned,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    check(
+        &mut decoder,
+        &mut misaligned,
+        &[2, 3],
+        2,
+        "requires target = MTP + 1",
+    );
+
+    // A two-token prompt plus three staged tokens does not fit four slots.
+    let mut full = model
+        .new_speculative_decode_state(CacheConfig::new(1, 4).unwrap(), 1, 2, &device)
+        .unwrap();
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3]], &device);
+    let prompt_hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: prompt.clone(),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut full,
+            &ForwardOptions {
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    model
+        .prefill_mtp_cache(prompt, prompt_hidden, &mut full)
+        .unwrap();
+    check(
+        &mut decoder,
+        &mut full,
+        &[2, 3],
+        2,
+        "speculative target suffix reaches 5, exceeding cache capacity 4",
+    );
+}
+
+/// Selected-token readback rejects negative IDs and a row that did not yield exactly one token.
+#[test]
+fn token_readback_rejects_negative_ids_and_wrong_counts() {
+    let device = Default::default();
+    let error =
+        read_tokens(Tensor::<TestBackend, 1, Int>::from_ints([3, -1], &device)).unwrap_err();
+    assert!(error.to_string().contains("invalid ID -1"), "{error}");
+    assert_eq!(
+        read_tokens(Tensor::<TestBackend, 1, Int>::from_ints([3, 0], &device)).unwrap(),
+        [3, 0]
+    );
+    let error =
+        single_token(Tensor::<TestBackend, 1, Int>::from_ints([1, 2], &device)).unwrap_err();
+    assert!(error.to_string().contains("returned 2 tokens"), "{error}");
+    assert_eq!(
+        single_token(Tensor::<TestBackend, 1, Int>::from_ints([5], &device)).unwrap(),
+        5
+    );
+}
+
+/// A target pass that fails during verification rolls the cycle back.
+///
+/// The MTP head drafts normally, but the target's only block lost its
+/// attention module, so the verification forward fails. Both cursors must
+/// be unchanged and no transaction may remain open.
+#[test]
+fn failing_target_verification_rolls_the_cycle_back() {
+    let device = Default::default();
+    let mut model = zero_model(&device);
+    let (mut state, hidden) = aligned_state(&model, &device);
+    model.model.layers[0].self_attn = None;
+    let mut decoder = Qwen3_5SpeculativeDecoder::new(
+        Qwen3_5SpeculativeConfig::default(),
+        model.config().vocab_size,
+        &device,
+    )
+    .unwrap();
+    let error = decoder
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
+        .expect_err("the target cannot verify without its attention");
+    assert!(matches!(error, Error::Checkpoint(_)), "{error}");
+    assert!(!state.tensor_state().has_active_transaction());
+    assert_eq!(state.tensor_state().lengths(), &[2]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+}

@@ -405,3 +405,15 @@ proptest! {
         }
     }
 }
+
+/// A batch-one target cursor without exactly one MTP cursor is misaligned.
+#[test]
+fn speculative_cycle_requires_exactly_one_mtp_cursor() {
+    for mtp in [&[][..], &[4, 4][..]] {
+        assert_eq!(
+            speculative_cycle_plan(&[5], mtp, 5, 3, 8),
+            Err(CycleFault::Misaligned),
+            "{mtp:?}"
+        );
+    }
+}
