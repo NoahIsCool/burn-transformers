@@ -913,6 +913,11 @@ fn inspect_shard(
         }
         let (dtype, byte_len) = describe_header_entry(&tensor)
             .map_err(|error| invalid_header_entry(relative_path, &name, error))?;
+        // Per-entry checks validate each range on its own: it must not be
+        // reversed (the length below needs `end >= start`) and its length must
+        // equal the shape's byte count. Bounds, gaps, overlaps, and coverage are
+        // cross-tensor properties decided only by the verified tiling below, so
+        // every header-entry error is reported before any layout error.
         let [start, end] = tensor.data_offsets;
         let actual = end
             .checked_sub(start)
@@ -928,13 +933,6 @@ fn inspect_shard(
                 actual,
             };
             return Err(invalid_header_entry(relative_path, &name, mismatch));
-        }
-        if end > data_bytes {
-            return Err(CheckpointError::InvalidDataOffsets {
-                tensor: name,
-                shard: relative_path.to_owned(),
-                reason: format!("end {end} exceeds data section size {data_bytes}"),
-            });
         }
         ranges.push((start, end, name.clone()));
         tensors.insert(
@@ -954,8 +952,14 @@ fn inspect_shard(
         .iter()
         .map(|(start, end, _)| (*start, *end))
         .collect::<Vec<_>>();
+    // The verified tiling is the only bounds authority: it walks the ranges in
+    // byte-offset order and names the first one that breaks the exact tiling of
+    // `[0, data_bytes)`, so the reported tensor is the first violation in the
+    // data section rather than in header-name order.
     if let Err(error) = validate_contiguous_tiling(&intervals, data_bytes) {
         let (tensor, reason) = match error {
+            // Defensive: the per-entry check above already rejected every
+            // reversed range, so the tiling cannot report one from this caller.
             TilingError::Reversed { index } => (
                 ranges[index].2.clone(),
                 format!("end {} precedes start {}", ranges[index].1, ranges[index].0),
