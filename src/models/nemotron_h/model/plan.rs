@@ -63,8 +63,11 @@
 //! `gather`, `unpack`, `packed`, and `last` entry equals its equation above,
 //! `scatter` sends valid column `c_{b,k}` to slot `(b, k)` and every other
 //! column to the zero row, and `unpack` addresses the zero row exactly at
-//! padded slots. A plan is refused exactly for malformed columns or
-//! unrepresentable extents. They also prove every slot's query position (a
+//! padded slots. The shortcuts of the tensor wrappers are sound: a dense
+//! plan (`T = B N`) has full rows with identity `packed` and `unpack` maps
+//! and `last[b] = b N + N - 1`, and an identity plan (also `N = S`) has
+//! identity `gather` and `scatter` maps. A plan is refused exactly for
+//! malformed columns or unrepresentable extents. They also prove every slot's query position (a
 //! query never lies beyond its row's last readable key), the policies' exact
 //! decision rules, the MTP cursor invariant, that each cache kind's slots
 //! are exactly `0..count` in schedule order (every block addresses a
@@ -181,6 +184,104 @@ proof fn lemma_packed_below(columns: Seq<Vec<usize>>, row: int, rows: int, j: in
     lemma_total_step(columns, row);
     lemma_total_monotone(columns, row + 1, rows);
     lemma_total_nonnegative(columns, row);
+}
+
+/// Rows of at most `width` tokens total at most `rows * width`, with equality only for full rows.
+proof fn lemma_total_at_most(columns: Seq<Vec<usize>>, rows: int, width: int)
+    requires
+        0 <= rows <= columns.len(),
+        width >= 0,
+        forall|b: int| 0 <= b < rows ==> #[trigger] columns[b]@.len() <= width,
+    ensures
+        total_tokens(columns, rows) <= rows * width,
+        total_tokens(columns, rows) == rows * width
+            ==> forall|b: int| 0 <= b < rows ==> #[trigger] columns[b]@.len() == width,
+    decreases rows,
+{
+    if rows > 0 {
+        lemma_total_at_most(columns, rows - 1, width);
+        assert(rows * width == (rows - 1) * width + width) by (nonlinear_arith);
+        assert(columns[rows - 1]@.len() <= width);
+    }
+}
+
+/// Full rows of `width` tokens start at packed offset `rows * width`.
+proof fn lemma_total_full(columns: Seq<Vec<usize>>, rows: int, width: int)
+    requires
+        0 <= rows <= columns.len(),
+        forall|b: int| 0 <= b < rows ==> #[trigger] columns[b]@.len() == width,
+    ensures
+        total_tokens(columns, rows) == rows * width,
+    decreases rows,
+{
+    if rows > 0 {
+        lemma_total_full(columns, rows - 1, width);
+        assert(rows * width == (rows - 1) * width + width) by (nonlinear_arith);
+        assert(columns[rows - 1]@.len() == width);
+    } else {
+        assert(rows * width == 0) by (nonlinear_arith)
+            requires rows == 0;
+    }
+}
+
+/// Every flat index below `rows * width` is entry `(i / width, i % width)`.
+proof fn lemma_flat_cover(i: int, rows: int, width: int)
+    requires
+        rows >= 0,
+        0 <= i < rows * width,
+    ensures
+        width > 0,
+        0 <= i / width < rows,
+        0 <= i % width < width,
+        i == flat(i / width, i % width, width),
+{
+    if width <= 0 {
+        assert(rows * width <= 0) by (nonlinear_arith)
+            requires width <= 0, rows >= 0;
+    }
+    assert(width > 0);
+    assert(i == width * (i / width) + i % width) by (nonlinear_arith)
+        requires width > 0;
+    assert(0 <= i % width < width) by (nonlinear_arith)
+        requires width > 0, i >= 0;
+    assert(i / width >= 0) by (nonlinear_arith)
+        requires width > 0, i >= 0;
+    assert(i / width < rows) by (nonlinear_arith)
+        requires width > 0, 0 <= i < rows * width, i == width * (i / width) + i % width,
+            0 <= i % width;
+    assert(width * (i / width) == (i / width) * width) by (nonlinear_arith);
+}
+
+/// Entry `j` of a strictly increasing sequence of naturals is at least `j`.
+proof fn lemma_sorted_at_least(s: Seq<usize>, bound: int, j: int)
+    requires
+        sorted_unique_below(s, bound),
+        0 <= j < s.len(),
+    ensures
+        s[j] >= j,
+    decreases j,
+{
+    if j > 0 {
+        lemma_sorted_at_least(s, bound, j - 1);
+        assert(s[j - 1] < s[j]);
+    }
+}
+
+/// Entry `j` of a strictly increasing sequence below `bound` leaves room for the rest.
+proof fn lemma_sorted_at_most(s: Seq<usize>, bound: int, j: int)
+    requires
+        sorted_unique_below(s, bound),
+        0 <= j < s.len(),
+    ensures
+        s[j] <= bound - (s.len() - j),
+    decreases s.len() - j,
+{
+    if j + 1 < s.len() {
+        lemma_sorted_at_most(s, bound, j + 1);
+        assert(s[j] < s[j + 1]);
+    } else {
+        assert(s[j] < bound);
+    }
 }
 
 /// Some row among the first `rows` has exactly `width` valid columns.
@@ -455,6 +556,19 @@ impl CompactPlan {
                 &&& all_below(plan.packed@, batch * width)
                 &&& all_at_most(plan.unpack@, tokens)
                 &&& all_at_most(plan.last@, batch * width)
+                // A dense plan (`T = B N`) has full rows and identity packing maps.
+                &&& plan.packed.len() == plan.unpack.len() ==> {
+                    &&& forall|b: int| 0 <= b < batch ==> #[trigger] plan.counts@[b] == plan.width
+                    &&& forall|i: int| 0 <= i < plan.packed.len() ==> #[trigger] plan.packed@[i] == i
+                    &&& forall|i: int| 0 <= i < plan.unpack.len() ==> #[trigger] plan.unpack@[i] == i
+                    &&& plan.width > 0 ==> forall|b: int| 0 <= b < batch
+                        ==> #[trigger] plan.last@[b] == flat(b, width - 1, width)
+                }
+                // An identity plan (dense with `N = S`) gathers and scatters in place.
+                &&& plan.width == sequence && plan.packed.len() == plan.unpack.len() ==> {
+                    &&& forall|i: int| 0 <= i < plan.gather.len() ==> #[trigger] plan.gather@[i] == i
+                    &&& forall|i: int| 0 <= i < plan.scatter.len() ==> #[trigger] plan.scatter@[i] == i
+                }
             },
             None => {
                 ||| exists|b: int| 0 <= b < columns.len()
@@ -762,6 +876,59 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 lemma_packed_below(columns@, b, batch as int, j);
             }
         }
+        // `T = B N` forces full rows, so every packing map is the identity.
+        if packed.len() == unpack.len() {
+            let n = width as int;
+            lemma_total_at_most(columns@, batch as int, n);
+            assert forall|i: int| 0 <= i < packed.len() implies #[trigger] packed@[i] == i by {
+                lemma_flat_cover(i, batch as int, n);
+                let b = i / n;
+                let j = i % n;
+                lemma_total_full(columns@, b, n);
+                assert(columns@[b]@.len() == n);
+                assert(packed@[packed_index(columns@, b, j)] == flat(b, j, n));
+            }
+            assert forall|i: int| 0 <= i < unpack.len() implies #[trigger] unpack@[i] == i by {
+                lemma_flat_cover(i, batch as int, n);
+                let b = i / n;
+                let j = i % n;
+                lemma_total_full(columns@, b, n);
+                assert(columns@[b]@.len() == n);
+                assert(unpack@[flat(b, j, n)] == packed_index(columns@, b, j));
+            }
+            assert forall|b: int| 0 <= b < batch implies #[trigger] counts@[b] == width by {
+                assert(columns@[b]@.len() == n);
+            }
+            if width > 0 {
+                assert forall|b: int| 0 <= b < batch
+                    implies #[trigger] last@[b] == flat(b, n - 1, n) by {
+                    assert(columns@[b]@.len() == n);
+                }
+            }
+            // Full rows of `S` strictly increasing columns below `S` are `0..S`.
+            if width == sequence {
+                assert forall|i: int| 0 <= i < gather.len() implies #[trigger] gather@[i] == i by {
+                    lemma_flat_cover(i, batch as int, n);
+                    let b = i / n;
+                    let j = i % n;
+                    assert(columns@[b]@.len() == n);
+                    lemma_sorted_at_least(columns@[b]@, sequence as int, j);
+                    lemma_sorted_at_most(columns@[b]@, sequence as int, j);
+                    assert(columns@[b]@[j] == j);
+                    assert(gather@[flat(b, j, n)] == flat(b, columns@[b]@[j] as int, sequence as int));
+                }
+                assert forall|i: int| 0 <= i < scatter.len() implies #[trigger] scatter@[i] == i by {
+                    lemma_flat_cover(i, batch as int, n);
+                    let b = i / n;
+                    let j = i % n;
+                    assert(columns@[b]@.len() == n);
+                    lemma_sorted_at_least(columns@[b]@, sequence as int, j);
+                    lemma_sorted_at_most(columns@[b]@, sequence as int, j);
+                    assert(columns@[b]@[j] == j);
+                    assert(scatter@[flat(b, columns@[b]@[j] as int, sequence as int)] == flat(b, j, n));
+                }
+            }
+        }
     }
     Some(CompactPlan {
         sequence,
@@ -974,7 +1141,7 @@ pub(crate) enum TransactionalMamba {
 /// proposal must keep the state after every token. Only the recurrent update
 /// produces per-token states, and the reference uses it only for rows that
 /// already have state; a row that would start its prompt inside a
-/// transaction is therefore reported as `Err(row)`.
+/// transaction is therefore reported as `Err(row)`, naming the first such row.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(policy =>
     ensures
@@ -991,6 +1158,8 @@ pub(crate) enum TransactionalMamba {
                 &&& row < counts.len()
                 &&& counts@[row as int] > 0
                 &&& (row >= baselines.len() || baselines@[row as int] == 0)
+                &&& forall|r: int| 0 <= r < row && #[trigger] counts@[r] > 0
+                    ==> r < baselines.len() && baselines@[r] > 0
             },
         },
 ))]

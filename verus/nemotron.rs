@@ -5,11 +5,13 @@
 //! gather, scatter, pack, unpack, and select the last token of ragged rows
 //! (every entry equals its documented equation, the compact width is the
 //! largest row count, the scatter is the inverse of the gather on valid
-//! columns, and a plan is refused exactly for malformed columns or
+//! columns, a dense or identity plan has the identity maps the tensor
+//! wrappers skip, and a plan is refused exactly for malformed columns or
 //! unrepresentable extents), the exact absolute query position of every
 //! compact slot (padded slots repeat a row's last readable position, so no
 //! query of a row with history loses every key), the reference Mamba-2 path
-//! choice, the transactional recurrent-staging policy, the shifted MTP cursor
+//! choice, the transactional recurrent-staging policy (naming the first
+//! row that lacks state), the shifted MTP cursor
 //! after a truncation (per row and for a whole batch), the one-pass
 //! verification length, the hybrid schedule's cache slots (each kind's
 //! blocks are numbered exactly `0..count` in schedule order, so attention

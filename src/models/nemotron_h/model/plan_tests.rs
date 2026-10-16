@@ -186,6 +186,8 @@ fn transactional_mamba_policy() {
     );
     assert_eq!(transactional_mamba(&[3, 1], &[4, 0]), Err(1));
     assert_eq!(transactional_mamba(&[2], &[]), Err(0));
+    // The first active row without state is reported.
+    assert_eq!(transactional_mamba(&[2, 1, 1], &[3, 0, 0]), Err(1));
 }
 
 /// MTP truncation only rewinds and keeps the one-token lag.
@@ -351,6 +353,20 @@ proptest! {
         let columns = columns_of(&mask);
         let plan = plan_compaction(&columns, 5).unwrap();
         assert_plan_is_consistent(&columns, 5, &plan);
+        // The tensor wrappers skip the maps of dense and identity plans.
+        if plan.is_dense() {
+            prop_assert!(plan.packed.iter().enumerate().all(|(i, &source)| source == i));
+            prop_assert!(plan.unpack.iter().enumerate().all(|(i, &source)| source == i));
+            if plan.width > 0 {
+                for (row, &last) in plan.last.iter().enumerate() {
+                    prop_assert_eq!(last, row * plan.width + plan.width - 1);
+                }
+            }
+        }
+        if plan.is_identity() {
+            prop_assert!(plan.gather.iter().enumerate().all(|(i, &source)| source == i));
+            prop_assert!(plan.scatter.iter().enumerate().all(|(i, &source)| source == i));
+        }
     }
 
     /// Every slot position follows its defining rule and sees a readable key.
