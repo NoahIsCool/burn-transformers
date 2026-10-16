@@ -585,3 +585,175 @@ fn tiled_transpose_rejects_wrong_buffer_lengths_and_dimension_overflow() {
         }))
     ));
 }
+
+/// Materializes `tensor` from `payloads` without the plan validation that normally precedes it.
+fn materialize_unvalidated(
+    tensor: &PlannedTensor,
+    payloads: Vec<SourceTensor>,
+) -> Result<TensorData> {
+    let mut source = FixtureSource { payloads, reads: 0 };
+    materialize(tensor, &mut source, &mut ExecutionStats::default())
+}
+
+/// Every materializer re-derives its own layout preconditions from the payload.
+///
+/// `validate_plan` rejects all of these work items first; called directly,
+/// the materializers still fail with contextual errors instead of indexing
+/// past a buffer or producing a silently misplaced tensor.
+#[test]
+fn materializers_reject_unvalidated_layouts_with_contextual_errors() {
+    let values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let matrix = || float_payload("weight", &[2, 3], TensorDType::F32, &values);
+
+    let mut alias = identity();
+    alias.transform = PlannedTransform::Alias {
+        source_target: "owner".into(),
+    };
+    assert!(matches!(materialize_unvalidated(&alias, vec![matrix()]),
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "alias `target` occurred in the primary tensor list"));
+
+    // A rank-three source cannot be transposed as a matrix.
+    let mut cube = identity();
+    cube.transform = PlannedTransform::Transpose2d;
+    cube.sources = vec![descriptor("weight", &[1, 2, 3], TensorDType::F32)];
+    cube.shape = vec![3, 2];
+    let payload = float_payload("weight", &[1, 2, 3], TensorDType::F32, &values);
+    assert!(matches!(materialize_unvalidated(&cube, vec![payload]),
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "transpose target `target` requires a rank-two source"));
+
+    // A transpose target holding the wrong element count leaves the output untouched.
+    let mut oversized = identity();
+    oversized.transform = PlannedTransform::Transpose2d;
+    oversized.shape = vec![4, 2];
+    assert!(
+        matches!(materialize_unvalidated(&oversized, vec![matrix()]),
+        Err(CheckpointError::InvalidTensorPayload { tensor, reason })
+            if tensor == "target" && reason == "computed scalar range is outside the payload")
+    );
+
+    // A slice past its source axis.
+    let mut past_axis = identity();
+    past_axis.transform = PlannedTransform::Slice {
+        axis: 1,
+        start: 2,
+        length: 2,
+    };
+    past_axis.shape = vec![2, 2];
+    assert!(
+        matches!(materialize_unvalidated(&past_axis, vec![matrix()]),
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "slice target `target` exceeds source axis 1 of length 3")
+    );
+
+    // Concatenated sources longer than the target axis.
+    let mut overfull = identity();
+    overfull.transform = PlannedTransform::Concatenate { axis: 0 };
+    overfull.sources = vec![
+        descriptor("left", &[1, 3], TensorDType::F32),
+        descriptor("right", &[1, 3], TensorDType::F32),
+    ];
+    overfull.shape = vec![1, 3];
+    let rows = vec![
+        float_payload("left", &[1, 3], TensorDType::F32, &values[..3]),
+        float_payload("right", &[1, 3], TensorDType::F32, &values[3..]),
+    ];
+    assert!(matches!(materialize_unvalidated(&overfull, rows),
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "concatenation sources exceed target `target` axis 0"));
+
+    // A narrower source than the target's inner extent cannot fill its block.
+    let mut narrow = identity();
+    narrow.transform = PlannedTransform::Concatenate { axis: 0 };
+    narrow.sources = vec![descriptor("left", &[1, 2], TensorDType::F32)];
+    let narrow_payload = float_payload("left", &[1, 2], TensorDType::F32, &values[..2]);
+    assert!(
+        matches!(materialize_unvalidated(&narrow, vec![narrow_payload]),
+        Err(CheckpointError::InvalidTensorPayload { tensor, .. }) if tensor == "target")
+    );
+}
+
+/// MXFP4 materialization rechecks source arity, geometry, and the decoded dtype.
+#[test]
+fn mxfp4_materialization_rejects_unvalidated_work_items() {
+    let blocks = |shape: &[u64]| {
+        let bytes = vec![0_u8; shape.iter().product::<u64>() as usize];
+        SourceTensor::new("blocks", shape.to_vec(), TensorDType::U8, bytes).unwrap()
+    };
+    let scales = SourceTensor::new("scales", vec![1, 1, 1], TensorDType::U8, vec![127]).unwrap();
+    let mut tensor = PlannedTensor {
+        target: "experts".into(),
+        sources: vec![descriptor("blocks", &[1, 1, 1, 16], TensorDType::U8)],
+        transform: PlannedTransform::DequantizeMxfp4,
+        shape: vec![1, 32, 1],
+        dtype: TensorDType::F32,
+    };
+    assert!(
+        matches!(materialize_unvalidated(&tensor, vec![blocks(&[1, 1, 1, 16])]),
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "MXFP4 target `experts` requires blocks and scales sources")
+    );
+
+    // Blocks whose last axis is not sixteen bytes do not describe 32 codes per group.
+    tensor.sources = vec![
+        descriptor("blocks", &[1, 1, 1, 8], TensorDType::U8),
+        descriptor("scales", &[1, 1, 1], TensorDType::U8),
+    ];
+    assert!(matches!(
+        materialize_unvalidated(&tensor, vec![blocks(&[1, 1, 1, 8]), scales.clone()]),
+        Err(CheckpointError::InvalidMapping { message })
+            if message.starts_with("MXFP4 target `experts` sources ")
+    ));
+
+    // A valid pair still refuses a non-float decoded dtype.
+    tensor.sources[0] = descriptor("blocks", &[1, 1, 1, 16], TensorDType::U8);
+    tensor.dtype = TensorDType::I32;
+    assert!(matches!(
+        materialize_unvalidated(&tensor, vec![blocks(&[1, 1, 1, 16]), scales.clone()]),
+        Err(CheckpointError::UnsupportedDTypeConversion {
+            source_dtype: TensorDType::F64,
+            target_dtype: TensorDType::I32,
+        })
+    ));
+
+    // The same pair decodes 32 values of 2^(127 - 127) * 0 = +0 into F32.
+    tensor.dtype = TensorDType::F32;
+    let decoded = materialize_unvalidated(&tensor, vec![blocks(&[1, 1, 1, 16]), scales]).unwrap();
+    assert_eq!(decoded.shape.as_slice(), [1, 32, 1]);
+    assert!(
+        decoded
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.to_bits() == 0)
+    );
+}
+
+/// Axis views map each layout failure to the diagnostic of its cause.
+#[test]
+fn axis_views_report_bounds_overflow_and_host_size_separately() {
+    assert!(matches!(AxisView::new(&[2], 3, "t"),
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "axis 3 is out of bounds for `t` shape [2]"));
+    for (shape, axis) in [(&[u64::MAX, 2, 1][..], 2), (&[1, 2, u64::MAX, 2][..], 1)] {
+        assert!(matches!(AxisView::new(shape, axis, "t"),
+            Err(CheckpointError::InvalidTensorPayload { tensor, reason })
+                if tensor == "t" && reason == "shape element count overflows u64"));
+    }
+    // Each factor fits, but `outer * axis * inner` does not.
+    assert!(matches!(AxisView::new(&[u64::MAX, 2], 0, "t"),
+        Err(CheckpointError::InvalidTensorPayload { tensor, reason })
+            if tensor == "t" && reason == "axis view element count does not fit in usize"));
+    let view = AxisView::new(&[2, 3, 4], 1, "t").unwrap();
+    assert_eq!((view.outer, view.axis, view.inner), (2, 3, 4));
+    assert_eq!(view.elements_with_axis(5, "t").unwrap(), 40);
+    let wide = AxisView {
+        outer: 2,
+        axis: 1,
+        inner: usize::MAX,
+    };
+    assert!(matches!(wide.elements_with_axis(1, "t"),
+        Err(CheckpointError::InvalidTensorPayload { reason, .. })
+            if reason == "axis view element count does not fit in usize"));
+}

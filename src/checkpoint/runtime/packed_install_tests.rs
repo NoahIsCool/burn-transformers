@@ -222,7 +222,15 @@ fn mapper_probe_classifies_identity_permutations_and_arithmetic() {
         load_mapper_effect(&col.weight),
         MapperEffect::AxisPermutation
     );
-    let cases: [(&str, Param<Tensor<Flex, 2>>, MapperEffect); 5] = [
+    let cases: [(&str, Param<Tensor<Flex, 2>>, MapperEffect); 6] = [
+        (
+            "flattening reshape",
+            mapped_parameter(|value| {
+                let [rows, columns] = value.dims();
+                value.reshape([1, rows * columns])
+            }),
+            MapperEffect::Other,
+        ),
         (
             "noop closure",
             mapped_parameter(|value| value),
