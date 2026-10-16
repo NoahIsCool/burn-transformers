@@ -28,6 +28,14 @@
 //! like the plain dictionaries Python callers pass, so optional keys are
 //! absent rather than `null`.
 //!
+//! Templates are found and chosen as in Hugging Face 5.2. `chat_template.jinja`
+//! (the `default` template) and `additional_chat_templates/<name>.jinja`
+//! replace any `chat_template` entry in `tokenizer_config.json`, and template
+//! files are read with Python's universal newlines (`\r\n` and `\r` become
+//! `\n`). A render without [`ChatTemplateOptions::template_name`] uses the
+//! checkpoint's `tool_use` template when [`ChatTemplateOptions::tools`] is
+//! set, otherwise `default`, otherwise the only template.
+//!
 //! Known differences from Hugging Face, each of which changes prompt text:
 //!
 //! - **Dictionary keys reach templates sorted.** Python preserves insertion
@@ -47,6 +55,25 @@
 //!   sandbox's limits (below) fails where Python might still render. The
 //!   limits scale with the conversation, so only adversarial templates reach
 //!   them; no published template does.
+//!
+//! Deliberate differences in naming and validating templates, which matter
+//! only for calls and artifacts Hugging Face rejects or resolves arbitrarily:
+//!
+//! - **`template_name` only names a stored template.** Hugging Face's
+//!   `chat_template` argument is looked up only among several named
+//!   templates and is otherwise rendered as Jinja source, so an unknown name,
+//!   or any name for a checkpoint with a single unnamed template, renders as
+//!   literal text there. Here a template stored without a name (a string
+//!   `chat_template` or `chat_template.jinja`) is `default`, and an unknown
+//!   name is an error that lists the available names.
+//! - **A sole non-`default` template renders without a name**, where Hugging
+//!   Face raises "multiple chat templates with no default".
+//! - **Ambiguous or malformed template artifacts are rejected**: empty
+//!   templates or names, duplicate names (in a config list, or
+//!   `additional_chat_templates/default.jinja` beside `chat_template.jinja`),
+//!   template files that are not UTF-8, symlinks that leave the model
+//!   directory, and template files beyond the loader's size and count limits.
+//!   Hugging Face keeps the last duplicate and reads the rest.
 //!
 //! Chat templates are data supplied by a checkpoint and therefore are treated
 //! as untrusted programs. The MiniJinja environment has no filesystem loader,
@@ -85,6 +112,7 @@ use crate::{
 // rustdoc resolve their intra-doc links from this module's scope.
 #[cfg(feature = "chat-templates")]
 mod calendar; // Proleptic-Gregorian civil time for `strftime_now` (Verus-verified).
+mod catalog; // Chat-template discovery and selection in Hugging Face's precedence.
 #[cfg(feature = "chat-templates")]
 mod chat_template; // Hugging Face-compatible template environment and `strftime`.
 mod layout; // Truncation-budget and padding arithmetic (Verus-verified).
@@ -92,6 +120,9 @@ mod layout; // Truncation-budget and padding arithmetic (Verus-verified).
 mod pycompat; // Python `str`/`dict` semantics, printing, and filters for templates.
 mod vocabulary; // Special-token ID and embedding-row checks (Verus-verified).
 
+use catalog::load_chat_templates;
+#[cfg(feature = "chat-templates")]
+use catalog::select_template;
 use layout::{
     LimitViolation, PaddedBatch, content_token_budget, encoding_limit_violation, first_ragged_row,
     flatten_mask_rows, flatten_token_rows, longest_row, pad_batch, unpadded_masks,
@@ -306,7 +337,12 @@ pub struct TokenizerMetadata {
     pub vocabulary_size: usize,
     /// Resolved special-token spellings and IDs.
     pub special_tokens: SpecialTokens,
-    /// Named chat templates, with a scalar template normalized as `default`.
+    /// Named chat templates, in Hugging Face's precedence.
+    ///
+    /// When the model directory holds `chat_template.jinja` (stored as
+    /// `default`) or `additional_chat_templates/<name>.jinja` files, they are
+    /// the whole set; otherwise the entries of `tokenizer_config.json`'s
+    /// `chat_template` are, with a scalar template stored as `default`.
     pub chat_templates: BTreeMap<String, String>,
 }
 
@@ -411,7 +447,13 @@ impl ChatMessage {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatTemplateOptions {
-    /// Named template; omission selects `default` or the only available template.
+    /// Name of the checkpoint template to render, such as `default` or `tool_use`.
+    ///
+    /// Omission chooses as Hugging Face's `get_chat_template` does: `tool_use`
+    /// when [`Self::tools`] is set and the checkpoint has that template,
+    /// otherwise `default`, otherwise the checkpoint's only template. A name
+    /// the checkpoint lacks is an error; unlike Hugging Face, it is never
+    /// rendered as template source.
     pub template_name: Option<String>,
     /// Whether the rendered prompt should end at the next assistant turn prefix.
     pub add_generation_prompt: bool,
@@ -422,6 +464,10 @@ pub struct ChatTemplateOptions {
     /// end-of-turn markup. Incompatible with [`Self::add_generation_prompt`].
     pub continue_final_message: bool,
     /// Optional tool schemas exposed as `tools` to templates that support tool use.
+    ///
+    /// Any value but JSON `null` (Python's `None`), even an empty list, also
+    /// selects the checkpoint's `tool_use` template when
+    /// [`Self::template_name`] is unset, as in Hugging Face.
     ///
     /// Schema keys reach the template sorted, so a template that prints a
     /// schema with `tojson` emits `{"function": ..., "type": "function"}`
@@ -444,6 +490,17 @@ pub struct ChatTemplateOptions {
     pub current_time_unix_seconds: Option<i64>,
     /// Additional checkpoint-specific variables; reserved built-ins cannot be replaced.
     pub extra_context: BTreeMap<String, Value>,
+}
+
+#[cfg(feature = "chat-templates")]
+impl ChatTemplateOptions {
+    /// Whether tools were supplied, as Python's `tools is not None`.
+    ///
+    /// JSON `null` counts as absent: Python callers cannot pass it, and the
+    /// template sees `tools` as `none` either way.
+    fn tools_given(&self) -> bool {
+        self.tools.as_ref().is_some_and(|tools| !tools.is_null())
+    }
 }
 
 /// Token IDs and semantic validity masks retained on the host.
@@ -587,6 +644,12 @@ impl fmt::Debug for LocalTokenizer {
 
 impl LocalTokenizer {
     /// Opens `tokenizer.json` and optional metadata from one contained directory.
+    ///
+    /// The optional artifacts are `tokenizer_config.json`,
+    /// `special_tokens_map.json`, and the chat-template files
+    /// `chat_template.jinja` and `additional_chat_templates/*.jinja` (see
+    /// [`TokenizerMetadata::chat_templates`]). Every file must resolve inside
+    /// the canonical directory and stay within the loader's size limits.
     pub fn from_directory(root: impl AsRef<Path>) -> Result<Self> {
         let supplied_root = root.as_ref();
         let root = supplied_root
@@ -870,7 +933,11 @@ impl LocalTokenizer {
                 "continue_final_message and add_generation_prompt are mutually exclusive: the first extends the final message, the second starts a new assistant turn".into(),
             ));
         }
-        let (name, template) = select_template(&self.metadata.chat_templates, options)?;
+        let (name, template) = select_template(
+            &self.metadata.chat_templates,
+            options.template_name.as_deref(),
+            options.tools_given(),
+        )?;
         let mut messages = chat_messages_value(messages)?;
         let continued_text = if options.continue_final_message {
             Some(mark_final_message(&mut messages)?)
@@ -974,14 +1041,29 @@ fn clear_serialized_batch_policy(tokenizer: &mut Tokenizer) -> Result<()> {
     Ok(())
 }
 
-/// Resolves a fixed artifact name and ensures symlinks cannot escape the root.
+/// Whether nothing, not even a dangling symlink, exists at `path`.
+///
+/// One `lstat` settles the common case of an absent optional artifact, which
+/// `canonicalize` would decide only after resolving every path component.
+/// Dangling and looping symlinks exist here; resolving them reports them.
+fn is_absent(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Resolves an artifact path relative to `root` and ensures symlinks cannot escape it.
+///
+/// Returns `None` only for an absent optional artifact; the resolved file
+/// must be a regular file of at most `maximum_bytes`.
 fn contained_file(
     root: &Path,
-    name: &str,
+    name: impl AsRef<Path>,
     required: bool,
     maximum_bytes: u64,
 ) -> Result<Option<PathBuf>> {
     let candidate = root.join(name);
+    if !required && is_absent(&candidate) {
+        return Ok(None);
+    }
     let canonical = match candidate.canonicalize() {
         Ok(path) => path,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound && !required => {
@@ -1064,19 +1146,7 @@ fn normalize_metadata(
         mask: resolve_special("mask_token", tokenizer_config, special_map, tokenizer)?,
         additional: resolve_additional(tokenizer_config, special_map, tokenizer)?,
     };
-    let mut chat_templates = parse_chat_templates(get("chat_template"))?;
-    if chat_templates.is_empty()
-        && let Some(path) = contained_file(root, "chat_template.jinja", false, MAX_METADATA_BYTES)?
-    {
-        let template = fs::read_to_string(&path).map_err(|source| Error::io(&path, source))?;
-        if template.trim().is_empty() {
-            return Err(Error::Artifact {
-                path,
-                reason: "chat template must not be empty".into(),
-            });
-        }
-        chat_templates.insert("default".into(), template);
-    }
+    let chat_templates = load_chat_templates(root, get("chat_template"))?;
     Ok(TokenizerMetadata {
         tokenizer_class,
         model_max_length,
@@ -1215,94 +1285,6 @@ fn resolve_additional(
         resolved.push(SpecialToken { content, id });
     }
     Ok(resolved)
-}
-
-/// Accepts scalar, list, and map chat-template encodings used by Hub artifacts.
-fn parse_chat_templates(value: Option<&Value>) -> Result<BTreeMap<String, String>> {
-    let Some(value) = value else {
-        return Ok(BTreeMap::new());
-    };
-    let mut templates = BTreeMap::new();
-    match value {
-        Value::String(template) => insert_template(&mut templates, "default", template)?,
-        Value::Array(entries) => {
-            for (index, entry) in entries.iter().enumerate() {
-                let name = entry.get("name").and_then(Value::as_str).ok_or_else(|| {
-                    Error::Tokenizer(format!("chat_template[{index}].name must be a string"))
-                })?;
-                let template = entry
-                    .get("template")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        Error::Tokenizer(format!(
-                            "chat_template[{index}].template must be a string"
-                        ))
-                    })?;
-                insert_template(&mut templates, name, template)?;
-            }
-        }
-        Value::Object(entries) => {
-            for (name, template) in entries {
-                let template = template.as_str().ok_or_else(|| {
-                    Error::Tokenizer(format!("chat template `{name}` must be a string"))
-                })?;
-                insert_template(&mut templates, name, template)?;
-            }
-        }
-        _ => {
-            return Err(Error::Tokenizer(
-                "chat_template must be a string, named array, or string map".into(),
-            ));
-        }
-    }
-    Ok(templates)
-}
-
-/// Inserts one named, non-empty chat template without silent replacement.
-fn insert_template(
-    templates: &mut BTreeMap<String, String>,
-    name: &str,
-    template: &str,
-) -> Result<()> {
-    if name.trim().is_empty() || template.trim().is_empty() {
-        return Err(Error::Tokenizer(
-            "chat template name and source must not be empty".into(),
-        ));
-    }
-    if templates.insert(name.into(), template.into()).is_some() {
-        return Err(Error::Tokenizer(format!(
-            "duplicate chat template name `{name}`"
-        )));
-    }
-    Ok(())
-}
-
-/// Selects the explicit, default, or only template deterministically.
-#[cfg(feature = "chat-templates")]
-fn select_template<'a>(
-    templates: &'a BTreeMap<String, String>,
-    options: &ChatTemplateOptions,
-) -> Result<(&'a str, &'a str)> {
-    if let Some(name) = options.template_name.as_deref() {
-        return templates
-            .get_key_value(name)
-            .map(|(name, template)| (name.as_str(), template.as_str()))
-            .ok_or_else(|| Error::Tokenizer(format!("chat template `{name}` was not found")));
-    }
-    if let Some(template) = templates.get("default") {
-        return Ok(("default", template));
-    }
-    if templates.len() == 1 {
-        return templates
-            .first_key_value()
-            .map(|(name, template)| (name.as_str(), template.as_str()))
-            .ok_or_else(|| Error::Tokenizer("checkpoint does not provide a chat template".into()));
-    }
-    Err(Error::Tokenizer(if templates.is_empty() {
-        "checkpoint does not provide a chat template".into()
-    } else {
-        "checkpoint provides multiple chat templates but no default; choose a name".into()
-    }))
 }
 
 /// Serializes messages as template dictionaries, rejecting shadowed field names.

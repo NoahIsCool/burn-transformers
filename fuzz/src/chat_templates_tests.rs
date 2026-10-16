@@ -38,7 +38,7 @@ fn conventional_template_renders_and_encodes() {
 /// Every storage form loads both templates and selects by name.
 #[test]
 fn every_template_storage_selects_by_name() {
-    for storage in [Storage::NamedList, Storage::Map] {
+    for storage in [Storage::NamedList, Storage::Map, Storage::TemplateFiles] {
         let mut tool = problem("default");
         tool.storage = storage;
         tool.tool_template = "tool".to_owned();
@@ -53,6 +53,26 @@ fn every_template_storage_selects_by_name() {
     let mut blank_file = problem("  ");
     blank_file.storage = Storage::JinjaFile;
     check(&blank_file);
+    let mut blank_tool_file = problem("default");
+    blank_tool_file.storage = Storage::TemplateFiles;
+    blank_tool_file.tool_template = "\r\n".to_owned();
+    check(&blank_tool_file);
+}
+
+/// Template files replace the config template and are read with universal newlines.
+///
+/// Hugging Face 5.2 `_from_pretrained` lets `chat_template.jinja` and
+/// `additional_chat_templates/*.jinja` replace `tokenizer_config.json`'s
+/// `chat_template` and reads them with Python's universal newlines, which
+/// turn `\r\n` and `\r` into `\n` (the harness also checks the loaded text).
+#[test]
+fn template_files_replace_the_config_template() {
+    let mut files = problem("D\r\n{{ messages | length }}\rE");
+    files.storage = Storage::TemplateFiles;
+    files.tool_template = "T\r\nU".to_owned();
+    assert_eq!(render(&files).unwrap(), "D\n1\nE");
+    files.options.tools = Some(json!([]));
+    assert_eq!(render(&files).unwrap(), "T\nU");
 }
 
 /// Each documented argument check fails, whatever the template.
@@ -144,17 +164,20 @@ fn hugging_face_selection_follows_get_chat_template() {
         Storage::NamedList,
         Storage::Map,
         Storage::JinjaFile,
+        Storage::TemplateFiles,
     ] {
         selection.storage = storage;
         selection.options.tools = None;
         assert_eq!(hugging_face_selection(&selection), "default");
         assert_eq!(render(&selection).unwrap(), "D");
         selection.options.tools = Some(json!([]));
-        let named = matches!(storage, Storage::NamedList | Storage::Map);
-        let expected = if named { "tool_use" } else { "default" };
+        let (expected, text) = if storage.has_tool_template() {
+            ("tool_use", "T")
+        } else {
+            ("default", "D")
+        };
         assert_eq!(hugging_face_selection(&selection), expected);
-        // `render` runs the tolerant selection oracle (CHAT-4 is still open).
-        render(&selection).unwrap();
+        assert_eq!(render(&selection).unwrap(), text, "{storage:?}");
     }
 }
 
@@ -176,19 +199,17 @@ fn marked_templates_are_selected_by_name() {
     assert!(decoded.tool_template.starts_with(TOOL_MARKER));
 }
 
-/// CHAT-4: with `tools` and a named `tool_use` template, Hugging Face selects `tool_use`.
+/// CHAT-4 (fixed): with `tools` and a named `tool_use` template, Hugging Face selects `tool_use`.
 ///
 /// Hugging Face 5.2 `get_chat_template` (`tokenization_utils_base.py`) returns
 /// `template_dict["tool_use"]` when no template name is given, `tools is not
-/// None`, and the checkpoint stores a `tool_use` template; `select_template`
-/// in `src/tokenization.rs` always returns `default`, so tool-use checkpoints
-/// with named templates (Command-R, Hermes-2-Pro) render a different prompt.
-/// Fix: select `tool_use` when `options.tools.is_some()` and no name is given
-/// (explicit name, then `tool_use` with tools, then `default`).
+/// None`, and the checkpoint stores a `tool_use` template. `select_template`
+/// returned `default` instead, so tool-use checkpoints with named templates
+/// (Command-R, Hermes-2-Pro) rendered a different prompt. It now selects the
+/// explicit name, then `tool_use` with tools, then `default`.
 #[test]
-#[ignore = "CHAT-4: open follow-up in src/tokenization.rs (select_template ignores tools)"]
 fn tools_select_the_tool_use_template() {
-    for storage in [Storage::NamedList, Storage::Map] {
+    for storage in [Storage::NamedList, Storage::Map, Storage::TemplateFiles] {
         let mut tools = problem("D");
         tools.storage = storage;
         tools.tool_template = "T".to_owned();

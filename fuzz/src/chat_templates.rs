@@ -9,7 +9,11 @@
 //!
 //! 1. **Loading.** A whitespace-only template is rejected at load time; any other
 //!    template loads, embedded in `tokenizer_config.json` as a string, a named
-//!    list, or a map, or as a separate `chat_template.jinja` file.
+//!    list, or a map, or as separate `chat_template.jinja` and
+//!    `additional_chat_templates/tool_use.jinja` files. The loaded templates
+//!    are exactly the stored ones: template files replace a decoy
+//!    `chat_template` entry in the config and are read with Python's universal
+//!    newlines, as in Hugging Face 5.2.
 //! 2. **Rendering never panics** and fails only with [`Error::Tokenizer`]. The
 //!    documented argument checks fail whenever they apply: no messages, both
 //!    `continue_final_message` and `add_generation_prompt`, an unknown template
@@ -21,9 +25,8 @@
 //! 4. **Selection.** Without a template name, rendering equals rendering with
 //!    the name Hugging Face 5.2's `get_chat_template` picks: `tool_use` when
 //!    `tools` is set and the checkpoint has a named `tool_use` template, else
-//!    `default`. The library picks `default` in the first case (open finding
-//!    CHAT-4), which the harness tolerates until it is fixed. Templates carry
-//!    distinguishing `D:`/`T:` prefixes when flag bit 7 is set.
+//!    `default` (finding CHAT-4, fixed). Templates carry distinguishing
+//!    `D:`/`T:` prefixes when flag bit 7 is set.
 //! 5. **Tokenization.** [`LocalTokenizer::encode_chat`] equals encoding the
 //!    rendered prompt without added special tokens (both fail for a prompt that
 //!    encodes to no tokens) and fails whenever rendering fails.
@@ -246,6 +249,8 @@ const EXTRA_CONTEXT_KEYS: [&str; 17] = [
 const DEFAULT_MARKER: &str = "D:";
 /// Prefix of the `tool_use` template when flag bit 7 asks for distinguishable templates.
 const TOOL_MARKER: &str = "T:";
+/// Config template written beside template files, which must replace it.
+const CONFIG_DECOY: &str = "the config template must be replaced by template files";
 
 /// Message text fragments; some look like Jinja or contain the continuation marker.
 const TEXTS: &[&str] = &[
@@ -331,6 +336,16 @@ enum Storage {
     Map,
     /// A separate `chat_template.jinja` file (the `default` template).
     JinjaFile,
+    /// `chat_template.jinja` plus `additional_chat_templates/tool_use.jinja`,
+    /// beside a [`CONFIG_DECOY`] config template that they replace.
+    TemplateFiles,
+}
+
+impl Storage {
+    /// Whether the fixture stores a named `tool_use` template next to `default`.
+    fn has_tool_template(self) -> bool {
+        matches!(self, Self::NamedList | Self::Map | Self::TemplateFiles)
+    }
 }
 
 /// One decoded rendering problem.
@@ -339,7 +354,7 @@ struct Problem {
     storage: Storage,
     /// The `default` template source.
     default_template: String,
-    /// A second, `tool_use` template (list and map storage only).
+    /// A second, `tool_use` template (list, map, and template-file storage only).
     tool_template: String,
     /// Messages to render.
     messages: Vec<ChatMessage>,
@@ -354,6 +369,7 @@ fn decode(bytes: &mut Bytes<'_>) -> Problem {
         Storage::NamedList,
         Storage::Map,
         Storage::JinjaFile,
+        Storage::TemplateFiles,
     ]);
     let flags = bytes.byte();
     let default_count = bytes.below(24);
@@ -439,6 +455,18 @@ fn write_fixture(problem: &Problem) -> tempfile::TempDir {
             .expect("write template file");
             None
         }
+        Storage::TemplateFiles => {
+            let additional = directory.path().join("additional_chat_templates");
+            fs::create_dir(&additional).expect("create additional template directory");
+            fs::write(
+                directory.path().join("chat_template.jinja"),
+                &problem.default_template,
+            )
+            .expect("write default template file");
+            fs::write(additional.join("tool_use.jinja"), &problem.tool_template)
+                .expect("write tool template file");
+            Some(json!(CONFIG_DECOY))
+        }
     };
     if let Some(templates) = templates {
         config["chat_template"] = templates;
@@ -467,10 +495,9 @@ fn violates_preconditions(problem: &Problem) -> bool {
             .keys()
             .any(|key| MESSAGE_FIELDS.contains(&key.as_str()))
     });
-    let has_tool_template = matches!(problem.storage, Storage::NamedList | Storage::Map);
     let missing_template = match options.template_name.as_deref() {
         Some("default") | None => false,
-        Some("tool_use") => !has_tool_template,
+        Some("tool_use") => !problem.storage.has_tool_template(),
         Some(_) => true,
     };
     let bad_documents = options.documents.as_ref().is_some_and(|documents| {
@@ -492,8 +519,7 @@ fn violates_preconditions(problem: &Problem) -> bool {
 /// None` and the checkpoint stores named templates including `tool_use`, else
 /// `default` (a single unnamed template is the `default` here).
 fn hugging_face_selection(problem: &Problem) -> &'static str {
-    let named = matches!(problem.storage, Storage::NamedList | Storage::Map);
-    if named && problem.options.tools.is_some() {
+    if problem.storage.has_tool_template() && problem.options.tools.is_some() {
         "tool_use"
     } else {
         "default"
@@ -509,12 +535,36 @@ fn same_render(left: &transformers::Result<String>, right: &transformers::Result
     }
 }
 
-/// Checks that an unnamed render selects the template Hugging Face selects.
+/// Python's universal-newline translation, which Hugging Face applies to template files.
 ///
-/// Open finding CHAT-4: with `tools` and a named `tool_use` template the
-/// library selects `default` (see `select_template` in `src/tokenization.rs`);
-/// until that is fixed the oracle also accepts `default` there, and the
-/// ignored test `tools_select_the_tool_use_template` pins the reference.
+/// Restated here as an independent oracle: `\r\n` and a lone `\r` become `\n`.
+fn python_text_mode(source: &str) -> String {
+    source.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// The templates Hugging Face 5.2 loads from the fixture, by name.
+///
+/// Template files replace the config's `chat_template` (here [`CONFIG_DECOY`])
+/// and are read with universal newlines; config strings are kept verbatim.
+fn expected_templates(problem: &Problem) -> BTreeMap<String, String> {
+    let default = problem.default_template.clone();
+    let tool_use = problem.tool_template.clone();
+    let entries = match problem.storage {
+        Storage::String => vec![("default", default)],
+        Storage::NamedList | Storage::Map => vec![("default", default), ("tool_use", tool_use)],
+        Storage::JinjaFile => vec![("default", python_text_mode(&default))],
+        Storage::TemplateFiles => vec![
+            ("default", python_text_mode(&default)),
+            ("tool_use", python_text_mode(&tool_use)),
+        ],
+    };
+    entries
+        .into_iter()
+        .map(|(name, source)| (name.to_owned(), source))
+        .collect()
+}
+
+/// Checks that an unnamed render selects the template Hugging Face selects.
 fn check_selection(
     tokenizer: &LocalTokenizer,
     problem: &Problem,
@@ -531,15 +581,15 @@ fn check_selection(
         tokenizer.render_chat(&problem.messages, &options)
     };
     let expected = hugging_face_selection(problem);
-    let agrees = same_render(rendered, &named(expected))
-        || (expected == "tool_use" && same_render(rendered, &named("default")));
-    assert!(agrees, "an unnamed render did not select `{expected}`");
+    assert!(
+        same_render(rendered, &named(expected)),
+        "an unnamed render did not select `{expected}`"
+    );
 }
 
-/// Whether the template selected by the options is empty after trimming.
+/// Whether any stored template is empty after trimming.
 fn whitespace_only(problem: &Problem) -> bool {
-    let tool = matches!(problem.storage, Storage::NamedList | Storage::Map)
-        && problem.tool_template.trim().is_empty();
+    let tool = problem.storage.has_tool_template() && problem.tool_template.trim().is_empty();
     problem.default_template.trim().is_empty() || tool
 }
 
@@ -552,6 +602,11 @@ fn check(problem: &Problem) {
         return;
     }
     let tokenizer = loaded.expect("non-empty templates load");
+    assert_eq!(
+        tokenizer.metadata().chat_templates,
+        expected_templates(problem),
+        "loaded templates differ from the stored ones"
+    );
     let started = Instant::now();
     let rendered = tokenizer.render_chat(&problem.messages, &problem.options);
     let elapsed = started.elapsed();
@@ -601,7 +656,7 @@ fn check(problem: &Problem) {
 
 /// Decodes and renders one chat-template problem.
 ///
-/// Byte layout: template storage, a flag byte (bit 0 generation prompt, 1
+/// Byte layout: template storage (one of the five [`Storage`] forms), a flag byte (bit 0 generation prompt, 1
 /// continue final message, 2 tools, 3 documents, 4 vision IDs, 5 thinking
 /// switch, 6 extra context, 7 `D:`/`T:` template prefixes), the default
 /// template's fragment count (0..=23)
