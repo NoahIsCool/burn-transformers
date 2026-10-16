@@ -2340,6 +2340,49 @@ fn a_fully_excluded_source_row_has_no_finite_candidate() {
     );
 }
 
+/// A fully excluded parent beam contributes no candidates while its sibling expands.
+///
+/// After the first step the two live beams end in tokens 1 and 2. Every
+/// continuation of token 1 is excluded (`-inf`), so its row has no
+/// distribution, but the source as a whole still has finite candidates: the
+/// step succeeds and every returned hypothesis descends from token 2, as
+/// Hugging Face's ranking puts `-inf` scores last.
+#[test]
+fn a_fully_excluded_parent_is_skipped_while_its_sibling_expands() {
+    let inf = f32::NEG_INFINITY;
+    let table = MarkovTable {
+        first: vec![vec![inf, 1.0, 0.0, inf]],
+        next: vec![
+            vec![0.0; 4],
+            vec![inf; 4],
+            vec![0.0, 0.0, 0.0, 1.0],
+            vec![0.0; 4],
+        ],
+    };
+    let (model, request) = markov_fixture(table, search(2, 2));
+    let output = generate_seq2seq_beam_search(&model, request).unwrap();
+    let hypotheses = &output.sequences[0];
+    assert_eq!(
+        hypotheses
+            .iter()
+            .map(|hypothesis| hypothesis.token_ids.clone())
+            .collect::<Vec<_>>(),
+        [vec![2, 3], vec![2, 0]]
+    );
+    // log(e + 1) normalizes the first step; log(e + 3) the second.
+    let first = -(1.0_f64.exp() + 1.0).ln();
+    let second = -(1.0_f64.exp() + 3.0).ln();
+    for (hypothesis, last) in hypotheses.iter().zip([1.0 + second, second]) {
+        assert_eq!(hypothesis.finish_reason, FinishReason::Length);
+        assert_eq!(hypothesis.log_probabilities.len(), 2);
+        for (actual, expected) in hypothesis.log_probabilities.iter().zip([first, last]) {
+            assert!((actual - expected).abs() < 1e-6, "{hypotheses:?}");
+        }
+    }
+    // Both decoded parents were live: the excluded one was skipped, not dropped early.
+    assert_eq!(model.trace.lock().unwrap().decode_tokens, [vec![1, 2]]);
+}
+
 /// Zero beams can never form a final finished pool, and cannot be expanded.
 #[test]
 fn zero_beam_pools_are_never_final_and_cannot_expand() {

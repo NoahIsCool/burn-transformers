@@ -1218,8 +1218,11 @@ fn validate_encoder_batch<B: Backend>(encoder: &EncoderOutput<B>, batch: usize) 
 ///
 /// A row whose every logit is `-inf` (every token excluded) has no
 /// distribution: `log_softmax` would compute `-inf - (-inf) = NaN` for it.
-/// Such rows stay `-inf` instead, so candidate selection reports the empty
-/// candidate set rather than a spurious numerical failure. A row containing
+/// Such rows stay `-inf` instead, so candidate selection skips them like
+/// masked tokens: a fully excluded parent beam contributes no candidates while
+/// its siblings expand, as `-inf` scores rank last in Hugging Face, and a
+/// source whose every live parent is fully excluded reports that it has no
+/// finite candidate rather than a spurious numerical failure. A row containing
 /// any NaN logit is not fully excluded and still yields NaN, which candidate
 /// selection rejects as non-finite. Every other row is unchanged.
 fn host_log_probabilities<B: Backend>(
