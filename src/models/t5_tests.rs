@@ -138,3 +138,109 @@ proptest::proptest! {
         );
     }
 }
+
+/// Validates `config` and returns the failing `(field, reason)`.
+fn failure(config: T5Config) -> (&'static str, String) {
+    let error = Validate::validate(&config).unwrap_err();
+    assert_eq!(error.architecture, "t5");
+    (error.field, error.reason)
+}
+
+/// Ungated projections name the activation their single input matrix uses.
+#[test]
+fn ungated_projections_name_their_activation() {
+    assert_eq!(T5FeedForwardProjection::Relu.activation(), "relu");
+    assert_eq!(T5FeedForwardProjection::Gelu.activation(), "gelu");
+    assert_eq!(T5FeedForwardProjection::GatedSilu.activation(), "silu");
+    assert!(!T5FeedForwardProjection::Gelu.is_gated());
+    T5Config {
+        feed_forward_proj: T5FeedForwardProjection::Gelu,
+        dense_act_fn: Some("gelu".into()),
+        is_gated_act: Some(false),
+        ..T5Config::default()
+    }
+    .validate()
+    .unwrap();
+}
+
+/// Metadata fields that contradict the T5 graph or its vocabulary name the field.
+#[test]
+fn contradictory_metadata_names_the_field() {
+    let cases = [
+        (
+            T5Config {
+                is_encoder_decoder: false,
+                ..T5Config::default()
+            },
+            (
+                "is_encoder_decoder",
+                "must be true because T5 decoder blocks contain cross-attention",
+            ),
+        ),
+        (
+            T5Config {
+                n_positions: Some(0),
+                ..T5Config::default()
+            },
+            ("n_positions", "must be nonzero"),
+        ),
+        (
+            T5Config {
+                decoder_start_token_id: Some(32_128),
+                ..T5Config::default()
+            },
+            ("decoder_start_token_id", "must index the shared vocabulary"),
+        ),
+        (
+            T5Config {
+                is_gated_act: Some(true),
+                ..T5Config::default()
+            },
+            ("is_gated_act", "disagrees with feed_forward_proj"),
+        ),
+        (
+            T5Config {
+                pad_token_id: Some(TokenIds::One(32_128)),
+                ..T5Config::default()
+            },
+            ("pad_token_id", "contains an ID outside the vocabulary"),
+        ),
+        (
+            T5Config {
+                bos_token_id: Some(TokenIds::Many(Vec::new())),
+                ..T5Config::default()
+            },
+            ("bos_token_id", "must contain at least one token ID"),
+        ),
+        (
+            T5Config {
+                eos_token_id: Some(TokenIds::Many(vec![1, 40_000])),
+                ..T5Config::default()
+            },
+            ("eos_token_id", "contains an ID outside the vocabulary"),
+        ),
+    ];
+    for (config, (field, reason)) in cases {
+        assert_eq!(failure(config), (field, reason.to_owned()));
+    }
+    assert_eq!(
+        failure(T5Config {
+            classifier_dropout: Some(1.5),
+            ..T5Config::default()
+        }),
+        (
+            "classifier_dropout",
+            "must be finite and in [0, 1]".to_owned()
+        )
+    );
+    for classifier_dropout in [Some(0.1), None] {
+        T5Config {
+            n_positions: Some(512),
+            decoder_start_token_id: Some(0),
+            classifier_dropout,
+            ..T5Config::default()
+        }
+        .validate()
+        .unwrap();
+    }
+}

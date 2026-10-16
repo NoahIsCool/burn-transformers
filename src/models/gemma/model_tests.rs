@@ -723,3 +723,48 @@ fn gradients_reach_every_parameter_kind() {
         }
     }
 }
+
+/// A failing edit at any point of either variant aborts the complete and the staged passes.
+///
+/// Eager attention adds the score and pattern points; right padding runs the
+/// validity-masked scope.
+#[test]
+fn every_variant_propagates_edit_failures() {
+    use crate::models::shared::test_support::{
+        assert_edit_failures_propagate, assert_staged_edit_failures_propagate,
+    };
+    for variant in GemmaVariant::ALL {
+        let model = tiny_model(variant, 31)
+            .with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+        let padded = || {
+            input(
+                ints([[1, 2, 3], [4, 5, 0]]),
+                Some(mask([[true, true, true], [true, true, false]])),
+                None,
+            )
+        };
+        let points = model.activation_points();
+        assert_edit_failures_propagate(&points, |hooks| {
+            model.forward_with_hooks(padded(), &ForwardOptions::default(), hooks)
+        });
+        assert_staged_edit_failures_propagate(&model, &padded(), &points);
+    }
+}
+
+/// A replaced vocabulary head of the wrong input width fails at projection.
+#[test]
+fn replaced_heads_are_checked_at_projection() {
+    let mut model = tiny_model(GemmaVariant::Gemma2, 32);
+    model.lm_head = Some(burn::nn::LinearConfig::new(15, VOCABULARY).init(&Default::default()));
+    let error = model
+        .forward(
+            input(ints([[1, 2]]), None, None),
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "linear.weight" && expected == "[16, nonzero_output]" && actual == "[15, 32]"),
+        "{error:?}"
+    );
+}

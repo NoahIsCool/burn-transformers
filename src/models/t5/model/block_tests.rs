@@ -295,3 +295,153 @@ fn non_broadcasting_exclusions_are_rejected() {
             .is_none()
     );
 }
+
+/// The two-head topology shared by the direct sublayer tests.
+fn sublayer_model(projection: T5FeedForwardProjection) -> T5ForConditionalGeneration<TestBackend> {
+    T5ForConditionalGeneration::<TestBackend>::init(
+        T5Config {
+            vocab_size: 16,
+            d_model: 4,
+            d_kv: 2,
+            d_ff: 8,
+            num_layers: 1,
+            num_decoder_layers: Some(1),
+            num_heads: 2,
+            relative_attention_num_buckets: 8,
+            relative_attention_max_distance: 16,
+            feed_forward_proj: projection,
+            ..T5Config::default()
+        },
+        &Default::default(),
+    )
+    .unwrap()
+}
+
+/// Unwraps a shape error into `(tensor, expected, actual)`.
+fn shape_parts(error: Error) -> (String, String, String) {
+    match error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    }
+}
+
+/// Encoder sources of another width or batch are rejected by stateless cross-attention.
+#[test]
+fn stateless_cross_attention_checks_the_encoder_source() {
+    let device = Default::default();
+    let model = sublayer_model(T5FeedForwardProjection::Relu);
+    let cross = model.decoder.block[0].cross_attention.as_ref().unwrap();
+    let hidden = Tensor::<TestBackend, 3>::zeros([2, 1, 4], &device);
+    let attend = |source: &Tensor<TestBackend, 3>| {
+        let plan = CrossAttentionPlan::new(CrossSource::Encoder(source), None);
+        cross
+            .forward_with(hidden.clone(), &plan, Layer::decoder(0), &mut Hooks::new())
+            .unwrap_err()
+    };
+    assert_eq!(
+        shape_parts(attend(&Tensor::zeros([2, 3, 5], &device))),
+        (
+            "t5.encoder_output.hidden_state".into(),
+            "[batch>0, token>0, 4]".into(),
+            "[2, 3, 5]".into()
+        )
+    );
+    assert_eq!(
+        shape_parts(attend(&Tensor::zeros([1, 3, 4], &device))),
+        (
+            "t5.encoder_output.hidden_state".into(),
+            "[2, source>0, 4]".into(),
+            "[1, 3, 4]".into()
+        )
+    );
+}
+
+/// Residuals of another width are rejected before the first projection.
+#[test]
+fn self_attention_rejects_foreign_residual_widths() {
+    let device = Default::default();
+    let model = sublayer_model(T5FeedForwardProjection::Relu);
+    let error = model.encoder.block[0]
+        .self_attention
+        .forward_with(
+            Tensor::zeros([1, 2, 3], &device),
+            SelfAttentionPlan::padded(None, None, false),
+            &mut FreshKeyValues,
+            Layer::encoder(0),
+            &mut Hooks::new(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        shape_parts(error),
+        (
+            "t5.self_attention.input".into(),
+            "[batch>0, token>0, 4]".into(),
+            "[1, 2, 3]".into()
+        )
+    );
+}
+
+/// An edited feed-forward branch that disagrees with the configured projection is rejected.
+#[test]
+fn feed_forward_modules_must_match_the_projection() {
+    let device = Default::default();
+    for projection in [
+        T5FeedForwardProjection::Relu,
+        T5FeedForwardProjection::GatedGelu,
+    ] {
+        let mut model = sublayer_model(projection);
+        let feed_forward = &mut model.encoder.block[0].feed_forward;
+        feed_forward.dense = None;
+        feed_forward.gated = None;
+        let error = feed_forward
+            .forward_with(
+                Tensor::zeros([1, 2, 4], &device),
+                Layer::encoder(0),
+                &mut Hooks::new(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "t5.feed_forward"),
+            "{error:?}"
+        );
+    }
+}
+
+/// Only decoder stacks accept a cross-attention plan, and they require one.
+#[test]
+fn stacks_require_cross_attention_exactly_when_decoding() {
+    let device = Default::default();
+    let model = sublayer_model(T5FeedForwardProjection::Relu);
+    let hidden = Tensor::<TestBackend, 3>::zeros([1, 2, 4], &device);
+    let source = Tensor::<TestBackend, 3>::zeros([1, 3, 4], &device);
+    for (stack, cross) in [
+        (&model.decoder, None),
+        (
+            &model.encoder,
+            Some(CrossAttentionPlan::new(CrossSource::Encoder(&source), None)),
+        ),
+    ] {
+        let plan = StackPlan {
+            self_attention: SelfAttentionPlan::padded(None, None, stack.is_decoder),
+            cross_attention: cross,
+        };
+        let error = stack
+            .run(
+                hidden.clone(),
+                &plan,
+                &mut FreshKeyValues,
+                false,
+                &mut Hooks::new(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "t5.stack" && reason.contains("only decoder stacks")),
+            "{error:?}"
+        );
+    }
+}

@@ -396,3 +396,27 @@ proptest! {
         prop_assert_eq!(int_values(valid_token_ordinals(&mask_from_rows(&rows))), expected);
     }
 }
+
+/// Deferred validation reports a misshapen mask or position grid immediately, without a readback.
+#[test]
+fn deferred_inputs_reject_misshapen_grids_immediately() {
+    let tokens = ints([[1, 2, 3]]);
+    for (input, tensor, actual) in [
+        (
+            input(tokens.clone(), Some(mask([[true, true]])), None),
+            "t.token_mask",
+            "[1, 2]",
+        ),
+        (
+            input(tokens, None, Some(ints([[0, 1, 2], [0, 1, 2]]))),
+            "t.position_ids",
+            "[2, 3]",
+        ),
+    ] {
+        let mut checks = DeferredChecks::new();
+        let error = defer_input(&input, &Default::default(), &contract(), &mut checks)
+            .map(|_| ())
+            .unwrap_err();
+        assert_same_error(error, Error::shape(tensor, "[1, 3]", actual));
+    }
+}

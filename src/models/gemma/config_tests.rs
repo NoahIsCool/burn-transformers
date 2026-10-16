@@ -205,6 +205,21 @@ fn meaningful_flat_keys_beside_per_type_objects_are_rejected() {
     ));
 }
 
+/// A `rope_parameters` value that is not a mapping is left as is and rejected by its schema.
+#[test]
+fn non_mapping_rope_parameters_are_rejected_unchanged() {
+    for rope in ["[]", "\"default\"", "7"] {
+        let error = parse(&single_kind_config("sliding_attention", rope)).unwrap_err();
+        assert!(matches!(error, ConfigLoadError::Json(_)), "{rope}: {error}");
+        assert!(
+            error
+                .to_string()
+                .contains("expected a RoPE parameter object"),
+            "{rope}: {error}"
+        );
+    }
+}
+
 /// Serialization writes every resolved value and parses back to the same config.
 #[test]
 fn configs_round_trip_through_json() {

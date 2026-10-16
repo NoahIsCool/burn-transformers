@@ -147,7 +147,10 @@ impl<B: Backend> SelfAttentionPlan<B> {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CrossSource<'a, B: Backend> {
     /// Project keys and values from encoder states `[batch, source, d_model]`.
-    Encoder(&'a Tensor<B, 3>),
+    Encoder(
+        /// Final encoder hidden states, `[batch, source, d_model]`.
+        &'a Tensor<B, 3>,
+    ),
     /// Reuse per-layer projections `[batch, heads, source, d_kv]` made once at prefill.
     Projected {
         /// Projected keys, one tensor per decoder layer.

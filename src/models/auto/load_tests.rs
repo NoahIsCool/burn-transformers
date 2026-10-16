@@ -2403,3 +2403,205 @@ fn llama_family_aliases_load_through_one_registry_entry() {
         assert_eq!(logits.dims(), [1, 1, 96]);
     }
 }
+
+/// A malformed `generation_config.json` stops causal and encoder-decoder loads with its error.
+#[test]
+fn malformed_generation_artifacts_stop_causal_and_seq2seq_loads() {
+    for config in [
+        serde_json::to_value(packed_muse_config()).unwrap(),
+        serde_json::to_value(tiny_automatic_t5_config()).unwrap(),
+    ] {
+        let root = tempfile::tempdir().expect("temporary model root");
+        write_auto_metadata(root.path(), &config);
+        std::fs::write(root.path().join("generation_config.json"), b"{").unwrap();
+        let expected = normalize_generation_defaults(root.path(), None, None, 16, None)
+            .expect_err("the artifact itself is malformed");
+        let options = fixture_options("fixture/generation", "generation");
+        let error = if config["model_type"] == "t5" {
+            AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err()
+        } else {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&expected),
+            "{error}"
+        );
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+}
+
+/// A Muse checkpoint holding only the multimodal namespace plans the multimodal contract.
+///
+/// The wrapped embedding alone selects the multimodal source, whose mapping
+/// renames it to the text target `model.embed_tokens.weight`; the strict plan
+/// then reports that target's shape, proving the wrapped source was mapped.
+#[test]
+fn wrapped_muse_namespaces_plan_the_multimodal_contract() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &packed_muse_config());
+    let names = ["model.language_model.embed_tokens.weight"];
+    let expected_tensors = names
+        .iter()
+        .map(|name| ExpectedTensor::new(*name, vec![1]))
+        .collect::<Vec<_>>();
+    let mut mappings = MappingPlan::default();
+    for name in names {
+        mappings.map(name, name);
+    }
+    write_contract_checkpoint(root.path(), &expected_tensors, &mappings);
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("fixture/muse", "muse"),
+        &Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Checkpoint(reason)
+            if reason == "shape mismatch for `model.embed_tokens.weight`: mapped [1], expected [128, 64]"),
+        "{error}"
+    );
+}
+
+/// File name of the one shard in indexed automatic-load fixtures.
+const INDEXED_SHARD: &str = "model-00001-of-00001.safetensors";
+
+/// Moves a single-file fixture into the `INDEXED_SHARD` file.
+///
+/// Returns the index `weight_map` that assigns every tensor to that shard,
+/// and the shard's physical tensor bytes, which is the total a correct index
+/// declares.
+fn reshard_contract_checkpoint(root: &Path) -> (Map<String, Value>, u64) {
+    let single = root.join("model.safetensors");
+    let bytes = std::fs::read(&single).expect("single-file fixture");
+    let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let header_end = 8 + usize::try_from(header_len).unwrap();
+    let header: Map<String, Value> =
+        serde_json::from_slice(&bytes[8..header_end]).expect("fixture header");
+    let physical = u64::try_from(bytes.len() - header_end).unwrap();
+    std::fs::rename(&single, root.join(INDEXED_SHARD)).expect("rename fixture into a shard");
+    let weight_map = header
+        .keys()
+        .filter(|name| *name != "__metadata__")
+        .map(|name| (name.clone(), json!(INDEXED_SHARD)))
+        .collect();
+    (weight_map, physical)
+}
+
+/// Writes the standard shard index with `weight_map` and a declared `total_size`.
+fn write_shard_index(root: &Path, weight_map: &Map<String, Value>, total_size: u64) {
+    std::fs::write(
+        root.join("model.safetensors.index.json"),
+        serde_json::to_vec(&json!({
+            "metadata": {"total_size": total_size},
+            "weight_map": weight_map,
+        }))
+        .unwrap(),
+    )
+    .expect("index fixture");
+}
+
+/// Only a recorded repository and revision together select Nemotron-H's pinned accounting.
+///
+/// The fixture's index overstates its tensor bytes by four. Without a
+/// complete repository/revision pair, discovery uses the generic strict policy
+/// and reports the plain total-size mismatch. With both, the pinned NVIDIA
+/// Lightning policy is consulted instead, and it rejects the fixture because
+/// the supplied repository is not the pinned one. A correct total loads with
+/// complete provenance, so the index layout itself is valid.
+#[test]
+fn nemotron_applies_pinned_accounting_only_with_complete_provenance() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .expect("valid Nemotron-H contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    let (weight_map, physical) = reshard_contract_checkpoint(root.path());
+    write_shard_index(root.path(), &weight_map, physical + 4);
+    let load = |options: &AutoLoadOptions| {
+        AutoCausalLm::<TestBackend>::load_local(root.path(), options, &Default::default())
+    };
+
+    let generic = format!(
+        "checkpoint index declares {} tensor bytes, validated index entries describe {physical}",
+        physical + 4
+    );
+    let incomplete = [
+        (None, None),
+        (Some("nvidia/fixture"), None),
+        (None, Some("fixture-revision")),
+    ];
+    for (repository, revision) in incomplete {
+        let options = AutoLoadOptions {
+            load_tokenizer: false,
+            repository: repository.map(Into::into),
+            revision: revision.map(Into::into),
+            ..AutoLoadOptions::default()
+        };
+        let error = load(&options).map(|_| ()).unwrap_err();
+        assert!(
+            matches!(&error, Error::Checkpoint(reason) if *reason == generic),
+            "{repository:?} {revision:?}: {error}"
+        );
+    }
+
+    let complete = fixture_options("nvidia/fixture", "fixture-revision");
+    let error = load(&complete).map(|_| ()).unwrap_err();
+    assert!(
+        matches!(&error, Error::Checkpoint(reason) if reason
+            == "checkpoint index total-size policy mismatch: supplied repository \
+                `nvidia/fixture` does not match pinned \
+                `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`"),
+        "{error}"
+    );
+
+    write_shard_index(root.path(), &weight_map, physical);
+    let loaded = load(&complete).expect("a correct index total loads");
+    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+}
+
+/// A tokenizer whose IDs outrun the model vocabulary fails the bundle after a complete load.
+#[cfg(feature = "tokenizers")]
+#[test]
+fn tokenizers_beyond_the_model_vocabulary_fail_the_bundle() {
+    use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
+
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_goldens/llama3");
+    let root = tempfile::tempdir().expect("temporary model root");
+    for file in ["config.json", "model.safetensors"] {
+        std::fs::copy(fixture.join(file), root.path().join(file)).unwrap();
+    }
+    let vocabulary = [("unknown".to_owned(), 0_u32), ("far".to_owned(), 4096_u32)]
+        .into_iter()
+        .collect();
+    let model = WordLevel::builder()
+        .vocab(vocabulary)
+        .unk_token("unknown".into())
+        .build()
+        .expect("word-level tokenizer");
+    Tokenizer::new(model)
+        .save(root.path().join("tokenizer.json"), false)
+        .expect("save tokenizer fixture");
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions::default(),
+        &Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Tokenizer(reason) if reason.contains("tokenizer emits ID 4096")),
+        "{error}"
+    );
+}

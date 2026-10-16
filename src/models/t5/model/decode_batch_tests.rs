@@ -323,13 +323,25 @@ fn assert_states_match(
 /// One stateful call applied identically to the batched and the reference state.
 enum Call {
     /// Initial prompt (binds the encoder).
-    Prefill(CausalLmInput<TestBackend>),
+    Prefill(
+        /// Decoder prompt tokens `[batch, sequence]` with their padding mask.
+        CausalLmInput<TestBackend>,
+    ),
     /// Continuation segment.
-    Decode(CausalLmInput<TestBackend>),
+    Decode(
+        /// Next decoder tokens `[batch, sequence]` with their padding mask.
+        CausalLmInput<TestBackend>,
+    ),
     /// Rollback to the given lengths.
-    Truncate(Vec<usize>),
+    Truncate(
+        /// Committed decoder length to keep for each row.
+        Vec<usize>,
+    ),
     /// Beam-style row reorder.
-    Reorder(Vec<usize>),
+    Reorder(
+        /// Source row for each output row; repeats duplicate a beam.
+        Vec<usize>,
+    ),
 }
 
 /// Runs a call script on two states and compares every output and state.

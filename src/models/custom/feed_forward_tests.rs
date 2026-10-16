@@ -143,3 +143,20 @@ fn expert_and_absent_branches_have_the_expected_shape() {
     assert_eq!(absent.num_params(), 0);
     assert!(absent.activation_points(Layer::decoder(0)).is_empty());
 }
+
+/// An absent branch contributes exact zeros, has no points, and routes nothing.
+#[test]
+fn absent_branch_contributes_exact_zeros() {
+    let device = Default::default();
+    let absent = branch(&FeedForwardSpec::None, &device);
+    assert!(absent.is_absent());
+    assert!(absent.activation_points(Layer::decoder(0)).is_empty());
+    let mut hooks = Hooks::new();
+    let (output, routing) = absent
+        .forward(input(&device), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    assert!(routing.is_none());
+    output
+        .into_data()
+        .assert_eq(&TensorData::zeros::<f32, _>([2, 3, 8]), true);
+}

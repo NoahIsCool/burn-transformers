@@ -446,3 +446,7 @@ fn install_linear<B: Backend>(
         _ => Err(Gpt2LoadError::Target(target.into())),
     }
 }
+
+#[cfg(test)]
+#[path = "checkpoint_tests.rs"]
+mod tests;

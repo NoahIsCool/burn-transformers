@@ -167,3 +167,39 @@ fn staged_trait_rejects_invalid_states_and_attention_policies() {
     assert!(StagedModel::normalize(&model, finished.clone()).is_err());
     assert!(StagedModel::run_layers(&model, finished, 2..2).is_err());
 }
+
+/// GPT-NeoX stages are decoder blocks, and every staged call propagates edit failures.
+#[test]
+fn staged_calls_propagate_edit_failures_at_every_point() {
+    use crate::models::shared::test_support::assert_staged_edit_failures_propagate;
+    let model = model();
+    assert_eq!(StagedModel::<TestBackend>::stack(&model), Stack::Decoder);
+    assert_staged_edit_failures_propagate(
+        &model,
+        &input([[1, 4, 2], [3, 5, 0]], None),
+        &model.activation_points(),
+    );
+}
+
+/// A staged context whose mask hides every token of a row is rejected before any block.
+#[test]
+fn staged_blocks_reject_a_fully_masked_row() {
+    let model = model();
+    let mut state = StagedModel::embed(&model, input([[1, 4, 2], [3, 5, 0]], None)).unwrap();
+    state.context.token_mask = Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true, true], [false, false, false]].into(),
+        &Default::default(),
+    )));
+    match StagedModel::run_layers(&model, state, 0..2).unwrap_err() {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => {
+            assert_eq!(tensor, "gpt_neox.token_mask");
+            assert_eq!(expected, "at least one valid token in every row");
+            assert_eq!(actual, "a fully masked row");
+        }
+        other => panic!("expected a shape error, found {other:?}"),
+    }
+}

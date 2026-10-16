@@ -577,9 +577,16 @@ enum NeutralSetting {
     /// `null`, or an empty list (no banned, suppressed, or biased tokens).
     Absent,
     /// This number disables the feature, such as `num_beams: 1`.
-    Number(f64),
+    Number(
+        /// The neutral value; any other present value is reported as an unsupported setting.
+        f64,
+    ),
     /// This boolean disables the feature.
-    Flag(bool),
+    Flag(
+        /// The neutral value, such as `false` for `renormalize_logits`; any
+        /// other present value is reported as an unsupported setting.
+        bool,
+    ),
     /// Any present value differs from this crate's semantics (`max_length`).
     Never,
 }
@@ -633,7 +640,11 @@ const UNSUPPORTED_GENERATION_SETTINGS: &[(&str, NeutralSetting, bool)] = &[
 ];
 
 impl NeutralSetting {
-    /// Returns whether `value` leaves Hugging Face generation unchanged.
+    /// Returns whether `value` is `null` or this setting's neutral value.
+    ///
+    /// A `false` result means the setting is reported as unsupported. That is
+    /// conservative: some non-neutral values (a `min_length` shorter than the
+    /// prompt, say) happen to leave Hugging Face output unchanged.
     fn matches(self, value: &Value) -> bool {
         match self {
             Self::Absent => value.is_null() || value.as_array().is_some_and(Vec::is_empty),

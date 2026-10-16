@@ -619,3 +619,113 @@ fn pinned_flan_t5_small_loads_strictly_and_runs_forward() {
         );
     assert_eq!(state.lengths(), [2]);
 }
+
+/// Malformed block targets and unknown parameters name the precise sink failure.
+#[test]
+fn malformed_targets_and_missing_components_are_specific() {
+    let device = Default::default();
+    let mut gated = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny(T5FeedForwardProjection::GatedSilu, false),
+        &device,
+    )
+    .unwrap();
+    let vector = || TensorData::zeros::<f32, _>([4]);
+    let invalid_block =
+        |model: &mut T5ForConditionalGeneration<TestBackend>, target: &str| match model
+            .write_tensor(target, vector())
+            .unwrap_err()
+        {
+            T5LoadError::InvalidBlock { target: t, reason } => {
+                assert_eq!(t, target);
+                reason
+            }
+            other => panic!("expected an invalid block for {target}, found {other:?}"),
+        };
+    assert_eq!(
+        invalid_block(&mut gated, "encoder.block.0"),
+        "expected `<stack>.block.<index>.<parameter>`"
+    );
+    assert_eq!(
+        invalid_block(&mut gated, "encoder.block..layer.0.layer_norm.weight"),
+        "block index and parameter suffix must be non-empty"
+    );
+    assert_eq!(
+        invalid_block(&mut gated, "decoder.block.0."),
+        "block index and parameter suffix must be non-empty"
+    );
+    for target in [
+        "encoder.block.0.layer.9.layer_norm.weight",
+        "encoder.block.0.layer.1.EncDecAttention.q.weight",
+        "decoder.block.0.layer.0.SelfAttention.bias",
+        "decoder.block.0.layer.2.DenseReluDense.wx.weight",
+    ] {
+        assert_eq!(
+            gated.write_tensor(target, vector()),
+            Err(T5LoadError::UnknownTarget {
+                target: target.into()
+            }),
+            "{target}"
+        );
+    }
+
+    // Edited public modules no longer match the validated checkpoint topology.
+    gated.lm_head = None;
+    gated.decoder.block[0].cross_attention = None;
+    gated.decoder.block[0].feed_forward.gated = None;
+    gated.encoder.block[0].feed_forward.gated = None;
+    for (target, component) in [
+        (
+            "lm_head.weight",
+            "independent LM head for an untied checkpoint",
+        ),
+        (
+            "decoder.block.0.layer.1.EncDecAttention.k.weight",
+            "decoder encoder-decoder attention",
+        ),
+        (
+            "decoder.block.0.layer.1.layer_norm.weight",
+            "decoder encoder-decoder attention",
+        ),
+        (
+            "encoder.block.0.layer.1.DenseReluDense.wi_1.weight",
+            "gated `wi_1` feed-forward projection",
+        ),
+        (
+            "encoder.block.0.layer.1.DenseReluDense.wo.weight",
+            "feed-forward output projection matching the configured topology",
+        ),
+    ] {
+        assert_eq!(
+            gated.write_tensor(target, vector()),
+            Err(T5LoadError::MissingComponent {
+                target: target.into(),
+                component,
+            }),
+            "{target}"
+        );
+    }
+}
+
+/// A sink failure during streaming surfaces through `load_checkpoint` with its partial report.
+#[test]
+fn load_checkpoint_returns_execution_failures_with_partial_reports() {
+    let device = Default::default();
+    let config = tiny(T5FeedForwardProjection::Relu, false);
+    let contract = config.checkpoint_contract().unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(config, &device).unwrap();
+    model.lm_head = None;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("planning succeeded, so execution reports the failure");
+    assert_eq!(failure.failed_target.as_deref(), Some("lm_head.weight"));
+    assert!(matches!(
+        failure.cause,
+        ExecutionFailureCause::Sink(T5LoadError::MissingComponent { .. })
+    ));
+    assert!(matches!(error, T5CheckpointLoadError::Execution(_)));
+}

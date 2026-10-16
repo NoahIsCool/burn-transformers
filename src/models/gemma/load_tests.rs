@@ -15,7 +15,7 @@ use crate::{
         config::ModelConfig,
         gemma::{
             GemmaConfig, GemmaVariant,
-            model::test_support::{B, host, ints, tiny_config, tiny_model},
+            model::test_support::{B, host, ints, model_from, tiny_config, tiny_model},
         },
     },
 };
@@ -349,4 +349,52 @@ fn the_tied_head_alias_is_validated() {
         .alias_tensor("lm_head.weight", "model.embed_tokens.weight")
         .unwrap_err();
     assert!(error.to_string().contains("not been installed"), "{error}");
+}
+
+/// Biased attention installs projection biases; a graph edited after planning reports the partial load.
+#[test]
+fn biases_install_and_sink_failures_keep_the_partial_report() {
+    let mut biased = model_from(
+        GemmaConfig {
+            attention_bias: true,
+            ..tiny_config(GemmaVariant::Gemma3Text)
+        },
+        2,
+    );
+    let values = (0..16).map(|value| value as f32).collect::<Vec<_>>();
+    biased
+        .write_tensor(
+            "model.layers.0.self_attn.o_proj.bias",
+            TensorData::new(values.clone(), [16]),
+        )
+        .unwrap();
+    let installed = biased.model.layers[0]
+        .self_attn
+        .o_proj
+        .bias
+        .as_ref()
+        .unwrap()
+        .val()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(installed, values);
+
+    let root = fixture("gemma3-text");
+    let mut model = graph(&root);
+    model.model.layers[2].self_attn.key_norm = None;
+    let error = model
+        .load_checkpoint(&root, &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("planning succeeded, so execution reports the failure");
+    assert_eq!(
+        failure.failed_target.as_deref(),
+        Some("model.layers.2.self_attn.key_norm.weight")
+    );
+    assert!(matches!(
+        &failure.cause,
+        crate::checkpoint::ExecutionFailureCause::Sink(GemmaLoadError::MissingComponent { .. })
+    ));
 }

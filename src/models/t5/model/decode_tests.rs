@@ -2273,3 +2273,250 @@ fn attention_ready_cross_storage_leaves_decode_logits_bit_identical() {
         assert_eq!(step(&mut contiguous), step(&mut strided));
     }
 }
+
+/// A state whose configured sequence count differs from its batch is rejected.
+#[test]
+fn state_batch_must_match_the_cache_configuration() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let error = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 3, &device)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::TensorCache(TensorCacheError::BatchSizeMismatch {
+                configured: 2,
+                requested: 3
+            })
+        ),
+        "{error:?}"
+    );
+}
+
+/// A first prefill rejects an encoder output of another width before binding it.
+#[test]
+fn first_prefill_validates_the_encoder_width() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.hidden_state = Tensor::zeros([1, 3, 7], &device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "t5.encoder_output.hidden_state"
+                && expected == "[1, source>0, 8]"
+                && actual == "[1, 3, 7]"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+}
+
+/// A first prefill rejects an encoder mask whose grid differs from the encoder states.
+#[test]
+fn first_prefill_validates_the_encoder_mask_grid() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.token_mask = Some(validity([[true, true]], &device));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "t5.encoder_output.token_mask" && expected == "[1, 3]" && actual == "[1, 2]"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+}
+
+/// A vocabulary head that contradicts tying fails after the pass without binding the encoder.
+#[test]
+fn prefill_projection_failure_binds_nothing() {
+    let device = Default::default();
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    model.lm_head = Some(crate::operations::init_linear(
+        &burn::nn::LinearConfig::new(8, 24).with_bias(false),
+        &device,
+    ));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "t5.lm_head"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+    assert_eq!(state.lengths(), [0]);
+}
+
+/// Trailing padding packs into a narrower block and unpacks with exact zeros.
+///
+/// Every row's valid tokens form a prefix of the two columns, so the packed
+/// block is the first column alone; the padded column of every output is
+/// zero, and the valid column equals the unpadded one-token step.
+#[test]
+fn trailing_padding_packs_a_prefix_block() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = model
+        .encode(
+            padded_input([[8, 9], [10, 11]], None, &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let run = |input: CausalLmInput<TestBackend>| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+            .unwrap();
+        model
+            .prefill_decoder(
+                &encoder,
+                padded_input([[0], [0]], None, &device),
+                &mut state,
+                &options,
+            )
+            .unwrap();
+        model
+            .decode(
+                &encoder,
+                DecodeInput {
+                    token_ids: input.token_ids,
+                    token_mask: input.token_mask,
+                    position_ids: None,
+                },
+                &mut state,
+                &options,
+            )
+            .unwrap()
+    };
+    let padded = run(padded_input(
+        [[3, 23], [4, 23]],
+        Some([[true, false], [true, false]]),
+        &device,
+    ));
+    let compact = run(padded_input([[3], [4]], None, &device));
+    assert_close(
+        padded.decoder.logits.clone().narrow(1, 0, 1),
+        compact.decoder.logits,
+    );
+    assert!(
+        exact(padded.decoder.logits.narrow(1, 1, 1))
+            .iter()
+            .all(|value| *value == 0.0)
+    );
+    for (padded, compact) in padded
+        .decoder
+        .hidden_states
+        .into_iter()
+        .zip(compact.decoder.hidden_states)
+    {
+        assert!(
+            exact(padded.clone().narrow(1, 1, 1))
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert_close(padded.narrow(1, 0, 1), compact);
+    }
+}
+
+/// A step where every row is finished returns zero diagnostics for every requested state.
+#[test]
+fn all_finished_steps_return_zero_hidden_states() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = model
+        .encode(
+            padded_input([[8, 9]], None, &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let output = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: Tensor::from_ints([[5]], &device),
+                token_mask: Some(validity([[false]], &device)),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                hidden_states: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(output.decoder.hidden_states.len(), 4);
+    for hidden in output.decoder.hidden_states {
+        assert_eq!(hidden.dims(), [1, 1, 8]);
+        assert!(exact(hidden).iter().all(|value| *value == 0.0));
+    }
+    assert_eq!(state.lengths(), [2], "a finished row commits nothing");
+}

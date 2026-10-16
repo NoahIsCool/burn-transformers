@@ -724,3 +724,76 @@ fn recipe_encode_benchmark() {
     }
     eprintln!("T5 recipe encode batch={batch} sequence={sequence}: best={best:.4}s");
 }
+
+/// Eager attention everywhere, so score and pattern points join the catalog.
+fn eager_encoder() -> T5Encoder<TestBackend> {
+    let mut encoder = T5EncoderRecipe::from_config(config())
+        .unwrap()
+        .init::<TestBackend>(&Default::default())
+        .unwrap();
+    for block in &mut encoder.encoder.block {
+        block.self_attention.self_attention.attention.precision_mode =
+            crate::attention::AttentionPrecisionMode::EagerFp32Softmax;
+    }
+    encoder
+}
+
+/// A failing edit at any point aborts the complete pass and the staged call that emits it.
+#[test]
+fn t5_encoder_points_propagate_edit_failures() {
+    use crate::models::shared::test_support::{
+        assert_edit_failures_propagate, assert_staged_edit_failures_propagate,
+    };
+    let device = Default::default();
+    let encoder = eager_encoder();
+    let points = encoder.activation_points();
+    assert_edit_failures_propagate(&points, |hooks| {
+        encoder.encode_with_hooks(input(&device), &ForwardOptions::default(), hooks)
+    });
+    assert_staged_edit_failures_propagate(&encoder, &input(&device), &points);
+}
+
+/// Staged states are checked for width and for positions inside the evaluated context.
+#[test]
+fn t5_recipe_rejects_foreign_widths_and_out_of_context_positions() {
+    let device = Default::default();
+    let encoder = eager_encoder();
+    let state = encoder.embed(input(&device)).unwrap();
+    let mut narrow = state.clone();
+    narrow.hidden = Tensor::zeros([1, 3, 5], &device);
+    let error = encoder.run_layers(narrow, 0..1).unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "execution.hidden"
+                && expected == "nonempty [batch, token, 4]"
+                && actual == "[1, 3, 5]"),
+        "{error:?}"
+    );
+    let mut moved = state;
+    moved.context.positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 7]], &device);
+    let error = encoder.run_layers(moved, 0..1).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "execution.positions"
+                && reason == "positions must lie within the nonnegative evaluated context 0..3, found 0..=7"),
+        "{error:?}"
+    );
+}
+
+/// Appending a block without a new recipe leaves it without a bias owner, which is reported.
+#[test]
+fn t5_recipe_reports_blocks_added_after_construction() {
+    let device = Default::default();
+    let mut encoder = eager_encoder();
+    let extra = encoder.encoder.block[2].clone();
+    encoder.encoder.block.push(extra);
+    let state = encoder
+        .run_layers(encoder.embed(input(&device)).unwrap(), 0..3)
+        .unwrap();
+    let error = encoder.run_layers(state, 3..4).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "t5.encoder.relative_bias" && reason.contains("layer list changed")),
+        "{error:?}"
+    );
+}

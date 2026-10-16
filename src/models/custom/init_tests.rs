@@ -139,3 +139,24 @@ fn scaled_initialization_keeps_tied_logits_well_conditioned() {
         "scaled std {scaled_std}"
     );
 }
+
+/// Without depth or residual-writing projections, the policy is the plain normal initializer.
+#[test]
+fn zero_depth_or_no_residual_projections_leave_the_policy_unscaled() {
+    let spec = decoder(vec![layer(attention(PositionEncodingSpec::None))]);
+    assert_eq!(
+        scaled_init_policy([&spec], 0, false, 0.02),
+        InitPolicy::normal(0.02)
+    );
+    let empty = decoder(Vec::new());
+    assert_eq!(
+        scaled_init_policy([&empty], 3, false, 0.02),
+        InitPolicy::normal(0.02)
+    );
+    let scaled = scaled_init_policy([&empty], 3, true, 0.02);
+    assert_eq!(
+        names(&scaled),
+        ["o_proj"],
+        "cross-attention alone writes the residual"
+    );
+}

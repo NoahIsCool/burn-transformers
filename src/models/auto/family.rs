@@ -159,6 +159,7 @@ fn manifest_namespace(manifest: &CheckpointManifest, family: &str) -> Result<Lan
 // Registered families.
 
 impl<B: Backend> CausalFamily<B> for DeepseekV2ForCausalLm<B> {
+    /// The `deepseek_v2` text-decoder schema: MLA ranks, expert routing, and RoPE.
     type Config = DeepseekV2Config;
 
     /// Reads DeepSeek-V2's vocabulary and token fields.
@@ -195,6 +196,7 @@ impl<B: Backend> CausalFamily<B> for DeepseekV2ForCausalLm<B> {
 }
 
 impl<B: Backend> CausalFamily<B> for MuseGlimmerForCausalLm<B> {
+    /// The `muse_glimmer_text` backbone, extracted from a multimodal `text_config`.
     type Config = MuseGlimmerTextConfig;
 
     /// Reads Muse Glimmer's vocabulary and token fields.
@@ -235,6 +237,7 @@ impl<B: Backend> CausalFamily<B> for MuseGlimmerForCausalLm<B> {
 }
 
 impl<B: Backend> CausalFamily<B> for NemotronHForCausalLm<B> {
+    /// The normalized `nemotron_h` schema (legacy Nemotron-H and Nemotron Nano).
     type Config = NemotronHConfig;
 
     /// Reads Nemotron-H's vocabulary and token fields.
@@ -282,6 +285,7 @@ impl<B: Backend> CausalFamily<B> for NemotronHForCausalLm<B> {
 }
 
 impl<B: Backend> CausalFamily<B> for Qwen3_5ForCausalLm<B> {
+    /// The `qwen3_5_text` backbone shared by Qwen3.5–Qwen3.8, read from `text_config`.
     type Config = Qwen3_5TextConfig;
 
     /// Reads Qwen3.5's vocabulary and token fields.
@@ -331,6 +335,7 @@ impl<B: Backend> CausalFamily<B> for Qwen3_5ForCausalLm<B> {
 }
 
 impl<B: Backend> CausalFamily<B> for Qwen3MoeForCausalLm<B> {
+    /// The `qwen3_moe` schema, including sparse-layer placement and routing.
     type Config = Qwen3MoeConfig;
 
     /// Reads Qwen3-MoE's vocabulary and token fields.

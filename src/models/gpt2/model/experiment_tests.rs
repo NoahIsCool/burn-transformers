@@ -204,3 +204,63 @@ fn staged_trait_rejects_invalid_cursors_and_attention_policies() {
     assert!(StagedModel::normalize(&model, finished.clone()).is_err());
     assert!(StagedModel::run_layers(&model, finished, 2..2).is_err());
 }
+
+/// Both staged views are decoder stacks, and every staged call propagates edit failures.
+#[test]
+fn staged_calls_propagate_edit_failures_at_every_point() {
+    use crate::models::shared::test_support::assert_staged_edit_failures_propagate;
+    let model = model();
+    let input = input([[1, 2, 3, 4], [5, 6, 7, 0]], None);
+    assert_eq!(StagedModel::<TestBackend>::stack(&model), Stack::Decoder);
+    assert_eq!(
+        StagedModel::<TestBackend>::stack(&model.model),
+        Stack::Decoder
+    );
+    let points = model.activation_points();
+    assert_staged_edit_failures_propagate(&model, &input, &points);
+    assert_staged_edit_failures_propagate(&model.model, &input, &points);
+}
+
+/// A staged context whose mask hides every token of a row is rejected before any block.
+#[test]
+fn staged_blocks_reject_a_fully_masked_row() {
+    let model = model();
+    let mut state = StagedModel::embed(&model, input([[1, 2, 3, 4], [5, 6, 7, 0]], None)).unwrap();
+    state.context.token_mask = Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true, true, true], [false, false, false, false]].into(),
+        &Default::default(),
+    )));
+    match StagedModel::run_layers(&model, state, 0..2).unwrap_err() {
+        Error::Shape { tensor, actual, .. } => {
+            assert_eq!(tensor, "gpt2.token_mask");
+            assert_eq!(actual, "a fully masked row");
+        }
+        other => panic!("expected a shape error, found {other:?}"),
+    }
+}
+
+/// Staged states and standalone blocks reject residuals of another width.
+#[test]
+fn staged_and_block_residual_widths_are_checked() {
+    let model = model();
+    let mut state = StagedModel::embed(&model, input([[1, 2, 3, 4], [5, 6, 7, 0]], None)).unwrap();
+    state.hidden = Tensor::zeros([2, 4, 11], &Default::default());
+    for error in [
+        StagedModel::run_layers(&model, state.clone(), 0..2).unwrap_err(),
+        model.model.layers[0]
+            .forward(state.hidden.clone(), None)
+            .unwrap_err(),
+    ] {
+        match error {
+            Error::Shape {
+                tensor,
+                expected,
+                actual,
+            } => assert_eq!(
+                (tensor.as_str(), expected.as_str(), actual.as_str()),
+                ("gpt2.hidden", "[batch>0, token>0, 12]", "[2, 4, 11]")
+            ),
+            other => panic!("expected a width error, found {other:?}"),
+        }
+    }
+}

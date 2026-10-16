@@ -715,3 +715,8 @@ impl<B: Backend> StagedModel<B> for ModularCausalLm<B> {
 #[path = "intervention_tests.rs"]
 /// Public activation-hook, staged execution, and consumer composition regressions.
 mod intervention_tests;
+
+#[cfg(test)]
+#[path = "causal_tests.rs"]
+/// Hook propagation across every mixer kind, staged-state checks, and trait entry points.
+mod tests;

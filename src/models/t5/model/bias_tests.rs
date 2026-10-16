@@ -133,6 +133,24 @@ fn malformed_position_tensors_are_rejected() {
     assert!(positional_bias(&bias_table, empty, positions(&[0], 1), 0).is_err());
 }
 
+/// A displacement table whose width would overflow `usize` is a configuration error.
+#[test]
+fn unbounded_displacement_tables_are_rejected() {
+    let unbounded = table(8, usize::MAX, true, 1);
+    let error = positional_bias(
+        &unbounded,
+        positions(&[0], 1),
+        positions(&[0], 1),
+        usize::MAX,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "t5.relative_positions" && reason == "displacement bound overflows usize"),
+        "{error:?}"
+    );
+}
+
 proptest! {
     /// Random per-row positions (gapped, unsorted, repeated) always match the pairwise lookup.
     #[test]

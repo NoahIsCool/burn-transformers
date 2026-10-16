@@ -1008,3 +1008,43 @@ fn batched_decode_speedup_over_row_by_row() {
         );
     }
 }
+
+/// An all-inactive step returns zero logits shaped by every logits selection.
+///
+/// `All` keeps every input column, `Last` one column, and `Positions` the
+/// requested columns; nothing is committed.
+#[test]
+fn all_inactive_steps_shape_zero_logits_by_selection() {
+    let model = tiny_model(LlamaVariant::Mistral, 4);
+    let mut cache = state(&model, 2, 8);
+    model
+        .prefill(
+            input(ints([[1, 2], [3, 4]]), None, None),
+            &mut cache,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    for (logits, columns) in [
+        (LogitsSelection::All, 2),
+        (LogitsSelection::Last, 1),
+        (LogitsSelection::Positions(vec![1, 0, 1]), 3),
+    ] {
+        let idle = model
+            .decode(
+                DecodeInput {
+                    token_ids: ints([[5, 6], [7, 8]]),
+                    position_ids: None,
+                    token_mask: Some(mask([[false, false], [false, false]])),
+                },
+                &mut cache,
+                &ForwardOptions {
+                    logits,
+                    ..ForwardOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idle.logits.dims(), [2, columns, VOCABULARY]);
+        assert!(host(idle.logits).iter().all(|&value| value == 0.0));
+        assert_eq!(cache.lengths(), [2, 2]);
+    }
+}
