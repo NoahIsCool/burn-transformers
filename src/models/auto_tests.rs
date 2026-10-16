@@ -194,6 +194,7 @@ fn assert_bounded_prefill_contract<M>(
     family: &str,
     model: &M,
     cache: CacheConfig,
+    vocabulary_size: usize,
     device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
 ) where
     M: CausalLanguageModel<TestBackend>,
@@ -256,7 +257,7 @@ fn assert_bounded_prefill_contract<M>(
             ..Default::default()
         },
         prefill_chunk_size,
-        vocabulary_size: 32,
+        vocabulary_size,
     };
     let one_shot = generate_causal(model, generation(None))
         .unwrap_or_else(|error| panic!("{family} one-shot generation: {error}"));
@@ -292,55 +293,177 @@ fn assert_bounded_prefill_contract<M>(
     }
 }
 
-/// Every concrete causal family supports the bounded-prefill coordinator contract.
+/// Tiny modular decoder: RoPE attention followed by Gated DeltaNet.
+fn tiny_modular() -> crate::architecture::DecoderSpec {
+    use crate::architecture::{
+        Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+        FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+        ResidualTopology, RopeScaling,
+    };
+    let norm = NormalizationSpec::Rms {
+        epsilon: 1e-6,
+        zero_centered: false,
+    };
+    let layer = |mixer| DecoderLayerSpec {
+        mixer,
+        feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+            intermediate_size: 12,
+            activation: Activation::Silu,
+            bias: false,
+        }),
+        mixer_norm: norm,
+        feed_forward_norm: norm,
+        norm_placement: NormPlacement::Pre,
+        residual: ResidualTopology::Add,
+    };
+    DecoderSpec {
+        vocabulary_size: 32,
+        hidden_size: 8,
+        layers: vec![
+            layer(MixerSpec::Attention(AttentionSpec {
+                query_heads: 2,
+                key_value_heads: 1,
+                head_dim: 4,
+                query_key_norm: true,
+                output_gate: false,
+                position: PositionEncodingSpec::Rope {
+                    theta: 10_000.0,
+                    rotary_dim: 4,
+                    scaling: RopeScaling::None,
+                },
+            })),
+            layer(MixerSpec::DeltaNet {
+                key_heads: 1,
+                value_heads: 2,
+                key_head_dim: 4,
+                value_head_dim: 4,
+                convolution_kernel: 2,
+            }),
+        ],
+        final_norm: norm,
+        tie_word_embeddings: false,
+        max_position_embeddings: 32,
+    }
+}
+
+/// Every causal language model supports the bounded-prefill coordinator contract.
+///
+/// The staggered prompt's first chunk reaches `decode` while row zero has
+/// never started, which every implementation must accept as a no-op. The test
+/// covers every registered family (each Llama-family alias included) and the
+/// modular reference model, and fails if a registered family is left out.
 #[test]
 fn every_causal_family_matches_bounded_and_one_shot_prefill() {
     let device = Default::default();
+    let cache = CacheConfig::new(2, 8).unwrap();
+    let mut covered = Vec::new();
 
     TestBackend::seed(&device, 10_001);
     let qwen = Qwen3_5ForCausalLm::init(tiny_qwen(), &device).expect("tiny Qwen");
-    assert_bounded_prefill_contract("Qwen3.5", &qwen, CacheConfig::new(2, 8).unwrap(), &device);
+    assert_bounded_prefill_contract("Qwen3.5", &qwen, cache, 32, &device);
+    covered.push(AutoCausalConfig::Qwen3_5);
 
     TestBackend::seed(&device, 10_002);
     let qwen_moe = Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).expect("tiny Qwen MoE");
-    assert_bounded_prefill_contract(
-        "Qwen3-MoE",
-        &qwen_moe,
-        CacheConfig::new(2, 8).unwrap(),
-        &device,
-    );
+    assert_bounded_prefill_contract("Qwen3-MoE", &qwen_moe, cache, 32, &device);
+    covered.push(AutoCausalConfig::Qwen3Moe);
 
     let deepseek = crate::models::deepseek_v2::model::tests_support::initialized_model(
         crate::models::deepseek_v2::model::tests_support::tiny_config(),
         &device,
     );
-    assert_bounded_prefill_contract(
-        "DeepSeek-V2",
-        &deepseek,
-        CacheConfig::new(2, 8).unwrap(),
-        &device,
-    );
+    assert_bounded_prefill_contract("DeepSeek-V2", &deepseek, cache, 32, &device);
+    covered.push(AutoCausalConfig::DeepseekV2);
 
     TestBackend::seed(&device, 10_003);
     let muse = MuseGlimmerForCausalLm::init(tiny_muse(), &device).expect("tiny Muse");
     assert_bounded_prefill_contract(
         "Muse Glimmer",
         &muse,
-        CacheConfig::new(2, 8)
-            .unwrap()
-            .with_sliding_window(3)
-            .unwrap(),
+        cache.with_sliding_window(3).unwrap(),
+        32,
         &device,
     );
+    covered.push(AutoCausalConfig::MuseGlimmer);
 
     TestBackend::seed(&device, 10_004);
     let nemotron = NemotronHForCausalLm::init(tiny_nemotron(), &device).expect("tiny Nemotron-H");
-    assert_bounded_prefill_contract(
-        "Nemotron-H",
-        &nemotron,
-        CacheConfig::new(2, 8).unwrap(),
-        &device,
-    );
+    assert_bounded_prefill_contract("Nemotron-H", &nemotron, cache, 32, &device);
+    covered.push(AutoCausalConfig::NemotronH);
+
+    for (name, json) in [
+        (
+            "Llama 3",
+            include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+        ),
+        (
+            "Llama with bias and tied embeddings",
+            include_str!("../../tests/fixtures/tiny_goldens/llama-bias-tied/config.json"),
+        ),
+        (
+            "Mistral sliding",
+            include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
+        ),
+        (
+            "OLMo 2",
+            include_str!("../../tests/fixtures/tiny_goldens/olmo2/config.json"),
+        ),
+        (
+            "Qwen2",
+            include_str!("../../tests/fixtures/tiny_goldens/qwen2/config.json"),
+        ),
+        (
+            "Qwen3",
+            include_str!("../../tests/fixtures/tiny_goldens/qwen3/config.json"),
+        ),
+        (
+            "SmolLM3",
+            include_str!("../../tests/fixtures/tiny_goldens/smollm3/config.json"),
+        ),
+        (
+            "Gemma 2",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
+        ),
+        (
+            "Gemma 3 text",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
+        ),
+        (
+            "gpt-oss",
+            include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
+        ),
+    ] {
+        TestBackend::seed(&device, 10_006);
+        let model = AutoCausalLm::<TestBackend>::from_config_json(json, &device).unwrap();
+        let vocabulary = model.config().vocabulary_size();
+        covered.push(model.family());
+        // Unwrap to the concrete family so its own implementation is checked.
+        match model {
+            AutoCausalLm::Llama(model) => {
+                assert_bounded_prefill_contract(name, &model, cache, vocabulary, &device);
+            }
+            AutoCausalLm::Gemma(model) => {
+                assert_bounded_prefill_contract(name, &model, cache, vocabulary, &device);
+            }
+            AutoCausalLm::GptOss(model) => {
+                assert_bounded_prefill_contract(name, &model, cache, vocabulary, &device);
+            }
+            other => panic!("{name} selected the {:?} family", other.family()),
+        }
+    }
+
+    TestBackend::seed(&device, 10_007);
+    let modular =
+        crate::models::custom::ModularCausalLm::<TestBackend>::init(tiny_modular(), &device)
+            .expect("tiny modular decoder");
+    assert_bounded_prefill_contract("ModularCausalLm", &modular, cache, 32, &device);
+
+    for family in AutoCausalConfig::ALL {
+        assert!(
+            covered.contains(family),
+            "registered family {family:?} lacks a bounded-prefill check"
+        );
+    }
 }
 
 /// Automatic dispatch preserves the same fresh-state fallback and parity contract.
@@ -355,6 +478,7 @@ fn auto_causal_dispatch_matches_bounded_and_one_shot_prefill() {
         "AutoCausalLm<Qwen3-MoE>",
         &model,
         CacheConfig::new(2, 8).unwrap(),
+        32,
         &device,
     );
 }

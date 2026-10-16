@@ -50,7 +50,12 @@ pub struct CausalGenerationRequest<B: Backend> {
     ///
     /// Chunking bounds temporary attention masks and score tensors for long
     /// prompts while preserving one shared decode state. `None` evaluates the
-    /// complete prompt in one call. A value of zero is invalid.
+    /// complete prompt in one call. A value of zero is invalid. A chunk in
+    /// which every row holds a valid token is sent to `prefill`; a chunk in
+    /// which only some rows do, such as a left-padded prompt's first chunk,
+    /// is sent to `decode`, whose shared contract treats the other rows (even
+    /// rows that have not started) as no-ops; a chunk without any valid token
+    /// is skipped.
     pub prefill_chunk_size: Option<usize>,
     /// Number of output categories in the model language head.
     pub vocabulary_size: usize,

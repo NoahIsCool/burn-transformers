@@ -1,7 +1,7 @@
 //! Public decode-state contracts, including sparse diagnostics and transactional failures.
 
 use super::*;
-use crate::{CausalLmOutput, Error};
+use crate::{CausalGenerationRequest, CausalLmOutput, Error, GenerationConfig, generate_causal};
 
 /// Creates two distinct sparse layers with every expert initialized before any inference.
 fn sparse_model(device: &<TestBackend as BackendTypes>::Device) -> ModularCausalLm<TestBackend> {
@@ -354,7 +354,13 @@ fn assert_inactive_output_row(output: &CausalLmOutput<TestBackend>, row: usize) 
     }
 }
 
-/// Empty prompt rows and entirely inactive steps fail atomically; started inactive rows are valid.
+/// Prefill rejects empty prompt rows; decode accepts inactive rows as exact-zero no-ops.
+///
+/// This is the stateful contract every family shares, and the bounded-prefill
+/// coordinator relies on it: a left-padded prompt's first chunk reaches
+/// `decode` while some rows have never started. Inactive rows, started or
+/// not, and steps in which no row is active leave committed history unchanged
+/// and return zero rows.
 #[test]
 fn inactive_rows_obey_prefill_and_decode_state_contracts() {
     let device = Default::default();
@@ -381,7 +387,34 @@ fn inactive_rows_obey_prefill_and_decode_state_contracts() {
         "a fully masked row",
     );
     assert_eq!(state.lengths(), &[0, 0]);
-    let error = model
+    let diagnostics = ForwardOptions {
+        hidden_states: true,
+        ..Default::default()
+    };
+    let idle_step = |state: &mut super::super::ModularDecodeState<TestBackend>, width: usize| {
+        let output = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::zeros([2, width], &device),
+                    token_mask: Some(TokenMask::new(Tensor::from_bool(
+                        TensorData::new(vec![false; 2 * width], [2, width]),
+                        &device,
+                    ))),
+                    position_ids: None,
+                },
+                state,
+                &diagnostics,
+            )
+            .unwrap();
+        assert_eq!(output.logits.dims(), [2, 1, 32]);
+        assert_inactive_output_row(&output, 0);
+        assert_inactive_output_row(&output, 1);
+    };
+    // Before anything has started, an entirely inactive step is a no-op.
+    idle_step(&mut state, 1);
+    assert_eq!(state.lengths(), &[0, 0]);
+    // Row 1 has never started and sits out the step while row 0 starts alone.
+    let started = model
         .decode(
             DecodeInput {
                 token_ids: Tensor::from_ints([[1], [0]], &device),
@@ -389,12 +422,41 @@ fn inactive_rows_obey_prefill_and_decode_state_contracts() {
                 position_ids: None,
             },
             &mut state,
+            &diagnostics,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[1, 0]);
+    assert_inactive_output_row(&started, 1);
+    let expected = model
+        .forward(
+            parity_input(&[1], None, None, &device),
             &ForwardOptions::default(),
         )
-        .unwrap_err();
-    assert!(matches!(error, Error::BackendCapability(ref reason)
-        if reason == "reference batched decoding cannot evaluate a never-started inactive row"));
-    assert_eq!(state.lengths(), &[0, 0]);
+        .unwrap();
+    assert_token_logits_match(&started.logits, 0, 0, &expected.logits, 0);
+    // Row 1 then starts in a later step, at slot zero and implicit position zero.
+    let joined = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[2], [3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2, 1]);
+    for (row, ids) in [(0, &[1, 2][..]), (1, &[3][..])] {
+        let expected = model
+            .forward(
+                parity_input(ids, None, None, &device),
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        assert_token_logits_match(&joined.logits, row, 0, &expected.logits, 0);
+    }
+    state.reset().unwrap();
     model
         .prefill(
             CausalLmInput {
@@ -406,23 +468,9 @@ fn inactive_rows_obey_prefill_and_decode_state_contracts() {
             &ForwardOptions::default(),
         )
         .unwrap();
-    let error = model
-        .decode(
-            DecodeInput {
-                token_ids: Tensor::from_ints([[0, 0], [0, 0]], &device),
-                token_mask: Some(mask([[false, false], [false, false]], &device)),
-                position_ids: None,
-            },
-            &mut state,
-            &ForwardOptions::default(),
-        )
-        .unwrap_err();
-    assert_shape_error(
-        error,
-        "custom.decode.token_mask",
-        "at least one active token across the batch",
-        "an entirely inactive decode step",
-    );
+    // A started batch also treats an entirely inactive step as a no-op; the
+    // parity checks below prove the committed history is untouched.
+    idle_step(&mut state, 2);
     assert_eq!(state.lengths(), &[2, 2]);
     let actual = model
         .decode(
@@ -471,6 +519,65 @@ fn inactive_rows_obey_prefill_and_decode_state_contracts() {
         )
         .unwrap();
     assert_token_logits_match(&resumed.logits, 1, 0, &expected.logits, 0);
+}
+
+/// Chunked prefill through `generate_causal` equals one-shot prefill on a left-padded batch.
+///
+/// Row zero's leading chunk is padding, so the coordinator sends that chunk to
+/// `decode` before row zero has started; later chunks leave either row
+/// inactive in turn. A recurrent schedule (RoPE attention, then DeltaNet) and
+/// plain attention must generate the same tokens, finish reasons, and log
+/// probabilities for every chunk width.
+#[test]
+fn chunked_generation_matches_one_shot_with_a_never_started_row() {
+    let device = Default::default();
+    for spec in [
+        causal_spec(),
+        decoder(vec![layer(attention(PositionEncodingSpec::None))]),
+    ] {
+        let model = ModularCausalLm::<TestBackend>::init(spec, &device)
+            .unwrap()
+            .map(&mut DeterministicParameters::default());
+        let request = |prefill_chunk_size| CausalGenerationRequest {
+            prompt: CausalLmInput {
+                token_ids: Tensor::from_ints([[31, 31, 1, 2, 3, 31], [4, 5, 6, 7, 31, 8]], &device),
+                token_mask: Some(mask(
+                    [
+                        [false, false, true, true, true, false],
+                        [true, true, true, true, false, true],
+                    ],
+                    &device,
+                )),
+                position_ids: None,
+            },
+            cache: CacheConfig::new(2, 8).unwrap(),
+            generation: GenerationConfig {
+                max_new_tokens: 3,
+                ..Default::default()
+            },
+            prefill_chunk_size,
+            vocabulary_size: 32,
+        };
+        let one_shot = generate_causal(&model, request(None)).unwrap();
+        for chunk in [1, 2, 4] {
+            let chunked = generate_causal(&model, request(Some(chunk)))
+                .unwrap_or_else(|error| panic!("chunk {chunk}: {error}"));
+            for (chunked, one_shot) in chunked.sequences.iter().zip(&one_shot.sequences) {
+                assert_eq!(chunked.token_ids, one_shot.token_ids, "chunk {chunk}");
+                assert_eq!(chunked.finish_reason, one_shot.finish_reason);
+                for (actual, expected) in chunked
+                    .log_probabilities
+                    .iter()
+                    .zip(&one_shot.log_probabilities)
+                {
+                    assert!(
+                        (actual - expected).abs() <= 1.0e-4,
+                        "chunk {chunk}: log probability {actual} != {expected}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Equal decoder specs still reject causal/seq2seq state-role swaps without corrupting histories.
@@ -606,6 +713,84 @@ fn seq2seq_supplied_source_mask_is_validated_without_commit() {
         .prefill_decoder(&encoder, target(), &mut state, &options)
         .unwrap();
     assert_eq!(state.lengths(), &[1, 1]);
+}
+
+/// Seq2seq target decoding shares the inactive-row contract, including never-started rows.
+#[test]
+fn seq2seq_decode_accepts_never_started_and_idle_target_rows() {
+    let device = Default::default();
+    let model = ModularSeq2SeqLm::<TestBackend>::init(seq2seq_spec(), &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    let options = ForwardOptions::default();
+    let encoder = model
+        .encode(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[4, 5], [6, 7]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &options,
+        )
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    let step = |ids: [[i32; 1]; 2], valid: [[bool; 1]; 2]| DecodeInput {
+        token_ids: Tensor::from_ints(ids, &device),
+        token_mask: Some(mask(valid, &device)),
+        position_ids: None,
+    };
+    let zero_row = |logits: &Tensor<TestBackend, 3>, row: usize| {
+        let values = logits
+            .clone()
+            .slice([row..row + 1, 0..1, 0..32])
+            .into_data();
+        assert!(
+            values
+                .as_slice::<f32>()
+                .unwrap()
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+    };
+
+    let idle = model
+        .decode(
+            &encoder,
+            step([[0], [0]], [[false], [false]]),
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[0, 0]);
+    zero_row(&idle.decoder.logits, 0);
+    zero_row(&idle.decoder.logits, 1);
+
+    let started = model
+        .decode(
+            &encoder,
+            step([[1], [0]], [[true], [false]]),
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[1, 0]);
+    zero_row(&started.decoder.logits, 1);
+    let expected = model
+        .forward(
+            Seq2SeqInput {
+                encoder: CausalLmInput {
+                    token_ids: Tensor::from_ints([[4, 5]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                decoder: parity_input(&[1], None, None, &device),
+            },
+            &options,
+        )
+        .unwrap();
+    assert_token_logits_match(&started.decoder.logits, 0, 0, &expected.decoder.logits, 0);
 }
 
 /// Invalid seq2seq output selection leaves the target prefix available for a correct retry.

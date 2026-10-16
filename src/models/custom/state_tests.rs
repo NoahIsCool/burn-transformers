@@ -125,6 +125,64 @@ fn history_layout_mismatch_maps_to_a_cache_error() {
     );
 }
 
+/// Planner failures the decode contract rules out map to one internal cache error.
+///
+/// Prefill rejects an empty row before the planner can report an empty step,
+/// and decode answers an empty step itself and plans every non-advancing row
+/// from one slot, so `EmptyStep` and `NeverStarted` only arise from a direct
+/// planner call like this one.
+#[test]
+fn planner_failures_ruled_out_by_the_decode_contract_map_to_cache_errors() {
+    let state = ModularDecodeState::<B>::new(
+        CacheConfig::new(2, 3).expect("small positive geometry"),
+        2,
+        spec(),
+        StatePurpose::Causal,
+        &Default::default(),
+    )
+    .expect("small histories");
+    for (validity, failure) in [
+        ([false, false], HistoryAppendError::EmptyStep),
+        ([true, false], HistoryAppendError::NeverStarted { row: 1 }),
+    ] {
+        let planned = plan_history(&validity, 1, state.lengths(), state.capacity(), false);
+        assert_eq!(planned.unwrap_err(), failure);
+        let error = state.append_error(failure);
+        assert!(
+            matches!(&error, Error::Cache(reason)
+                if reason == "custom history planner rejected a step the decode contract admits"),
+            "{error:?}"
+        );
+    }
+}
+
+/// Decode plans every row without a valid cell from one slot and leaves active rows alone.
+#[test]
+fn inactive_rows_are_planned_from_one_slot() {
+    // Rows: never started and idle, started and idle, never started and active, started and active.
+    let validity = [false, false, false, false, true, false, false, true];
+    assert_eq!(
+        inactive_rows_shortened(&[0, 5, 0, 3], &validity, 2),
+        [1, 1, 0, 3]
+    );
+    let (plan, writes) = plan_history(&validity, 2, &[1, 1, 0, 3], 8, false)
+        .expect("every row now has a history slot");
+    assert_eq!(plan.counts, [0, 0, 1, 1]);
+    assert_eq!(plan.lengths, [1, 1, 1, 4]);
+    assert_eq!(plan.slots, [0, 0, 0, 0, 0, 0, 0, 3]);
+    // Only the advancing rows' slots `0..1` and `3..4` fall inside the write window.
+    assert_eq!((writes.start, writes.end), (0, 4));
+    assert_eq!(
+        writes.written,
+        [
+            false, false, false, false, //
+            false, false, false, false, //
+            true, false, false, false, //
+            false, false, false, true,
+        ]
+    );
+}
+
 /// Successful and rejected reorders preserve history geometry and accounting before reset.
 #[test]
 fn history_element_accounting_stays_fixed_across_lifecycle_operations() {

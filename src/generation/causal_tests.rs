@@ -1682,8 +1682,8 @@ fn release_v2_overlapping_stops_stream_at_the_exact_cache_boundary() {
 /// Prefill chunks made entirely of padding are skipped instead of sent to `decode`.
 ///
 /// Right-padded fixed-width prompts end in chunks with no valid token. Such a
-/// chunk cannot change any row's cache or logits, and architectures such as
-/// the custom stack reject an entirely inactive decode step.
+/// chunk cannot change any row's cache or logits, so the coordinator spends no
+/// model call on it, although every architecture accepts it as a no-op.
 #[test]
 fn all_padding_prefill_chunks_are_skipped() {
     let (inner, device) = tiny_model();
