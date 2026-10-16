@@ -875,3 +875,233 @@ fn tied_readout_matches_reshaping_linear_oracle() {
         .into_data()
         .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
 }
+
+/// Selects eager attention in every self- and cross-attention module, exposing score points.
+fn eager(
+    mut model: T5ForConditionalGeneration<TestBackend>,
+) -> T5ForConditionalGeneration<TestBackend> {
+    for block in model
+        .encoder
+        .block
+        .iter_mut()
+        .chain(&mut model.decoder.block)
+    {
+        block.self_attention.self_attention.attention.precision_mode =
+            AttentionPrecisionMode::EagerFp32Softmax;
+        if let Some(cross) = &mut block.cross_attention {
+            cross.enc_dec_attention.attention.precision_mode =
+                AttentionPrecisionMode::EagerFp32Softmax;
+        }
+    }
+    model
+}
+
+/// A two-row source and a target with interior padding, so padded hooks run.
+fn padded_pair() -> Seq2SeqInput<TestBackend> {
+    Seq2SeqInput {
+        encoder: masked_input(
+            &[&[1, 2, 3], &[4, 5, 0]],
+            Some(&[&[true, true, true], &[true, true, false]]),
+        ),
+        decoder: masked_input(
+            &[&[0, 6, 7], &[0, 8, 9]],
+            Some(&[&[true, true, true], &[true, false, true]]),
+        ),
+    }
+}
+
+/// A failing edit at any encoder, decoder, or cross-attention point aborts the pass.
+#[test]
+fn every_point_propagates_edit_failures() {
+    use crate::models::shared::test_support::assert_edit_failures_propagate;
+    let device = Default::default();
+    for projection in [
+        T5FeedForwardProjection::Relu,
+        T5FeedForwardProjection::GatedGelu,
+    ] {
+        let model = eager(
+            T5ForConditionalGeneration::<TestBackend>::init(tiny_config(projection), &device)
+                .unwrap(),
+        );
+        assert_edit_failures_propagate(&model.activation_points(), |hooks| {
+            model.forward_with_hooks(padded_pair(), &ForwardOptions::default(), hooks)
+        });
+        assert_edit_failures_propagate(&model.encoder.activation_points(), |hooks| {
+            model.encode_with_hooks(padded_pair().encoder, &ForwardOptions::default(), hooks)
+        });
+    }
+}
+
+/// Empty hook collections run the plain passes; hooked passes validate inputs before callbacks.
+#[test]
+fn hooked_passes_delegate_or_validate_before_callbacks() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu),
+        &device,
+    )
+    .unwrap();
+    let options = ForwardOptions::default();
+    let plain = model.encode(padded_pair().encoder, &options).unwrap();
+    let delegated = model
+        .encode_with_hooks(padded_pair().encoder, &options, &mut Hooks::new())
+        .unwrap();
+    assert_eq!(
+        plain.hidden_state.into_data(),
+        delegated.hidden_state.into_data()
+    );
+
+    let mut hooks = Hooks::new();
+    let embedding = hooks.capture(crate::intervention::Stack::Encoder.embedding());
+    let bad_source = masked_input(&[&[1, 2, 16]], None);
+    let error = model
+        .encode_with_hooks(bad_source, &options, &mut hooks)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, .. } if tensor == "t5.encoder.input_ids"),
+        "{error:?}"
+    );
+    assert!(hooks.get(&embedding).is_err(), "no callback ran");
+
+    let mut misshapen = padded_pair();
+    misshapen.encoder.token_mask = Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true], [true, true]].into(),
+        &device,
+    )));
+    let error = model
+        .forward_with_hooks(misshapen, &options, &mut hooks)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, .. } if tensor == "t5.encoder.token_mask"),
+        "{error:?}"
+    );
+}
+
+/// Hooked target padding without host columns uses logical positions and matches the plain pass.
+#[test]
+fn hooked_logical_padding_matches_the_plain_pass() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu),
+        &device,
+    )
+    .unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let plain = model.forward(padded_pair(), &options).unwrap();
+    let mut hooks = Hooks::new();
+    let residual = hooks.capture(Layer::decoder(0).residual_post());
+    let hooked = model
+        .forward_with_hooks(padded_pair(), &options, &mut hooks)
+        .unwrap();
+    plain.decoder.logits.into_data().assert_approx_eq::<f32>(
+        &hooked.decoder.logits.into_data(),
+        Tolerance::absolute(1e-6),
+    );
+    assert_eq!(hooks.get(&residual).unwrap().dims(), [2, 3, 4]);
+}
+
+/// The vocabulary head must agree with tying; attention probabilities are unavailable.
+#[test]
+fn head_ownership_and_unsupported_diagnostics_are_rejected() {
+    let device = Default::default();
+    let mut tied = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu),
+        &device,
+    )
+    .unwrap();
+    let error = tied
+        .forward(
+            padded_pair(),
+            &ForwardOptions {
+                attentions: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("reference attention path")),
+        "{error:?}"
+    );
+    tied.lm_head = Some(crate::operations::init_linear(
+        &burn::nn::LinearConfig::new(4, 16).with_bias(false),
+        &device,
+    ));
+    let error = tied
+        .forward(padded_pair(), &ForwardOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "t5.lm_head" && reason.contains("must not own")),
+        "{error:?}"
+    );
+    let mut untied = T5ForConditionalGeneration::<TestBackend>::init(
+        T5Config {
+            tie_word_embeddings: false,
+            ..tiny_config(T5FeedForwardProjection::Relu)
+        },
+        &device,
+    )
+    .unwrap();
+    untied.lm_head = None;
+    let error = untied
+        .forward(padded_pair(), &ForwardOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "t5.lm_head" && reason.contains("require a separate")),
+        "{error:?}"
+    );
+}
+
+/// Block zero must own each stack's shared relative-bias table.
+#[test]
+fn removing_the_shared_bias_owner_is_reported() {
+    let device = Default::default();
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu),
+        &device,
+    )
+    .unwrap();
+    model.encoder.block[0]
+        .self_attention
+        .self_attention
+        .relative_attention_bias = None;
+    let error = model
+        .encode(padded_pair().encoder, &ForwardOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "t5.relative_attention_bias" && reason.contains("block zero")),
+        "{error:?}"
+    );
+}
+
+/// One-head attention receives exclusion planes of exactly the score shape.
+#[test]
+fn single_head_exclusion_planes_need_no_broadcast() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        T5Config {
+            num_heads: 1,
+            d_kv: 4,
+            ..tiny_config(T5FeedForwardProjection::Relu)
+        },
+        &device,
+    )
+    .unwrap();
+    let output = model
+        .forward(
+            padded_pair(),
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(output.decoder.logits.dims(), [2, 3, 16]);
+    let values = output.decoder.logits.into_data().to_vec::<f32>().unwrap();
+    assert!(values.iter().all(|value| value.is_finite()));
+}

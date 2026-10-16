@@ -340,6 +340,16 @@ fn known_hugging_face_embedding_aliases_are_exact_and_reported() {
             1
         );
         assert!(options.allow_unexpected.contains(&custom));
+        // T5 allowlists no unexpected keys: embedding copies are equivalences instead.
+        assert!(contract.allow_unexpected().is_empty());
+        assert_eq!(options.allow_unexpected.len(), 2);
+        let aliases = options.index_aliases.len();
+        contract.configure_load_options(&mut options);
+        assert_eq!(
+            options.index_aliases.len(),
+            aliases,
+            "aliases are added once"
+        );
     }
 }
 

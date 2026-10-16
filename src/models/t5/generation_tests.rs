@@ -7,9 +7,9 @@ use burn::{
     tensor::{Int, Tensor},
 };
 
-use super::{T5BeamSearchOptions, generate_t5_beam_search, one_token};
+use super::{T5BeamSearchOptions, generate_t5_beam_search, one_token, token_to_u32};
 use crate::{
-    CausalLmInput, FinishReason,
+    CausalLmInput, Error, FinishReason,
     checkpoint::LoadOptions,
     models::{
         config::{ModelConfig, TokenIds},
@@ -127,6 +127,61 @@ fn family_token_defaults_reject_missing_empty_and_ambiguous_pad() {
         one_token(Some(&TokenIds::One(7)), "pad_token_id").unwrap(),
         7
     );
+}
+
+/// Token IDs beyond the `u32` generation domain are rejected with the field name.
+#[test]
+fn token_ids_beyond_u32_are_rejected() {
+    assert_eq!(
+        token_to_u32(u32::MAX as usize, "eos_token_id").unwrap(),
+        u32::MAX
+    );
+    let error = token_to_u32(u32::MAX as usize + 1, "eos_token_id").unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if *reason == format!("T5 config eos_token_id token {} exceeds the u32 token-ID domain", u32::MAX as usize + 1)),
+        "{error:?}"
+    );
+}
+
+/// Missing start or EOS tokens, and an edited empty EOS list, stop generation before any work.
+#[test]
+fn missing_or_empty_generation_tokens_are_rejected() {
+    let device = Default::default();
+    let source = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3, 4, 1]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = || T5BeamSearchOptions {
+        max_new_tokens: 2,
+        num_beams: 2,
+        num_return_sequences: 1,
+        length_penalty: 1.0,
+        early_stopping: false,
+    };
+    let mut model =
+        T5ForConditionalGeneration::<TestBackend>::init(tiny_config(), &device).unwrap();
+    let reason = |model: &T5ForConditionalGeneration<TestBackend>| match generate_t5_beam_search(
+        model,
+        source(),
+        options(),
+    )
+    .unwrap_err()
+    {
+        Error::Generation(reason) => reason,
+        other => panic!("expected a generation error, found {other:?}"),
+    };
+    // The public config may be edited after validation; generation re-checks what it reads.
+    model.config.eos_token_id = Some(TokenIds::Many(Vec::new()));
+    assert_eq!(
+        reason(&model),
+        "T5 config eos_token_id list must not be empty"
+    );
+    model.config.eos_token_id = None;
+    assert_eq!(reason(&model), "T5 config has no eos_token_id");
+    model.config.decoder_start_token_id = None;
+    assert_eq!(reason(&model), "T5 config has no decoder_start_token_id");
 }
 
 /// Pinned FLAN-Small beam output matches Transformers 5.2.0 token-for-token.
