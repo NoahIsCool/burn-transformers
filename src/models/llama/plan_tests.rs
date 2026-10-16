@@ -450,3 +450,46 @@ fn projection_extents_are_exact_or_report_overflow() {
     );
     assert_eq!(checkpoint_extent(7), Some(7));
 }
+
+/// The widest context is the maximum, or 1 without active rows.
+#[test]
+fn widest_context_is_the_maximum_or_one() {
+    assert_eq!(widest_context(&[]), 1);
+    assert_eq!(widest_context(&[3, 9, 4]), 9);
+    assert_eq!(widest_context(&[0]), 0);
+}
+
+/// The tightest limit is the first used set with the smallest limit.
+#[test]
+fn tightest_limit_picks_the_first_used_minimum() {
+    assert_eq!(
+        tightest_limit(&[Some(8), Some(4), Some(4)], &[true, true, true]),
+        Some(1)
+    );
+    assert_eq!(
+        tightest_limit(&[Some(2), None, Some(5)], &[false, true, true]),
+        Some(2)
+    );
+    assert_eq!(tightest_limit(&[None, Some(3)], &[true, false]), None);
+    assert_eq!(tightest_limit(&[Some(3)], &[]), None);
+}
+
+proptest! {
+    /// The tightest limit equals `Iterator::min_by_key` over the used sets.
+    #[test]
+    fn tightest_limit_matches_min_by_key(
+        sets in prop::collection::vec((prop::option::of(0usize..6), any::<bool>()), 0..8),
+    ) {
+        let limits: Vec<Option<usize>> = sets.iter().map(|&(limit, _)| limit).collect();
+        let used: Vec<bool> = sets.iter().map(|&(_, used)| used).collect();
+        let expected = limits
+            .iter()
+            .zip(&used)
+            .enumerate()
+            .filter(|(_, (_, used))| **used)
+            .filter_map(|(set, (limit, _))| limit.map(|limit| (set, limit)))
+            .min_by_key(|&(_, limit)| limit)
+            .map(|(set, _)| set);
+        prop_assert_eq!(tightest_limit(&limits, &used), expected);
+    }
+}

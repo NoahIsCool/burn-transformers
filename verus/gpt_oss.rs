@@ -37,6 +37,8 @@
 //!   `checkpoint_extent` and `projection_extent` form the contract's `u64`
 //!   extents exactly or name the `usize` or `u64` overflow; and
 //!   `derived_head_dim` is `hidden / heads`, or zero without heads;
+//!   `widest_context` is the largest active row's rotary context, 1 when no
+//!   row is active;
 //! - `interleaved_offset` locates gate output `j` at column `2j` and up output
 //!   `j` at column `2j + 1` of a row of the stacked `gate_up_proj`, provably
 //!   inside the `[experts, rows, 2 · width]` tensor;

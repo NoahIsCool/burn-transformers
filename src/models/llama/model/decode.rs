@@ -106,6 +106,7 @@ use super::super::{
     LlamaFamilyConfig,
     plan::{
         LayerReach, RingPlanError, cache_slots, group_indices, plan_ring, truncation_leaves_bytes,
+        widest_context,
     },
 };
 use super::{
@@ -714,11 +715,8 @@ fn cached_rotary_context<B: Backend, G: DecoderGraph<B>>(
     graph: &G,
     rows: &StatefulRows,
 ) -> Result<usize> {
-    let context = rows
-        .active_contexts()
-        .map(|(_, context)| context)
-        .max()
-        .unwrap_or(1);
+    let contexts: Vec<usize> = rows.active_contexts().map(|(_, context)| context).collect();
+    let context = widest_context(&contexts);
     match graph.rotary_schedule().cached_context_limit() {
         Some((limit, scaling)) if context > limit => Err(Error::BackendCapability(format!(
             "{} cached decoding with context-dependent RoPE ({scaling:?}) is limited to the original context {limit}; this call reaches {context}",

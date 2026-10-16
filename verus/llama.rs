@@ -25,6 +25,10 @@
 //!   shortened to a nonzero length", the condition that clears clean tails;
 //! - rotary sets: `used_rotary_sets` marks set `s` exactly when some layer
 //!   rotates with it, so each call evaluates exactly the tables it needs;
+//!   `tightest_limit` returns the first used set with the smallest
+//!   cached-context limit (`Iterator::min_by_key`'s choice), `None` exactly
+//!   when no used set has one; `widest_context` is the largest active
+//!   row's context, 1 when no row is active;
 //! - batched steps: `plan_step` plans the whole `[batch, Q]` block. It fails
 //!   with `NoActiveRow` exactly when no row has a token; when every row is a
 //!   run it slices the minimal input window `[lo, hi)` (some row starts at

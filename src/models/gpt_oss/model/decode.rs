@@ -100,7 +100,7 @@ use crate::{
 
 use super::super::{
     GptOssArchitecture, GptOssConfig,
-    plan::{cache_slots, group_indices, ring_assignment, truncation_leaves_bytes},
+    plan::{cache_slots, group_indices, ring_assignment, truncation_leaves_bytes, widest_context},
 };
 use super::{GptOssForCausalLm, INPUT_NAMES, LayerKeys};
 
@@ -573,11 +573,8 @@ impl<B: Backend> GptOssForCausalLm<B> {
         }
         let rows = self.prepare_rows(&input, state, phase)?;
         validate_logits_selection(&options.logits, rows.sequence)?;
-        let context = rows
-            .active_contexts()
-            .map(|(_, context)| context)
-            .max()
-            .unwrap_or(1);
+        let contexts: Vec<usize> = rows.active_contexts().map(|(_, context)| context).collect();
+        let context = widest_context(&contexts);
         ensure_cacheable_rotary_context(self.architecture().rope, context, "gpt-oss")?;
         let retain_router_logits = self.retains_router_logits(options);
         if rows.token_counts.iter().all(|&count| count == 0) {

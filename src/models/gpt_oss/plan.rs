@@ -13,7 +13,8 @@
 //! * `fused_expert_elements`: the overflow check of the stacked expert
 //!   projections; `checkpoint_extent`/`projection_extent`: the checked
 //!   `u64` extents of the checkpoint contract; `derived_head_dim`: the head
-//!   width of a config that omits it;
+//!   width of a config that omits it; `widest_context`: the rotary context a
+//!   cached step evaluates;
 //! * `interleaved_offset`: where the loader finds expert `e`'s gate and up
 //!   weights inside the stacked, column-interleaved `gate_up_proj`, and the
 //!   byte-level splitters built on it: `stacked_layout` (one expert's and
@@ -950,6 +951,47 @@ pub(crate) fn projection_extent(heads: usize, head_dim: usize) -> Result<u64, Ex
 ))]
 pub(crate) fn derived_head_dim(hidden: usize, heads: usize) -> usize {
     hidden.checked_div(heads).unwrap_or(0)
+}
+
+/// Returns the widest rotary context of a step's active rows, or 1 when none is active.
+///
+/// Proved: with no context the result is 1; otherwise it is one of the
+/// contexts and at least every other, so the step evaluates RoPE (and
+/// checks its cached limit) at the largest context any row reaches.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(widest =>
+    ensures
+        contexts.len() == 0 ==> widest == 1,
+        contexts.len() > 0 ==> exists|i: int| 0 <= i < contexts.len() && #[trigger] contexts@[i] == widest,
+        forall|i: int| 0 <= i < contexts.len() ==> #[trigger] contexts@[i] <= widest,
+))]
+pub(crate) fn widest_context(contexts: &[usize]) -> usize {
+    if contexts.is_empty() {
+        return 1;
+    }
+    let mut widest = contexts[0];
+    let mut index: usize = 1;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! { let ghost mut witness: int = 0; }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= index <= contexts.len(),
+            0 <= witness < index,
+            contexts@[witness] == widest,
+            forall|i: int| 0 <= i < index ==> #[trigger] contexts@[i] <= widest,
+        decreases contexts.len() - index,
+    ))]
+    while index < contexts.len() {
+        if contexts[index] > widest {
+            widest = contexts[index];
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                witness = index as int;
+            }
+        }
+        index += 1;
+    }
+    widest
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@
 //!   and `first_set` for the first sliding layer without a window);
 //! * `derived_head_dim`, the head width of a config that omits it,
 //!   `used_rotary_sets`, the rotary parameter sets some layer rotates with,
+//!   `tightest_limit`, the used set whose cached-context limit binds, and
+//!   `widest_context`, the rotary context a cached step evaluates,
 //!   and `checkpoint_extent`/`projection_extent`, the checked `u64` extents
 //!   of the checkpoint contract;
 //! * the cache layout: `plan_ring`, which assigns sliding layers below the
@@ -1681,6 +1683,114 @@ pub(crate) fn projection_extent(heads: usize, head_dim: usize) -> Result<u64, Ex
         Some(extent) => Ok(extent),
         None => Err(ExtentError::Format),
     }
+}
+
+/// Returns the widest rotary context of a step's active rows, or 1 when none is active.
+///
+/// Proved: with no context the result is 1; otherwise it is one of the
+/// contexts and at least every other, so the step evaluates RoPE (and
+/// checks its cached limit) at the largest context any row reaches.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(widest =>
+    ensures
+        contexts.len() == 0 ==> widest == 1,
+        contexts.len() > 0 ==> exists|i: int| 0 <= i < contexts.len() && #[trigger] contexts@[i] == widest,
+        forall|i: int| 0 <= i < contexts.len() ==> #[trigger] contexts@[i] <= widest,
+))]
+pub(crate) fn widest_context(contexts: &[usize]) -> usize {
+    if contexts.is_empty() {
+        return 1;
+    }
+    let mut widest = contexts[0];
+    let mut index: usize = 1;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! { let ghost mut witness: int = 0; }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= index <= contexts.len(),
+            0 <= witness < index,
+            contexts@[witness] == widest,
+            forall|i: int| 0 <= i < index ==> #[trigger] contexts@[i] <= widest,
+        decreases contexts.len() - index,
+    ))]
+    while index < contexts.len() {
+        if contexts[index] > widest {
+            widest = contexts[index];
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                witness = index as int;
+            }
+        }
+        index += 1;
+    }
+    widest
+}
+
+/// Returns the first used set whose cached-context limit is the smallest.
+///
+/// `limits[s]` is set `s`'s original context when its frequencies change
+/// beyond it (dynamic NTK, LongRoPE), `None` otherwise; `used[s]` says
+/// whether some layer rotates with set `s`; sets beyond either list are
+/// ignored. Proved: `Some(s)` names a used set with a limit that no used
+/// set's limit undercuts, and every earlier used set with a limit has a
+/// strictly larger one (the first minimum, as `Iterator::min_by_key`
+/// picks); `None` exactly when no used set has a limit.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(tightest =>
+    ensures
+        match tightest {
+            Some(set) => {
+                &&& set < limits.len() && set < used.len()
+                &&& used@[set as int]
+                &&& limits@[set as int] is Some
+                &&& forall|s: int| 0 <= s < limits.len() && s < used.len() && #[trigger] used@[s]
+                    && limits@[s] is Some ==> limits@[set as int].unwrap() <= limits@[s].unwrap()
+                &&& forall|s: int| 0 <= s < set && #[trigger] used@[s] && limits@[s] is Some
+                    ==> limits@[set as int].unwrap() < limits@[s].unwrap()
+            },
+            None => forall|s: int| 0 <= s < limits.len() && s < used.len() && #[trigger] used@[s]
+                ==> limits@[s] is None,
+        },
+))]
+pub(crate) fn tightest_limit(limits: &[Option<usize>], used: &[bool]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut set: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            set <= limits.len(),
+            match best {
+                Some(chosen) => {
+                    &&& chosen < set && chosen < used.len()
+                    &&& used@[chosen as int]
+                    &&& limits@[chosen as int] is Some
+                    &&& forall|s: int| 0 <= s < set && s < used.len() && #[trigger] used@[s]
+                        && limits@[s] is Some ==> limits@[chosen as int].unwrap() <= limits@[s].unwrap()
+                    &&& forall|s: int| 0 <= s < chosen && #[trigger] used@[s] && limits@[s] is Some
+                        ==> limits@[chosen as int].unwrap() < limits@[s].unwrap()
+                },
+                None => forall|s: int| 0 <= s < set && s < used.len() && #[trigger] used@[s]
+                    ==> limits@[s] is None,
+            },
+        decreases limits.len() - set,
+    ))]
+    while set < limits.len() && set < used.len() {
+        if used[set] {
+            if let Some(limit) = limits[set] {
+                let tighter = match best {
+                    Some(chosen) => match limits[chosen] {
+                        Some(current) => limit < current,
+                        None => true,
+                    },
+                    None => true,
+                };
+                if tighter {
+                    best = Some(set);
+                }
+            }
+        }
+        set += 1;
+    }
+    best
 }
 
 #[cfg(test)]

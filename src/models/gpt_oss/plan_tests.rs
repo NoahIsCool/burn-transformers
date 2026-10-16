@@ -211,3 +211,10 @@ fn derived_head_dim_divides_or_is_zero() {
     assert_eq!(derived_head_dim(2880, 64), 45);
     assert_eq!(derived_head_dim(64, 0), 0);
 }
+
+/// The widest context is the maximum, or 1 without active rows.
+#[test]
+fn widest_context_is_the_maximum_or_one() {
+    assert_eq!(widest_context(&[]), 1);
+    assert_eq!(widest_context(&[5, 2, 5]), 5);
+}
