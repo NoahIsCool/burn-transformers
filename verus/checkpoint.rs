@@ -73,6 +73,13 @@
 //! canonical buffers and otherwise names the first short read, reserved code, or
 //! dirty Q4 padding.
 //!
+//! It verifies `src/checkpoint/quantization/staging.rs`, the Burnpack staging
+//! session's admission arithmetic: `bounded_add` admits exactly the sums within
+//! a limit (so a running total kept below its limit stays below it, with no
+//! wraparound), and `admit_tensor` admits a tensor exactly when the new count,
+//! its payload, and the new staged total are within their limits, naming the
+//! first breached limit otherwise.
+//!
 //! And it verifies `src/checkpoint/quantization/counts.rs`: exact ceilings in
 //! `u64` and `usize`; persisted group (`⌈n / G⌉`), packed-byte, and scale-byte
 //! counts, with the scale length proved never to overflow for `G >= 32`; and the
@@ -104,3 +111,6 @@ pub mod packing;
 
 #[path = "../src/checkpoint/quantization/counts.rs"]
 pub mod counts;
+
+#[path = "../src/checkpoint/quantization/staging.rs"]
+pub mod staging;

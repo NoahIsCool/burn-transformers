@@ -32,6 +32,7 @@ mod packing;
 mod policy;
 mod provenance;
 mod reference;
+mod staging;
 
 pub use burnpack::{
     BURNPACK_MANIFEST_TENSOR, BurnpackAppendOutcome, BurnpackArtifactSummary,
