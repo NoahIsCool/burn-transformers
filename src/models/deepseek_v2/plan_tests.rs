@@ -2,25 +2,36 @@
 
 use proptest::prelude::*;
 
-use super::{LatentFault, any_sparse_layer, eligible_experts, latent_cache_bytes, sparse_layer};
+use super::{
+    LatentBytes, LatentFault, any_sparse_layer, eligible_experts, latent_cache_bytes, sparse_layer,
+};
 
 /// The reference checked-product chain of the latent cache preflight.
+///
+/// The per-token bytes are the exact `u128` product saturated to `usize`.
 fn reference_bytes(
     batch: usize,
     capacity: usize,
     width: usize,
     layers: usize,
     scalar: usize,
-) -> Result<usize, LatentFault> {
+) -> Result<LatentBytes, LatentFault> {
     let per_layer = batch
         .checked_mul(capacity)
         .and_then(|value| value.checked_mul(width))
         .filter(|&elements| elements <= i32::MAX as usize)
         .ok_or(LatentFault::LayerTooLarge)?;
-    per_layer
+    let total = per_layer
         .checked_mul(layers)
         .and_then(|elements| elements.checked_mul(scalar))
-        .ok_or(LatentFault::BytesOverflow)
+        .ok_or(LatentFault::BytesOverflow)?;
+    let exact = (width as u128)
+        .checked_mul(layers as u128)
+        .and_then(|scalars| scalars.checked_mul(scalar as u128));
+    let per_token = exact.map_or(usize::MAX, |bytes| {
+        usize::try_from(bytes).unwrap_or(usize::MAX)
+    });
+    Ok(LatentBytes { total, per_token })
 }
 
 /// Released DeepSeek-V2-Lite: one dense layer, then every layer sparse.
@@ -51,7 +62,33 @@ fn routing_and_latent_arithmetic_report_overflow() {
     // DeepSeek-V2-Lite: rank 512 + rope 64, 27 layers of BF16 latents.
     assert_eq!(
         latent_cache_bytes(2, 16, 576, 27, 2),
-        Ok(2 * 16 * 576 * 27 * 2)
+        Ok(LatentBytes {
+            total: 2 * 16 * 576 * 27 * 2,
+            per_token: 576 * 27 * 2,
+        })
+    );
+    // An empty batch allocates nothing; its per-token bytes saturate, or are
+    // exactly zero for zero-byte scalars.
+    assert_eq!(
+        latent_cache_bytes(0, 16, usize::MAX, 2, 2),
+        Ok(LatentBytes {
+            total: 0,
+            per_token: usize::MAX,
+        })
+    );
+    assert_eq!(
+        latent_cache_bytes(1, 0, usize::MAX, 2, 0),
+        Ok(LatentBytes {
+            total: 0,
+            per_token: 0,
+        })
+    );
+    assert_eq!(
+        latent_cache_bytes(0, 1, 1 << 40, 1 << 30, 1),
+        Ok(LatentBytes {
+            total: 0,
+            per_token: usize::MAX,
+        })
     );
     assert_eq!(
         latent_cache_bytes(1, 1 << 31, 1, 1, 1),
@@ -86,9 +123,9 @@ proptest! {
     fn latent_bytes_match_the_checked_chain(
         batch in prop_oneof![0usize..4, Just(usize::MAX)],
         capacity in prop_oneof![0usize..64, Just(1usize << 30)],
-        width in 0usize..1_024,
+        width in prop_oneof![0usize..1_024, Just(usize::MAX / 3)],
         layers in prop_oneof![0usize..64, Just(usize::MAX / 2)],
-        scalar in 1usize..9,
+        scalar in 0usize..9,
     ) {
         prop_assert_eq!(
             latent_cache_bytes(batch, capacity, width, layers, scalar),

@@ -18,8 +18,9 @@
 //!
 //! One MLA cache layer is a `[batch, capacity, kv_lora_rank +
 //! qk_rope_head_dim]` latent plane; Burn's portable tensor indices are
-//! signed 32-bit, and the whole cache must have a representable byte count
-//! ([`latent_cache_bytes`]).
+//! signed 32-bit, and the whole cache must have a representable byte count.
+//! [`latent_cache_bytes`] checks both and returns the total and per-token
+//! bytes the decode state reports ([`LatentBytes`]).
 //!
 //! Every function is checked through `verus/deepseek_muse.rs`.
 
@@ -103,32 +104,51 @@ pub(crate) fn eligible_experts(experts: usize, groups: usize, top_groups: usize)
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LatentFault {
-    /// One layer's `batch * capacity * width` elements exceed `i32::MAX` (or `usize`).
+    /// `batch * capacity` overflows `usize`, or one layer's `batch * capacity * width` elements exceed `i32::MAX`.
     LayerTooLarge,
-    /// The whole cache's byte count overflows `usize`.
+    /// `elements * layers` or `elements * layers * scalar_bytes` overflows `usize`.
     BytesOverflow,
 }
 
-/// Returns the byte count of `layers` latent planes `[batch, capacity, width]` of `scalar_bytes`-byte scalars.
+/// Byte accounting of an accepted latent cache, fixed for the state's lifetime.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LatentBytes {
+    /// Bytes allocated by every layer's `[batch, capacity, width]` plane.
+    pub(crate) total: usize,
+    /// Bytes one more token occupies across all layers, `width * layers * scalar_bytes`.
+    pub(crate) per_token: usize,
+}
+
+/// Returns the byte accounting of `layers` latent planes `[batch, capacity, width]` of `scalar_bytes`-byte scalars.
 ///
-/// Proved: `Ok(total)` exactly when one layer's element count
-/// `batch * capacity * width` fits `i32::MAX` and the products with `layers`
-/// and `scalar_bytes` are representable, with
-/// `total = batch * capacity * width * layers * scalar_bytes`; each error
-/// names the first failing product, in the order the checks run. A cache
-/// with at least one row and slot also bounds the per-token byte count
-/// `width * layers * scalar_bytes <= total` and splits as
-/// `total = batch * capacity * (width * layers * scalar_bytes)`, so the
-/// state's byte accessors cannot overflow.
+/// The checks run in order: `batch * capacity` and then one layer's element
+/// count `elements = batch * capacity * width` must be representable, with
+/// `elements <= i32::MAX` (Burn's portable index range), else
+/// [`LatentFault::LayerTooLarge`]; then `elements * layers` and
+/// `elements * layers * scalar_bytes` must be representable, else
+/// [`LatentFault::BytesOverflow`]. Proved: the cache is accepted exactly when
+/// every one of those intermediate products is representable and
+/// `elements <= i32::MAX`, each error names the first failing check, and an
+/// accepted cache reports the exact `total = elements * layers *
+/// scalar_bytes` and the per-token bytes `width * layers * scalar_bytes`
+/// saturated at `usize::MAX`. Every cache with at least one row and slot (all
+/// a decode state can hold) has the exact, unsaturated per-token count, and
+/// `total = batch * capacity * per_token`, so the stored values are the
+/// state's byte accessors.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(bytes =>
     ensures
         match bytes {
-            Ok(total) => {
+            Ok(bytes) => {
                 &&& batch * capacity * width <= i32::MAX
-                &&& total == batch * capacity * width * layers * scalar_bytes
-                &&& (batch >= 1 && capacity >= 1 ==> width * layers * scalar_bytes <= total)
-                &&& total == batch * capacity * (width * layers * scalar_bytes)
+                &&& bytes.total == batch * capacity * width * layers * scalar_bytes
+                &&& bytes.per_token == vstd::math::min(
+                    width * layers * scalar_bytes, usize::MAX as int)
+                &&& (batch >= 1 && capacity >= 1 ==> {
+                    &&& bytes.per_token == width * layers * scalar_bytes
+                    &&& bytes.total == batch * capacity * bytes.per_token
+                })
             },
             Err(LatentFault::LayerTooLarge) =>
                 batch * capacity > usize::MAX || batch * capacity * width > i32::MAX,
@@ -145,7 +165,7 @@ pub(crate) fn latent_cache_bytes(
     width: usize,
     layers: usize,
     scalar_bytes: usize,
-) -> Result<usize, LatentFault> {
+) -> Result<LatentBytes, LatentFault> {
     let per_layer = match batch.checked_mul(capacity) {
         Some(rows) => match rows.checked_mul(width) {
             Some(elements) if elements <= i32::MAX as usize => elements,
@@ -160,10 +180,31 @@ pub(crate) fn latent_cache_bytes(
         },
         None => return Err(LatentFault::BytesOverflow),
     };
+    // Saturating `width * layers * scalar_bytes`: only a cache without rows
+    // or slots, which no decode state holds, can saturate (see below).
+    let per_token = match width.checked_mul(layers) {
+        Some(scalars) => match scalars.checked_mul(scalar_bytes) {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        },
+        None => {
+            if scalar_bytes == 0 {
+                0
+            } else {
+                usize::MAX
+            }
+        }
+    };
     #[cfg(verus_keep_ghost)]
     proof! {
         assert(batch * capacity * width * layers * scalar_bytes
             == batch * capacity * (width * layers * scalar_bytes)) by (nonlinear_arith);
+        if scalar_bytes >= 1 {
+            assert(width * layers <= width * layers * scalar_bytes) by (nonlinear_arith)
+                requires
+                    scalar_bytes >= 1,
+                    width * layers >= 0;
+        }
         if batch >= 1 && capacity >= 1 {
             assert(width * layers * scalar_bytes
                 <= batch * capacity * (width * layers * scalar_bytes)) by (nonlinear_arith)
@@ -173,7 +214,7 @@ pub(crate) fn latent_cache_bytes(
                     width * layers * scalar_bytes >= 0;
         }
     }
-    Ok(total)
+    Ok(LatentBytes { total, per_token })
 }
 
 #[cfg(test)]

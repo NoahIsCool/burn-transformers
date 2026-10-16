@@ -65,6 +65,9 @@ use vstd::prelude::*;
 verus! {
 
 /// Number of entries of `kinds` equal to `kind`.
+///
+/// Twin of `count_kind` in `src/models/qwen3_5/plan.rs` (checked by
+/// `verus/qwen.rs`); keep the two definitions identical.
 pub open spec fn count_kind(kinds: Seq<bool>, kind: bool) -> nat
     decreases kinds.len(),
 {
@@ -76,6 +79,8 @@ pub open spec fn count_kind(kinds: Seq<bool>, kind: bool) -> nat
 }
 
 /// Extending a prefix by one entry adds one exactly when the entry matches.
+///
+/// Twin of `lemma_count_extend` in `src/models/qwen3_5/plan.rs`.
 pub proof fn lemma_count_extend(kinds: Seq<bool>, end: int, kind: bool)
     requires
         0 <= end < kinds.len(),
@@ -87,6 +92,8 @@ pub proof fn lemma_count_extend(kinds: Seq<bool>, end: int, kind: bool)
 }
 
 /// Appending an entry adds one to its kind's count.
+///
+/// Twin of `lemma_count_push` in `src/models/qwen3_5/plan.rs`.
 pub proof fn lemma_count_push(kinds: Seq<bool>, entry: bool, kind: bool)
     ensures
         count_kind(kinds.push(entry), kind) == count_kind(kinds, kind)
@@ -195,13 +202,9 @@ pub open spec fn sat_sub(a: int, b: int) -> int {
     }
 }
 
-/// The smaller of two integers.
+/// The smaller of two integers, `vstd::math::min`.
 pub open spec fn min_int(a: int, b: int) -> int {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    vstd::math::min(a, b)
 }
 
 } // verus!

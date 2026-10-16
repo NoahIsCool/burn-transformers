@@ -35,10 +35,14 @@
 //!   rule and `any_sparse_layer` decides whether some layer qualifies;
 //! * `eligible_experts` is exactly `(experts / groups) * top_groups` or
 //!   reports overflow;
-//! * `latent_cache_bytes` accepts a latent cache exactly when one layer's
-//!   `batch * capacity * width` elements fit `i32::MAX` and the total bytes
-//!   fit `usize`, returning the exact total, which also bounds the per-token
-//!   bytes;
+//! * `latent_cache_bytes` accepts a latent cache exactly when every
+//!   intermediate product (`batch * capacity`, then `* width`, `* layers`,
+//!   and `* scalar_bytes`) is representable and one layer's
+//!   `batch * capacity * width` elements fit `i32::MAX`, each error naming the
+//!   first failing check; it returns the exact total bytes and the per-token
+//!   bytes `width * layers * scalar_bytes` (saturated at `usize::MAX`, and
+//!   exact with `total = batch * capacity * per_token` whenever the cache has
+//!   a row and a slot), which the decode state stores as its byte accessors;
 //!
 //! and the specifications attached to `src/models/muse_glimmer/schedule.rs`:
 //!

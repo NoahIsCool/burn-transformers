@@ -60,7 +60,7 @@ use super::{
     block::BlockLayout,
     router_diagnostics,
 };
-use crate::models::deepseek_v2::plan::{LatentFault, latent_cache_bytes};
+use crate::models::deepseek_v2::plan::{LatentBytes, LatentFault, latent_cache_bytes};
 
 /// Owner named when an input tensor is on another device than the cache.
 const DECODE_STATE: &str = "DeepSeek decode state";
@@ -114,6 +114,8 @@ pub struct DeepseekV2DecodeState<B: Backend> {
     kv_rank: usize,
     /// Cached shared positional-key width.
     rope_width: usize,
+    /// Verified total and per-token byte counts of the latent planes.
+    bytes: LatentBytes,
     /// Kernel selected by the most recent successful stateful operation.
     last_path: Option<MlaExecutionPath>,
 }
@@ -159,40 +161,33 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
                 "backend cannot allocate DeepSeek MLA cache dtype {dtype:?}"
             )));
         }
+        let layers = model.model.layers.len();
         // Verified: one layer's elements fit `i32::MAX` and the whole cache's
-        // bytes fit `usize`, which also bounds `bytes_per_token` and
-        // `allocated_bytes` once the state holds a row and a slot.
-        match latent_cache_bytes(
-            batch_size,
-            config.capacity(),
-            width,
-            model.model.layers.len(),
-            dtype.size(),
-        ) {
-            Ok(_) => {}
-            Err(LatentFault::LayerTooLarge) => {
-                return Err(Error::configuration(
-                    "deepseek_v2.decode_state",
-                    "one layer cache exceeds the portable signed tensor-index limit",
-                ));
-            }
-            Err(LatentFault::BytesOverflow) => {
-                return Err(Error::configuration(
-                    "deepseek_v2.decode_state",
-                    "cache byte count overflows usize",
-                ));
-            }
-        }
+        // bytes fit `usize`; the result is the exact total and, because a
+        // state always holds a row and a slot, the exact per-token bytes of
+        // the planes allocated below from the same `layers`, `width`, and
+        // `dtype`.
+        let bytes =
+            match latent_cache_bytes(batch_size, config.capacity(), width, layers, dtype.size()) {
+                Ok(bytes) => bytes,
+                Err(LatentFault::LayerTooLarge) => {
+                    return Err(Error::configuration(
+                        "deepseek_v2.decode_state",
+                        "one layer cache exceeds the portable signed tensor-index limit",
+                    ));
+                }
+                Err(LatentFault::BytesOverflow) => {
+                    return Err(Error::configuration(
+                        "deepseek_v2.decode_state",
+                        "cache byte count overflows usize",
+                    ));
+                }
+            };
         // In-place staging writes speculative proposals into the full-history
         // slots beyond each committed length: transactions cost no memory.
-        let spec = NativeKvCacheSpec::latent(
-            model.model.layers.len(),
-            width,
-            KvCacheStorage::Full,
-            dtype,
-        )?
-        .with_staging_capacity(config.capacity())
-        .with_in_place_staging();
+        let spec = NativeKvCacheSpec::latent(layers, width, KvCacheStorage::Full, dtype)?
+            .with_staging_capacity(config.capacity())
+            .with_in_place_staging();
         let mut tensors = TensorDecodeState::new(config, batch_size, device)?;
         let group = tensors.main_mut().add_native_kv(spec)?;
         debug_assert_eq!(group, LATENT_GROUP);
@@ -200,6 +195,7 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
             tensors,
             kv_rank,
             rope_width,
+            bytes,
             last_path: None,
         })
     }
@@ -217,16 +213,21 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
     }
 
     /// Returns exact physical bytes allocated by all cache tensors.
+    ///
+    /// This is `batch * capacity * bytes_per_token`, computed once by the
+    /// verified allocation preflight, so it cannot overflow.
     #[must_use]
-    pub fn allocated_bytes(&self) -> usize {
-        self.tensors.batch_size() * self.tensors.capacity() * self.bytes_per_token()
+    pub const fn allocated_bytes(&self) -> usize {
+        self.bytes.total
     }
 
     /// Returns bytes needed for one additional logical token across all layers.
+    ///
+    /// This is `(kv_rank + rope_width) * layers * scalar_bytes`, computed once
+    /// by the verified allocation preflight.
     #[must_use]
-    pub fn bytes_per_token(&self) -> usize {
-        let spec = self.spec();
-        self.scalars_per_layer_token() * spec.layers() * spec.dtype().size()
+    pub const fn bytes_per_token(&self) -> usize {
+        self.bytes.per_token
     }
 
     /// Returns the MLA path selected by the most recent successful call.
