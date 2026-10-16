@@ -232,8 +232,10 @@ fn logits_rows(logits: Tensor<Metal, 3>, batch: usize) -> Vec<Vec<f32>> {
         .to_data()
         .to_vec::<f32>()
         .expect("Metal F32 logits")
-        .chunks_exact(VOCABULARY)
-        .map(<[f32]>::to_vec)
+        .as_chunks::<VOCABULARY>()
+        .0
+        .iter()
+        .map(|row| row.to_vec())
         .collect()
 }
 

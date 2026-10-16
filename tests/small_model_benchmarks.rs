@@ -158,8 +158,10 @@ mod flan {
         assert_eq!(file_hash(&path), descriptor["sha256"].as_str().unwrap());
         let raw = fs::read(path).unwrap();
         assert!(raw.len().is_multiple_of(4));
-        raw.chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        raw.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect()
     }
 

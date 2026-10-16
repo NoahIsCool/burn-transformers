@@ -300,9 +300,9 @@ fn parallel_byte_transpose_matches_naive_reference() {
         .collect::<Vec<_>>();
     let transposed = transpose_bytes(&source, rows, columns, 4).unwrap();
     assert_eq!(transposed.len(), source.len());
-    for (target, scalar) in transposed.chunks_exact(4).enumerate() {
+    for (target, scalar) in transposed.as_chunks::<4>().0.iter().enumerate() {
         let (column, row) = (target / rows, target % rows);
-        let value = u32::from_ne_bytes(scalar.try_into().unwrap());
+        let value = u32::from_ne_bytes(*scalar);
         assert_eq!(value as usize, row * columns + column, "target {target}");
     }
 }

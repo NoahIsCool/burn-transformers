@@ -190,18 +190,28 @@ impl RenderBudget {
     }
 
     /// Adds `bytes` to the cumulative counter unless that would exceed the total budget.
+    ///
+    /// The compare-and-swap loop is what `fetch_update` does; that method is
+    /// deprecated in favor of `try_update`, which is newer than the MSRV.
     fn charge(&self, bytes: usize, operation: &str) -> Result<(), Error> {
         let total = self.limits.total_bytes;
-        self.produced
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |produced| {
-                limits::charged_total(produced, bytes, total)
-            })
-            .map(|_| ())
-            .map_err(|produced| {
-                limit_error(format!(
+        let mut produced = self.produced.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = limits::charged_total(produced, bytes, total) else {
+                return Err(limit_error(format!(
                     "{operation} would raise the bytes this render has produced from {produced} past its {total}-byte budget"
-                ))
-            })
+                )));
+            };
+            match self.produced.compare_exchange_weak(
+                produced,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(current) => produced = current,
+            }
+        }
     }
 }
 

@@ -948,8 +948,10 @@ fn read_f32le(path: &Path, expected_bytes: u64, expected_sha256: &str) -> Vec<f3
         path.display()
     );
     let values = bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte F32 chunk")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     assert!(
         values.iter().all(|value| value.is_finite()),
@@ -1488,8 +1490,10 @@ fn assert_generation(
     assert_eq!(generation.minimum_margin_to_epsilon_ratio, minimum_ratio);
 
     let cached_top1 = cached_rows
-        .chunks_exact(VOCAB_SIZE)
-        .map(row_top1)
+        .as_chunks::<VOCAB_SIZE>()
+        .0
+        .iter()
+        .map(|row| row_top1(row.as_slice()))
         .collect::<Vec<_>>();
     assert_eq!(cached_top1, generation.token_ids);
     assert!(
@@ -1503,8 +1507,10 @@ fn assert_generation(
         manifest.cached_generation_logits.row_top1_token_ids
     );
     let teacher_top1 = teacher_rows
-        .chunks_exact(VOCAB_SIZE)
-        .map(row_top1)
+        .as_chunks::<VOCAB_SIZE>()
+        .0
+        .iter()
+        .map(|row| row_top1(row.as_slice()))
         .collect::<Vec<_>>();
     assert_eq!(teacher_top1, generation.token_ids);
     assert_eq!(
@@ -1523,8 +1529,10 @@ fn assert_generation(
     assert!(teacher.top1_equal);
     assert_eq!(teacher.per_prefix_cosine.len(), GREEDY_TOKENS);
     let observed_cosines = cached_rows
-        .chunks_exact(VOCAB_SIZE)
-        .zip(teacher_rows.chunks_exact(VOCAB_SIZE))
+        .as_chunks::<VOCAB_SIZE>()
+        .0
+        .iter()
+        .zip(teacher_rows.as_chunks::<VOCAB_SIZE>().0.iter())
         .map(|(cached, teacher)| vector_cosine(cached, teacher))
         .collect::<Vec<_>>();
     for (observed, recorded) in observed_cosines.iter().zip(&teacher.per_prefix_cosine) {
@@ -1541,8 +1549,10 @@ fn assert_generation(
     );
     assert_eq!(teacher.per_prefix_max_abs_error.len(), GREEDY_TOKENS);
     let observed_errors = cached_rows
-        .chunks_exact(VOCAB_SIZE)
-        .zip(teacher_rows.chunks_exact(VOCAB_SIZE))
+        .as_chunks::<VOCAB_SIZE>()
+        .0
+        .iter()
+        .zip(teacher_rows.as_chunks::<VOCAB_SIZE>().0.iter())
         .map(|(cached, teacher)| maximum_absolute_error(cached, teacher))
         .collect::<Vec<_>>();
     for (observed, recorded) in observed_errors

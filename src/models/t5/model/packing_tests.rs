@@ -269,8 +269,8 @@ proptest! {
                 prop_assert_eq!(compact[row * block + slot] / sequence, row);
             }
             for column in 0..sequence {
-                if block > 0 {
-                    prop_assert_eq!(scatter[row * sequence + column] / block, row);
+                if let Some(quotient) = scatter[row * sequence + column].checked_div(block) {
+                    prop_assert_eq!(quotient, row);
                 }
             }
         }

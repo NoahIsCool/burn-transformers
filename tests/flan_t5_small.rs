@@ -372,8 +372,10 @@ impl ReferenceBundle {
             .unwrap_or_else(|| panic!("unknown reference tensor {key}"));
         let bytes = fs::read(self.root.join(file.name)).expect("read authenticated tensor");
         let values = bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(values.len(), file.rows * file.columns);
         assert!(values.iter().all(|value| value.is_finite()));

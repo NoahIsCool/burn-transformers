@@ -143,16 +143,20 @@ fn i32_bytes(values: &[i32]) -> Vec<u8> {
 /// Decodes native-endian F32 sink bytes for numerical comparisons.
 fn tensor_f32(data: &TensorData) -> Vec<f32> {
     data.as_bytes()
-        .chunks_exact(4)
-        .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_ne_bytes(*bytes))
         .collect()
 }
 
 /// Decodes native-endian U16 sink bytes without changing their bit patterns.
 fn tensor_u16(data: &TensorData) -> Vec<u16> {
     data.as_bytes()
-        .chunks_exact(2)
-        .map(|bytes| u16::from_ne_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_ne_bytes(*bytes))
         .collect()
 }
 

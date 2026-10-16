@@ -672,16 +672,25 @@ impl<B: Backend> LogitsProcessor<B> {
         })?;
         // One atomic reservation gives this call the disjoint counter block
         // `start..start + count`, so concurrent callers never share a draw.
-        let start = self
-            .sample_counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |position| {
-                position.checked_add(count)
-            })
-            .map_err(|position| {
-                Error::Generation(format!(
-                    "sampling random stream exhausted at position {position}"
-                ))
-            })?;
+        // The compare-and-swap loop is what `fetch_update` does; that method is
+        // deprecated in favor of `try_update`, which is newer than the MSRV.
+        let mut start = self.sample_counter.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = start.checked_add(count) else {
+                return Err(Error::Generation(format!(
+                    "sampling random stream exhausted at position {start}"
+                )));
+            };
+            match self.sample_counter.compare_exchange_weak(
+                start,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => start = current,
+            }
+        }
         let mut uniforms = metadata::vec_with_capacity(batch, "categorical sampling thresholds")?;
         for offset in 0..count {
             uniforms.push(splitmix64_uniform(self.config.seed, start + offset));

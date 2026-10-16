@@ -1066,8 +1066,10 @@ fn loads_pinned_deepseek_v2_lite_f16_and_runs_metal_smoke() {
         "DeepSeek absorbed/stateless decode logit cosine {decoded_cosine} is below the gate"
     );
     let decode_hidden_cosines = extended_trace
-        .chunks_exact(2_048)
-        .zip(decoded_trace.chunks_exact(2_048))
+        .as_chunks::<2_048>()
+        .0
+        .iter()
+        .zip(decoded_trace.as_chunks::<2_048>().0.iter())
         .map(|(stateless, cached)| cosine_similarity(stateless, cached))
         .collect::<Vec<_>>();
     assert_eq!(decode_hidden_cosines.len(), 29);

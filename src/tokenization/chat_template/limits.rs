@@ -309,14 +309,12 @@ pub(crate) fn replacement_bound(
     to: usize,
     count: Option<usize>,
 ) -> usize {
-    let mut matches = if from == 0 {
-        if characters == usize::MAX {
-            usize::MAX
-        } else {
-            characters + 1
-        }
-    } else {
-        length / from
+    // An empty pattern matches between every pair of characters and at both
+    // ends; any other pattern matches at most `length / from` times.
+    let mut matches = match length.checked_div(from) {
+        Some(quotient) => quotient,
+        None if characters == usize::MAX => usize::MAX,
+        None => characters + 1,
     };
     // A `match` rather than a let-chain: Verus checks this body with an older edition.
     matches = match count {

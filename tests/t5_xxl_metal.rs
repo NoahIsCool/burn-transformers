@@ -638,12 +638,12 @@ fn read_f32le(path: &Path, spec: &ReferenceTensorSpec) -> Vec<f32> {
         spec.key
     );
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let mut chunks = bytes.chunks_exact(4);
+    let (chunks, remainder) = bytes.as_chunks::<4>();
     let values = chunks
-        .by_ref()
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 chunk")))
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
-    assert!(chunks.remainder().is_empty());
+    assert!(remainder.is_empty());
     assert_eq!(
         values.len(),
         spec.shape.iter().product::<usize>(),

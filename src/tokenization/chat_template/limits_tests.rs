@@ -168,11 +168,9 @@ proptest! {
         to in 0_usize..16,
         count in proptest::option::of(any::<usize>()),
     ) {
-        let possible = if from == 0 {
-            (characters as u128 + 1).min(usize::MAX as u128)
-        } else {
-            (length / from) as u128
-        };
+        let possible = length
+            .checked_div(from)
+            .map_or((characters as u128 + 1).min(usize::MAX as u128), |quotient| quotient as u128);
         let matches = count.map_or(possible, |count| possible.min(count as u128));
         let expected = (length as u128 + matches * to.saturating_sub(from) as u128).min(usize::MAX as u128);
         prop_assert_eq!(replacement_bound(length, characters, from, to, count) as u128, expected);

@@ -215,7 +215,7 @@ fn demonstrate() -> Result<(), Box<dyn std::error::Error>> {
     let scores = scores.into_data().to_vec::<f32>()?;
     for (sentence, pair) in ["this film delights", "this story is awful"]
         .iter()
-        .zip(scores.chunks_exact(2))
+        .zip(scores.as_chunks::<2>().0.iter())
     {
         println!(
             "{sentence:?}: untrained negative={:.3}, positive={:.3}",

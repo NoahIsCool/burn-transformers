@@ -89,8 +89,10 @@ fn fixture_values(tensors: &[Fixture], name: &str) -> Vec<f32> {
         .find(|(fixture, ..)| fixture == name)
         .unwrap_or_else(|| panic!("no fixture `{name}`"));
     bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 

@@ -382,8 +382,8 @@ fn convert_fixture_to_bfloat16(root: &Path) {
         let start = entry["data_offsets"][0].as_u64().unwrap() as usize;
         let end = entry["data_offsets"][1].as_u64().unwrap() as usize;
         let converted_start = converted.len();
-        for scalar in source[start..end].chunks_exact(4) {
-            let bits = u32::from_le_bytes(scalar.try_into().unwrap());
+        for scalar in source[start..end].as_chunks::<4>().0 {
+            let bits = u32::from_le_bytes(*scalar);
             converted.extend(((bits >> 16) as u16).to_le_bytes());
         }
         entry["dtype"] = json!("BF16");

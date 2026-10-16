@@ -1488,8 +1488,8 @@ fn decode_payload(
         owned_payload_bytes(owned_payload.capacity(), scales.capacity())
             .map_err(|error| read_failure(error, stats))?,
     );
-    for chunk in owned_payload[packed_len..].chunks_exact(4) {
-        scales.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in owned_payload[packed_len..].as_chunks::<4>().0 {
+        scales.push(f32::from_le_bytes(*chunk));
     }
     owned_payload.truncate(packed_len);
     let weight =

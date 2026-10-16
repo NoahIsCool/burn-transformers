@@ -2824,8 +2824,10 @@ fn decode_f32le(label: &str, payload: &[u8]) -> Vec<f32> {
         "{label} payload is not aligned to F32 elements"
     );
     payload
-        .chunks_exact(size_of::<f32>())
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 element")))
+        .as_chunks::<{ size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -3094,8 +3096,10 @@ fn read_pinned_muse_reference() -> LoadedMuseReference {
         "official stateless/cached prompt cosine was {prompt_cached_cosine}"
     );
     for (row, (stateless, cached)) in hidden
-        .chunks_exact(6_656)
-        .zip(cached_prefill_hidden.chunks_exact(6_656))
+        .as_chunks::<6_656>()
+        .0
+        .iter()
+        .zip(cached_prefill_hidden.as_chunks::<6_656>().0.iter())
         .enumerate()
     {
         let cosine = cosine_similarity(stateless, cached);
@@ -3105,8 +3109,10 @@ fn read_pinned_muse_reference() -> LoadedMuseReference {
         );
     }
     for (step, (cached_row, teacher_row)) in cached_prefix_logits
-        .chunks_exact(202_048)
-        .zip(teacher_prefix_logits.chunks_exact(202_048))
+        .as_chunks::<202_048>()
+        .0
+        .iter()
+        .zip(teacher_prefix_logits.as_chunks::<202_048>().0.iter())
         .enumerate()
     {
         assert_eq!(
@@ -3592,8 +3598,10 @@ fn assert_hidden_trace_parity(
     assert_eq!(labels.len(), 54);
     let mut minimum = f64::INFINITY;
     for (row, ((actual, expected), semantic_label)) in actual
-        .chunks_exact(6_656)
-        .zip(expected.chunks_exact(6_656))
+        .as_chunks::<6_656>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<6_656>().0.iter())
         .zip(labels)
         .enumerate()
     {
@@ -5547,9 +5555,11 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
     let mut minimum_teacher_official_cosine = f64::INFINITY;
     let mut minimum_burn_cached_teacher_cosine = f64::INFINITY;
     for (step, ((teacher_row, official_teacher_row), cached_row)) in burn_teacher_logits
-        .chunks_exact(202_048)
-        .zip(oracle.teacher_prefix_logits.chunks_exact(202_048))
-        .zip(burn_cached_logits.chunks_exact(202_048))
+        .as_chunks::<202_048>()
+        .0
+        .iter()
+        .zip(oracle.teacher_prefix_logits.as_chunks::<202_048>().0.iter())
+        .zip(burn_cached_logits.as_chunks::<202_048>().0.iter())
         .enumerate()
     {
         let teacher_official_cosine = cosine_similarity(teacher_row, official_teacher_row);

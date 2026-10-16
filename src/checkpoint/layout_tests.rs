@@ -207,7 +207,7 @@ proptest! {
             prop_assert!(block.source.end <= outer * axis * inner);
             // Every source element in the block has its axis coordinate in the slice.
             for element in block.source.clone() {
-                let axis_coordinate = if inner == 0 { start } else { (element / inner) % axis };
+                let axis_coordinate = element.checked_div(inner).map_or(start, |quotient| quotient % axis);
                 prop_assert!(axis_coordinate >= start && axis_coordinate < start + length);
                 prop_assert_eq!(element / (axis * inner.max(1)), row);
             }

@@ -172,8 +172,10 @@ proptest! {
             prop_assert_eq!(gathered.len(), heads * head_dim * row_bytes);
             seen.extend(
                 gathered
-                    .chunks_exact(4)
-                    .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| u32::from_le_bytes(*chunk)),
             );
         }
         seen.sort_unstable();

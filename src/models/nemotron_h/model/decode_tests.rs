@@ -251,7 +251,7 @@ fn contract_sigmoid_load_loss(logits: &[f32]) -> f64 {
     let tokens = (logits.len() / 4) as f64;
     let mut scores = [0.0_f64; 4];
     let mut assignments = [0.0_f64; 4];
-    for row in logits.chunks_exact(4) {
+    for row in logits.as_chunks::<4>().0 {
         let sigmoid = row
             .iter()
             .map(|&logit| {

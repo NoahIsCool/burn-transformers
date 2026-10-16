@@ -231,7 +231,7 @@ fn hex_spelling_matches_the_table_encoder() {
     let mut spelled = vec![0; 2 * every_byte.len()];
     spell_lower_hex(&every_byte, &mut spelled);
     assert_eq!(spelled, reference_spelling(&every_byte));
-    for (byte, pair) in every_byte.iter().zip(spelled.chunks_exact(2)) {
+    for (byte, pair) in every_byte.iter().zip(spelled.as_chunks::<2>().0) {
         assert_eq!(pair, format!("{byte:02x}").as_bytes());
     }
     let digest = [0xa5_u8; 32];

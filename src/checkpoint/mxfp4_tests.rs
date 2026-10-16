@@ -203,16 +203,22 @@ const EXHAUSTIVE_SCALES: [u64; 3] = [1, 256, 16];
 fn decoded_bits(bytes: &[u8], dtype: TensorDType) -> Vec<u64> {
     match dtype.bits() {
         16 => bytes
-            .chunks_exact(2)
-            .map(|chunk| u64::from(u16::from_ne_bytes([chunk[0], chunk[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u64::from(u16::from_ne_bytes(*chunk)))
             .collect(),
         32 => bytes
-            .chunks_exact(4)
-            .map(|chunk| u64::from(u32::from_ne_bytes(chunk.try_into().unwrap())))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u64::from(u32::from_ne_bytes(*chunk)))
             .collect(),
         _ => bytes
-            .chunks_exact(8)
-            .map(|chunk| u64::from_ne_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_ne_bytes(*chunk))
             .collect(),
     }
 }

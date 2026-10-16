@@ -473,7 +473,9 @@ pub fn gradient_symmetry<B: burn::tensor::backend::AutodiffBackend>(
         .into_data()
         .to_vec::<f32>()?;
     let similarities: Vec<f64> = gradient
-        .chunks_exact(2 * crate::model::HIDDEN)
+        .as_chunks::<{ 2 * crate::model::HIDDEN }>()
+        .0
+        .iter()
         .map(|pair| {
             let (a, b) = pair.split_at(crate::model::HIDDEN);
             let dot = a

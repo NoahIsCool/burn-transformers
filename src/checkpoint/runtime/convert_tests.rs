@@ -146,8 +146,10 @@ fn f32_sticky_bits_below_the_bf16_tie_round_up() {
         .collect::<Vec<_>>();
     let actual = gather_all(&source, TensorDType::F32, TensorDType::BF16);
     let bits = actual
-        .chunks_exact(2)
-        .map(|scalar| u16::from_ne_bytes([scalar[0], scalar[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|scalar| u16::from_ne_bytes(*scalar))
         .collect::<Vec<_>>();
     assert_eq!(bits, [0x3F81, 0x3F80, 0x3F82, 0xBF81]);
 }
@@ -723,7 +725,7 @@ fn previous_tiled_transpose<const WIDTH: usize>(
                 let target_scalars = &mut target_row[row_start * WIDTH..row_end * WIDTH];
                 for (source_row, target_scalar) in source_rows
                     .chunks_exact(source_row_bytes)
-                    .zip(target_scalars.chunks_exact_mut(WIDTH))
+                    .zip(target_scalars.as_chunks_mut::<WIDTH>().0)
                 {
                     target_scalar
                         .copy_from_slice(&source_row[source_column..source_column + WIDTH]);

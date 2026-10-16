@@ -46,6 +46,14 @@
 //!   below its limit;
 //! - [`is_identifier`] accepts exactly the ASCII identifiers.
 
+// Delimiters and tag names are spelled as byte arrays (`[b'{', b'%']`)
+// rather than byte strings (`*b"{%"`): Verus cannot see the bytes of a
+// byte-string literal, and the scanner proofs reason about each byte.
+#![allow(
+    clippy::byte_char_slices,
+    reason = "Verus cannot see the contents of byte-string literals"
+)]
+
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]

@@ -1712,8 +1712,10 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
     );
     assert_eq!(raw_digest, reference.last_logits.sha256);
     let values = raw
-        .chunks_exact(size_of::<f32>())
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 logit")))
+        .as_chunks::<{ size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(values.len(), reference.last_logits.elements);
     assert!(values.iter().all(|value| value.is_finite()));
@@ -4092,11 +4094,11 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         "teacher-forced official-comparison logits",
         &generation_logits,
     );
-    let teacher_rows = teacher_logits.chunks_exact(248_320).collect::<Vec<_>>();
+    let (teacher_rows, teacher_remainder) = teacher_logits.as_chunks::<248_320>();
     assert_eq!(teacher_rows.len(), expected_greedy.len());
-    assert!(teacher_logits.chunks_exact(248_320).remainder().is_empty());
+    assert!(teacher_remainder.is_empty());
     let mut minimum_teacher_reference_cosine = f64::INFINITY;
-    for (step, actual) in teacher_rows.into_iter().enumerate() {
+    for (step, actual) in teacher_rows.iter().enumerate() {
         let official_cosine = cosine_similarity(actual, official_reference.teacher_row(step));
         minimum_teacher_reference_cosine = minimum_teacher_reference_cosine.min(official_cosine);
         assert!(
