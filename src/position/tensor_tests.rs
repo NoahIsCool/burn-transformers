@@ -601,11 +601,12 @@ fn half_precision_default_child() {
     assert!((f64::from(cosine[0]) - 2049.0_f64.cos()).abs() < 1e-4);
 }
 
-/// Q/K disagreement on any axis, or Q against the tables, is one contextual shape error.
+/// Q/K batch, sequence, or width disagreement, or Q against the tables, is one shape error.
 ///
 /// Batch, sequence, and width are compared between Q and K before the tables
 /// are checked against Q, so each mismatch is rejected even when the other
-/// operand alone would fit the tables.
+/// operand alone would fit the tables. Head counts may differ, as in grouped
+/// query attention, so a Q with more heads than K still rotates.
 #[test]
 fn query_key_rotation_rejects_every_operand_mismatch() {
     let device = Default::default();
@@ -618,9 +619,15 @@ fn query_key_rotation_rejects_every_operand_mismatch() {
     .expect("angles");
     let fitting = Tensor::<TestBackend, 4>::zeros([1, 2, 2, 4], &device);
     for (query, key) in [
+        // Q/K batch.
         ([1, 2, 2, 4], [2, 2, 2, 4]),
+        // Q/K sequence.
+        ([1, 2, 2, 4], [1, 2, 3, 4]),
+        // Q/K width.
         ([1, 2, 2, 4], [1, 2, 2, 6]),
+        // Q batch against the tables.
         ([2, 2, 2, 4], [2, 2, 2, 4]),
+        // Q width below the rotary width.
         ([1, 2, 2, 2], [1, 2, 2, 2]),
     ] {
         let error = apply_rotary(
@@ -636,6 +643,13 @@ fn query_key_rotation_rejects_every_operand_mismatch() {
             "{query:?} {key:?}: {error:?}"
         );
     }
+    let (query, key) = apply_rotary(
+        Tensor::<TestBackend, 4>::zeros([1, 4, 2, 4], &device),
+        fitting.clone(),
+        &angles,
+    )
+    .expect("grouped query heads rotate");
+    assert_eq!((query.dims(), key.dims()), ([1, 4, 2, 4], [1, 2, 2, 4]));
     assert!(apply_rotary(fitting.clone(), fitting, &angles).is_ok());
 }
 

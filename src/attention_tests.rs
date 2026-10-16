@@ -1320,11 +1320,11 @@ fn position_free_forward_rejects_mismatched_token_masks() {
     assert!(
         matches!(
             &error,
-            crate::Error::Shape { .. } | crate::Error::Configuration { .. }
+            crate::Error::Shape { tensor, expected, actual }
+                if tensor == "query_mask" && expected == "[1, 3]" && actual == "[1, 2]"
         ),
         "{error:?}"
     );
-    assert!(error.to_string().contains("mask"), "{error}");
     let full = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
         burn::tensor::TensorData::new(vec![true; 3], [1, 3]),
         &device,

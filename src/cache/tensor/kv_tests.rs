@@ -458,18 +458,35 @@ fn segment_violations_map_to_contextual_cache_errors() {
             storage: "mirrored sliding ring"
         }
     ));
-    let write_end = segment_error(
-        KvCacheStorage::Full,
-        7,
-        3,
-        8,
-        SegmentViolation::WriteEnd(WriteEndViolation::ExceedsCapacity { end: 10 }),
-    );
-    assert_eq!(
-        write_end.to_string(),
-        TensorCacheError::write_end(7, 3, 8, WriteEndViolation::ExceedsCapacity { end: 10 })
-            .to_string()
-    );
+    // A write end past capacity keeps the start, the end, and the capacity.
+    assert!(matches!(
+        segment_error(
+            KvCacheStorage::Full,
+            7,
+            3,
+            8,
+            SegmentViolation::WriteEnd(WriteEndViolation::ExceedsCapacity { end: 10 }),
+        ),
+        TensorCacheError::WriteExceedsCapacity {
+            start: 7,
+            end: 10,
+            capacity: 8
+        }
+    ));
+    // An unrepresentable write end keeps the start and the token count.
+    assert!(matches!(
+        segment_error(
+            KvCacheStorage::Full,
+            7,
+            3,
+            8,
+            SegmentViolation::WriteEnd(WriteEndViolation::Overflow),
+        ),
+        TensorCacheError::WritePositionOverflow {
+            start: 7,
+            tokens: 3
+        }
+    ));
     let ring = crate::cache::RingPlanError::WindowExceedsCapacity {
         window: 5,
         capacity: 4,

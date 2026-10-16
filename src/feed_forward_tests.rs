@@ -520,13 +520,17 @@ fn clamped_and_hooked_forwards_are_differentiable() {
 
 /// A failing edit at either MLP point aborts the hooked forward with that point's error.
 ///
-/// The pre-activation and activation hooks run in sequence, so an edit that
-/// fails at the first point must stop before the second point is emitted, and
-/// a failure at the second point must surface after the first point's capture
-/// ran. Both the dense and the gated block propagate the callback's error with
-/// the failing point's name instead of continuing with an unedited tensor.
+/// The pre-activation and activation hooks run in sequence. An observer on the
+/// point that does not fail records whether that point was emitted: a failure
+/// at the pre-activation point must stop before the activation point is
+/// emitted, and a failure at the activation point must surface after the
+/// pre-activation point was emitted exactly once. Both the dense and the gated
+/// block propagate the callback's error with the failing point's name instead
+/// of continuing with an unedited tensor.
 #[test]
 fn hooked_mlp_forward_propagates_point_failures() {
+    use core::cell::Cell;
+
     let device = Default::default();
     let layer = Layer::decoder(1);
     let input = Tensor::<Flex, 3>::from_floats([[[0.5, -1.5]]], &device);
@@ -539,14 +543,16 @@ fn hooked_mlp_forward_propagates_point_failures() {
     dense.down_proj = gated.down_proj.clone();
     for gated_block in [false, true] {
         for fail_at_activation in [false, true] {
+            let emitted = Cell::new(0_usize);
             let mut hooks = Hooks::new();
             let pre_activation = hooks.capture(layer.mlp_pre_activation());
             let activation_capture = hooks.capture(layer.mlp_activation());
-            let failing = if fail_at_activation {
-                layer.mlp_activation()
+            let (failing, observed) = if fail_at_activation {
+                (layer.mlp_activation(), layer.mlp_pre_activation())
             } else {
-                layer.mlp_pre_activation()
+                (layer.mlp_pre_activation(), layer.mlp_activation())
             };
+            hooks.observe(observed, |_| emitted.set(emitted.get() + 1));
             hooks.try_edit(failing.clone(), |_| {
                 Err(crate::Error::configuration("test.edit", "refused"))
             });
@@ -564,6 +570,13 @@ fn hooked_mlp_forward_propagates_point_failures() {
             };
             assert_eq!(*point, failing.info().name);
             assert!(reason.contains("refused"), "{reason}");
+            // The earlier point ran once before the later one failed; a
+            // failure at the earlier point never reaches the later one.
+            assert_eq!(
+                emitted.get(),
+                usize::from(fail_at_activation),
+                "gated={gated_block}, fail_at_activation={fail_at_activation}"
+            );
             // A failed run releases every capture, including the one that ran.
             assert!(hooks.get(&pre_activation).is_err());
             assert!(hooks.get(&activation_capture).is_err());

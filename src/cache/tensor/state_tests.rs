@@ -191,9 +191,11 @@ fn paired_truncate_requires_an_auxiliary_bank() {
 
 /// A mark must agree with the state on whether an auxiliary bank exists.
 ///
-/// Transaction tokens already distinguish states, so these marks are stale
-/// twice over; the auxiliary-presence check must reject them on its own
-/// before either bank is touched, and the genuine mark still recovers.
+/// Each forged mark carries the state's own main-bank identity, so only the
+/// auxiliary half disagrees: the paired state receives a mark without an
+/// auxiliary identity, and the plain state receives one with an auxiliary
+/// identity. The presence check alone must reject both as stale, leave each
+/// transaction active, and let the genuine marks recover.
 #[test]
 fn marks_must_match_the_auxiliary_bank_topology() {
     let config = CacheConfig::new(1, 4).expect("valid config");
@@ -203,18 +205,32 @@ fn marks_must_match_the_auxiliary_bank_topology() {
     let mut plain = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
     let paired_mark = paired.begin_transaction().expect("paired transaction");
     let plain_mark = plain.begin_transaction().expect("plain transaction");
+    let paired_without_auxiliary = TensorCacheMark {
+        main: paired_mark.main.clone(),
+        mtp: None,
+    };
     assert!(matches!(
-        paired.rollback(plain_mark),
+        paired.rollback(paired_without_auxiliary),
         Err(TensorCacheError::StaleTransactionMark)
     ));
+    assert!(paired.has_active_transaction());
+    let plain_with_auxiliary = TensorCacheMark {
+        main: plain_mark.main.clone(),
+        mtp: paired_mark.mtp.clone(),
+    };
     assert!(matches!(
-        plain.rollback(paired_mark.clone()),
+        plain.rollback(plain_with_auxiliary),
         Err(TensorCacheError::StaleTransactionMark)
     ));
+    assert!(plain.has_active_transaction());
     paired
         .rollback(paired_mark)
         .expect("the genuine mark recovers");
     assert!(!paired.has_active_transaction());
+    plain
+        .rollback(plain_mark)
+        .expect("the genuine mark recovers");
+    assert!(!plain.has_active_transaction());
 }
 
 /// Bank staging transitions reject a second begin and a commit without a transaction.
