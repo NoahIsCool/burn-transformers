@@ -25,6 +25,7 @@ fn failure(config: &Gpt2Config) -> (&'static str, String) {
 /// Zero or beyond-`i32::MAX` extents are rejected before any other rule, naming the field.
 #[test]
 fn every_extent_must_be_positive_and_portable() {
+    /// Sets one extent field of a configuration to the given value.
     type Edit = fn(&mut Gpt2Config, usize);
     let cases: [(&str, Edit); 5] = [
         ("vocab_size", |config, value| config.vocab_size = value),

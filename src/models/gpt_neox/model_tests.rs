@@ -585,6 +585,7 @@ fn edited_parameter_shapes_are_reported_by_label() {
     let device = Default::default();
     let wrong_linear =
         |input: usize, output: usize| LinearConfig::new(input, output).init::<B>(&device);
+    /// Installs a replacement projection at one parameter slot of the model.
     type Edit = fn(&mut GptNeoXForCausalLm<B>, Linear<B>);
     let cases: [(&str, usize, usize, Edit, &str); 6] = [
         (

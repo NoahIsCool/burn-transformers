@@ -467,6 +467,7 @@ fn replacing_attention_derives_partial_rope_from_the_new_head_width() {
 #[test]
 fn zero_or_oversized_extents_name_the_field() {
     let oversized = i32::MAX as usize + 1;
+    /// Sets one extent field of a configuration to the given value.
     type Edit = fn(&mut GptNeoXConfig, usize);
     let cases: [(&str, Edit); 6] = [
         ("vocab_size", |config, value| config.vocab_size = value),
