@@ -16,13 +16,24 @@
 //! boundary satisfies `L_target = L_mtp + 1` for the single speculative row;
 //! [`shifted_alignment`] checks exactly that.
 //!
+//! # Query positions
+//!
+//! An MTP step writes its `w` pairs to slots `[W, W + w)` after the working
+//! length `W` and attends with its last `q <= w` pairs, which therefore sit
+//! at the final `q` positions before `end = W + w`. [`trailing_positions`]
+//! lists them as device position IDs.
+//!
 //! # Verified checks
 //!
-//! Both functions are checked in place by Verus through `verus/nemotron.rs`
-//! (see `verus/README.md`): for every input they never overflow, an accepted
-//! extent is exactly `start + count <= limit`, every rejection names its
-//! exact cause, and alignment holds exactly for one row with
-//! `L_target = L_mtp + 1`.
+//! Every function here is checked in place by Verus through
+//! `verus/nemotron.rs` (see `verus/README.md`). For every input they never
+//! overflow, and:
+//!
+//! - an accepted extent is exactly `start + count <= limit`, and every
+//!   rejection names its exact cause;
+//! - alignment holds exactly for one row with `L_target = L_mtp + 1`;
+//! - the query positions are exactly `end - q, …, end - 1`, refused exactly
+//!   when the last one exceeds `i64::MAX`.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -76,6 +87,49 @@ pub(crate) const fn bounded_end(
 ))]
 pub(crate) fn shifted_alignment(target: &[usize], mtp: &[usize]) -> bool {
     target.len() == 1 && mtp.len() == 1 && mtp[0] < target[0] && target[0] - mtp[0] == 1
+}
+
+/// Absolute positions `end - queries, …, end - 1` of a step's last `queries` queries.
+///
+/// The caller guarantees `queries <= end` (its `q <= w` queries end at
+/// `end = W + w`). Returns `None` exactly when the last position exceeds
+/// `i64::MAX`, the range of device position IDs; the proof establishes
+/// every returned entry.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(positions =>
+    requires
+        queries <= end,
+    ensures
+        match positions {
+            Some(positions) => {
+                &&& positions.len() == queries
+                &&& forall|i: int| 0 <= i < queries
+                    ==> #[trigger] positions@[i] == end - queries + i
+            },
+            None => queries > 0 && end - 1 > i64::MAX,
+        },
+))]
+pub(crate) fn trailing_positions(end: usize, queries: usize) -> Option<Vec<i64>> {
+    let first = end - queries;
+    let mut positions: Vec<i64> = Vec::with_capacity(queries);
+    let mut position = first;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            first == end - queries,
+            first <= position <= end,
+            positions.len() == position - first,
+            forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] == first + i,
+        decreases end - position,
+    ))]
+    while position < end {
+        // `usize` has at most 64 bits, so widening to `u64` is lossless.
+        if position as u64 > i64::MAX as u64 {
+            return None;
+        }
+        positions.push(position as i64);
+        position += 1;
+    }
+    Some(positions)
 }
 
 #[cfg(test)]

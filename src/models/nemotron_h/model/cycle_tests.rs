@@ -50,3 +50,33 @@ proptest! {
         );
     }
 }
+
+/// Trailing query positions are the last `q` positions before `end`.
+#[test]
+fn trailing_positions_end_at_the_step_end() {
+    assert_eq!(trailing_positions(7, 3), Some(vec![4, 5, 6]));
+    assert_eq!(trailing_positions(7, 0), Some(Vec::new()));
+    assert_eq!(trailing_positions(2, 2), Some(vec![0, 1]));
+    #[cfg(target_pointer_width = "64")]
+    {
+        let limit = i64::MAX as usize;
+        assert_eq!(trailing_positions(limit + 1, 1), Some(vec![i64::MAX]));
+        assert_eq!(trailing_positions(limit + 2, 1), None);
+        assert_eq!(trailing_positions(limit + 2, 0), Some(Vec::new()));
+    }
+}
+
+proptest! {
+    /// Trailing positions equal the checked range conversion they replaced.
+    #[test]
+    fn trailing_positions_match_the_range_conversion(
+        end in prop_oneof![0_usize..64, Just(i64::MAX as usize), Just(usize::MAX)],
+        queries in 0_usize..8,
+    ) {
+        let queries = queries.min(end);
+        let expected = (end - queries..end)
+            .map(|position| i64::try_from(position).ok())
+            .collect::<Option<Vec<_>>>();
+        prop_assert_eq!(trailing_positions(end, queries), expected);
+    }
+}

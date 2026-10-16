@@ -35,6 +35,8 @@
 //!   `start + count <= limit`, and each rejection names its cause.
 //! - `shifted_alignment`: the alignment `L_target = L_mtp + 1` is checked
 //!   exactly.
+//! - `trailing_positions`: an MTP step's last `q` queries sit exactly at
+//!   `end - q, …, end - 1`, refused exactly when one exceeds `i64::MAX`.
 //!
 //! `src/models/nemotron_h/routing.rs`:
 //!

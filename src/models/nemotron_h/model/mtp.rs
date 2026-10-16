@@ -46,7 +46,7 @@ use crate::{
 use super::{
     INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm, NemotronHNextTokenHead,
     batch::CompactBatch,
-    cycle::{ExtentError, bounded_end},
+    cycle::{ExtentError, bounded_end, trailing_positions},
     decode::{KV_GROUP, Retain, StatefulPhase, prepare_stateful_input},
     plan::active_window,
 };
@@ -548,16 +548,13 @@ fn mtp_attention<B: Backend>(
     let Some(window) = window else {
         return head.attention.attend(projection, None, None, true);
     };
-    let positions = (end - queries..end)
-        .map(|position| {
-            i64::try_from(position).map_err(|_| {
-                Error::configuration(
-                    "nemotron_h.mtp.position_ids",
-                    "position exceeds the signed index range",
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // The `queries <= w` queries end at `end = W + w`.
+    let positions = trailing_positions(end, queries).ok_or_else(|| {
+        Error::configuration(
+            "nemotron_h.mtp.position_ids",
+            "position exceeds the signed index range",
+        )
+    })?;
     let positions = Tensor::<B, 2, Int>::from_data(
         TensorData::new(positions, [1, queries]),
         state.tensors.device(),
