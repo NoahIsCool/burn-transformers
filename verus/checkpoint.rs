@@ -29,6 +29,10 @@
 //!   names the first failed check, with every earlier check proved to pass;
 //!   `axis_elements` and `range_within` decide their products and ranges
 //!   exactly;
+//! - `check_slice_plan` accepts a planned slice exactly when its axis is below
+//!   the source rank, `[start, start + length)` lies inside that axis, and the
+//!   target shape is the source shape with the axis replaced by the length,
+//!   naming the first failed check otherwise;
 //! - `slice_block` keeps every slice and concatenation block inside its tensor
 //!   with overflow-free arithmetic, and consecutive target blocks partition the
 //!   output in order;

@@ -269,6 +269,56 @@ fn reference_axis_view(shape: &[u64], axis: usize) -> Result<AxisExtents, AxisVi
     })
 }
 
+/// The original runtime slice-plan checks, written directly.
+fn reference_slice_plan(
+    source: &[u64],
+    target: &[u64],
+    axis: usize,
+    start: u64,
+    length: u64,
+) -> Result<(), SlicePlanError> {
+    let axis_len = *source.get(axis).ok_or(SlicePlanError::AxisOutOfBounds)?;
+    let end = start
+        .checked_add(length)
+        .ok_or(SlicePlanError::EndOverflow)?;
+    if end > axis_len {
+        return Err(SlicePlanError::PastAxis { end });
+    }
+    let mut expected = source.to_vec();
+    expected[axis] = length;
+    if target != expected {
+        return Err(SlicePlanError::ShapeMismatch);
+    }
+    Ok(())
+}
+
+/// Slice plans accept in-range slices with the replaced shape and name the first failure.
+#[test]
+fn slice_plans_check_range_then_shape() {
+    assert_eq!(check_slice_plan(&[4, 6], &[4, 2], 1, 3, 2), Ok(()));
+    assert_eq!(check_slice_plan(&[4, 6], &[4, 0], 1, 6, 0), Ok(()));
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[4, 2], 2, 0, 2),
+        Err(SlicePlanError::AxisOutOfBounds)
+    );
+    assert_eq!(
+        check_slice_plan(&[4, u64::MAX], &[4, 2], 1, u64::MAX, 2),
+        Err(SlicePlanError::EndOverflow)
+    );
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[4, 2], 1, 5, 2),
+        Err(SlicePlanError::PastAxis { end: 7 })
+    );
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[2, 2], 1, 0, 2),
+        Err(SlicePlanError::ShapeMismatch)
+    );
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[4, 2, 1], 1, 0, 2),
+        Err(SlicePlanError::ShapeMismatch)
+    );
+}
+
 /// Axis views report exact extents and name the first failed check.
 #[test]
 fn axis_views_split_shapes_and_name_the_first_failure() {
@@ -453,6 +503,21 @@ proptest! {
         prop_assert_eq!(view.axis as u64, shape[axis]);
         prop_assert_eq!(view.inner as u64, product(&shape[axis + 1..]));
         prop_assert_eq!((view.outer * view.axis * view.inner) as u64, product(&shape));
+    }
+
+    /// Slice plans give the original verdict on small and overflowing plans.
+    #[test]
+    fn slice_plans_match_the_original_checks(
+        source in proptest::collection::vec(0_u64..5, 0..4),
+        target in proptest::collection::vec(0_u64..5, 0..4),
+        axis in 0_usize..4,
+        start in prop_oneof![0_u64..6, Just(u64::MAX)],
+        length in 0_u64..6,
+    ) {
+        prop_assert_eq!(
+            check_slice_plan(&source, &target, axis, start, length),
+            reference_slice_plan(&source, &target, axis, start, length)
+        );
     }
 
     /// Axis views classify overflowing and zero-bearing shapes like a direct reference.

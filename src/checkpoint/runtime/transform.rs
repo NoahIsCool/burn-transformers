@@ -29,8 +29,8 @@ use super::{
     },
 };
 use crate::checkpoint::layout::{
-    AxisViewError, ConcatError, axis_elements, axis_view, element_count, extend_concatenation,
-    range_within, slice_block,
+    AxisViewError, ConcatError, SlicePlanError, axis_elements, axis_view, check_slice_plan,
+    element_count, extend_concatenation, range_within, slice_block,
 };
 use crate::checkpoint::mxfp4::{
     Mxfp4Geometry, Mxfp4Table, decode_transposed, decoded_shape, mxfp4_geometry,
@@ -158,34 +158,37 @@ fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
             length,
         } => {
             let source = exactly_one_source(tensor)?;
-            let source_axis =
-                source
-                    .shape
-                    .get(*axis)
-                    .ok_or_else(|| CheckpointError::InvalidMapping {
+            // Verified: `Ok` exactly for an in-range slice whose target shape
+            // is the source shape with the axis replaced by the length.
+            match check_slice_plan(&source.shape, &tensor.shape, *axis, *start, *length) {
+                Ok(()) => {}
+                Err(SlicePlanError::AxisOutOfBounds) => {
+                    return Err(CheckpointError::InvalidMapping {
                         message: format!(
                             "slice axis {axis} is out of bounds for source `{}`",
                             source.name
                         ),
-                    })?;
-            let end = start
-                .checked_add(*length)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing runtime slice end",
-                })?;
-            if end > *source_axis {
-                return invalid_plan(format!(
-                    "slice target `{}` ends at {end}, source axis has length {source_axis}",
-                    tensor.target
-                ));
-            }
-            let mut expected = source.shape.clone();
-            expected[*axis] = *length;
-            if tensor.shape != expected {
-                return invalid_plan(format!(
-                    "slice target `{}` shape {:?} should be {expected:?}",
-                    tensor.target, tensor.shape
-                ));
+                    });
+                }
+                Err(SlicePlanError::EndOverflow) => {
+                    return Err(CheckpointError::ArithmeticOverflow {
+                        context: "computing runtime slice end",
+                    });
+                }
+                Err(SlicePlanError::PastAxis { end }) => {
+                    return invalid_plan(format!(
+                        "slice target `{}` ends at {end}, source axis has length {}",
+                        tensor.target, source.shape[*axis]
+                    ));
+                }
+                Err(SlicePlanError::ShapeMismatch) => {
+                    let mut expected = source.shape.clone();
+                    expected[*axis] = *length;
+                    return invalid_plan(format!(
+                        "slice target `{}` shape {:?} should be {expected:?}",
+                        tensor.target, tensor.shape
+                    ));
+                }
             }
         }
         PlannedTransform::Concatenate { axis } => {

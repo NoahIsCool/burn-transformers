@@ -918,6 +918,106 @@ pub(crate) fn extend_concatenation(
     Ok(())
 }
 
+/// First reason a planned slice does not describe a sub-range of its source.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlicePlanError {
+    /// The slice axis is not below the source rank.
+    AxisOutOfBounds,
+    /// `start + length` overflows `u64`.
+    EndOverflow,
+    /// The slice ends past the source axis.
+    PastAxis {
+        /// The exact slice end, `start + length`.
+        end: u64,
+    },
+    /// The target shape is not the source shape with the axis replaced by the length.
+    ShapeMismatch,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: `target` is `source` with dimension `axis` replaced by `length`.
+pub open spec fn sliced_shape(source: Seq<u64>, target: Seq<u64>, axis: int, length: u64) -> bool {
+    &&& target.len() == source.len()
+    &&& forall|i: int| 0 <= i < target.len()
+        ==> #[trigger] target[i] == if i == axis { length } else { source[i] }
+}
+
+} // verus!
+
+/// Checks that slicing `source` to `[start, start + length)` along `axis` yields `target`.
+///
+/// The checks run in order (axis bound, end overflow, end within the axis,
+/// target shape) and the first failure is returned.
+///
+/// Verified: `Ok` exactly when the axis is below the source rank, the range
+/// `[start, start + length)` lies inside that axis, and `target` equals the
+/// source shape with the axis replaced by `length`; each error names the
+/// first failed check, with every earlier check proved to have passed.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(checked =>
+    ensures
+        match checked {
+            Ok(()) => {
+                &&& axis < source@.len()
+                &&& start + length <= source@[axis as int]
+                &&& sliced_shape(source@, target@, axis as int, length)
+            },
+            Err(SlicePlanError::AxisOutOfBounds) => axis >= source@.len(),
+            Err(SlicePlanError::EndOverflow) => axis < source@.len()
+                && start + length > u64::MAX,
+            Err(SlicePlanError::PastAxis { end }) => axis < source@.len()
+                && end == start + length
+                && end > source@[axis as int],
+            Err(SlicePlanError::ShapeMismatch) => {
+                &&& axis < source@.len()
+                &&& start + length <= source@[axis as int]
+                &&& !sliced_shape(source@, target@, axis as int, length)
+            },
+        }
+))]
+pub(crate) fn check_slice_plan(
+    source: &[u64],
+    target: &[u64],
+    axis: usize,
+    start: u64,
+    length: u64,
+) -> Result<(), SlicePlanError> {
+    if axis >= source.len() {
+        return Err(SlicePlanError::AxisOutOfBounds);
+    }
+    let Some(end) = start.checked_add(length) else {
+        return Err(SlicePlanError::EndOverflow);
+    };
+    if end > source[axis] {
+        return Err(SlicePlanError::PastAxis { end });
+    }
+    if target.len() != source.len() {
+        return Err(SlicePlanError::ShapeMismatch);
+    }
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= target@.len(),
+            target@.len() == source@.len(),
+            axis < source@.len(),
+            start + length <= source@[axis as int],
+            forall|i: int| 0 <= i < index
+                ==> #[trigger] target@[i] == if i == axis { length } else { source@[i] },
+        decreases target@.len() - index,
+    ))]
+    while index < target.len() {
+        let expected = if index == axis { length } else { source[index] };
+        if target[index] != expected {
+            return Err(SlicePlanError::ShapeMismatch);
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
 /// Computes the dense byte length `product(shape) * width`, or `None` on overflow.
 ///
 /// The product accumulates left to right with checked multiplication (rank
