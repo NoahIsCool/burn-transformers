@@ -49,6 +49,8 @@ pub proof fn lemma_ceiling_bounds(dividend: int, divisor: int)
     ensures
         quotient == ceiling(value as int, divisor as int),
         value <= quotient * divisor,
+        quotient == 0 || (quotient - 1) * divisor < value,
+        value > 0 ==> quotient > 0,
         quotient <= value,
 ))]
 pub(crate) const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
@@ -82,8 +84,9 @@ The proofs are written with five constructs:
   such as `spec_bucket` or `lexer_state`) and the `proof fn` lemmas that
   bodies call.
 - **`#[cfg(any(test, verus_keep_ghost))]`** keeps an executable reference
-  function out of release builds while Verus proves it and unit tests
-  compare the production path against it (`transposed_offset` in
+  function out of every non-test build, debug or release: only `cargo test`
+  and Verus compile it, so Verus proves it and unit tests compare the
+  production path against it (`transposed_offset` in
   `src/checkpoint/mxfp4.rs`, `displacement_slot` in
   `src/models/custom/plan.rs`).
 
@@ -198,8 +201,9 @@ done
 `VERUS` is the `verus` binary from the release archive. Each harness prints
 one `verification results:: N verified, 0 errors` line. Verification
 performs no Cargo build, downloads nothing, and writes no target directory.
-The whole loop takes about 75 seconds on an Apple M3 Max; a single harness
-can be run alone while working on its area.
+The whole loop takes 35 to 55 seconds on an Apple M3 Max, depending on
+concurrent load; a single harness can be run alone while working on its
+area.
 
 Without Verus installed, `cargo test --locked --test verus_harness` still
 checks the harness structure: every harness begins with module
