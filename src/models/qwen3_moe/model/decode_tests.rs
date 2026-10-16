@@ -633,10 +633,13 @@ fn decode_state_rejects_unaddressable_capacities() {
         .new_decode_state(CacheConfig::new(1, 65).unwrap(), 1, &device)
         .expect_err("capacity beyond the position table");
     assert!(
-        error
-            .to_string()
-            .contains("65 exceeds max_position_embeddings 64"),
-        "{error}"
+        matches!(
+            &error,
+            Error::Configuration { field, reason }
+                if field == "qwen3_moe.decode_state.capacity"
+                    && reason == "65 exceeds max_position_embeddings 64"
+        ),
+        "{error:?}"
     );
     let at_limit = model
         .new_decode_state(CacheConfig::new(1, 64).unwrap(), 1, &device)
@@ -656,14 +659,27 @@ fn decode_state_rejects_unaddressable_capacities() {
         )
         .expect_err("capacity beyond the signed index range");
     assert!(
-        error.to_string().contains("portable signed position-index"),
-        "{error}"
+        matches!(
+            &error,
+            Error::Configuration { field, reason }
+                if field == "qwen3_moe.decode_state.capacity"
+                    && reason == "must fit Burn's portable signed position-index range"
+        ),
+        "{error:?}"
     );
 }
 
-/// A state from another geometry, or a request for cached probabilities, is rejected atomically.
+/// A state from another geometry, or a request for cached probabilities, is
+/// rejected without touching either cache, and no transaction can be opened.
+///
+/// The foreign two-layer state stays empty after the rejected prefill. The
+/// attention-probability request is refused after a committed one-token
+/// prefill, and the row keeps its length and readable KV slots bit-for-bit.
+/// Qwen3-MoE states allocate no speculative staging, so `begin_transaction`
+/// fails with `StagingDisabled`: the ordinary-call transaction guard can
+/// never observe an open transaction.
 #[test]
-fn stateful_calls_reject_foreign_states_and_open_transactions() {
+fn stateful_calls_reject_foreign_states_and_cannot_open_transactions() {
     let device = Default::default();
     let model = windowed_model(&device);
     let mut shallow_config = model.config().clone();
@@ -680,19 +696,36 @@ fn stateful_calls_reject_foreign_states_and_open_transactions() {
             &ForwardOptions::default(),
         )
         .expect_err("a two-layer state cannot serve a three-layer model");
-    assert!(error.to_string().contains("incompatible"), "{error}");
+    assert!(
+        matches!(
+            &error,
+            Error::Cache(message)
+                if message == "Qwen3 MoE decode state is incompatible with the model"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(foreign.lengths(), &[0]);
 
-    // The family allocates no speculative staging, so no transaction can
-    // ever be open when an ordinary call starts.
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
         .unwrap();
-    assert!(state.tensors.begin_transaction().is_err());
+    assert!(matches!(
+        state.tensors.begin_transaction(),
+        Err(TensorCacheError::StagingDisabled)
+    ));
     assert!(!state.tensors.has_active_transaction());
 
-    let error = model
+    model
         .prefill(
             masked_input(&[vec![true]], 1, &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let committed = readable_cache(&state);
+    let error = model
+        .prefill(
+            masked_input(&[vec![true]], 2, &device),
             &mut state,
             &ForwardOptions {
                 attentions: true,
@@ -700,7 +733,16 @@ fn stateful_calls_reject_foreign_states_and_open_transactions() {
             },
         )
         .expect_err("cached attention probabilities are unavailable");
-    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(
+        matches!(
+            &error,
+            Error::BackendCapability(message)
+                if message == "Qwen3 MoE cached attention probability capture is unavailable"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(state.lengths(), &[1]);
+    assert_eq!(readable_cache(&state), committed);
 }
 
 /// An all-finished decode returns rectangular zero traces and zero router logits.
@@ -783,7 +825,14 @@ fn stateful_calls_reject_a_bank_with_an_extra_group() {
             &ForwardOptions::default(),
         )
         .expect_err("two native groups cannot serve one homogeneous model");
-    assert!(error.to_string().contains("incompatible"), "{error}");
+    assert!(
+        matches!(
+            &error,
+            Error::Cache(message)
+                if message == "Qwen3 MoE decode state is incompatible with the model"
+        ),
+        "{error:?}"
+    );
     assert_eq!(state.lengths(), &[0]);
 }
 

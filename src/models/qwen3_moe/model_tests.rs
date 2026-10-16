@@ -1484,6 +1484,12 @@ fn a_failing_edit_at_any_point_aborts_with_its_error() {
 }
 
 /// Eager-softmax blocks add score and pattern points whose rows are probability distributions.
+///
+/// The captured `[batch, heads, query, key]` pattern normalizes over keys for
+/// every query that sees at least one valid key: all four queries of the
+/// unpadded row and queries 1..3 of the row whose first column is padding.
+/// Those padded-row queries give the padded key exactly zero weight, and no
+/// query of either row attends to a strictly later key.
 #[test]
 fn eager_softmax_blocks_expose_scores_and_patterns() {
     let (mut model, device) = experiment_model();
@@ -1519,8 +1525,9 @@ fn eager_softmax_blocks_expose_scores_and_patterns() {
     let pattern = hooks.get(&pattern).unwrap();
     assert_eq!(pattern.dims(), [2, 2, 4, 4]);
     // Row 0 has a padded first column: its first query attends to nothing
-    // valid, so only fully visible rows are required to normalize.
+    // valid, so it is the only query without a normalization requirement.
     pattern
+        .clone()
         .slice([1..2, 0..2, 0..4, 0..4])
         .sum_dim(3)
         .into_data()
@@ -1528,6 +1535,35 @@ fn eager_softmax_blocks_expose_scores_and_patterns() {
             &Tensor::<TestBackend, 4>::ones([1, 2, 4, 1], &device).into_data(),
             Tolerance::absolute(1e-5),
         );
+    pattern
+        .clone()
+        .slice([0..1, 0..2, 1..4, 0..4])
+        .sum_dim(3)
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &Tensor::<TestBackend, 4>::ones([1, 2, 3, 1], &device).into_data(),
+            Tolerance::absolute(1e-5),
+        );
+    let weights = pattern.into_data().to_vec::<f32>().unwrap();
+    let weight = |row: usize, head: usize, query: usize, key: usize| {
+        weights[((row * 2 + head) * 4 + query) * 4 + key]
+    };
+    for head in 0..2 {
+        for query in 1..4 {
+            assert_eq!(weight(0, head, query, 0), 0.0, "padded key, query {query}");
+        }
+        for row in 0..2 {
+            for query in 0..4 {
+                for key in query + 1..4 {
+                    assert_eq!(
+                        weight(row, head, query, key),
+                        0.0,
+                        "future key {key} of query {query} in row {row}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Step-wise routing with no hook action equals the fused sparse module under both precisions.
