@@ -221,8 +221,17 @@ python3 scripts/check_release.py --gate coverage --toolchain nightly --offline
 python3 scripts/check_release.py --gate dependencies
 python3 scripts/check_release.py --gate accelerator-compile --offline
 python3 scripts/check_release.py --gate package --offline
+python3 scripts/check_release.py --gate guides --offline
 VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
 ```
+
+The `guides` gate compiles every Rust block of `README.md`, `EXPERIMENTS.md`,
+`TRAINING.md`, and `V0_2_INTERFACE.md` as a doctest of a scratch crate that
+depends on this one by path, as a downstream user would. A fragment that
+assumes a model or an input is compiled inside the context named by a hidden
+`doctest NAME` comment above it, defined by a `doctest-context NAME` comment in
+the same guide; an unknown or unused context fails the gate. CI runs it in the
+documentation job.
 
 Run from this crate or use its full script path from the repository root. Install
 tools separately; the runner does not install or update them. The reviewed tool

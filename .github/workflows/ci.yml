@@ -155,11 +155,18 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
@@ -167,6 +174,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The docs.rs feature set from Cargo.toml's package.metadata.
       - run: cargo doc --locked --no-deps --no-default-features --features std,flex,tokenizers,chat-templates
+      # Compiles every Rust block of README.md, EXPERIMENTS.md, TRAINING.md,
+      # and V0_2_INTERFACE.md as a doctest against this crate.
+      - name: Guide snippets
+        run: python3 scripts/check_release.py --gate guides
+      - name: Show the guide doctest log
+        if: failure()
+        run: cat target/release-gates/*/*.log
 
   examples:
     name: Examples

@@ -767,6 +767,133 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertIn("--offline", archive_tests)
             self.assertTrue(GATES.command_compiles(archive_tests))
 
+    def test_guide_fragments_compile_inside_their_hidden_context(self):
+        """A marked fragment is wrapped in its context as rustdoc hidden lines."""
+
+        markdown = (
+            "# Guide\n\n<!-- doctest-context model\nuse burn::tensor::backend::Backend;\n\n"
+            "fn fragment<B: Backend>(value: u8) {\n    __FRAGMENT__\n}\n-->\n"
+            "Prose.\n\n<!-- doctest model -->\n```rust\nlet doubled = value * 2;\n```\n"
+        )
+        rewritten, compiled = GATES.guide_doctests(markdown)
+        self.assertEqual(compiled, 1)
+        self.assertNotIn("doctest-context", rewritten)
+        self.assertIn(
+            "```rust\n# use burn::tensor::backend::Backend;\n#\n# fn fragment<B: Backend>(value: u8) {\n"
+            "let doubled = value * 2;\n# }\n```", rewritten)
+        self.assertTrue(rewritten.startswith("# Guide\n\nProse."))
+
+    def test_guide_blocks_outside_markers_keep_their_language(self):
+        """Complete Rust compiles as written, other languages never, and bare fences become text."""
+
+        markdown = ("```rust\nfn complete() {}\n```\n\n```sh\ncargo test\n```\n\n```\nplain\n```\n\n"
+                    "```rust,ignore\nnot compiled\n```\n\n- item\n\n  ```rust\n  fn nested() {}\n  ```\n")
+        rewritten, compiled = GATES.guide_doctests(markdown)
+        self.assertEqual(compiled, 2)
+        self.assertIn("```rust\nfn complete() {}\n```", rewritten)
+        self.assertIn("```sh\ncargo test\n```", rewritten)
+        self.assertIn("```text\nplain\n```", rewritten)
+        self.assertIn("```rust,ignore\nnot compiled\n```", rewritten)
+        self.assertIn("  ```rust\n  fn nested() {}\n  ```", rewritten)
+
+    def test_guide_doctest_markers_fail_closed(self):
+        """Unknown, unused, duplicate, or malformed contexts cannot hide a fragment."""
+
+        context = "<!-- doctest-context a\nfn f() {\n__FRAGMENT__\n}\n-->\n"
+        fragment = "<!-- doctest a -->\n```rust\nlet x = 1;\n```\n"
+        for markdown, message in (
+            ("<!-- doctest missing -->\n```rust\nlet x = 1;\n```\n", "unknown"),
+            (context, "unused"),
+            (context + context + fragment, "unique"),
+            ("<!-- doctest-context a\nfn f() {}\n-->\n" + fragment, "__FRAGMENT__"),
+            (context + "<!-- doctest a -->\n```sh\nls\n```\n", "non-Rust"),
+            (context + "<!-- doctest a -->\n```rust\nlet x = 1;\n", "unclosed"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                GATES.guide_doctests(markdown)
+
+    def test_repository_guides_mark_every_fragment_consistently(self):
+        """Every Rust block of every gated guide is compiled; markers and contexts match."""
+
+        for guide in GATES.GUIDES:
+            with self.subTest(guide=guide):
+                text = (GATES.CRATE / guide).read_text()
+                _, compiled = GATES.guide_doctests(text)
+                blocks = [line for line in text.split("\n") if line.strip().startswith("```rust")]
+                self.assertEqual(compiled, len([block for block in blocks if "ignore" not in block]))
+                self.assertGreater(compiled, 0)
+
+    def test_guide_doctest_crate_depends_on_this_crate_by_path(self):
+        """The scratch crate uses the source gate's features and this crate's lockfile."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate, scratch = Path(directory) / "crate", Path(directory) / "out/guides"
+            crate.mkdir()
+            (crate / "Cargo.toml").write_text('[package]\nname = "transformers"\n\n[dependencies]\n'
+                                             'burn = { version = "=0.21.0", default-features = false }\n')
+            (crate / "Cargo.lock").write_text("version = 4\n")
+            for guide in GATES.GUIDES:
+                (crate / guide).write_text("```rust\nfn complete() {}\n```\n")
+            with mock.patch.object(GATES.subprocess, "run") as run:
+                summary = GATES.write_guide_doctests(crate, scratch, True)
+            self.assertEqual(summary["compiled_blocks"], len(GATES.GUIDES))
+            manifest = tomllib.loads((scratch / "Cargo.toml").read_text())
+            dependency = manifest["dependencies"]["transformers"]
+            self.assertEqual(dependency["path"], str(crate.resolve()))
+            self.assertFalse(dependency["default-features"])
+            self.assertEqual(dependency["features"], [*GATES.FEATURES.split(","), "train"])
+            self.assertEqual(manifest["dependencies"]["burn"]["version"], "=0.21.0")
+            self.assertIn("workspace", manifest)
+            self.assertEqual((scratch / "Cargo.lock").read_text(), "version = 4\n")
+            library = (scratch / "lib.rs").read_text()
+            for guide in GATES.GUIDES:
+                self.assertIn(f'include_str!("guides/{guide}")', library)
+                self.assertTrue((scratch / "guides" / guide).is_file())
+            command = run.call_args.args[0]
+            self.assertEqual(command[:2], ["cargo", "metadata"])
+            self.assertIn("--offline", command)
+            self.assertNotIn("--locked", command)
+
+    def test_guides_gate_tests_the_generated_crate_with_the_shared_target(self):
+        """The doctest command is locked and reuses Cargo's normal target directory."""
+
+        with mock.patch.dict(GATES.os.environ, {"CARGO_TARGET_DIR": "/explicit/target"}, clear=True):
+            command, = GATES.command_plan("guides", Path("/tmp/output"), "stable", "1.92.0", True)
+        self.assertEqual(command[:4], ["cargo", "+stable", "test", "--doc"])
+        self.assertEqual(command[command.index("--manifest-path") + 1], "/tmp/output/guide-doctests/Cargo.toml")
+        self.assertEqual(command[command.index("--target-dir") + 1], "/explicit/target")
+        self.assertIn("--locked", command)
+        self.assertIn("--offline", command)
+        self.assertTrue(GATES.command_compiles(command))
+
+    def test_guides_gate_writes_the_crate_before_running_its_doctests(self):
+        """The runner prepares the scratch crate, records its block counts, then runs cargo."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            observed = []
+
+            def run(command, **kwargs):
+                """Observe that the scratch crate exists when the doctests run."""
+
+                observed.append(Path(command[command.index("--manifest-path") + 1]).is_file())
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "guides"]),
+                mock.patch.object(GATES, "write_guide_doctests", side_effect=lambda crate, directory, offline: (
+                    directory.mkdir(parents=True), (directory / "Cargo.toml").write_text(""),
+                    {"guides": {}, "compiled_blocks": 25})[-1]) as write,
+                mock.patch.object(GATES.subprocess, "run", side_effect=run),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 0)
+            self.assertEqual(observed, [True])
+            write.assert_called_once()
+            result = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())
+            self.assertEqual(result["gates"][0]["guide_doctests"]["compiled_blocks"], 25)
+
     def test_verus_gate_requires_the_executable(self):
         """An unset VERUS fails before any evidence directory exists."""
 

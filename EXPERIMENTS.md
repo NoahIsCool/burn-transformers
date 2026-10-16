@@ -14,6 +14,12 @@ The fragments below assume an initialized model, an input, and a backend `B`;
 the workbench supplies the complete setup. For a trained circuit, read the
 [grokking experiment](examples/mechanistic/grokking.md).
 
+<!-- Maintainers: `python3 scripts/check_release.py --gate guides` compiles
+every Rust block in this guide. A fragment names the hidden context it compiles
+in with a `doctest NAME` comment directly above its fence; the matching
+`doctest-context NAME` comment, beside the fragment that first uses it, holds
+that context with `__FRAGMENT__` where the fragment goes. -->
+
 For architecture changes, start with these complete examples:
 
 | Experiment | What to change |
@@ -99,6 +105,19 @@ its input); generic code bounded by the traits sees the uniform signatures.
 Choose a computation point, then optionally narrow it. Indices start at zero;
 selecting one token or head keeps that dimension with length one.
 
+<!-- doctest-context hooked-model
+use burn::tensor::backend::Backend;
+use transformers::{CausalLmInput, CausalLmOutput, ForwardOptions, Result, architecture::HookedModel};
+
+fn fragment<B: Backend, M>(model: &M, input: CausalLmInput<B>, options: ForwardOptions) -> Result<()>
+where
+    M: HookedModel<B, Input = CausalLmInput<B>, Output = CausalLmOutput<B>>,
+{
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest hooked-model -->
 ```rust
 use transformers::intervention::{Hooks, Layer};
 
@@ -113,6 +132,17 @@ Captures stay on the tensor's device and detach from the gradient graph by
 default. Use `capture_with_grad` when a loss must depend on a capture. Use
 `observe` to compute a small statistic without storing the activation in hooks:
 
+<!-- doctest-context hooks
+use burn::tensor::backend::Backend;
+use transformers::intervention::{Hooks, Layer};
+
+fn fragment<B: Backend>() {
+    let neurons = Layer::decoder(0).mlp_activation().token(1);
+    let mut hooks = Hooks::<B>::new();
+    __FRAGMENT__
+}
+-->
+<!-- doctest hooks -->
 ```rust
 hooks.observe(&neurons, |x| println!("mean: {:?}", x.mean().into_scalar()));
 ```
@@ -126,6 +156,33 @@ captures.
 
 ## Change an activation or patch another run
 
+<!-- doctest-context neuron-patch
+use burn::tensor::backend::Backend;
+use transformers::{
+    CausalLmInput, CausalLmOutput, ForwardOptions, Result,
+    architecture::HookedModel,
+    intervention::{Hooks, Layer},
+};
+
+fn fragment<B: Backend, M>(
+    model: &M,
+    input: CausalLmInput<B>,
+    corrupted_input: CausalLmInput<B>,
+    options: ForwardOptions,
+) -> Result<()>
+where
+    M: HookedModel<B, Input = CausalLmInput<B>, Output = CausalLmOutput<B>>,
+{
+    let neurons = Layer::decoder(0).mlp_activation().token(1);
+    let mut hooks = Hooks::<B>::new();
+    let saved = hooks.capture(&neurons);
+    model.forward_with_hooks(input.clone(), &options, &mut hooks)?;
+    let activation = hooks.get(&saved)?;
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest neuron-patch -->
 ```rust
 let mut ablate = Hooks::<B>::new();
 ablate.edit(&neurons, |x| x.zeros_like());
@@ -159,6 +216,21 @@ returning a different shape from a tensor edit.
 
 An edit can borrow an ordinary Burn module:
 
+<!-- doctest-context experiment-adapter
+use burn::{nn::Linear, tensor::backend::Backend};
+use transformers::intervention::{Hooks, Layer};
+
+/// Owns the adapter, as the workbench's `ExperimentModel` does.
+struct Experiment<B: Backend> {
+    adapter: Linear<B>,
+}
+
+fn fragment<B: Backend>(experiment: &Experiment<B>) {
+    let mut hooks = Hooks::<B>::new();
+    __FRAGMENT__
+}
+-->
+<!-- doctest experiment-adapter -->
 ```rust
 hooks.edit(Layer::decoder(0).residual_post(), |hidden| {
     hidden.clone() + experiment.adapter.forward(hidden) * 0.1
@@ -177,9 +249,10 @@ remain tied under Burn 0.21 optimizers.
 
 ## Find the right point
 
-`model.activation_points()?` returns the catalog for the execution path you
-are about to run: each `PointInfo` has a stable name and its axes in tensor
-order. Generic tools capture any listed point with `Hooks::capture_dynamic`, or
+`HookedModel::activation_points(&model)?` returns the catalog for the
+execution path you are about to run (a concrete family type's inherent
+`activation_points()` returns the same list without a `Result`): each
+`PointInfo` has a stable name and its axes in tensor order. Generic tools capture any listed point with `Hooks::capture_dynamic`, or
 recover a typed point with `Point::<D>::try_from(info)?`. Requesting a point
 the catalog does not list fails before computation.
 
@@ -201,6 +274,7 @@ Decoder cross-attention uses `.cross_attention()` and the corresponding
 Attention matrices use `.query_token(i)` and `.key_token(i)` instead of `.token(i)`.
 For example, on a full-attention layer, ablate one head before its output projection:
 
+<!-- doctest hooks -->
 ```rust
 hooks.edit(Layer::decoder(0).self_attention().head_context().head(0), |x| {
     x.zeros_like()
@@ -241,6 +315,15 @@ GPT-NeoX expose `with_attention_precision` (GPT-2 and GPT-NeoX also
 have a public `precision_mode` field. For a loaded `AutoCausalLm`, take the
 concrete variant from `loaded.into_model()` first. Check the resulting catalog.
 
+<!-- doctest-context modular-model
+use burn::tensor::backend::Backend;
+use transformers::models::custom::ModularCausalLm;
+
+fn fragment<B: Backend>(model: ModularCausalLm<B>) {
+    __FRAGMENT__
+}
+-->
+<!-- doctest modular-model -->
 ```rust
 use transformers::attention::AttentionPrecisionMode;
 let model = model.with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
@@ -263,6 +346,21 @@ computation.
 
 Execution stages make a prefix and a replacement task head explicit:
 
+<!-- doctest-context staged-encoder
+use burn::{nn::Linear, tensor::backend::Backend};
+use transformers::{CausalLmInput, Result, architecture::StagedModel};
+
+fn fragment<B: Backend, E: StagedModel<B>>(
+    encoder: &E,
+    input: CausalLmInput<B>,
+    adapter: &Linear<B>,
+    classifier: &Linear<B>,
+) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest staged-encoder -->
 ```rust
 let mut state = encoder.embed(input)?;
 state = encoder.run_layers(state, 0..1)?;
@@ -300,6 +398,15 @@ carries execution metadata, not parameters or decode caches.
 
 Change attention through the context before running the relevant stages:
 
+<!-- doctest-context staged-state
+use burn::tensor::{Bool, Tensor, backend::Backend};
+use transformers::{experiment::HiddenState, intervention::Layer};
+
+fn fragment<B: Backend>(mut state: HiddenState<B>, allowed: Tensor<B, 4, Bool>) {
+    __FRAGMENT__
+}
+-->
+<!-- doctest staged-state -->
 ```rust
 use transformers::experiment::AttentionPolicy;
 
@@ -334,6 +441,20 @@ states.
 
 For an unpadded batch, a custom sentiment head can use mean pooling:
 
+<!-- doctest-context modular-classifier
+use burn::{nn::Linear, tensor::backend::Backend};
+use transformers::{CausalLmInput, Result, models::custom::ModularCausalLm};
+
+fn fragment<B: Backend>(
+    model: &ModularCausalLm<B>,
+    input: CausalLmInput<B>,
+    classifier: &Linear<B>,
+) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest modular-classifier -->
 ```rust
 let hidden = model.forward_hidden_bidirectional(input)?;
 let pooled = hidden.mean_dim(1).squeeze_dim::<2>(1);
@@ -374,6 +495,16 @@ reuses the earliest compatible table or initializes one explicitly.
 
 Construct a new architecture before transferring existing parameters:
 
+<!-- doctest-context transfer
+use burn::{module::Module, tensor::backend::Backend};
+use transformers::Result;
+
+fn fragment<B: Backend, S: Module<B>, T: Module<B>>(pretrained: S, new_encoder: T) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest transfer -->
 ```rust
 use transformers::transfer::{ShapeChangePolicy, TransferPlan};
 
@@ -421,6 +552,21 @@ cargo run --release --locked --example mla_encoder_decoder
 `kv_latent()` selects normalized compressed source states **before** expansion
 into keys and values. For an initialized MLA module, edit those states directly:
 
+<!-- doctest-context mla-cross-attention
+use burn::{nn::Linear, tensor::{Tensor, backend::Backend}};
+use transformers::{Result, intervention::{Hooks, Layer}, mla::MultiLatentAttention};
+
+fn fragment<B: Backend>(
+    mla: &MultiLatentAttention<B>,
+    adapter: &Linear<B>,
+    query: Tensor<B, 3>,
+    encoder_states: Tensor<B, 3>,
+) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest mla-cross-attention -->
 ```rust
 let points = Layer::decoder(0).cross_attention();
 let mut hooks = Hooks::<B>::new();
@@ -468,9 +614,23 @@ positions:
 Bidirectional encoder stacks reject sliding windows and recurrent mixers;
 `ResidualTopology::Gated` is describable but not yet executable. Both models
 implement `HookedModel` and `StagedModel` (seq2seq through its stage views).
-Initialize from scratch with `ModularCausalLm::init_with(spec,
-&ModularCausalLm::scaled_init_policy(&spec, 0.02), &device)`; see
-[initialization](TRAINING.md#initialize-deliberately).
+Initialize from scratch with a depth-scaled policy (see
+[initialization](TRAINING.md#initialize-deliberately)):
+
+<!-- doctest-context modular-spec
+use burn::tensor::backend::Backend;
+use transformers::{Result, architecture::DecoderSpec, models::custom::ModularCausalLm};
+
+fn fragment<B: Backend>(spec: DecoderSpec, device: B::Device) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest modular-spec -->
+```rust
+let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+let model = ModularCausalLm::<B>::init_with(spec, &policy, &device)?;
+```
 
 Modular decoding is a correctness-oriented reference path: attention layers
 cache their token history and recompute, and recurrent mixers replay their
@@ -497,6 +657,17 @@ and `run_with_hooks` validate the context once, inside the hook scope.
 
 In your own module, declare additional typed points and list them in its catalog:
 
+<!-- doctest-context custom-point
+use burn::{nn::Linear, tensor::{Tensor, backend::Backend}};
+use transformers::{Result, intervention::Hooks};
+
+fn fragment<B: Backend>(hidden: Tensor<B, 2>, readout: &Linear<B>) -> Result<()> {
+    let mut hooks = Hooks::<B>::new();
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest custom-point -->
 ```rust
 use transformers::intervention::{Axis, Point};
 

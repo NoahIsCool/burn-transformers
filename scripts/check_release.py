@@ -30,7 +30,7 @@ from coverage_binding import prepare_capture, validate_capture, read_json, requi
 
 CRATE = Path(__file__).resolve().parents[1]
 FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
-GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package", "verus")
+GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package", "verus", "guides")
 MINIMUM_BUILD_FREE_BYTES = 20 * 1024**3
 # Public experiments with fixed/random fixtures and numerical assertions. Paper
 # checkpoints have separate explicit preparation/replay protocols; never fetch
@@ -231,6 +231,122 @@ def package_directory() -> Path:
 
     package = tomllib.loads((CRATE / "Cargo.toml").read_text())["package"]
     return cargo_target_directory() / "package" / f"{package['name']}-{package['version']}"
+
+
+def guide_doctests(markdown: str) -> tuple[str, int]:
+    """Rewrite one guide so rustdoc compiles every Rust block as a doctest.
+
+    A complete block (items, or statements that need nothing undeclared)
+    compiles as written. A fragment that assumes a model, an input, or other
+    surrounding code is preceded by ``<!-- doctest NAME -->`` and compiled
+    inside the context that an HTML comment of the same guide defines::
+
+        <!-- doctest-context NAME
+        use ...;
+        fn fragment<B: Backend>(...) -> transformers::Result<()> {
+            __FRAGMENT__
+            Ok(())
+        }
+        -->
+
+    HTML comments are invisible in rendered Markdown, so the context lines
+    stay out of the reader's way; the rewrite turns them into rustdoc hidden
+    lines (``# …``) around the fragment. Blocks fenced as ``rust,ignore`` are
+    deliberately not compiled. An unknown or unused context name fails, so a
+    stale marker cannot silently stop a fragment from compiling. Returns the
+    rewritten Markdown and the number of Rust blocks that will compile.
+    """
+
+    contexts = {}
+    for match in re.finditer(r"^<!-- doctest-context ([a-z0-9-]+)\n(.*?)^-->\n", markdown, re.MULTILINE | re.DOTALL):
+        name, body = match.group(1), match.group(2).rstrip("\n").split("\n")
+        if name in contexts or sum(line.strip() == "__FRAGMENT__" for line in body) != 1:
+            raise ValueError(f"doctest context {name!r} must be unique and contain one __FRAGMENT__ line")
+        contexts[name] = body
+    text = re.sub(r"^<!-- doctest-context [a-z0-9-]+\n.*?^-->\n", "", markdown, flags=re.MULTILINE | re.DOTALL)
+    lines, output, used, compiled = text.split("\n"), [], set(), 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        fence = re.match(r"^(\s*)```(.*)$", line)
+        if not fence:
+            output.append(line)
+            index += 1
+            continue
+        info = fence.group(2).strip()
+        end = next((position for position in range(index + 1, len(lines))
+                    if lines[position].strip() == "```"), None)
+        if end is None:
+            raise ValueError(f"unclosed code fence at line {index + 1}")
+        body = lines[index + 1:end]
+        language = info.split(",")[0].strip()
+        previous = next((output[position] for position in range(len(output) - 1, -1, -1)
+                         if output[position].strip()), "")
+        marker = re.fullmatch(r"<!-- doctest ([a-z0-9-]+) -->", previous.strip())
+        if marker and language != "rust":
+            raise ValueError(f"doctest marker before a non-Rust block at line {index + 1}")
+        if language == "rust" and "ignore" not in info.split(","):
+            compiled += 1
+            if marker:
+                name = marker.group(1)
+                if name not in contexts:
+                    raise ValueError(f"unknown doctest context {name!r} at line {index + 1}")
+                used.add(name)
+                wrapped = []
+                for context_line in contexts[name]:
+                    if context_line.strip() == "__FRAGMENT__":
+                        wrapped.extend(body)
+                    else:
+                        wrapped.append(f"# {context_line}" if context_line else "#")
+                body = wrapped
+        # rustdoc compiles an unlabeled fence as Rust; label it as text instead.
+        output.extend([fence.group(1) + "```" + (info or "text"), *body, lines[end]])
+        index = end + 1
+    unused = sorted(set(contexts) - used)
+    if unused:
+        raise ValueError(f"unused doctest contexts: {unused}")
+    return "\n".join(output), compiled
+
+
+GUIDES = ("README.md", "EXPERIMENTS.md", "TRAINING.md", "V0_2_INTERFACE.md")
+
+
+def write_guide_doctests(crate: Path, directory: Path, offline: bool) -> dict:
+    """Write a scratch crate whose doctests are the Rust blocks of the guides.
+
+    The crate depends on this one by path with the source gate's features, as
+    a downstream user would, and starts from a copy of this crate's lockfile.
+    ``cargo metadata`` then adds only the scratch package, so the checked
+    command can run with ``--locked`` against the same dependency versions.
+    """
+
+    directory.mkdir(parents=True)
+    (directory / "guides").mkdir()
+    features = ", ".join(f'"{feature}"' for feature in f"{FEATURES},train".split(","))
+    manifest = tomllib.loads((crate / "Cargo.toml").read_text())
+    burn = manifest["dependencies"]["burn"]["version"]
+    (directory / "Cargo.toml").write_text(
+        "[package]\nname = \"transformers-guide-doctests\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"
+        "publish = false\n\n[lib]\npath = \"lib.rs\"\n\n[dependencies]\n"
+        f"burn = {{ version = \"{burn}\", default-features = false }}\n"
+        f"transformers = {{ path = {json.dumps(str(crate.resolve()))}, default-features = false, "
+        f"features = [{features}] }}\n\n[workspace]\n"
+    )
+    items, counts = [], {}
+    for guide in GUIDES:
+        rewritten, counts[guide] = guide_doctests((crate / guide).read_text())
+        (directory / "guides" / guide).write_text(rewritten)
+        name = "".join(part.capitalize() for part in re.split(r"[^A-Za-z0-9]+", guide.removesuffix(".md")) if part)
+        items.append(f"/// Doctests generated from `{guide}`.\n#[doc = include_str!(\"guides/{guide}\")]\npub struct {name};\n")
+    (directory / "lib.rs").write_text(
+        "//! The Rust blocks of the repository guides, compiled as doctests by\n"
+        "//! `scripts/check_release.py --gate guides`. Generated; do not edit.\n\n" + "\n".join(items)
+    )
+    shutil.copyfile(crate / "Cargo.lock", directory / "Cargo.lock")
+    subprocess.run(["cargo", "metadata", "--format-version", "1", "--manifest-path", str(directory / "Cargo.toml")]
+                   + (["--offline"] if offline else []), check=True, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.PIPE, text=True)
+    return {"guides": counts, "compiled_blocks": sum(counts.values())}
 
 
 def verus_harnesses(crate: Path) -> list[Path]:
@@ -434,6 +550,11 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
             cargo + ["package"] + manifest + locked,
             cargo + ["test", "--manifest-path", str(package_directory() / "Cargo.toml")] + locked,
         ]
+    if gate == "guides":
+        # write_guide_doctests prepares this scratch crate before the command
+        # runs; sharing the target directory reuses the source gate's build.
+        return [cargo + ["test", "--doc", "--manifest-path", str(output / "guide-doctests/Cargo.toml")]
+                + locked + ["--target-dir", str(cargo_target_directory())]]
     if gate == "verus":
         if not verus:
             raise ValueError("the verus gate needs the VERUS environment variable to name the pinned "
@@ -591,6 +712,8 @@ def main() -> int:
                     raise ValueError(f"compile storage preflight failed at {storage['checked_path']}: {reason}")
             if gate == "verus" and verus_state is None:
                 verus_state = start_verus_evidence(CRATE)
+            if gate == "guides":
+                row["guide_doctests"] = write_guide_doctests(CRATE, output / "guide-doctests", args.offline)
             if gate == "coverage":
                 if args.coverage_compiler_evidence:
                     command_environment, compiler_setup = prepare_capture(CRATE.resolve(), output.resolve(), args.toolchain, FEATURES, command_environment)

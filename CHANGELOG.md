@@ -307,6 +307,14 @@ code written against unreleased sources.
   registered experiment to survive serialization and reloading.
 - Reject packed quantized autodiff before unsupported Burn operations panic,
   including checkpoint installation; validate the explicit dequantized path.
+- Guides: two inline snippets did not compile. `ModularCausalLm::init_with(spec,
+  &ModularCausalLm::scaled_init_policy(&spec, 0.02), &device)` needed a
+  turbofish and moved `spec` before borrowing it; EXPERIMENTS.md and
+  TRAINING.md now show the two-statement form. EXPERIMENTS.md's
+  `model.activation_points()?` is `HookedModel::activation_points(&model)?`,
+  since concrete types' inherent method returns the list directly. The new
+  `scripts/check_release.py --gate guides`, which CI runs, compiles every Rust
+  block of the guides as a doctest.
 - Packaging: the source archive now includes `verus/*.rs` and
   `verus/README.md`, which `tests/verus_harness.rs` reads, so `cargo test`
   passes from the extracted archive (all three Verus structure tests failed
