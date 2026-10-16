@@ -120,8 +120,14 @@ enum MapperEffect {
 /// operations are exact ([`packed_layout_is_exact`]). Otherwise `policy` decides.
 /// Every failure leaves the parameter untouched.
 ///
-/// The mapper probe reads two tiny tensors back to the host once per call; it is
-/// a load-time cost independent of the parameter's size.
+/// The mapper probe uploads one tiny tensor, runs the mapper on it, and reads
+/// two tiny tensors back to the host, once per call: a load-time cost
+/// independent of the parameter's size. On an asynchronous backend each read
+/// synchronizes the device. The probe runs before this payload is uploaded, and
+/// Burn's `LinearLayout::Col` load mapper itself synchronizes the device twice
+/// per call, so when the previous install used such a mapper the queue is
+/// already drained: the probe's synchronizations wait only on its own tiny
+/// tensors, not on queued weight uploads.
 ///
 /// # Panics
 ///

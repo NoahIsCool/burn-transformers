@@ -1103,29 +1103,51 @@ fn load_checkpoint_with_default_options_matches_load_checkpoint() {
     assert_eq!(explicit.report, detected.report);
 }
 
-/// Reports Flex forward time and projection bytes of exact versus requantized packed installs.
+/// Reports Flex install time, forward time, and projection bytes of exact
+/// versus requantized packed installs.
 ///
-/// Run with `cargo test --release --lib packed_install_cost_report -- --ignored
-/// --nocapture`. Both graphs receive the same Q8 `[1, 32]`-block payloads for
-/// every eligible projection. The exact graph goes through the family sink
-/// (the current exact install); the requantized graph installs the same
-/// payloads with [`PackedLayoutPolicy::BackendDefault`], the policy the sink
-/// used before, which on Flex keeps QFloat storage but requantizes it. The
-/// report prints each graph's projection storage, its largest logit error
-/// relative to the full-precision source graph's largest logit, and per-call
-/// times for a 64-token prefill and a 1-token step.
+/// Run with `cargo test --locked --release --lib packed_install_cost_report --
+/// --ignored --nocapture`. Every eligible projection receives the same Q8
+/// `[1, 32]`-block payload, installed three ways:
+///
+/// - exact: [`install_packed_parameter`] under
+///   [`PackedLayoutPolicy::DequantizeWhenInexact`], the sink's current install;
+/// - former: [`install_float_parameter`], the sink's install before packed
+///   weights were made exact, which on Flex keeps QFloat storage but
+///   requantizes it through the transposing load mapper;
+/// - probe + former: [`install_packed_parameter`] under
+///   [`PackedLayoutPolicy::BackendDefault`], which stores the same blocks as
+///   the former install after running the mapper probe, so its difference
+///   from the former install is the probe's cost.
+///
+/// The report prints the time to install every packed projection each way; the
+/// projection storage bytes and the largest logit error relative to the
+/// full-precision source graph's largest logit, for the exact graph and the
+/// former (requantized) graph; and per-call times of both graphs for a
+/// 64-token prefill and a 1-token step.
+///
+/// Every timing is paired so that varying host load affects all variants
+/// alike: each of `ROUNDS` rounds times every variant back to back, rotating
+/// which goes first. The report prints the median and range of the per-round
+/// times and the median per-round ratio to the exact variant, which stays
+/// meaningful when the host's speed drifts between rounds.
 #[test]
 #[ignore = "timing report, not a correctness check"]
 fn packed_install_cost_report() {
     use std::time::Instant;
 
     use crate::checkpoint::{
-        PackedLayoutPolicy, install_packed_parameter,
+        PackedLayoutPolicy, install_float_parameter, install_packed_parameter,
         quantization::{
             QuantizationEligibility, QuantizationGroupSize, WeightQuantizationConfig,
             classify_weight_for_quantization, quantize_tensor_data,
         },
     };
+
+    /// Timing rounds per measurement; each round times every variant once.
+    const ROUNDS: usize = 9;
+    /// One way of installing a packed payload into a projection weight.
+    type Install = fn(&mut Param<Tensor<TestBackend, 2>>, TensorData);
 
     let config = Qwen3MoeConfig {
         vocab_size: 4096,
@@ -1153,9 +1175,11 @@ fn packed_install_cost_report() {
         group_size: QuantizationGroupSize::new(32).unwrap(),
         ..WeightQuantizationConfig::default()
     };
+    let template = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let mut source = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let mut exact = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let mut requantized = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let mut packed_payloads = Vec::new();
     for expected in contract.expected_tensors() {
         let shape = expected
             .shape
@@ -1171,16 +1195,48 @@ fn packed_install_cost_report() {
                     .into_burn_qfloat_data()
                     .unwrap();
                 exact.write_tensor(&expected.name, packed.clone()).unwrap();
-                // The former sink path: the mapper runs on QFloat storage.
                 let target = packed_linear_weight(&mut requantized, &expected.name);
-                install_packed_parameter(target, packed, PackedLayoutPolicy::BackendDefault)
-                    .unwrap();
+                install_float_parameter(target, packed.clone()).unwrap();
+                packed_payloads.push((expected.name.clone(), packed));
             }
             QuantizationEligibility::Excluded(_) => {
                 exact.write_tensor(&expected.name, float.clone()).unwrap();
                 requantized.write_tensor(&expected.name, float).unwrap();
             }
         }
+    }
+
+    let installs: [(&str, Install); 3] = [
+        ("exact (DequantizeWhenInexact)", |target, data| {
+            install_packed_parameter(target, data, PackedLayoutPolicy::DequantizeWhenInexact)
+                .unwrap();
+        }),
+        ("former (install_float_parameter)", |target, data| {
+            install_float_parameter(target, data).unwrap();
+        }),
+        ("probe + former (BackendDefault)", |target, data| {
+            install_packed_parameter(target, data, PackedLayoutPolicy::BackendDefault).unwrap();
+        }),
+    ];
+    let mut install_ms = [Vec::new(), Vec::new(), Vec::new()];
+    for round in 0..ROUNDS {
+        for offset in 0..installs.len() {
+            let variant = (round + offset) % installs.len();
+            let mut model = template.clone();
+            let payloads = packed_payloads.clone();
+            let started = Instant::now();
+            for (name, data) in payloads {
+                (installs[variant].1)(packed_linear_weight(&mut model, &name), data);
+            }
+            install_ms[variant].push(started.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    println!("install all {} packed projections:", packed_payloads.len());
+    for (variant, (label, _)) in installs.iter().enumerate() {
+        println!(
+            "  {label}: {}",
+            paired_timing_summary(&install_ms[variant], &install_ms[0])
+        );
     }
 
     let tokens = |count: usize| CausalLmInput {
@@ -1204,7 +1260,8 @@ fn packed_install_cost_report() {
             .unwrap()
     };
     let reference = logits(&source);
-    for (label, model) in [("exact", &exact), ("requantized", &requantized)] {
+    let graphs = [("exact", &exact), ("former (requantized)", &requantized)];
+    for (label, model) in graphs {
         let projection_bytes = model
             .lm_head
             .iter()
@@ -1236,24 +1293,65 @@ fn packed_install_cost_report() {
             .map(|(left, right)| (left - right).abs())
             .fold(0.0_f32, f32::max)
             / scale;
-        let time = |count: usize, iterations: u32| {
-            let _ = model.forward(tokens(count), &ForwardOptions::default());
-            let started = Instant::now();
-            for _ in 0..iterations {
-                let output = model
-                    .forward(tokens(count), &ForwardOptions::default())
-                    .unwrap();
-                let _ = output.logits.into_data();
-            }
-            started.elapsed().as_secs_f64() * 1e3 / f64::from(iterations)
-        };
         println!(
             "{label}: projection bytes {projection_bytes}, max |logit - source| / max |source| \
-             {gap:.3e}, prefill64 {:.2} ms, step1 {:.2} ms",
-            time(64, 20),
-            time(1, 50)
+             {gap:.3e}"
         );
     }
+    for (workload, count, iterations) in [("prefill64", 64, 5_u32), ("step1", 1, 25)] {
+        for (_, model) in graphs {
+            let _ = model.forward(tokens(count), &ForwardOptions::default());
+        }
+        let mut per_call_ms = [Vec::new(), Vec::new()];
+        for round in 0..ROUNDS {
+            for offset in 0..graphs.len() {
+                let graph = (round + offset) % graphs.len();
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    let output = graphs[graph]
+                        .1
+                        .forward(tokens(count), &ForwardOptions::default())
+                        .unwrap();
+                    let _ = output.logits.into_data();
+                }
+                per_call_ms[graph]
+                    .push(started.elapsed().as_secs_f64() * 1e3 / f64::from(iterations));
+            }
+        }
+        for (graph, (label, _)) in graphs.iter().enumerate() {
+            println!(
+                "{workload} {label}: {}",
+                paired_timing_summary(&per_call_ms[graph], &per_call_ms[0])
+            );
+        }
+    }
+}
+
+/// Returns the median of a non-empty sample; for an even count, the upper median.
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
+/// Summarizes paired per-round timings in milliseconds.
+///
+/// `samples[i]` and `baseline[i]` were measured back to back in round `i`, so
+/// their ratio cancels host-speed drift between rounds. Returns the median and
+/// range of `samples` and the median of the ratios `samples[i] / baseline[i]`.
+fn paired_timing_summary(samples: &[f64], baseline: &[f64]) -> String {
+    let ratios = samples
+        .iter()
+        .zip(baseline)
+        .map(|(sample, base)| sample / base)
+        .collect::<Vec<_>>();
+    let low = samples.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    format!(
+        "median {:.3} ms (range {low:.3}-{high:.3}), median ratio to exact {:.3}",
+        median(samples),
+        median(&ratios)
+    )
 }
 
 /// Returns the linear weight parameter a quantization-eligible Qwen3-MoE target names.
