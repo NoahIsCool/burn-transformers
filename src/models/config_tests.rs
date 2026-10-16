@@ -1020,3 +1020,80 @@ fn dense_families_accept_exactly_the_layer_bound() {
             .unwrap_or_else(|error| panic!("{} at MAX_LAYERS: {error}", case.name));
     }
 }
+
+// Transformers 5 tagged non-finite floats (review finding NUM-2).
+
+/// A topology with an optional-bounded limit pair, like Nemotron-H's `time_step_limit`.
+#[derive(Debug, Deserialize)]
+struct LimitConfig {
+    /// Lower and optional upper bound; `None` is unbounded.
+    limit: Vec<Option<f64>>,
+}
+
+impl Validate for LimitConfig {
+    /// Accepts every decoded limit; the tests inspect the decoded values.
+    fn validate(&self) -> Result<(), ConfigError> {
+        Ok(())
+    }
+}
+
+/// Transformers' tagged `+Infinity` reads as an unbounded `null`, wherever it is nested.
+///
+/// Regression for NUM-2: every Nemotron-H config written by Transformers
+/// 5's `save_pretrained` serializes `time_step_limit` as
+/// `[0.0, {"__float__": "Infinity"}]`, which failed with `invalid type: map,
+/// expected f64`.
+#[test]
+fn tagged_positive_infinity_reads_as_an_unbounded_limit() {
+    let config: LimitConfig =
+        parse_text_config(r#"{"limit":[0.0,{"__float__":"Infinity"}]}"#).unwrap();
+    assert_eq!(config.limit, [Some(0.0), None]);
+    let config: LimitConfig =
+        parse_text_config(r#"{"text_config":{"limit":[{"__float__":"Infinity"}]}}"#).unwrap();
+    assert_eq!(config.limit, [None]);
+    // The legacy bare literal and the tag decode identically.
+    let legacy: LimitConfig = parse_text_config(r#"{"limit":[0.0,Infinity]}"#).unwrap();
+    assert_eq!(legacy.limit, [Some(0.0), None]);
+}
+
+/// Tagged `-Infinity`, `NaN`, and unknown tags are errors naming the tag and its JSON path.
+#[test]
+fn other_float_tags_are_rejected_with_their_path() {
+    for (json, tag, path) in [
+        (
+            r#"{"limit":[0.0,{"__float__":"-Infinity"}]}"#,
+            "-Infinity",
+            "limit[1]",
+        ),
+        (r#"{"limit":[{"__float__":"NaN"}]}"#, "NaN", "limit[0]"),
+        (
+            r#"{"text_config":{"nested":{"x":[[{"__float__":"inf"}]]}},"limit":[]}"#,
+            "inf",
+            "text_config.nested.x[0][0]",
+        ),
+        (r#"{"__float__":"NaN"}"#, "NaN", "<root>"),
+    ] {
+        let error = parse_text_config::<LimitConfig>(json).unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, ConfigLoadError::Json(_)), "{message}");
+        assert!(
+            message.contains(&format!(r#"{{"__float__": "{tag}"}} at `{path}`"#)),
+            "{message}"
+        );
+    }
+}
+
+/// Objects Transformers does not decode stay ordinary data, and quoted text is never rewritten.
+#[test]
+fn untagged_objects_and_strings_are_left_alone() {
+    // Extra keys or a non-string tag make an ordinary object, as in Transformers.
+    let config: LimitConfig = parse_text_config(
+        r#"{"limit":[1.0],"a":{"__float__":"NaN","other":1},"b":{"__float__":1.5},"c":"{\"__float__\":\"NaN\"}"}"#,
+    )
+    .unwrap();
+    assert_eq!(config.limit, [Some(1.0)]);
+    // In a typed field such an object is still a type error.
+    let error = parse_text_config::<LimitConfig>(r#"{"limit":[{"__float__":"Infinity","x":0}]}"#)
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid type: map"), "{error}");
+}

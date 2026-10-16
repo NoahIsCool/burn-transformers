@@ -699,3 +699,112 @@ fn mtp_stage_shape_is_restricted_to_the_released_topology() {
         .validate()
         .unwrap();
 }
+
+/// `NemotronHConfig(...).to_json_string()` at the pinned Transformers revision `cfa309cf`.
+///
+/// Produced with `vocab_size=32, hidden_size=8, layers_block_type=['mamba',
+/// 'attention', 'mlp', 'moe'], num_attention_heads=2, num_key_value_heads=1,
+/// head_dim=4, max_position_embeddings=32, intermediate_size=12,
+/// ssm_state_size=3, mamba_num_heads=4, mamba_head_dim=2, n_groups=2,
+/// conv_kernel=3, chunk_size=2, n_routed_experts=4, moe_intermediate_size=6,
+/// moe_shared_expert_intermediate_size=8, num_experts_per_tok=2, n_group=2,
+/// topk_group=1, sliding_window=3`. Transformers 5 serializes the default
+/// `time_step_limit = (0.0, inf)` with its `__float__` tag, so every config it
+/// saves carries one, and it writes `sliding_window` even though its
+/// Nemotron-H graph never reads the field.
+pub(super) const TRANSFORMERS_SAVED_CONFIG: &str = r#"{
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "chunk_size": 2,
+  "conv_kernel": 3,
+  "eos_token_id": 2,
+  "expand": 2,
+  "head_dim": 4,
+  "hidden_dropout": 0.0,
+  "hidden_size": 8,
+  "initializer_range": 0.02,
+  "intermediate_size": 12,
+  "layer_norm_epsilon": 1e-05,
+  "layers_block_type": [
+    "linear_attention",
+    "full_attention",
+    "mlp",
+    "moe"
+  ],
+  "mamba_head_dim": 2,
+  "mamba_hidden_act": "silu",
+  "mamba_num_heads": 4,
+  "mamba_proj_bias": false,
+  "mamba_ssm_cache_dtype": "float32",
+  "max_position_embeddings": 32,
+  "mlp_bias": false,
+  "mlp_hidden_act": "relu2",
+  "model_type": "nemotron_h",
+  "moe_intermediate_size": 6,
+  "moe_latent_size": null,
+  "moe_shared_expert_intermediate_size": 8,
+  "moe_shared_expert_overlap": true,
+  "mtp_layers_block_type": [
+    "full_attention",
+    "moe"
+  ],
+  "n_group": 2,
+  "n_groups": 2,
+  "n_routed_experts": 4,
+  "n_shared_experts": 1,
+  "norm_topk_prob": true,
+  "num_attention_heads": 2,
+  "num_experts_per_tok": 2,
+  "num_key_value_heads": 1,
+  "num_logits_to_keep": 1,
+  "num_nextn_predict_layers": 0,
+  "pad_token_id": 0,
+  "rescale_prenorm_residual": true,
+  "residual_in_fp32": false,
+  "routed_scaling_factor": 1.0,
+  "sliding_window": 3,
+  "ssm_state_size": 3,
+  "tie_word_embeddings": false,
+  "time_step_floor": 0.0001,
+  "time_step_limit": [
+    0.0,
+    {
+      "__float__": "Infinity"
+    }
+  ],
+  "time_step_max": 0.1,
+  "time_step_min": 0.001,
+  "topk_group": 1,
+  "transformers_version": "5.17.0.dev0",
+  "use_bias": false,
+  "use_cache": true,
+  "use_conv_bias": true,
+  "use_mamba_kernels": true,
+  "vocab_size": 32
+}"#;
+
+/// A config written by the pinned Transformers `save_pretrained` loads unchanged.
+///
+/// Regression for NUM-2: its `{"__float__": "Infinity"}` time-step limit
+/// failed with `invalid type: map, expected f64`.
+#[test]
+fn transformers_saved_config_loads_with_an_unbounded_time_step_limit() {
+    use crate::models::config::ModelConfig;
+
+    let config = NemotronHConfig::from_json_str(TRANSFORMERS_SAVED_CONFIG).unwrap();
+    assert_eq!(config.time_step_limit, [Some(0.0), None]);
+    assert_eq!(config.block_count(), 4);
+    assert_eq!(config.sliding_window, Some(3));
+    for tag in ["-Infinity", "NaN"] {
+        let json = TRANSFORMERS_SAVED_CONFIG.replace(
+            r#""__float__": "Infinity""#,
+            &format!(r#""__float__": "{tag}""#),
+        );
+        let error = NemotronHConfig::from_json_str(&json).unwrap_err();
+        assert!(
+            error.to_string().contains("at `time_step_limit[1]`"),
+            "{error}"
+        );
+    }
+}

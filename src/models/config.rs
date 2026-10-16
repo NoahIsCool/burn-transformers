@@ -192,15 +192,27 @@ where
 /// Hugging Face multimodal repositories conventionally store the language backbone
 /// under `text_config`. Historic/custom repositories also use `language_config` or
 /// `llm_config`; accepting those aliases is safe because this crate intentionally
-/// ignores the vision tower. NVIDIA's original Nemotron-H files contain the
-/// non-standard JSON literal `Infinity`; it is normalized to `null`, the same
-/// representation used by newer official checkpoints for an unbounded limit.
+/// ignores the vision tower.
+///
+/// JSON has no infinity, and checkpoints spell an unbounded limit (Nemotron-H's
+/// `time_step_limit` upper bound) in two non-standard ways, both read as `null`:
+///
+/// * NVIDIA's original files contain the bare Python literal `Infinity`, which
+///   a lexical pass rewrites before parsing ([`normalize_positive_infinity`]).
+/// * Transformers 5 (`PreTrainedConfig.to_json_string`, since 5.2 and at the
+///   pinned `cfa309cf`) writes every non-finite float as a tagged object,
+///   `{"__float__": "Infinity"}`, so every config it saves carries one
+///   ([`decode_float_tags`]).
+///
+/// The tagged `-Infinity` and `NaN`, which no supported field can hold, are
+/// rejected with the JSON path of the offending value.
 pub fn parse_text_config<T>(json: &str) -> Result<T, ConfigLoadError>
 where
     T: Validate + DeserializeOwned,
 {
     let normalized = normalize_positive_infinity(json);
-    let value: serde_json::Value = serde_json::from_str(&normalized)?;
+    let mut value: serde_json::Value = serde_json::from_str(&normalized)?;
+    decode_float_tags(&mut value, &mut String::new())?;
     let text_value = ["text_config", "language_config", "llm_config"]
         .iter()
         .find_map(|key| value.get(*key).filter(|nested| !nested.is_null()))
@@ -234,6 +246,75 @@ fn normalize_positive_infinity(input: &str) -> String {
     }
     normalized.push_str(&input[copied..]);
     normalized
+}
+
+/// Object key under which Transformers 5 serializes a non-finite float.
+const FLOAT_TAG_KEY: &str = "__float__";
+
+/// Decodes Transformers 5's tagged non-finite floats in place, reporting errors at `path`.
+///
+/// Transformers' `_decode_special_floats` (pinned `cfa309cf`,
+/// `configuration_utils.py`) recognizes exactly an object whose only key is
+/// `__float__` and whose value is a string, and maps `"Infinity"`,
+/// `"-Infinity"`, and `"NaN"` to the IEEE values; any other object is
+/// ordinary data. This decoder recognizes the same objects:
+///
+/// * `"Infinity"` becomes `null`, the crate's representation of an unbounded
+///   limit (the same value the legacy `Infinity` repair produces);
+/// * `"-Infinity"`, `"NaN"`, and any other tag string are errors naming the
+///   tag and its JSON path (for example `time_step_limit[1]`), because no
+///   supported field accepts them and Transformers never writes other tags.
+///
+/// `path` is the location of `value` (empty at the root) and is restored
+/// before returning. Recursion follows the parsed document, whose depth
+/// `serde_json` already limits to 128 nested levels.
+fn decode_float_tags(
+    value: &mut serde_json::Value,
+    path: &mut String,
+) -> Result<(), serde_json::Error> {
+    use serde::de::Error as _;
+    use serde_json::Value;
+    use std::fmt::Write as _;
+
+    match value {
+        Value::Object(fields) => {
+            if fields.len() == 1
+                && let Some(Value::String(tag)) = fields.get(FLOAT_TAG_KEY)
+            {
+                if tag != "Infinity" {
+                    let location = if path.is_empty() { "<root>" } else { path };
+                    return Err(serde_json::Error::custom(format!(
+                        "unsupported float {{\"{FLOAT_TAG_KEY}\": \"{tag}\"}} at `{location}`; \
+                         only Transformers' tagged +Infinity (an unbounded limit, read as null) \
+                         is accepted"
+                    )));
+                }
+                *value = Value::Null;
+                return Ok(());
+            }
+            for (key, field) in fields.iter_mut() {
+                let restore = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(key);
+                decode_float_tags(field, path)?;
+                path.truncate(restore);
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let restore = path.len();
+                // Writing to a `String` cannot fail.
+                let _ = write!(path, "[{index}]");
+                decode_float_tags(item, path)?;
+                path.truncate(restore);
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
+    }
 }
 
 /// A token field that may contain one ID or several accepted end-of-sequence IDs.

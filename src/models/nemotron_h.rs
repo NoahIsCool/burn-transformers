@@ -195,6 +195,11 @@ pub struct NemotronHConfig {
     pub time_step_max: f64,
     /// Runtime clamp `[lower, upper]` declared by NVIDIA's remote code; `None` is `+inf`.
     ///
+    /// An unbounded upper limit is read from JSON `null`, from NVIDIA's legacy
+    /// bare `Infinity`, or from the `{"__float__": "Infinity"}` tag that
+    /// Transformers 5 writes into every config it saves (see
+    /// [`crate::models::config::parse_text_config`]).
+    ///
     /// Retained and validated as compatibility metadata. The Transformers
     /// graph this crate executes ignores it (see [`Self::time_step_min`]);
     /// NVIDIA's Nemotron Nano remote code instead clamps both paths to it,
