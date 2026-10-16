@@ -1716,12 +1716,21 @@ fn template_files_replace_configured_templates() {
     );
     // Additional templates alone still replace the config, leaving no `default`.
     let additional_only = template_file_fixture(
-        configured,
+        configured.clone(),
         &[("additional_chat_templates/tool_use.jinja", b"TOOLS")],
     );
     assert_eq!(
         loaded_templates(&additional_only),
         template_map(&[("tool_use", "TOOLS")])
+    );
+    // A directory without `.jinja` files supplies no template, so the config's stays.
+    let no_template_files = template_file_fixture(
+        configured,
+        &[("additional_chat_templates/README.md", b"not a template")],
+    );
+    assert_eq!(
+        loaded_templates(&no_template_files),
+        template_map(&[("default", "CONFIG")])
     );
     // A replaced config template is never read, so it may even be malformed.
     let malformed_config = template_file_fixture(
