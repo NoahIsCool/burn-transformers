@@ -2341,6 +2341,7 @@ fn seq2seq_defaults_report_processor_constraints_that_beam_search_ignores() {
     assert_eq!(
         seq2seq.unsupported,
         BTreeMap::from([
+            ("do_sample".to_owned(), json!(true)),
             ("min_new_tokens".to_owned(), json!(300)),
             ("min_p".to_owned(), json!(0.05)),
             ("no_repeat_ngram_size".to_owned(), json!(3)),
@@ -2361,15 +2362,100 @@ fn seq2seq_defaults_report_processor_constraints_that_beam_search_ignores() {
         causal.unsupported.keys().collect::<Vec<_>>(),
         ["min_new_tokens", "num_beams"]
     );
-    // Neutral values (zero, null, and min-p under greedy decoding) are not reported.
+    // Neutral values (zero, null, unit penalties, and warpers under greedy
+    // decoding) are not reported.
     for neutral in [
-        json!({"min_new_tokens": 0, "no_repeat_ngram_size": 0, "do_sample": true, "min_p": 0.0}),
+        json!({"min_new_tokens": 0, "no_repeat_ngram_size": 0, "do_sample": false, "min_p": 0.0}),
         json!({"min_new_tokens": null, "no_repeat_ngram_size": null, "min_p": null}),
-        json!({"do_sample": false, "min_p": 0.3}),
+        json!({"do_sample": false, "min_p": 0.3, "temperature": 0.7, "top_k": 10, "top_p": 0.9}),
+        json!({"repetition_penalty": 1.0, "presence_penalty": 0.5}),
     ] {
         let resolved = resolve(GenerationConsumer::Seq2SeqBeamSearch, neutral.clone());
         assert!(resolved.unsupported.is_empty(), "{neutral}");
     }
+}
+
+/// Seq2seq loads leave sampling and the repetition penalty neutral and report them.
+///
+/// Regression for follow-up 170 (FU-BW): `repetition_penalty` and
+/// `do_sample` with its warpers were copied into the seq2seq defaults, which
+/// beam search never reads, and were not reported, although Hugging Face
+/// beam search applies `RepetitionPenaltyLogitsProcessor` and `do_sample`
+/// selects beam sampling.
+#[test]
+fn seq2seq_defaults_report_sampling_and_repetition_penalty() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let declared = json!({
+        "repetition_penalty": 1.3,
+        "presence_penalty": 0.5,
+        "do_sample": true,
+        "temperature": 0.7,
+        "top_k": 10,
+        "top_p": 0.9,
+        "seed": 7
+    });
+    std::fs::write(&path, serde_json::to_vec(&declared).unwrap()).unwrap();
+    let resolve = |consumer| {
+        resolve_generation_defaults(consumer, root.path(), None, None, 64, None).unwrap()
+    };
+    let seq2seq = resolve(GenerationConsumer::Seq2SeqBeamSearch);
+    let neutral = GenerationConfig::default();
+    assert_eq!(seq2seq.config.strategy, SamplingStrategy::Greedy);
+    assert_eq!(
+        (
+            seq2seq.config.repetition_penalty,
+            seq2seq.config.presence_penalty,
+            seq2seq.config.temperature,
+            seq2seq.config.top_k,
+            seq2seq.config.top_p,
+        ),
+        (
+            neutral.repetition_penalty,
+            neutral.presence_penalty,
+            neutral.temperature,
+            neutral.top_k,
+            neutral.top_p,
+        )
+    );
+    assert_eq!(seq2seq.config.seed, 7);
+    assert_eq!(
+        seq2seq.unsupported,
+        BTreeMap::from([
+            ("do_sample".to_owned(), json!(true)),
+            ("repetition_penalty".to_owned(), json!(1.3)),
+            ("temperature".to_owned(), json!(0.7)),
+            ("top_k".to_owned(), json!(10)),
+            ("top_p".to_owned(), json!(0.9)),
+        ])
+    );
+    // Causal generation applies every one of them and reports none.
+    let causal = resolve(GenerationConsumer::Causal);
+    assert_eq!(causal.config.strategy, SamplingStrategy::Sample);
+    assert_eq!(
+        (
+            causal.config.repetition_penalty,
+            causal.config.presence_penalty,
+            causal.config.temperature,
+            causal.config.top_k,
+            causal.config.top_p,
+        ),
+        (1.3, 0.5, 0.7, Some(10), Some(0.9))
+    );
+    assert!(causal.unsupported.is_empty(), "{:?}", causal.unsupported);
+    // Disabled warpers are not reported even while sampling.
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"do_sample": true, "temperature": 1.0, "top_k": 0, "top_p": 1.0}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resolve(GenerationConsumer::Seq2SeqBeamSearch).unsupported,
+        BTreeMap::from([("do_sample".to_owned(), json!(true))])
+    );
 }
 
 /// An automatic T5 load reports the n-gram and minimum-length constraints its beam search ignores.
