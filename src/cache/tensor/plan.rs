@@ -82,6 +82,23 @@ pub open spec fn staged_commit_passes_before(
         ==> #[trigger] accepted[s] <= proposed[s]
 }
 
+/// `violation` is exactly why appending `tokens` at `start` leaves `capacity`.
+///
+/// `Overflow` means the end `start + tokens` is unrepresentable;
+/// `ExceedsCapacity` carries that representable end and means it passes
+/// `capacity`.
+pub(crate) open spec fn write_end_violation_exact(
+    start: usize,
+    tokens: usize,
+    capacity: usize,
+    violation: WriteEndViolation,
+) -> bool {
+    match violation {
+        WriteEndViolation::Overflow => start + tokens > usize::MAX,
+        WriteEndViolation::ExceedsCapacity { end } => end == start + tokens && end > capacity,
+    }
+}
+
 } // verus!
 
 /// Returns the next lifecycle version, wrapping after `u64::MAX`.
@@ -247,9 +264,7 @@ pub(crate) enum WriteEndViolation {
     ensures
         match result {
             Ok(end) => end == start + tokens && end <= capacity,
-            Err(WriteEndViolation::Overflow) => start + tokens > usize::MAX,
-            Err(WriteEndViolation::ExceedsCapacity { end }) =>
-                end == start + tokens && end > capacity,
+            Err(violation) => write_end_violation_exact(start, tokens, capacity, violation),
         }
 ))]
 pub(crate) fn write_end(

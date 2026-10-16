@@ -26,6 +26,8 @@ use vstd::prelude::*;
 use crate::cache::rows::row_runs;
 #[cfg(verus_keep_ghost)]
 use crate::cache::rows::{consistent, covered};
+#[cfg(verus_keep_ghost)]
+use crate::cache::tensor::plan::write_end_violation_exact;
 use crate::cache::tensor::plan::{WriteEndViolation, staging_end, write_end};
 
 #[cfg(verus_keep_ghost)]
@@ -54,6 +56,19 @@ pub open spec fn proposal_cursor(baseline: usize, staged: usize) -> int {
     if baseline + staged <= usize::MAX { baseline + staged } else { usize::MAX as int }
 }
 
+/// Row `row`'s proposal starts at its cursor `baseline + staged`, when the baseline is known.
+pub open spec fn cursor_ok(
+    starts: Seq<usize>,
+    staged: Seq<usize>,
+    baseline: Option<&[usize]>,
+    row: int,
+) -> bool {
+    match baseline {
+        Some(base) => starts[row] as int == proposal_cursor(base@[row], staged[row]),
+        None => true,
+    }
+}
+
 /// Row `row` of a staging write passes the cursor, staging, and capacity checks.
 pub open spec fn stage_row_ok(
     starts: Seq<usize>,
@@ -65,10 +80,7 @@ pub open spec fn stage_row_ok(
     row: int,
 ) -> bool {
     counts[row] == 0 || {
-        &&& match baseline {
-            Some(base) => starts[row] as int == proposal_cursor(base@[row], staged[row]),
-            None => true,
-        }
+        &&& cursor_ok(starts, staged, baseline, row)
         &&& staged[row] + counts[row] <= staging_capacity
         &&& starts[row] + counts[row] <= capacity
     }
@@ -456,7 +468,9 @@ pub(crate) enum StageViolation {
 /// cursor, staging-capacity, and logical-capacity checks; the updates then
 /// list exactly the active rows in increasing order with their new staged
 /// lengths `staged[b] + counts[b]`. A rejection names the first failing
-/// check of the first failing active row.
+/// check of the first failing active row: every earlier check of that row
+/// passed, and its operands are exact, including whether the write end
+/// overflowed or exceeded the capacity.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     requires
@@ -489,14 +503,16 @@ pub(crate) enum StageViolation {
                         &&& actual != expected
                     },
                     StageViolation::StagingCapacityExceeded { requested } => {
+                        &&& cursor_ok(starts@, staged@, baseline, row)
                         &&& requested as int == proposal_cursor(staged[row], counts[row])
                         &&& staged[row] + counts[row] > staging_capacity
                     },
                     StageViolation::WriteEnd { start, tokens, violation } => {
+                        &&& cursor_ok(starts@, staged@, baseline, row)
                         &&& start == starts[row]
                         &&& tokens == counts[row]
                         &&& staged[row] + counts[row] <= staging_capacity
-                        &&& start + tokens > capacity
+                        &&& write_end_violation_exact(start, tokens, capacity, violation)
                     },
                 }
             }
