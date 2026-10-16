@@ -20,6 +20,7 @@ use crate::{
     architecture::{RouterDiagnostics, TokenMask},
     checkpoint::TensorSink,
     models::{
+        config::{RopeParameters, RopeType},
         qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig},
         shared::{implicit_position_ids, rows::concat_rows},
     },
@@ -447,6 +448,73 @@ fn explicit_positions_and_selections_match_the_per_row_algorithm() {
         .unwrap();
         assert_outputs_close(&batched, &oracle);
     }
+}
+
+/// A context-dependent rotary policy rejects the first active row past its limit.
+///
+/// LongRoPE switches frequency tables once the evaluated context passes the
+/// original training context `L = 2`. Row 0 of the batch stays within it
+/// (two tokens), row 1 does not (three tokens), so the prefill fails with
+/// row 1's context before any cache mutation.
+#[test]
+fn context_dependent_rope_rejects_the_first_row_past_the_limit() {
+    let device = Default::default();
+    let config = Qwen3MoeConfig {
+        vocab_size: 32,
+        hidden_size: 8,
+        intermediate_size: 12,
+        num_hidden_layers: 2,
+        num_attention_heads: 2,
+        num_key_value_heads: 1,
+        head_dim: 4,
+        max_position_embeddings: 64,
+        rope_parameters: Some(RopeParameters {
+            rope_type: RopeType::LongRope,
+            factor: Some(2.0),
+            original_max_position_embeddings: Some(2),
+            short_factor: Some(vec![1.0, 1.0]),
+            long_factor: Some(vec![1.5, 2.0]),
+            ..Default::default()
+        }),
+        decoder_sparse_step: 1,
+        moe_intermediate_size: 6,
+        num_experts: 4,
+        num_experts_per_tok: 2,
+        ..Default::default()
+    };
+    let model = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    let error = model
+        .prefill(
+            masked_input(
+                &[vec![true, true, false], vec![true, true, true]],
+                3,
+                &device,
+            ),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect_err("row 1 passes the original LongRoPE window");
+    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(
+        error.to_string().contains(
+            "Qwen3 MoE cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to 3 beyond 2"
+        ),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[0, 0]);
+
+    // Within the limit every row is accepted.
+    model
+        .prefill(
+            masked_input(&[vec![true, true], vec![false, true]], 3, &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect("contexts within the original window are cacheable");
+    assert_eq!(state.lengths(), &[2, 1]);
 }
 
 /// Measures batched against per-row cached execution on a small MoE model.

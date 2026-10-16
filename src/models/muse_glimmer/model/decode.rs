@@ -52,7 +52,10 @@ use crate::{
         TensorDecodeState,
     },
     models::{
-        deepseek_v2::model::block::BlockLayout,
+        deepseek_v2::model::{
+            batch::{first_uncacheable_context, rotary_contexts},
+            block::BlockLayout,
+        },
         shared::{
             EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
             select_hidden_with_last_columns, validate_logits_selection,
@@ -66,7 +69,8 @@ use super::{
     plan_attention_chunks,
 };
 use crate::models::muse_glimmer::{
-    MuseGlimmerLayerType, MuseGlimmerTextConfig, schedule::group_slots,
+    MuseGlimmerLayerType, MuseGlimmerTextConfig,
+    schedule::{GroupFault, cache_groups},
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -503,19 +507,16 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         positions: Tensor<B, 2, Int>,
         prepared: &StatefulRows,
     ) -> Result<RotaryTables<B>> {
-        let contexts = prepared
-            .active_contexts()
-            .map(|(_, context)| context)
-            .collect::<Vec<_>>();
-        let first = contexts.first().copied().unwrap_or(1).max(1);
+        // Verified: the first active context (at least one), whether every
+        // active row shares it, and each row's own context.
+        let contexts = rotary_contexts(&prepared.token_counts, &prepared.evaluated_contexts);
         let ropes = self.model.distinct_ropes();
-        let uniform = contexts.iter().all(|&context| context == first);
-        if uniform
+        if contexts.uniform
             || ropes
                 .iter()
                 .all(|rope| !rope.scaling().is_context_dependent())
         {
-            return self.model.rotary_tables(positions, first);
+            return self.model.rotary_tables(positions, contexts.first);
         }
         let dtype = self.model.embed_tokens.weight.val().dtype();
         let [batch, block] = positions.dims();
@@ -526,10 +527,7 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                 let mut sine = Vec::with_capacity(batch);
                 let mut rotary_dimension = 0;
                 for row in 0..batch {
-                    let context = match prepared.token_counts[row] {
-                        0 => first,
-                        _ => prepared.evaluated_contexts[row].max(1),
-                    };
+                    let context = contexts.rows[row];
                     let angles = rotary_angles_from_frequencies(
                         &RotaryFrequencies::new(rope, context)?,
                         positions.clone().slice([row..row + 1, 0..block]),
@@ -633,21 +631,25 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    for (row, context) in rows.active_contexts() {
-        // A fresh prefill has no rotated keys to invalidate yet.
-        if state.tensors.lengths()[row] == 0 {
-            continue;
-        }
-        for rope in model.model.distinct_ropes() {
-            if let Some(limit) = rope.scaling().cached_context_limit()
-                && context > limit
-            {
-                return Err(Error::BackendCapability(format!(
-                    "Muse cached decoding at context {context} exceeds the {limit}-token limit of \
-                     its context-dependent rotary scaling, which would require re-rotating cached keys"
-                )));
-            }
-        }
+    // A fresh prefill has no rotated keys to invalidate yet. Verified: the
+    // first active row with cached keys whose context passes a rotary
+    // configuration's limit, rows first and configurations second.
+    let limits = model
+        .model
+        .distinct_ropes()
+        .iter()
+        .map(|rope| rope.scaling().cached_context_limit())
+        .collect::<Vec<_>>();
+    if let Some((context, limit)) = first_uncacheable_context(
+        state.tensors.lengths(),
+        &rows.token_counts,
+        &rows.evaluated_contexts,
+        &limits,
+    ) {
+        return Err(Error::BackendCapability(format!(
+            "Muse cached decoding at context {context} exceeds the {limit}-token limit of \
+             its context-dependent rotary scaling, which would require re-rotating cached keys"
+        )));
     }
     Ok(rows)
 }
@@ -660,22 +662,24 @@ fn cache_layout<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
     window: Option<usize>,
 ) -> Result<MuseGlimmerCacheLayout> {
-    let schedule_types = model.config().resolved_layer_types();
-    let sliding_count = schedule_types
+    let global = model
+        .config()
+        .resolved_layer_types()
         .iter()
-        .filter(|&&kind| kind == MuseGlimmerLayerType::SlidingAttention)
-        .count();
-    let full_count = schedule_types.len() - sliding_count;
-    let window = match (sliding_count, window) {
-        (0, _) => None,
-        (_, Some(0)) => {
+        .map(|&kind| kind == MuseGlimmerLayerType::FullAttention)
+        .collect::<Vec<_>>();
+    // Verified: exact group sizes, a ring (group 0) exactly with local layers
+    // and a non-zero window, the full group after it exactly with global
+    // layers, and every layer's (existing) group and dense slot.
+    let plan = match cache_groups(&global, window) {
+        Ok(plan) => plan,
+        Err(GroupFault::ZeroWindow) => {
             return Err(Error::configuration(
                 "muse_glimmer.decode_state.window",
                 "must be non-zero",
             ));
         }
-        (_, Some(window)) => Some(window),
-        (_, None) => {
+        Err(GroupFault::MissingWindow) => {
             return Err(Error::configuration(
                 "muse_glimmer.decode_state.window",
                 "is required by the sliding cache group",
@@ -684,66 +688,42 @@ fn cache_layout<B: Backend>(
     };
     let dtype = model.model.embed_tokens.weight.val().dtype();
     let mut groups = Vec::with_capacity(2);
-    let sliding_group = match window.and_then(NonZeroUsize::new) {
-        Some(width) => {
-            groups.push(
-                NativeKvCacheSpec::new(
-                    sliding_count,
-                    model.config().num_key_value_heads,
-                    model.config().head_dim,
-                    KvCacheStorage::MirroredSlidingRing,
-                    dtype,
-                )?
-                .with_sliding_window(width),
-            );
-            Some(groups.len() - 1)
-        }
-        None => None,
-    };
-    let full_group = if full_count > 0 {
+    if let Some(width) = plan.window.and_then(NonZeroUsize::new) {
+        groups.push(
+            NativeKvCacheSpec::new(
+                plan.sliding_layers,
+                model.config().num_key_value_heads,
+                model.config().head_dim,
+                KvCacheStorage::MirroredSlidingRing,
+                dtype,
+            )?
+            .with_sliding_window(width),
+        );
+    }
+    if plan.full_group.is_some() {
         groups.push(NativeKvCacheSpec::new(
-            full_count,
+            plan.full_layers,
             model.config().num_key_value_heads,
             model.config().head_dim,
             KvCacheStorage::Full,
             dtype,
         )?);
-        Some(groups.len() - 1)
-    } else {
-        None
-    };
-    let global = schedule_types
-        .iter()
-        .map(|&kind| kind == MuseGlimmerLayerType::FullAttention)
-        .collect::<Vec<_>>();
-    // Verified dense slots: each group's layers occupy slots 0, 1, … in order.
-    let slots = group_slots(&global);
+    }
     let schedule = global
         .iter()
-        .zip(slots)
-        .map(|(&is_global, layer)| -> Result<MuseGlimmerLayerCache> {
+        .zip(plan.groups.iter().zip(&plan.slots))
+        .map(|(&is_global, (&group, &layer))| {
             if is_global {
-                let group = full_group.ok_or_else(|| {
-                    Error::Cache(
-                        "Muse schedule contains a full layer without a full cache group".into(),
-                    )
-                })?;
-                Ok(MuseGlimmerLayerCache::Full { group, layer })
+                MuseGlimmerLayerCache::Full { group, layer }
             } else {
-                let group = sliding_group.ok_or_else(|| {
-                    Error::Cache(
-                        "Muse schedule contains a sliding layer without a sliding cache group"
-                            .into(),
-                    )
-                })?;
-                Ok(MuseGlimmerLayerCache::Sliding { group, layer })
+                MuseGlimmerLayerCache::Sliding { group, layer }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
     Ok(MuseGlimmerCacheLayout {
         schedule,
         groups,
-        window,
+        window: plan.window,
     })
 }
 

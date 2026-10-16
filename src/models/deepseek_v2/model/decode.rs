@@ -51,12 +51,16 @@ use crate::{
         EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
         select_hidden_with_last_columns, validate_logits_selection,
     },
-    position::{RopeScaling, RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
+    position::{RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };
 
 use super::{
-    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, block::BlockLayout, router_diagnostics,
+    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE,
+    batch::{first_uncacheable_context, rotary_contexts},
+    block::BlockLayout,
+    router_diagnostics,
 };
+use crate::models::deepseek_v2::plan::{LatentBytes, LatentFault, latent_cache_bytes};
 
 /// Owner named when an input tensor is on another device than the cache.
 const DECODE_STATE: &str = "DeepSeek decode state";
@@ -110,6 +114,8 @@ pub struct DeepseekV2DecodeState<B: Backend> {
     kv_rank: usize,
     /// Cached shared positional-key width.
     rope_width: usize,
+    /// Verified total and per-token byte counts of the latent planes.
+    bytes: LatentBytes,
     /// Kernel selected by the most recent successful stateful operation.
     last_path: Option<MlaExecutionPath>,
 }
@@ -155,35 +161,33 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
                 "backend cannot allocate DeepSeek MLA cache dtype {dtype:?}"
             )));
         }
-        let per_layer = batch_size
-            .checked_mul(config.capacity())
-            .and_then(|value| value.checked_mul(width))
-            .filter(|&elements| elements <= i32::MAX as usize)
-            .ok_or_else(|| {
-                Error::configuration(
-                    "deepseek_v2.decode_state",
-                    "one layer cache exceeds the portable signed tensor-index limit",
-                )
-            })?;
-        per_layer
-            .checked_mul(model.model.layers.len())
-            .and_then(|elements| elements.checked_mul(dtype.size()))
-            .ok_or_else(|| {
-                Error::configuration(
-                    "deepseek_v2.decode_state",
-                    "cache byte count overflows usize",
-                )
-            })?;
+        let layers = model.model.layers.len();
+        // Verified: one layer's elements fit `i32::MAX` and the whole cache's
+        // bytes fit `usize`; the result is the exact total and, because a
+        // state always holds a row and a slot, the exact per-token bytes of
+        // the planes allocated below from the same `layers`, `width`, and
+        // `dtype`.
+        let bytes =
+            match latent_cache_bytes(batch_size, config.capacity(), width, layers, dtype.size()) {
+                Ok(bytes) => bytes,
+                Err(LatentFault::LayerTooLarge) => {
+                    return Err(Error::configuration(
+                        "deepseek_v2.decode_state",
+                        "one layer cache exceeds the portable signed tensor-index limit",
+                    ));
+                }
+                Err(LatentFault::BytesOverflow) => {
+                    return Err(Error::configuration(
+                        "deepseek_v2.decode_state",
+                        "cache byte count overflows usize",
+                    ));
+                }
+            };
         // In-place staging writes speculative proposals into the full-history
         // slots beyond each committed length: transactions cost no memory.
-        let spec = NativeKvCacheSpec::latent(
-            model.model.layers.len(),
-            width,
-            KvCacheStorage::Full,
-            dtype,
-        )?
-        .with_staging_capacity(config.capacity())
-        .with_in_place_staging();
+        let spec = NativeKvCacheSpec::latent(layers, width, KvCacheStorage::Full, dtype)?
+            .with_staging_capacity(config.capacity())
+            .with_in_place_staging();
         let mut tensors = TensorDecodeState::new(config, batch_size, device)?;
         let group = tensors.main_mut().add_native_kv(spec)?;
         debug_assert_eq!(group, LATENT_GROUP);
@@ -191,6 +195,7 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
             tensors,
             kv_rank,
             rope_width,
+            bytes,
             last_path: None,
         })
     }
@@ -208,16 +213,21 @@ impl<B: Backend> DeepseekV2DecodeState<B> {
     }
 
     /// Returns exact physical bytes allocated by all cache tensors.
+    ///
+    /// This is `batch * capacity * bytes_per_token`, computed once by the
+    /// verified allocation preflight, so it cannot overflow.
     #[must_use]
-    pub fn allocated_bytes(&self) -> usize {
-        self.tensors.batch_size() * self.tensors.capacity() * self.bytes_per_token()
+    pub const fn allocated_bytes(&self) -> usize {
+        self.bytes.total
     }
 
     /// Returns bytes needed for one additional logical token across all layers.
+    ///
+    /// This is `(kv_rank + rope_width) * layers * scalar_bytes`, computed once
+    /// by the verified allocation preflight.
     #[must_use]
-    pub fn bytes_per_token(&self) -> usize {
-        let spec = self.spec();
-        self.scalars_per_layer_token() * spec.layers() * spec.dtype().size()
+    pub const fn bytes_per_token(&self) -> usize {
+        self.bytes.per_token
     }
 
     /// Returns the MLA path selected by the most recent successful call.
@@ -601,15 +611,11 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         positions: Tensor<B, 2, Int>,
         prepared: &StatefulRows,
     ) -> Result<RotaryAngles<B>> {
-        let contexts = prepared
-            .active_contexts()
-            .map(|(_, context)| context)
-            .collect::<Vec<_>>();
-        let first = contexts.first().copied().unwrap_or(1).max(1);
-        if !self.model.rope.scaling().is_context_dependent()
-            || contexts.iter().all(|&context| context == first)
-        {
-            return self.model.rotary_tables(positions, first);
+        // Verified: the first active context (at least one), whether every
+        // active row shares it, and each row's own context.
+        let contexts = rotary_contexts(&prepared.token_counts, &prepared.evaluated_contexts);
+        if !self.model.rope.scaling().is_context_dependent() || contexts.uniform {
+            return self.model.rotary_tables(positions, contexts.first);
         }
         let dtype = self.model.embed_tokens.weight.val().dtype();
         let [batch, block] = positions.dims();
@@ -617,10 +623,7 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         let mut sine = Vec::with_capacity(batch);
         let mut rotary_dimension = 0;
         for row in 0..batch {
-            let context = match prepared.token_counts[row] {
-                0 => first,
-                _ => prepared.evaluated_contexts[row].max(1),
-            };
+            let context = contexts.rows[row];
             let frequencies = RotaryFrequencies::new(self.model.rope, context)?;
             let angles = rotary_angles_from_frequencies(
                 &frequencies,
@@ -672,34 +675,34 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    // A fresh prefill has no rotated keys to invalidate yet.
-    for (row, context) in rows.active_contexts() {
-        if baselines[row] > 0 {
-            ensure_cached_rotary_context(model.model.rope.scaling(), context)?;
-        }
+    // Cached rotary keys were rotated with the frequencies of the context at
+    // the time they were written. Context-dependent scalings (dynamic NTK,
+    // and LongRoPE's short/long factor switch) change those frequencies
+    // beyond `RopeScaling::cached_context_limit`, so extending a non-empty
+    // cache past it would mix incompatible rotations; static scalings never
+    // invalidate keys, and a fresh prefill has no rotated keys yet. Verified:
+    // the first active row with cached keys whose context passes the limit.
+    let limits = [model.model.rope.scaling().cached_context_limit()];
+    if let Some((context, limit)) = first_uncacheable_context(
+        baselines,
+        &rows.token_counts,
+        &rows.evaluated_contexts,
+        &limits,
+    ) {
+        return Err(uncacheable_rotary_context(context, limit));
     }
     Ok(rows)
 }
 
-/// Rejects a rotary context that would invalidate keys already in the cache.
+/// Reports a rotary context that would invalidate keys already in the cache.
 ///
-/// Cached rotary keys were rotated with the frequencies of the context at
-/// the time they were written. Context-dependent scalings (dynamic NTK, and
-/// LongRoPE's short/long factor switch) change those frequencies beyond
-/// [`RopeScaling::cached_context_limit`], so extending a non-empty cache past
-/// it would mix incompatible rotations; static scalings never invalidate keys.
-///
-/// # Errors
-///
-/// Returns [`Error::BackendCapability`] for a context beyond the limit.
-fn ensure_cached_rotary_context(scaling: RopeScaling, context: usize) -> Result<()> {
-    match scaling.cached_context_limit() {
-        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
-            "DeepSeek cached decoding at context {context} exceeds the {limit}-token limit of its \
-             context-dependent rotary scaling, which would require re-rotating cached keys"
-        ))),
-        _ => Ok(()),
-    }
+/// Extending a non-empty cache from `limit` to `context` would mix the
+/// rotations of two frequency sets; re-rotating cached keys is unsupported.
+fn uncacheable_rotary_context(context: usize, limit: usize) -> Error {
+    Error::BackendCapability(format!(
+        "DeepSeek cached decoding at context {context} exceeds the {limit}-token limit of its \
+         context-dependent rotary scaling, which would require re-rotating cached keys"
+    ))
 }
 
 #[cfg(test)]

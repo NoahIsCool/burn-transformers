@@ -79,7 +79,10 @@ use crate::{
     },
 };
 
-use super::{MuseGlimmerLayerType, MuseGlimmerTextConfig, schedule::ring_chunk_keys};
+use super::{
+    MuseGlimmerLayerType, MuseGlimmerTextConfig,
+    schedule::{KeyRule, plane_elements, planning_bound, prefix_chunk_limit, ring_chunk_keys},
+};
 use crate::models::{
     config::{PartialRotary, RopeContext},
     shared::{
@@ -514,24 +517,28 @@ enum MuseKeySlicing<'a> {
 }
 
 impl MuseKeySlicing<'_> {
+    /// Returns the integer rule that fixes this slicing's key bound.
+    const fn rule(self) -> KeyRule {
+        match self {
+            Self::Aligned {
+                window: Some(window),
+            } => KeyRule::AlignedWindow { window },
+            Self::Aligned { window: None } => KeyRule::AlignedPrefix,
+            Self::RingHistory { window } => KeyRule::Ring { window },
+            Self::PrefixLimits { .. } => KeyRule::Limits,
+        }
+    }
+
     /// Returns the widest key slice of any chunk of at most `maximum_query` rows.
     ///
     /// The policy sizes its chunks with this bound, and the planner rejects
     /// any realized slice that exceeds it, so the bound is never trusted
     /// blindly. Aligned windows need `W + q - 1` keys, ring chunks at most
-    /// `(K - Q) + W - 1 + q`, and causal prefixes up to all `K` keys.
+    /// `(K - Q) + W - 1 + q`, and causal prefixes up to all `K` keys. The
+    /// formula is [`planning_bound`], whose proof also shows that no ring or
+    /// aligned slice of an admitted chunk can exceed it.
     fn planning_bound(self, queries: usize, keys: usize, maximum_query: usize) -> usize {
-        let bound = match self {
-            Self::Aligned {
-                window: Some(window),
-            } => window.saturating_add(maximum_query.saturating_sub(1)),
-            Self::Aligned { window: None } | Self::PrefixLimits { .. } => keys,
-            Self::RingHistory { window } => keys
-                .saturating_sub(queries)
-                .saturating_add(window.saturating_sub(1))
-                .saturating_add(maximum_query),
-        };
-        bound.min(keys)
+        planning_bound(self.rule(), queries, keys, maximum_query)
     }
 
     /// Returns the key slice that query rows `rows` (non-empty, in `0..Q`) may see.
@@ -571,18 +578,19 @@ impl MuseKeySlicing<'_> {
                         "a ring window must be non-zero",
                     )
                 }),
-            Self::PrefixLimits { limits } => match limits.get(rows.end - 1) {
-                Some(&limit) if limits.len() == queries && (1..=keys).contains(&limit) => {
-                    Ok(0..limit)
-                }
-                _ => Err(Error::configuration(
-                    "muse_glimmer.attention_chunk",
-                    format!(
-                        "{} key limits must cover {queries} query rows within 1..={keys}",
-                        limits.len()
-                    ),
-                )),
-            },
+            // Verified: the chunk's last row's limit, when the limits cover
+            // every query row within `1..=K`.
+            Self::PrefixLimits { limits } => prefix_chunk_limit(limits, queries, keys, rows.end)
+                .map(|limit| 0..limit)
+                .ok_or_else(|| {
+                    Error::configuration(
+                        "muse_glimmer.attention_chunk",
+                        format!(
+                            "{} key limits must cover {queries} query rows within 1..={keys}",
+                            limits.len()
+                        ),
+                    )
+                }),
         }
     }
 }
@@ -660,9 +668,8 @@ fn plan_muse_attention_chunks(
         }
         policy.validate_chunk(batch, heads, query_range.len(), key_range.len())?;
         let plane_shape = [batch, heads, query_range.len(), key_range.len()];
-        let plane_elements = plane_shape
-            .into_iter()
-            .try_fold(1usize, usize::checked_mul)
+        // Verified: exactly the product of the four extents, or `None` on overflow.
+        let plane_elements = plane_elements(batch, heads, query_range.len(), key_range.len())
             .ok_or_else(|| {
                 Error::configuration(
                     "muse_glimmer.attention_plan",

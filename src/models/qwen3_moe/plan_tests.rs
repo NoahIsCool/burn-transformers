@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 
-use super::sparse_layer;
+use super::{any_sparse_layer, listed, sparse_layer};
 
 /// The reference predicate as Transformers writes it, in wide arithmetic.
 fn reference_sparse(index: usize, step: usize, experts: usize, dense: bool) -> bool {
@@ -29,7 +29,38 @@ fn sparse_schedule_matches_the_reference_exhaustively() {
     assert!(sparse_layer(usize::MAX, 1, 4, false));
 }
 
+/// Membership and schedule existence on hand-picked schedules.
+#[test]
+fn sparse_schedule_existence_honors_dense_overrides() {
+    assert!(listed(&[3, 1], 1));
+    assert!(!listed(&[3, 1], 2));
+    assert!(!listed(&[], 0));
+    // Step one makes every block sparse unless overridden.
+    assert!(any_sparse_layer(2, 1, 4, &[0]));
+    assert!(!any_sparse_layer(2, 1, 4, &[0, 1]));
+    // Step two makes only odd blocks sparse.
+    assert!(!any_sparse_layer(1, 2, 4, &[]));
+    assert!(any_sparse_layer(2, 2, 4, &[]));
+    assert!(!any_sparse_layer(4, 2, 4, &[1, 3]));
+    assert!(!any_sparse_layer(4, 0, 4, &[]));
+    assert!(!any_sparse_layer(4, 1, 0, &[]));
+    assert!(!any_sparse_layer(0, 1, 4, &[]));
+}
+
 proptest! {
+    /// Schedule existence equals the iterator definition over every block.
+    #[test]
+    fn sparse_schedule_existence_matches_the_iterator_definition(
+        layers in 0usize..12,
+        step in 0usize..5,
+        experts in 0usize..3,
+        dense in proptest::collection::vec(0usize..12, 0..6),
+    ) {
+        let reference = (0..layers)
+            .any(|index| sparse_layer(index, step, experts, dense.contains(&index)));
+        prop_assert_eq!(any_sparse_layer(layers, step, experts, &dense), reference);
+    }
+
     /// Arbitrary indices and steps agree with the reference predicate.
     #[test]
     fn sparse_schedule_matches_the_reference(

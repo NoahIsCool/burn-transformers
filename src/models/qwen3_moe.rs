@@ -160,13 +160,14 @@ impl Qwen3MoeConfig {
     ///
     /// Block `i` is sparse when it is not in `mlp_only_layers`, the model has
     /// experts, and `(i + 1) mod decoder_sparse_step = 0` (a zero step
-    /// disables sparsity); the predicate is verified in `verus/qwen.rs`.
+    /// disables sparsity); the predicate and the membership test are verified
+    /// in `verus/qwen.rs`.
     pub fn is_moe_layer(&self, layer_index: usize) -> bool {
         plan::sparse_layer(
             layer_index,
             self.decoder_sparse_step,
             self.num_experts,
-            self.mlp_only_layers.contains(&layer_index),
+            plan::listed(&self.mlp_only_layers, layer_index),
         )
     }
 
@@ -274,7 +275,13 @@ impl Validate for Qwen3MoeConfig {
                 ));
             }
         }
-        if !(0..self.num_hidden_layers).any(|index| self.is_moe_layer(index)) {
+        // Verified: true exactly when some block satisfies `is_moe_layer`.
+        if !plan::any_sparse_layer(
+            self.num_hidden_layers,
+            self.decoder_sparse_step,
+            self.num_experts,
+            &self.mlp_only_layers,
+        ) {
             return Err(ConfigError::new(
                 FAMILY,
                 "decoder_sparse_step",

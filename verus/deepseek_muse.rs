@@ -2,31 +2,73 @@
 //!
 //! Verifies, in place, the specifications attached to
 //! `src/models/deepseek_v2/model/batch.rs`: the host planning of batched
-//! stateful execution. For all admissible inputs the proofs establish
-//! freedom from integer overflow and that
+//! stateful execution shared by DeepSeek-V2 and Muse-Glimmer. For all
+//! admissible inputs the proofs establish freedom from integer overflow and
+//! that
 //!
 //! * `row_maps` gathers exactly the valid columns into the first `n` block
-//!   entries and scatters each valid column back to its entry, every other
-//!   column to the zero row `T`;
-//! * `batch_extents` returns the widest row `T = max_b n_b` (attained) and a
-//!   key extent covering every row's cache end `L_b + n_b`;
-//! * `key_limits` returns nondecreasing limits in `1..=E` that cover every
-//!   active row's causal key prefix `L_b + i + 1`, the bound that lets
-//!   bounded attention skip keys a query chunk cannot see;
+//!   entries (padding entries gather `c_0`, or `0` for an empty row) and
+//!   scatters each valid column back to its entry, every other column to the
+//!   zero row `T`;
+//! * `batch_extents` returns exactly the widest row `T = max_b n_b` and the
+//!   furthest cache end `E = max_b (L_b + n_b)` (both attained, zero for no
+//!   rows), failing only on a length mismatch or an overflowing end;
+//! * `key_limits` returns nondecreasing limits in `1..=E` that are exactly
+//!   `max(1, max_{j <= i, n_b > j} (L_b + j + 1))`: they cover every active
+//!   row's causal key prefix and are attained by one, so bounded attention
+//!   reads no key a query prefix cannot see;
 //! * `query_slots` places entry `k < n_b` of row `b` at cache slot `L_b + k`
-//!   and keeps padding placeholders within the key extent;
+//!   and padding entries at `L_b`, within the key extent;
+//! * `identity_layout`, `query_validity`, and `implicit_positions` decide the
+//!   identity packing, the validity `k < n_b`, and the implicit positions
+//!   `L_b + k` (zero at padding) exactly; `signed_indices` converts to `i64`
+//!   exactly or reports an unrepresentable index; `clamp_limits` keeps
+//!   limits nondecreasing and in `1..=K`;
+//! * `rotary_contexts` returns the first active row's context (at least one),
+//!   whether every active context equals it, and each row's own context;
+//!   `first_uncacheable_context` names the first active row with cached keys
+//!   whose context passes a rotary configuration's cached-context limit;
+//!
+//! the specifications attached to `src/models/deepseek_v2/plan.rs`:
+//!
+//! * `sparse_layer` is exactly the `moe_layer_freq` / `first_k_dense_replace`
+//!   rule and `any_sparse_layer` decides whether some layer qualifies;
+//! * `eligible_experts` is exactly `(experts / groups) * top_groups` or
+//!   reports overflow;
+//! * `latent_cache_bytes` accepts a latent cache exactly when every
+//!   intermediate product (`batch * capacity`, then `* width`, `* layers`,
+//!   and `* scalar_bytes`) is representable and one layer's
+//!   `batch * capacity * width` elements fit `i32::MAX`, each error naming the
+//!   first failing check; it returns the exact total bytes and the per-token
+//!   bytes `width * layers * scalar_bytes` (saturated at `usize::MAX`, and
+//!   exact with `total = batch * capacity * per_token` whenever the cache has
+//!   a row and a slot), which the decode state stores as its byte accessors;
 //!
 //! and the specifications attached to `src/models/muse_glimmer/schedule.rs`:
 //!
 //! * `is_global_layer` is the backward-counted `(n - 1 - i) mod 4 = 0` rule
 //!   without underflow, and the last layer is always global;
+//!   `derived_global_layers` builds the whole schedule, which holds exactly
+//!   `ceil(n / 4)` global layers;
 //! * `group_slots` gives every layer the number of earlier layers of its kind,
 //!   so each cache group's slots are dense and strictly increasing in layer
 //!   order (an injective schedule);
 //! * `ring_chunk_keys` returns, for cached sliding attention over
 //!   `[ring history | fresh block]`, a key slice that contains every fresh key
 //!   visible to the chunk's rows, the whole ring while any row can still see
-//!   history, no history otherwise, and at most `H + W - 1 + rows` keys.
+//!   history, no history otherwise, and at most `H + W - 1 + rows` keys;
+//!   every fresh key it covers is visible to some row, so without history
+//!   it is exactly the rows' window union;
+//! * `planning_bound` is exactly the saturating per-rule formula clamped to
+//!   `K`, and no ring slice (or aligned window union of `rows + W - 1` keys)
+//!   of a chunk the policy admits exceeds it;
+//! * `prefix_chunk_limit` returns the chunk's last row limit exactly when
+//!   the limits cover every query row within `1..=K`; `plane_elements` is the
+//!   exact checked product of a score plane's extents;
+//! * `cache_groups` counts each layer kind exactly, allocates the ring
+//!   (group `0`) exactly with local layers and a non-zero window and the full
+//!   group after it exactly with global layers, and maps every layer to its
+//!   kind's existing group and dense slot.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Burn tensor
 //! programs driven by these plans (gathers, scatters, cache writes, and
@@ -40,6 +82,9 @@
 
 #[path = "../src/models/deepseek_v2/model/batch.rs"]
 pub mod batch;
+
+#[path = "../src/models/deepseek_v2/plan.rs"]
+pub mod deepseek_plan;
 
 #[path = "../src/models/muse_glimmer/schedule.rs"]
 pub mod schedule;

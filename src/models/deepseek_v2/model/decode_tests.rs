@@ -870,13 +870,22 @@ fn context_dependent_rotary_scaling_guards_cached_keys() {
     let dynamic = crate::position::RopeScaling::from(
         crate::position::DynamicNtkScaling::new(2.0, 16).unwrap(),
     );
-    assert!(ensure_cached_rotary_context(dynamic, 16).is_ok());
-    let error = ensure_cached_rotary_context(dynamic, 17).unwrap_err();
+    let limits = [dynamic.cached_context_limit()];
+    assert_eq!(first_uncacheable_context(&[4], &[1], &[16], &limits), None);
+    let (context, limit) = first_uncacheable_context(&[4], &[1], &[17], &limits).unwrap();
+    let error = uncacheable_rotary_context(context, limit);
     assert!(
         matches!(&error, Error::BackendCapability(message) if message.contains("16-token limit")),
         "{error}"
     );
-    assert!(ensure_cached_rotary_context(crate::position::RopeScaling::None, usize::MAX).is_ok());
+    // A fresh prefill and a finished row have no cached keys to invalidate.
+    assert_eq!(first_uncacheable_context(&[0], &[1], &[17], &limits), None);
+    assert_eq!(first_uncacheable_context(&[4], &[0], &[17], &limits), None);
+    let static_limits = [crate::position::RopeScaling::None.cached_context_limit()];
+    assert_eq!(
+        first_uncacheable_context(&[4], &[1], &[usize::MAX], &static_limits),
+        None
+    );
 }
 
 /// One stateful call of a scenario: rectangular tokens and validity per row.
