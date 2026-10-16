@@ -502,3 +502,23 @@ fn overflowing_mtp_fusion_width_is_rejected() {
             .is_ok()
     );
 }
+
+/// The MTP section reports `hidden_size` when its checked `2 h` width is absent.
+///
+/// Validation shadows this guard on the public path, so the section builder is
+/// called directly with dimensions whose fusion width overflowed `u64`; it
+/// must fail before recording any tensor or mapping.
+#[test]
+fn mtp_section_rejects_unrepresentable_fusion_width() {
+    let config = tiny_config();
+    let mut dimensions = Dimensions::try_from(&config).unwrap();
+    dimensions.double_hidden = None;
+    let mut expected = Vec::new();
+    let mut mappings = MappingPlan::new();
+    let error = add_mtp(&mut expected, &mut mappings, dimensions, &config).unwrap_err();
+    assert_eq!(error.architecture, FAMILY);
+    assert_eq!(error.field, "hidden_size");
+    assert_eq!(error.reason, "dimension product overflows u64");
+    assert!(expected.is_empty());
+    assert!(mappings.operations().is_empty());
+}
