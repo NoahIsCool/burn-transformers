@@ -549,6 +549,8 @@ fn dynamic_ntk_is_inert_within_the_accepted_positions() {
         .unwrap();
     let expected = serde_json::from_value::<Vec<f64>>(golden["logits"].clone()).unwrap();
     let vocabulary = expected.len() / (input_ids.len() * input_ids[0].len());
+    // Every position's logits are compared, not a prefix that `zip` would truncate to.
+    assert_eq!(logits.len(), expected.len());
     for (index, (actual, expected)) in logits.iter().zip(&expected).enumerate() {
         let position = index / vocabulary;
         if mask[position / input_ids[0].len()][position % input_ids[0].len()] == 1 {
