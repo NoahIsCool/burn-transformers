@@ -30,13 +30,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     initialization::InitPolicy,
-    models::config::{ConfigError, ModelConfig, Validate, model_type, positive_finite},
+    models::{
+        config::{ConfigError, ModelConfig, Validate, model_type, positive_finite},
+        gpt2::extents::{first_invalid_extent, product_fits},
+    },
     position::{RopeConfig, RopeScaling},
 };
 
 mod model;
 pub use model::{GptNeoXForCausalLm, GptNeoXLayer, GptNeoXModel};
 mod load;
+mod widths;
 pub use load::{GptNeoXCheckpointContract, GptNeoXCheckpointLoadError, GptNeoXLoadError};
 
 // Source topology, rotary dimensions, and allocation preflight.
@@ -143,21 +147,20 @@ impl Validate for GptNeoXConfig {
         /// Family label attached to configuration validation errors.
         const FAMILY: &str = "gpt_neox";
         model_type(FAMILY, &self.model_type, &["gpt_neox"])?;
-        for (field, value) in [
+        let fields = [
             ("vocab_size", self.vocab_size),
             ("hidden_size", self.hidden_size),
             ("num_hidden_layers", self.num_hidden_layers),
             ("num_attention_heads", self.num_attention_heads),
             ("intermediate_size", self.intermediate_size),
             ("max_position_embeddings", self.max_position_embeddings),
-        ] {
-            if value == 0 || value > i32::MAX as usize {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    field,
-                    "must be nonzero and fit a signed 32-bit tensor index",
-                ));
-            }
+        ];
+        if let Some(position) = first_invalid_extent(&fields.map(|(_, value)| value)) {
+            return Err(ConfigError::new(
+                FAMILY,
+                fields[position].0,
+                "must be nonzero and fit a signed 32-bit tensor index",
+            ));
         }
         if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(ConfigError::new(
@@ -182,16 +185,9 @@ impl Validate for GptNeoXConfig {
                 "tied GPT-NeoX embeddings are not implemented",
             ));
         }
-        if self.hidden_size.checked_mul(self.vocab_size).is_none()
-            || self
-                .hidden_size
-                .checked_mul(self.intermediate_size)
-                .is_none()
-            || self
-                .hidden_size
-                .checked_mul(self.hidden_size)
-                .and_then(|n| n.checked_mul(3))
-                .is_none()
+        if !product_fits(&[self.hidden_size, self.vocab_size])
+            || !product_fits(&[self.hidden_size, self.intermediate_size])
+            || !product_fits(&[self.hidden_size, self.hidden_size, 3])
         {
             return Err(ConfigError::new(
                 FAMILY,

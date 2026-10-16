@@ -28,7 +28,10 @@ use burn::tensor::Int;
 
 use super::*;
 use crate::{
-    experiment::AttentionPolicy, intervention::Stack, models::shared::checks::read_int_tensors,
+    experiment::AttentionPolicy,
+    intervention::Stack,
+    models::shared::checks::read_int_tensors,
+    models::t5::buckets::{bias_owners, positions_within},
 };
 use block::diagnostic_buffer;
 
@@ -149,11 +152,17 @@ impl T5EncoderRecipe {
                 std: self.config.initializer_factor,
             })
             .init(device);
-        let mut owners = BTreeMap::new();
-        let mut bias_sources = Vec::with_capacity(self.layers.len());
+        // Layer `i` shares the table of the first layer with its head count.
+        let bias_sources = bias_owners(
+            &self
+                .layers
+                .iter()
+                .map(|layer| layer.attention_heads)
+                .collect::<Vec<_>>(),
+        );
         let mut blocks = Vec::with_capacity(self.layers.len());
         for (index, specification) in self.layers.iter().enumerate() {
-            let owner = *owners.entry(specification.attention_heads).or_insert(index);
+            let owner = bias_sources[index];
             let mut block = T5Block::init(
                 &specification.config(&self.config),
                 false,
@@ -163,7 +172,6 @@ impl T5EncoderRecipe {
             block.self_attention.self_attention.attention.precision_mode =
                 specification.attention_precision;
             blocks.push(block);
-            bias_sources.push(owner);
         }
         Ok(T5Encoder {
             shared,
@@ -624,7 +632,7 @@ impl PositionSummary {
         )?;
         let (low, high) = (values[0], values[1]);
         let context = state.context.evaluated_context;
-        if !(low >= 0 && usize::try_from(high).is_ok_and(|high| high < context)) {
+        if !positions_within(low, high, context) {
             return Err(Error::configuration(
                 "execution.positions",
                 format!(

@@ -21,7 +21,8 @@
 //!   a right-padded compact batch (`batch` realizes, and `plan` plans and
 //!   verifies, its index maps);
 //! - `mtp` and `speculative`: the shifted MTP stage and lossless speculation
-//!   that verifies a whole draft in one target pass;
+//!   that verifies a whole draft in one target pass (`cycle` verifies their
+//!   extent and alignment checks);
 //! - `hooks`: activation points, [`HookedModel`](crate::architecture::HookedModel),
 //!   and [`StagedModel`](crate::architecture::StagedModel) for experiments;
 //! - `mamba2`: the family's names for the shared [`crate::mamba2`] mixer.
@@ -56,6 +57,7 @@ use crate::models::shared::{
 };
 
 mod batch;
+mod cycle;
 mod decode;
 mod hooks;
 pub mod mamba2;
@@ -737,6 +739,18 @@ impl<B: Backend> NemotronHModel<B> {
             norm: nemotron_rms_norm(config.hidden_size, config.layer_norm_epsilon, device)?,
             config,
         })
+    }
+
+    /// Lists which compact cache every block uses, in schedule order.
+    pub(super) fn cache_kinds(&self) -> Vec<plan::CacheKind> {
+        self.layers
+            .iter()
+            .map(|layer| match layer.block_type {
+                NemotronHBlockType::FullAttention => plan::CacheKind::Attention,
+                NemotronHBlockType::LinearAttention => plan::CacheKind::Recurrent,
+                NemotronHBlockType::Mlp | NemotronHBlockType::Moe => plan::CacheKind::Stateless,
+            })
+            .collect()
     }
 
     /// Counts blocks of one kind; cache groups index attention and Mamba blocks separately.

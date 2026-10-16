@@ -14,11 +14,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use buckets::BucketGeometryError;
+
 use super::config::{
     ConfigError, ModelConfig, TokenIds, Validate, model_type, nonzero, positive_finite,
     probability, token_ids,
 };
 
+mod buckets;
 mod checkpoint;
 mod generation;
 mod load;
@@ -234,38 +237,41 @@ impl T5Config {
         ] {
             nonzero(FAMILY, field, value)?;
         }
-        if self.relative_attention_num_buckets < 4 {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_num_buckets",
-                "must contain at least four buckets for bidirectional encoder attention",
-            ));
-        }
-        if !self.relative_attention_num_buckets.is_multiple_of(2) {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_num_buckets",
-                "must be even so bidirectional encoder buckets split by sign",
-            ));
-        }
-        let encoder_exact_buckets = self.relative_attention_num_buckets / 4;
-        if self.relative_attention_max_distance <= encoder_exact_buckets {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_max_distance",
-                "must exceed the encoder's exact-distance bucket region",
-            ));
-        }
-        let decoder_exact_buckets = self.relative_attention_num_buckets / 2;
-        if stacks == T5Stacks::EncoderDecoder
-            && self.relative_attention_max_distance <= decoder_exact_buckets
-        {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_max_distance",
-                "must exceed the causal decoder's exact-distance bucket region \
-                 (relative_attention_num_buckets / 2)",
-            ));
+        match buckets::bucket_geometry(
+            self.relative_attention_num_buckets,
+            self.relative_attention_max_distance,
+            stacks == T5Stacks::EncoderDecoder,
+        ) {
+            Ok(()) => {}
+            Err(BucketGeometryError::TooFewBuckets) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_num_buckets",
+                    "must contain at least four buckets for bidirectional encoder attention",
+                ));
+            }
+            Err(BucketGeometryError::OddBuckets) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_num_buckets",
+                    "must be even so bidirectional encoder buckets split by sign",
+                ));
+            }
+            Err(BucketGeometryError::EncoderDistance) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_max_distance",
+                    "must exceed the encoder's exact-distance bucket region",
+                ));
+            }
+            Err(BucketGeometryError::DecoderDistance) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_max_distance",
+                    "must exceed the causal decoder's exact-distance bucket region \
+                     (relative_attention_num_buckets / 2)",
+                ));
+            }
         }
         if !self.is_encoder_decoder {
             return Err(ConfigError::new(
