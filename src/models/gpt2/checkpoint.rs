@@ -265,6 +265,11 @@ pub enum Gpt2LoadError {
 /// Failure from configuration, namespace detection, strict planning, or streamed execution.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[expect(
+    unnameable_types,
+    reason = "public load methods return this type, so src/models/gpt2.rs must re-export it; \
+              delete this expectation in the change that adds that re-export"
+)]
 pub enum Gpt2CheckpointLoadError {
     /// The declared graph is invalid.
     #[error(transparent)]
