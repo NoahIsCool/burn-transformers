@@ -1360,3 +1360,43 @@ fn staged_execution_matches_the_fused_backbone() {
         fused.router_logits[1].to_data()
     );
 }
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, burn::tensor::Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// The tied readout equals Burn's reshaping `linear(h, Eᵀ)` up to F32 reassociation.
+///
+/// It multiplies by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_readout_matches_reshaping_linear_oracle() {
+    let device = Default::default();
+    let config = Qwen3MoeConfig {
+        tie_word_embeddings: true,
+        ..tiny_config()
+    };
+    let model =
+        Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).expect("tied tiny model");
+    assert!(model.lm_head.is_none());
+    let hidden = readout_hidden(config.hidden_size, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        model.model.embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    model
+        .project_logits(hidden)
+        .expect("tied head")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+}

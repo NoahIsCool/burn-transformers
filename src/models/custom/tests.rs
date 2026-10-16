@@ -1753,3 +1753,57 @@ fn every_mechanism_keeps_parameters_trainable() {
         audit.missing
     );
 }
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// Causal and seq2seq tied readouts equal Burn's reshaping `linear(h, Eᵀ)` within F32 rounding.
+///
+/// They multiply by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_readouts_match_reshaping_linear_oracle() {
+    let device = Default::default();
+    let mut spec = decoder(vec![layer(attention(PositionEncodingSpec::None))]);
+    spec.tie_word_embeddings = true;
+    let causal = ModularCausalLm::<TestBackend>::init(spec, &device).unwrap();
+    let width = causal.embed_tokens.weight.val().dims()[1];
+    let hidden = readout_hidden(width, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        causal.embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    causal
+        .project(hidden.clone())
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+
+    let mut spec = seq2seq_spec();
+    spec.decoder.tie_word_embeddings = true;
+    let seq2seq = ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap();
+    let width = seq2seq.decoder_embed_tokens.weight.val().dims()[1];
+    let hidden = readout_hidden(width, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        seq2seq.decoder_embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    seq2seq
+        .project_decoder(hidden)
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+}

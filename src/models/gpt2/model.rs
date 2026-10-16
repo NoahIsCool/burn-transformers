@@ -494,23 +494,22 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
     }
 
     /// Projects already normalized states with the tied token embedding.
+    ///
+    /// One rank-2 product against the transposed view of the `[vocabulary,
+    /// n_embd]` table ([`operations::matmul_transposed`]); the table is never copied.
     pub fn project(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         validate_hidden(
             &hidden,
             self.model.config.n_embd,
             &self.model.token_embedding.weight.lazy_device(),
         )?;
-        let [batch, sequence, width] = hidden.dims();
         let embedding = self.model.token_embedding.weight.val();
         if hidden.dtype() != embedding.dtype() {
             return Err(Error::BackendCapability(
                 "GPT-2 readout activations and tied embedding must share a floating dtype".into(),
             ));
         }
-        Ok(hidden
-            .reshape([batch * sequence, width])
-            .matmul(embedding.transpose())
-            .reshape([batch, sequence, self.model.config.vocab_size]))
+        operations::matmul_transposed(hidden, embedding)
     }
 
     /// Normalizes a final residual then projects it. Useful for direct-effect interventions.

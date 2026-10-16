@@ -1008,3 +1008,31 @@ proptest::proptest! {
         proptest::prop_assert_eq!(policy.resolve(path, role), expected);
     }
 }
+
+/// Column-layout heads hold contiguous storage on inference Flex after every application mode.
+///
+/// The crate's column-layout constructor stores Burn's constructed value
+/// contiguously; replacements are drawn contiguously; and `Keep` leaves the
+/// constructed (contiguous) value in place. No mode leaves a strided weight.
+#[test]
+fn column_heads_stay_contiguous_under_every_application_mode() {
+    let device = Default::default();
+    let contiguous = |model: &Model<B>| {
+        let primitive: burn::backend::flex::FlexTensor =
+            model.head.weight.val().into_primitive().tensor();
+        primitive.is_contiguous()
+    };
+    assert!(contiguous(&lazy_model::<B>(&device)));
+    let (applied, _) = InitPolicy::normal(0.02)
+        .apply(lazy_model::<B>(&device))
+        .unwrap();
+    assert!(contiguous(&applied));
+    let (deferred, _) = InitPolicy::normal(0.02)
+        .apply_lazy(lazy_model::<B>(&device))
+        .unwrap();
+    assert!(!deferred.head.weight.is_initialized());
+    assert!(contiguous(&deferred));
+    let (kept, _) = InitPolicy::keep().apply(lazy_model::<B>(&device)).unwrap();
+    assert!(contiguous(&kept));
+    assert_eq!(kept.head.weight.val().dims(), [WIDTH, VOCABULARY]);
+}

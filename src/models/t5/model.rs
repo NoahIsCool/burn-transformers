@@ -46,7 +46,7 @@
 use burn::{
     module::{Initializer, Module},
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{Bool, DType, Tensor, backend::Backend, module::linear},
+    tensor::{Bool, DType, Tensor, backend::Backend},
 };
 
 use crate::{CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result};
@@ -866,6 +866,10 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
     }
 
     /// Applies the tied/scaled or independent/unscaled vocabulary projection.
+    ///
+    /// A tied head computes `(h / sqrt(d_model)) · Eᵀ` against the transposed
+    /// view of the shared `[vocabulary, d_model]` table without copying it
+    /// ([`operations::matmul_transposed`]).
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         let hidden_device = hidden.device();
         if self.config.tie_word_embeddings {
@@ -882,7 +886,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                 PARAMETERS,
             )?;
             let hidden = hidden.mul_scalar(1.0 / (self.config.d_model as f64).sqrt());
-            return Ok(linear(hidden, self.shared.weight.val().transpose(), None));
+            return operations::matmul_transposed(hidden, self.shared.weight.val());
         }
         self.lm_head
             .as_ref()

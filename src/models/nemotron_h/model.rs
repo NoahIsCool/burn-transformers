@@ -1102,6 +1102,9 @@ impl<B: Backend> NemotronHForCausalLm<B> {
     }
 
     /// Applies the independent or tied vocabulary projection.
+    ///
+    /// A tied head multiplies by the transposed view of the embedding table
+    /// without copying it ([`operations::matmul_transposed`]).
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         #[cfg(test)]
         LOGIT_PROJECTIONS.with(|projections| projections.set(projections.get() + 1));
@@ -1116,11 +1119,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         }
         match &self.lm_head {
             Some(head) => operations::linear(hidden, head),
-            None => Ok(burn::tensor::module::linear(
-                hidden,
-                self.model.embed_tokens.weight.val().transpose(),
-                None,
-            )),
+            None => operations::matmul_transposed(hidden, self.model.embed_tokens.weight.val()),
         }
     }
 }

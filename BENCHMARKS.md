@@ -517,6 +517,191 @@ How each file is tied to its source:
   remain of them.
 - Profiles name their sampled executable in their first line.
 
+## 2026-10-15 performance follow-ups (shared host, battery power)
+
+These runs measure the follow-up branch `claude/tfm-polish-w4-perf-followups`
+against its base `ac07281` (the integrated performance pass). Commits:
+`bba1f70` reads tied vocabulary heads through `operations::matmul_transposed`;
+`a9033ac` stores randomly initialized column-layout projections contiguously
+on inference Flex; `dc6a91f` caches T5 cross-attention keys and values in
+contiguous storage at prefill. Like the series above they are **not** a
+controlled baseline: other agents compiled and tested throughout (load
+averages 7–43 at run starts), and the laptop ran on battery (76% falling to
+54%, `pmset` powermode 0). Runs of different revisions were interleaved, and
+each table reports the median of per-run medians with the range of per-run
+medians; compare best samples where contention was heavy.
+
+| Item | Value |
+| --- | --- |
+| Machine | Mac15,11, Apple M3 Max (10 performance + 4 efficiency cores, 30-core GPU), 103,079,215,104 bytes unified memory |
+| OS | macOS 27.0.1 (26A434), Darwin 27.0.0, OS-provided Metal 4 |
+| Toolchain | `rustc 1.92.0 (ded5c06cf 2025-12-08)` (`cargo +stable`), release profile, Burn 0.21.0, lockfile unchanged |
+| Features | FLAN Flex: `std,flex,tokenizers,chat-templates`; library timing harnesses: default (`std,flex`); Qwen Metal memory: `std,metal,tokenizers,chat-templates` |
+| Raw evidence | `/Volumes/bag of holding/cargo-targets/tfm-polish-w4-perf-followups-reports/` on the measurement host, authenticated by its `SHA256SUMS` manifest (see the end of this section) |
+
+### FLAN-T5-small Flex/F32 cached decode
+
+`flan::flan_small_flex_benchmark` (three warmups, ten repetitions, 128 forced
+decode steps) from the base binary built from a `git archive ac07281` export
+and the `dc6a91f` binary (SHA-256 `7cd9c072…3069`). That executable was
+first built from the uncommitted working tree whose library sources equal
+`dc6a91f`, so the reports of its first two runs name `ac07281` with modified
+files; rebuilding at `dc6a91f` reproduced the identical executable. Three
+interleaved runs each, 21:25–21:59 local time:
+
+| Source tokens | Prefill ms `ac07281` | Prefill ms `dc6a91f` | Decode tok/s `ac07281` | Decode tok/s `dc6a91f` | September 10 decode |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 23.97 (23.76–26.22) | 24.23 (23.79–24.25) | 218.4 (209.6–226.4) | 260.3 (257.4–266.6) | 233.70 |
+| 128 | 50.83 (50.33–51.11) | 54.00 (52.83–54.64) | 145.1 (144.0–150.2) | 256.7 (253.2–258.1) | 159.52 |
+| 512 | 186.08 (185.22–197.26) | 190.33 (187.87–194.68) | 61.3 (58.8–65.4) | 232.9 (230.9–236.6) | 68.38 |
+
+Cached decode is 1.2x, 1.8x and 3.8x faster and now nearly independent of the
+source length; it exceeds the September 10 controlled series at every length
+(by 11%, 61% and 3.4x), which closes the 8–18% regression recorded above. The
+cost is the one-time contiguous copy at prefill, `2 · layers · source · heads
+· d_kv` elements (8 decoder layers and 6 · 64 = 384 projected channels for
+FLAN-T5-small, so 786,432 F32 elements at 128 source tokens; about 3 ms there,
+within noise at 32 and 512), and whole-process peak footprint rose from
+472–479 MB to 509–514 MB.
+Predicted tokens are identical in every run. The FLAN-T5-small
+official-reference gate (`flan_t5_small_flex_matches_official_reference`)
+reproduces the earlier Flex output hashes bit for bit, and a unit test shows
+that decode logits from the contiguous cache equal those from the former
+strided view exactly.
+
+### Tied vocabulary readout and random-initialization layout on Flex/F32
+
+The ignored `models::custom::tests::perf::tied_vocabulary_decode_throughput`
+harness times batch-one cached decode (32-token prompt, 32 decode steps,
+two warmups) of seeded random models: `modular-tiny` (width 64, vocabulary
+1,024, two attention layers), `modular-small` (width 576, vocabulary 49,152 as
+in SmolLM-135M, four layers) and `qwen3.5-small` (Qwen3.5-0.8B's width 1,024
+and 248,320-token vocabulary, three DeltaNet layers and one attention layer).
+All three were built with the same harness source (SHA-256 `9e242c02…b616`)
+on top of `ac07281`, `bba1f70` and `dc6a91f`, and run three times each,
+interleaved, 21:49–21:57 local time:
+
+| Model | Decode tok/s `ac07281` | `bba1f70` (tied readout) | `dc6a91f` (+ contiguous init) | Prefill ms `ac07281` / `bba1f70` / `dc6a91f` |
+| --- | ---: | ---: | ---: | --- |
+| modular-tiny | 358 (225–1,261) | 1,172 (691–1,222) | 1,346 (1,285–1,351) | 2.49 / 0.66 / 0.62 |
+| modular-small | 7.5 (6.1–8.2) | 49.9 (48.6–51.5) | 53.1 (31.5–53.6) | 121.9 / 16.3 / 15.4 |
+| qwen3.5-small | 5.9 (5.3–6.3) | 19.9 (19.5–19.9) | 22.2 (21.8–22.5) | 190.4 / 74.5 / 77.2 |
+
+Before `bba1f70` every tied readout copied the whole table per call (113 MB
+for `modular-small`, 1.02 GB for `qwen3.5-small` in F32), prefill included,
+which is why prefill also fell 7.5x and 2.6x. Reading the transposed view
+directly makes decode 6.6x and 3.4x faster; contiguous random initialization
+adds a further 6% and 11% (single-row products against strided weights are
+about twice as slow on Flex, but other work dominates a whole step). The tiny
+model is overhead-bound and its `ac07281` runs coincided with load averages
+up to 43: its best samples (1,281, 1,273 and 1,383 tok/s) differ by at most
+8%, within the contention spread. An earlier round with the harness's
+unseeded first version agreed (decode 8.2, 49.4 and 54.9 tok/s for `modular-small`; 6.6,
+19.8 and 22.3 tok/s for `qwen3.5-small`). Final-logit checksums agree to F32
+reassociation (for example 2189.550982 versus 2189.548077 over 49,152
+logits); `bba1f70` and
+`dc6a91f` are bit-identical for the modular models, while contiguous storage
+reassociates the Qwen hybrid's projections (103.546148 versus 103.541986 over
+248,320 logits). Every family's new unit test bounds the readout difference
+against the former `module::linear` formulation by `1e-6`.
+
+On the real tied checkpoint, Qwen3.5-0.8B (`2fc06364`) loaded on Flex/F32,
+a load-and-decode probe built against `ac07281` and `ce602d1` (sources and
+executables in the evidence manifest; two interleaved processes each,
+22:32–22:33 local time, load averages 21–28) prefilled the official 23-token
+reference prompt and decoded 16 greedy tokens three times per process:
+prefill took 314–380 ms at `ac07281` and 215–227 ms at `ce602d1`, and decode
+ran at 5.0–5.5 and 11.8–12.1 tok/s (2.2x). Both matched the official
+Transformers prompt logits at cosine `0.999999169` (maximum absolute error
+`0.019312` and `0.019309`) and all 17 reference greedy tokens; their own
+last-position logits differ by at most `2.5e-5` (largest logit magnitude 21.1).
+Peak footprint was 4.74–4.77 GB in both.
+
+The existing gpt-oss batched-versus-row-by-row timing test (width 1,024, eight
+rows, 32 steps) ran in the same binaries: the row-by-row path, which runs
+single-row products, took 1.41 s (1.32–3.92), 1.31 s (1.27–1.36) and 1.09 s
+(1.05–2.22) at the three revisions, while the batched path stayed at 1.73–2.55
+s. At width 256 neither path changed beyond noise.
+
+### Qwen3.5-0.8B Metal/F16 process memory
+
+The footprint increase recorded above (4.37 GB at `e4011b9` versus the
+2,907,412,480-byte, 2.91 GB, peak of the September 9 benchmark run) is **not**
+a regression of the polish pass. September's supervised memory runs peaked at
+3,014,105,216 bytes (3.01 GB) on September 9
+([record](acceptance/measurements/qwen3.5-0.8b-metal-memory-20260909-supervisor.json),
+the first column of the table below) and 2,977,486,656 bytes (2.98 GB) on
+September 10
+([record](acceptance/measurements/small-model-performance-20260910/qwen-memory-phase-summary.json)).
+The supervised memory run (`scripts/profile_process_memory.py`
+around `qwen::qwen35_metal_baseline_benchmark`, one Metal job at a time) was
+repeated on today's host for three source revisions: `103c6ff` (this
+repository's September 10 state), `5ab1fa6` (the pre-polish `main`, September
+12) and `ac07281`, and once more at this branch's `9e04750` after review
+fixes (22:54–22:58 local time, AC power, load averages 19–26, no other test
+binary running). Sampled per-phase maxima of physical footprint (resident set
+in parentheses), in GB of 10⁹ bytes, each the maximum over all repetitions of
+that phase:
+
+| Phase | September 9 supervised run, macOS 15.7.9 | `103c6ff` | `5ab1fa6` | `ac07281` | `9e04750` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| strict load | 2.781 (2.518) | 4.310 (2.546) | 4.309 (2.564) | 4.369 (2.642) | 4.367 (2.641) |
+| cold prefill | 2.622 | 4.162 (1.844) | 4.162 (1.842) | 4.184 (1.845) | 4.176 (1.842) |
+| 32 tokens, decode | 2.818 | 4.218 (1.871) | 4.197 (1.855) | 4.205 (1.862) | 4.197 (1.857) |
+| 128 tokens, prefill | 2.679 | 2.591 (0.269) | 3.164 (0.838) | 2.589 (0.259) | 2.588 (0.254) |
+| 512 tokens, decode | 3.000 | 2.737 (0.269) | 2.770 (0.292) | 2.806 (0.263) | 2.804 (0.258) |
+| natural greedy | 3.014 | 2.736 (0.269) | 2.766 (0.292) | 2.801 (0.263) | 2.789 (0.258) |
+| kernel lifetime maximum | 3.014 | 4.310 | 4.309 | 4.369 | 4.367 |
+
+Source code from September 10 reproduces the 4.31 GB peak on macOS 27.0.1
+(Metal 4), so the increase follows the operating-system change from macOS
+15.7.9 (Metal 3). On the current OS about 1.6 GB of CPU-visible memory
+(resident set 1.84 GB after load) stays allocated after strict load and is
+released later, during the warm 32-token series (at its 5th to 10th of 13
+prefill/decode repetitions in these four runs), without any call from
+this crate, consistent with the CubeCL memory pool's periodic deallocation;
+steady-state footprint afterwards (2.59–2.81 GB) is below the September
+values. The polish pass adds 60 MB (1.4%) to the load peak and changes the
+later phases by at most 70 MB. A separate load-only probe built against
+`dc6a91f` showed that `Backend::memory_cleanup` after loading, and even
+dropping the loaded model, release none of it (footprint 4.12–4.13 GB before
+and after), so the retention lies in the backend's allocator rather than in
+any tensor this crate keeps alive.
+
+The `9e04750` run also checks the tied vocabulary readout on Metal. This
+branch computes Qwen3.5-0.8B's tied head as one rank-2 product against the
+transposed embedding view instead of `module::linear`'s rank-3 broadcast.
+The benchmark's in-run official-reference checks reproduce the `ac07281` run
+digit for digit: prompt-logit cosine `0.9999985227492314`, minimum cached-row
+cosine `0.9999976706692852` and minimum teacher-row cosine
+`0.9999962022545661` over the 32 reference rows, the same 32 greedy tokens,
+and identical predicted tokens in every timed series. On this batch-one path
+both formulations issue the same `[source, 1024] · [1024, 248,320]` product
+to CubeCL's non-autotuned matmul, so identical F16 logits are expected. With
+several rows the former formulation ran a broadcast batch of per-row products
+while the new one runs a single `[rows · positions, 1024]` product, so CubeCL
+may choose a different kernel there; the padded two-row case in
+`tests/qwen35_release_api.rs` was not run here and remains for the
+release-gate rerun. The run recorded commit `9e04750` with a clean worktree
+and rustc 1.92.0. Peak footprint is unchanged (4.367 GB versus 4.369 GB).
+
+### Evidence manifest (follow-ups)
+
+Every report, log, supervisor sample file, probe source and timed executable
+behind this section is listed with its SHA-256 in `SHA256SUMS` in the
+raw-evidence directory named above; that manifest itself has SHA-256
+`f6b95fbb14bc0cb8e3566b20db0e0a9abdd6ad7e8a128a48fdf51906b1ae99f0`. (It
+extends the first published manifest, SHA-256 `127fbc75…8250`, with the
+`9e04750` Metal run, its executable, the final FLAN-T5-small gate log and the
+run-comparison script; the earlier entries are unchanged.)
+Executables of note: FLAN Flex `ac07281` `6c79ea31…9bdb` and `dc6a91f`
+`7cd9c072…3069`; library timing binaries
+`26fefbbb…4e7f` (`ac07281` + harness), `1c8e918f…6f47` (`bba1f70` + harness)
+and `f7eafb90…af4a` (`dc6a91f` + harness); Qwen Metal `103c6ff`
+`f2517245…4663`, `5ab1fa6` `ad783adc…2bcf`, `ac07281` `ad1e4c5f…444b` and
+`9e04750` `cf1f04a5…9de6`;
+Qwen Flex probe `ac07281` `0fdd0d03…d077` and `ce602d1` `8938eac6…db5b`.
+
 ## Current smoke evidence
 
 These values establish correctness progress only. They include cold loading or

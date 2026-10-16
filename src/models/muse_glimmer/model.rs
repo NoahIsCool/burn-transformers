@@ -58,7 +58,7 @@ use burn::{
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
     tensor::{
         Bool, DType, Int, Tensor, activation::sigmoid, backend::Backend,
-        module::linear as tensor_linear, ops::AttentionModuleOptions,
+        ops::AttentionModuleOptions,
     },
 };
 
@@ -1311,12 +1311,17 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
     }
 }
 
-/// Applies a tied embedding matrix as a vocabulary projection.
+/// Applies a tied `[vocabulary, hidden]` embedding matrix as a vocabulary projection.
+///
+/// `logits[b, t, v] = Σ_i hidden[b, t, i] · E[v, i]`, computed by
+/// [`crate::operations::matmul_transposed`] against the transposed view of `E`,
+/// which never copies the table (Burn's `module::linear` copies it on Flex on
+/// every call).
 fn tied_projection<B: Backend>(
     hidden: Tensor<B, 3>,
     embedding: Tensor<B, 2>,
 ) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, hidden_width] = hidden.dims();
+    let hidden_width = hidden.dims()[2];
     let [vocabulary, embedding_width] = embedding.dims();
     if hidden_width != embedding_width || vocabulary == 0 {
         return Err(Error::shape(
@@ -1325,7 +1330,7 @@ fn tied_projection<B: Backend>(
             format!("[{vocabulary}, {embedding_width}]"),
         ));
     }
-    Ok(tensor_linear(hidden, embedding.transpose(), None).reshape([batch, sequence, vocabulary]))
+    crate::operations::matmul_transposed(hidden, embedding)
 }
 
 /// Translates one RoPE layer's configuration with the shared translator.
