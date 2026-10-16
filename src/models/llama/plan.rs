@@ -20,7 +20,8 @@
 //!   interior padding into a right-padded block (`compaction_sources`), and
 //!   the gathers that restore the rectangular layout with exact zeros
 //!   (`scatter_sources` from a compact row, `restore_slots` from any run
-//!   offset).
+//!   offset), composed for one row by `plan_row_step` and for the whole
+//!   batch by `plan_step`, which chooses between slicing and gathering.
 //!
 //! A batched step places row `b`'s `n_b` new tokens in block slots
 //! `[c_b, c_b + n_b)`. Slot `t` in that run is the token at absolute cache
@@ -1044,6 +1045,524 @@ pub(crate) fn restore_slots(
         }
     }
     slots
+}
+
+// The whole step.
+
+/// One row's share of a batched step block.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowStep {
+    /// `[block]` cache position of each slot, in Burn's signed index type.
+    pub(crate) positions: Vec<i64>,
+    /// `[block]` flags: the slot holds one of the row's new tokens.
+    pub(crate) valid: Vec<bool>,
+    /// `[sequence]` block slot restoring each input column (`block` is the zero slot).
+    pub(crate) restore: Vec<usize>,
+    /// `[block]` input column gathered into each slot; empty for a sliced block.
+    pub(crate) sources: Vec<usize>,
+    /// Slot of the row's last new token (slot zero for an inactive row).
+    pub(crate) last: usize,
+}
+
+/// The integer layout of one batched step.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StepPlan {
+    /// First input column of a sliced block; `None` when interior padding forces a gather.
+    pub(crate) offset: Option<usize>,
+    /// Block width `Q`.
+    pub(crate) block: usize,
+    /// First block slot `c_b` of each row's new tokens.
+    pub(crate) columns: Vec<usize>,
+    /// Each row's slots.
+    pub(crate) rows: Vec<RowStep>,
+}
+
+/// Why a batched step cannot be planned.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepPlanError {
+    /// No row appends a token.
+    NoActiveRow,
+    /// A row's end position `L_b + n_b` overflows `usize`.
+    PositionOverflow,
+    /// A cache position exceeds `i64::MAX`, Burn's index range.
+    PositionBeyondI64,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Each later entry of a strictly increasing sequence exceeds an earlier one by the index gap.
+pub proof fn lemma_increasing_gaps(s: Seq<usize>, i: int, j: int)
+    requires
+        forall|a: int, b: int| 0 <= a < b < s.len() ==> s[a] < s[b],
+        0 <= i <= j < s.len(),
+    ensures
+        s[j] >= s[i] + (j - i),
+    decreases j - i,
+{
+    if i < j {
+        lemma_increasing_gaps(s, i, j - 1);
+    }
+}
+
+/// Strictly increasing entries spanning `n - 1` are consecutive.
+pub proof fn lemma_run_is_consecutive(s: Seq<usize>)
+    requires
+        forall|a: int, b: int| 0 <= a < b < s.len() ==> s[a] < s[b],
+        s.len() > 0,
+        s[s.len() - 1] - s[0] == s.len() - 1,
+    ensures
+        forall|k: int| 0 <= k < s.len() ==> #[trigger] s[k] == s[0] + k,
+{
+    assert forall|k: int| 0 <= k < s.len() implies #[trigger] s[k] == s[0] + k by {
+        lemma_increasing_gaps(s, 0, k);
+        lemma_increasing_gaps(s, k, s.len() - 1);
+    }
+}
+
+/// A row's valid columns form one run (the empty row trivially).
+pub open spec fn is_run(s: Seq<usize>) -> bool {
+    s.len() == 0 || s[s.len() - 1] - s[0] == s.len() - 1
+}
+
+/// Every row's valid columns are strictly increasing and below `sequence`.
+pub open spec fn rows_sorted_below(rows: Seq<Vec<usize>>, sequence: int) -> bool {
+    forall|b: int| 0 <= b < rows.len() ==> #[trigger] sorted_unique_below(rows[b]@, sequence)
+}
+
+/// Cache position of slot `t` for a row appending `count` tokens at `start` from slot `column`.
+pub open spec fn slot_position(start: int, column: int, count: int, t: int) -> int {
+    if column <= t < column + count {
+        start + (t - column)
+    } else {
+        fill_position(start, count)
+    }
+}
+
+/// First block slot of a row: its offset into a sliced window, else zero.
+pub open spec fn first_slot(columns: Seq<usize>, lo: int, sliced: bool) -> int {
+    if sliced && columns.len() > 0 {
+        columns[0] - lo
+    } else {
+        0
+    }
+}
+
+/// `step` is exactly the share of the block of a row with valid `columns`.
+pub(crate) open spec fn row_step_matches(
+    step: RowStep,
+    columns: Seq<usize>,
+    start: int,
+    column: int,
+    block: int,
+    sequence: int,
+    gathered: bool,
+) -> bool {
+    let count = columns.len() as int;
+    &&& step.positions.len() == block
+    &&& forall|t: int| 0 <= t < block ==>
+        #[trigger] step.positions@[t] as int == slot_position(start, column, count, t)
+    &&& step.valid.len() == block
+    &&& forall|t: int| 0 <= t < block ==> #[trigger] step.valid@[t] == (column <= t < column + count)
+    &&& step.restore.len() == sequence
+    &&& forall|k: int| 0 <= k < count ==> step.restore@[columns[k] as int] == column + k
+    &&& forall|j: int| 0 <= j < sequence ==> #[trigger] step.restore@[j] <= block
+    &&& forall|j: int| 0 <= j < sequence && step.restore@[j] < block ==>
+        column <= step.restore@[j] && columns[step.restore@[j] - column] == j
+    &&& if gathered {
+        &&& step.sources.len() == block
+        &&& forall|k: int| 0 <= k < count ==> #[trigger] step.sources@[k] == columns[k]
+        &&& forall|k: int| count <= k < block ==>
+            #[trigger] step.sources@[k] == if count > 0 { columns[0] } else { 0usize }
+    } else {
+        step.sources.len() == 0
+    }
+    &&& step.last == if column + count > 0 { column + count - 1 } else { 0 }
+    &&& step.last < block
+}
+
+} // verus!
+
+/// Plans one row's slots of a step block of width `block`.
+///
+/// The row's `n` valid `columns` occupy block slots `[column, column + n)`
+/// and append at cache position `start`. Proved: the positions, slot
+/// flags, restoring gather, compaction gather (only when `gathered`), and
+/// last-token slot are exactly those of `row_step_matches`; an error means
+/// `start + n` overflows `usize` or a position exceeds `i64::MAX`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(step =>
+    requires
+        sorted_unique_below(columns@, sequence as int),
+        column + columns.len() <= block,
+        block > 0,
+    ensures
+        match step {
+            Ok(step) => row_step_matches(
+                step,
+                columns@,
+                start as int,
+                column as int,
+                block as int,
+                sequence as int,
+                gathered,
+            ),
+            Err(StepPlanError::PositionOverflow) => start + columns.len() > usize::MAX,
+            Err(StepPlanError::PositionBeyondI64) => start + columns.len() > i64::MAX,
+            Err(StepPlanError::NoActiveRow) => false,
+        },
+))]
+pub(crate) fn plan_row_step(
+    columns: &[usize],
+    sequence: usize,
+    start: usize,
+    column: usize,
+    block: usize,
+    gathered: bool,
+) -> Result<RowStep, StepPlanError> {
+    let count = columns.len();
+    let Some(cache) = slot_positions(start, column, count, block) else {
+        return Err(StepPlanError::PositionOverflow);
+    };
+    let mut positions: Vec<i64> = Vec::with_capacity(block);
+    let mut slot: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            slot <= block,
+            cache.len() == block,
+            column + count <= block,
+            count == columns.len(),
+            positions.len() == slot,
+            forall|t: int| 0 <= t < block ==> #[trigger] cache@[t] <= start + count,
+            forall|t: int| 0 <= t < block ==>
+                #[trigger] cache@[t] as int == slot_position(start as int, column as int, count as int, t),
+            forall|t: int| 0 <= t < slot ==> #[trigger] positions@[t] as int == cache@[t] as int,
+        decreases block - slot,
+    ))]
+    while slot < block {
+        match i64::try_from(cache[slot]) {
+            Ok(position) => positions.push(position),
+            Err(_) => return Err(StepPlanError::PositionBeyondI64),
+        }
+        slot += 1;
+    }
+    let mut valid: Vec<bool> = Vec::with_capacity(block);
+    let mut slot: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            slot <= block,
+            column + count <= block,
+            valid.len() == slot,
+            forall|t: int| 0 <= t < slot ==> #[trigger] valid@[t] == (column <= t < column + count),
+        decreases block - slot,
+    ))]
+    while slot < block {
+        valid.push(slot >= column && slot - column < count);
+        slot += 1;
+    }
+    let restore = restore_slots(columns, sequence, block, column);
+    let sources = if gathered {
+        compaction_sources(columns, block)
+    } else {
+        Vec::new()
+    };
+    let last = (column + count).saturating_sub(1);
+    Ok(RowStep {
+        positions,
+        valid,
+        restore,
+        sources,
+        last,
+    })
+}
+
+/// Plans a batched step of rows with valid `valid_columns` appending at cursors `starts`.
+///
+/// When every row's valid columns form one run, the block is the narrowest
+/// input window `[lo, hi)` holding every valid column (one slice); otherwise
+/// every row is compacted into a right-padded block as wide as the longest
+/// row (one gather). Proved: `NoActiveRow` exactly when no row has a valid
+/// column; for a slice, every row's `k`-th valid column is input column
+/// `lo + c_b + k` (so slots `[c_b, c_b + n_b)` hold exactly its tokens), the
+/// window lies inside the input and is minimal (some row starts at `lo`,
+/// some row ends at `hi`); for a gather, some row is not a run, every
+/// `c_b = 0`, and the block is the longest row; in both, every row fits its
+/// block (`c_b + n_b <= Q`, so the per-row plans' preconditions hold) and
+/// each row's slots are exactly `row_step_matches`. Position errors come
+/// from a row whose end position overflows.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(plan =>
+    requires
+        starts.len() == valid_columns.len(),
+        rows_sorted_below(valid_columns@, sequence as int),
+    ensures
+        match plan {
+            Err(StepPlanError::NoActiveRow) => forall|b: int| 0 <= b < valid_columns.len() ==>
+                #[trigger] valid_columns@[b].len() == 0,
+            Err(StepPlanError::PositionOverflow) => exists|b: int| 0 <= b < valid_columns.len()
+                && #[trigger] starts@[b] + valid_columns@[b].len() > usize::MAX,
+            Err(StepPlanError::PositionBeyondI64) => exists|b: int| 0 <= b < valid_columns.len()
+                && #[trigger] starts@[b] + valid_columns@[b].len() > i64::MAX,
+            Ok(plan) => {
+                &&& exists|b: int| 0 <= b < valid_columns.len() && #[trigger] valid_columns@[b].len() > 0
+                &&& plan.block > 0
+                &&& plan.columns.len() == valid_columns.len()
+                &&& plan.rows.len() == valid_columns.len()
+                &&& forall|b: int| 0 <= b < valid_columns.len() ==>
+                    plan.columns@[b] + #[trigger] valid_columns@[b].len() <= plan.block
+                &&& forall|b: int| 0 <= b < valid_columns.len() ==> #[trigger] row_step_matches(
+                    plan.rows@[b],
+                    valid_columns@[b]@,
+                    starts@[b] as int,
+                    plan.columns@[b] as int,
+                    plan.block as int,
+                    sequence as int,
+                    plan.offset.is_none(),
+                )
+                &&& match plan.offset {
+                    Some(lo) => {
+                        &&& forall|b: int| 0 <= b < valid_columns.len() ==>
+                            #[trigger] is_run(valid_columns@[b]@)
+                        &&& lo + plan.block <= sequence
+                        &&& forall|b: int, k: int|
+                            0 <= b < valid_columns.len() && 0 <= k < valid_columns@[b].len()
+                            ==> #[trigger] valid_columns@[b]@[k] == lo + plan.columns@[b] + k
+                        &&& forall|b: int| 0 <= b < valid_columns.len()
+                            && #[trigger] valid_columns@[b].len() == 0 ==> plan.columns@[b] == 0
+                        &&& exists|b: int| 0 <= b < valid_columns.len()
+                            && #[trigger] valid_columns@[b].len() > 0 && plan.columns@[b] == 0
+                        &&& exists|b: int| 0 <= b < valid_columns.len()
+                            && plan.columns@[b] + #[trigger] valid_columns@[b].len() == plan.block
+                    },
+                    None => {
+                        &&& exists|b: int| 0 <= b < valid_columns.len()
+                            && !#[trigger] is_run(valid_columns@[b]@)
+                        &&& forall|b: int| 0 <= b < valid_columns.len() ==> #[trigger] plan.columns@[b] == 0
+                        &&& exists|b: int| 0 <= b < valid_columns.len()
+                            && #[trigger] valid_columns@[b].len() == plan.block
+                    },
+                }
+            },
+        },
+))]
+pub(crate) fn plan_step(
+    valid_columns: &[Vec<usize>],
+    starts: &[usize],
+    sequence: usize,
+) -> Result<StepPlan, StepPlanError> {
+    let batch = valid_columns.len();
+    // Pass 1: the common window, whether every row is a run, and the longest row.
+    let mut lo: usize = usize::MAX;
+    let mut hi: usize = 0;
+    let mut active = false;
+    let mut contiguous = true;
+    let mut widest: usize = 0;
+    let mut row: usize = 0;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! {
+        let ghost mut lo_row: int = 0;
+        let ghost mut hi_row: int = 0;
+        let ghost mut wide_row: int = 0;
+        let ghost mut broken_row: int = 0;
+    }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= batch,
+            batch == valid_columns.len(),
+            rows_sorted_below(valid_columns@, sequence as int),
+            active == exists|b: int| 0 <= b < row && #[trigger] valid_columns@[b].len() > 0,
+            active ==> lo < hi && hi <= sequence,
+            forall|b: int| 0 <= b < row && #[trigger] valid_columns@[b].len() > 0 ==> {
+                &&& lo <= valid_columns@[b]@[0]
+                &&& valid_columns@[b]@[valid_columns@[b].len() - 1] + 1 <= hi
+            },
+            active ==> 0 <= lo_row < row && valid_columns@[lo_row].len() > 0
+                && valid_columns@[lo_row]@[0] == lo,
+            active ==> 0 <= hi_row < row && valid_columns@[hi_row].len() > 0
+                && valid_columns@[hi_row]@[valid_columns@[hi_row].len() - 1] + 1 == hi,
+            contiguous ==> forall|b: int| 0 <= b < row ==> #[trigger] is_run(valid_columns@[b]@),
+            !contiguous ==> 0 <= broken_row < row && !is_run(valid_columns@[broken_row]@),
+            forall|b: int| 0 <= b < row ==> #[trigger] valid_columns@[b].len() <= widest,
+            widest > 0 ==> 0 <= wide_row < row && valid_columns@[wide_row].len() == widest,
+        decreases batch - row,
+    ))]
+    while row < batch {
+        let columns = valid_columns[row].as_slice();
+        let count = columns.len();
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(sorted_unique_below(valid_columns@[row as int]@, sequence as int));
+        }
+        if count > 0 {
+            // Strict increase orders the row's last column after its first.
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                if count > 1 {
+                    assert(columns@[0] < columns@[count - 1]);
+                }
+            }
+            if !active || columns[0] < lo {
+                lo = columns[0];
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lo_row = row as int;
+                }
+            }
+            if !active || columns[count - 1] + 1 > hi {
+                hi = columns[count - 1] + 1;
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    hi_row = row as int;
+                }
+            }
+            active = true;
+        }
+        if !is_one_run(columns) {
+            contiguous = false;
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                broken_row = row as int;
+            }
+        }
+        if count > widest {
+            widest = count;
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                wide_row = row as int;
+            }
+        }
+        row += 1;
+    }
+    if !active {
+        return Err(StepPlanError::NoActiveRow);
+    }
+    let block = if contiguous { hi - lo } else { widest };
+    // Every row fits the block: a run ends by `hi`, and no row is longer than the widest.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(valid_columns@[lo_row].len() <= widest);
+        assert forall|b: int| 0 <= b < batch implies
+            #[trigger] first_slot(valid_columns@[b]@, lo as int, contiguous)
+                + valid_columns@[b].len() <= block by {
+            if contiguous && valid_columns@[b].len() > 0 {
+                assert(is_run(valid_columns@[b]@));
+            }
+        }
+    }
+    let gathered = !contiguous;
+    let mut columns_out: Vec<usize> = Vec::with_capacity(batch);
+    let mut rows_out: Vec<RowStep> = Vec::with_capacity(batch);
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= batch,
+            batch == valid_columns.len(),
+            starts.len() == batch,
+            block > 0,
+            gathered == !contiguous,
+            rows_sorted_below(valid_columns@, sequence as int),
+            contiguous ==> forall|b: int| 0 <= b < batch ==> #[trigger] is_run(valid_columns@[b]@),
+            forall|b: int| 0 <= b < batch && #[trigger] valid_columns@[b].len() > 0 ==>
+                lo <= valid_columns@[b]@[0],
+            forall|b: int| 0 <= b < batch ==>
+                #[trigger] first_slot(valid_columns@[b]@, lo as int, contiguous)
+                    + valid_columns@[b].len() <= block,
+            columns_out.len() == row,
+            rows_out.len() == row,
+            forall|b: int| 0 <= b < row ==>
+                #[trigger] columns_out@[b] as int == first_slot(valid_columns@[b]@, lo as int, contiguous),
+            forall|b: int| 0 <= b < row ==> #[trigger] row_step_matches(
+                rows_out@[b],
+                valid_columns@[b]@,
+                starts@[b] as int,
+                columns_out@[b] as int,
+                block as int,
+                sequence as int,
+                gathered,
+            ),
+        decreases batch - row,
+    ))]
+    while row < batch {
+        let columns = valid_columns[row].as_slice();
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(columns@ == valid_columns@[row as int]@);
+            assert(sorted_unique_below(valid_columns@[row as int]@, sequence as int));
+            assert(first_slot(valid_columns@[row as int]@, lo as int, contiguous)
+                + valid_columns@[row as int].len() <= block);
+        }
+        let column = if contiguous && !columns.is_empty() {
+            columns[0] - lo
+        } else {
+            0
+        };
+        let step = match plan_row_step(columns, sequence, starts[row], column, block, gathered) {
+            Ok(step) => step,
+            Err(error) => {
+                // The failing row witnesses the reported overflow.
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    match error {
+                        StepPlanError::PositionOverflow => {
+                            assert(starts@[row as int] + valid_columns@[row as int].len() > usize::MAX);
+                        }
+                        StepPlanError::PositionBeyondI64 => {
+                            assert(starts@[row as int] + valid_columns@[row as int].len() > i64::MAX);
+                        }
+                        StepPlanError::NoActiveRow => {}
+                    }
+                }
+                return Err(error);
+            }
+        };
+        columns_out.push(column);
+        rows_out.push(step);
+        row += 1;
+    }
+    // A run's k-th column is its first plus k, which places it at slot c_b + k.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|b: int, k: int|
+            contiguous && 0 <= b < batch && 0 <= k < valid_columns@[b].len()
+            implies #[trigger] valid_columns@[b]@[k] == lo + columns_out@[b] + k by {
+            assert(is_run(valid_columns@[b]@));
+            assert(sorted_unique_below(valid_columns@[b]@, sequence as int));
+            lemma_run_is_consecutive(valid_columns@[b]@);
+        }
+    }
+    if contiguous {
+        // The rows attaining `lo` and `hi` start and end the sliced window.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(columns_out@[lo_row] == 0);
+            assert(is_run(valid_columns@[hi_row]@));
+            assert(columns_out@[hi_row] + valid_columns@[hi_row].len() == block);
+        }
+        Ok(StepPlan {
+            offset: Some(lo),
+            block,
+            columns: columns_out,
+            rows: rows_out,
+        })
+    } else {
+        // The widest row sets the block, and some row is not a run.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(valid_columns@[wide_row].len() == block);
+            assert(!is_run(valid_columns@[broken_row]@));
+        }
+        Ok(StepPlan {
+            offset: None,
+            block,
+            columns: columns_out,
+            rows: rows_out,
+        })
+    }
 }
 
 #[cfg(test)]

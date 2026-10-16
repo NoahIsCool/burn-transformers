@@ -20,14 +20,15 @@
 //! Results return to the caller's `[batch, S]` columns by one gather from the
 //! block extended with a zero slot: column `j = v_k` (the row's `k`-th valid
 //! column) reads slot `c_b + k`, every padded column reads the zero slot, so
-//! padding gets exact zeros. The integer plans come from the Verus-verified
-//! functions in `plan.rs`.
+//! padding gets exact zeros. The integer plan is the Verus-verified
+//! `plan_step` in `plan.rs`, which also proves that every row fits the
+//! block, so the per-row plans it composes are called within their contracts.
 
 use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{Error, Result, architecture::bool_tensor_from_values, models::shared::StatefulRows};
 
-use super::super::plan::{compaction_sources, is_one_run, restore_slots, slot_positions};
+use super::super::plan::{StepPlanError, plan_step};
 
 /// How the block is cut from the rectangular input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,10 +66,15 @@ pub(super) struct StepLayout {
     valid: Vec<bool>,
     /// Row-major `[batch, sequence]` block slot restoring each input column (`block` = zero slot).
     restore: Vec<usize>,
+    /// Block slot of each row's last new token (slot zero for an inactive row).
+    last: Vec<usize>,
 }
 
 impl StepLayout {
     /// Plans the step of validated `rows` appending at committed lengths `starts`.
+    ///
+    /// The integer layout is the Verus-verified `plan_step`; this wrapper
+    /// only maps its errors and concatenates its per-row plans row-major.
     ///
     /// # Errors
     ///
@@ -77,73 +83,50 @@ impl StepLayout {
     /// position overflows `usize` or `i64`.
     pub(super) fn plan(rows: &StatefulRows, starts: &[usize]) -> Result<Self> {
         let (batch, sequence) = (rows.batch, rows.sequence);
-        let valid_columns = &rows.valid_indices;
-        let active = valid_columns.iter().filter(|columns| !columns.is_empty());
-        let (lo, hi) = active.fold((usize::MAX, 0), |(lo, hi), columns| {
-            (lo.min(columns[0]), hi.max(columns[columns.len() - 1] + 1))
-        });
-        if hi == 0 {
-            return Err(Error::shape(
-                "decoder.step",
-                "at least one row with a new token",
-                "only inactive rows",
-            ));
+        let plan =
+            plan_step(&rows.valid_indices, starts, sequence).map_err(|error| match error {
+                StepPlanError::NoActiveRow => Error::shape(
+                    "decoder.step",
+                    "at least one row with a new token",
+                    "only inactive rows",
+                ),
+                StepPlanError::PositionOverflow => Error::configuration(
+                    "decoder.step.positions",
+                    "a cache position overflows usize",
+                ),
+                StepPlanError::PositionBeyondI64 => {
+                    Error::configuration("decoder.step.positions", "a cache position exceeds i64")
+                }
+            })?;
+        let block = plan.block;
+        let mut positions = Vec::with_capacity(batch * block);
+        let mut valid = Vec::with_capacity(batch * block);
+        let mut restore = Vec::with_capacity(batch * sequence);
+        let mut sources = Vec::new();
+        let mut last = Vec::with_capacity(batch);
+        for row in plan.rows {
+            positions.extend(row.positions);
+            valid.extend(row.valid);
+            restore.extend(row.restore);
+            sources.extend(row.sources);
+            last.push(row.last);
         }
-        let contiguous = valid_columns.iter().all(|columns| is_one_run(columns));
-        let (source, block) = if contiguous {
-            (BlockSource::Slice { offset: lo }, hi - lo)
-        } else {
-            let block = rows.token_counts.iter().copied().max().unwrap_or(0);
-            let sources = valid_columns
-                .iter()
-                .flat_map(|columns| compaction_sources(columns, block))
-                .collect();
-            (BlockSource::Gather { sources }, block)
+        let source = match plan.offset {
+            Some(offset) => BlockSource::Slice { offset },
+            None => BlockSource::Gather { sources },
         };
-        let columns: Vec<usize> = valid_columns
-            .iter()
-            .map(|columns| match (&source, columns.first()) {
-                (BlockSource::Slice { offset }, Some(&first)) => first - offset,
-                _ => 0,
-            })
-            .collect();
-        let mut layout = Self {
+        Ok(Self {
             batch,
             sequence,
             block,
             source,
+            columns: plan.columns,
             counts: rows.token_counts.clone(),
-            columns,
-            positions: Vec::with_capacity(batch * block),
-            valid: Vec::with_capacity(batch * block),
-            restore: Vec::with_capacity(batch * sequence),
-        };
-        for row in 0..batch {
-            layout.plan_row(row, starts[row], &valid_columns[row])?;
-        }
-        Ok(layout)
-    }
-
-    /// Appends row `row`'s slot positions, slot flags, and restore indices.
-    fn plan_row(&mut self, row: usize, start: usize, valid_columns: &[usize]) -> Result<()> {
-        let (column, count) = (self.columns[row], self.counts[row]);
-        let positions = slot_positions(start, column, count, self.block).ok_or_else(|| {
-            Error::configuration("decoder.step.positions", "a cache position overflows usize")
-        })?;
-        for position in positions {
-            self.positions.push(i64::try_from(position).map_err(|_| {
-                Error::configuration("decoder.step.positions", "a cache position exceeds i64")
-            })?);
-        }
-        self.valid
-            .extend((0..self.block).map(|slot| (column..column + count).contains(&slot)));
-        self.restore.extend(restore_slots(
-            valid_columns,
-            self.sequence,
-            self.block,
-            column,
-        ));
-        Ok(())
+            positions,
+            valid,
+            restore,
+            last,
+        })
     }
 
     /// Returns whether every block slot holds a new token (no padding slot).
@@ -280,13 +263,7 @@ impl StepLayout {
     ) -> Result<Tensor<B, 3>> {
         let [batch, _, width] = block_states.dims();
         let device = block_states.device();
-        let last: Vec<usize> = self
-            .columns
-            .iter()
-            .zip(&self.counts)
-            .map(|(&column, &count)| (column + count).saturating_sub(1))
-            .collect();
-        let index = int_tensor(&last, [batch, 1], &device)?
+        let index = int_tensor(&self.last, [batch, 1], &device)?
             .unsqueeze_dim::<3>(2)
             .expand([batch, 1, width]);
         let selected = block_states.gather(1, index);

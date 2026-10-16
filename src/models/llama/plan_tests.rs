@@ -316,3 +316,98 @@ proptest! {
         }
     }
 }
+
+/// Runs are sliced from their narrowest common window; interior padding is gathered.
+#[test]
+fn step_plans_slice_runs_and_gather_interior_padding() {
+    let plan = plan_step(&[vec![2, 3], vec![1, 2]], &[5, 0], 4).unwrap();
+    assert_eq!(plan.offset, Some(1));
+    assert_eq!(plan.block, 3);
+    assert_eq!(plan.columns, [1, 0]);
+    assert_eq!(plan.rows[0].positions, [6, 5, 6]);
+    assert_eq!(plan.rows[0].valid, [false, true, true]);
+    assert_eq!(plan.rows[0].restore, [3, 3, 1, 2]);
+    assert!(plan.rows[0].sources.is_empty());
+    assert_eq!((plan.rows[0].last, plan.rows[1].last), (2, 1));
+
+    let gathered = plan_step(&[vec![0, 2], vec![], vec![3]], &[1, 4, 0], 4).unwrap();
+    assert_eq!(gathered.offset, None);
+    assert_eq!(gathered.block, 2);
+    assert_eq!(gathered.columns, [0, 0, 0]);
+    assert_eq!(gathered.rows[0].sources, [0, 2]);
+    assert_eq!(gathered.rows[1].sources, [0, 0]);
+    assert_eq!(gathered.rows[1].positions, [3, 3]);
+    assert_eq!(gathered.rows[1].valid, [false, false]);
+    assert_eq!(gathered.rows[2].sources, [3, 3]);
+    assert_eq!(gathered.rows[2].restore, [2, 2, 2, 0]);
+}
+
+/// Steps without active rows and positions beyond `usize` or `i64` are rejected.
+#[test]
+fn step_plans_reject_idle_batches_and_overflowing_positions() {
+    assert_eq!(
+        plan_step(&[vec![], vec![]], &[3, 0], 2),
+        Err(StepPlanError::NoActiveRow)
+    );
+    assert_eq!(
+        plan_step(&[vec![0], vec![0]], &[0, usize::MAX], 1),
+        Err(StepPlanError::PositionOverflow)
+    );
+    let beyond = usize::try_from(i64::MAX).unwrap();
+    assert_eq!(
+        plan_step(&[vec![0, 1]], &[beyond], 2),
+        Err(StepPlanError::PositionBeyondI64)
+    );
+    assert!(plan_step(&[vec![0]], &[beyond], 1).is_ok());
+}
+
+proptest! {
+    /// Step plans reproduce every row's tokens, positions, and restoration.
+    #[test]
+    fn step_plans_match_a_direct_layout(
+        rows in prop::collection::vec((sorted_columns(8), 0usize..20), 1..5),
+    ) {
+        let columns: Vec<Vec<usize>> = rows.iter().map(|(columns, _)| columns.clone()).collect();
+        let starts: Vec<usize> = rows.iter().map(|&(_, start)| start).collect();
+        let plan = plan_step(&columns, &starts, 8);
+        if columns.iter().all(Vec::is_empty) {
+            prop_assert_eq!(plan, Err(StepPlanError::NoActiveRow));
+            return Ok(());
+        }
+        let plan = plan.unwrap();
+        let widest = columns.iter().map(Vec::len).max().unwrap();
+        for (row, valid) in columns.iter().enumerate() {
+            let (column, count, step) = (plan.columns[row], valid.len(), &plan.rows[row]);
+            prop_assert!(column + count <= plan.block);
+            for slot in 0..plan.block {
+                // The block's slot holds input column `source` of this row.
+                let source = match plan.offset {
+                    Some(offset) => offset + slot,
+                    None => step.sources[slot],
+                };
+                let inside = (column..column + count).contains(&slot);
+                prop_assert_eq!(step.valid[slot], inside);
+                if inside {
+                    prop_assert_eq!(source, valid[slot - column]);
+                    prop_assert_eq!(step.positions[slot] as usize, starts[row] + slot - column);
+                }
+            }
+            for (input, &slot) in step.restore.iter().enumerate() {
+                let expected = valid.iter().position(|&c| c == input).map_or(plan.block, |k| column + k);
+                prop_assert_eq!(slot, expected);
+            }
+            prop_assert_eq!(step.last, (column + count).saturating_sub(1));
+        }
+        match plan.offset {
+            Some(offset) => {
+                let lo = columns.iter().filter_map(|c| c.first()).min().unwrap();
+                let hi = columns.iter().filter_map(|c| c.last()).max().unwrap() + 1;
+                prop_assert_eq!((offset, plan.block), (*lo, hi - lo));
+            }
+            None => {
+                prop_assert_eq!(plan.block, widest);
+                prop_assert!(!columns.iter().all(|c| is_one_run(c)));
+            }
+        }
+    }
+}

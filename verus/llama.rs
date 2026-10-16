@@ -20,12 +20,22 @@
 //!   the layers; `group_indices` numbers the allocated groups densely, full
 //!   storage first; `truncation_leaves_bytes` is exactly "some row is
 //!   shortened to a nonzero length", the condition that clears clean tails;
-//! - batched steps: the contiguous-run test of a row's valid columns, the
-//!   cache positions of a block's slots (exact `start + (t - column)` inside
-//!   the run, the fill position elsewhere, and no overflow), the compaction
-//!   gather of interior-padded rows, and the two restoring gathers (from a
-//!   compact row, and from a run at any block offset) with their appended
-//!   zero slot.
+//! - batched steps: `plan_step` plans the whole `[batch, Q]` block. It fails
+//!   with `NoActiveRow` exactly when no row has a token; when every row is a
+//!   run it slices the minimal input window `[lo, hi)` (some row starts at
+//!   `lo`, some ends at `hi`) and places row `b`'s `k`-th valid column at
+//!   slot `c_b + k` (input column `lo + c_b + k`); otherwise it gathers into a
+//!   block as wide as the longest row with every `c_b = 0`; every row fits
+//!   (`c_b + n_b <= Q`), which discharges the contracts of the per-row
+//!   plans it composes, and a position error names a row whose end overflows.
+//!   `plan_row_step` gives each row exactly its slot positions (as `i64`),
+//!   slot flags `c_b <= t < c_b + n_b`, restoring gather, compaction gather,
+//!   and in-range last-token slot. The per-row plans are the contiguous-run
+//!   test, the cache positions of a block's slots (exact
+//!   `start + (t - column)` inside the run, the fill position elsewhere, and
+//!   no overflow), the compaction gather of interior-padded rows, and the two
+//!   restoring gathers (from a compact row, and from a run at any block
+//!   offset) with their appended zero slot.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
