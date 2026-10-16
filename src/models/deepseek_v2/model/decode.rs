@@ -122,18 +122,16 @@ pub struct DeepseekV2DecodeState<B: Backend> {
 
 impl<B: Backend> DeepseekV2DecodeState<B> {
     /// Allocates one `[batch, 1, capacity, kv_rank + rope_width]` latent per MLA layer.
+    ///
+    /// MLA keeps the full history, so a cache-level sliding window is ignored
+    /// exactly as every other family ignores it: the architecture, not the
+    /// [`CacheConfig`], decides what each layer retains.
     fn new(
         model: &DeepseekV2ForCausalLm<B>,
         config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self> {
-        if config.sliding_window().is_some() {
-            return Err(Error::BackendCapability(
-                "DeepSeek-V2 MLA uses full-history storage; sliding cache eviction is unsupported"
-                    .into(),
-            ));
-        }
         let limit = model.config().max_position_embeddings;
         if config.capacity() > limit {
             return Err(Error::configuration(

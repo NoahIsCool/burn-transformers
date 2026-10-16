@@ -655,21 +655,13 @@ fn decode_state_batch_must_match_the_cache_sequence_count() {
     );
 }
 
-/// Families that reject a `CacheConfig` sliding window until the follow-up to SI-3 lands.
-///
-/// DeepSeek-V2 still fails allocation with `Error::BackendCapability` (its
-/// decode-state constructor checks the field); every other family ignores it.
-const WINDOW_REJECTED: &[&str] = &["DeepSeek-V2"];
-
 /// A `CacheConfig` sliding window never changes a model family's retention.
 ///
 /// Families derive per-layer windows from their architecture; the cache-level
 /// window only sizes raw cache-bank rings that have no window of their own.
 /// Allocating with a window of two and decoding past it must therefore give
-/// exactly the logits of the same cache without a window, for T5, the modular
-/// model and every registered causal family except those in
-/// [`WINDOW_REJECTED`], which must refuse the windowed configuration with
-/// `Error::BackendCapability` instead of allocating.
+/// exactly the logits of the same cache without a window, for every
+/// registered causal family, T5, and the modular model.
 #[test]
 fn cache_sliding_window_never_changes_model_family_retention() {
     let device = Default::default();
@@ -709,18 +701,11 @@ fn cache_sliding_window_never_changes_model_family_retention() {
         materialize_registry_parameters(&model);
         let expected = run_causal(&model, plain, &options, &device).unwrap();
         let windowed_run = run_causal(&model, windowed, &options, &device);
-        if WINDOW_REJECTED.contains(&name) {
-            assert!(
-                matches!(windowed_run, Err(Error::BackendCapability(_))),
-                "{name}: {windowed_run:?}"
-            );
-        } else {
-            assert_eq!(
-                bits(windowed_run.unwrap()),
-                bits(expected),
-                "{name} must ignore the cache window"
-            );
-        }
+        assert_eq!(
+            bits(windowed_run.unwrap_or_else(|error| panic!("{name}: {error:?}"))),
+            bits(expected),
+            "{name} must ignore the cache window"
+        );
     }
     let modular =
         crate::models::custom::ModularCausalLm::<TestBackend>::init(tiny_modular(), &device)

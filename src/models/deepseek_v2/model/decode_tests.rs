@@ -401,6 +401,8 @@ fn cache_configuration_and_lifecycle_errors_are_contextual() {
             .new_decode_state(CacheConfig::new(2, 8).unwrap(), 1, &device)
             .is_err()
     );
+    // A cache-level window is ignored like in every other family; MLA keeps
+    // the full history regardless.
     assert!(
         model
             .new_decode_state(
@@ -411,7 +413,7 @@ fn cache_configuration_and_lifecycle_errors_are_contextual() {
                 1,
                 &device,
             )
-            .is_err()
+            .is_ok()
     );
     assert!(
         model

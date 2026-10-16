@@ -9,8 +9,8 @@
 //! configuration (a Mistral or Gemma sliding window, for example), so the
 //! optional window here never changes what a model remembers; it is the
 //! default ring width of raw cache banks built directly from a
-//! [`CacheConfig`]. Every family ignores it except DeepSeek-V2, which rejects
-//! a windowed configuration, so family-generic code should leave it unset.
+//! [`CacheConfig`]. Every family ignores it, so one configuration serves
+//! every family.
 
 use core::fmt;
 use core::num::NonZeroUsize;
@@ -21,14 +21,11 @@ use core::num::NonZeroUsize;
 /// sliding window is the ring width of raw [`TensorCacheBank`] and
 /// [`NativeKvCache`] sliding-ring groups that carry no window of their own; it
 /// never changes absolute token positions. Model decode states take each
-/// layer's window from the architecture instead, so the field never changes
-/// what a model retains: every family ignores it except DeepSeek-V2, which
-/// fails allocation with [`Error::BackendCapability`] when it is set. Leave the
-/// window unset in configurations shared across model families.
+/// layer's window from the architecture instead and ignore this field, so one
+/// configuration serves every family.
 ///
 /// [`TensorCacheBank`]: super::TensorCacheBank
 /// [`NativeKvCache`]: super::NativeKvCache
-/// [`Error::BackendCapability`]: crate::Error::BackendCapability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheConfig {
     /// Number of independently tracked sequences, always nonzero.
@@ -62,8 +59,7 @@ impl CacheConfig {
     ///
     /// Groups with their own window keep it, full-storage groups ignore it,
     /// and model families size retention from their architecture, so this
-    /// does not make a model forget older tokens. DeepSeek-V2 rejects a
-    /// configuration that sets it; every other family ignores it.
+    /// does not make a model forget older tokens.
     ///
     /// # Errors
     ///
