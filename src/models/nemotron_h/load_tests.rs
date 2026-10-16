@@ -710,3 +710,312 @@ fn optional_projections_loaded_cache_and_mtp_outputs_are_nonzero() {
     assert!(values.iter().all(|value| value.is_finite()));
     assert!(values.iter().any(|value| value.abs() > 1e-3));
 }
+
+/// Writes `target` with a one-element payload and returns the sink's typed error.
+fn sink_error(model: &mut NemotronHForCausalLm<TestBackend>, target: &str) -> NemotronHLoadError {
+    model
+        .write_tensor(target, TensorData::from([0.0_f32]))
+        .expect_err(target)
+}
+
+/// Every malformed, out-of-range, unknown, or schedule-absent target names its cause.
+#[test]
+fn sink_dispatch_rejects_every_malformed_or_absent_target_with_its_cause() {
+    let device = Default::default();
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let unknown = [
+        "model.unknown.weight",
+        "model.layers.0.unknown.weight",
+        "model.layers.0.mamba.unknown",
+        "model.layers.1.attention.unknown",
+        "model.layers.2.mlp.unknown",
+        "model.layers.3.moe.unknown",
+        "model.layers.3.moe.shared.unknown",
+        "model.layers.3.moe.routed.0.unknown",
+        "next_token_head.unknown",
+        "next_token_head.attention.unknown",
+        "next_token_head.moe.unknown",
+    ];
+    for target in unknown {
+        assert_eq!(
+            sink_error(&mut model, target),
+            NemotronHLoadError::UnknownTarget {
+                target: target.into()
+            }
+        );
+    }
+    let invalid = [
+        ("model.layers.4.norm.weight", "block 4 is outside 0..4"),
+        (
+            "model.layers.0",
+            "expected `model.layers.<index>.<parameter>`",
+        ),
+        ("model.layers.0.", "parameter suffix must not be empty"),
+        (
+            "model.layers.-1.norm.weight",
+            "`-1` is not a decimal usize: invalid digit found in string",
+        ),
+        (
+            "model.layers.3.moe.routed.0",
+            "expected `routed.<index>.<parameter>`",
+        ),
+        (
+            "model.layers.3.moe.routed.x.up_proj.weight",
+            "invalid expert index `x`: invalid digit found in string",
+        ),
+        (
+            "model.layers.3.moe.routed.4.up_proj.weight",
+            "expert 4 is outside 0..4",
+        ),
+        (
+            "next_token_head.moe.routed.9.down_proj.weight",
+            "expert 9 is outside 0..4",
+        ),
+    ];
+    for (target, reason) in invalid {
+        assert_eq!(
+            sink_error(&mut model, target),
+            NemotronHLoadError::InvalidIndex {
+                target: target.into(),
+                reason: reason.into()
+            }
+        );
+    }
+    let missing = [
+        (
+            "model.layers.1.mamba.in_proj.weight",
+            "Mamba2 mixer selected by the block schedule",
+        ),
+        (
+            "model.layers.0.attention.q_proj.weight",
+            "attention mixer selected by the block schedule",
+        ),
+        (
+            "model.layers.3.mlp.up_proj.weight",
+            "dense MLP selected by the block schedule",
+        ),
+        (
+            "model.layers.2.moe.router.weight",
+            "routed MoE selected by the block schedule",
+        ),
+        (
+            "model.layers.0.mamba.in_proj.bias",
+            "configured linear bias",
+        ),
+        (
+            "model.layers.0.mamba.out_proj.bias",
+            "configured linear bias",
+        ),
+        (
+            "model.layers.1.attention.o_proj.bias",
+            "configured linear bias",
+        ),
+        ("model.layers.2.mlp.up_proj.bias", "configured linear bias"),
+        (
+            "model.layers.3.moe.fc1_latent_proj.weight",
+            "first routed-expert latent projection",
+        ),
+        (
+            "model.layers.3.moe.fc2_latent_proj.weight",
+            "second routed-expert latent projection",
+        ),
+    ];
+    for (target, component) in missing {
+        assert_eq!(
+            sink_error(&mut model, target),
+            NemotronHLoadError::MissingComponent {
+                target: target.into(),
+                component
+            }
+        );
+    }
+    // No rejected target initialized a parameter as a side effect.
+    assert!(!model.model.embed_tokens.weight.is_initialized());
+    assert!(!model.model.layers[0].norm.weight.is_initialized());
+}
+
+/// Optional components absent from a configuration are reported, not silently skipped.
+#[test]
+fn sink_rejects_components_the_configuration_omits() {
+    let device = Default::default();
+    // A tied head, no MTP stage, and an unbiased convolution.
+    let config = NemotronHConfig {
+        num_nextn_predict_layers: 0,
+        use_conv_bias: false,
+        ..tiny_config(true)
+    };
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    for (target, component) in [
+        (
+            "lm_head.weight",
+            "independent LM head for an untied checkpoint",
+        ),
+        (
+            "next_token_head.eh_proj.weight",
+            "checkpoint-declared next-token head",
+        ),
+        (
+            "model.layers.0.mamba.conv1d.bias",
+            "Mamba depthwise-convolution bias",
+        ),
+    ] {
+        assert_eq!(
+            sink_error(&mut model, target),
+            NemotronHLoadError::MissingComponent {
+                target: target.into(),
+                component
+            }
+        );
+    }
+    // A latent projection exposes only `weight` and `bias`.
+    let mut latent =
+        NemotronHForCausalLm::<TestBackend>::init(optional_projection_config(), &device).unwrap();
+    for target in [
+        "model.layers.3.moe.fc1_latent_proj.scale",
+        "next_token_head.moe.fc2_latent_proj.scale",
+    ] {
+        assert_eq!(
+            sink_error(&mut latent, target),
+            NemotronHLoadError::UnknownTarget {
+                target: target.into()
+            }
+        );
+    }
+}
+
+/// Only an installed embedding may alias into a tied head; diagnostics name the cause.
+#[test]
+fn tied_alias_requires_the_tied_topology_and_an_installed_owner() {
+    let device = Default::default();
+    let (head, embedding) = ("lm_head.weight", "model.embed_tokens.weight");
+    let alias_error = |target: &str, source: &str, reason: &str| NemotronHLoadError::InvalidAlias {
+        target: target.into(),
+        source_target: source.into(),
+        reason: reason.into(),
+    };
+    let mut untied =
+        NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    assert_eq!(
+        untied.alias_tensor(head, "model.norm.weight").unwrap_err(),
+        alias_error(
+            head,
+            "model.norm.weight",
+            "only the tied embedding-to-LM-head alias is supported"
+        )
+    );
+    assert_eq!(
+        untied.alias_tensor(head, embedding).unwrap_err(),
+        alias_error(
+            head,
+            embedding,
+            "the configured model declares an independent LM head"
+        )
+    );
+    let mut tied = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let error = tied.alias_tensor(head, embedding).unwrap_err();
+    assert_eq!(
+        error,
+        alias_error(
+            head,
+            embedding,
+            "the embedding storage owner has not been installed"
+        )
+    );
+    assert_eq!(
+        error.to_string(),
+        "invalid Nemotron-H alias `lm_head.weight` -> `model.embed_tokens.weight`: \
+         the embedding storage owner has not been installed"
+    );
+    tied.write_tensor(embedding, TensorData::zeros::<f32, _>([16, 8]))
+        .unwrap();
+    tied.alias_tensor(head, embedding).unwrap();
+}
+
+/// Sink diagnostics render the target, component, and parameter cause.
+#[test]
+fn sink_error_messages_name_target_and_cause() {
+    let device = Default::default();
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    assert_eq!(
+        sink_error(&mut model, "model.other").to_string(),
+        "unknown Nemotron-H parameter target `model.other`"
+    );
+    assert_eq!(
+        sink_error(&mut model, "model.layers.9.norm.weight").to_string(),
+        "invalid Nemotron-H target `model.layers.9.norm.weight`: block 9 is outside 0..4"
+    );
+    assert_eq!(
+        sink_error(&mut model, "model.layers.0.mamba.in_proj.bias").to_string(),
+        "Nemotron-H target `model.layers.0.mamba.in_proj.bias` requires missing component \
+         `configured linear bias`"
+    );
+    let error = sink_error(&mut model, "model.norm.weight");
+    assert!(
+        matches!(&error, NemotronHLoadError::Parameter { target, .. } if target == "model.norm.weight")
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("cannot install Nemotron-H parameter `model.norm.weight`: "),
+        "{error}"
+    );
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+/// Configuration, planning, and pass-two failures are distinct, and only pass two reports progress.
+#[test]
+fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+
+    // A configuration edited after initialization cannot describe a checkpoint.
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    model.model.config.vocab_size = 0;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, NemotronHCheckpointLoadError::Config(config)
+        if config.field == "vocab_size")
+    );
+    assert!(error.execution_failure().is_none());
+    assert_eq!(error.to_string(), "nemotron_h.vocab_size: must be nonzero");
+
+    // A missing root fails discovery before any write.
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let error = model
+        .load_checkpoint(temp.path().join("absent"), &LoadOptions::default())
+        .unwrap_err();
+    assert!(matches!(error, NemotronHCheckpointLoadError::Checkpoint(_)));
+    assert!(error.execution_failure().is_none());
+
+    // A graph whose head was removed after planning fails in pass two with progress.
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    model.lm_head = None;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("pass two reached the sink");
+    assert_eq!(failure.failed_target.as_deref(), Some("lm_head.weight"));
+    assert!(matches!(
+        &failure.cause,
+        crate::checkpoint::ExecutionFailureCause::Sink(NemotronHLoadError::MissingComponent {
+            component: "independent LM head for an untied checkpoint",
+            ..
+        })
+    ));
+    assert!(
+        !failure
+            .report
+            .applied
+            .iter()
+            .any(|name| name == "lm_head.weight")
+    );
+}

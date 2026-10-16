@@ -1257,3 +1257,165 @@ fn speculative_decoding_timing() {
         );
     }
 }
+
+/// Preflight names out-of-vocabulary history, missing staging, misalignment, and capacity.
+#[test]
+fn cycle_preflight_reports_each_rejection_exactly() {
+    let device = Default::default();
+    let model = zero_model(&device);
+    let decoder = |max_draft_tokens| {
+        NemotronHSpeculativeDecoder::<TestBackend>::new(
+            NemotronHSpeculativeConfig {
+                max_draft_tokens,
+                ..Default::default()
+            },
+            model.config().vocab_size,
+            &device,
+        )
+        .unwrap()
+    };
+
+    let (mut state, hidden) = aligned_state(&model, &device);
+    let error = decoder(2)
+        .speculate(&model, 1, hidden.clone(), &[2, 32], 2, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.speculative.history"
+            && expected == "token values in 0..32"
+            && actual == "an out-of-vocabulary token"),
+        "{error}"
+    );
+    let error = decoder(3)
+        .speculate(&model, 1, hidden.clone(), &[2, 3], 2, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "Nemotron-H decode-state staging capacity 3 is below required 4"),
+        "{error}"
+    );
+    let error = decoder(2)
+        .select_lead(Tensor::zeros([1, 32], &device), &[2, 3], 3)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.speculative.prompt_length"
+            && expected == "at most the 2 history tokens"
+            && actual == "3"),
+        "{error}"
+    );
+    assert_eq!(state.tensor_state().lengths(), &[2]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+
+    // A target prefilled without its shifted MTP pairs is not a cycle boundary.
+    let mut unaligned = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut unaligned,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let error = decoder(2)
+        .speculate(&model, 1, hidden.clone(), &[2, 3], 2, &mut unaligned)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Cache(reason)
+            if reason == "Nemotron-H speculative alignment requires target = MTP + 1, found target=[2], MTP=[0]"),
+        "{error}"
+    );
+
+    // A cycle whose `K + 1` tentative tokens would pass the cache capacity.
+    let mut full = model
+        .new_speculative_decode_state(CacheConfig::new(1, 4).unwrap(), 1, 2, &device)
+        .unwrap();
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3]], &device);
+    let prefill = model.prefill_speculative(prompt, &mut full).unwrap();
+    let error = decoder(2)
+        .speculate(&model, 1, prefill.hidden_state, &[2, 3], 2, &mut full)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "Nemotron-H speculative suffix reaches 5, exceeding cache capacity 4"),
+        "{error}"
+    );
+    assert_eq!(full.tensor_state().lengths(), &[2]);
+    assert!(!full.tensor_state().has_active_transaction());
+}
+
+/// The decoder exposes its validated configuration unchanged.
+#[test]
+fn decoder_exposes_its_validated_configuration() {
+    let device = Default::default();
+    let config = NemotronHSpeculativeConfig {
+        max_draft_tokens: 3,
+        ..Default::default()
+    };
+    let decoder =
+        NemotronHSpeculativeDecoder::<TestBackend>::new(config.clone(), 32, &device).unwrap();
+    assert_eq!(decoder.config(), &config);
+    let error = NemotronHSpeculativeDecoder::<TestBackend>::new(
+        NemotronHSpeculativeConfig {
+            max_draft_tokens: 0,
+            ..Default::default()
+        },
+        32,
+        &device,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "Nemotron-H MTP max_draft_tokens must be greater than zero"),
+        "{error}"
+    );
+    let error = NemotronHSpeculativeConfig {
+        max_draft_tokens: usize::MAX,
+        ..Default::default()
+    }
+    .validate(32)
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "Nemotron-H MTP proposal capacity overflows usize"),
+        "{error}"
+    );
+}
+
+/// Selected-token readback converts backend integers and rejects an empty selection.
+#[test]
+fn selected_token_readback_converts_and_requires_a_row() {
+    let device = Default::default();
+    assert_eq!(
+        tokens(Tensor::<TestBackend, 1, Int>::from_ints(
+            [3, 0, 31],
+            &device
+        ))
+        .unwrap(),
+        [3, 0, 31]
+    );
+    assert_eq!(
+        first_token(Tensor::<TestBackend, 1, Int>::from_ints([7, 2], &device)).unwrap(),
+        7
+    );
+    let error = tokens(Tensor::<TestBackend, 1, Int>::from_ints([-1], &device)).unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason) if reason == "Nemotron-H selected invalid token -1"),
+        "{error}"
+    );
+    let error = first_token(Tensor::<TestBackend, 1, Int>::from_data(
+        TensorData::new(Vec::<i64>::new(), [0]),
+        &device,
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "Nemotron-H token selector returned no row"),
+        "{error}"
+    );
+}

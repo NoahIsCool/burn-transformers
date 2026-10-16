@@ -1704,3 +1704,231 @@ fn batched_decode_timing() {
         }
     }
 }
+
+/// The trait accessors report the allocated rows, capacity, and device.
+#[test]
+fn decode_state_trait_accessors_report_allocation_geometry() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let state = model
+        .new_decode_state(CacheConfig::new(3, 8).unwrap(), 3, &device)
+        .unwrap();
+    assert_eq!(DecodeState::batch_size(&state), 3);
+    assert_eq!(DecodeState::capacity(&state), 8);
+    assert_eq!(DecodeState::device(&state), &device);
+    assert_eq!(state.lengths(), &[0, 0, 0]);
+    assert_eq!(state.attention_layer_count(), 1);
+    assert_eq!(state.mamba_layer_count(), 1);
+    assert_eq!(state.mtp_layer_count(), 0);
+    assert_eq!(state.staging_capacity(), 0);
+}
+
+/// A state allocated for another schedule is rejected before any model work or mutation.
+#[test]
+fn foreign_decode_state_is_rejected_before_work() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let other = NemotronHForCausalLm::<TestBackend>::init(
+        crate::models::nemotron_h::NemotronHConfig {
+            layers_block_type: vec![
+                NemotronHBlockType::FullAttention,
+                NemotronHBlockType::FullAttention,
+            ],
+            num_hidden_layers: Some(2),
+            ..tiny_config(false)
+        },
+        &device,
+    )
+    .unwrap();
+    let mut foreign = other
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let incompatible = |error: Error| {
+        assert!(
+            matches!(&error, Error::Cache(reason)
+                if reason == "Nemotron-H decode state is incompatible with the model"),
+            "{error}"
+        );
+    };
+    incompatible(
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut foreign,
+                &ForwardOptions::default(),
+            )
+            .unwrap_err(),
+    );
+    incompatible(model.verify_tokens(&[1], &mut foreign).unwrap_err());
+    assert_eq!(foreign.lengths(), &[0]);
+}
+
+/// The shifted MTP cursor requires one truncation length per row.
+#[test]
+fn speculative_truncate_rejects_a_mismatched_row_count() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 8).unwrap(), 1, 2, &device)
+        .unwrap();
+    let error = state.truncate(&[0, 0]).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::TensorCache(TensorCacheError::Metadata(
+                DecodeStateError::SequenceCountMismatch {
+                    expected: 1,
+                    actual: 2
+                }
+            ))
+        ),
+        "{error}"
+    );
+}
+
+/// The verifier pass accepts only a non-empty in-vocabulary batch-one row within the context.
+#[test]
+fn verify_tokens_rejects_invalid_rows_and_context_overflow() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 32).unwrap(), 1, &device)
+        .unwrap();
+    for (tokens, batch, actual) in [
+        (&[1_u32][..], 2, "1 tokens for batch 2"),
+        (&[][..], 1, "0 tokens for batch 1"),
+        (&[1, 32][..], 1, "2 tokens for batch 1"),
+    ] {
+        let target = if batch == 2 { &mut batched } else { &mut state };
+        let error = model.verify_tokens(tokens, target).unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, expected, actual: found }
+                if tensor == "nemotron_h.input_ids"
+                && expected == "a non-empty batch-one row of token values in 0..32"
+                && found == actual),
+            "{error}"
+        );
+    }
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1; 30]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let error = model.verify_tokens(&[1, 2, 3], &mut state).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.position"
+            && reason == "cached length exceeds max_position_embeddings"),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[30]);
+    // Two more tokens still fit and are published.
+    let (logits, hidden) = model.verify_tokens(&[1, 2], &mut state).unwrap();
+    assert_eq!(logits.dims(), [2, 32]);
+    assert_eq!(hidden.dims(), [1, 2, 8]);
+    assert_eq!(state.lengths(), &[32]);
+}
+
+/// A step in which every row is finished costs no model work and returns only exact zeros.
+#[test]
+fn fully_inactive_decode_returns_zero_logits_without_diagnostics() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2], [3, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let snapshot = contract_cache_snapshot(&state);
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[5], [6]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false], [false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(output.logits.dims(), [2, 1, 32]);
+    assert!(
+        output
+            .logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .all(|value| value == 0.0)
+    );
+    assert!(output.final_hidden_state.is_none());
+    assert!(output.hidden_states.is_empty());
+    assert!(output.routers.is_empty());
+    assert_eq!(state.lengths(), &[2, 2]);
+    assert_eq!(contract_cache_snapshot(&state), snapshot);
+}
+
+/// Every serialized recurrent-cache dtype maps to its Burn dtype; others are rejected.
+#[test]
+fn mamba_state_dtype_maps_every_serialized_name() {
+    assert_eq!(mamba_state_dtype("float32").unwrap(), DType::F32);
+    assert_eq!(mamba_state_dtype("float16").unwrap(), DType::F16);
+    assert_eq!(mamba_state_dtype("bfloat16").unwrap(), DType::BF16);
+    let error = mamba_state_dtype("int8").unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.mamba_ssm_cache_dtype"
+            && reason == "unsupported recurrent cache dtype \"int8\""),
+        "{error}"
+    );
+}
+
+/// Reduced-precision recurrent caches allocate in the declared dtype.
+#[test]
+fn reduced_precision_recurrent_cache_uses_the_declared_dtype() {
+    let device = Default::default();
+    for (name, dtype) in [("float16", DType::F16), ("bfloat16", DType::BF16)] {
+        let model = NemotronHForCausalLm::<TestBackend>::init(
+            crate::models::nemotron_h::NemotronHConfig {
+                mamba_ssm_cache_dtype: name.into(),
+                ..tiny_config(false)
+            },
+            &device,
+        )
+        .unwrap();
+        let state = model
+            .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+            .unwrap();
+        let recurrent = state
+            .tensor_state()
+            .main()
+            .recurrent(RECURRENT_GROUP)
+            .unwrap();
+        assert_eq!(recurrent.matrix(0).unwrap().dtype(), dtype, "{name}");
+    }
+}
