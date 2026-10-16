@@ -26,6 +26,14 @@
 //! follower insertion (the list stays strictly increasing and gains exactly
 //! the new token).
 //!
+//! And `src/generation/random.rs`: `splitmix64` computes exactly
+//! `mix(seed + gamma * (index + 1) mod 2^64)`; that draw is injective in the
+//! counter for every seed (the finalizer is inverted round by round and
+//! `gamma` by its modular inverse), so a stream's `2^64` raw draws are
+//! pairwise distinct; advancing the counter adds `gamma` to the Weyl state,
+//! as the classic sequential generator does; and `SplitMix64::next_u64`
+//! returns the draw at its position and advances it by one.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
@@ -39,3 +47,6 @@ pub mod layout;
 
 #[path = "../src/generation/ngram.rs"]
 pub mod ngram;
+
+#[path = "../src/generation/random.rs"]
+pub mod random;
