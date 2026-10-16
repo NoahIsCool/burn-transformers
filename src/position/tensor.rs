@@ -17,6 +17,11 @@
 //!
 //! Interleaved checkpoints (`[re_0, im_0, re_1, im_1, ...]`) convert to the
 //! split-half layout with [`interleaved_to_split_half`] before rotation.
+//!
+//! Applying the tables broadcasts them over heads. CubeCL backends evaluate
+//! that broadcast natively; Burn Flex 0.21 does not, so on inference Flex the
+//! rotation runs a fused kernel (the private `flex` submodule) that produces
+//! the same bits in one pass.
 
 use burn::tensor::{DType, FloatDType, Int, Tensor, TensorData, backend::Backend};
 
@@ -24,6 +29,9 @@ use crate::{Error, Result};
 
 use super::index_plan::{mrope_section_total, rotary_operand_fits, split_half_width_fits};
 use super::{RopeConfig, RotaryFrequencies, mrope_frequency_axis};
+
+#[cfg(feature = "flex")]
+mod flex;
 
 /// Cosine and sine tables broadcastable across attention heads.
 #[derive(Clone, Debug)]
@@ -345,7 +353,31 @@ fn tables_in<B: Backend>(angles: &RotaryAngles<B>, dtype: DType) -> (Tensor<B, 4
 }
 
 /// Applies `x * cos + rotate_half(x) * sin` to the rotary prefix and keeps the suffix.
+///
+/// On inference Flex this runs the fused kernel of the `flex` submodule,
+/// which reads strided operands directly, writes the same contiguous layout,
+/// and returns the same bits as [`rotate_prefix_broadcast`]; for 512-token
+/// prefill queries it is 20x to 65x faster there (`rotary_prefill_timing` in
+/// `tensor_tests.rs`). Every other backend, and any operand the kernel does
+/// not cover, uses the broadcast formulation.
 fn rotate_prefix<B: Backend>(
+    input: Tensor<B, 4>,
+    cosine: &Tensor<B, 4>,
+    sine: &Tensor<B, 4>,
+    rotary_dimension: usize,
+) -> Tensor<B, 4> {
+    #[cfg(feature = "flex")]
+    if let Some(rotated) = flex::rotate_prefix(&input, cosine, sine, rotary_dimension) {
+        return rotated;
+    }
+    rotate_prefix_broadcast(input, cosine, sine, rotary_dimension)
+}
+
+/// The backend-generic rotation: tables broadcast over heads, then the suffix is concatenated.
+///
+/// CubeCL kernels read the heads-swapped strided operand and the broadcast
+/// tables natively. The result is contiguous `[batch, heads, sequence, width]`.
+fn rotate_prefix_broadcast<B: Backend>(
     input: Tensor<B, 4>,
     cosine: &Tensor<B, 4>,
     sine: &Tensor<B, 4>,

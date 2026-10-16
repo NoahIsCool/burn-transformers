@@ -188,6 +188,32 @@ fn is_flex_primitive<P: 'static>() -> bool {
     false
 }
 
+/// Returns the Burn Flex primitive behind a floating `tensor` on inference Flex.
+///
+/// The primitive is a cheap clone: it shares the tensor's host buffer (an
+/// `Arc` increment) and exposes its storage, dtype, and strided layout, so
+/// Flex-specific kernels can read a strided view without first copying it.
+/// Returns `None` on every other backend (autodiff included) and for packed
+/// tensors. The downcast is a checked `Any` conversion, not a cast.
+#[cfg(feature = "flex")]
+pub(crate) fn inference_flex_primitive<B: Backend, const D: usize>(
+    tensor: &Tensor<B, D>,
+) -> Option<burn::backend::flex::FlexTensor> {
+    if !is_inference_flex::<B>(&tensor.device()) {
+        return None;
+    }
+    match tensor.clone().into_primitive() {
+        burn::tensor::TensorPrimitive::Float(primitive) => {
+            let primitive: Box<dyn core::any::Any> = Box::new(primitive);
+            primitive
+                .downcast::<burn::backend::flex::FlexTensor>()
+                .ok()
+                .map(|primitive| *primitive)
+        }
+        burn::tensor::TensorPrimitive::QFloat(_) => None,
+    }
+}
+
 /// Returns `tensor` in contiguous row-major storage on backends that prefer it.
 ///
 /// On a backend for which [`prefers_contiguous_storage`] holds, a floating
