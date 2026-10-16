@@ -35,6 +35,23 @@
 //! - `data_section` places the data section at `8 + header` and proves it ends
 //!   exactly at the end of the file, rejecting an empty or oversized header.
 //!
+//! It verifies `src/checkpoint/lexical.rs`, the byte rules applied to untrusted
+//! shard-index paths, tensor names, and byte totals:
+//!
+//! - `lexical_path_violation` names exactly the first broken rule (empty, NUL,
+//!   backslash, Windows drive prefix) and returns `None` exactly when none is
+//!   broken;
+//! - `normal_components` holds exactly when the path is not rooted, does not
+//!   begin with a `.` component, and has no `..` component anywhere (the Unix
+//!   `Path::components` rule, cross-checked exhaustively by tests), so an
+//!   accepted path cannot climb out of the directory it is joined to;
+//! - `decimal_layer_between` holds exactly when a name is `prefix ++ layer ++
+//!   suffix` with a canonical decimal layer (digits, no leading zero except
+//!   `0`), with non-overlapping anchors;
+//! - `integral_lexeme_digits` accepts exactly the lexemes whose part before the
+//!   first `.` is nonempty digits and whose fraction, if any, is nonempty zeros,
+//!   returning the integer digits' length.
+//!
 //! It also verifies `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed
 //! lengths (`n` and `ceil(n / 2)`, never above `n`), the two's-complement nibble
 //! and byte encodings and their inverses, nibble joining and splitting, and code
@@ -66,6 +83,9 @@
 
 #[path = "../src/checkpoint/layout.rs"]
 pub mod layout;
+
+#[path = "../src/checkpoint/lexical.rs"]
+pub mod lexical;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;

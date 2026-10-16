@@ -20,6 +20,7 @@ mod artifact;
 mod dtype;
 mod error;
 mod layout;
+mod lexical;
 mod mapping;
 mod mxfp4;
 mod options;

@@ -28,6 +28,7 @@ use super::{
         DataSectionError, TilingError, data_section, element_count, tensor_file_offset,
         validate_contiguous_tiling,
     },
+    lexical::{PathViolation, integral_lexeme_digits, lexical_path_violation, normal_components},
 };
 
 /// Preferred Hugging Face index filename during automatic discovery.
@@ -758,30 +759,32 @@ fn resolve_local_file(root: &Path, untrusted: &str, kind: &'static str) -> Resul
 }
 
 /// Rejects absolute, parent, drive-prefixed, NUL, and nonportable artifact paths.
+///
+/// The verified [`lexical_path_violation`] and [`normal_components`] decide the
+/// byte-level rules; on Unix the latter agrees exactly with
+/// `Path::components`, which is kept as a second check so a platform-specific
+/// prefix the byte rules do not model is still rejected.
 fn validate_relative_path(path: &str) -> Result<()> {
-    if path.is_empty() {
-        return Err(unsafe_path(path, "path is empty"));
-    }
-    if path.contains('\0') {
-        return Err(unsafe_path(path, "path contains a NUL byte"));
-    }
-    if path.contains('\\') {
+    let bytes = path.as_bytes();
+    if let Some(violation) = lexical_path_violation(bytes) {
         return Err(unsafe_path(
             path,
-            "backslashes are forbidden in portable artifact paths",
+            match violation {
+                PathViolation::Empty => "path is empty",
+                PathViolation::Nul => "path contains a NUL byte",
+                PathViolation::Backslash => "backslashes are forbidden in portable artifact paths",
+                PathViolation::DrivePrefix => "Windows drive prefixes are forbidden",
+            },
         ));
-    }
-    let bytes = path.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        return Err(unsafe_path(path, "Windows drive prefixes are forbidden"));
     }
     let candidate = Path::new(path);
     if candidate.is_absolute() {
         return Err(unsafe_path(path, "absolute paths are forbidden"));
     }
-    if candidate
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_)))
+    if !normal_components(bytes)
+        || candidate
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(unsafe_path(
             path,
@@ -1236,19 +1239,14 @@ where
 /// `55562855904.0`. Fractions, signs, exponents, strings, and overflowing
 /// integers fail closed rather than being rounded by IEEE-754 conversion.
 fn parse_integral_u64_lexeme(lexeme: &str) -> std::result::Result<u64, String> {
-    let (integer, fraction) = match lexeme.split_once('.') {
-        Some((integer, fraction)) => (integer, Some(fraction)),
-        None => (lexeme, None),
-    };
-    let canonical_digits = !integer.is_empty() && integer.bytes().all(|byte| byte.is_ascii_digit());
-    let exact_zero_fraction = fraction
-        .map(|fraction| !fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0'))
-        .unwrap_or(true);
-    if !canonical_digits || !exact_zero_fraction {
+    // Verified: the integer digits end at the first `.`, and any fraction is all zeros.
+    let Some(digits) = integral_lexeme_digits(lexeme.as_bytes()) else {
         return Err(format!(
             "metadata.total_size must be an unsigned integer or have only a zero fractional suffix, found {lexeme}"
         ));
-    }
+    };
+    // `digits` indexes an ASCII `.` or the end, so it is a character boundary.
+    let integer = &lexeme[..digits];
     integer.parse::<u64>().map_err(|error| {
         format!("metadata.total_size `{lexeme}` is outside the unsigned 64-bit range: {error}")
     })
