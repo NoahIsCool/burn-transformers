@@ -17,6 +17,10 @@
 //!   readback;
 //! * [`plan`] holds the dependency-free index planning, verified in place by
 //!   Verus through `verus/models.rs`;
+//! * [`block_plan`] and [`block`] pack ragged cached rows into one left-aligned
+//!   `[B, T]` block with exact cache slots and position-ordered key limits
+//!   (the verified host plan and its tensor application), shared by every
+//!   family whose cached attention bounds key prefixes;
 //! * [`load_audit`] holds the verified counter arithmetic that
 //!   [`LoadedModel`](crate::LoadedModel) audits use for every loaded family.
 //!
@@ -33,6 +37,8 @@
 //! The module deliberately contains no model-name branches: a family passes
 //! its tensor names and numbering policy as data.
 
+pub(crate) mod block;
+pub(crate) mod block_plan;
 pub(crate) mod checks;
 pub(crate) mod input;
 pub(crate) mod load_audit;

@@ -1,6 +1,6 @@
 //! Packing, inert padding, and scatter tests for ragged `[B, T]` blocks.
 //!
-//! The host maps are verified by Verus and property-tested in `batch_tests`;
+//! The host maps are verified by Verus and property-tested in `block_plan_tests`;
 //! these tests pin the device side: what [`BlockLayout::compact`] and
 //! [`BlockLayout::compact_inert`] gather, which entries count as padding, and
 //! that [`BlockLayout::scatter`] restores exact zeros at masked columns.
@@ -13,10 +13,14 @@ use burn::{
 use super::*;
 use crate::{
     CausalLmInput, TokenMask,
-    models::{
-        deepseek_v2::model::INPUT_NAMES,
-        shared::{EmptyRows, StatefulContract, prepare_stateful_rows},
-    },
+    models::shared::{EmptyRows, InputNames, StatefulContract, prepare_stateful_rows},
+};
+
+/// Tensor names reported by the fixtures' input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "block.input_ids",
+    token_mask: "block.token_mask",
+    position_ids: "block.position_ids",
 };
 
 /// Deterministic CPU backend with I32 token indices.

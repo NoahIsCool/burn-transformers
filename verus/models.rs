@@ -42,11 +42,40 @@
 //! of quantized payload byte counts, and `equivalence_reads` is exactly `2 n`
 //! or reports overflow, as `LoadedModel` audits require.
 //!
+//! Finally, it verifies `src/models/shared/block_plan.rs`, the host planning
+//! of batched stateful blocks shared by DeepSeek-V2 and Muse Glimmer:
+//!
+//! - `row_maps` gathers exactly the valid columns into the first `n` block
+//!   entries (padding entries gather `c_0`, or `0` for an empty row) and
+//!   scatters each valid column back to its entry, every other column to the
+//!   zero row `T`;
+//! - `batch_extents` returns exactly the widest row `T = max_b n_b` and the
+//!   furthest cache end `E = max_b (L_b + n_b)` (both attained, zero for no
+//!   rows), failing only on a length mismatch or an overflowing end;
+//! - `key_limits` returns nondecreasing limits in `1..=E` that are exactly
+//!   `max(1, max_{j <= i, n_b > j} (L_b + j + 1))`: they cover every active
+//!   row's causal key prefix and are attained by one, so bounded attention
+//!   reads no key a query prefix cannot see;
+//! - `query_slots` places entry `k < n_b` of row `b` at cache slot `L_b + k`
+//!   and padding entries at `L_b`, within the key extent;
+//! - `identity_layout`, `query_validity`, and `implicit_positions` decide the
+//!   identity packing, the validity `k < n_b`, and the implicit positions
+//!   `L_b + k` (zero at padding) exactly; `clamp_limits` keeps limits
+//!   nondecreasing and in `1..=K`;
+//! - `rotary_contexts` returns the first active row's context (at least one),
+//!   whether every active context equals it, and each row's own context;
+//!   `first_uncacheable_context` names the first active row with cached keys
+//!   whose context passes a rotary configuration's cached-context limit.
+//!
+//! Index conversion for the uploaded block maps reuses the verified
+//! `plan::signed_indices` above.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
-//! The planning file is dependency-free, so it is included as a single module.
-//! Burn tensor programs driven by these plans (selection, concatenation,
-//! gathers, and the fused validation readback itself), the readback slot
+//! The planning files are dependency-free, so each is included as a single
+//! module. Burn tensor programs driven by these plans (selection,
+//! concatenation, gathers and scatters, cache writes, attention, and the fused
+//! validation readback itself), the readback slot
 //! bookkeeping of `DeferredChecks`, and the shape preconditions established by
 //! the unverified callers (`[batch, sequence]` host buffers and one cursor per
 //! row, checked there at runtime) remain covered by the Rust tests in
@@ -64,3 +93,6 @@ pub mod plan;
 
 #[path = "../src/models/shared/load_audit.rs"]
 pub mod load_audit;
+
+#[path = "../src/models/shared/block_plan.rs"]
+pub mod block_plan;
