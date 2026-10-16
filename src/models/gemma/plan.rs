@@ -369,10 +369,7 @@ pub(crate) enum ExtentError {
         },
 ))]
 pub(crate) fn checkpoint_extent(value: usize) -> Option<u64> {
-    match u64::try_from(value) {
-        Ok(extent) => Some(extent),
-        Err(_) => None,
-    }
+    u64::try_from(value).ok()
 }
 
 /// Returns the projection width `heads · head_dim` as a checkpoint-format extent.

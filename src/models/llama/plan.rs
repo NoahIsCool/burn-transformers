@@ -1091,10 +1091,12 @@ pub(crate) fn used_rotary_sets(set_count: usize, layers: &[Option<usize>]) -> Ve
         decreases layers.len() - layer,
     ))]
     while layer < layers.len() {
-        if let Some(named) = layers[layer] {
-            if named < set_count {
-                used[named] = true;
-            }
+        let named = match layers[layer] {
+            Some(named) => named,
+            None => set_count,
+        };
+        if named < set_count {
+            used[named] = true;
         }
         // Only the named set gains a witness; every other set keeps its own.
         #[cfg(verus_keep_ghost)]
@@ -1656,10 +1658,7 @@ pub(crate) enum ExtentError {
         },
 ))]
 pub(crate) fn checkpoint_extent(value: usize) -> Option<u64> {
-    match u64::try_from(value) {
-        Ok(extent) => Some(extent),
-        Err(_) => None,
-    }
+    u64::try_from(value).ok()
 }
 
 /// Returns the projection width `heads · head_dim` as a checkpoint-format extent.
@@ -1774,18 +1773,16 @@ pub(crate) fn tightest_limit(limits: &[Option<usize>], used: &[bool]) -> Option<
         decreases limits.len() - set,
     ))]
     while set < limits.len() && set < used.len() {
-        if used[set] {
-            if let Some(limit) = limits[set] {
-                let tighter = match best {
-                    Some(chosen) => match limits[chosen] {
-                        Some(current) => limit < current,
-                        None => true,
-                    },
+        if let (true, Some(limit)) = (used[set], limits[set]) {
+            let tighter = match best {
+                Some(chosen) => match limits[chosen] {
+                    Some(current) => limit < current,
                     None => true,
-                };
-                if tighter {
-                    best = Some(set);
-                }
+                },
+                None => true,
+            };
+            if tighter {
+                best = Some(set);
             }
         }
         set += 1;
