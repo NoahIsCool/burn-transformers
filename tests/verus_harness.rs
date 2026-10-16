@@ -184,6 +184,7 @@ fn continues_identifier(character: char) -> bool {
 /// arguments, so `rlimit(10)` is one argument. An unclosed list runs to the
 /// end of the text, so a truncated attribute is still scanned.
 fn verus_verify_arguments(text: &str) -> Vec<&str> {
+    /// The attribute whose argument lists are returned.
     const NAME: &str = "verus_verify";
     let mut arguments = Vec::new();
     for (start, _) in text.match_indices(NAME) {
