@@ -147,13 +147,8 @@ pub fn derive_position_ids(
     masked_position: usize,
 ) -> Result<Vec<usize>, PositionIdError> {
     let starts = [start_position];
-    let result = derive_batched_position_ids(
-        valid_mask,
-        1,
-        valid_mask.len(),
-        &starts,
-        masked_position,
-    );
+    let result =
+        derive_batched_position_ids(valid_mask, 1, valid_mask.len(), &starts, masked_position);
     #[cfg(verus_keep_ghost)]
     proof! {
         // One row of `len` tokens: every flat index lies in row zero.

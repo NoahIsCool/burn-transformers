@@ -231,8 +231,14 @@ fn displacement_parts_are_exact_at_extremes() {
     assert_eq!(signed_direction_distance(i64::MAX), (true, i64::MAX as u64));
     assert_eq!(signed_direction_distance(i64::MIN), (false, 1u64 << 63));
     assert_eq!(position_direction_distance(7, 7), (false, 0));
-    assert_eq!(position_direction_distance(0, usize::MAX), (true, usize::MAX as u64));
-    assert_eq!(position_direction_distance(usize::MAX, 0), (false, usize::MAX as u64));
+    assert_eq!(
+        position_direction_distance(0, usize::MAX),
+        (true, usize::MAX as u64)
+    );
+    assert_eq!(
+        position_direction_distance(usize::MAX, 0),
+        (false, usize::MAX as u64)
+    );
 }
 
 /// The geometry check returns the first failed condition, and accepts the smallest valid tables.

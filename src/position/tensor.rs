@@ -22,6 +22,7 @@ use burn::tensor::{DType, FloatDType, Int, Tensor, TensorData, backend::Backend}
 
 use crate::{Error, Result};
 
+use super::index_plan::{mrope_section_total, rotary_operand_fits, split_half_width_fits};
 use super::{RopeConfig, RotaryFrequencies, mrope_frequency_axis};
 
 /// Cosine and sine tables broadcastable across attention heads.
@@ -124,9 +125,7 @@ pub fn mrope_angles<B: Backend>(
         ));
     }
     let half = config.rotary_dimension() / 2;
-    let section_total = sections
-        .into_iter()
-        .try_fold(0usize, usize::checked_add)
+    let section_total = mrope_section_total(sections)
         .ok_or_else(|| Error::configuration("mrope.sections", "sum overflows usize"))?;
     if section_total != half {
         return Err(Error::configuration(
@@ -284,8 +283,10 @@ fn validate_position_shape<B: Backend>(position_ids: &Tensor<B, 2, Int>) -> Resu
 }
 
 /// Requires a non-zero even channel count for complex-pair permutations.
+///
+/// The check is the Verus-verified [`split_half_width_fits`].
 fn validate_pair_width(name: &'static str, dims: [usize; 4]) -> Result<()> {
-    if dims[3] == 0 || !dims[3].is_multiple_of(2) {
+    if !split_half_width_fits(dims[3]) {
         return Err(Error::shape(
             name,
             "a non-zero even final dimension",
@@ -296,21 +297,20 @@ fn validate_pair_width(name: &'static str, dims: [usize; 4]) -> Result<()> {
 }
 
 /// Checks that tables `[batch, 1, sequence, rotary]` fit one `[batch, heads, sequence, width]` operand.
+///
+/// The check is the Verus-verified [`rotary_operand_fits`], which also
+/// guarantees the `width - rotary` suffix that [`rotate_prefix`] keeps.
 fn validate_rotary_operand<B: Backend>(
     name: &'static str,
     dims: [usize; 4],
     angles: &RotaryAngles<B>,
 ) -> Result<()> {
-    let [batch, _, sequence, width] = dims;
-    let [angle_batch, one, angle_sequence, angle_width] = angles.cosine.dims();
-    if angle_batch != batch
-        || one != 1
-        || angle_sequence != sequence
-        || angle_width != angles.rotary_dimension
-        || angles.sine.dims() != angles.cosine.dims()
-        || angles.rotary_dimension > width
-        || !angles.rotary_dimension.is_multiple_of(2)
-    {
+    if !rotary_operand_fits(
+        dims,
+        angles.cosine.dims(),
+        angles.sine.dims(),
+        angles.rotary_dimension,
+    ) {
         return Err(Error::shape(
             name,
             "operand [batch, heads, sequence, width] and angles [batch, 1, sequence, rotary<=width]",

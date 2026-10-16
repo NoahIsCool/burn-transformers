@@ -2,9 +2,20 @@
 //!
 //! Verifies, in place, the specifications attached to:
 //!
-//! * `src/position/index_plan.rs`: multimodal-RoPE axis selection and the T5
-//!   displacement-table length and lookup index (in bounds, overflow-free, and
-//!   displacement-preserving);
+//! * `src/position/index_plan.rs`: multimodal-RoPE axis selection equals
+//!   `spec_mrope_axis`, and `lemma_mrope_axis_counts` proves that the first
+//!   `half` frequencies give height `min(h, (half + 1) / 3)`, width
+//!   `min(w, half / 3)`, and temporal the rest; `mrope_section_total` is the
+//!   exact section sum or `None` on overflow; `rotary_operand_fits` and
+//!   `split_half_width_fits` are exactly the rotary shape relations; the T5
+//!   displacement-table length and lookup index are in bounds, overflow-free,
+//!   and displacement-preserving, and `lemma_relative_table_entries_are_read`
+//!   shows every entry is read by some pair; `plan_relative_table` accepts
+//!   exactly the representable `[query, key]` geometries with a query offset
+//!   (faults in check order), returns the exact length and anchor, and proves
+//!   that pair `(i, j)` reads the entry whose anchor displacement is
+//!   `j - (offset + i)`; `relative_bias_shape_fault` reports the first failed
+//!   learned-table shape check;
 //! * `src/position/t5.rs`: `checked_bucket_geometry` (behind
 //!   `T5RelativePositionBuckets::new`) accepts exactly the valid geometries and
 //!   otherwise returns the first failed check with its values;

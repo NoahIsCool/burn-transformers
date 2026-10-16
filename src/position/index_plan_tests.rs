@@ -48,8 +48,134 @@ fn relative_table_length_rejects_empty_and_overflowing_geometry() {
     assert_eq!(relative_table_length(2, usize::MAX), None);
 }
 
+/// Section totals are exact when representable and absent on overflow.
+#[test]
+fn mrope_section_totals_are_exact_or_absent() {
+    assert_eq!(mrope_section_total([24, 20, 20]), Some(64));
+    assert_eq!(mrope_section_total([0, 0, 0]), Some(0));
+    assert_eq!(mrope_section_total([usize::MAX, 0, 0]), Some(usize::MAX));
+    assert_eq!(mrope_section_total([usize::MAX, 1, 0]), None);
+    assert_eq!(mrope_section_total([1, usize::MAX, 0]), None);
+    assert_eq!(mrope_section_total([usize::MAX - 1, 0, 2]), None);
+}
+
+/// Rotary tables fit an operand only with matching batch, sequence, unit heads, and an even prefix.
+#[test]
+fn rotary_operand_check_requires_every_shape_relation() {
+    let operand = [2, 4, 5, 8];
+    assert!(rotary_operand_fits(operand, [2, 1, 5, 6], [2, 1, 5, 6], 6));
+    assert!(rotary_operand_fits(operand, [2, 1, 5, 8], [2, 1, 5, 8], 8));
+    for (cosine, sine, rotary) in [
+        ([3, 1, 5, 6], [3, 1, 5, 6], 6),
+        ([2, 2, 5, 6], [2, 2, 5, 6], 6),
+        ([2, 1, 4, 6], [2, 1, 4, 6], 6),
+        ([2, 1, 5, 6], [2, 1, 5, 6], 4),
+        ([2, 1, 5, 6], [2, 1, 5, 4], 6),
+        ([2, 1, 5, 10], [2, 1, 5, 10], 10),
+        ([2, 1, 5, 5], [2, 1, 5, 5], 5),
+    ] {
+        assert!(!rotary_operand_fits(operand, cosine, sine, rotary));
+    }
+    assert!(split_half_width_fits(2));
+    assert!(!split_half_width_fits(0));
+    assert!(!split_half_width_fits(7));
+}
+
+/// Relative-table faults follow the documented order and plans carry the exact anchor.
+#[test]
+fn relative_table_plan_orders_faults_and_reports_anchor() {
+    assert_eq!(
+        plan_relative_table(0, usize::MAX, usize::MAX),
+        Err(RelativeTableFault::EmptyAxis)
+    );
+    assert_eq!(
+        plan_relative_table(2, usize::MAX, usize::MAX),
+        Err(RelativeTableFault::OutputOverflow)
+    );
+    assert_eq!(
+        plan_relative_table(2, 3, usize::MAX - 1),
+        Err(RelativeTableFault::OffsetOverflow)
+    );
+    assert_eq!(
+        plan_relative_table(1, usize::MAX, 0),
+        Err(RelativeTableFault::IndexRange)
+    );
+    assert_eq!(
+        plan_relative_table(3, 5, 10),
+        Ok(RelativeTablePlan {
+            length: 7,
+            anchor: 12
+        })
+    );
+    assert_eq!(
+        plan_relative_table(1, 1 << 62, usize::MAX - 1),
+        Ok(RelativeTablePlan {
+            length: 1 << 62,
+            anchor: usize::MAX - 1
+        })
+    );
+}
+
+/// Bias table shapes report the first failed check.
+#[test]
+fn relative_bias_shape_reports_first_fault() {
+    assert_eq!(relative_bias_shape_fault(8, 32), None);
+    assert_eq!(
+        relative_bias_shape_fault(0, usize::MAX),
+        Some(RelativeBiasShapeFault::ZeroHeads)
+    );
+    assert_eq!(
+        relative_bias_shape_fault(2, usize::MAX),
+        Some(RelativeBiasShapeFault::BucketIndexRange)
+    );
+    assert_eq!(
+        relative_bias_shape_fault(4, i64::MAX as usize),
+        Some(RelativeBiasShapeFault::TableOverflow)
+    );
+    assert_eq!(relative_bias_shape_fault(1, i64::MAX as usize), None);
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+
+    /// Axis counts follow the verified closed form `min(h, (n + 1) / 3)` and `min(w, n / 3)`.
+    #[test]
+    fn axis_counts_match_closed_form(
+        half in 0usize..200,
+        height in 0usize..80,
+        width in 0usize..80,
+    ) {
+        let mut counts = [0usize; 3];
+        for index in 0..half {
+            counts[mrope_frequency_axis(index, height, width)] += 1;
+        }
+        let height_count = height.min((half + 1) / 3);
+        let width_count = width.min(half / 3);
+        proptest::prop_assert_eq!(counts, [half - height_count - width_count, height_count, width_count]);
+    }
+
+    /// Offset query blocks read the entry whose anchor displacement is the true displacement.
+    #[test]
+    fn offset_table_entries_carry_true_displacements(
+        query_length in 1usize..48,
+        key_length in 1usize..48,
+        query_offset in 0usize..1000,
+    ) {
+        let plan = plan_relative_table(query_length, key_length, query_offset).expect("small geometry");
+        let mut read = vec![false; plan.length];
+        for query in 0..query_length {
+            for key in 0..key_length {
+                let entry = relative_table_index(query, key, query_length);
+                proptest::prop_assert!(entry < plan.length);
+                proptest::prop_assert_eq!(
+                    entry as i64 - plan.anchor as i64,
+                    key as i64 - (query_offset + query) as i64
+                );
+                read[entry] = true;
+            }
+        }
+        proptest::prop_assert!(read.into_iter().all(|entry_read| entry_read));
+    }
 
     /// The closed-form axis selector equals the original masking loops for any sections.
     #[test]
