@@ -335,8 +335,8 @@ milestones above or the advertised checkpoint support:
 - **New families.** The dense-decoder Llama family (`llama`, `mistral`,
   `qwen2`, `qwen3`, `smollm3`, `olmo2`), Gemma 2/3 text, and gpt-oss, each with
   tiny Transformers goldens and real-checkpoint gates that passed on Flex and
-  Metal in F32 at `ade8696`. Acceptance records and half-precision gates
-  remain open.
+  Metal in F32 at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). Half-precision
+  gates remain open.
 - **Shared mechanisms.** Connectivity masks, sinks, soft caps, differential
   attention, every RoPE scaling rule, one router for softmax/sigmoid and
   grouped routing, clamped SwiGLU, a shared Mamba-2 mixer, MXFP4 decoding, and

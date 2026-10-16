@@ -257,8 +257,8 @@ acceptance record for an exact checkpoint, backend, and dtype
 
 | Family | `model_type` | Validation status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `ade8696`, acceptance record pending. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
-| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `ade8696`, acceptance record pending. FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
+| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
 | Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16. |
 | Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference; on Metal under the documented `2.5e-3` tolerance). |
 | Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window. |
@@ -270,9 +270,8 @@ acceptance record for an exact checkpoint, backend, and dtype
 | Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
 
 The two supported profiles were qualified on the v0.1.0 source. Later work
-changed their execution paths; their gates passed again on source `ade8696`,
-and those replays must be recorded as acceptance measurements before the next
-release; see
+changed their execution paths; their gates passed again on source `f4c56c4`,
+as recorded in the [real-checkpoint replay](acceptance/measurements/real-checkpoint-replay-20261016.json); see
 [v0.1 release qualification](ARCHITECTURE_COMPATIBILITY.md#v01-release-qualification)
 and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
 

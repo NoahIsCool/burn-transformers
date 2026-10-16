@@ -30,3 +30,11 @@ The [v1](whole-test-file-coverage-v1-20260910.json) and
 [v2](whole-test-file-coverage-v2-20260910.json) coverage records retain distinct
 source snapshots and exclusion policies. Neither is qualified production-only
 coverage; v2 exposes a numerical gap after removing 78 verified test-only files.
+
+The [October 16 real-checkpoint replay](real-checkpoint-replay-20261016.json)
+records the final polish-cycle source `f4c56c4` against every locally available
+reference: FLAN-T5-small and Qwen3.5-0.8B (the v0.1 profiles), the Llama-family
+checkpoints, gemma-3-4b-it, truncated gpt-oss-20b, and the DeepSeek-V2-Lite
+smoke, 61 tests on Flex and Metal, each in its own process. Its log is committed
+with its SHA-256, and `scripts/tests/test_real_checkpoint_replay_record.py`
+checks that every summarized run appears in it. It promotes no checkpoint.

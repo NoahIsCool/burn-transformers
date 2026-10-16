@@ -31,6 +31,31 @@ these results. This bounded line diagnostic does not claim macro closure,
 production-only coverage, or branch coverage. Earlier failures and unrun
 checkpoint/hardware checks remain explicit in the records.
 
+## Integrated source validation
+
+At `f4c56c4` (the final integrated source of the polish cycle) the full source
+gate passed: `cargo fmt`, warning-denied Clippy with all features, 3,604 tests
+with default features and 3,920 with `std,flex,tokenizers,chat-templates,autodiff,train`
+(all targets, 0 failures), 14 doctests including the guides' Rust snippets,
+feature-minimal builds, the Rust 1.92 check, warning-denied public and
+private rustdoc, the documentation audit (0 gaps in 22,780 authored items),
+the fuzz harness tests, 441 Python tooling tests, and all 25 Verus harnesses
+(2,035 verified, 0 errors).
+
+Coverage was measured on that source with `cargo +nightly llvm-cov --branch`
+over the library and integration tests (`std,flex,tokenizers,chat-templates,autodiff`),
+counting production files only (sibling `*_tests.rs` files, test oracles, and
+test support excluded): **97.31% of lines and 95.35% of branches crate-wide**,
+96.85% / 96.05% for shared/core (`src/` outside `src/models/`), and
+97.81% / 94.33% for the model families. Before the polish cycle's coverage
+work (`2816989`) the same measurement gave 93.55% / 90.17% crate-wide and
+95.25% / 93.09% shared/core. This is a direct native measurement, not the
+qualified whole-test-file diagnostic of
+[scripts/WHOLE_FILE_COVERAGE.md](scripts/WHOLE_FILE_COVERAGE.md), which has not
+been re-run on this source. The largest remaining gaps are I/O-failure
+branches of the Burnpack and checkpoint writers that need a fault-injecting
+file abstraction.
+
 ## Checks added since v0.1
 
 These commands cover the work recorded in the
@@ -121,8 +146,8 @@ Qualify half-precision gpt-oss runs (including Metal F16, with
 `TRANSFORMERS_GPT_OSS_DTYPE=f16`) against a truncated F32 bundle; the full
 24-block BF16 bundle needs about 55 GiB of host memory to generate. These
 gates establish experimental validation only; none promotes a checkpoint.
-The Metal F32 runs at `ade8696` (below) are experimental evidence on the same
-terms.
+The Flex and Metal F32 runs at `f4c56c4` (below) are experimental evidence on
+the same terms.
 
 ### Artifact-gated tokenizer and chat-template parity
 
@@ -155,7 +180,11 @@ python3 -I scripts/generate_diffllama_reference.py --check src/attention/differe
 
 The batched-execution, attention, position, DeltaNet, Mamba-2, and loader
 changes touch real-checkpoint paths whose recorded evidence predates them.
-These replays ran on source `ade8696` and passed:
+These replays ran on source `f4c56c4`, each test in its own process, and all 61
+passed. The [real-checkpoint replay record](acceptance/measurements/real-checkpoint-replay-20261016.json) keeps the
+source, toolchain, lockfile, reference-bundle identities, tolerance override,
+and full log; the numerics are identical to the earlier runs at `ade8696` and
+`65912c1`:
 
 - Qwen3.5-0.8B Metal/F16 official-reference parity: prompt cosine
   `0.999998523`, cached decisions at least `0.999997671`, teacher-forced rows
@@ -176,11 +205,8 @@ These replays ran on source `ade8696` and passed:
 - DeepSeek-V2-Lite's metadata gate and Metal/F16 smoke: cached/stateless
   cosine `1.0`, absorbed decode `0.999998964`.
 
-None has an `acceptance/measurements/` record yet. Each needs one, with its
-source commit, binary, bundle `config.json` SHA-256, backend, dtype, and any
-tolerance override, before it counts as release evidence. Commits after
-`ade8696` are mostly tests and documentation but include small host-side
-refactors, so each record names the source it actually ran.
+The record is experimental evidence, not a support declaration: no checkpoint
+above is advertised as supported.
 
 Still to replay on the integrated source:
 

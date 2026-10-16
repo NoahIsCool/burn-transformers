@@ -1,0 +1,333 @@
+== source f4c56c42cdb41e8fa8719d62ac39f5d6d31cb6e7 dirty=0
+== FLAN-T5-small Flex + Metal
+test flan_t5_small_flex_matches_official_reference ... FLAN-T5-small Flex/F32: load=0.090s stateless=0.030s cached32=0.124s teacher32=0.049s boundary512=0.186s beam=0.081s
+FLAN-T5-small Flex/F32 encoder: cosine=1.000000000000 max_abs=0.000000402 failures_1e-4=0 actual_f32le_sha256=afffe1e1975d35fe3d8ece63d06d454e379dddb0fe8acc5dd2baa997d4ff97d9
+FLAN-T5-small Flex/F32 decoder: cosine=0.999999999999 max_abs=0.000011086 failures_1e-4=0 actual_f32le_sha256=f52fd015046be6adbb1e5a310fed19b8c721efdbe7571f8d393e7641d5b7df8b
+FLAN-T5-small Flex/F32 first: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=641925fdbb570c1005a59d81a8cdede3a2a1510776a840f358927407079aded2
+FLAN-T5-small Flex/F32 cached: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=8e13fa2d8ecc1219ce52452796e7602588b17a90ed282d6d43e41bd485e56dbb
+FLAN-T5-small Flex/F32 teacher: cosine=1.000000000000 max_abs=0.000026703 failures_1e-4=0 actual_f32le_sha256=a452051426b728529edfb727b837d7d46d93d3a157f98001abe63e45cdb1912b
+FLAN-T5-small Flex/F32 padded: cosine=1.000000000000 max_abs=0.000026703 failures_1e-4=0 actual_f32le_sha256=7bfe4070380a1e16cafde0ddc2e172cf2eaeaa21323205f6431c14359946e874
+FLAN-T5-small Flex/F32 boundary: cosine=1.000000000000 max_abs=0.000091553 failures_1e-4=0 actual_f32le_sha256=694f73a1d77c7a9cb082187fbd2da5b85e3ab82693238f817c30d07ec95c49ab
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.60s
+           505791400  peak memory footprint
+test flan_t5_small_metal_matches_official_reference ... FLAN-T5-small Metal/F32: load=0.127s stateless=0.136s cached32=0.490s teacher32=0.129s boundary512=0.026s beam=0.322s
+FLAN-T5-small Metal/F32 encoder: cosine=1.000000000000 max_abs=0.000000432 failures_1e-4=0 actual_f32le_sha256=0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26
+FLAN-T5-small Metal/F32 decoder: cosine=0.999999999999 max_abs=0.000010252 failures_1e-4=0 actual_f32le_sha256=c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83
+FLAN-T5-small Metal/F32 first: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d
+FLAN-T5-small Metal/F32 cached: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc
+FLAN-T5-small Metal/F32 teacher: cosine=1.000000000000 max_abs=0.000022888 failures_1e-4=0 actual_f32le_sha256=38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b
+FLAN-T5-small Metal/F32 padded: cosine=1.000000000000 max_abs=0.000030518 failures_1e-4=0 actual_f32le_sha256=cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1
+FLAN-T5-small Metal/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 2.16s
+          1004700824  peak memory footprint
+== Qwen3.5-0.8B Metal/F16
+test loads_pinned_qwen35_weights_and_runs_metal_inference ... official full-vocabulary prompt-logit cosine similarity: 0.999998523
+minimum cached/official full-vocabulary cosine similarity: 0.999997671
+minimum teacher-forced/official full-vocabulary cosine similarity: 0.999997517
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 13.35s
+          3493464392  peak memory footprint
+== Llama family SmolLM-135M-1d461723
+test flex_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 7.05719e-5
+prompt 1: 18 tokens, max |Δ| = 5.5789948e-5
+prompt 2: 8 tokens, max |Δ| = 9.10759e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.06s
+           693666920  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.62s
+           683459640  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 2.4795532e-5
+batched row 1: max |Δ| = 3.2186508e-5
+batched row 2: max |Δ| = 2.7656555e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.22s
+           688751720  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 1.3446808e-4
+prompt 1: 18 tokens, max |Δ| = 4.7683716e-5
+prompt 2: 8 tokens, max |Δ| = 1.3160706e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.89s
+          1227883672  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.43s
+          1148994664  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 2.861023e-5
+batched row 1: max |Δ| = 4.5776367e-5
+batched row 2: max |Δ| = 4.053116e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.30s
+          1130398848  peak memory footprint
+== Llama family Qwen3-4B-531c80e2
+test flex_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 1.2207031e-4
+prompt 1: 13 tokens, max |Δ| = 1.335144e-4
+prompt 2: 8 tokens, max |Δ| = 1.411438e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 14.87s
+         18824280008  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 13.97s
+         18820396952  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 1.2207031e-4
+batched row 1: max |Δ| = 5.8174133e-5
+batched row 2: max |Δ| = 4.7683716e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 4.48s
+         18835896240  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 1.05023384e-4
+prompt 1: 13 tokens, max |Δ| = 8.4877014e-5
+prompt 2: 8 tokens, max |Δ| = 6.1035156e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 7.63s
+         24117369456  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 10.24s
+         24115436144  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 1.05023384e-4
+batched row 1: max |Δ| = 6.2942505e-5
+batched row 2: max |Δ| = 4.196167e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 4.67s
+         24118418032  peak memory footprint
+== Llama family SmolLM3-3B-1fa6fa28
+test flex_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 2.1600723e-4
+prompt 1: 13 tokens, max |Δ| = 1.4591217e-4
+prompt 2: 8 tokens, max |Δ| = 3.8337708e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 13.07s
+         14216178368  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 11.03s
+         14199810704  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 1.2207031e-4
+batched row 1: max |Δ| = 1.0108948e-4
+batched row 2: max |Δ| = 9.6321106e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 3.88s
+         14220323496  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 1.0681152e-4
+prompt 1: 13 tokens, max |Δ| = 1.4019012e-4
+prompt 2: 8 tokens, max |Δ| = 3.1661987e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 6.60s
+         18845832472  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 8.49s
+         18846143744  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 1.0085106e-4
+batched row 1: max |Δ| = 8.201599e-5
+batched row 2: max |Δ| = 1.4829636e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 3.76s
+         18845930776  peak memory footprint
+== Llama family Qwen2-7B-453ed157-f64
+test flex_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 4.2915344e-5
+prompt 1: 13 tokens, max |Δ| = 2.8562546e-4
+prompt 2: 8 tokens, max |Δ| = 1.821518e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 29.97s
+         36804454968  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 34.64s
+         36794657264  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 3.0994415e-5
+batched row 1: max |Δ| = 3.361702e-5
+batched row 2: max |Δ| = 4.4822693e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 11.25s
+         36804078088  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 5.181432e-4
+prompt 1: 13 tokens, max |Δ| = 3.8588047e-4
+prompt 2: 8 tokens, max |Δ| = 1.8978119e-3
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 20.81s
+         45517565856  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 17.34s
+         45489729464  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 7.534027e-5
+batched row 1: max |Δ| = 6.389618e-5
+batched row 2: max |Δ| = 6.484985e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 9.39s
+         45489647544  peak memory footprint
+== Llama family Llama-3.1-8B-d04e592b
+test flex_prompt_logits_match_the_reference ... prompt 0: 6 tokens, max |Δ| = 7.05719e-5
+prompt 1: 14 tokens, max |Δ| = 6.389618e-5
+prompt 2: 9 tokens, max |Δ| = 7.1525574e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 36.27s
+         38166949104  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 33.58s
+         38173846744  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 6.2942505e-5
+batched row 1: max |Δ| = 5.531311e-5
+batched row 2: max |Δ| = 5.340576e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 20.14s
+         38181154032  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... prompt 0: 6 tokens, max |Δ| = 6.484985e-5
+prompt 1: 14 tokens, max |Δ| = 7.605553e-5
+prompt 2: 9 tokens, max |Δ| = 6.246567e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 21.99s
+         45846817040  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 29.70s
+         45829187856  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... batched row 0: max |Δ| = 4.6253204e-5
+batched row 1: max |Δ| = 5.38826e-5
+batched row 2: max |Δ| = 4.9591064e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 13.89s
+         45863610616  peak memory footprint
+== Gemma 3 4B it
+test flex_prompt_logits_match_the_reference ... load: 439 vision-tower tensors intentionally ignored
+prompt 0: 6 tokens, max |Δ| = 7.247925e-5
+prompt 1: 19 tokens, max |Δ| = 1.296997e-4
+prompt 2: 9 tokens, max |Δ| = 1.6117096e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 15.11s
+         19970570880  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... load: 439 vision-tower tensors intentionally ignored
+cached prefill: max |Δ| = 6.9618225e-5
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 14.24s
+         19974945384  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... load: 439 vision-tower tensors intentionally ignored
+batched row 0: max |Δ| = 6.771088e-5
+batched row 1: max |Δ| = 1.18255615e-4
+batched row 2: max |Δ| = 4.7683716e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 4.68s
+         20001176216  peak memory footprint
+test flex_long_context_logits_cross_the_sliding_window ... load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 1.18255615e-4
+windowed: positions 1016..1024: max |Δ| = 5.452633e-4
+windowed: positions 1024..1032: max |Δ| = 1.6403198e-4
+windowed: positions 1032..1088: max |Δ| = 1.183033e-3
+windowed: positions 1088..1237: max |Δ| = 4.6396255e-4
+long prompt (1237 tokens, window 1024): max |Δ| = 5.452633e-4 before the window, 1.183033e-3 at or beyond it
+unwindowed: positions 0..4: max |Δ| = 1.18255615e-4
+unwindowed: positions 1016..1024: max |Δ| = 5.452633e-4
+unwindowed: positions 1024..1032: max |Δ| = 1.7370644e0
+unwindowed: positions 1032..1088: max |Δ| = 1.1642107e1
+unwindowed: positions 1088..1237: max |Δ| = 3.5908382e1
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 49.97s
+         22660743704  peak memory footprint
+test flex_long_context_cached_decode_wraps_the_rings ... load: 439 vision-tower tensors intentionally ignored
+cached chunk 0..1000: max |Δ| = 1.5115738e-4 at position 999
+cached chunk 1000..1237: max |Δ| = 6.818771e-5 at position 1236
+long greedy: 8 of 8 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 29.45s
+         23141811072  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... load: 439 vision-tower tensors intentionally ignored
+prompt 0: 6 tokens, max |Δ| = 5.9127808e-5
+prompt 1: 19 tokens, max |Δ| = 1.1271238e-4
+prompt 2: 9 tokens, max |Δ| = 3.6621094e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 7.42s
+         27189273408  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... load: 439 vision-tower tensors intentionally ignored
+cached prefill: max |Δ| = 5.4359436e-5
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 9.95s
+         27171873552  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... load: 439 vision-tower tensors intentionally ignored
+batched row 0: max |Δ| = 5.531311e-5
+batched row 1: max |Δ| = 1.0204315e-4
+batched row 2: max |Δ| = 4.9591064e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 4.53s
+         27213669280  peak memory footprint
+test metal::metal_long_context_logits_cross_the_sliding_window ... load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 8.058548e-5
+windowed: positions 1016..1024: max |Δ| = 6.3562393e-4
+windowed: positions 1024..1032: max |Δ| = 1.449585e-4
+windowed: positions 1032..1088: max |Δ| = 1.1320114e-3
+windowed: positions 1088..1237: max |Δ| = 4.7779083e-4
+long prompt (1237 tokens, window 1024): max |Δ| = 6.3562393e-4 before the window, 1.1320114e-3 at or beyond it
+unwindowed: positions 0..4: max |Δ| = 8.058548e-5
+unwindowed: positions 1016..1024: max |Δ| = 6.3562393e-4
+unwindowed: positions 1024..1032: max |Δ| = 1.7369881e0
+unwindowed: positions 1032..1088: max |Δ| = 1.1642223e1
+unwindowed: positions 1088..1237: max |Δ| = 3.5908627e1
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 11.37s
+         29771688472  peak memory footprint
+test metal::metal_long_context_cached_decode_wraps_the_rings ... load: 439 vision-tower tensors intentionally ignored
+cached chunk 0..1000: max |Δ| = 1.3923645e-4 at position 999
+cached chunk 1000..1237: max |Δ| = 7.915497e-5 at position 1236
+long greedy: 8 of 8 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 11.86s
+         29917309320  peak memory footprint
+== gpt-oss-20b truncated references
+-- gpt-oss-20b-6cee5e81-1layer-f32-reference.bundle
+test flex_prompt_logits_match_the_reference ... loaded 1 blocks as F32 in 11.578952542s
+prompt 0: 5 tokens, max |Δ| = 7.6293945e-5, mean |Δ| = 3.3899559309188657e-6
+prompt 1: 13 tokens, max |Δ| = 7.05719e-5, mean |Δ| = 3.18732724717849e-6
+prompt 2: 8 tokens, max |Δ| = 6.1035156e-5, mean |Δ| = 3.6147020893332775e-6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 12.04s
+         17175868016  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... loaded 1 blocks as F32 in 3.313507625s
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 5.71s
+         17159484016  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... loaded 1 blocks as F32 in 3.358283667s
+batched row 0: max |Δ| = 4.9591064e-5 to the reference, 4.9591064e-5 to the stateless pass
+batched row 1: max |Δ| = 4.2915344e-5 to the reference, 3.71933e-5 to the stateless pass
+batched row 2: max |Δ| = 5.1498413e-5 to the reference, 5.340576e-5 to the stateless pass
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 3.92s
+         17166643824  peak memory footprint
+test flex_cached_long_prompt_matches_the_reference ... loaded 1 blocks as F32 in 3.177240208s
+cached decode of a 13-token prompt (prefill 3): max |Δ| = 2.9563904e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 4.04s
+         17159025264  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... loaded 1 blocks as F32 in 3.5281085s
+prompt 0: 5 tokens, max |Δ| = 3.1471252e-5, mean |Δ| = 2.7181729764209066e-6
+prompt 1: 13 tokens, max |Δ| = 2.9563904e-5, mean |Δ| = 2.2323041431836017e-6
+prompt 2: 8 tokens, max |Δ| = 3.2424927e-5, mean |Δ| = 2.4995351325743624e-6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 4.84s
+         27542043120  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... loaded 1 blocks as F32 in 3.584837958s
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 5.39s
+         27543304712  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... loaded 1 blocks as F32 in 3.529532041s
+batched row 0: max |Δ| = 2.2888184e-5 to the reference, 0e0 to the stateless pass
+batched row 1: max |Δ| = 1.6212463e-5 to the reference, 0e0 to the stateless pass
+batched row 2: max |Δ| = 1.7642975e-5 to the reference, 9.536743e-6 to the stateless pass
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 4.70s
+         27539012032  peak memory footprint
+test metal::metal_cached_long_prompt_matches_the_reference ... loaded 1 blocks as F32 in 3.554626166s
+cached decode of a 13-token prompt (prefill 3): max |Δ| = 3.2424927e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 4.62s
+         27542878728  peak memory footprint
+-- gpt-oss-20b-6cee5e81-4layer-f32-reference.bundle
+test flex_prompt_logits_match_the_reference ... loaded 4 blocks as F32 in 13.183960333s
+prompt 0: 5 tokens, max |Δ| = 5.6266785e-5, mean |Δ| = 4.877037294840762e-6
+prompt 1: 13 tokens, max |Δ| = 6.484985e-5, mean |Δ| = 4.107968881426281e-6
+prompt 2: 8 tokens, max |Δ| = 6.866455e-5, mean |Δ| = 4.96400607592685e-6
+prompt 3: 183 tokens, max |Δ| = 1.282692e-4, mean |Δ| = 4.454966948125984e-6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 15.83s
+         27295289168  peak memory footprint
+test flex_cached_greedy_matches_the_reference ... loaded 4 blocks as F32 in 9.76052125s
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 13.51s
+         27238616888  peak memory footprint
+test flex_batched_prefill_matches_the_reference ... loaded 4 blocks as F32 in 10.033512292s
+batched row 0: max |Δ| = 5.531311e-5 to the reference, 4.5776367e-5 to the stateless pass
+batched row 1: max |Δ| = 3.8146973e-5 to the reference, 3.9100647e-5 to the stateless pass
+batched row 2: max |Δ| = 6.866455e-5 to the reference, 4.7683716e-5 to the stateless pass
+batched row 3: max |Δ| = 4.7683716e-5 to the reference, 4.386902e-5 to the stateless pass
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 13.90s
+         27498778616  peak memory footprint
+test flex_cached_long_prompt_matches_the_reference ... loaded 4 blocks as F32 in 9.922603125s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.673004e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 23.62s
+         27251150600  peak memory footprint
+test metal::metal_prompt_logits_match_the_reference ... loaded 4 blocks as F32 in 10.602851084s
+prompt 0: 5 tokens, max |Δ| = 4.673004e-5, mean |Δ| = 4.405056670753809e-6
+prompt 1: 13 tokens, max |Δ| = 3.8146973e-5, mean |Δ| = 3.803721218192966e-6
+prompt 2: 8 tokens, max |Δ| = 4.9591064e-5, mean |Δ| = 4.411954888482253e-6
+prompt 3: 183 tokens, max |Δ| = 5.1021576e-5, mean |Δ| = 3.914985075923837e-6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 13.79s
+         39052344944  peak memory footprint
+test metal::metal_cached_greedy_matches_the_reference ... loaded 4 blocks as F32 in 10.368099292s
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 13.85s
+         39054720552  peak memory footprint
+test metal::metal_batched_prefill_matches_the_reference ... loaded 4 blocks as F32 in 10.425270916s
+batched row 0: max |Δ| = 3.886223e-5 to the reference, 2.5749207e-5 to the stateless pass
+batched row 1: max |Δ| = 3.0994415e-5 to the reference, 2.2888184e-5 to the stateless pass
+batched row 2: max |Δ| = 3.6239624e-5 to the reference, 2.9563904e-5 to the stateless pass
+batched row 3: max |Δ| = 2.861023e-5 to the reference, 0e0 to the stateless pass
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 13.92s
+         39083638312  peak memory footprint
+test metal::metal_cached_long_prompt_matches_the_reference ... loaded 4 blocks as F32 in 10.367106208s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.863739e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 19.57s
+         39058751064  peak memory footprint
+== DeepSeek-V2-Lite metadata + Metal F16 smoke
+test validates_pinned_deepseek_v2_lite_config_headers_plan_memory_and_tokenizer ... DeepSeek-V2-Lite header gate: repository=deepseek-ai/DeepSeek-V2-Lite, revision=604d5664dddd88a0433dbae533b7fe9472482de0, shards=4, tensors=5291, tensor_bytes=31412968448, header_inventory_sha256=08f26cb4a2c6c5899e65ba3976a45a537b8811e312319f4945aa3ac95fe33e60, f16_plan_sha256=af3bb522e5a1d498cf1979978ab553d3ce53db088e74447997b33a914466ab2b, f16_target_bytes=31412968448, peak_host_staging_bytes=9014317808, prompt_ids=[17464, 1843, 11, 25890, 39671, 13], elapsed_seconds=0.162
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.17s
+            75596352  peak memory footprint
+test loads_pinned_deepseek_v2_lite_f16_and_runs_metal_smoke ... DeepSeek-V2-Lite F16 Metal: prompt_tokens=6, prompt_ids=[17464, 1843, 11, 25890, 39671, 13], first_top1=185, first_text="\n", cached_cosine=1.000000000, decoded_cosine=0.999998964, min_prefill_hidden_cosine=1.000000000, min_decode_hidden_cosine=0.999978353, cache_scalars_per_layer_token=576, cache_bytes_per_token=31104, stateless_logits_fnv1a64=bb3d30f7d2514383, cached_logits_fnv1a64=bb3d30f7d2514383, decoded_logits_fnv1a64=c61fa00d3c7970df, extended_logits_fnv1a64=9337a9aed90f0dd3, stateless_trace_fnv1a64=8521687d3437db77, cached_trace_fnv1a64=8521687d3437db77, decoded_trace_fnv1a64=368af6648680dd3b, extended_trace_fnv1a64=7a882bb8abd08fe0, load_seconds=16.662, shard_opens=4, max_open_shards=1, source_reads=5291, stateless_seconds=0.461, prefill_seconds=0.202, decode_seconds=0.204, extended_seconds=0.272
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 115.32s
+         33252690128  peak memory footprint
+== done
