@@ -1311,7 +1311,9 @@ pub(crate) fn chunked_scan_with_budget<B: Backend>(
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
     let [batch, sequence, heads, head_dim] = x.dims();
     let [_, _, groups, state_size] = b.dims();
-    if sequence == 0 || chunk_size == 0 || groups == 0 || !heads.is_multiple_of(groups) {
+    // `group_width` exists exactly when `groups > 0` divides `heads`, which is
+    // `heads_per_group`'s precondition in every block.
+    if sequence == 0 || chunk_size == 0 || plan::group_width(heads, groups).is_none() {
         return Err(Error::configuration(
             "mamba2.chunk",
             "the scan needs tokens, a non-zero chunk width, and groups dividing the heads",
@@ -1417,7 +1419,7 @@ fn scan_block<B: Backend>(
     let BlockOperands { x, dt, b, c } = operands;
     let [batch, heads, chunks, width, head_dim] = x.dims();
     let [_, groups, _, _, state_size] = b.dims();
-    // `chunked_scan_with_budget` checked that `groups > 0` divides `heads`.
+    // `chunked_scan_with_budget` checked that the groups split the heads.
     let per_group = heads_per_group(heads, groups);
     let log_decay = dt.clone() * a;
     let cumulative = log_decay.clone().cumsum(3);

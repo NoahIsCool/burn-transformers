@@ -45,7 +45,9 @@ mod geometry;
 pub mod router;
 
 use assignment::{ExpertAssignmentPlan, InvalidExpertId, RoutedIdsError, plan_expert_assignments};
-use geometry::{ExpertBankViolation, check_expert_bank, expert_ids_within};
+use geometry::{
+    ExpertBankViolation, check_expert_bank, check_router_cardinality, expert_ids_within,
+};
 pub(crate) use router::deterministic_top_k;
 pub use router::{
     ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
@@ -837,10 +839,8 @@ impl<B: Backend> SparseMoe<B> {
                 ),
             ));
         }
-        if self.routed.is_empty()
-            || self.experts_per_token == 0
-            || self.experts_per_token > self.routed.len()
-        {
+        // The verified check rejects exactly an empty expert set or `K` outside `1..=E`.
+        if check_router_cardinality(self.routed.len(), self.experts_per_token).is_err() {
             return Err(Error::configuration(
                 "moe.dispatch.experts_per_token",
                 format!(
@@ -885,7 +885,9 @@ impl<B: Backend> SparseMoe<B> {
                 format!("[{batch}, {sequence}, {hidden}]"),
             ));
         }
-        if self.experts_per_token == 0 || self.experts_per_token > self.routed.len() {
+        // The verified check rejects exactly `K` outside `1..=E`; with no
+        // experts that range is empty, so every `K` is rejected, as before.
+        if check_router_cardinality(self.routed.len(), self.experts_per_token).is_err() {
             return Err(Error::configuration(
                 "moe.experts_per_token",
                 format!(
