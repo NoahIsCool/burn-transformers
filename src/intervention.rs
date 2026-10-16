@@ -48,6 +48,19 @@
 //! yet, so requesting it from a built-in model fails preflight as an unknown
 //! point; custom attention emits it by calling
 //! [`Hooks::apply_sink_probability`] right after emitting its pattern.
+//!
+//! # Mixture-of-experts points
+//!
+//! Sparse layers also emit router and expert-branch points, addressed like
+//! every other layer point: [`Layer::router_logits`], [`Layer::router_weights`],
+//! [`Layer::routed_output`], and [`Layer::shared_output`]. Router tensors end in
+//! [`Axis::EXPERT`] or [`Axis::EXPERT_SLOT`], so
+//! `Layer::decoder(3).router_logits().slice(Axis::EXPERT, 5..6)` selects one
+//! expert's score. Each family emits the subset its routing defines, only in
+//! sparse layers; `activation_points()` lists exactly what a model emits.
+//!
+//! # Custom models
+//!
 //! Closures may borrow ordinary Burn modules; their owner must register trainable
 //! parameters in its `Module` tree. Hooks themselves are temporary execution state.
 //! Custom models declare [`Point::custom`] and emit tensors with [`Hooks::apply`]
@@ -91,6 +104,17 @@ pub enum Axis {
         /// Stable experiment-defined label for this tensor dimension.
         &'static str,
     ),
+}
+
+impl Axis {
+    /// Routed experts of a sparse mixture-of-experts layer, the last axis of
+    /// [`Layer::router_logits`]; select experts with
+    /// `point.slice(Axis::EXPERT, first..end)`.
+    pub const EXPERT: Self = Self::Other("expert");
+    /// Selected-expert slots of one token, the last axis of
+    /// [`Layer::router_weights`]: slot `j` holds the `j`-th selected expert in
+    /// decreasing router-score order.
+    pub const EXPERT_SLOT: Self = Self::Other("expert_slot");
 }
 
 /// Discoverable description of a computation point, independent of tensor rank.
@@ -381,6 +405,56 @@ impl Layer {
     /// Emitted before the residual addition as `<stack>.layers.<index>.attention.output`.
     pub fn mixer_output(self) -> Point<3> {
         self.attention_output()
+    }
+
+    // Sparse mixture-of-experts points. Only sparse layers emit them, and each
+    // family emits the subset its routing defines; `activation_points()` lists
+    // exactly what a model emits.
+
+    /// Pre-softmax router scores of a sparse MoE layer, `[batch, token, expert]`.
+    ///
+    /// Emitted after the router projection and before expert selection by
+    /// Qwen3-MoE, gpt-oss, and DeepSeek-V2/V3 (F32 there), so edits change which
+    /// experts run and their mixture weights. The last axis is [`Axis::EXPERT`].
+    /// Dense layers do not emit this point.
+    pub fn router_logits(self) -> Point<3> {
+        Point::custom(
+            self.mlp_point_name("router_logits"),
+            [Axis::Batch, Axis::Token, Axis::EXPERT],
+        )
+    }
+
+    /// Mixture weights of the selected experts, `[batch, token, expert_slot]`.
+    ///
+    /// Emitted by Qwen3-MoE and gpt-oss after top-k selection and any
+    /// renormalization: slot `j` weights the `j`-th selected expert in
+    /// decreasing router-score order ([`Axis::EXPERT_SLOT`]). Edits rescale each
+    /// selected expert's contribution without changing which experts run.
+    pub fn router_weights(self) -> Point<3> {
+        Point::custom(
+            self.mlp_point_name("router_weights"),
+            [Axis::Batch, Axis::Token, Axis::EXPERT_SLOT],
+        )
+    }
+
+    /// Weighted sum of the routed experts, `[batch, token, channel]`.
+    ///
+    /// Emitted by DeepSeek-V2/V3 before the always-active shared experts are
+    /// added, so edits reach only the routed branch.
+    pub fn routed_output(self) -> Point<3> {
+        hidden_point(self.mlp_point_name("routed_output"))
+    }
+
+    /// Output of the always-active shared experts, `[batch, token, channel]`.
+    ///
+    /// Emitted by DeepSeek-V2/V3 before it is added to [`Self::routed_output`].
+    pub fn shared_output(self) -> Point<3> {
+        hidden_point(self.mlp_point_name("shared_output"))
+    }
+
+    /// Names a point beside this layer's built-in MLP points: `<stack>.layers.<index>.mlp.<suffix>`.
+    fn mlp_point_name(self, suffix: &str) -> String {
+        format!("{}.layers.{}.mlp.{suffix}", self.stack.name(), self.index)
     }
 
     /// Address projected self-attention tensors in this layer.
