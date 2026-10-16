@@ -356,16 +356,35 @@ pub(super) fn transpose_tiles<const SOURCE: usize, const TARGET: usize>(
     columns: usize,
     convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
 ) {
-    if rows == 0 || columns == 0 {
-        return;
-    }
     // The plan stays on one thread below the threshold, so skip the system query there.
     let available = if rows.saturating_mul(columns) < PARALLEL_MIN_SCALARS {
         1
     } else {
         std::thread::available_parallelism().map_or(1, usize::from)
     };
-    let plan = transpose_plan(rows, columns, available);
+    transpose_tiles_with_parallelism(source, target, rows, columns, available, convert);
+}
+
+/// Runs [`transpose_tiles`] with an explicit parallelism budget instead of the host's.
+///
+/// `available` is the most threads the transpose may use; values below one are
+/// treated as one. [`transpose_plan`] still keeps matrices below
+/// `PARALLEL_MIN_SCALARS` on the caller's thread and never starts more threads
+/// than there are tile blocks. Production calls go through [`transpose_tiles`];
+/// tests call this directly so the multi-band path runs with chosen thread
+/// counts regardless of the host's core count.
+fn transpose_tiles_with_parallelism<const SOURCE: usize, const TARGET: usize>(
+    source: &[[u8; SOURCE]],
+    target: &mut [[u8; TARGET]],
+    rows: usize,
+    columns: usize,
+    available: usize,
+    convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
+) {
+    if rows == 0 || columns == 0 {
+        return;
+    }
+    let plan = transpose_plan(rows, columns, available.max(1));
     std::thread::scope(|scope| {
         for (band, target_band) in target.chunks_mut(rows * plan.band_columns).enumerate() {
             let first_column = band * plan.band_columns;

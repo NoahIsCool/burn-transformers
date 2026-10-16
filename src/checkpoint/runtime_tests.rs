@@ -2062,12 +2062,28 @@ fn in_memory_transpose_data(
     dtype: TensorDType,
     bytes: Vec<u8>,
 ) -> TensorData {
-    let payload_bytes = dtype.storage_bytes(rows * columns).unwrap();
+    in_memory_cast_transpose_data(rows, columns, dtype, dtype, bytes)
+}
+
+/// Executes one planned `Transpose2d` from `source_dtype` to `target_dtype`
+/// through the complete in-memory runtime.
+///
+/// The plan's staging budget is the source payload plus the target buffer,
+/// the two buffers `materialize_transpose` holds at once.
+fn in_memory_cast_transpose_data(
+    rows: u64,
+    columns: u64,
+    source_dtype: TensorDType,
+    target_dtype: TensorDType,
+    bytes: Vec<u8>,
+) -> TensorData {
+    let payload_bytes = source_dtype.storage_bytes(rows * columns).unwrap();
+    let staging_bytes = payload_bytes + target_dtype.storage_bytes(rows * columns).unwrap();
     let source = PlannedSource {
         name: "source".into(),
         shard: "memory.safetensors".into(),
         shape: vec![rows, columns],
-        dtype,
+        dtype: source_dtype,
         data_offsets: [0, payload_bytes],
     };
     let target = PlannedTensor {
@@ -2075,11 +2091,11 @@ fn in_memory_transpose_data(
         sources: vec![source],
         transform: PlannedTransform::Transpose2d,
         shape: vec![columns, rows],
-        dtype,
+        dtype: target_dtype,
     };
     let report = crate::checkpoint::LoadReport {
         memory: Some(crate::checkpoint::MemoryEstimate {
-            peak_host_staging_bytes: payload_bytes * 2,
+            peak_host_staging_bytes: staging_bytes,
             ..crate::checkpoint::MemoryEstimate::default()
         }),
         ..crate::checkpoint::LoadReport::default()
@@ -2090,18 +2106,56 @@ fn in_memory_transpose_data(
         aliases: Vec::new(),
         report,
         memory: crate::checkpoint::MemoryEstimate {
-            peak_host_staging_bytes: payload_bytes * 2,
+            peak_host_staging_bytes: staging_bytes,
             ..crate::checkpoint::MemoryEstimate::default()
         },
     };
     let mut source = MemorySource::default();
     source.tensors.insert(
         "source".into(),
-        SourceTensor::new("source", [rows, columns], dtype, bytes).unwrap(),
+        SourceTensor::new("source", [rows, columns], source_dtype, bytes).unwrap(),
     );
     let mut sink = CollectingSink::default();
     execute_load_plan(&plan, &mut source, &mut sink).unwrap();
     sink.tensors.remove("target").unwrap()
+}
+
+/// A planned BF16-to-F32 `Transpose2d` above the threaded-transpose threshold
+/// (`[1031, 1037]`, ragged final band) converts and places every scalar exactly.
+///
+/// Every finite BF16 value widens exactly to F32 by appending sixteen zero
+/// bits. Patterns with an all-ones exponent are folded to finite ones (NaN
+/// quieting is covered by the conversion tests), so the oracle is that shift
+/// applied at the naively transposed position.
+#[cfg(target_endian = "little")]
+#[test]
+fn planned_large_converting_transpose_is_exact_above_the_thread_threshold() {
+    let (rows, columns) = (1031_usize, 1037_usize);
+    let values = (0..rows * columns)
+        .map(|index| {
+            // A multiplicative hash spreads indices over the BF16 bit patterns.
+            let bits = (index as u32).wrapping_mul(0x9E37_79B9).rotate_left(7) as u16;
+            if bits & 0x7F80 == 0x7F80 {
+                bits & !0x0080
+            } else {
+                bits
+            }
+        })
+        .collect::<Vec<_>>();
+    let data = in_memory_cast_transpose_data(
+        rows as u64,
+        columns as u64,
+        TensorDType::BF16,
+        TensorDType::F32,
+        u16_bytes(&values),
+    );
+    assert_eq!(data.shape.as_slice(), [columns, rows]);
+    let output = data.as_slice::<f32>().unwrap();
+    for (index, value) in output.iter().enumerate() {
+        let (column, row) = (index / rows, index % rows);
+        let expected = u32::from(values[row * columns + column]) << 16;
+        assert_eq!(value.to_bits(), expected, "target ({column}, {row})");
+    }
 }
 
 /// Executes the numeric `u16` transpose used by the index-equation property test.

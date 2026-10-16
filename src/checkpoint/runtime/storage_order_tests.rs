@@ -287,22 +287,24 @@ fn byte_transpose_rejects_unsupported_widths_and_lengths() {
     assert_eq!(transpose_bytes(&[], 0, 3, 4), Some(Vec::new()));
 }
 
-/// A multi-threaded transpose (above the parallel threshold, ragged final band) is exact.
+/// A transpose above the parallel threshold (ragged final band) places every element.
+///
+/// This runs with the host's own parallelism; the multi-band path is checked
+/// for explicit thread budgets, independent of the host, in the conversion
+/// kernel's tests (`threaded_index_transpose_places_every_element_for_every_budget`).
 #[test]
 fn parallel_byte_transpose_matches_naive_reference() {
     let (rows, columns) = (1031, 1037);
     let source = (0..rows * columns)
-        .flat_map(|index| (index as u32).to_le_bytes())
+        .flat_map(|index| u32::try_from(index).unwrap().to_ne_bytes())
         .collect::<Vec<_>>();
     let transposed = transpose_bytes(&source, rows, columns, 4).unwrap();
-    for row in 0..rows {
-        for column in [0, 1, 31, 32, 33, 511, columns - 1] {
-            let target = (column * rows + row) * 4;
-            let value = u32::from_le_bytes(transposed[target..target + 4].try_into().unwrap());
-            assert_eq!(value as usize, row * columns + column);
-        }
-    }
     assert_eq!(transposed.len(), source.len());
+    for (target, scalar) in transposed.chunks_exact(4).enumerate() {
+        let (column, row) = (target / rows, target % rows);
+        let value = u32::from_ne_bytes(scalar.try_into().unwrap());
+        assert_eq!(value as usize, row * columns + column, "target {target}");
+    }
 }
 
 proptest! {

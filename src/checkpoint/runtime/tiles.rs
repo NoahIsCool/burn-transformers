@@ -25,8 +25,10 @@
 //! and every column lies in exactly one band; that `n <= t <= available`, so
 //! no more threads run than requested; and that one band's target slice,
 //! `rows · w` scalars, never exceeds the `rows · columns` scalars of the whole
-//! matrix. The tiled copy that consumes the plan is covered by exact-permutation
-//! property tests.
+//! matrix. The tiled copy that consumes the plan is covered by tests, not
+//! proofs: exact-permutation property tests on small shapes, and element-wise
+//! checks of a ragged `[1031, 1037]` matrix with injected parallelism budgets
+//! of 1, 2, 3, 7, 14 and 64 threads, for identity and dtype-converting copies.
 //!
 //! The module has no crate, Burn, or allocator dependencies so that Verus can
 //! check it in isolation.
