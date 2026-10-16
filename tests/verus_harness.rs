@@ -5,9 +5,9 @@
 //! honest between Verus runs:
 //!
 //! * every harness includes real source files;
-//! * proof code uses no trusted escape hatch, including the two that
-//!   `--no-cheating` still accepts (`exec_allows_no_decreases_clause` and
-//!   `verifier::external`);
+//! * proof code uses no trusted escape hatch, including the ones that
+//!   `--no-cheating` still accepts (`exec_allows_no_decreases_clause`,
+//!   `verifier::external`, and the crate's own `verus_verify(external)`);
 //! * every source file compiled under `verus_keep_ghost` is checked by some
 //!   harness;
 //! * the proof-surface figures the documentation quotes (harness count,
@@ -33,7 +33,10 @@ use std::path::{Path, PathBuf};
 /// (contract included) from verification without a diagnostic. The external
 /// specification forms trust a hand-written contract for code Verus never
 /// checks, and `inline_air_stmt` injects unchecked solver input. All of them
-/// are rejected here, in harnesses and in every included source file.
+/// are rejected here, in harnesses and in every included source file. The
+/// attribute spelling the crate itself uses, `verus_verify(external)`, is not
+/// a fixed substring, so [`escape_hatches`] checks it separately (see
+/// [`FORBIDDEN_VERUS_VERIFY_ARGUMENT`]).
 const FORBIDDEN_PROOF_TOKENS: &[&str] = &[
     "admit(",
     "assume(",
@@ -49,6 +52,21 @@ const FORBIDDEN_PROOF_TOKENS: &[&str] = &[
     "verifier(external)",
     "verifier::external",
 ];
+
+/// The `verus_verify(...)` argument that removes an item from verification.
+///
+/// Every verified function carries `verus_verify`, and with the pinned prover
+/// `#[cfg_attr(verus_keep_ghost, verus_verify(external))]` behaves like
+/// `verifier::external` under `--no-cheating`: a function with a false
+/// `ensures` reports `0 verified, 0 errors`. The argument may sit anywhere in
+/// the list and be padded with whitespace, so [`verus_verify_arguments`]
+/// parses the list instead of matching a substring.
+/// (`verus_verify(external_body)` is reported as `external_body`.)
+const FORBIDDEN_VERUS_VERIFY_ARGUMENT: &str = "external";
+
+/// How [`escape_hatches`] reports a `verus_verify` attribute whose arguments
+/// include [`FORBIDDEN_VERUS_VERIFY_ARGUMENT`].
+const VERUS_VERIFY_EXTERNAL: &str = "verus_verify(external)";
 
 /// Documents, besides the changelog, that quote the proof surface's size.
 ///
@@ -153,17 +171,64 @@ fn annotated_sources(root: &Path) -> BTreeSet<String> {
     found
 }
 
-/// Returns the forbidden proof tokens that occur in `text`, in list order.
+/// Whether `character` can continue a Rust identifier.
+fn continues_identifier(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+/// Returns the trimmed top-level arguments of every `verus_verify(...)` attribute in `text`.
+///
+/// `verus_verify` must begin an identifier, so `helper_verus_verify(` does
+/// not count, and whitespace may separate it from `(`. The argument list ends
+/// at the matching `)`, and only commas outside nested parentheses separate
+/// arguments, so `rlimit(10)` is one argument. An unclosed list runs to the
+/// end of the text, so a truncated attribute is still scanned.
+fn verus_verify_arguments(text: &str) -> Vec<&str> {
+    const NAME: &str = "verus_verify";
+    let mut arguments = Vec::new();
+    for (start, _) in text.match_indices(NAME) {
+        if text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(continues_identifier)
+        {
+            continue;
+        }
+        let Some(list) = text[start + NAME.len()..].trim_start().strip_prefix('(') else {
+            continue;
+        };
+        let mut depth = 0_usize;
+        let mut argument_start = 0;
+        let mut end = list.len();
+        for (offset, character) in list.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    end = offset;
+                    break;
+                }
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    arguments.push(list[argument_start..offset].trim());
+                    argument_start = offset + 1;
+                }
+                _ => {}
+            }
+        }
+        arguments.push(list[argument_start..end].trim());
+    }
+    arguments
+}
+
+/// Returns the escape hatches that occur in `text`: the forbidden proof
+/// tokens in list order, then [`VERUS_VERIFY_EXTERNAL`] when some
+/// `verus_verify(...)` attribute has the argument `external`.
 ///
 /// A token that ends in an identifier character must also end the identifier
 /// or path it occurs in, so `verifier::external` does not match inside
 /// `verifier::external_body` (which `external_body` reports on its own).
 fn escape_hatches(text: &str) -> Vec<&'static str> {
-    /// Whether `character` can continue a Rust identifier.
-    fn continues_identifier(character: char) -> bool {
-        character.is_ascii_alphanumeric() || character == '_'
-    }
-    FORBIDDEN_PROOF_TOKENS
+    let mut found = FORBIDDEN_PROOF_TOKENS
         .iter()
         .copied()
         .filter(|token| {
@@ -176,7 +241,11 @@ fn escape_hatches(text: &str) -> Vec<&'static str> {
                         .is_some_and(continues_identifier)
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if verus_verify_arguments(text).contains(&FORBIDDEN_VERUS_VERIFY_ARGUMENT) {
+        found.push(VERUS_VERIFY_EXTERNAL);
+    }
+    found
 }
 
 /// Parses a decimal count written with optional thousands commas, such as `1,877`.
@@ -408,6 +477,24 @@ fn escape_hatch_scanner_rejects_every_trusted_construct() {
             "#[cfg_attr(verus_keep_ghost, verifier::external, verus_verify)]",
             "verifier::external",
         ),
+        (
+            "#[cfg_attr(verus_keep_ghost, verus_verify(external))]",
+            "verus_verify(external)",
+        ),
+        ("#[verus_verify(external)]", "verus_verify(external)"),
+        ("#[verus_verify( external )]", "verus_verify(external)"),
+        (
+            "#[verus_verify(external, rlimit(10))]",
+            "verus_verify(external)",
+        ),
+        (
+            "#[verus_verify(rlimit(10), external)]",
+            "verus_verify(external)",
+        ),
+        (
+            "#[cfg_attr(verus_keep_ghost, verus_verify (\n    external,\n))]",
+            "verus_verify(external)",
+        ),
     ];
     for (text, token) in cases {
         assert!(
@@ -419,6 +506,53 @@ fn escape_hatch_scanner_rejects_every_trusted_construct() {
         escape_hatches("#[verifier::external_body]"),
         ["external_body"],
         "`verifier::external` must not match inside `verifier::external_body`"
+    );
+    assert_eq!(
+        escape_hatches("#[cfg_attr(verus_keep_ghost, verus_verify(external_body))]"),
+        ["external_body"],
+        "`verus_verify(external_body)` is reported once, as `external_body`"
+    );
+}
+
+/// The crate's `verus_verify` attribute passes the scanner unless an argument is `external`.
+#[test]
+fn verus_verify_arguments_other_than_external_pass_the_scanner() {
+    for text in [
+        "#[cfg_attr(verus_keep_ghost, verus_verify)]",
+        "#[cfg_attr(verus_keep_ghost, verus_verify(dual_spec))]",
+        "#[verus_verify(rlimit(10))]",
+        "#[verus_verify(dual_spec, rlimit(external))]",
+        "fn helper_verus_verify(external: u8) {}",
+        "// verus_verify",
+    ] {
+        assert_eq!(
+            escape_hatches(text),
+            Vec::<&str>::new(),
+            "{text:?} must pass the scanner"
+        );
+    }
+}
+
+/// `verus_verify` argument lists split at top-level commas and end at the matching parenthesis.
+#[test]
+fn verus_verify_argument_parser_respects_nesting_and_bounds() {
+    assert_eq!(
+        verus_verify_arguments("#[verus_verify(a, rlimit(1, 2), b)] fn f() {}"),
+        ["a", "rlimit(1, 2)", "b"]
+    );
+    assert_eq!(
+        verus_verify_arguments("#[verus_verify] #[verus_verify (x)] #[verus_verify()]"),
+        ["x", ""]
+    );
+    assert_eq!(
+        verus_verify_arguments("#[verus_verify(external"),
+        ["external"],
+        "an unclosed list is scanned to the end of the text"
+    );
+    assert_eq!(
+        verus_verify_arguments("my_verus_verify(external); verus_verify_x(external)"),
+        Vec::<&str>::new(),
+        "only the `verus_verify` identifier itself introduces arguments"
     );
 }
 

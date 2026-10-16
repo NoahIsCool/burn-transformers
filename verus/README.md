@@ -172,14 +172,14 @@ different count, so update this table with the proofs.
 ## Rules for proof code
 
 Proof code must not trust anything Verus has not checked. The
-`verus_harness` integration test rejects these tokens in harnesses and in
+`verus_harness` integration test rejects these constructs in harnesses and in
 every included source file:
 
 | Rejected | Why |
 | --- | --- |
 | `admit(`, `assume(`, `assume_specification`, `assume_termination`, `external_body` | Assume a fact, a contract, or termination without proof. `--no-cheating` rejects these too. |
 | `exec_allows_no_decreases_clause` | Lets an executable loop or recursion skip its termination proof, so a body that never returns satisfies any postcondition. `--no-cheating` accepts it. |
-| `verifier::external`, `verifier(external)` | Removes an item, contract included, from verification without a diagnostic. `--no-cheating` accepts it. |
+| `verifier::external`, `verifier(external)`, and `external` as any argument of `verus_verify(...)` | Removes an item, contract included, from verification without a diagnostic. `--no-cheating` accepts it, so even a false `ensures` under `verus_verify(external)` produces no error. |
 | `external_fn_specification`, `external_type_specification`, `external_trait_specification`, `external_trait_extension` | Trust a hand-written contract for code Verus never checks. |
 | `inline_air_stmt` | Injects unchecked solver input. |
 

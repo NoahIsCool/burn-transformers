@@ -369,8 +369,9 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   pins the prover release, fails when a harness's count differs from the table
   in `verus/README.md`, and records per-harness counts and input hashes.
 - The `verus_harness` test also rejects `exec_allows_no_decreases_clause`,
-  `verifier::external`, `assume_termination`, `inline_air_stmt`, and the
-  external-specification attributes (the first two pass `--no-cheating`),
+  `verifier::external`, `verus_verify(external)`, `assume_termination`,
+  `inline_air_stmt`, and the external-specification attributes (the first
+  three pass `--no-cheating`),
   treats every file containing `verus_keep_ghost` as needing a harness, and
   checks the proof counts quoted by the documentation against the tree.
 
