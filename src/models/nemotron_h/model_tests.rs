@@ -1210,16 +1210,16 @@ fn stateless_window_mask_unites_padding_with_the_causal_window() {
                 .unwrap_err();
         assert!(
             matches!(&error, Error::Configuration { field, reason }
-                if field == "nemotron_h.sliding_window"
+                if field == "nemotron_h.attention_window"
                 && reason == "window exceeds portable signed index range"),
             "{error}"
         );
     }
 }
 
-/// A padded windowed batch excludes old keys: shrinking the window changes only late rows.
+/// A padded batch under an experiment window excludes old keys: shrinking it changes only late rows.
 #[test]
-fn padded_sliding_window_forward_limits_old_keys() {
+fn padded_attention_window_forward_limits_old_keys() {
     let device = Default::default();
     let reference = NemotronHForCausalLm::<TestBackend>::init(
         NemotronHConfig {
@@ -1246,7 +1246,7 @@ fn padded_sliding_window_forward_limits_old_keys() {
     // The same (now materialized) parameters with a one-token window; cloning
     // before the first forward would re-draw lazily initialized parameters.
     let mut windowed = reference.clone();
-    windowed.model.config.sliding_window = Some(1);
+    windowed.model.config.attention_window = Some(1);
     let local = windowed.forward(input(), &options).unwrap().logits;
     // The first valid query sees only itself under both masks.
     full.clone()
@@ -1363,5 +1363,72 @@ fn component_constructors_refuse_zero_widths() {
             if field == "nemotron_h.mlp_hidden_act" && reason == "unsupported activation \"gelu\""),
         "{:?}",
         block.map(drop)
+    );
+}
+
+/// The serialized `sliding_window` never changes stateless, hidden-state, or MTP outputs.
+///
+/// Regression for NUM-1: the pinned Transformers Nemotron-H graph
+/// (`cfa309cf`) never reads `sliding_window`, yet this crate windowed every
+/// attention block and the MTP stage with it, so a Transformers-saved tiny
+/// model with `sliding_window = 3` diverged from the reference from position
+/// 3 on (up to 1.78 in the logits) while the same weights with `null`
+/// matched to about 1e-6. Seven tokens exceed every tested window, so any
+/// windowing would change the later positions.
+#[test]
+fn serialized_sliding_window_never_changes_outputs() {
+    let device = Default::default();
+    let reference = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let input = || CausalLmInput {
+        token_ids: Tensor::from_ints([[1, 2, 3, 4, 5, 6, 7]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..Default::default()
+    };
+    let values = |tensor: Tensor<TestBackend, 3>| tensor.into_data().to_vec::<f32>().unwrap();
+    // The first forward materializes the lazy parameters every clone then shares.
+    let expected = reference.forward(input(), &options).unwrap();
+    let expected_hidden = expected.final_hidden_state.unwrap();
+    let shifted = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3, 4, 5, 6, 7]], &device);
+    let expected_mtp = reference
+        .predict_next_token_logits(shifted.clone(), expected_hidden.clone().narrow(1, 0, 6))
+        .unwrap();
+    for window in [1, 2, 3, 32] {
+        let mut serialized = reference.clone();
+        serialized.model.config.sliding_window = Some(window);
+        let actual = serialized.forward(input(), &options).unwrap();
+        assert_eq!(values(actual.logits), values(expected.logits.clone()));
+        let hidden = actual.final_hidden_state.unwrap();
+        assert_eq!(values(hidden.clone()), values(expected_hidden.clone()));
+        let mtp = serialized
+            .predict_next_token_logits(shifted.clone(), hidden.narrow(1, 0, 6))
+            .unwrap();
+        assert_eq!(values(mtp), values(expected_mtp.clone()));
+    }
+    // The MTP stage takes only the explicit experiment window from a configuration.
+    let built = NemotronHForCausalLm::<TestBackend>::init(
+        NemotronHConfig {
+            sliding_window: Some(2),
+            ..tiny_config(true)
+        },
+        &device,
+    )
+    .unwrap();
+    assert_eq!(built.next_token_head.as_ref().unwrap().sliding_window, None);
+    let opted_in = NemotronHForCausalLm::<TestBackend>::init(
+        NemotronHConfig {
+            attention_window: Some(2),
+            ..tiny_config(true)
+        },
+        &device,
+    )
+    .unwrap();
+    assert_eq!(
+        opted_in.next_token_head.as_ref().unwrap().sliding_window,
+        Some(2)
     );
 }

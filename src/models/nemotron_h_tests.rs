@@ -372,23 +372,25 @@ fn attention_fields_are_rejected_only_when_attention_is_scheduled() {
             "must be finite and greater than zero",
         ),
         (
-            edited(|c| c.sliding_window = Some(0)),
-            "sliding_window",
+            edited(|c| c.attention_window = Some(0)),
+            "attention_window",
             "must be nonzero",
         ),
         (
-            edited(|c| c.sliding_window = Some(4097)),
-            "sliding_window",
+            edited(|c| c.attention_window = Some(4097)),
+            "attention_window",
             "cannot exceed max_position_embeddings",
         ),
     ];
     for (config, field, reason) in &cases {
         assert_rejected(config, field, reason);
     }
-    // A partial factor yielding an even integral width and a full window are valid.
+    // A partial factor yielding an even integral width and a full window are
+    // valid; the serialized `sliding_window` is ignored metadata at any value.
     edited(|c| {
         c.partial_rotary_factor = Some(0.5);
-        c.sliding_window = Some(4096);
+        c.attention_window = Some(4096);
+        c.sliding_window = Some(0);
     })
     .validate()
     .unwrap();
@@ -795,7 +797,9 @@ fn transformers_saved_config_loads_with_an_unbounded_time_step_limit() {
     let config = NemotronHConfig::from_json_str(TRANSFORMERS_SAVED_CONFIG).unwrap();
     assert_eq!(config.time_step_limit, [Some(0.0), None]);
     assert_eq!(config.block_count(), 4);
+    // The serialized window is kept as metadata; only the experiment window applies.
     assert_eq!(config.sliding_window, Some(3));
+    assert_eq!(config.attention_window, None);
     for tag in ["-Infinity", "NaN"] {
         let json = TRANSFORMERS_SAVED_CONFIG.replace(
             r#""__float__": "Infinity""#,
@@ -805,6 +809,47 @@ fn transformers_saved_config_loads_with_an_unbounded_time_step_limit() {
         assert!(
             error.to_string().contains("at `time_step_limit[1]`"),
             "{error}"
+        );
+    }
+}
+
+/// The experiment window is validated but never serialized; the serialized key is unchecked metadata.
+#[test]
+fn attention_window_is_validated_and_never_serialized() {
+    use crate::models::config::ModelConfig;
+
+    let windowed = NemotronHConfig {
+        attention_window: Some(2),
+        ..NemotronHConfig::default()
+    };
+    windowed.validate().unwrap();
+    let json = serde_json::to_string(&windowed).unwrap();
+    assert!(!json.contains("attention_window"), "{json}");
+    assert_eq!(
+        NemotronHConfig::from_json_str(&json)
+            .unwrap()
+            .attention_window,
+        None
+    );
+    let json = json.replace(r#""sliding_window":null"#, r#""sliding_window":0"#);
+    // Like the reference, any serialized window (even zero) is accepted and ignored.
+    assert_eq!(
+        NemotronHConfig::from_json_str(&json)
+            .unwrap()
+            .sliding_window,
+        Some(0)
+    );
+    for (window, reason) in [
+        (0, "must be nonzero"),
+        (4097, "cannot exceed max_position_embeddings"),
+    ] {
+        assert_rejected(
+            &NemotronHConfig {
+                attention_window: Some(window),
+                ..NemotronHConfig::default()
+            },
+            "attention_window",
+            reason,
         );
     }
 }

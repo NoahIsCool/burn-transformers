@@ -21,7 +21,7 @@
 //! - Attention blocks write the step's keys and values into the full cache
 //!   *ahead* of attention and attend over one zero-copy view `[0, L_b + n_b)`
 //!   of every row. Keys are excluded by absolute position (`k > q`, outside
-//!   the sliding window, or beyond a row's end); a dense batch with equal
+//!   an experiment's attention window, or beyond a row's end); a dense batch with equal
 //!   lengths needs no mask at all, only bottom-right causality. Padded query
 //!   slots repeat their row's last readable position, so they never lose
 //!   every key and their discarded outputs are ordinary finite softmaxes on
@@ -604,9 +604,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         let kv_plan = has_attention
             .then(|| state.tensors.kv_read_plan_through(&step, KV_GROUP))
             .transpose()?;
-        // A window wider than every row's history can exclude nothing.
+        // A window wider than every row's history can exclude nothing. Only
+        // the experiment's explicit window applies; the reference ignores the
+        // serialized `sliding_window`.
         let window = active_window(
-            self.config().sliding_window,
+            self.config().attention_window,
             longest_end(&baselines, &counts),
         )
         .and_then(NonZeroUsize::new);
