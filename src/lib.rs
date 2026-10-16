@@ -1,4 +1,7 @@
 #![deny(missing_docs)]
+// Every public type must be reachable by a public path, so a public signature
+// never returns a type that callers cannot name or match.
+#![warn(unnameable_types)]
 #![forbid(unsafe_code)]
 
 //! Backend-generic implementations of modern transformer architectures.

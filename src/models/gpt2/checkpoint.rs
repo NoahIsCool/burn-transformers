@@ -56,7 +56,7 @@ impl Gpt2CheckpointLayout {
     ///
     /// # Errors
     ///
-    /// `Gpt2CheckpointLoadError::Namespace` unless exactly one of `wte.weight`
+    /// [`Gpt2CheckpointLoadError::Namespace`] unless exactly one of `wte.weight`
     /// and `transformer.wte.weight` is present.
     pub fn detect(manifest: &CheckpointManifest) -> Result<Self, Gpt2CheckpointLoadError> {
         let backbone = manifest.tensors.contains_key("wte.weight");
@@ -241,7 +241,7 @@ impl Gpt2CheckpointContract {
 /// Contextual failure while installing one planned GPT-2 parameter.
 ///
 /// This is the [`TensorSink`] error of [`Gpt2Model`] and [`Gpt2ForCausalLm`];
-/// a complete load reports it inside `Gpt2CheckpointLoadError::Execution`.
+/// a complete load reports it inside [`Gpt2CheckpointLoadError::Execution`].
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Gpt2LoadError {
@@ -265,11 +265,6 @@ pub enum Gpt2LoadError {
 /// Failure from configuration, namespace detection, strict planning, or streamed execution.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-#[expect(
-    unnameable_types,
-    reason = "public load methods return this type, so src/models/gpt2.rs must re-export it; \
-              delete this expectation in the change that adds that re-export"
-)]
 pub enum Gpt2CheckpointLoadError {
     /// The declared graph is invalid.
     #[error(transparent)]
@@ -331,7 +326,7 @@ impl<B: Backend> Gpt2Model<B> {
     ///
     /// # Errors
     ///
-    /// Returns a `Gpt2CheckpointLoadError` naming the failing stage.
+    /// Returns a [`Gpt2CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
@@ -376,7 +371,7 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
     ///
     /// # Errors
     ///
-    /// Returns a `Gpt2CheckpointLoadError` naming the failing stage.
+    /// Returns a [`Gpt2CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
