@@ -18,22 +18,29 @@
 //!
 //! # Verified behavior
 //!
-//! `verus/tokenization.rs` checks every function here in place. For all
-//! inputs the proofs establish that no index leaves its buffer and no
+//! `verus/tokenization.rs` checks every function here in place, against a
+//! step-by-step reference model of MiniJinja 2.19's lexer written as
+//! recursive spec functions (`string_close`, `skip_tag_space`,
+//! `basic_tag_scan`, `raw_end_scan`, `tag_end_scan`, `next_tag_scan`). For
+//! all inputs the proofs establish that no index leaves its buffer and no
 //! arithmetic overflows, and:
 //!
+//! - [`next_tag`] returns exactly the model's next tag ([`next_tag_scan`]):
+//!   no tag MiniJinja would parse is skipped, and no comment, raw section, or
+//!   template text is returned as a tag. A returned span starts at or after
+//!   its position, opens with the delimiter of its kind, closes with the
+//!   matching delimiter, and ends after the position, so a scan over the
+//!   source makes progress and every slice it takes is in bounds;
+//! - [`find_tag_end`] returns exactly the first closing delimiter at bracket
+//!   depth zero outside string literals ([`tag_end_scan`]), and
+//!   [`skip_string`] exactly the offset after the first unescaped closing
+//!   quote, or the end of the buffer ([`string_skip_end`]);
+//! - [`basic_tag_end`] returns exactly [`basic_tag_scan`], which finds every
+//!   tag `[-+]? ws* name ws* [-+]? %}` ([`is_basic_tag`]) and only those, for
+//!   names such as `raw` and `endraw` that start with a non-space byte; and
+//!   [`raw_section_end`] ends at the first such `endraw` tag;
 //! - [`next_tag_opening`] returns exactly the first `{{`, `{%`, or `{#` at or
 //!   after its start, and [`find_pattern`] the first occurrence of a pattern;
-//! - [`skip_string`] moves strictly forward, to just past the closing quote or
-//!   to the end of the buffer;
-//! - [`find_tag_end`] returns only offsets where the closing delimiter really
-//!   occurs;
-//! - [`basic_tag_end`] accepts exactly `[-+]? ws* name ws* [-+]? %}`, and
-//!   [`raw_section_end`] ends at such an `endraw` tag;
-//! - [`next_tag`] returns a span that starts at or after its position, opens
-//!   with the delimiter of its kind, closes with the matching delimiter, and
-//!   ends after the position, so a scan over the source makes progress and
-//!   every slice it takes is in bounds;
 //! - [`marker_widths`] never measures more than the tag body holds;
 //! - [`char_boundary_at_most`] returns the largest character boundary at or
 //!   below its limit;
@@ -77,6 +84,14 @@ pub(crate) struct TagSpan {
     /// Offset just past the closing `}`.
     pub(crate) end: usize,
 }
+
+/// `raw`, the basic tag that opens a raw section (spelled per byte so Verus sees its contents).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+const RAW_NAME: [u8; 3] = [b'r', b'a', b'w'];
+
+/// `endraw`, the basic tag that closes a raw section.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+const ENDRAW_NAME: [u8; 6] = [b'e', b'n', b'd', b'r', b'a', b'w'];
 
 #[cfg(verus_keep_ghost)]
 verus! {
@@ -180,6 +195,402 @@ pub(crate) open spec fn is_basic_tag(bytes: Seq<u8>, from: int, name: Seq<u8>, e
         }
 }
 
+// ---------------------------------------------------------------------------
+// Reference model of MiniJinja's tag scanning
+//
+// The recursive spec functions below transcribe, step by step, how MiniJinja
+// 2.19's lexer moves through template source: where a string literal closes,
+// where whitespace ends, where a basic `raw`/`endraw` tag ends, where a tag's
+// closing delimiter sits at bracket depth zero, and which tag comes next once
+// comments and raw sections are skipped. The scanners are proved to return
+// exactly these values; the declarative facts (`is_basic_tag`, `occurs_at`,
+// `opening_at`) are proved alongside them.
+// ---------------------------------------------------------------------------
+
+/// `#}`, the closing delimiter of a comment.
+pub(crate) open spec fn comment_close_bytes() -> Seq<u8> {
+    seq![35u8, 125u8]
+}
+
+/// `raw`, the basic tag that opens a raw section.
+pub(crate) open spec fn raw_name_bytes() -> Seq<u8> {
+    seq![114u8, 97u8, 119u8]
+}
+
+/// `endraw`, the basic tag that closes a raw section.
+pub(crate) open spec fn endraw_name_bytes() -> Seq<u8> {
+    seq![101u8, 110u8, 100u8, 114u8, 97u8, 119u8]
+}
+
+/// Where a string literal closed by `quote` ends, scanning its body from `index`.
+///
+/// A backslash skips the byte after it, the first unescaped `quote` closes
+/// the literal (the result is the offset just past it), and running off the
+/// end leaves the literal unterminated (`None`).
+pub(crate) open spec fn string_close(bytes: Seq<u8>, quote: u8, index: int) -> Option<int>
+    decreases bytes.len() + 1 - index,
+{
+    if index < 0 || index >= bytes.len() {
+        None
+    } else if bytes[index] == 92 {
+        string_close(bytes, quote, index + 2)
+    } else if bytes[index] == quote {
+        Some(index + 1)
+    } else {
+        string_close(bytes, quote, index + 1)
+    }
+}
+
+/// Where scanning resumes after the string literal opened by `quote` at `start`.
+///
+/// Just past the closing quote, or the end of the buffer when unterminated.
+pub(crate) open spec fn string_skip_end(bytes: Seq<u8>, start: int, quote: u8) -> int {
+    match string_close(bytes, quote, start + 1) {
+        Some(end) => end,
+        None => bytes.len() as int,
+    }
+}
+
+/// The first offset at or after `index` that is not tag whitespace (or the end of the buffer).
+pub(crate) open spec fn skip_tag_space(bytes: Seq<u8>, index: int) -> int
+    decreases bytes.len() - index,
+{
+    if 0 <= index < bytes.len() && is_tag_space(bytes[index]) {
+        skip_tag_space(bytes, index + 1)
+    } else {
+        index
+    }
+}
+
+/// MiniJinja's `skip_basic_tag` on the text after `{%`: the end of `[-+]? ws* name ws* [-+]? %}`.
+///
+/// An optional marker, greedy whitespace, the name, greedy whitespace, an
+/// optional marker, and `%}`; `None` when any part is missing.
+pub(crate) open spec fn basic_tag_scan(bytes: Seq<u8>, from: int, name: Seq<u8>) -> Option<int> {
+    let lead = if from < bytes.len() && is_marker(bytes[from]) {
+        from + 1
+    } else {
+        from
+    };
+    let name_start = skip_tag_space(bytes, lead);
+    if !occurs_at(bytes, name_start, name) {
+        None
+    } else {
+        let spaces_end = skip_tag_space(bytes, name_start + name.len());
+        let close = if spaces_end < bytes.len() && is_marker(bytes[spaces_end]) {
+            spaces_end + 1
+        } else {
+            spaces_end
+        };
+        if occurs_at(bytes, close, statement_close_bytes()) {
+            Some(close + 2)
+        } else {
+            None
+        }
+    }
+}
+
+/// The first offset at or after `from` where `pattern` occurs (`str::find`).
+pub(crate) open spec fn first_occurrence(bytes: Seq<u8>, from: int, pattern: Seq<u8>) -> Option<int>
+    decreases bytes.len() + 1 - from,
+{
+    if from < 0 || from > bytes.len() {
+        None
+    } else if occurs_at(bytes, from, pattern) {
+        Some(from)
+    } else {
+        first_occurrence(bytes, from + 1, pattern)
+    }
+}
+
+/// The first offset at or after `from` where `{{`, `{%`, or `{#` opens.
+pub(crate) open spec fn first_opening(bytes: Seq<u8>, from: int) -> Option<int>
+    decreases bytes.len() - from,
+{
+    if from < 0 || from >= bytes.len() {
+        None
+    } else if opening_at(bytes, from).is_some() {
+        Some(from)
+    } else {
+        first_opening(bytes, from + 1)
+    }
+}
+
+/// End of a raw section's `{% endraw %}`: the first `{%` at or after `search` that starts one.
+pub(crate) open spec fn raw_end_scan(bytes: Seq<u8>, search: int) -> Option<int>
+    decreases bytes.len() + 1 - search via raw_end_scan_decreases
+{
+    match first_occurrence(bytes, search, statement_open_bytes()) {
+        None => None,
+        Some(opening) => match basic_tag_scan(bytes, opening + 2, endraw_name_bytes()) {
+            Some(end) => Some(end),
+            None => raw_end_scan(bytes, opening + 2),
+        },
+    }
+}
+
+/// Where a tag's `closing` delimiter sits, scanning from `index` at bracket depth `depth`.
+///
+/// String literals are skipped whole; `([{` deepen and `)]}` shallow the
+/// nesting; the delimiter counts only at depth zero. `None` when the buffer
+/// ends first.
+pub(crate) open spec fn tag_end_scan(bytes: Seq<u8>, closing: Seq<u8>, index: int, depth: int) -> Option<
+    int,
+>
+    decreases bytes.len() + 1 - index via tag_end_scan_decreases
+{
+    if index < 0 || index >= bytes.len() {
+        None
+    } else if bytes[index] == 39 || bytes[index] == 34 {
+        tag_end_scan(bytes, closing, string_skip_end(bytes, index, bytes[index]), depth)
+    } else if depth == 0 && occurs_at(bytes, index, closing) {
+        Some(index)
+    } else if bytes[index] == 40 || bytes[index] == 91 || bytes[index] == 123 {
+        tag_end_scan(bytes, closing, index + 1, depth + 1)
+    } else if bytes[index] == 41 || bytes[index] == 93 || bytes[index] == 125 {
+        tag_end_scan(bytes, closing, index + 1, depth - 1)
+    } else {
+        tag_end_scan(bytes, closing, index + 1, depth)
+    }
+}
+
+/// The next expression or statement tag at or after `search`: its kind, start, and end.
+///
+/// Template text is skipped up to the next opening. A comment resumes the
+/// scan after its `#}`; a `{% raw %}` tag resumes it after the matching
+/// `{% endraw %}`; any other statement or expression tag ends at its
+/// closing delimiter found by [`tag_end_scan`]. An unterminated comment, raw
+/// section, or tag ends the scan (`None`).
+pub(crate) open spec fn next_tag_scan(bytes: Seq<u8>, search: int) -> Option<(TagKind, int, int)>
+    decreases bytes.len() + 1 - search via next_tag_scan_decreases
+{
+    match first_opening(bytes, search) {
+        None => None,
+        Some(start) => {
+            let body = start + 2;
+            if opening_at(bytes, start) == Some(TagOpening::Comment) {
+                match first_occurrence(bytes, body, comment_close_bytes()) {
+                    None => None,
+                    Some(close) => next_tag_scan(bytes, close + 2),
+                }
+            } else if opening_at(bytes, start) == Some(TagOpening::Statement) {
+                match basic_tag_scan(bytes, body, raw_name_bytes()) {
+                    Some(after) => match raw_end_scan(bytes, after) {
+                        None => None,
+                        Some(end) => next_tag_scan(bytes, end),
+                    },
+                    None => match tag_end_scan(bytes, statement_close_bytes(), body, 0) {
+                        None => None,
+                        Some(close) => Some((TagKind::Statement, start, close + 2)),
+                    },
+                }
+            } else {
+                match tag_end_scan(bytes, expression_close_bytes(), body, 0) {
+                    None => None,
+                    Some(close) => Some((TagKind::Expression, start, close + 2)),
+                }
+            }
+        },
+    }
+}
+
+/// A closed string ends after its scan position, inside the buffer, just past the closing quote.
+pub(crate) proof fn lemma_string_close_bounds(bytes: Seq<u8>, quote: u8, index: int)
+    requires
+        0 <= index,
+    ensures
+        string_close(bytes, quote, index) matches Some(end) ==> index < end <= bytes.len()
+            && bytes[end - 1] == quote,
+    decreases bytes.len() + 1 - index,
+{
+    if index < bytes.len() {
+        if bytes[index] == 92 {
+            lemma_string_close_bounds(bytes, quote, index + 2);
+        } else if bytes[index] != quote {
+            lemma_string_close_bounds(bytes, quote, index + 1);
+        }
+    }
+}
+
+/// The first occurrence found is at or after the start and the pattern really occurs there.
+pub(crate) proof fn lemma_first_occurrence_bounds(bytes: Seq<u8>, from: int, pattern: Seq<u8>)
+    ensures
+        first_occurrence(bytes, from, pattern) matches Some(index) ==> from <= index && occurs_at(
+            bytes,
+            index,
+            pattern,
+        ),
+    decreases bytes.len() + 1 - from,
+{
+    if 0 <= from <= bytes.len() && !occurs_at(bytes, from, pattern) {
+        lemma_first_occurrence_bounds(bytes, from + 1, pattern);
+    }
+}
+
+/// The first opening found is at or after the start and a tag really opens there.
+pub(crate) proof fn lemma_first_opening_bounds(bytes: Seq<u8>, from: int)
+    ensures
+        first_opening(bytes, from) matches Some(index) ==> from <= index && opening_at(
+            bytes,
+            index,
+        ).is_some(),
+    decreases bytes.len() - from,
+{
+    if 0 <= from < bytes.len() && opening_at(bytes, from).is_none() {
+        lemma_first_opening_bounds(bytes, from + 1);
+    }
+}
+
+/// Whitespace skipping stays in the buffer, crosses only whitespace, and stops at a non-space byte.
+pub(crate) proof fn lemma_skip_tag_space(bytes: Seq<u8>, index: int)
+    requires
+        0 <= index <= bytes.len(),
+    ensures
+        index <= skip_tag_space(bytes, index) <= bytes.len(),
+        all_space(bytes, index, skip_tag_space(bytes, index)),
+        skip_tag_space(bytes, index) < bytes.len() ==> !is_tag_space(
+            bytes[skip_tag_space(bytes, index)],
+        ),
+    decreases bytes.len() - index,
+{
+    if index < bytes.len() && is_tag_space(bytes[index]) {
+        lemma_skip_tag_space(bytes, index + 1);
+    }
+}
+
+/// Whitespace skipping from `index` stops at `stop` when only whitespace lies between them and `stop` is not whitespace.
+pub(crate) proof fn lemma_skip_tag_space_stops(bytes: Seq<u8>, index: int, stop: int)
+    requires
+        0 <= index <= stop <= bytes.len(),
+        all_space(bytes, index, stop),
+        stop < bytes.len() ==> !is_tag_space(bytes[stop]),
+    ensures
+        skip_tag_space(bytes, index) == stop,
+    decreases stop - index,
+{
+    if index < stop {
+        assert(is_tag_space(bytes[index]));
+        lemma_skip_tag_space_stops(bytes, index + 1, stop);
+    }
+}
+
+/// A basic tag found from `from` ends after it and inside the buffer.
+pub(crate) proof fn lemma_basic_tag_scan_bounds(bytes: Seq<u8>, from: int, name: Seq<u8>)
+    requires
+        0 <= from <= bytes.len(),
+    ensures
+        basic_tag_scan(bytes, from, name) matches Some(end) ==> from < end <= bytes.len(),
+{
+    let lead = if from < bytes.len() && is_marker(bytes[from]) {
+        from + 1
+    } else {
+        from
+    };
+    lemma_skip_tag_space(bytes, lead);
+    let name_start = skip_tag_space(bytes, lead);
+    if occurs_at(bytes, name_start, name) {
+        lemma_skip_tag_space(bytes, name_start + name.len());
+    }
+}
+
+/// Every basic tag the declarative grammar admits is the one the scan finds, when the name starts with a non-space byte.
+///
+/// Whitespace skipping is greedy and the name's first byte is not
+/// whitespace, so the name can only start where the skip stops; the same
+/// holds for the closing marker and `%}`. Hence [`is_basic_tag`] has at most
+/// one end and [`basic_tag_scan`] returns it.
+pub(crate) proof fn lemma_basic_tag_scan_complete(bytes: Seq<u8>, from: int, name: Seq<u8>, end: int)
+    requires
+        0 <= from <= bytes.len(),
+        name.len() > 0,
+        !is_tag_space(name[0]),
+        is_basic_tag(bytes, from, name, end),
+    ensures
+        basic_tag_scan(bytes, from, name) == Some(end),
+{
+    let (name_start, close) = choose|name_start: int, close: int|
+        #![trigger occurs_at(bytes, name_start, name), occurs_at(bytes, close, statement_close_bytes())]
+        {
+            let name_end = name_start + name.len();
+            let lead = if from < bytes.len() && is_marker(bytes[from]) {
+                from + 1
+            } else {
+                from
+            };
+            let trail = if close > name_end && is_marker(bytes[close - 1]) {
+                close - 1
+            } else {
+                close
+            };
+            &&& lead <= name_start
+            &&& name_end <= close
+            &&& close + 2 == end
+            &&& end <= bytes.len()
+            &&& occurs_at(bytes, name_start, name)
+            &&& occurs_at(bytes, close, statement_close_bytes())
+            &&& all_space(bytes, lead, name_start)
+            &&& all_space(bytes, name_end, trail)
+        };
+    let lead = if from < bytes.len() && is_marker(bytes[from]) {
+        from + 1
+    } else {
+        from
+    };
+    let name_end = name_start + name.len();
+    assert(bytes.subrange(name_start, name_end)[0] == name[0]);
+    lemma_skip_tag_space_stops(bytes, lead, name_start);
+    assert(bytes.subrange(close, close + 2)[0] == statement_close_bytes()[0]);
+    if close > name_end && is_marker(bytes[close - 1]) {
+        lemma_skip_tag_space_stops(bytes, name_end, close - 1);
+    } else {
+        lemma_skip_tag_space_stops(bytes, name_end, close);
+    }
+}
+
+/// A raw section's end found from `search` lies after it and inside the buffer.
+pub(crate) proof fn lemma_raw_end_scan_bounds(bytes: Seq<u8>, search: int)
+    requires
+        0 <= search,
+    ensures
+        raw_end_scan(bytes, search) matches Some(end) ==> search < end <= bytes.len(),
+    decreases bytes.len() + 1 - search,
+{
+    lemma_first_occurrence_bounds(bytes, search, statement_open_bytes());
+    if let Some(opening) = first_occurrence(bytes, search, statement_open_bytes()) {
+        lemma_basic_tag_scan_bounds(bytes, opening + 2, endraw_name_bytes());
+        if basic_tag_scan(bytes, opening + 2, endraw_name_bytes()).is_none() {
+            lemma_raw_end_scan_bounds(bytes, opening + 2);
+        }
+    }
+}
+
+/// Termination of [`raw_end_scan`]: each retry resumes after the `{%` it rejected.
+#[via_fn]
+pub(crate) proof fn raw_end_scan_decreases(bytes: Seq<u8>, search: int) {
+    lemma_first_occurrence_bounds(bytes, search, statement_open_bytes());
+}
+
+/// Termination of [`tag_end_scan`]: a skipped string ends after its opening quote.
+#[via_fn]
+pub(crate) proof fn tag_end_scan_decreases(bytes: Seq<u8>, closing: Seq<u8>, index: int, depth: int) {
+    if 0 <= index < bytes.len() {
+        lemma_string_close_bounds(bytes, bytes[index], index + 1);
+    }
+}
+
+/// Termination of [`next_tag_scan`]: a skipped comment or raw section ends after the scan position.
+#[via_fn]
+pub(crate) proof fn next_tag_scan_decreases(bytes: Seq<u8>, search: int) {
+    lemma_first_opening_bounds(bytes, search);
+    if let Some(start) = first_opening(bytes, search) {
+        lemma_first_occurrence_bounds(bytes, start + 2, comment_close_bytes());
+        lemma_basic_tag_scan_bounds(bytes, start + 2, raw_name_bytes());
+        if let Some(after) = basic_tag_scan(bytes, start + 2, raw_name_bytes()) {
+            lemma_raw_end_scan_bounds(bytes, after);
+        }
+    }
+}
+
 } // verus!
 
 /// Whether `byte` is ASCII whitespace as `char::is_ascii_whitespace` defines it.
@@ -235,14 +646,18 @@ pub(crate) fn starts_with_at(bytes: &[u8], index: usize, pattern: &[u8]) -> bool
 /// Offset of the first occurrence of `pattern` in `bytes` at or after `from`.
 ///
 /// This is `str::find` on `&source[from..]`, shifted by `from`. Verified: the
-/// result is the first offset at or after `from` where the pattern occurs,
-/// and `None` means it occurs nowhere there.
+/// result is the first offset at or after `from` where the pattern occurs
+/// ([`first_occurrence`]), and `None` means it occurs nowhere there.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
         scannable(bytes@),
         from <= bytes.len(),
     ensures
+        match found {
+            Some(index) => first_occurrence(bytes@, from as int, pattern@) == Some(index as int),
+            None => first_occurrence(bytes@, from as int, pattern@).is_none(),
+        },
         match found {
             Some(index) => {
                 &&& from <= index
@@ -256,9 +671,14 @@ pub(crate) fn find_pattern(bytes: &[u8], from: usize, pattern: &[u8]) -> Option<
     let mut index = from;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
-            from <= index,
+            from <= index <= bytes.len() + 1,
             scannable(bytes@),
             forall|i: int| from <= i < index ==> !#[trigger] occurs_at(bytes@, i, pattern@),
+            first_occurrence(bytes@, index as int, pattern@) == first_occurrence(
+                bytes@,
+                from as int,
+                pattern@,
+            ),
         decreases bytes.len() + 1 - index,
     ))]
     while index <= bytes.len() {
@@ -272,11 +692,15 @@ pub(crate) fn find_pattern(bytes: &[u8], from: usize, pattern: &[u8]) -> Option<
 
 /// Offset and delimiter of the first `{{`, `{%`, or `{#` at or after `from`.
 ///
-/// Verified: exactly the first tag opening at or after `from`; `None` when
-/// there is none.
+/// Verified: exactly the first tag opening at or after `from`
+/// ([`first_opening`]); `None` when there is none.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     ensures
+        match found {
+            Some((index, _)) => first_opening(bytes@, from as int) == Some(index as int),
+            None => first_opening(bytes@, from as int).is_none(),
+        },
         match found {
             Some((index, opening)) => {
                 &&& from <= index
@@ -292,6 +716,7 @@ pub(crate) fn next_tag_opening(bytes: &[u8], from: usize) -> Option<(usize, TagO
         invariant
             from <= index,
             forall|i: int| from <= i < index ==> #[trigger] opening_at(bytes@, i).is_none(),
+            first_opening(bytes@, index as int) == first_opening(bytes@, from as int),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() {
@@ -314,24 +739,31 @@ pub(crate) fn next_tag_opening(bytes: &[u8], from: usize) -> Option<(usize, TagO
 /// Returns the index just past the string literal opened by `quote` at `start`.
 ///
 /// A backslash escapes the next byte. An unterminated literal runs to the end
-/// of the buffer. Verified: the result is after `start` and at most the
-/// buffer length, and unless it is the buffer length it is just past a
-/// `quote` byte.
+/// of the buffer. Verified: the result is exactly [`string_skip_end`], just
+/// past the first `quote` byte after `start` that no backslash escapes, or
+/// the buffer length when there is none; so it is after `start`, at most the
+/// buffer length, and unless it is the buffer length just past a `quote`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(end =>
     requires
         start < bytes.len(),
         scannable(bytes@),
     ensures
+        end == string_skip_end(bytes@, start as int, quote),
         start < end <= bytes.len(),
         end == bytes.len() || (start + 2 <= end && bytes@[end - 1] == quote),
 ))]
 pub(crate) fn skip_string(bytes: &[u8], start: usize, quote: u8) -> usize {
     let mut index = start + 1;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_string_close_bounds(bytes@, quote, start + 1);
+    }
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             start < index <= bytes.len() + 1,
             scannable(bytes@),
+            string_close(bytes@, quote, index as int) == string_close(bytes@, quote, start + 1),
         decreases bytes.len() + 1 - index,
     ))]
     while index < bytes.len() {
@@ -352,13 +784,20 @@ pub(crate) fn skip_string(bytes: &[u8], start: usize, quote: u8) -> usize {
 /// delimiter only counts at bracket depth zero, so a `}}` that closes a
 /// nested dict literal does not end an expression tag; a closing bracket
 /// without an opening one makes the depth negative, which no delimiter can
-/// then end. Verified: a returned offset is at or after `from` and the
-/// closing delimiter occurs there.
+/// then end. Verified: the result is exactly [`tag_end_scan`] from `from` at
+/// depth zero, so it is the first offset where the delimiter occurs outside
+/// every string literal at bracket depth zero, and `None` means there is
+/// none; a returned offset is at or after `from` and the closing delimiter
+/// occurs there.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
         scannable(bytes@),
     ensures
+        match found {
+            Some(index) => tag_end_scan(bytes@, closing@, from as int, 0) == Some(index as int),
+            None => tag_end_scan(bytes@, closing@, from as int, 0).is_none(),
+        },
         found matches Some(index) ==> from <= index && occurs_at(bytes@, index as int, closing@),
 ))]
 pub(crate) fn find_tag_end(bytes: &[u8], from: usize, closing: &[u8]) -> Option<usize> {
@@ -369,6 +808,12 @@ pub(crate) fn find_tag_end(bytes: &[u8], from: usize, closing: &[u8]) -> Option<
             from <= index,
             scannable(bytes@),
             -(index as int) <= depth <= index as int,
+            tag_end_scan(bytes@, closing@, index as int, depth as int) == tag_end_scan(
+                bytes@,
+                closing@,
+                from as int,
+                0,
+            ),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() {
@@ -394,22 +839,44 @@ pub(crate) fn find_tag_end(bytes: &[u8], from: usize, closing: &[u8]) -> Option<
 /// Matches `[-+]? ws* name ws* [-+]? %}` at `from` (just after `{%`) and returns its end.
 ///
 /// This is MiniJinja's `skip_basic_tag`, which recognizes `raw` and `endraw`
-/// before any expression parsing. Verified: a returned end is exactly the end
-/// of such a tag ([`is_basic_tag`]).
+/// before any expression parsing. Verified: the result is exactly
+/// [`basic_tag_scan`]; a returned end is the end of such a tag
+/// ([`is_basic_tag`]), and for a name that starts with a non-space byte
+/// (`raw`, `endraw`) every such tag is found: `None` means there is none, and
+/// a tag has only the one end returned.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
         scannable(bytes@),
         from <= bytes.len(),
     ensures
+        match found {
+            Some(end) => basic_tag_scan(bytes@, from as int, name@) == Some(end as int),
+            None => basic_tag_scan(bytes@, from as int, name@).is_none(),
+        },
         found matches Some(end) ==> from < end <= bytes.len() && is_basic_tag(
             bytes@,
             from as int,
             name@,
             end as int,
         ),
+        name.len() > 0 && !is_tag_space(name@[0]) ==> forall|end: int| #[trigger] is_basic_tag(
+            bytes@,
+            from as int,
+            name@,
+            end,
+        ) ==> (found matches Some(found_end) && found_end == end),
 ))]
 pub(crate) fn basic_tag_end(bytes: &[u8], from: usize, name: &[u8]) -> Option<usize> {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if name.len() > 0 && !is_tag_space(name@[0]) {
+            assert forall|end: int| #[trigger] is_basic_tag(bytes@, from as int, name@, end) implies
+                basic_tag_scan(bytes@, from as int, name@) == Some(end) by {
+                lemma_basic_tag_scan_complete(bytes@, from as int, name@, end);
+            }
+        }
+    }
     let mut index = from;
     if index < bytes.len() && (bytes[index] == b'-' || bytes[index] == b'+') {
         index += 1;
@@ -422,6 +889,7 @@ pub(crate) fn basic_tag_end(bytes: &[u8], from: usize, name: &[u8]) -> Option<us
         invariant
             lead <= index <= bytes.len(),
             all_space(bytes@, lead as int, index as int),
+            skip_tag_space(bytes@, index as int) == skip_tag_space(bytes@, lead as int),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() && is_ascii_space(bytes[index]) {
@@ -443,6 +911,7 @@ pub(crate) fn basic_tag_end(bytes: &[u8], from: usize, name: &[u8]) -> Option<us
         invariant
             name_end <= index <= bytes.len(),
             all_space(bytes@, name_end as int, index as int),
+            skip_tag_space(bytes@, index as int) == skip_tag_space(bytes@, name_end as int),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() && is_ascii_space(bytes[index]) {
@@ -456,13 +925,16 @@ pub(crate) fn basic_tag_end(bytes: &[u8], from: usize, name: &[u8]) -> Option<us
         index += 1;
     }
     let statement_close = [b'%', b'}'];
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(statement_close@ =~= statement_close_bytes());
+    }
     if !starts_with_at(bytes, index, &statement_close) {
         return None;
     }
     #[cfg(verus_keep_ghost)]
     proof! {
         let close = index as int;
-        assert(statement_close@ =~= statement_close_bytes());
         assert(occurs_at(bytes@, close, statement_close_bytes()));
         assert(occurs_at(bytes@, name_start as int, name@));
         if close == spaces_end && close > name_end {
@@ -475,18 +947,23 @@ pub(crate) fn basic_tag_end(bytes: &[u8], from: usize, name: &[u8]) -> Option<us
 /// End of a raw section's body plus its `{% endraw %}` tag, scanning from `from`.
 ///
 /// As in MiniJinja, the first `{%` that starts an `endraw` tag ends the
-/// section; every other byte is data. Verified: a returned end is after
-/// `from`, at most the buffer length, and ends a basic `endraw` tag that
-/// starts after a `{%` at or after `from`.
+/// section; every other byte is data. Verified: the result is exactly
+/// [`raw_end_scan`], the end of the `endraw` tag after the first `{%` at or
+/// after `from` that starts one; it is after `from`, at most the buffer
+/// length, and ends a basic `endraw` tag ([`is_basic_tag`]).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
         scannable(bytes@),
         from <= bytes.len(),
     ensures
+        match found {
+            Some(end) => raw_end_scan(bytes@, from as int) == Some(end as int),
+            None => raw_end_scan(bytes@, from as int).is_none(),
+        },
         found matches Some(end) ==> from < end <= bytes.len() && exists|opening: int|
             from <= opening && #[trigger] occurs_at(bytes@, opening, statement_open_bytes())
-                && is_basic_tag(bytes@, opening + 2, b"endraw"@, end as int),
+                && is_basic_tag(bytes@, opening + 2, endraw_name_bytes(), end as int),
 ))]
 pub(crate) fn raw_section_end(bytes: &[u8], from: usize) -> Option<usize> {
     let mut search = from;
@@ -494,17 +971,23 @@ pub(crate) fn raw_section_end(bytes: &[u8], from: usize) -> Option<usize> {
         invariant
             from <= search <= bytes.len(),
             scannable(bytes@),
+            raw_end_scan(bytes@, search as int) == raw_end_scan(bytes@, from as int),
         decreases bytes.len() - search,
     ))]
     loop {
         let statement_open = [b'{', b'%'];
-        let opening = find_pattern(bytes, search, &statement_open)?;
         #[cfg(verus_keep_ghost)]
         proof! {
             assert(statement_open@ =~= statement_open_bytes());
         }
+        let opening = find_pattern(bytes, search, &statement_open)?;
         let after_opening = opening + 2;
-        if let Some(end) = basic_tag_end(bytes, after_opening, b"endraw") {
+        let endraw: &[u8] = &ENDRAW_NAME;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(endraw@ =~= endraw_name_bytes());
+        }
+        if let Some(end) = basic_tag_end(bytes, after_opening, endraw) {
             return Some(end);
         }
         search = after_opening;
@@ -516,16 +999,25 @@ pub(crate) fn raw_section_end(bytes: &[u8], from: usize) -> Option<usize> {
 /// Template text is skipped, and so are `{# comments #}` and `{% raw %}`
 /// sections (through their `{% endraw %}`). An unterminated comment, raw
 /// section, or tag ends the scan (`None`): MiniJinja's parser then rejects
-/// the remainder itself. Verified: a returned span starts at or after
-/// `position`, opens with `{{` (expressions) or `{%` (statements), closes with
-/// the matching `}}` or `%}`, holds both delimiters (`start + 4 <= end`), and
-/// ends inside the buffer, so a scan that resumes at `end` makes progress.
+/// the remainder itself. Verified: the result is exactly [`next_tag_scan`],
+/// the reference model of MiniJinja's lexer, so no tag MiniJinja would parse
+/// is skipped and none it treats as data is returned; a returned span starts
+/// at or after `position`, opens with `{{` (expressions) or `{%`
+/// (statements), closes with the matching `}}` or `%}`, holds both
+/// delimiters (`start + 4 <= end`), and ends inside the buffer, so a scan
+/// that resumes at `end` makes progress.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
         scannable(bytes@),
         position <= bytes.len(),
     ensures
+        match found {
+            Some(span) => next_tag_scan(bytes@, position as int) == Some(
+                (span.kind, span.start as int, span.end as int),
+            ),
+            None => next_tag_scan(bytes@, position as int).is_none(),
+        },
         found matches Some(span) ==> {
             &&& position <= span.start
             &&& span.start + 4 <= span.end <= bytes.len()
@@ -547,6 +1039,7 @@ pub(crate) fn next_tag(bytes: &[u8], position: usize) -> Option<TagSpan> {
         invariant
             position <= search <= bytes.len(),
             scannable(bytes@),
+            next_tag_scan(bytes@, search as int) == next_tag_scan(bytes@, position as int),
         decreases bytes.len() - search,
     ))]
     loop {
@@ -555,11 +1048,24 @@ pub(crate) fn next_tag(bytes: &[u8], position: usize) -> Option<TagSpan> {
         match opening {
             TagOpening::Comment => {
                 let comment_close = [b'#', b'}'];
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    assert(comment_close@ =~= comment_close_bytes());
+                }
                 let close = find_pattern(bytes, body_start, &comment_close)?;
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_first_occurrence_bounds(bytes@, body_start as int, comment_close_bytes());
+                }
                 search = close + 2;
             }
             TagOpening::Statement => {
-                if let Some(after) = basic_tag_end(bytes, body_start, b"raw") {
+                let raw: &[u8] = &RAW_NAME;
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    assert(raw@ =~= raw_name_bytes());
+                }
+                if let Some(after) = basic_tag_end(bytes, body_start, raw) {
                     // Like MiniJinja, copy everything up to the matching `{% endraw %}`.
                     search = raw_section_end(bytes, after)?;
                 } else {

@@ -65,18 +65,26 @@
 //!   against the unit exactly.
 //!
 //! and to `src/tokenization/chat_template/scan.rs`, the tag scanner shared by
-//! the chat-template source rewrites:
+//! the chat-template source rewrites, against a step-by-step reference model
+//! of MiniJinja 2.19's lexer written as recursive spec functions:
 //!
+//! - `next_tag` returns exactly the model's next tag (`next_tag_scan`):
+//!   template text, comments, and `{% raw %}` sections are skipped exactly as
+//!   the model skips them, so no tag MiniJinja would parse escapes the source
+//!   rewrites and the operator guard; a returned span starts at or after the
+//!   scan position, opens with its kind's delimiter, closes with the matching
+//!   one, and ends inside the source, so the rewrite loop makes progress and
+//!   slices in bounds;
+//! - `find_tag_end` returns exactly the first closing delimiter at bracket
+//!   depth zero outside string literals (`tag_end_scan`), and `skip_string`
+//!   exactly the offset after the first unescaped closing quote, or the end
+//!   (`string_skip_end`);
+//! - `basic_tag_end` returns exactly `basic_tag_scan`, which is sound and
+//!   complete for the declarative `[-+]? ws* name ws* [-+]? %}` grammar
+//!   (`is_basic_tag`) for names that start with a non-space byte, and
+//!   `raw_section_end` ends at the first such `endraw` tag (`raw_end_scan`);
 //! - `next_tag_opening` and `find_pattern` return exactly the first tag
 //!   opening or pattern occurrence at or after their start;
-//! - `skip_string` moves strictly forward to just past the closing quote or
-//!   to the end; `find_tag_end` returns only offsets where the closing
-//!   delimiter occurs; `basic_tag_end` accepts exactly
-//!   `[-+]? ws* name ws* [-+]? %}` and `raw_section_end` ends at such an
-//!   `endraw` tag;
-//! - `next_tag` returns spans that start at or after the scan position, open
-//!   with their kind's delimiter, close with the matching one, and end inside
-//!   the source, so the rewrite loop makes progress and slices in bounds;
 //!   `marker_widths` never exceeds the tag body, and `char_boundary_at_most`
 //!   returns the largest character boundary at or below its limit (against
 //!   vstd's UTF-8 model of `str`); `is_identifier`, which picks the namespace
@@ -86,18 +94,24 @@
 //! and to `src/tokenization/chat_template/guard/lexer.rs`, the operator
 //! guard's tag-body lexer:
 //!
-//! - `lex_spans` partitions a body into ordered, disjoint, non-empty tokens
-//!   separated only by ASCII whitespace, each of its kind's lexical class (a
-//!   quoted string, a number starting with a digit, a maximal identifier, or a
-//!   one- or two-byte symbol from MiniJinja's tables), so no operator byte can
-//!   hide inside a name; its errors name an unterminated quote or a byte no
+//! - `lex_spans` decides the body's tokenization: on success its spans are
+//!   ordered, disjoint, non-empty tokens separated only by ASCII whitespace,
+//!   each of its kind's lexical class (a string closed exactly where the
+//!   string scan `string_close` closes it, a number ending exactly where
+//!   MiniJinja's number state machine stops, a maximal identifier, or a one-
+//!   or two-byte symbol, two-byte first), and they are the body's only
+//!   tokenization (`lemma_tokenization_unique`), so the guard sees exactly
+//!   the operators of that tokenization and none can hide inside or be split
+//!   out of a name, string, or number; an error means no tokenization exists
+//!   (`lemma_no_tokenization`) and names an unterminated quote or a byte no
 //!   token starts with;
-//! - `string_end` ends just past the matching quote, and `number_end`
-//!   consumes at least the leading digit and only number characters, accepts
-//!   a sign only after an exponent letter, a point at most once and before
-//!   any exponent (never with a radix prefix), at most one decimal exponent,
-//!   and reports a float exactly for a decimal number containing `.` or an
-//!   exponent; number tokens carry these facts.
+//! - `string_end` returns exactly `string_close`, and `number_end` stops
+//!   exactly where the transcribed state machine (`number_step`) stops
+//!   (`number_stops_at`, which at most one end satisfies) and reports a float
+//!   exactly for a fraction or exponent final state; consequently the number
+//!   consumes only number characters, a sign only after an exponent letter,
+//!   a point at most once and before any exponent (never with a radix
+//!   prefix), and at most one decimal exponent.
 //!
 //! The sandbox's size and budget arithmetic in
 //! `src/tokenization/chat_template/limits.rs` is checked by
@@ -105,10 +119,10 @@
 //!
 //! Outside the proofs, and covered by the Rust tests: tokenizer encoding,
 //! truncation, and post-processing (the `tokenizers` crate), streamed
-//! decoding (`tokenizers::DecodeStream`), the Burn tensor constructors, which
-//! tags `next_tag` skips as comments and raw sections (its contract covers
-//! delimiters and progress, not that classification), the guard's recursive
-//! parser and its nesting counters, the keyword-argument rewrite's lexer, the
+//! decoding (`tokenizers::DecodeStream`), the Burn tensor constructors, that
+//! the reference models above match MiniJinja's own lexer (the Rust tests
+//! compare them with MiniJinja on example and generated templates), the
+//! guard's recursive parser and its nesting counters, the keyword-argument rewrite's lexer, the
 //! `format` filter's printf width scan, `strftime` and float formatting, and
 //! the MiniJinja engine itself. See `verus/README.md` for the method,
 //! toolchain, and command.
