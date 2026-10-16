@@ -526,3 +526,113 @@ fn gradients_reach_every_parameter_kind() {
         }
     }
 }
+
+/// A failing edit at any point of any variant aborts the complete and the staged passes.
+///
+/// Eager attention adds the score and pattern points, and right padding runs
+/// the validity-masked scope.
+#[test]
+fn every_variant_propagates_edit_failures() {
+    use crate::models::shared::test_support::{
+        assert_edit_failures_propagate, assert_staged_edit_failures_propagate,
+    };
+    for variant in LlamaVariant::ALL {
+        let model = tiny_model(variant, 21)
+            .with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+        let padded = || {
+            input(
+                ints([[1, 2, 3], [4, 5, 0]]),
+                Some(mask([[true, true, true], [true, true, false]])),
+                None,
+            )
+        };
+        let points = model.activation_points();
+        assert_edit_failures_propagate(&points, |hooks| {
+            model.forward_with_hooks(padded(), &ForwardOptions::default(), hooks)
+        });
+        assert_staged_edit_failures_propagate(&model, &padded(), &points);
+    }
+}
+
+/// Each block lists exactly its own slice of the model catalog.
+#[test]
+fn block_catalogs_partition_the_model_catalog() {
+    let model = tiny_model(LlamaVariant::Olmo2, 22)
+        .with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+    let mut expected = vec![Stack::Decoder.embedding().info()];
+    for (index, block) in model.model.layers.iter().enumerate() {
+        expected.extend(block.activation_points(index));
+    }
+    expected.push(Stack::Decoder.final_norm().info());
+    assert_eq!(model.activation_points(), expected);
+}
+
+/// The hooked pass rejects attention diagnostics and empty grids inside its scope.
+#[test]
+fn hooked_passes_reject_diagnostics_and_empty_grids() {
+    let model = tiny_model(LlamaVariant::Llama, 23);
+    let mut hooks = Hooks::new();
+    let embedding = hooks.capture(Stack::Decoder.embedding());
+    let error = model
+        .forward_with_hooks(
+            input(ints([[1, 2]]), None, None),
+            &ForwardOptions {
+                attentions: true,
+                ..ForwardOptions::default()
+            },
+            &mut hooks,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("attention.pattern hook point")),
+        "{error:?}"
+    );
+    let empty = input(
+        Tensor::<B, 2, Int>::zeros([1, 0], &Default::default()),
+        Some(crate::TokenMask::new(
+            Tensor::<B, 2, burn::tensor::Bool>::empty([1, 0], &Default::default()),
+        )),
+        None,
+    );
+    let error = model
+        .forward_with_hooks(empty, &ForwardOptions::default(), &mut hooks)
+        .unwrap_err();
+    assert!(matches!(&error, Error::Shape { .. }), "{error:?}");
+    assert!(
+        hooks.get(&embedding).is_err(),
+        "no successful run left a capture"
+    );
+}
+
+/// Staged states must keep the embedding dtype, stay decoder-only, and carry valid policies.
+#[test]
+fn staged_states_reject_dtypes_sources_and_misshapen_policies() {
+    use crate::experiment::EncoderContext;
+    let model = tiny_model(LlamaVariant::Qwen3, 24);
+    let state = StagedModel::embed(&model, input(ints([[1, 2, 3]]), None, None)).unwrap();
+    let mut half = state.clone();
+    half.hidden = half.hidden.cast(burn::tensor::DType::F16);
+    let error = StagedModel::run_layers(&model, half, 0..3).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "llama.execution.hidden"),
+        "{error:?}"
+    );
+    let mut sourced = state.clone();
+    sourced.context.encoder = Some(EncoderContext {
+        hidden: Tensor::zeros([1, 2, 16], &Default::default()),
+        positions: ints([[0, 1]]),
+        token_mask: None,
+    });
+    let error = StagedModel::normalize(&model, sourced).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "llama.execution.cross_attention" && reason.contains("decoder-only")),
+        "{error:?}"
+    );
+    let mut biased = state;
+    biased.context = biased.context.with_attention(
+        AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 2, 2], &Default::default())),
+    );
+    let error = StagedModel::run_layers(&model, biased, 0..3).unwrap_err();
+    assert!(matches!(&error, Error::Shape { .. }), "{error:?}");
+}

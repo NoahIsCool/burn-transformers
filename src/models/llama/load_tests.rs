@@ -176,3 +176,26 @@ fn the_tied_head_alias_is_validated() {
         .unwrap_err();
     assert!(error.to_string().contains("not been installed"), "{error}");
 }
+
+/// A graph edited after planning fails in the sink and reports the partial load.
+#[test]
+fn sink_failures_after_planning_keep_the_partial_report() {
+    let root = fixture("qwen3");
+    let mut model = graph(&root);
+    model.model.layers[1].self_attn.query_norm = None;
+    let error = model
+        .load_checkpoint(&root, &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("planning succeeded, so execution reports the failure");
+    assert_eq!(
+        failure.failed_target.as_deref(),
+        Some("model.layers.1.self_attn.query_norm.weight")
+    );
+    assert!(matches!(
+        &failure.cause,
+        crate::checkpoint::ExecutionFailureCause::Sink(LlamaLoadError::MissingComponent { .. })
+    ));
+    assert!(!failure.report.applied.is_empty());
+}

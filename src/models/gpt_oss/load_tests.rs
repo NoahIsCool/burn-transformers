@@ -607,3 +607,69 @@ fn sink_accepts_only_the_tied_head_alias() {
             .is_ok()
     );
 }
+
+/// A block without routed experts cannot receive stacked expert tensors.
+#[test]
+fn stacked_experts_require_routed_experts() {
+    let mut model = graph(&tiny_config());
+    model.model.layers[0].mlp.experts.clear();
+    for target in [
+        "model.layers.0.mlp.experts.gate_up_proj",
+        "model.layers.0.mlp.experts.down_proj",
+    ] {
+        let error = model
+            .write_tensor(target, TensorData::new(vec![0.0_f32; 4], [1, 2, 2]))
+            .unwrap_err();
+        assert!(
+            matches!(&error, GptOssLoadError::MissingComponent { target: t, component }
+                if t == target && *component == "routed experts"),
+            "{target}: {error}"
+        );
+    }
+}
+
+/// The tied alias needs an installed embedding owner.
+#[test]
+fn the_tied_alias_needs_an_installed_embedding() {
+    let mut tied = graph(&GptOssConfig {
+        tie_word_embeddings: true,
+        ..tiny_config()
+    });
+    let error = tied
+        .alias_tensor("lm_head.weight", "model.embed_tokens.weight")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the embedding storage owner has not been installed"),
+        "{error}"
+    );
+}
+
+/// A graph edited after planning fails in the sink and reports the partial load.
+#[test]
+fn sink_failures_after_planning_keep_the_partial_report() {
+    let config = tiny_config();
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), &config, &dense_tensors(&config));
+    let mut model = graph(&config);
+    model.model.layers[1].mlp.experts.clear();
+    let error = model
+        .load_checkpoint(directory.path(), &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("planning succeeded, so execution reports the failure");
+    assert!(
+        failure
+            .failed_target
+            .as_deref()
+            .is_some_and(|target| target.starts_with("model.layers.1.mlp.experts.")),
+        "{:?}",
+        failure.failed_target
+    );
+    assert!(matches!(
+        &failure.cause,
+        crate::checkpoint::ExecutionFailureCause::Sink(GptOssLoadError::MissingComponent { .. })
+    ));
+}

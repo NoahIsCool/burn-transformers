@@ -649,3 +649,65 @@ fn gradients_reach_router_experts_and_sinks() {
         .count();
     assert!(reached > 0, "some routed expert receives a gradient");
 }
+
+/// A failing edit at any point, router points included, aborts the complete and staged passes.
+#[test]
+fn every_point_propagates_edit_failures() {
+    use crate::models::shared::test_support::{
+        assert_edit_failures_propagate, assert_staged_edit_failures_propagate,
+    };
+    let model = tiny_model(41)
+        .with_attention_precision(crate::attention::AttentionPrecisionMode::EagerFp32Softmax);
+    let padded = || {
+        input(
+            ints([[1, 2, 3], [4, 5, 0]]),
+            Some(mask([[true, true, true], [true, true, false]])),
+            None,
+        )
+    };
+    let points = HookedModel::activation_points(&model).unwrap();
+    assert_edit_failures_propagate(&points, |hooks| {
+        HookedModel::forward_with_hooks(&model, padded(), &ForwardOptions::default(), hooks)
+    });
+    assert_staged_edit_failures_propagate(&model, &padded(), &points);
+}
+
+/// Hooked passes validate empty grids and logits positions; staged policies must broadcast.
+#[test]
+fn hooked_and_staged_inputs_are_validated() {
+    let model = tiny_model(42);
+    let empty = input(
+        Tensor::<B, 2, burn::tensor::Int>::zeros([1, 0], &Default::default()),
+        Some(crate::TokenMask::new(
+            Tensor::<B, 2, burn::tensor::Bool>::empty([1, 0], &Default::default()),
+        )),
+        None,
+    );
+    let error = HookedModel::forward_with_hooks(
+        &model,
+        empty,
+        &ForwardOptions::default(),
+        &mut Hooks::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(&error, crate::Error::Shape { .. }), "{error:?}");
+    let error = model
+        .forward(
+            input(ints([[1, 2, 3]]), None, None),
+            &ForwardOptions {
+                logits: LogitsSelection::Positions(vec![3]),
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Shape { tensor, .. } if tensor == "forward_options.logits.positions"),
+        "{error:?}"
+    );
+    let mut state = StagedModel::embed(&model, input(ints([[1, 2, 3]]), None, None)).unwrap();
+    state.context = state.context.with_attention(
+        AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 2, 2], &Default::default())),
+    );
+    let error = StagedModel::run_layers(&model, state, 0..1).unwrap_err();
+    assert!(matches!(&error, crate::Error::Shape { .. }), "{error:?}");
+}

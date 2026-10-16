@@ -723,3 +723,30 @@ fn gradients_reach_every_parameter_kind() {
         }
     }
 }
+
+/// A failing edit at any point of either variant aborts the complete and the staged passes.
+///
+/// Eager attention adds the score and pattern points; right padding runs the
+/// validity-masked scope.
+#[test]
+fn every_variant_propagates_edit_failures() {
+    use crate::models::shared::test_support::{
+        assert_edit_failures_propagate, assert_staged_edit_failures_propagate,
+    };
+    for variant in GemmaVariant::ALL {
+        let model = tiny_model(variant, 31)
+            .with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+        let padded = || {
+            input(
+                ints([[1, 2, 3], [4, 5, 0]]),
+                Some(mask([[true, true, true], [true, true, false]])),
+                None,
+            )
+        };
+        let points = model.activation_points();
+        assert_edit_failures_propagate(&points, |hooks| {
+            model.forward_with_hooks(padded(), &ForwardOptions::default(), hooks)
+        });
+        assert_staged_edit_failures_propagate(&model, &padded(), &points);
+    }
+}
