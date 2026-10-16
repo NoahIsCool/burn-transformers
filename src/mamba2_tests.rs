@@ -1496,6 +1496,44 @@ fn manual_zero_chunk_size_fails_only_where_chunks_are_used() {
     assert_eq!(output.dims(), [1, 3, 8]);
 }
 
+/// Row-wise entry points reject mismatched external state on every grouping path.
+///
+/// `forward_rows` validates the hidden tensor and the row counts itself and
+/// leaves the state check to each mixer pass, so a state whose matrix has the
+/// wrong `state_size` must surface the pass's `mamba2.state.recurrent` shape
+/// error whether all rows share one mode (one pass), the modes differ (one
+/// pass per mode group over the selected state rows), or the snapshot entry
+/// point runs. A matching state then succeeds on the same rows.
+#[test]
+fn row_entry_points_reject_mismatched_state_on_every_grouping_path() {
+    let device = Default::default();
+    let mixer = config().init::<TestBackend>(&device).unwrap();
+    let hidden = waves([2, 3, 8], 2.0, 0.4);
+    let mut state = Mamba2State::zeros(&config(), 2, DType::F32, &device).unwrap();
+    state.recurrent = Tensor::zeros([2, 4, 2, 4], &device);
+    let row = |tokens, mode| Mamba2Row { tokens, mode };
+    let uniform = [row(3, Mamba2Mode::Recurrent), row(2, Mamba2Mode::Recurrent)];
+    let mixed = [
+        row(3, Mamba2Mode::ChunkedPrefill),
+        row(2, Mamba2Mode::Recurrent),
+    ];
+    for rows in [uniform, mixed] {
+        assert_shape(
+            mixer.forward_rows(hidden.clone(), &rows, &state),
+            "mamba2.state.recurrent",
+        );
+    }
+    assert_shape(
+        mixer.forward_rows_with_snapshots(hidden.clone(), &[3, 2], &state),
+        "mamba2.state.recurrent",
+    );
+    let valid = Mamba2State::zeros(&config(), 2, DType::F32, &device).unwrap();
+    let (output, _) = mixer
+        .forward_rows(hidden, &mixed, &valid)
+        .expect("matching state");
+    assert_eq!(output.dims(), [2, 3, 8]);
+}
+
 /// Hidden states, token masks, and external state must match the mixer geometry.
 #[test]
 fn mismatched_inputs_and_state_are_shape_errors() {
