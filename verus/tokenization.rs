@@ -77,8 +77,10 @@
 //!   token starts with;
 //! - `string_end` ends just past the matching quote, and `number_end`
 //!   consumes at least the leading digit and only number characters, accepts
-//!   a sign only after a decimal exponent letter, and reports a float exactly
-//!   for a decimal number containing `.` or an exponent.
+//!   a sign only after an exponent letter, a point at most once and before
+//!   any exponent (never with a radix prefix), at most one decimal exponent,
+//!   and reports a float exactly for a decimal number containing `.` or an
+//!   exponent; number tokens carry these facts.
 //!
 //! Tokenizer encoding, special-token insertion, and the Burn tensor
 //! constructors are outside the proof and remain covered by the Rust tests. See

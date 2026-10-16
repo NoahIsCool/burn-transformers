@@ -26,8 +26,10 @@
 //!   names an unterminated quote or a byte no token can start with;
 //! - [`string_end`] ends just past the matching quote;
 //! - [`number_end`] consumes at least the leading digit and only number
-//!   characters, accepts a sign only in a decimal exponent, and reports a
-//!   float exactly for a decimal number with a `.` or exponent.
+//!   characters, accepts a sign only after an exponent letter, a point only
+//!   once and before any exponent (and never in a prefixed number), at most
+//!   one decimal exponent, and reports a float exactly for a decimal number
+//!   with a `.` or exponent.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -180,6 +182,21 @@ pub(crate) open spec fn has_exponent_mark(bytes: Seq<u8>, from: int, to: int) ->
     exists|i: int| from <= i < to && (#[trigger] bytes[i] == 101 || bytes[i] == 69)
 }
 
+/// Some byte in `from..to` is a decimal point.
+pub(crate) open spec fn has_point(bytes: Seq<u8>, from: int, to: int) -> bool {
+    exists|i: int| from <= i < to && #[trigger] bytes[i] == 46
+}
+
+/// The number text in `from..to` has the shape of a float: a decimal point
+/// only before any exponent and at most once, and at most one exponent letter
+/// (when decimal); a non-decimal number has no point at all.
+pub(crate) open spec fn has_literal_shape(bytes: Seq<u8>, from: int, to: int, decimal: bool) -> bool {
+    &&& forall|j: int| from <= j < to && #[trigger] bytes[j] == 46
+        ==> decimal && !has_point(bytes, from, j) && !has_exponent_mark(bytes, from, j)
+    &&& decimal ==> forall|j: int| from <= j < to && (#[trigger] bytes[j] == 101 || bytes[j] == 69)
+        ==> !has_exponent_mark(bytes, from, j)
+}
+
 /// Every byte in `from..to` is a number byte, and a sign appears only after an exponent letter.
 pub(crate) open spec fn is_number_text(bytes: Seq<u8>, from: int, to: int) -> bool {
     forall|i: int| from <= i < to ==> {
@@ -204,8 +221,11 @@ pub(crate) open spec fn is_token(bytes: Seq<u8>, span: Span) -> bool {
             &&& bytes[end - 1] == bytes[start]
         },
         Kind::Integer | Kind::Float => {
+            let decimal = number_radix(bytes, start) == 10;
             &&& spec_digit(bytes[start])
             &&& is_number_text(bytes, start, end)
+            &&& has_literal_shape(bytes, start, end, decimal)
+            &&& (span.kind == Kind::Float) == (decimal && has_float_mark(bytes, start, end))
         },
         Kind::Symbol => {
             ||| end == start + 2 && spec_double_symbol(bytes, start)
@@ -353,9 +373,11 @@ pub(crate) fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// Mirrors MiniJinja's `eat_number`: a radix prefix allows only digits (and
 /// hexadecimal letters for `0x`); a decimal number allows one fraction, then
 /// an exponent whose first character may be a sign; `_` is allowed anywhere.
-/// Verified: the number covers at least its leading digit, contains only
-/// number characters with a sign only after a decimal exponent letter, and
-/// is a float exactly when it is decimal and contains a `.` or exponent.
+/// Verified: the number covers at least its leading digit and contains only
+/// number characters, with a sign only after an exponent letter, at most one
+/// point and only before any exponent (none in a prefixed number), and at
+/// most one decimal exponent; it is a float exactly when it is decimal and
+/// contains a `.` or exponent.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(number =>
     requires
@@ -371,6 +393,12 @@ pub(crate) fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
             number.0 as int,
         ),
         number_radix(bytes@, start as int) != 10 ==> !number.1,
+        has_literal_shape(
+            bytes@,
+            start as int,
+            number.0 as int,
+            number_radix(bytes@, start as int) == 10,
+        ),
 ))]
 pub(crate) fn number_end(bytes: &[u8], start: usize) -> (usize, bool) {
     let radix = if start + 2 <= bytes.len() && bytes[start] == b'0' {
@@ -397,6 +425,9 @@ pub(crate) fn number_end(bytes: &[u8], start: usize) -> (usize, bool) {
             radix == 10 ==> index == start || start < index,
             is_number_text(bytes@, start as int, index as int),
             !has_float_mark(bytes@, start as int, index as int) || radix != 10,
+            has_literal_shape(bytes@, start as int, index as int, radix == 10),
+            radix == 10 ==> !has_point(bytes@, start as int, index as int),
+            radix == 10 ==> !has_exponent_mark(bytes@, start as int, index as int),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() && is_digit(bytes[index]) {
@@ -420,6 +451,17 @@ pub(crate) fn number_end(bytes: &[u8], start: usize) -> (usize, bool) {
             )),
             (state == NumberState::Exponent || state == NumberState::ExponentSign)
                 ==> has_exponent_mark(bytes@, start as int, index as int),
+            has_literal_shape(bytes@, start as int, index as int, radix == 10),
+            radix == 10 && state == NumberState::Integer ==> !has_point(
+                bytes@,
+                start as int,
+                index as int,
+            ) && !has_exponent_mark(bytes@, start as int, index as int),
+            radix == 10 && state == NumberState::Fraction ==> !has_exponent_mark(
+                bytes@,
+                start as int,
+                index as int,
+            ),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() {
@@ -469,7 +511,12 @@ pub(crate) proof fn lemma_extend_number_text(bytes: Seq<u8>, from: int, to: int)
         has_exponent_mark(bytes, from, to + 1) == (has_exponent_mark(bytes, from, to) || bytes[to] == 101
             || bytes[to] == 69),
         has_exponent_mark(bytes, from, to) ==> has_exponent_mark(bytes, from, to + 1),
+        has_point(bytes, from, to + 1) == (has_point(bytes, from, to) || bytes[to] == 46),
 {
+    if has_point(bytes, from, to + 1) && bytes[to] != 46 {
+        let i = choose|i: int| from <= i < to + 1 && #[trigger] bytes[i] == 46;
+        assert(i < to);
+    }
     if has_float_mark(bytes, from, to + 1) && !is_float_mark(bytes[to]) {
         let i = choose|i: int| from <= i < to + 1 && #[trigger] is_float_mark(bytes[i]);
         assert(i < to);
