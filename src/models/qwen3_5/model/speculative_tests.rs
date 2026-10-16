@@ -1266,3 +1266,29 @@ fn token_readback_rejects_negative_ids_and_wrong_counts() {
         5
     );
 }
+
+/// A target pass that fails during verification rolls the cycle back.
+///
+/// The MTP head drafts normally, but the target's only block lost its
+/// attention module, so the verification forward fails. Both cursors must
+/// be unchanged and no transaction may remain open.
+#[test]
+fn failing_target_verification_rolls_the_cycle_back() {
+    let device = Default::default();
+    let mut model = zero_model(&device);
+    let (mut state, hidden) = aligned_state(&model, &device);
+    model.model.layers[0].self_attn = None;
+    let mut decoder = Qwen3_5SpeculativeDecoder::new(
+        Qwen3_5SpeculativeConfig::default(),
+        model.config().vocab_size,
+        &device,
+    )
+    .unwrap();
+    let error = decoder
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
+        .expect_err("the target cannot verify without its attention");
+    assert!(matches!(error, Error::Checkpoint(_)), "{error}");
+    assert!(!state.tensor_state().has_active_transaction());
+    assert_eq!(state.tensor_state().lengths(), &[2]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+}

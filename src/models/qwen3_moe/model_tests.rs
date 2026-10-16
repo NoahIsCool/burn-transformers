@@ -1778,3 +1778,20 @@ fn auxiliary_loss_rejects_empty_and_disagreeing_layers() {
     .expect_err("zero experts per token is invalid");
     assert!(error.to_string().contains("experts_per_token"), "{error}");
 }
+
+/// A NaN activation makes step-wise routing fail with a contextual error instead of indexing.
+#[test]
+fn stepwise_routing_rejects_non_finite_router_scores() {
+    let (model, device) = experiment_model();
+    let moe = model.model.layers[1].sparse_mlp.as_ref().unwrap();
+    let mut values = vec![0.25_f32; 2 * 8];
+    values[8] = f32::NAN;
+    let input = Tensor::<TestBackend, 3>::from_data(TensorData::new(values, [1, 2, 8]), &device);
+    let stepwise = routed_with_hooks(moe, input.clone(), Layer::decoder(1), &mut Hooks::new())
+        .expect_err("a NaN token has no expert ranking");
+    let fused = moe
+        .forward(input)
+        .expect_err("the fused module rejects it too");
+    assert_eq!(stepwise.to_string(), fused.to_string());
+    assert!(stepwise.to_string().contains("token 1"), "{stepwise}");
+}

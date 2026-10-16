@@ -2520,3 +2520,71 @@ fn stateful_calls_reject_a_foreign_mtp_bank() {
     let error = prefill_once(&model, &mut state).expect_err("foreign MTP bank");
     assert!(error.to_string().contains("MTP cache geometry"), "{error}");
 }
+
+/// The cached pass refuses schedules and slots that disagree with its blocks.
+///
+/// Public calls validate the state layout first, so these are the private
+/// invariants behind it: a schedule shorter than the stack must not silently
+/// skip blocks, a block must not read another family's cache slot, and a
+/// full-attention block needs both its module and the step's attention plan.
+#[test]
+fn cached_steps_reject_mismatched_schedules_and_slots() {
+    let device = Default::default();
+    let mut model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let layout = CompactBatch::<TestBackend>::new(&[vec![0]], 1, &[0], &device).unwrap();
+    let tokens = || Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device);
+    let schedule = state.layout.schedule.clone();
+    let error = model
+        .model
+        .run_cached(
+            tokens(),
+            Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+            1,
+            &layout,
+            &mut state.tensors,
+            &schedule[..3],
+            StatefulPhase::Prefill,
+            false,
+        )
+        .err()
+        .expect("a short schedule");
+    assert!(
+        error.to_string().contains("3 entries for 4 model layers"),
+        "{error}"
+    );
+
+    let hidden = model.model.embed_tokens.forward(tokens());
+    let mut writes = state.tensors.step(layout.counts()).unwrap();
+    let terminal = DeltaStep::Terminal(DeltaNetMode::Recurrent);
+    let mut step = |layer: &Qwen3_5DecoderLayer<TestBackend>, slot| {
+        layer
+            .cached_step(
+                hidden.clone(),
+                slot,
+                &layout,
+                &mut state.tensors,
+                &mut writes,
+                None,
+                terminal,
+            )
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        step(&model.model.layers[0], Qwen3_5LayerCache::FullAttention(0))
+            .contains("incompatible cache slot")
+    );
+    assert!(
+        step(&model.model.layers[3], Qwen3_5LayerCache::FullAttention(0))
+            .contains("no cached attention step")
+    );
+    model.model.layers[3].self_attn = None;
+    assert!(
+        step(&model.model.layers[3], Qwen3_5LayerCache::FullAttention(0))
+            .contains("no attention module")
+    );
+    assert_eq!(state.lengths(), &[0]);
+}
