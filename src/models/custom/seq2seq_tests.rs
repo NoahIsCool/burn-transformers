@@ -435,3 +435,33 @@ fn an_encoder_logit_cap_is_rejected() {
     let error = ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap_err();
     assert_eq!(configuration_field(error), "encoder.final_logit_softcap");
 }
+
+/// A tied decoder readout is soft-capped too.
+#[test]
+fn tied_decoder_logits_are_soft_capped() {
+    let device = Default::default();
+    let tied = |cap: Option<f64>| {
+        let mut spec = seq2seq_spec();
+        spec.decoder.tie_word_embeddings = true;
+        spec.decoder.final_logit_softcap = cap;
+        ModularSeq2SeqLm::<TestBackend>::init(spec, &device)
+            .unwrap()
+            .map(&mut DeterministicParameters::default())
+    };
+    let cap = 0.05;
+    let raw = tied(None)
+        .forward(input(&device), &retained())
+        .unwrap()
+        .decoder
+        .logits;
+    tied(Some(cap))
+        .forward(input(&device), &retained())
+        .unwrap()
+        .decoder
+        .logits
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &raw.div_scalar(cap).tanh().mul_scalar(cap).into_data(),
+            Tolerance::absolute(1e-7),
+        );
+}

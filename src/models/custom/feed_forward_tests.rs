@@ -384,3 +384,62 @@ fn clamped_experts_are_differentiable() {
             .any(|expert| expert.gate_proj.weight.grad(&gradients).is_some())
     );
 }
+
+/// Several ungated shared experts are summed after their clamped units.
+///
+/// The routed mixture is recovered from the same branch with its shared
+/// experts removed, so the difference must be exactly the plain sum of the
+/// two clamped shared experts (no sigmoid gate).
+#[test]
+fn clamped_experts_sum_several_ungated_shared_experts() {
+    let device = Default::default();
+    let FeedForwardSpec::ClampedMixtureOfExperts {
+        mut experts,
+        limit,
+        alpha,
+        up_offset,
+    } = clamped_experts_spec()
+    else {
+        unreachable!("the fixture is a clamped expert branch");
+    };
+    experts.shared_experts = 2;
+    experts.shared_expert_gate = false;
+    let spec = FeedForwardSpec::ClampedMixtureOfExperts {
+        experts,
+        limit,
+        alpha,
+        up_offset,
+    };
+    let branch = branch(&spec, &device);
+    let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &branch else {
+        panic!("expected clamped experts");
+    };
+    let flat = input(&device).reshape([6, 8]);
+    let expected = clamped
+        .experts
+        .shared
+        .iter()
+        .map(|expert| expert.forward_clamped(flat.clone(), &clamped.glu).unwrap())
+        .reduce(|left, right| left + right)
+        .unwrap();
+    clamped
+        .shared_output(flat)
+        .unwrap()
+        .expect("two shared experts")
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(0.0));
+}
+
+/// A non-finite router score is reported as an error naming the token, not silently routed.
+#[test]
+fn clamped_experts_reject_non_finite_router_scores() {
+    let device = Default::default();
+    let branch = branch(&clamped_experts_spec(), &device);
+    let mut values = input(&device).into_data().to_vec::<f32>().unwrap();
+    values[8] = f32::NAN;
+    let poisoned = Tensor::<TestBackend, 3>::from_data(TensorData::new(values, [2, 3, 8]), &device);
+    let error = branch
+        .forward(poisoned, Layer::decoder(0), &mut Hooks::new())
+        .unwrap_err();
+    assert!(error.to_string().contains("token"), "{error}");
+}
