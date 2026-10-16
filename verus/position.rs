@@ -26,6 +26,8 @@
 //!   offset, so it is a valid table index on the correct side of a
 //!   bidirectional table, exact for short distances, `min(E + offset, B - 1)`
 //!   in the logarithmic region, and zero for causal future keys;
+//!   `lemma_bucket_monotone` proves buckets are monotone in distance within a
+//!   direction for any monotone offset proposal;
 //! * `src/position/ids.rs`: batched and single-row position-ID derivation (no
 //!   overflow or out-of-bounds access, `batch * sequence` outputs, each valid
 //!   token at its row start plus the number of earlier valid tokens, padding at

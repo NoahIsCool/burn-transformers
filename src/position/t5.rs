@@ -28,7 +28,9 @@
 //!   table index, bidirectional future keys use the upper half and past keys
 //!   the lower half, causal future keys map to bucket zero, exact-region
 //!   distances map to `direction_offset + distance`, and the logarithmic
-//!   region is `min(E + offset, B - 1)`.
+//!   region is `min(E + offset, B - 1)`; `lemma_bucket_monotone` shows that
+//!   within one direction buckets never decrease with distance whenever the
+//!   proposed offsets do not.
 
 use core::fmt;
 
@@ -97,6 +99,37 @@ pub open spec fn spec_bucket(
         per_direction - 1
     };
     direction_offset + within_direction
+}
+
+/// Within one direction, buckets never decrease with distance when the offsets do not.
+///
+/// The exact region `d < E` maps below `E`, the logarithmic region maps to
+/// `min(E + offset, B - 1) >= E`, and both pieces are monotone, so a
+/// monotone logarithmic proposal (the floating-point logarithm, covered by
+/// the unit tests) yields monotone buckets that saturate at `B - 1`.
+pub proof fn lemma_bucket_monotone(
+    num_buckets: int,
+    bidirectional: bool,
+    key_is_future: bool,
+    near: int,
+    far: int,
+    near_offset: int,
+    far_offset: int,
+)
+    requires
+        bidirectional ==> num_buckets >= 4 && num_buckets % 2 == 0,
+        !bidirectional ==> num_buckets >= 2,
+        0 <= near <= far,
+        0 <= near_offset <= far_offset,
+    ensures
+        spec_bucket(num_buckets, bidirectional, key_is_future, near, near_offset) <= spec_bucket(
+            num_buckets,
+            bidirectional,
+            key_is_future,
+            far,
+            far_offset,
+        ),
+{
 }
 
 /// Absolute value of a signed displacement.
