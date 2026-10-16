@@ -1214,3 +1214,38 @@ fn staging_defenses_reject_broken_private_invariants() {
         .check_proposal_start(0, 1, 3)
         .expect("no baseline to compare against");
 }
+
+/// Exclusion masks need at least one query per row of the segment's batch.
+#[test]
+fn exclusion_masks_reject_empty_or_mismatched_queries() {
+    let segment = KvBatchSegment::from_parts(
+        block(2, 1, 1.0),
+        block(2, 1, 1.0),
+        Tensor::<TestBackend, 2, Int>::from_ints([[0], [0]], &device()),
+        None,
+    );
+    let empty = Tensor::<TestBackend, 2, Int>::from_data(
+        TensorData::new(Vec::<i32>::new(), [2, 0]),
+        &device(),
+    );
+    assert!(matches!(
+        segment.exclusion_mask(&empty, 1, None),
+        Err(TensorCacheError::ShapeMismatch {
+            tensor: "query positions",
+            expected,
+            actual,
+        }) if expected == [2, 1] && actual == [2, 0]
+    ));
+    let one_row = Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device());
+    assert!(matches!(
+        segment.exclusion_mask(&one_row, 1, None),
+        Err(TensorCacheError::ShapeMismatch {
+            tensor: "query positions",
+            ..
+        })
+    ));
+    assert!(matches!(
+        segment.exclusion_mask(&one_row.repeat_dim(0, 2), 0, None),
+        Err(TensorCacheError::ZeroDimension { field: "heads" })
+    ));
+}

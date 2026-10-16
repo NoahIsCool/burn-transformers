@@ -266,3 +266,55 @@ fn commit_violations_map_to_tensor_cache_errors() {
         })
     ));
 }
+
+/// A transaction needs proposal storage in every recurrent group as well as every KV group.
+#[test]
+fn transactions_require_recurrent_staging_storage() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let mut state =
+        TensorDecodeState::<TestBackend>::new(config, 1, &Default::default()).expect("state");
+    let recurrent = crate::cache::RecurrentStateSpec::new(1, 1, 1, 1, 1, 1, DType::F32)
+        .expect("recurrent geometry");
+    state
+        .main_mut()
+        .add_recurrent(recurrent)
+        .expect("recurrent group");
+    assert!(matches!(
+        state.begin_transaction(),
+        Err(TensorCacheError::StagingDisabled)
+    ));
+    assert!(!state.has_active_transaction());
+}
+
+/// Both halves of a mark must name this state's transactions.
+///
+/// A mark that pairs this state's main identity with another state's
+/// auxiliary identity is stale even though its main half matches.
+#[test]
+fn marks_need_matching_main_and_auxiliary_identities() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let device = Default::default();
+    let paired = || {
+        let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+        state.enable_mtp().expect("auxiliary bank");
+        state
+    };
+    let mut first = paired();
+    let mut second = paired();
+    let first_mark = first.begin_transaction().expect("transaction");
+    let second_mark = second.begin_transaction().expect("transaction");
+    let hybrid = TensorCacheMark {
+        main: first_mark.main.clone(),
+        mtp: second_mark.mtp.clone(),
+    };
+    assert!(matches!(
+        first.rollback(hybrid),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    first
+        .rollback(first_mark)
+        .expect("the genuine mark recovers");
+    second
+        .rollback(second_mark)
+        .expect("the genuine mark recovers");
+}

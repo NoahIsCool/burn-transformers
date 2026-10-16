@@ -373,6 +373,10 @@ fn recurrent_allocation_totals_name_the_first_unrepresentable_buffer() {
         );
     };
     element_limit(
+        allocate(spec(1, 1 << 31, 0, DType::F32)),
+        "committed convolution state",
+    );
+    element_limit(
         allocate(spec(1, 1, 1 << 31, DType::F32)),
         "staged recurrent matrix",
     );
