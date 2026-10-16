@@ -44,6 +44,24 @@ fn rotary_sets_follow_the_layer_types() {
     assert_eq!((rotary_set_count(true), rotary_set_count(false)), (1, 2));
 }
 
+/// The table holds one entry per set: sliding first, then global unless shared.
+#[test]
+fn rotary_set_tables_hold_each_type_at_its_index() {
+    assert_eq!(rotary_set_table('s', 'g', false), ['s', 'g']);
+    assert_eq!(rotary_set_table('s', 's', true), ['s']);
+    for shared in [false, true] {
+        let table = rotary_set_table(10, 20, shared);
+        assert_eq!(table.len(), rotary_set_count(shared));
+        for (sliding, set) in [true, false]
+            .into_iter()
+            .zip(rotary_sets(&[true, false], shared))
+        {
+            let expected = if sliding || shared { 10 } else { 20 };
+            assert_eq!(table[set.unwrap()], expected);
+        }
+    }
+}
+
 proptest! {
     /// The overflow-free test equals the reference's `(l + 1) mod p != 0`.
     #[test]

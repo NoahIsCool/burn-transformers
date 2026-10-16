@@ -11,8 +11,9 @@
 //!   with: sliding layers set `0`, global layers set `1`, or set `0` for
 //!   every layer when both layer types share one set (Gemma 2, or a Gemma 3
 //!   config whose two sets coincide); [`rotary_set_count`] is the number of
-//!   sets. The tables of one call are indexed by these numbers, so an
-//!   out-of-range index would leave a layer unrotated.
+//!   sets, and [`rotary_set_table`] builds the parameter table with exactly
+//!   that many entries. The tables of one call are indexed by these numbers,
+//!   so an out-of-range index would leave a layer unrotated.
 //! * [`unique_flag`] decides which single published namespace a checkpoint
 //!   uses, and [`checkpoint_extent`]/[`projection_extent`] form the checked
 //!   `u64` extents of its contract.
@@ -227,6 +228,34 @@ pub(crate) fn sliding_schedule(layers: usize, pattern: usize) -> Vec<bool> {
 ))]
 pub(crate) const fn rotary_set_count(shared: bool) -> usize {
     if shared { 1 } else { 2 }
+}
+
+/// Returns the rotary parameter table that [`rotary_sets`] indexes.
+///
+/// Set `0` is the sliding configuration and, unless both layer types share
+/// one set, set `1` is the global configuration. Proved: the table has
+/// exactly [`rotary_set_count`] entries, and the set `set_of(type, shared)`
+/// that [`rotary_sets`] assigns a layer is in range and holds that layer
+/// type's configuration (the sliding one for a shared table, which the
+/// caller builds only when both configurations are equal).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(table =>
+    ensures
+        table.len() == if shared { 1usize } else { 2usize },
+        table@[0] == sliding,
+        !shared ==> table@[1] == global,
+        forall|layer_sliding: bool| #[trigger] set_of(layer_sliding, shared) < table.len()
+            && table@[set_of(layer_sliding, shared) as int]
+                == if layer_sliding || shared { sliding } else { global },
+))]
+pub(crate) fn rotary_set_table<T: Copy>(sliding: T, global: T, shared: bool) -> Vec<T> {
+    let count = rotary_set_count(shared);
+    let mut table: Vec<T> = Vec::with_capacity(count);
+    table.push(sliding);
+    if count > 1 {
+        table.push(global);
+    }
+    table
 }
 
 /// Returns the rotary set index of every layer.

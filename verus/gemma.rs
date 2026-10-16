@@ -12,11 +12,13 @@
 //! - `sliding_schedule`: the whole default schedule applies that rule to
 //!   every layer, so the global layers are the 1-based multiples of the
 //!   period and there are exactly `⌊L / p⌋` of them;
-//! - `rotary_sets` and `rotary_set_count`: every layer rotates (no NoPE
-//!   layer) with its type's set, below the number of sets (one when shared,
-//!   two otherwise); with shared sets every layer reads set 0, and otherwise
-//!   two layers read the same set exactly when they have the same type, so
-//!   no layer rotates with the other type's parameters;
+//! - `rotary_sets`, `rotary_set_count`, and `rotary_set_table`: every layer
+//!   rotates (no NoPE layer) with its type's set, below the number of sets
+//!   (one when shared, two otherwise); with shared sets every layer reads
+//!   set 0, and otherwise two layers read the same set exactly when they
+//!   have the same type; the runtime parameter table has exactly that many
+//!   entries and the set a layer reads holds its own type's configuration,
+//!   so no layer rotates with the other type's parameters;
 //! - `unique_flag`: a checkpoint's namespace is selected exactly when one
 //!   namespace's embedding is present, `Absent` and `Ambiguous` otherwise;
 //! - `checkpoint_extent` and `projection_extent`: the contract's `u64`

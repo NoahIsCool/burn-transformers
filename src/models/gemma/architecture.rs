@@ -81,7 +81,7 @@ use burn::tensor::{DType, bf16, f16};
 use serde::{Deserialize, Serialize};
 
 use super::config::{FAMILY, GemmaConfig, GemmaVariant};
-use super::plan::{default_period, rotary_set_count, rotary_sets, sliding_schedule};
+use super::plan::{default_period, rotary_set_table, rotary_sets, sliding_schedule};
 use crate::{
     architecture::Activation,
     attention::{
@@ -315,16 +315,10 @@ impl GemmaArchitecture {
             .iter()
             .map(|layer| layer.layer_type == GemmaLayerType::SlidingAttention)
             .collect();
-        // Set 0 is the sliding configuration and set 1 the global one, as
-        // the verified `rotary_sets` indexes them.
-        let sets = if shared {
-            vec![self.sliding_rope]
-        } else {
-            vec![self.sliding_rope, self.full_rope]
-        };
-        debug_assert_eq!(sets.len(), rotary_set_count(shared));
+        // The verified table holds set 0 (sliding) and, unless shared, set 1
+        // (global), exactly the sets the verified `rotary_sets` indexes.
         RotarySchedule {
-            sets,
+            sets: rotary_set_table(self.sliding_rope, self.full_rope, shared),
             layers: rotary_sets(&sliding, shared),
             precision: RotaryPrecision::ActivationDtype,
         }
