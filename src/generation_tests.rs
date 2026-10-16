@@ -926,6 +926,33 @@ fn logit_bias_precedes_penalties_and_validates_tokens() {
         };
         assert!(invalid.validate(4).is_err());
     }
+    // Entries are checked in key order, each for range before finiteness, so
+    // the first failing entry decides the error.
+    let message = |bias: BTreeMap<u32, f64>| {
+        GenerationConfig {
+            logit_bias: bias,
+            ..Default::default()
+        }
+        .validate(4)
+        .unwrap_err()
+        .to_string()
+    };
+    let cases = [
+        (vec![(1, f64::NAN), (9, 1.0)], "logit_bias for token 1"),
+        (
+            vec![(1, 1.0), (9, f64::NAN)],
+            "logit_bias token 9 is outside",
+        ),
+        (
+            vec![(4, f64::NAN), (5, 1.0)],
+            "logit_bias token 4 is outside",
+        ),
+        (vec![(0, 1.0), (3, f64::INFINITY)], "logit_bias for token 3"),
+    ];
+    for (entries, expected) in cases {
+        let found = message(entries.into_iter().collect());
+        assert!(found.contains(expected), "{found:?} lacks {expected:?}");
+    }
 }
 
 /// EOS is impossible below `min_new_tokens` and allowed once the minimum is reached.

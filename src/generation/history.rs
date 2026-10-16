@@ -40,7 +40,8 @@ use crate::{Error, Result, TokenMask};
 
 use super::bookkeeping::row_span;
 use super::layout::{
-    advance_generated_lengths, count_valid, history_token_id, push_history_row, record_scatter,
+    advance_generated_lengths, any_valid, count_valid, first_active_outside_vocabulary,
+    history_token_id, push_history_row, record_scatter,
 };
 use super::ngram::{completed_ngram_prefix, insert_follower, ngram_lookup_start};
 use super::{GenerationConfig, metadata};
@@ -438,6 +439,10 @@ impl<B: Backend> TokenHistory<B> {
     /// or padded) are ignored. Each tracked count tensor receives one
     /// scatter-add of the `[batch, 1]` new IDs; no data is read back from the
     /// device. See the module documentation for the per-backend cost.
+    ///
+    /// The Verus-verified [`first_active_outside_vocabulary`] rejects the
+    /// first active row whose token is not a valid scatter index, and
+    /// [`any_valid`] decides whether any row is active at all.
     pub fn record(&mut self, tokens: &[u32], active: &[bool]) -> Result<()> {
         let batch = self.batch_size();
         if tokens.len() != batch || active.len() != batch {
@@ -447,15 +452,13 @@ impl<B: Backend> TokenHistory<B> {
                 active.len()
             )));
         }
-        for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
-            if is_active && token as usize >= self.vocabulary_size {
-                return Err(Error::Generation(format!(
-                    "history update for row {row} has token {token} outside vocabulary size {}",
-                    self.vocabulary_size
-                )));
-            }
+        if let Some(row) = first_active_outside_vocabulary(tokens, active, self.vocabulary_size) {
+            return Err(Error::Generation(format!(
+                "history update for row {row} has token {} outside vocabulary size {}",
+                tokens[row], self.vocabulary_size
+            )));
         }
-        if !active.iter().any(|&is_active| is_active) {
+        if !any_valid(active, 0, batch) {
             return Ok(());
         }
         // Each active row gains one token, so no count grows by more than one.

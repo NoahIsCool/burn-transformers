@@ -8,8 +8,9 @@ use proptest::prelude::*;
 
 use super::{
     ChunkCall, advance_generated_lengths, any_valid, chunk_activity, chunk_call, count_valid,
-    deinterleave, fill_row_lengths, first_outside_vocabulary, history_token_id, last_valid,
-    push_constraint_row, push_history_row, record_scatter, repeat_row,
+    deinterleave, fill_row_lengths, first_active_outside_vocabulary, first_outside_vocabulary,
+    history_token_id, last_valid, push_constraint_row, push_history_row, record_scatter,
+    repeat_row,
 };
 
 /// Mask scans handle empty spans, single slots, and spans without valid entries.
@@ -95,10 +96,25 @@ fn lengths_advance_and_vocabulary_checks() {
     let mut lengths = [0, 4, usize::MAX];
     advance_generated_lengths(&mut lengths, &[true, true, false]);
     assert_eq!(lengths, [1, 5, usize::MAX]);
-    assert_eq!(first_outside_vocabulary(&[1, 9, 3, 12], 8), Some(9));
+    assert_eq!(first_outside_vocabulary(&[1, 9, 3, 12], 8), Some(1));
     assert_eq!(first_outside_vocabulary(&[1, 7], 8), None);
     assert_eq!(first_outside_vocabulary(&[], 0), None);
     assert_eq!(first_outside_vocabulary(&[0], 0), Some(0));
+    // Inactive rows are never inspected; the first active offender is reported.
+    let tokens = [9, 1, 12, 10];
+    assert_eq!(
+        first_active_outside_vocabulary(&tokens, &[false, true, true, true], 8),
+        Some(2)
+    );
+    assert_eq!(
+        first_active_outside_vocabulary(&tokens, &[true, true, false, false], 8),
+        Some(0)
+    );
+    assert_eq!(
+        first_active_outside_vocabulary(&tokens, &[false, true, false, false], 8),
+        None
+    );
+    assert_eq!(first_active_outside_vocabulary(&[], &[], 0), None);
 }
 
 /// Packed readbacks split into IDs and scores; history values must be vocabulary IDs.
@@ -255,8 +271,15 @@ proptest! {
         prop_assert_eq!(advanced, expected);
         prop_assert_eq!(
             first_outside_vocabulary(&tokens, vocabulary),
-            tokens.iter().copied().find(|&token| token as usize >= vocabulary)
+            tokens.iter().position(|&token| token as usize >= vocabulary)
         );
+        // The original `record` loop: the first active row with an invalid token.
+        let active = &active_seed[..tokens.len()];
+        let expected = tokens
+            .iter()
+            .zip(active)
+            .position(|(&token, &is_active)| is_active && token as usize >= vocabulary);
+        prop_assert_eq!(first_active_outside_vocabulary(&tokens, active, vocabulary), expected);
     }
 
     /// Readback splitting and token conversion agree with the original iterators.

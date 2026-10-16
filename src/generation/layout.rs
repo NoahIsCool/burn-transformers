@@ -23,15 +23,18 @@
 //! - a prefill chunk's row activity is exactly "some slot of this row inside
 //!   the chunk is valid", and the chunk is skipped, prefilled, or decoded
 //!   exactly when no row, every row, or only some rows are active;
-//! - scatter layouts put every row's entries in that row's segment, in order,
-//!   padded with no-op `(0, 0)` entries to the common width; repeated rows are
-//!   exact copies; history increments are one exactly for active or present
-//!   tokens (and generated ones for the generated view);
+//! - the hard-constraint and history-count layouts put every row's entries in
+//!   that row's segment, in order, padded with no-op `(0, 0)` entries to the
+//!   common width (every entry fits, so none is dropped); the logit-bias layout
+//!   repeats one row exactly, without padding; history increments are one
+//!   exactly for active or present tokens (and generated ones for the
+//!   generated view);
 //! - a decode step adds one to the generated length of exactly the active
 //!   rows;
 //! - a packed `[batch, 2]` readback splits into its even and odd entries;
-//! - special-token validation reports the first configured token outside the
-//!   vocabulary, so accepted tokens are valid scatter indices;
+//! - special-token, logit-bias, and decode-step validation report the first
+//!   (active) token outside the vocabulary, so accepted tokens are valid
+//!   scatter indices;
 //! - a history value becomes a token ID exactly when it is a non-negative
 //!   `u32` below the vocabulary size.
 //!
@@ -466,10 +469,13 @@ pub(crate) fn push_constraint_row(
 /// increment one exactly when `c >= prompt_length` (a generated token); past
 /// the row's end it carries the no-op `(0, 0, 0)`. The proof shows all three
 /// buffers grow by exactly `width`, earlier rows are untouched, and every new
-/// slot holds exactly those values.
+/// slot holds exactly those values. The row must fit (`tokens.len() <= width`),
+/// so every token is counted; `row_counts` meets this by taking `width` as the
+/// longest row, as `apply_hard_constraints` does for [`push_constraint_row`].
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(
     requires
+        tokens.len() <= width,
         old(ids).len() == old(observed).len(),
         old(observed).len() == old(generated).len(),
     ensures
@@ -509,6 +515,7 @@ pub(crate) fn push_history_row(
     let mut column = 0;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
+            tokens.len() <= width,
             column <= width,
             ids.len() == old(ids).len() + column,
             observed.len() == old(ids).len() + column,
@@ -684,25 +691,25 @@ pub(crate) fn deinterleave<T: Copy>(values: &[T]) -> (Vec<T>, Vec<T>) {
     (evens, odds)
 }
 
-/// Returns the first token of `tokens` outside a vocabulary of `vocabulary_size` IDs.
+/// Returns the index of the first token of `tokens` outside a vocabulary of
+/// `vocabulary_size` IDs.
 ///
-/// The proof shows `Some(token)` is `tokens[i]` for the smallest `i` with
+/// The proof shows `Some(i)` is the smallest `i` with
 /// `tokens[i] >= vocabulary_size`, and `None` means every token is a valid
 /// scatter index into the vocabulary.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(outside =>
     ensures
         match outside {
-            Some(token) => exists|i: int| {
-                &&& 0 <= i < tokens.len()
-                &&& #[trigger] tokens@[i] == token
-                &&& token >= vocabulary_size
-                &&& forall|j: int| 0 <= j < i ==> #[trigger] tokens@[j] < vocabulary_size
+            Some(index) => {
+                &&& index < tokens.len()
+                &&& tokens@[index as int] >= vocabulary_size
+                &&& forall|j: int| 0 <= j < index ==> #[trigger] tokens@[j] < vocabulary_size
             },
             None => forall|i: int| 0 <= i < tokens.len() ==> #[trigger] tokens@[i] < vocabulary_size,
         },
 ))]
-pub(crate) fn first_outside_vocabulary(tokens: &[u32], vocabulary_size: usize) -> Option<u32> {
+pub(crate) fn first_outside_vocabulary(tokens: &[u32], vocabulary_size: usize) -> Option<usize> {
     let mut index = 0;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
@@ -712,9 +719,55 @@ pub(crate) fn first_outside_vocabulary(tokens: &[u32], vocabulary_size: usize) -
     ))]
     while index < tokens.len() {
         if tokens[index] as usize >= vocabulary_size {
-            return Some(tokens[index]);
+            return Some(index);
         }
         index += 1;
+    }
+    None
+}
+
+/// Returns the first active row whose token lies outside a vocabulary of
+/// `vocabulary_size` IDs.
+///
+/// One decode step records `tokens[r]` only for rows with `active[r]`, so
+/// only those must be valid scatter indices. The proof shows `Some(r)` is the
+/// smallest active `r` with `tokens[r] >= vocabulary_size`, and `None` means
+/// every active row's token lies inside the vocabulary; inactive rows are
+/// never inspected.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(outside =>
+    requires
+        tokens.len() == active.len(),
+    ensures
+        match outside {
+            Some(row) => {
+                &&& row < tokens.len()
+                &&& active@[row as int]
+                &&& tokens@[row as int] >= vocabulary_size
+                &&& forall|j: int| 0 <= j < row && #[trigger] active@[j] ==> tokens@[j] < vocabulary_size
+            },
+            None => forall|i: int| 0 <= i < tokens.len() && #[trigger] active@[i] ==> tokens@[i]
+                < vocabulary_size,
+        },
+))]
+pub(crate) fn first_active_outside_vocabulary(
+    tokens: &[u32],
+    active: &[bool],
+    vocabulary_size: usize,
+) -> Option<usize> {
+    let mut row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            tokens.len() == active.len(),
+            row <= tokens.len(),
+            forall|j: int| 0 <= j < row && #[trigger] active@[j] ==> tokens@[j] < vocabulary_size,
+        decreases tokens.len() - row,
+    ))]
+    while row < tokens.len() {
+        if active[row] && tokens[row] as usize >= vocabulary_size {
+            return Some(row);
+        }
+        row += 1;
     }
     None
 }

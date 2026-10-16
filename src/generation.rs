@@ -368,14 +368,18 @@ impl GenerationConfig {
     ///
     /// Special tokens are checked in configuration order (EOS IDs, PAD, then
     /// each stop sequence) with the Verus-verified [`first_outside_vocabulary`],
-    /// so the first offending token is reported.
+    /// so the first offending token is reported. The same scan finds the first
+    /// logit-bias key outside the vocabulary; entries before it are only
+    /// checked for a finite F32 bias, so the error reported is the one the
+    /// per-entry check (range, then finiteness) meets first.
     fn validate_token_ids(&self, vocabulary_size: usize) -> Result<()> {
         let pad = self.pad_token_id.as_slice();
         let special = [self.eos_token_ids.as_slice(), pad]
             .into_iter()
             .chain(self.stop_sequences.iter().map(Vec::as_slice));
         for tokens in special {
-            if let Some(token) = first_outside_vocabulary(tokens, vocabulary_size) {
+            if let Some(index) = first_outside_vocabulary(tokens, vocabulary_size) {
+                let token = tokens[index];
                 return Err(Error::Generation(format!(
                     "special token {token} is outside vocabulary size {vocabulary_size}"
                 )));
@@ -384,8 +388,10 @@ impl GenerationConfig {
         if self.stop_sequences.iter().any(Vec::is_empty) {
             return Err(Error::Generation("stop sequences must not be empty".into()));
         }
-        for (&token, &bias) in &self.logit_bias {
-            if token as usize >= vocabulary_size {
+        let bias_tokens = self.logit_bias.keys().copied().collect::<Vec<_>>();
+        let outside = first_outside_vocabulary(&bias_tokens, vocabulary_size);
+        for (index, (&token, &bias)) in self.logit_bias.iter().enumerate() {
+            if outside == Some(index) {
                 return Err(Error::Generation(format!(
                     "logit_bias token {token} is outside vocabulary size {vocabulary_size}"
                 )));
