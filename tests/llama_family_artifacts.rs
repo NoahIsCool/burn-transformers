@@ -1,7 +1,7 @@
 //! Real Llama-family checkpoints against locally generated Transformers references.
 //!
 //! The reference bundle comes from `scripts/generate_causal_lm_reference.py`
-//! (Transformers `AutoModelForCausalLM`, F32, CPU, eager attention): token IDs
+//! (Transformers `AutoModelForCausalLM`, F32 or F64, CPU, eager attention): token IDs
 //! of a few fixed prompts, every prompt position's full-vocabulary logits as
 //! raw little-endian F32, and a 32-token cached greedy continuation of the
 //! first prompt with each step's top-2 margin. These tests are ignored by
@@ -34,6 +34,24 @@
 //! prefill's argmax and one cached decode step) must be compared, so a
 //! bundle whose continuation opens with a tie fails instead of passing
 //! vacuously; `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` overrides the minimum.
+//!
+//! # Checkpoints with massive activations
+//!
+//! An F32 reference carries its own rounding error, so a deviation measures
+//! the sum of two implementations' errors. Generate the bundle with
+//! `--dtype float64` to measure this crate's error alone. Qwen2-7B at
+//! `453ed157` is the case that needs it: its first-position hidden states
+//! reach magnitudes near 7,000, where one F32 unit in the last place is about
+//! `5e-4`. Against an F64 bundle (checked against an independent
+//! layer-streamed F64 forward, agreeing within `2.1e-5`), the largest
+//! first-position deviations on its third prompt are `1.6e-3` for F32
+//! Transformers itself, `1.8e-4` for Flex, and `1.9e-3` for Metal; every other
+//! position stays below `3e-4` on both backends, and both reproduce all 32
+//! greedy tokens. The Metal figure is ordinary F32 accumulation order, as
+//! large as the reference implementation's own, so that checkpoint's Metal
+//! run uses `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. Llama-3.1-8B at
+//! `d04e592b` (Llama 3 RoPE scaling) stays within `7.6e-5` on both backends
+//! against an F32 bundle.
 
 #![cfg(feature = "flex")]
 
