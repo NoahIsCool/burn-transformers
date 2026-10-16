@@ -25,10 +25,8 @@ use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizationGroupSize,
     QuantizedTensorMetadata, Result, SourceFloatDType, SymmetricQuantization,
     WeightQuantizationConfig, classify_weight_for_quantization,
-    packing::{
-        CodeWidth, encode_byte, encode_nibble, join_nibbles, read_code, reserved_code,
-        split_nibbles,
-    },
+    counts::{block_scale_count, ceil_div_usize},
+    packing::{CodeViolation, CodeWidth, first_code_violation, push_code, read_code},
     provenance::quantized_payload_sha256,
 };
 
@@ -230,8 +228,7 @@ impl QuantizedWeight {
             SymmetricQuantization::Q4 => (QuantValue::Q4S, 8),
         };
         debug_assert!(columns.is_multiple_of(values_per_u32));
-        let expected_scales = rows
-            .checked_mul(columns / group_size)
+        let expected_scales = block_scale_count(*rows, *columns, group_size)
             .ok_or(QuantizationError::ShapeElementOverflow)?;
         if scales.len() != expected_scales {
             return Err(QuantizationError::ScaleCountMismatch {
@@ -332,7 +329,7 @@ pub fn quantize_tensor_data(
 
     let packed_len = config.scheme.packed_bytes(elements)?;
     let group_size = config.group_size.get();
-    let groups = ceil_div(elements, group_size);
+    let groups = ceil_div_usize(elements, group_size);
     let metadata = QuantizedTensorMetadata::new(source.shape.as_slice(), source_dtype, config)?;
 
     let mut packed_values = Vec::new();
@@ -496,26 +493,6 @@ const fn code_width(scheme: SymmetricQuantization) -> CodeWidth {
     }
 }
 
-/// Appends a Q8 code or packs a Q4 code with even indices in the low nibble.
-///
-/// The caller visits contiguous increasing indices, so every odd index completes
-/// the byte created by its preceding even index. Codes come from
-/// [`quantize_value`] and therefore lie in `[-q_max, q_max]`.
-fn push_code(width: CodeWidth, output: &mut Vec<u8>, index: usize, code: i8) {
-    match width {
-        CodeWidth::Byte => output.push(encode_byte(code)),
-        CodeWidth::Nibble => {
-            let nibble = encode_nibble(code);
-            if index.is_multiple_of(2) {
-                output.push(join_nibbles(nibble, 0));
-            } else if let Some(byte) = output.last_mut() {
-                let (low, _) = split_nibbles(*byte);
-                *byte = join_nibbles(low, nibble);
-            }
-        }
-    }
-}
-
 /// Requires each persisted F32 scale to be finite and strictly positive.
 fn validate_scales(scales: &[f32]) -> Result<()> {
     for (group, &scale) in scales.iter().enumerate() {
@@ -527,35 +504,23 @@ fn validate_scales(scales: &[f32]) -> Result<()> {
 }
 
 /// Rejects asymmetric reserved codes and nonzero unused high-nibble padding.
+///
+/// The verified [`first_code_violation`] scans the codes in index order and
+/// reports the first defect, which maps to the matching contextual error.
 fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8]) -> Result<()> {
-    let width = code_width(scheme);
-    let reserved = reserved_code(width);
-    for index in 0..elements {
-        let value =
-            read_code(width, packed, index).ok_or(QuantizationError::PackedLengthMismatch {
-                expected: elements,
-                actual: packed.len(),
-            })?;
-        if value == reserved {
-            return Err(QuantizationError::InvalidQuantizedValue { index, value });
+    match first_code_violation(code_width(scheme), elements, packed) {
+        None => Ok(()),
+        Some(CodeViolation::Short) => Err(QuantizationError::PackedLengthMismatch {
+            expected: elements,
+            actual: packed.len(),
+        }),
+        Some(CodeViolation::Reserved { index, value }) => {
+            Err(QuantizationError::InvalidQuantizedValue { index, value })
         }
-    }
-    if width == CodeWidth::Nibble
-        && elements % 2 == 1
-        && packed
-            .last()
-            .is_some_and(|&byte| split_nibbles(byte).1 != 0)
-    {
-        return Err(QuantizationError::InvalidMetadata {
+        Some(CodeViolation::Padding) => Err(QuantizationError::InvalidMetadata {
             reason: "unused final Q4 high nibble must be zero".into(),
-        });
+        }),
     }
-    Ok(())
-}
-
-/// Computes a rounded-up quotient without addition overflow for a nonzero divisor.
-const fn ceil_div(value: usize, divisor: usize) -> usize {
-    value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
 
 #[cfg(test)]

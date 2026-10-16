@@ -23,6 +23,7 @@
 mod burnpack;
 mod checkpoint;
 mod config;
+mod counts;
 mod error;
 mod load;
 mod manifest;

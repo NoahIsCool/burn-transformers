@@ -1,0 +1,240 @@
+//! Exact group, packed-value, and scale counts of a quantized tensor.
+//!
+//! A tensor of `n` values quantized in contiguous groups of `G` values has
+//! `⌈n / G⌉` groups (the last one possibly partial), one four-byte F32 scale
+//! per group, and `n` packed Q8 bytes or `⌈n / 2⌉` packed Q4 bytes. For a
+//! rank-two `[rows, columns]` matrix whose width is a multiple of `G`, those
+//! flat row-major groups are exactly Burn's `[1, G]` blocks: there are
+//! `rows · (columns / G)` of them, which equals `⌈rows · columns / G⌉`.
+//!
+//! The module has no crate, Burn, or allocator dependencies so that Verus can
+//! check it in place through `verus/checkpoint.rs`; callers map its `None`
+//! results to contextual quantization errors.
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
+
+use super::packing::CodeWidth;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: the exact rounded-up quotient `⌈dividend / divisor⌉` for `divisor > 0`.
+pub open spec fn ceiling(dividend: int, divisor: int) -> int {
+    if dividend % divisor == 0 {
+        dividend / divisor
+    } else {
+        dividend / divisor + 1
+    }
+}
+
+/// `⌈n / d⌉` is the least `q` with `n <= q · d`, and it never exceeds `n` for `d >= 1`.
+proof fn lemma_ceiling_bounds(dividend: int, divisor: int)
+    requires
+        dividend >= 0,
+        divisor >= 1,
+    ensures
+        dividend <= ceiling(dividend, divisor) * divisor,
+        ceiling(dividend, divisor) == 0 || (ceiling(dividend, divisor) - 1) * divisor < dividend,
+        0 <= ceiling(dividend, divisor) <= dividend,
+        divisor >= 2 && dividend % divisor != 0 ==> dividend / divisor < dividend,
+{
+    let q = dividend / divisor;
+    let r = dividend % divisor;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(dividend, divisor);
+    assert(dividend == divisor * q + r);
+    assert(0 <= r < divisor);
+    assert(q >= 0) by (nonlinear_arith)
+        requires dividend == divisor * q + r, 0 <= r < divisor, dividend >= 0;
+    assert(q * divisor >= q) by (nonlinear_arith)
+        requires divisor >= 1, q >= 0;
+    if r == 0 {
+        assert(dividend == q * divisor) by (nonlinear_arith)
+            requires dividend == divisor * q + r, r == 0;
+        if q > 0 {
+            assert((q - 1) * divisor < dividend) by (nonlinear_arith)
+                requires dividend == q * divisor, divisor >= 1;
+        }
+    } else {
+        assert(dividend <= (q + 1) * divisor) by (nonlinear_arith)
+            requires dividend == divisor * q + r, r < divisor;
+        assert(q * divisor < dividend) by (nonlinear_arith)
+            requires dividend == divisor * q + r, r > 0;
+        // A nonzero remainder needs a divisor of at least two, so q + 1 <= dividend.
+        assert(q + 1 <= dividend) by (nonlinear_arith)
+            requires dividend == divisor * q + r, 0 < r < divisor, q >= 0;
+    }
+    if divisor >= 2 && r != 0 {
+        assert(q < dividend) by (nonlinear_arith)
+            requires dividend == divisor * q + r, r > 0, divisor >= 2, q >= 0;
+    }
+}
+
+} // verus!
+
+/// Returns `⌈value / divisor⌉` without forming the overflow-prone `value + divisor - 1`.
+///
+/// Verified: the exact mathematical ceiling, never above `value`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(quotient =>
+    requires
+        divisor > 0,
+    ensures
+        quotient == ceiling(value as int, divisor as int),
+        quotient <= value,
+))]
+pub(crate) const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_ceiling_bounds(value as int, divisor as int);
+    }
+    // A named remainder keeps this Verus-checkable (`is_multiple_of` has no spec).
+    let remainder = value % divisor;
+    value / divisor + if remainder == 0 { 0 } else { 1 }
+}
+
+/// Returns `⌈value / divisor⌉` over host indices; see [`ceil_div_u64`].
+///
+/// Verified: the exact mathematical ceiling, never above `value`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(quotient =>
+    requires
+        divisor > 0,
+    ensures
+        quotient == ceiling(value as int, divisor as int),
+        quotient <= value,
+))]
+pub(crate) const fn ceil_div_usize(value: usize, divisor: usize) -> usize {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_ceiling_bounds(value as int, divisor as int);
+    }
+    // A named remainder keeps this Verus-checkable (`is_multiple_of` has no spec).
+    let remainder = value % divisor;
+    value / divisor + if remainder == 0 { 0 } else { 1 }
+}
+
+/// Persisted counts derived from a tensor's element count and quantization layout.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WireCounts {
+    /// Contiguous groups, each sharing one scale: `⌈n / G⌉`.
+    pub(crate) group_count: u64,
+    /// Packed code bytes: `n` (Q8) or `⌈n / 2⌉` (Q4).
+    pub(crate) packed_value_bytes: u64,
+    /// Scale bytes `4 · groups`, or `None` when that overflows `u64`.
+    pub(crate) scale_bytes: Option<u64>,
+}
+
+/// Derives the group, packed-byte, and scale-byte counts of `elements` values.
+///
+/// Verified: every count is exact; the scale length is `None` only when
+/// `4 · groups` exceeds `u64::MAX`, which cannot happen for the supported
+/// group sizes (`G >= 32`).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(counts =>
+    requires
+        group_size > 0,
+    ensures
+        counts.group_count == ceiling(elements as int, group_size as int),
+        width == CodeWidth::Byte ==> counts.packed_value_bytes == elements,
+        width == CodeWidth::Nibble ==>
+            counts.packed_value_bytes == ceiling(elements as int, 2),
+        counts.packed_value_bytes <= elements,
+        match counts.scale_bytes {
+            Some(bytes) => bytes == 4 * counts.group_count,
+            None => 4 * counts.group_count > u64::MAX,
+        },
+        group_size >= 32 ==> counts.scale_bytes is Some,
+))]
+pub(crate) fn wire_counts(elements: u64, group_size: u64, width: CodeWidth) -> WireCounts {
+    let group_count = ceil_div_u64(elements, group_size);
+    let packed_value_bytes = match width {
+        CodeWidth::Byte => elements,
+        CodeWidth::Nibble => ceil_div_u64(elements, 2),
+    };
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if group_size >= 32 {
+            lemma_small_group_count(elements as int, group_size as int);
+        }
+    }
+    WireCounts {
+        group_count,
+        packed_value_bytes,
+        scale_bytes: group_count.checked_mul(4),
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// With groups of at least 32 values, four bytes per group never overflow `u64`.
+proof fn lemma_small_group_count(elements: int, group_size: int)
+    requires
+        0 <= elements <= u64::MAX,
+        group_size >= 32,
+    ensures
+        4 * ceiling(elements, group_size) <= u64::MAX,
+{
+    lemma_ceiling_bounds(elements, group_size);
+    let groups = ceiling(elements, group_size);
+    // (groups - 1) * G < elements <= u64::MAX, so groups <= u64::MAX / 32 + 1.
+    assert(groups == 0 || (groups - 1) * 32 < elements) by (nonlinear_arith)
+        requires
+            groups == 0 || (groups - 1) * group_size < elements,
+            group_size >= 32,
+            groups >= 0,
+    ;
+}
+
+} // verus!
+
+/// Returns the Burn `[1, G]` block count `rows · (columns / G)` of a matrix, or `None` on overflow.
+///
+/// Verified: the exact product; and when `G` divides the width, the blocks
+/// hold exactly `rows · columns` values and their count equals the flat group
+/// count `⌈rows · columns / G⌉` that the persisted metadata records, so a
+/// group-aligned artifact's scales map one-to-one onto Burn's blocks.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(blocks =>
+    requires
+        group_size > 0,
+    ensures
+        match blocks {
+            Some(count) => {
+                &&& count == rows * (columns / group_size)
+                &&& columns % group_size == 0 ==> count * group_size == rows * columns
+                &&& columns % group_size == 0
+                    ==> count == ceiling(rows * columns, group_size as int)
+            },
+            None => rows * (columns / group_size) > usize::MAX,
+        }
+))]
+pub(crate) fn block_scale_count(rows: usize, columns: usize, group_size: usize) -> Option<usize> {
+    let count = rows.checked_mul(columns / group_size);
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if columns % group_size == 0 {
+            let per_row = columns / group_size;
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod(columns as int, group_size as int);
+            assert(columns == group_size * per_row);
+            assert(rows * per_row * group_size == rows * columns) by (nonlinear_arith)
+                requires columns == group_size * per_row;
+            vstd::arithmetic::div_mod::lemma_div_multiples_vanish(
+                rows * per_row,
+                group_size as int,
+            );
+            vstd::arithmetic::div_mod::lemma_mod_multiples_basic(
+                rows * per_row,
+                group_size as int,
+            );
+            assert((rows * per_row) * group_size == group_size * (rows * per_row)) by (nonlinear_arith);
+        }
+    }
+    count
+}
+
+#[cfg(test)]
+#[path = "counts_tests.rs"]
+mod tests;

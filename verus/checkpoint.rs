@@ -1,4 +1,4 @@
-//! Verus harness for the checkpoint loader's pure layout and packing arithmetic.
+//! Verus harness for the checkpoint loader's pure layout, packing, and count arithmetic.
 //!
 //! Verifies, in place, the specifications attached to `src/checkpoint/layout.rs`:
 //!
@@ -39,7 +39,19 @@
 //! lengths (`n` and `ceil(n / 2)`, never above `n`), the two's-complement nibble
 //! and byte encodings and their inverses, nibble joining and splitting, and code
 //! reads that return exactly the stored code (Q8 byte `i`; Q4 low nibble of byte
-//! `i / 2` for even `i`, high nibble for odd `i`) and `None` exactly past the end.
+//! `i / 2` for even `i`, high nibble for odd `i`) and `None` exactly past the end;
+//! `push_code` preserves the packing invariant (a buffer holding codes `0..i`
+//! becomes one holding `0..=i`, every earlier code unchanged, the new code
+//! readable as pushed, and an unused Q4 high nibble kept zero), so packing then
+//! reading is the identity; `first_code_violation` returns `None` exactly for
+//! canonical buffers and otherwise names the first short read, reserved code, or
+//! dirty Q4 padding.
+//!
+//! And it verifies `src/checkpoint/quantization/counts.rs`: exact ceilings in
+//! `u64` and `usize`; persisted group (`⌈n / G⌉`), packed-byte, and scale-byte
+//! counts, with the scale length proved never to overflow for `G >= 32`; and the
+//! Burn block count `rows · (columns / G)`, proved equal to the flat group count
+//! `⌈rows · columns / G⌉` whenever `G` divides the width.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
 //! driven by these plans, file I/O, error mapping, and the floating-point
@@ -57,3 +69,6 @@ pub mod layout;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;
+
+#[path = "../src/checkpoint/quantization/counts.rs"]
+pub mod counts;

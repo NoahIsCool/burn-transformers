@@ -15,7 +15,10 @@ use crate::checkpoint::artifact::deserialize_unique_map;
 use super::{
     BurnpackProvenance, PackedValueLayout, QuantizationError, QuantizationGroupSize,
     QuantizedGroupLayout, QuantizedPayloadLayout, Result, ScaleLayout, SymmetricQuantization,
-    WeightQuantizationConfig, provenance::validate_sha256,
+    WeightQuantizationConfig,
+    counts::{block_scale_count, wire_counts},
+    packing::CodeWidth,
+    provenance::validate_sha256,
 };
 
 /// Legacy Burnpack quantization format without checkpoint content provenance.
@@ -209,17 +212,15 @@ impl QuantizedTensorMetadata {
                 context: "group size conversion",
             }
         })?;
-        let group_count = ceil_div_u64(num_elements, group_size);
-        let packed_value_bytes = match config.scheme {
-            SymmetricQuantization::Q8 => num_elements,
-            SymmetricQuantization::Q4 => ceil_div_u64(num_elements, 2),
-        };
-        let scale_bytes =
-            group_count
-                .checked_mul(4)
-                .ok_or(QuantizationError::ByteLengthOverflow {
-                    context: "scale payload length",
-                })?;
+        // Verified exact counts: `⌈n / G⌉` groups, `n` or `⌈n / 2⌉` code bytes, four scale bytes per group.
+        let counts = wire_counts(num_elements, group_size, code_width(config.scheme));
+        let group_count = counts.group_count;
+        let packed_value_bytes = counts.packed_value_bytes;
+        let scale_bytes = counts
+            .scale_bytes
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "scale payload length",
+            })?;
 
         Ok(Self {
             shape: shape_wire,
@@ -268,7 +269,8 @@ impl QuantizedTensorMetadata {
                 context: "group size conversion",
             }
         })?;
-        let expected_groups = ceil_div_u64(expected_elements, group_size);
+        let counts = wire_counts(expected_elements, group_size, code_width(self.scheme));
+        let expected_groups = counts.group_count;
         if self.group_count != expected_groups {
             return invalid_metadata(format!(
                 "group_count {} does not match expected {expected_groups}",
@@ -276,10 +278,7 @@ impl QuantizedTensorMetadata {
             ));
         }
 
-        let expected_packed = match self.scheme {
-            SymmetricQuantization::Q8 => expected_elements,
-            SymmetricQuantization::Q4 => ceil_div_u64(expected_elements, 2),
-        };
+        let expected_packed = counts.packed_value_bytes;
         if self.packed_value_bytes != expected_packed {
             return invalid_metadata(format!(
                 "packed_value_bytes {} does not match expected {expected_packed}",
@@ -288,8 +287,8 @@ impl QuantizedTensorMetadata {
         }
 
         let expected_scale_bytes =
-            expected_groups
-                .checked_mul(4)
+            counts
+                .scale_bytes
                 .ok_or(QuantizationError::ByteLengthOverflow {
                     context: "scale payload length",
                 })?;
@@ -370,8 +369,8 @@ impl QuantizedTensorMetadata {
                 ),
             });
         }
-        let expected_scales = rows
-            .checked_mul(columns / group_size)
+        // Verified: for a group-aligned width this equals the flat group count.
+        let expected_scales = block_scale_count(*rows, *columns, group_size)
             .ok_or(QuantizationError::ShapeElementOverflow)?;
         let actual_scales = usize::try_from(self.group_count).map_err(|_| {
             QuantizationError::ByteLengthOverflow {
@@ -567,6 +566,14 @@ impl Default for BurnpackQuantizationManifest {
     }
 }
 
+/// Maps a precision to the packed code width that stores it.
+const fn code_width(scheme: SymmetricQuantization) -> CodeWidth {
+    match scheme {
+        SymmetricQuantization::Q8 => CodeWidth::Byte,
+        SymmetricQuantization::Q4 => CodeWidth::Nibble,
+    }
+}
+
 /// Maps a precision to its sole canonical two's-complement byte layout.
 fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
     match scheme {
@@ -578,11 +585,6 @@ fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
 /// Computes the logical element product, allowing reference scalars and empty axes.
 fn checked_num_elements_u64(shape: &[u64]) -> Result<u64> {
     crate::checkpoint::layout::element_count(shape).ok_or(QuantizationError::ShapeElementOverflow)
-}
-
-/// Divides by a nonzero validated group/packing width without addition overflow.
-const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
-    value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
 
 /// Preserves a violated wire-format invariant as a contextual, non-panicking error.
