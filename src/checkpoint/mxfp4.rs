@@ -854,7 +854,7 @@ proof fn lemma_unit_sizes(g: Mxfp4Geometry, scalar_bytes: usize)
         scalar_bytes >= 1,
         g.experts * g.rows * g.columns * scalar_bytes <= usize::MAX,
     ensures
-        g.experts * g.groups <= g.experts * g.rows * g.columns,
+        1 <= g.experts * g.groups <= g.experts * g.rows * g.columns,
         32 * g.rows * scalar_bytes <= g.experts * g.rows * g.columns * scalar_bytes,
         32 * g.rows * scalar_bytes >= 1,
         32 * g.rows <= usize::MAX,
@@ -864,6 +864,8 @@ proof fn lemma_unit_sizes(g: Mxfp4Geometry, scalar_bytes: usize)
     assert(g.experts * g.rows * g.columns == (g.experts * g.groups) * (32 * g.rows))
         by (nonlinear_arith)
         requires g.columns == 32 * g.groups;
+    assert(g.experts * g.groups >= 1) by (nonlinear_arith)
+        requires g.experts >= 1, g.groups >= 1;
     assert(g.experts * g.groups <= (g.experts * g.groups) * (32 * g.rows)) by (nonlinear_arith)
         requires g.rows >= 1, g.experts * g.groups >= 0;
     assert(32 * g.rows <= (g.experts * g.groups) * (32 * g.rows)) by (nonlinear_arith)
