@@ -820,6 +820,16 @@ fn route_checks_bias_presence_and_logit_shape() {
             RouterConfig::new(4, 1).route(logits(&[0.0; 6], 3), None),
             "moe.router.logits",
         ),
+        (
+            RouterConfig::new(4, 1).route(
+                Tensor::<TestBackend, 2>::from_data(
+                    TensorData::new(Vec::<f32>::new(), [0, 4]),
+                    &device,
+                ),
+                None,
+            ),
+            "moe.router.logits",
+        ),
     ];
     for (result, field) in cases {
         let error = result.expect_err(field);
@@ -865,6 +875,36 @@ fn router_projection_precision_controls_logit_dtype() {
     )
     .expect_err("width mismatch");
     assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "moe.router.weight"));
+}
+
+/// Keeping every group is the identity, so group-limited routing then equals greedy routing.
+///
+/// Nemotron-H configures `n_group = topk_group = 1`; any `top_groups ==
+/// groups` keeps every expert, so the pruning step must return the scores
+/// unchanged (Burn cannot one-hot a single class) and selection must match the
+/// greedy policy exactly, including tie order.
+#[test]
+fn keeping_every_group_matches_greedy_routing() {
+    let values = [0.5_f32, -1.0, 2.0, 2.0, 0.25, 3.0, -0.5, 1.0];
+    let mut greedy = RouterConfig::new(4, 2);
+    greedy.policy.scoring = RouterScoring::Sigmoid;
+    let expected = host(greedy.route(logits(&values, 4), None).unwrap());
+    for (groups, group_score) in [(1, GroupScore::Max), (2, GroupScore::TopTwoSum)] {
+        let mut grouped = greedy;
+        grouped.policy.selection = ExpertSelection::GroupLimited(GroupLimitedSelection {
+            groups,
+            top_groups: groups,
+            group_score,
+            pruned_score: PrunedExpertScore::Zero,
+        });
+        assert_eq!(
+            host(grouped.route(logits(&values, 4), None).unwrap()),
+            expected,
+            "{groups} groups"
+        );
+    }
+    // The tie between experts 2 and 3 resolves to the smaller index first.
+    assert_eq!(expected.0[..2], [2, 3]);
 }
 
 /// Policies round-trip through serde and default when omitted.

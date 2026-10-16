@@ -517,3 +517,56 @@ fn clamped_and_hooked_forwards_are_differentiable() {
         .backward();
     assert!(block.gate_proj.weight.grad(&gradients).is_some());
 }
+
+/// A failing edit at either MLP point aborts the hooked forward with that point's error.
+///
+/// The pre-activation and activation hooks run in sequence, so an edit that
+/// fails at the first point must stop before the second point is emitted, and
+/// a failure at the second point must surface after the first point's capture
+/// ran. Both the dense and the gated block propagate the callback's error with
+/// the failing point's name instead of continuing with an unedited tensor.
+#[test]
+fn hooked_mlp_forward_propagates_point_failures() {
+    let device = Default::default();
+    let layer = Layer::decoder(1);
+    let input = Tensor::<Flex, 3>::from_floats([[[0.5, -1.5]]], &device);
+    let gated = distinct_gated_block();
+    let mut dense = DenseFeedForwardConfig::new(2, 2)
+        .with_activation(Activation::Silu)
+        .init::<Flex>(&device)
+        .unwrap();
+    dense.up_proj = gated.gate_proj.clone();
+    dense.down_proj = gated.down_proj.clone();
+    for gated_block in [false, true] {
+        for fail_at_activation in [false, true] {
+            let mut hooks = Hooks::new();
+            let pre_activation = hooks.capture(layer.mlp_pre_activation());
+            let activation_capture = hooks.capture(layer.mlp_activation());
+            let failing = if fail_at_activation {
+                layer.mlp_activation()
+            } else {
+                layer.mlp_pre_activation()
+            };
+            hooks.try_edit(failing.clone(), |_| {
+                Err(crate::Error::configuration("test.edit", "refused"))
+            });
+            let error = hooks
+                .run(mlp_hook_points(layer), |hooks| {
+                    if gated_block {
+                        gated.forward_with_hooks(input.clone(), layer, hooks)
+                    } else {
+                        dense.forward_with_hooks(input.clone(), layer, hooks)
+                    }
+                })
+                .unwrap_err();
+            let crate::Error::Intervention { point, reason, .. } = &error else {
+                panic!("expected an intervention error, got {error:?}");
+            };
+            assert_eq!(*point, failing.info().name);
+            assert!(reason.contains("refused"), "{reason}");
+            // A failed run releases every capture, including the one that ran.
+            assert!(hooks.get(&pre_activation).is_err());
+            assert!(hooks.get(&activation_capture).is_err());
+        }
+    }
+}

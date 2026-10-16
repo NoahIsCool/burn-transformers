@@ -511,3 +511,42 @@ proptest::proptest! {
         proptest::prop_assert_eq!(actual, expected);
     }
 }
+
+/// Lengths beyond `i64` and windows whose positions overflow `i64` fail before any allocation.
+///
+/// Positions are signed integers, so a query or key axis longer than
+/// `i64::MAX` is rejected by geometry validation, and a window that survives
+/// reduction (it is shorter than the keys) but whose largest formed position
+/// `K - 1 + window` exceeds `i64::MAX` is rejected by the peak check. Every
+/// geometry here is far too large to allocate, so reaching a tensor builder
+/// would abort the test.
+#[test]
+fn position_ranges_beyond_i64_are_rejected_from_metadata() {
+    let device = Default::default();
+    let beyond = 1_usize << 63;
+    for (geometry, reason) in [
+        (
+            MaskGeometry::new(1, 1, beyond, beyond),
+            "query length exceeds i64",
+        ),
+        (MaskGeometry::new(1, 1, 1, beyond), "key length exceeds i64"),
+    ] {
+        let error = AttentionConnectivity::Global
+            .exclusion_mask::<TestBackend>(true, geometry, None, None, &device)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason: actual }
+                if field == "attention.causal_mask" && actual == reason),
+            "{error:?}"
+        );
+    }
+    let keys = (1_usize << 62) + 2;
+    let error = AttentionConnectivity::SlidingWindow { window: keys - 1 }
+        .exclusion_mask::<TestBackend>(true, MaskGeometry::new(1, 1, 1, keys), None, None, &device)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "attention.positions" && reason == "position arithmetic exceeds i64"),
+        "{error:?}"
+    );
+}

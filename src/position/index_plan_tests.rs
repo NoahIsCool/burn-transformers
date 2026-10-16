@@ -70,6 +70,9 @@ fn rotary_operand_check_requires_every_shape_relation() {
         ([2, 2, 5, 6], [2, 2, 5, 6], 6),
         ([2, 1, 4, 6], [2, 1, 4, 6], 6),
         ([2, 1, 5, 6], [2, 1, 5, 6], 4),
+        ([2, 1, 5, 6], [3, 1, 5, 6], 6),
+        ([2, 1, 5, 6], [2, 2, 5, 6], 6),
+        ([2, 1, 5, 6], [2, 1, 4, 6], 6),
         ([2, 1, 5, 6], [2, 1, 5, 4], 6),
         ([2, 1, 5, 10], [2, 1, 5, 10], 10),
         ([2, 1, 5, 5], [2, 1, 5, 5], 5),
@@ -90,6 +93,11 @@ fn relative_table_plan_orders_faults_and_reports_anchor() {
     );
     assert_eq!(
         plan_relative_table(2, usize::MAX, usize::MAX),
+        Err(RelativeTableFault::OutputOverflow)
+    );
+    // `q + k - 1` fits but the `q * k` output plane does not.
+    assert_eq!(
+        plan_relative_table(1 << 33, 1 << 32, 0),
         Err(RelativeTableFault::OutputOverflow)
     );
     assert_eq!(

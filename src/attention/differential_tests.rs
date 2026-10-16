@@ -334,6 +334,75 @@ fn invalid_differential_layers_fail_with_context() {
     );
 }
 
+/// Each operand mismatch is reported by its own check, including a mask the kernel rejects.
+///
+/// The configuration rejects every non-finite or non-positive normalization
+/// epsilon; projection rejects a key source of the wrong width or batch; and
+/// `attend` names the projection when the query heads, query `head_dim`, or
+/// value heads disagree with the layer, then forwards the attention kernel's
+/// own mask error unchanged.
+#[test]
+fn differential_operand_mismatches_fail_with_context() {
+    let base = DifferentialAttentionConfig::new(8, 4, 2, 2, 0);
+    for norm_epsilon in [f64::NAN, f64::INFINITY, -1.0e-6] {
+        let error = DifferentialAttentionConfig {
+            norm_epsilon,
+            ..base.clone()
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("norm_epsilon"), "{norm_epsilon}: {error}");
+    }
+    let device = Default::default();
+    let layer = base.init::<TestBackend>(&device).unwrap();
+    for source in [[1, 3, 7], [2, 3, 8]] {
+        let error = layer
+            .project(
+                Tensor::zeros([1, 2, 8], &device),
+                Tensor::zeros(source, &device),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Shape { tensor, actual, .. }
+                if tensor == "differential_attention.input"
+                    && actual == &format!("query=[1, 2, 8], source={source:?}")),
+            "{error:?}"
+        );
+    }
+    let valid = layer
+        .project_self(Tensor::zeros([1, 2, 8], &device))
+        .unwrap();
+    let mut fewer_query_heads = valid.clone();
+    fewer_query_heads.query = fewer_query_heads.query.narrow(1, 0, 2);
+    let mut wider_queries = valid.clone();
+    wider_queries.query = Tensor::cat(vec![valid.query.clone(), valid.query.clone()], 3);
+    let mut fewer_value_heads = valid.clone();
+    fewer_value_heads.value = fewer_value_heads.value.narrow(1, 0, 1);
+    for (case, projection) in [
+        ("query heads", fewer_query_heads),
+        ("query head_dim", wider_queries),
+        ("value heads", fewer_value_heads),
+    ] {
+        let error = layer.attend(projection, None, true).unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Shape { tensor, .. }
+                if tensor == "differential_attention.projection"),
+            "{case}: {error:?}"
+        );
+    }
+    // A mask for three keys cannot address two; the kernel's error is forwarded.
+    let mask = Tensor::<TestBackend, 4, Bool>::from_bool(
+        TensorData::new(vec![true; 6], [1, 1, 2, 3]),
+        &device,
+    );
+    let error = layer.attend(valid, Some(mask), false).unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Shape { tensor, .. } if tensor == "attention.mask"),
+        "{error:?}"
+    );
+}
+
 /// Reduced-precision lambdas stay in the requested dtype, within one BF16 step of DiffLlama's order.
 #[test]
 fn reduced_precision_lambda_follows_the_reference_order() {

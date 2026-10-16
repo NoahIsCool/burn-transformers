@@ -834,3 +834,77 @@ fn inference_flex_random_column_projections_are_contiguous() {
     let row = super::init_linear::<Flex>(&config.clone().with_layout(LinearLayout::Row), &device);
     assert!(flex_primitive(row.weight.val()).is_contiguous());
 }
+
+/// Rank-zero activations have no projection axis and are rejected before any reshape.
+///
+/// Burn's creation APIs refuse rank zero, but a reshape to `[]` produces one;
+/// both products must report the missing axis instead of indexing `dims[D - 1]`.
+#[test]
+fn rank_zero_activations_are_contextual_errors() {
+    let device = Default::default();
+    let scalar = Tensor::<Flex, 1>::from_floats([3.0], &device).reshape::<0, [usize; 0]>([]);
+    let projection = Linear {
+        weight: Param::from_tensor(Tensor::<Flex, 2>::from_floats([[2.0]], &device)),
+        bias: None,
+    };
+    assert!(matches!(
+        linear(scalar.clone(), &projection),
+        Err(crate::Error::Shape { tensor, expected, actual })
+            if tensor == "linear.input"
+                && expected == "a tensor with at least one dimension"
+                && actual == "rank zero"
+    ));
+    assert!(matches!(
+        matmul_transposed(scalar, Tensor::<Flex, 2>::from_floats([[2.0]], &device)),
+        Err(crate::Error::Shape { tensor, expected, actual })
+            if tensor == "matmul_transposed.input"
+                && expected == "a tensor with at least one dimension"
+                && actual == "rank zero"
+    ));
+}
+
+/// Autodiff refuses a packed weight before dispatch, even when the weight is frozen.
+///
+/// Burn 0.21 cannot differentiate a quantized matmul, including the input
+/// gradient through a frozen packed matrix, so the boundary must name the
+/// limitation and the explicit-dequantization workaround instead of panicking
+/// in backward.
+#[cfg(feature = "autodiff")]
+#[test]
+fn autodiff_projection_rejects_packed_weights() {
+    /// Differentiable CPU backend that must not see packed parameters.
+    type AdBackend = burn::backend::Autodiff<Flex>;
+    let device = Default::default();
+    let packed = quantize_tensor_data(
+        &small_integers(32, 32, 3),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q8,
+            group_size: QuantizationGroupSize::new(32).expect("supported group"),
+        },
+    )
+    .expect("reference quantization")
+    .into_burn_qfloat_data()
+    .expect("Burn-compatible matrix");
+    // Burn 0.21's autodiff backend cannot upload packed data itself; wrap the
+    // inner backend's packed primitive, which autodiff stores unchanged.
+    let burn::tensor::TensorPrimitive::QFloat(inner) =
+        Tensor::<Flex, 2>::from_data(packed, &device).into_primitive()
+    else {
+        panic!("packed data must upload as a quantized primitive");
+    };
+    let weight =
+        Tensor::<AdBackend, 2>::from_primitive(burn::tensor::TensorPrimitive::QFloat(inner));
+    assert!(matches!(weight.dtype(), DType::QFloat(_)));
+    let projection = Linear {
+        weight: Param::from_tensor(weight).set_require_grad(false),
+        bias: None,
+    };
+    let input = Tensor::<AdBackend, 2>::ones([1, 32], &device).require_grad();
+    match linear(input, &projection) {
+        Err(crate::Error::BackendCapability(message)) => {
+            assert!(message.contains("autodiff does not support packed Q4/Q8 linear weights"));
+            assert!(message.contains("explicitly dequantize"));
+        }
+        other => panic!("expected a backend capability error, got {other:?}"),
+    }
+}

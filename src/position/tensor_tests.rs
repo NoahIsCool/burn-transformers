@@ -600,3 +600,60 @@ fn half_precision_default_child() {
     let cosine = mrope.cosine.into_data().to_vec::<f32>().expect("f32 table");
     assert!((f64::from(cosine[0]) - 2049.0_f64.cos()).abs() < 1e-4);
 }
+
+/// Q/K disagreement on any axis, or Q against the tables, is one contextual shape error.
+///
+/// Batch, sequence, and width are compared between Q and K before the tables
+/// are checked against Q, so each mismatch is rejected even when the other
+/// operand alone would fit the tables.
+#[test]
+fn query_key_rotation_rejects_every_operand_mismatch() {
+    let device = Default::default();
+    let config = RopeConfig::new(4, 4, 10_000.0, RopeScaling::None).expect("rope");
+    let angles = rotary_angles(
+        config,
+        Tensor::<TestBackend, 2, Int>::from_ints([[0, 1]], &device),
+        2,
+    )
+    .expect("angles");
+    let fitting = Tensor::<TestBackend, 4>::zeros([1, 2, 2, 4], &device);
+    for (query, key) in [
+        ([1, 2, 2, 4], [2, 2, 2, 4]),
+        ([1, 2, 2, 4], [1, 2, 2, 6]),
+        ([2, 2, 2, 4], [2, 2, 2, 4]),
+        ([1, 2, 2, 2], [1, 2, 2, 2]),
+    ] {
+        let error = apply_rotary(
+            Tensor::<TestBackend, 4>::zeros(query, &device),
+            Tensor::<TestBackend, 4>::zeros(key, &device),
+            &angles,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Shape { tensor, actual, .. }
+                if tensor == "rope.query_key_angles"
+                    && actual.starts_with(&format!("query={query:?}, key={key:?}"))),
+            "{query:?} {key:?}: {error:?}"
+        );
+    }
+    assert!(apply_rotary(fitting.clone(), fitting, &angles).is_ok());
+}
+
+/// Converting tables casts both when only one already has the requested dtype.
+#[test]
+fn table_conversion_casts_mixed_dtype_tables() {
+    let device = Default::default();
+    let mixed = RotaryAngles::<TestBackend> {
+        cosine: Tensor::ones([1, 1, 1, 2], &device),
+        sine: Tensor::<TestBackend, 4>::zeros([1, 1, 1, 2], &device).cast(DType::F16),
+        rotary_dimension: 2,
+    };
+    let converted = mixed.to_dtype(DType::F32);
+    assert_eq!(converted.cosine.dtype(), DType::F32);
+    assert_eq!(converted.sine.dtype(), DType::F32);
+    assert_eq!(converted.rotary_dimension, 2);
+    assert_eq!(
+        converted.sine.into_data().to_vec::<f32>().unwrap(),
+        [0.0, 0.0]
+    );
+}
