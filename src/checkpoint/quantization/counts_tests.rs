@@ -82,4 +82,54 @@ proptest! {
         );
         prop_assert_eq!(counts.scale_bytes, counts.group_count.checked_mul(4));
     }
+
+    /// Payload splits match the original conversion, checked-add, and length sequence.
+    #[test]
+    fn payload_splits_match_the_checked_sequence(
+        packed in prop_oneof![0_u64..64, Just(u64::MAX)],
+        scales in prop_oneof![0_u64..64, Just(u64::MAX)],
+        payload_len in 0_usize..130,
+    ) {
+        let expected = (|| {
+            let packed = usize::try_from(packed).map_err(|_| PayloadSplitError::PackedTooLarge)?;
+            let scales = usize::try_from(scales).map_err(|_| PayloadSplitError::ScalesTooLarge)?;
+            let total = packed.checked_add(scales).ok_or(PayloadSplitError::CombinedOverflow)?;
+            if payload_len != total {
+                return Err(PayloadSplitError::LengthMismatch { expected: total });
+            }
+            Ok(PayloadSplit { packed, scales })
+        })();
+        prop_assert_eq!(payload_split(packed, scales, payload_len), expected);
+    }
+}
+
+/// Payload splits tile the payload and report the first failed check.
+#[test]
+fn payload_splits_tile_the_payload() {
+    assert_eq!(
+        payload_split(6, 8, 14),
+        Ok(PayloadSplit {
+            packed: 6,
+            scales: 8
+        })
+    );
+    assert_eq!(
+        payload_split(6, 8, 13),
+        Err(PayloadSplitError::LengthMismatch { expected: 14 })
+    );
+    if usize::BITS == u64::BITS {
+        assert_eq!(
+            payload_split(u64::MAX, 1, 0),
+            Err(PayloadSplitError::CombinedOverflow)
+        );
+    } else {
+        assert_eq!(
+            payload_split(u64::MAX, 1, 0),
+            Err(PayloadSplitError::PackedTooLarge)
+        );
+        assert_eq!(
+            payload_split(1, u64::MAX, 0),
+            Err(PayloadSplitError::ScalesTooLarge)
+        );
+    }
 }

@@ -189,6 +189,86 @@ pub(crate) fn group_index(element: usize, elements: usize, group_size: usize) ->
     element / group_size
 }
 
+/// Host lengths of a stored payload: packed codes followed by little-endian scales.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PayloadSplit {
+    /// Packed code bytes, the payload prefix `[0, packed)`.
+    pub(crate) packed: usize,
+    /// Scale bytes, the payload suffix `[packed, packed + scales)`.
+    pub(crate) scales: usize,
+}
+
+/// First reason a stored payload cannot be split into its packed codes and scales.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PayloadSplitError {
+    /// The packed byte count does not fit `usize`.
+    PackedTooLarge,
+    /// The scale byte count does not fit `usize`.
+    ScalesTooLarge,
+    /// The combined length does not fit `usize`.
+    CombinedOverflow,
+    /// The payload length differs from the combined length.
+    LengthMismatch {
+        /// The combined length the metadata requires.
+        expected: usize,
+    },
+}
+
+/// Splits a `payload_len`-byte payload into `packed_bytes` codes followed by `scale_bytes` scales.
+///
+/// The checks run in order (packed host length, scale host length, combined
+/// length, payload length) and the first failure is returned.
+///
+/// Verified: on success the split keeps both metadata counts exactly and
+/// `packed + scales == payload_len`, so the prefix `[0, packed)` and the
+/// suffix `[packed, payload_len)` tile the payload and the scale suffix holds
+/// exactly `scales` bytes; each error names the first failed check, with
+/// every earlier check proved to have passed.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(split =>
+    ensures
+        match split {
+            Ok(lengths) => {
+                &&& lengths.packed == packed_bytes
+                &&& lengths.scales == scale_bytes
+                &&& lengths.packed + lengths.scales == payload_len
+            },
+            Err(PayloadSplitError::PackedTooLarge) => packed_bytes > usize::MAX,
+            Err(PayloadSplitError::ScalesTooLarge) => packed_bytes <= usize::MAX
+                && scale_bytes > usize::MAX,
+            Err(PayloadSplitError::CombinedOverflow) => packed_bytes <= usize::MAX
+                && scale_bytes <= usize::MAX
+                && packed_bytes + scale_bytes > usize::MAX,
+            Err(PayloadSplitError::LengthMismatch { expected }) => {
+                &&& expected == packed_bytes + scale_bytes
+                &&& expected != payload_len
+            },
+        }
+))]
+pub(crate) fn payload_split(
+    packed_bytes: u64,
+    scale_bytes: u64,
+    payload_len: usize,
+) -> Result<PayloadSplit, PayloadSplitError> {
+    if packed_bytes > usize::MAX as u64 {
+        return Err(PayloadSplitError::PackedTooLarge);
+    }
+    if scale_bytes > usize::MAX as u64 {
+        return Err(PayloadSplitError::ScalesTooLarge);
+    }
+    let packed = packed_bytes as usize;
+    let scales = scale_bytes as usize;
+    let Some(expected) = packed.checked_add(scales) else {
+        return Err(PayloadSplitError::CombinedOverflow);
+    };
+    if payload_len != expected {
+        return Err(PayloadSplitError::LengthMismatch { expected });
+    }
+    Ok(PayloadSplit { packed, scales })
+}
+
 #[cfg(test)]
 #[path = "counts_tests.rs"]
 mod tests;

@@ -127,7 +127,9 @@
 //!   block count `rows · (columns / G)`, proved equal to the flat group count
 //!   `⌈rows · columns / G⌉` whenever `G` divides the width; `group_index` places
 //!   each element in its group and below the group count, so dequantization
-//!   never indexes past a validated scale vector;
+//!   never indexes past a validated scale vector; `payload_split` accepts a
+//!   stored payload exactly when its packed and scale counts fit the host and
+//!   sum to its length, so the packed prefix and the scale suffix tile it;
 //! - `src/checkpoint/quantization/staging.rs`: `bounded_add` admits exactly the
 //!   sums within a limit (so a running total kept below its limit stays below
 //!   it, with no wraparound), and `admit_tensor` admits a tensor exactly when

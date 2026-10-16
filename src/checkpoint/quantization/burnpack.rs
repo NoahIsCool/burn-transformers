@@ -43,6 +43,7 @@ use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizedTensorMetadata,
     QuantizedWeight, Result, SourceFloatDType, WeightQuantizationConfig,
     classify_weight_for_quantization,
+    counts::{PayloadSplitError, payload_split},
     provenance::{DigestingWriter, packed_payload_sha256},
     quantize_tensor_data,
     staging::{
@@ -1402,29 +1403,34 @@ fn decode_payload(
     metadata: QuantizedTensorMetadata,
     bytes: &[u8],
 ) -> std::result::Result<(QuantizedWeight, BurnpackPayloadReadStats), BurnpackPayloadReadFailure> {
-    let packed_len = usize::try_from(metadata.packed_value_bytes).map_err(|_| {
-        empty_read_failure(QuantizationError::ByteLengthOverflow {
-            context: "packed payload host length",
-        })
-    })?;
-    let scale_len = usize::try_from(metadata.scale_bytes).map_err(|_| {
-        empty_read_failure(QuantizationError::ByteLengthOverflow {
-            context: "scale payload host length",
-        })
-    })?;
-    let expected = packed_len.checked_add(scale_len).ok_or_else(|| {
-        empty_read_failure(QuantizationError::ByteLengthOverflow {
-            context: "combined payload host length",
-        })
-    })?;
-    if bytes.len() != expected {
-        return Err(empty_read_failure(
-            QuantizationError::InvalidArtifactTensor {
-                name: name.to_owned(),
-                reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
+    // Verified: the packed prefix and scale suffix tile the payload exactly.
+    let split = payload_split(
+        metadata.packed_value_bytes,
+        metadata.scale_bytes,
+        bytes.len(),
+    )
+    .map_err(|error| {
+        empty_read_failure(match error {
+            PayloadSplitError::PackedTooLarge => QuantizationError::ByteLengthOverflow {
+                context: "packed payload host length",
             },
-        ));
-    }
+            PayloadSplitError::ScalesTooLarge => QuantizationError::ByteLengthOverflow {
+                context: "scale payload host length",
+            },
+            PayloadSplitError::CombinedOverflow => QuantizationError::ByteLengthOverflow {
+                context: "combined payload host length",
+            },
+            PayloadSplitError::LengthMismatch { expected } => {
+                QuantizationError::InvalidArtifactTensor {
+                    name: name.to_owned(),
+                    reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
+                }
+            }
+        })
+    })?;
+    let (packed_len, scale_len) = (split.packed, split.scales);
+    // Equals `packed_len + scale_len` by the split's verified postcondition.
+    let expected = bytes.len();
 
     let mut owned_payload = Vec::new();
     owned_payload.try_reserve_exact(expected).map_err(|_| {
