@@ -47,6 +47,8 @@ fn decoder() -> DecoderSpec {
         },
         tie_word_embeddings: false,
         max_position_embeddings: 256,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 
@@ -1257,6 +1259,12 @@ fn legacy_serialized_specs_load_with_default_options() {
     let spec: Seq2SeqSpec = serde_json::from_str(json).unwrap();
     spec.validate().unwrap();
     assert_eq!(spec.cross_attention_options, AttentionOptions::default());
+    for stack in [&spec.encoder, &spec.decoder] {
+        assert_eq!(
+            (stack.embedding_scale, stack.final_logit_softcap),
+            (None, None)
+        );
+    }
     let MixerSpec::Mla(mla) = &spec.encoder.layers[0].mixer else {
         panic!("expected MLA");
     };
@@ -1682,6 +1690,64 @@ fn clamped_experts_round_trip_and_default_their_unit() {
     assert_eq!(
         minimal.expert_glu(),
         Some(ClampedSwiGlu::new(7.0).with_alpha(1.0).with_up_offset(0.0))
+    );
+}
+
+/// Embedding scales and final logit caps must be finite and positive when present.
+#[test]
+fn readout_multipliers_must_be_finite_and_positive() {
+    for field in ["embedding_scale", "final_logit_softcap"] {
+        let with = |value: f64| {
+            let mut spec = decoder();
+            match field {
+                "embedding_scale" => spec.embedding_scale = Some(value),
+                _ => spec.final_logit_softcap = Some(value),
+            }
+            spec
+        };
+        with(30.0).validate().unwrap();
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_configuration_field(with(invalid).validate(), field);
+        }
+    }
+    // A cap on the encoder, which has no vocabulary readout, would be ignored.
+    let mut seq2seq = Seq2SeqSpec {
+        encoder: decoder(),
+        decoder: decoder(),
+        cross_attention_heads: 4,
+        cross_attention_head_dim: 8,
+        cross_attention_options: AttentionOptions::default(),
+    };
+    seq2seq.encoder.embedding_scale = Some(2.0);
+    seq2seq.decoder.final_logit_softcap = Some(30.0);
+    seq2seq.validate().unwrap();
+    seq2seq.encoder.final_logit_softcap = Some(30.0);
+    assert_configuration_field(seq2seq.validate(), "encoder.final_logit_softcap");
+}
+
+/// Readout multipliers round-trip, are omitted from JSON when absent, and default to absent.
+///
+/// Omitting `None` keeps the serialized form of every earlier spec
+/// byte-for-byte, and specs serialized before the fields existed load with
+/// both absent (see also [`legacy_serialized_specs_load_with_default_options`]).
+#[test]
+fn readout_multipliers_round_trip_and_default_to_absent() {
+    let plain = serde_json::to_string(&decoder()).unwrap();
+    assert!(
+        !plain.contains("embedding_scale") && !plain.contains("final_logit_softcap"),
+        "{plain}"
+    );
+    let gemma = DecoderSpec {
+        embedding_scale: Some(32f64.sqrt()),
+        final_logit_softcap: Some(30.0),
+        ..decoder()
+    };
+    let json = serde_json::to_string(&gemma).unwrap();
+    assert_eq!(serde_json::from_str::<DecoderSpec>(&json).unwrap(), gemma);
+    let legacy: DecoderSpec = serde_json::from_str(&plain).unwrap();
+    assert_eq!(
+        (legacy.embedding_scale, legacy.final_logit_softcap),
+        (None, None)
     );
 }
 

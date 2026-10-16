@@ -373,5 +373,7 @@ fn recipe() -> DecoderSpec {
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: 16,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }

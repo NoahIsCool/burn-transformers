@@ -3,7 +3,7 @@
 
 use burn::{
     module::Module,
-    tensor::{Int, Tensor, backend::BackendTypes},
+    tensor::{Int, Tensor, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -332,4 +332,106 @@ fn staged_embedding_validates_token_ids() {
         staged.embed(target(&device)).unwrap().hidden.dims(),
         [2, 2, 8]
     );
+}
+
+/// The encoder-decoder fixture with per-stack embedding scales and a decoder logit cap.
+fn readout_model(
+    scales: (Option<f64>, Option<f64>),
+    final_logit_softcap: Option<f64>,
+    device: &Device,
+) -> ModularSeq2SeqLm<TestBackend> {
+    let mut spec = seq2seq_spec();
+    (spec.encoder.embedding_scale, spec.decoder.embedding_scale) = scales;
+    spec.decoder.final_logit_softcap = final_logit_softcap;
+    ModularSeq2SeqLm::init(spec, device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default())
+}
+
+/// Options requesting every logit and every retained hidden state.
+fn retained() -> ForwardOptions {
+    ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    }
+}
+
+/// Each stack scales its own embeddings, and the decoder cap applies to every readout path.
+///
+/// The source and target embedding states (stateless and staged) are their
+/// stacks' scales times the unscaled ones; capped logits equal
+/// `c · tanh(z / c)` of the uncapped twin's, in the stateless forward and in
+/// a cached prefill.
+#[test]
+fn stack_embedding_scales_and_the_decoder_cap_apply_independently() {
+    let device = Default::default();
+    let plain = readout_model((None, None), None, &device);
+    let scaled = readout_model((Some(2.0), Some(0.5)), None, &device);
+    let reference = plain.forward(input(&device), &retained()).unwrap();
+    let output = scaled.forward(input(&device), &retained()).unwrap();
+    output.encoder.hidden_states[0]
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &(reference.encoder.hidden_states[0].clone() * 2.0).into_data(),
+            Tolerance::absolute(0.0),
+        );
+    output.decoder.hidden_states[0]
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &(reference.decoder.hidden_states[0].clone() * 0.5).into_data(),
+            Tolerance::absolute(0.0),
+        );
+    let staged = scaled.embed_encoder(source(&device)).unwrap();
+    staged.hidden.into_data().assert_approx_eq::<f32>(
+        &(reference.encoder.hidden_states[0].clone() * 2.0).into_data(),
+        Tolerance::absolute(0.0),
+    );
+
+    let cap = 0.05;
+    let capped = readout_model((None, None), Some(cap), &device);
+    let expected = reference
+        .decoder
+        .logits
+        .clone()
+        .div_scalar(cap)
+        .tanh()
+        .mul_scalar(cap);
+    capped
+        .forward(input(&device), &retained())
+        .unwrap()
+        .decoder
+        .logits
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(1e-7));
+    let encoded = capped
+        .encode(source(&device), &ForwardOptions::default())
+        .unwrap();
+    let mut state = capped
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    let prefill = capped
+        .prefill_decoder(
+            &encoded,
+            target(&device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    prefill.decoder.logits.into_data().assert_approx_eq::<f32>(
+        &expected.slice([0..2, 1..2]).into_data(),
+        Tolerance::absolute(1e-6),
+    );
+}
+
+/// An encoder stack has no vocabulary readout, so a cap there is rejected before allocation.
+#[test]
+fn an_encoder_logit_cap_is_rejected() {
+    let device: Device = Default::default();
+    let mut spec = seq2seq_spec();
+    spec.encoder.final_logit_softcap = Some(30.0);
+    let error = ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap_err();
+    assert_eq!(configuration_field(error), "encoder.final_logit_softcap");
 }

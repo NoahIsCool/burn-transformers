@@ -455,6 +455,8 @@ fn stack(draw: &mut Draw<'_, '_>, hidden_size: usize) -> DecoderSpec {
         final_norm: normalization(draw),
         tie_word_embeddings: draw.flag(),
         max_position_embeddings: draw.size(&[16, 8, 1 << 31, 0]),
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 

@@ -21,6 +21,7 @@
 //! | every shared RoPE scaling rule (linear, dynamic NTK, YaRN, Llama 3, LongRoPE, proportional) | [`RopeScaling`] |
 //! | ungated MLP, clamped SwiGLU, attention-only blocks | [`FeedForwardSpec::Ungated`], [`FeedForwardSpec::ClampedSwiGlu`], [`FeedForwardSpec::None`] |
 //! | router policy, shared-expert gate, expert biases | [`MixtureOfExpertsSpec`] |
+//! | embedding multiplier and final logit soft cap (Gemma) | [`DecoderSpec::embedding_scale`], [`DecoderSpec::final_logit_softcap`] |
 //! | clamped SwiGLU routed and shared experts (gpt-oss) | [`FeedForwardSpec::ClampedMixtureOfExperts`] |
 //! | cross-attention scale, soft cap, sinks, biases | [`Seq2SeqSpec::cross_attention_options`], [`CrossAttentionSpec`] |
 //!
@@ -50,6 +51,20 @@
 //! modular models, whose `init` rejects it with a capability error before
 //! allocating parameters. Every other variant, [`MixerSpec::Mamba2`]
 //! included, builds and runs.
+//!
+//! # Not expressible
+//!
+//! Some mechanisms of shipped families have no spec form; their family
+//! models remain the only implementation:
+//!
+//! | mechanism | family |
+//! | --- | --- |
+//! | scale-free embedding RMS norm and the bounded logit map `T · tanh(m · z / T)` | Muse Glimmer |
+//! | learned absolute position embeddings | GPT-2 |
+//! | parallel attention and MLP branches on one residual | GPT-NeoX |
+//! | output-only sublayer norm `x + N(F(x))` | OLMo 2 |
+//! | multi-token-prediction heads | Qwen3.5, Nemotron-H |
+//! | a learned residual gate ([`ResidualTopology::Gated`]) | none; its gate is unspecified |
 
 use super::constraints::{
     ExpertCheck, HeadCheck, MlaCheck, StackCheck, attention_heads, cross_projection_fits,
@@ -1611,10 +1626,33 @@ pub struct DecoderSpec {
     pub tie_word_embeddings: bool,
     /// Maximum supported logical position.
     pub max_position_embeddings: usize,
+    /// Optional multiplier `s` on looked-up token embeddings: `h_0 = s · E[token]`.
+    ///
+    /// Gemma 2 and 3 use `s = sqrt(hidden_size)`. The product runs in the
+    /// embedding dtype with `s` rounded to that dtype (through F32 for half
+    /// precisions), as Gemma's references round their normalizer, so a BF16
+    /// stack with `hidden_size = 3072` scales by `55.5`. The scaled embedding
+    /// is the stack's `embedding` activation point and the input of block 0;
+    /// a tied vocabulary projection still reads the unscaled table. `None`,
+    /// the default and the form of every earlier serialized spec, leaves
+    /// embeddings unscaled. A present value must be finite and positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_scale: Option<f64>,
+    /// Optional tanh soft cap `c` on vocabulary logits: `logits = c · tanh(z / c)`.
+    ///
+    /// Gemma 2 caps final logits with `c = 30`. The cap follows the tied or
+    /// independent vocabulary projection and runs in the logits' dtype, so
+    /// every logit lies in `[-c, c]` (`tanh` saturates to one in floating
+    /// point). `None`, the default and the form of
+    /// every earlier serialized spec, leaves logits uncapped. A present value
+    /// must be finite and positive; the encoder stack of a [`Seq2SeqSpec`]
+    /// has no vocabulary readout and rejects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_logit_softcap: Option<f64>,
 }
 
 impl DecoderSpec {
-    /// Validates global dimensions and every layer specification.
+    /// Validates global dimensions, the readout multipliers, and every layer specification.
     pub fn validate(&self) -> Result<()> {
         let failure = match stack_dimensions(
             self.vocabulary_size,
@@ -1632,6 +1670,17 @@ impl DecoderSpec {
             return Err(Error::configuration(field, reason));
         }
         self.final_norm.validate("final_norm")?;
+        for (field, value) in [
+            ("embedding_scale", self.embedding_scale),
+            ("final_logit_softcap", self.final_logit_softcap),
+        ] {
+            if value.is_some_and(|value| !(value.is_finite() && value > 0.0)) {
+                return Err(Error::configuration(
+                    field,
+                    "must be finite and greater than zero when present",
+                ));
+            }
+        }
         for (index, layer) in self.layers.iter().enumerate() {
             layer.validate_at(&format!("layers[{index}]"), self.hidden_size)?;
         }
@@ -1664,9 +1713,18 @@ impl Seq2SeqSpec {
     /// Cross-attention projects `hidden_size -> heads * head_dim -> hidden_size`,
     /// so the inner width may differ from the residual width (as in T5-3B/11B);
     /// it must only be nonzero and its projection matrices must not overflow.
+    ///
+    /// The encoder stack has no vocabulary readout, so an encoder
+    /// `final_logit_softcap` would be ignored and is rejected.
     pub fn validate(&self) -> Result<()> {
         self.encoder.validate()?;
         self.decoder.validate()?;
+        if self.encoder.final_logit_softcap.is_some() {
+            return Err(Error::configuration(
+                "encoder.final_logit_softcap",
+                "the encoder stack has no vocabulary readout; cap the decoder's logits instead",
+            ));
+        }
         if self.encoder.hidden_size != self.decoder.hidden_size {
             return Err(Error::configuration(
                 "decoder.hidden_size",

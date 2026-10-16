@@ -11,8 +11,10 @@
 //! rotary sub-head (DeepSeek-V2), zero-centered norms, sigmoid-gated
 //! attention, and Gated DeltaNet (Qwen3.5), T5's unscaled attention,
 //! learned relative buckets, ungated ReLU MLP, and unscaled cross-attention,
-//! and gpt-oss's learned sinks, biased projections and router,
-//! top-k-then-softmax routing, and clamped SwiGLU experts.
+//! gpt-oss's learned sinks, biased projections and router,
+//! top-k-then-softmax routing, and clamped SwiGLU experts, and Gemma 2's
+//! `sqrt(d)` embedding scale, sandwich zero-centered norms, explicit score
+//! scale, attention and final logit soft caps, and sliding/global layers.
 //!
 //! The comparison tolerance is `1e-5` absolute on logits of magnitude below
 //! about two: both graphs evaluate the same F32 operations, differing only in
@@ -42,6 +44,7 @@ use crate::{
         deepseek_v2::{
             DeepseekScoringFunction, DeepseekTopKMethod, DeepseekV2Config, DeepseekV2ForCausalLm,
         },
+        gemma::{GemmaConfig, GemmaForCausalLm, GemmaVariant},
         gpt_oss::{GptOssConfig, GptOssForCausalLm},
         qwen3_5::{Qwen3_5ForCausalLm, Qwen3_5LayerType, Qwen3_5TextConfig},
         qwen3_moe::{Qwen3MoeConfig, Qwen3MoeForCausalLm},
@@ -360,6 +363,8 @@ fn qwen3_moe_pair(
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: QWEN3_MOE_MAX_POSITIONS,
+        embedding_scale: None,
+        final_logit_softcap: None,
     };
     let custom = transferred(
         &family,
@@ -651,6 +656,8 @@ fn deepseek_v2_pair(
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: 32,
+        embedding_scale: None,
+        final_logit_softcap: None,
     };
     let custom = transferred(
         &family,
@@ -842,6 +849,8 @@ fn t5_encoder_decoder_matches_the_family() {
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: 32,
+        embedding_scale: None,
+        final_logit_softcap: None,
     };
     let cross = CrossAttentionSpec {
         options: AttentionOptions {
@@ -1001,6 +1010,8 @@ fn qwen3_5_hybrid_blocks_match_the_family() {
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: 64,
+        embedding_scale: None,
+        final_logit_softcap: None,
     };
     let custom = transferred(
         &family,
@@ -1172,6 +1183,8 @@ fn gpt_oss_pair(
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: 64,
+        embedding_scale: None,
+        final_logit_softcap: None,
     };
     let mut pairs = vec![
         ("model.embed_tokens".to_owned(), "embed_tokens".to_owned()),
@@ -1232,4 +1245,158 @@ fn gpt_oss_parity_detects_plain_experts() {
         &custom,
         "plain SiLU experts instead of clamped SwiGLU",
     );
+}
+
+/// Residual width of the Gemma 2 fixture; `sqrt(12)` is irrational, so the scale is rounded.
+const GEMMA2_HIDDEN: usize = 12;
+
+/// Which Gemma 2 readout mechanisms the modular twin reproduces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GemmaReadout {
+    /// Both the `sqrt(d)` embedding scale and the final logit soft cap.
+    Faithful,
+    /// No embedding scale: a deliberately wrong twin.
+    Unscaled,
+    /// No final logit soft cap: a deliberately wrong twin.
+    Uncapped,
+}
+
+/// Builds a two-block Gemma 2 model (sliding, then global) and its modular twin.
+///
+/// Every Gemma 2 mechanism is active and small enough to matter: the
+/// embedding scale `sqrt(12)`, zero-centered sandwich norms, the score scale
+/// `8^(-1/2)`, an attention soft cap of 2 and a final soft cap of 1.5, a
+/// window of 3, GeGLU with tanh GELU, and tied embeddings. `readout` drops
+/// one readout field from the twin for the negative controls.
+fn gemma2_pair(
+    readout: GemmaReadout,
+) -> (GemmaForCausalLm<TestBackend>, ModularCausalLm<TestBackend>) {
+    let device = Default::default();
+    let config = GemmaConfig {
+        vocab_size: 32,
+        hidden_size: GEMMA2_HIDDEN,
+        intermediate_size: 16,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 4,
+        max_position_embeddings: 64,
+        query_pre_attn_scalar: 8.0,
+        sliding_window: 3,
+        attn_logit_softcapping: Some(2.0),
+        final_logit_softcapping: Some(1.5),
+        pad_token_id: None,
+        bos_token_id: None,
+        eos_token_id: None,
+        ..GemmaConfig::new(GemmaVariant::Gemma2)
+    };
+    let norm = NormalizationSpec::Rms {
+        epsilon: config.rms_norm_eps,
+        zero_centered: true,
+    };
+    let family = GemmaForCausalLm::<TestBackend>::init(config, &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    let connectivity = [
+        AttentionConnectivity::SlidingWindow { window: 3 },
+        AttentionConnectivity::Global,
+    ];
+    let layers = connectivity
+        .iter()
+        .map(|&connectivity| DecoderLayerSpec {
+            mixer: MixerSpec::AttentionWithOptions {
+                attention: AttentionSpec {
+                    query_heads: 4,
+                    key_value_heads: 2,
+                    head_dim: 4,
+                    query_key_norm: false,
+                    output_gate: false,
+                    position: PositionEncodingSpec::Rope {
+                        theta: 10_000.0,
+                        rotary_dim: 4,
+                        scaling: RopeScaling::None,
+                    },
+                },
+                options: AttentionOptions {
+                    connectivity,
+                    score_scale: ScoreScale::Fixed {
+                        value: 8f64.powf(-0.5),
+                    },
+                    logit_softcap: Some(2.0),
+                    ..AttentionOptions::default()
+                },
+            },
+            feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+                intermediate_size: 16,
+                activation: Activation::GeluTanh,
+                bias: false,
+            }),
+            mixer_norm: norm,
+            feed_forward_norm: norm,
+            norm_placement: NormPlacement::Sandwich,
+            residual: ResidualTopology::Add,
+        })
+        .collect();
+    let spec = DecoderSpec {
+        vocabulary_size: 32,
+        hidden_size: GEMMA2_HIDDEN,
+        layers,
+        final_norm: norm,
+        tie_word_embeddings: true,
+        max_position_embeddings: 64,
+        embedding_scale: (readout != GemmaReadout::Unscaled).then(|| (GEMMA2_HIDDEN as f64).sqrt()),
+        final_logit_softcap: (readout != GemmaReadout::Uncapped).then_some(1.5),
+    };
+    let mut pairs = vec![
+        ("model.embed_tokens".to_owned(), "embed_tokens".to_owned()),
+        ("model.norm".to_owned(), "final_norm.Rms".to_owned()),
+    ];
+    for layer in 0..2 {
+        let family_layer = format!("model.layers.{layer}");
+        let modular_layer = format!("layers.{layer}");
+        pairs.extend(
+            [
+                ("input_layernorm", "mixer_norm.before.Rms"),
+                ("post_attention_layernorm", "mixer_norm.after.Rms"),
+                ("pre_feedforward_layernorm", "feed_forward_norm.before.Rms"),
+                ("post_feedforward_layernorm", "feed_forward_norm.after.Rms"),
+                ("self_attn", "mixer.Attention.attention"),
+                ("mlp", "feed_forward.Dense"),
+            ]
+            .map(|(from, to)| {
+                (
+                    format!("{family_layer}.{from}"),
+                    format!("{modular_layer}.{to}"),
+                )
+            }),
+        );
+    }
+    let custom = transferred(
+        &family,
+        &ModularCausalLm::<TestBackend>::init(spec, &device).unwrap(),
+        &pairs,
+    );
+    (family, custom)
+}
+
+/// Gemma 2: embedding scale, sandwich norms, soft caps, sliding/global layers, tied readout.
+#[test]
+fn gemma2_blocks_and_readout_match_the_family() {
+    let (family, custom) = gemma2_pair(GemmaReadout::Faithful);
+    assert_causal_parity(&family, &custom, &Default::default());
+}
+
+/// Negative controls: dropping the embedding scale or the final soft cap is far outside the tolerance.
+///
+/// Each twin keeps every transferred tensor and omits one readout field, so
+/// [`gemma2_blocks_and_readout_match_the_family`] can detect either omission.
+#[test]
+fn gemma2_parity_detects_missing_readout_multipliers() {
+    for (readout, mutation) in [
+        (GemmaReadout::Unscaled, "no sqrt(d) embedding scale"),
+        (GemmaReadout::Uncapped, "no final logit soft cap"),
+    ] {
+        let (family, custom) = gemma2_pair(readout);
+        assert_detectable(&family, &custom, mutation);
+    }
 }

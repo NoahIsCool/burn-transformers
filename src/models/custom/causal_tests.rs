@@ -4,7 +4,7 @@
 use burn::{
     module::Module,
     nn::LinearConfig,
-    tensor::{Int, Tensor, backend::BackendTypes},
+    tensor::{Int, Tensor, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -306,4 +306,167 @@ fn staged_tokens_and_logits_positions_are_validated() {
         matches!(&error, Error::Shape { tensor, .. } if tensor == "forward_options.logits.positions"),
         "{error:?}"
     );
+}
+
+/// The two-layer causal fixture with deterministic weights and optional readout multipliers.
+fn readout_model(
+    embedding_scale: Option<f64>,
+    final_logit_softcap: Option<f64>,
+    device: &Device,
+) -> ModularCausalLm<TestBackend> {
+    let spec = DecoderSpec {
+        embedding_scale,
+        final_logit_softcap,
+        ..causal_spec()
+    };
+    ModularCausalLm::init(spec, device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default())
+}
+
+/// Every logit, embedding, and final hidden state of a forward with retained states.
+fn readout_forward(
+    model: &ModularCausalLm<TestBackend>,
+    device: &Device,
+) -> CausalLmOutput<TestBackend> {
+    model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3], [4, 5, 0]], device),
+                token_mask: Some(mask([[true, true, true], [true, true, false]], device)),
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: crate::LogitsSelection::All,
+                hidden_states: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap()
+}
+
+/// The embedding scale multiplies the embedding point, the staged embedding, and layer 0's input.
+///
+/// With `s = sqrt(8)` the scaled model's first retained state is exactly
+/// `s` times the unscaled one, staged `embed` agrees, and the logits change
+/// (the scale reaches the blocks rather than being a no-op).
+#[test]
+fn embedding_scale_multiplies_the_layer_zero_input() {
+    let device = Default::default();
+    let scale = 8f64.sqrt();
+    let plain = readout_model(None, None, &device);
+    let scaled = readout_model(Some(scale), None, &device);
+    let expected = readout_forward(&plain, &device).hidden_states[0].clone() * scale;
+    let output = readout_forward(&scaled, &device);
+    output.hidden_states[0]
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(0.0));
+    let staged = scaled
+        .embed(CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 2, 3], [4, 5, 0]], &device),
+            token_mask: Some(mask([[true, true, true], [true, true, false]], &device)),
+            position_ids: None,
+        })
+        .unwrap();
+    staged
+        .hidden
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(0.0));
+    let gap = (output.logits - readout_forward(&plain, &device).logits)
+        .abs()
+        .max()
+        .into_scalar();
+    assert!(gap > 1e-3, "the scale must reach the blocks: {gap:e}");
+}
+
+/// The final soft cap maps every logit `z` to `c · tanh(z / c)`, bounding it by `c`.
+///
+/// Stateless, prefill, and decode logits all pass through the cap, so the
+/// cached reference path agrees with the stateless graph.
+#[test]
+fn final_logit_softcap_bounds_every_readout_path() {
+    let device = Default::default();
+    let cap = 0.05;
+    let plain = readout_model(None, None, &device);
+    let capped = readout_model(None, Some(cap), &device);
+    let raw = readout_forward(&plain, &device).logits;
+    let expected = raw.clone().div_scalar(cap).tanh().mul_scalar(cap);
+    let logits = readout_forward(&capped, &device).logits;
+    logits
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-7));
+    // `tanh` saturates to one in F32, so a capped logit can equal `c` exactly.
+    assert!(logits.abs().max().into_scalar() <= cap as f32);
+    assert!(
+        raw.abs().max().into_scalar() > cap as f32,
+        "the fixture must exceed the cap"
+    );
+    let mut state = capped
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let prefill = capped
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let decoded = capped
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let stateless = capped
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: crate::LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    prefill.logits.into_data().assert_approx_eq::<f32>(
+        &stateless.clone().slice([0..1, 1..2]).into_data(),
+        Tolerance::absolute(1e-6),
+    );
+    decoded.logits.into_data().assert_approx_eq::<f32>(
+        &stateless.slice([0..1, 2..3]).into_data(),
+        Tolerance::absolute(1e-6),
+    );
+}
+
+/// Embedding multipliers are rounded to the activation dtype, as Gemma rounds `sqrt(d)`.
+#[test]
+fn embedding_multipliers_round_to_the_activation_dtype() {
+    use super::super::common::round_to_dtype;
+    use burn::tensor::DType;
+
+    let sqrt_3072 = 3072f64.sqrt();
+    assert_eq!(round_to_dtype(sqrt_3072, DType::BF16), 55.5);
+    assert_eq!(
+        round_to_dtype(sqrt_3072, DType::F16),
+        f64::from(burn::tensor::f16::from_f64(sqrt_3072).to_f32())
+    );
+    assert_eq!(
+        round_to_dtype(sqrt_3072, DType::F32),
+        f64::from(sqrt_3072 as f32)
+    );
+    assert_eq!(round_to_dtype(sqrt_3072, DType::F64), sqrt_3072);
 }

@@ -35,9 +35,10 @@ use crate::models::shared::{check_nonempty_mask, ensure_grid, ensure_same_device
 
 use super::{
     common::{
-        BackboneOutput, causal_output, embedded_state, has_moe, router_diagnostics, select_hidden,
-        tied_projection, validate_and_resolve_input, validate_and_resolve_input_with,
-        validate_forward_options, validate_stack_execution, validate_staged_positions,
+        BackboneOutput, causal_output, embed_tokens, embedded_state, has_moe, router_diagnostics,
+        select_hidden, soft_cap_logits, tied_projection, validate_and_resolve_input,
+        validate_and_resolve_input_with, validate_forward_options, validate_stack_execution,
+        validate_staged_positions,
     },
     init::scaled_init_policy,
     layer::ModularLayer,
@@ -49,9 +50,9 @@ use super::{
 /// A modular bidirectional encoder and causal cross-attending decoder.
 #[derive(Module, Debug)]
 pub struct ModularSeq2SeqLm<B: Backend> {
-    /// Source token embedding table.
+    /// Source token embedding table; lookups use the encoder spec's optional `embedding_scale`.
     pub encoder_embed_tokens: Embedding<B>,
-    /// Target token embedding table.
+    /// Target token embedding table; lookups use the decoder spec's optional `embedding_scale`.
     pub decoder_embed_tokens: Embedding<B>,
     /// Bidirectional source layers.
     encoder_layers: Vec<ModularLayer<B>>,
@@ -283,7 +284,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 spec.max_position_embeddings,
                 "custom.seq2seq.embed",
             )?;
-            let hidden = hooks.apply(stack.embedding(), embeddings.forward(input.token_ids))?;
+            let hidden = hooks.apply(
+                stack.embedding(),
+                embed_tokens(embeddings, input.token_ids, spec.embedding_scale),
+            )?;
             embedded_state(
                 hidden,
                 positions,
@@ -551,7 +555,11 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
             self.spec.encoder.max_position_embeddings,
             "custom.seq2seq.encoder",
         )?;
-        let hidden = self.encoder_embed_tokens.forward(source.token_ids.clone());
+        let hidden = embed_tokens(
+            &self.encoder_embed_tokens,
+            source.token_ids.clone(),
+            self.spec.encoder.embedding_scale,
+        );
         let pass = StackPass::new(
             positions,
             source.token_mask.as_ref(),
@@ -638,7 +646,11 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 )
             },
         )?;
-        let hidden = self.decoder_embed_tokens.forward(decoder.token_ids.clone());
+        let hidden = embed_tokens(
+            &self.decoder_embed_tokens,
+            decoder.token_ids.clone(),
+            self.spec.decoder.embedding_scale,
+        );
         let pass = StackPass::new(
             positions,
             decoder.token_mask.as_ref(),
@@ -682,12 +694,19 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         })
     }
 
-    /// Applies an independent or target-embedding-tied vocabulary projection.
+    /// Applies an independent or target-embedding-tied vocabulary projection, then the decoder's soft cap.
+    ///
+    /// A tied projection reads the unscaled target table; the decoder spec's
+    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`.
     pub(super) fn project_decoder(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
-        match &self.lm_head {
+        let logits = match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
             None => tied_projection(hidden, self.decoder_embed_tokens.weight.val()),
-        }
+        }?;
+        Ok(soft_cap_logits(
+            logits,
+            self.spec.decoder.final_logit_softcap,
+        ))
     }
 
     /// Evaluates a complete stateless encoder-decoder graph.

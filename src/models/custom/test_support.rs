@@ -72,6 +72,8 @@ pub(super) fn decoder(layers: Vec<DecoderLayerSpec>) -> DecoderSpec {
         final_norm: rms(),
         tie_word_embeddings: false,
         max_position_embeddings: 32,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 

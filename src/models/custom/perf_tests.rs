@@ -498,6 +498,8 @@ fn tied_modular_decoder(
         final_norm: rms(),
         tie_word_embeddings: true,
         max_position_embeddings: 128,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 

@@ -47,6 +47,8 @@ fn spec() -> DecoderSpec {
         final_norm: norm,
         tie_word_embeddings: true,
         max_position_embeddings: i32::MAX as usize,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 

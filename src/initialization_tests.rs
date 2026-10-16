@@ -870,6 +870,8 @@ fn tied_embedding_logit_scale_follows_sigma_sqrt_d() {
         final_norm: norm,
         tie_word_embeddings: true,
         max_position_embeddings: 64,
+        embedding_scale: None,
+        final_logit_softcap: None,
     };
     let ids = (0..batch * tokens)
         .map(|index| ((index * 37 + 11) % vocabulary) as i32)
