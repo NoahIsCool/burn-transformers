@@ -420,6 +420,17 @@ fn tied_alias_requires_the_tied_topology_and_an_installed_owner() {
             "only the tied embedding-to-LM-head alias is supported"
         )
     );
+    // The embedding may only alias into the head, never into another parameter.
+    assert_eq!(
+        untied
+            .alias_tensor("model.norm.weight", embedding)
+            .unwrap_err(),
+        MuseGlimmerLoadError::InvalidAlias {
+            target: "model.norm.weight".into(),
+            source_target: embedding.into(),
+            reason: "only the tied embedding-to-LM-head alias is supported".into(),
+        }
+    );
     assert_eq!(
         untied.alias_tensor(head, embedding).unwrap_err(),
         alias_error(

@@ -591,3 +591,47 @@ fn unbiased_latent_projections_map_only_weights() {
         .build_load_plan(&manifest(&contract), &LoadOptions::default())
         .unwrap();
 }
+
+/// A Mamba-2 block maps exactly the biases its config enables.
+///
+/// The released checkpoints use a biased depthwise convolution and unbiased
+/// projections; the reverse switches must drop `conv1d.bias` and add
+/// `in_proj.bias` (one entry per projected channel) and `out_proj.bias`
+/// (one per residual channel), and the strict plan must still consume every
+/// source exactly once.
+#[test]
+fn mamba_block_maps_exactly_the_enabled_biases() {
+    let config = NemotronHConfig {
+        use_conv_bias: false,
+        use_bias: true,
+        ..tiny_config()
+    };
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let mamba = contract
+        .expected_tensors()
+        .iter()
+        .filter(|tensor| tensor.name.contains("layers.0."))
+        .map(|tensor| (tensor.name.as_str(), tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    // Projection width 2 * 8 + 2 * 2 * 3 + 4 = 32; convolution channels 8 + 2 * 2 * 3 = 20.
+    assert_eq!(
+        mamba,
+        [
+            ("model.layers.0.norm.weight", vec![8]),
+            ("model.layers.0.mamba.in_proj.weight", vec![32, 8]),
+            ("model.layers.0.mamba.conv1d.weight", vec![20, 1, 3]),
+            ("model.layers.0.mamba.dt_bias", vec![4]),
+            ("model.layers.0.mamba.a_log", vec![4]),
+            ("model.layers.0.mamba.d", vec![4]),
+            ("model.layers.0.mamba.norm.weight", vec![8]),
+            ("model.layers.0.mamba.out_proj.weight", vec![8, 8]),
+            ("model.layers.0.mamba.in_proj.bias", vec![32]),
+            ("model.layers.0.mamba.out_proj.bias", vec![8]),
+        ]
+    );
+    contract
+        .build_load_plan(&manifest(&contract), &LoadOptions::default())
+        .unwrap();
+}
