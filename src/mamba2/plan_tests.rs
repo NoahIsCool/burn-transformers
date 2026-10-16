@@ -24,6 +24,11 @@ fn widths_are_exact_or_name_the_first_overflow() {
         convolution_width(usize::MAX, 2, usize::MAX, 2),
         Err(WidthOverflow::StateChannels)
     );
+    // `groups * state` fits but the doubled `B` and `C` width does not.
+    assert_eq!(
+        convolution_width(1, 1, 1, usize::MAX / 2 + 1),
+        Err(WidthOverflow::StateChannels)
+    );
     assert_eq!(
         convolution_width(usize::MAX, 2, 1, 1),
         Err(WidthOverflow::Intermediate)
@@ -45,6 +50,12 @@ fn widths_are_exact_or_name_the_first_overflow() {
         projection_width(usize::MAX / 2, 1, 1, 1),
         Err(WidthOverflow::Projection)
     );
+    // `[z | xBC]` reaches `usize::MAX - 1`; only the `dt` heads overflow it.
+    assert_eq!(
+        projection_width(3, 1, 1, (1 << 63) - 4),
+        Err(WidthOverflow::Projection)
+    );
+    assert_eq!(projection_width(3, 1, 1, (1 << 63) - 5), Ok(usize::MAX));
 }
 
 /// Projection and convolution slices tile the fused layouts end to end.
