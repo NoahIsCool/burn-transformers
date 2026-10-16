@@ -1,8 +1,8 @@
 //! Feed-forward variants against the shared reference implementations and their hook points.
 
 use burn::{
-    module::Module,
-    tensor::{TensorData, Tolerance, backend::BackendTypes},
+    module::{Module, ModuleMapper, Param},
+    tensor::{DType, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -323,29 +323,105 @@ fn clamped_experts_without_shared_experts_return_the_routed_mixture() {
     assert!(routing.is_some());
 }
 
-/// FP32-weighted clamped experts round each weighted contribution, matching the plain dispatch path.
+/// Rounds every floating parameter to F16, emulating a half-precision checkpoint.
+struct HalfPrecision;
+
+impl ModuleMapper<TestBackend> for HalfPrecision {
+    /// Casts one floating parameter to F16 while keeping its shape and device.
+    fn map_float<const D: usize>(
+        &mut self,
+        param: Param<Tensor<TestBackend, D>>,
+    ) -> Param<Tensor<TestBackend, D>> {
+        param.map(|tensor| tensor.cast(DType::F16))
+    }
+}
+
+/// Half-precision clamped experts weight each routed contribution at the layer's precision.
 ///
-/// With F32 activations both weighting precisions agree exactly; the test
-/// pins that the `Fp32ThenResidual` arm builds and evaluates.
+/// With F16 activations the two [`RoutedWeightingPrecision`] policies are
+/// observable: `Fp32ThenResidual` multiplies each F16 expert output by its
+/// F32 routing weight and rounds the product, `(E(x) · w)_{f16}`, while
+/// `Residual` rounds the weight first and multiplies in F16,
+/// `E(x) ·_{f16} (w)_{f16}`. Evaluating one token per call keeps every
+/// expert on a single row, so the oracle reproduces the dispatcher's
+/// arithmetic bit for bit: the two routed contributions summed in F16 (two
+/// terms, so the scatter order cannot matter), then the gated shared expert
+/// added. Swapping the policy arms, or always multiplying in the residual
+/// dtype, makes one of the exact comparisons fail; the final assertion proves
+/// the fixture separates the two policies.
 #[test]
 fn clamped_experts_honor_the_layer_weighting_precision() {
     let device = Default::default();
-    let mut branch = branch(&clamped_experts_spec(), &device);
-    let expected = branch
-        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
-        .unwrap()
-        .0;
-    let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &mut branch else {
-        panic!("expected clamped experts");
-    };
-    clamped.experts.weighting_precision = RoutedWeightingPrecision::Fp32ThenResidual;
-    let actual = branch
-        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
-        .unwrap()
-        .0;
-    actual
-        .into_data()
-        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+    let mut branch = branch(&clamped_experts_spec(), &device).map(&mut HalfPrecision);
+    let rows = input(&device).cast(DType::F16).reshape([6, 8]);
+    let mut policies_differ = false;
+    for token in 0..6 {
+        let row = rows.clone().narrow(0, token, 1);
+        let mut run = |precision| {
+            let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &mut branch else {
+                panic!("expected clamped experts");
+            };
+            clamped.experts.weighting_precision = precision;
+            let (output, routing) = branch
+                .forward(
+                    row.clone().reshape([1, 1, 8]),
+                    Layer::decoder(0),
+                    &mut Hooks::new(),
+                )
+                .unwrap();
+            assert_eq!(output.dtype(), DType::F16);
+            (
+                output.reshape([1, 8]),
+                routing.expect("experts report their routing"),
+            )
+        };
+        let (residual, residual_routing) = run(RoutedWeightingPrecision::Residual);
+        let (fp32, fp32_routing) = run(RoutedWeightingPrecision::Fp32ThenResidual);
+        let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &branch else {
+            panic!("expected clamped experts");
+        };
+
+        // Both runs share one F32 routing decision; `Residual` reports its F16 rounding.
+        let weights = fp32_routing.selected_weights.reshape([1, 2]);
+        assert_eq!(weights.dtype(), DType::F32);
+        assert_eq!(residual_routing.selected_weights.dtype(), DType::F16);
+        residual_routing
+            .selected_weights
+            .reshape([1, 2])
+            .into_data()
+            .assert_eq(&weights.clone().cast(DType::F16).into_data(), true);
+        let selected = fp32_routing.selected_experts.into_data();
+        residual_routing
+            .selected_experts
+            .into_data()
+            .assert_eq(&selected, true);
+        let selected = selected.to_vec::<i32>().unwrap();
+
+        let shared = clamped.shared_output(row.clone()).unwrap().unwrap();
+        let mut expected_fp32 = Tensor::<TestBackend, 2>::zeros([1, 8], (&device, DType::F16));
+        let mut expected_residual = expected_fp32.clone();
+        for (slot, &expert) in selected.iter().enumerate() {
+            let unit = clamped.experts.routed[expert as usize]
+                .forward_clamped(row.clone(), &clamped.glu)
+                .unwrap();
+            let weight = weights.clone().narrow(1, slot, 1);
+            expected_fp32 =
+                expected_fp32 + (unit.clone().cast(DType::F32) * weight.clone()).cast(DType::F16);
+            expected_residual = expected_residual + unit * weight.cast(DType::F16);
+        }
+        let expected_fp32 = expected_fp32 + shared.clone();
+        let expected_residual = expected_residual + shared;
+        fp32.into_data()
+            .assert_eq(&expected_fp32.clone().into_data(), true);
+        residual
+            .into_data()
+            .assert_eq(&expected_residual.clone().into_data(), true);
+        policies_differ |= expected_fp32.into_data() != expected_residual.into_data();
+    }
+    assert!(
+        policies_differ,
+        "the fixture must separate the two weighting precisions"
+    );
 }
 
 /// Gradients reach the router, a routed expert's projections, and the shared expert gate.
