@@ -20,7 +20,7 @@ use super::{
     AliasRecord, ArtifactSource, CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest,
     DTypeConversion, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     LoadReport, MemoryEstimate, Result, TensorDType, TensorInventory, TransformRecord,
-    layout::{SectionError, section_starts},
+    layout::{ConcatError, SectionError, extend_concatenation, section_starts},
 };
 
 // Declarative architecture mapping: names, axes, dtypes, and alias topology.
@@ -760,25 +760,23 @@ impl PlanBuilder<'_> {
                     ),
                 });
             }
-            let other_axes_match = tensor.shape.len() == shape.len()
-                && tensor
-                    .shape
-                    .iter()
-                    .enumerate()
-                    .all(|(index, value)| index == axis || *value == shape[index]);
-            if !other_axes_match {
-                return Err(CheckpointError::InvalidMapping {
-                    message: format!(
-                        "concatenation source `{}` has incompatible shape {:?}",
-                        tensor.name, tensor.shape
-                    ),
-                });
+            // Verified: agrees with `shape` off the axis and adds its axis length.
+            match extend_concatenation(&mut shape, &tensor.shape, axis) {
+                Ok(()) => {}
+                Err(ConcatError::Incompatible) => {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!(
+                            "concatenation source `{}` has incompatible shape {:?}",
+                            tensor.name, tensor.shape
+                        ),
+                    });
+                }
+                Err(ConcatError::Overflow) => {
+                    return Err(CheckpointError::ArithmeticOverflow {
+                        context: "summing concatenated tensor dimensions",
+                    });
+                }
             }
-            shape[axis] = shape[axis].checked_add(tensor.shape[axis]).ok_or(
-                CheckpointError::ArithmeticOverflow {
-                    context: "summing concatenated tensor dimensions",
-                },
-            )?;
         }
         self.claim_primary(
             target,

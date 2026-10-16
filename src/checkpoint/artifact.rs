@@ -24,7 +24,10 @@ use super::{
     ArtifactSelection, CheckpointError, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     Result, TensorDType,
     accounting::{IndexTotalSizeEvidence, PinnedControlFile, PinnedIndexTotalSizePolicy},
-    layout::{TilingError, element_count, tensor_file_offset, validate_contiguous_tiling},
+    layout::{
+        DataSectionError, TilingError, data_section, element_count, tensor_file_offset,
+        validate_contiguous_tiling,
+    },
 };
 
 /// Preferred Hugging Face index filename during automatic discovery.
@@ -839,19 +842,22 @@ fn inspect_shard(
             limit: options.limits.max_header_bytes,
         });
     }
-    let data_start =
-        8_u64
-            .checked_add(header_bytes)
-            .ok_or(CheckpointError::ArithmeticOverflow {
+    // Verified: the section starts after the prefix and header and ends at the file's end.
+    let section = match data_section(header_bytes, file_bytes) {
+        Ok(section) => section,
+        Err(DataSectionError::Overflow) => {
+            return Err(CheckpointError::ArithmeticOverflow {
                 context: "computing SafeTensors data start",
-            })?;
-    if header_bytes == 0 || data_start > file_bytes {
-        return Err(CheckpointError::InvalidHeaderLength {
-            path,
-            header_bytes,
-            file_bytes,
-        });
-    }
+            });
+        }
+        Err(DataSectionError::InvalidHeaderLength) => {
+            return Err(CheckpointError::InvalidHeaderLength {
+                path,
+                header_bytes,
+                file_bytes,
+            });
+        }
+    };
     let header_len = usize::try_from(header_bytes).map_err(|_| CheckpointError::LimitExceeded {
         kind: "SafeTensors header byte",
         actual: header_bytes,
@@ -884,7 +890,7 @@ fn inspect_shard(
         ));
     }
 
-    let data_bytes = file_bytes - data_start;
+    let data_bytes = section.bytes;
     let mut tensors = BTreeMap::new();
     let mut ranges = Vec::with_capacity(raw.tensors.len());
     for (name, tensor) in raw.tensors {

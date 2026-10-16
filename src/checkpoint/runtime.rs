@@ -343,12 +343,7 @@ fn validate_float_payload_length(
     dtype: DType,
     actual: usize,
 ) -> std::result::Result<(), ParameterInstallError> {
-    let elements = shape
-        .iter()
-        .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
-        .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
-    let expected = elements
-        .checked_mul(dtype.size())
+    let expected = super::layout::dense_byte_len(shape, dtype.size())
         .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
     if expected != actual {
         return Err(ParameterInstallError::PayloadLength { expected, actual });

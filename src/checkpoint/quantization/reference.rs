@@ -447,11 +447,8 @@ pub(super) fn for_each_scale_chunk<E>(
 
 /// Computes the flattened element count without overflowing the host index type.
 fn checked_num_elements(shape: &[usize]) -> Result<usize> {
-    shape.iter().try_fold(1_usize, |elements, &dimension| {
-        elements
-            .checked_mul(dimension)
-            .ok_or(QuantizationError::ShapeElementOverflow)
-    })
+    crate::checkpoint::layout::checked_host_product(shape)
+        .ok_or(QuantizationError::ShapeElementOverflow)
 }
 
 /// Requires exact native-endian source byte length before indexed scalar decoding.

@@ -15,6 +15,13 @@
 //! `[(o * axis + start) * inner, (o * axis + start + length) * inner)` and writes
 //! target elements `[o * length * inner, (o + 1) * length * inner)`.
 //!
+//! The same view splits a shape around an axis for the runtime transforms
+//! ([`axis_view`]), concatenation sums one axis while every other axis agrees
+//! ([`extend_concatenation`]), dense host byte counts multiply the shape by the
+//! scalar width ([`dense_byte_len`]), and a file's data section starts after the
+//! eight-byte prefix and JSON header and runs to the end of the file
+//! ([`data_section`]).
+//!
 //! The module has no crate, Burn, or allocator dependencies so that Verus can
 //! check its arithmetic in place through `verus/checkpoint.rs`. Callers map the
 //! small error enums below to contextual [`super::CheckpointError`] values.
@@ -532,6 +539,494 @@ proof fn slice_block_bounds(
 }
 
 } // verus!
+
+// Axis views, slice ranges, concatenation shapes, host sizes, and data sections.
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Mathematical product of `shape[start..end]`, one for an empty range.
+pub open spec fn range_product(shape: Seq<u64>, start: int, end: int) -> int
+    decreases end - start,
+{
+    if end <= start {
+        1
+    } else {
+        range_product(shape, start, end - 1) * shape[end - 1] as int
+    }
+}
+
+/// Every left-to-right partial product of `shape[start..end]` fits `u64`.
+pub open spec fn range_fits(shape: Seq<u64>, start: int, end: int) -> bool {
+    forall|k: int| start <= k <= end ==> #[trigger] range_product(shape, start, k) <= u64::MAX
+}
+
+/// A product over `[a, c)` factors at any `b` in between.
+proof fn lemma_range_product_split(shape: Seq<u64>, a: int, b: int, c: int)
+    requires
+        a <= b <= c,
+    ensures
+        range_product(shape, a, c) == range_product(shape, a, b) * range_product(shape, b, c),
+    decreases c - b,
+{
+    if c > b {
+        lemma_range_product_split(shape, a, b, c - 1);
+        let left = range_product(shape, a, b);
+        let middle = range_product(shape, b, c - 1);
+        let last = shape[c - 1] as int;
+        assert(left * middle * last == left * (middle * last)) by (nonlinear_arith);
+    }
+}
+
+/// The whole-shape product used by [`element_count`] is the product over `[0, len)`.
+proof fn lemma_shape_product_is_range(shape: Seq<u64>, len: int)
+    ensures
+        shape_product(shape, len) == range_product(shape, 0, len),
+    decreases len,
+{
+    if len > 0 {
+        lemma_shape_product_is_range(shape, len - 1);
+    }
+}
+
+/// Mathematical product of `shape[0..len]` over host dimensions.
+pub open spec fn host_product(shape: Seq<usize>, len: int) -> int
+    decreases len,
+{
+    if len <= 0 {
+        1
+    } else {
+        host_product(shape, len - 1) * shape[len - 1] as int
+    }
+}
+
+/// The first `count` dimensions of `old` and `new` agree everywhere except `axis`.
+pub open spec fn other_axes_agree(old: Seq<u64>, new: Seq<u64>, axis: int, count: int) -> bool {
+    forall|i: int| 0 <= i < count && i != axis ==> #[trigger] new[i] == old[i]
+}
+
+} // verus!
+
+/// Computes `shape[start] * ... * shape[end - 1]`, or `None` when a running product overflows.
+///
+/// This is [`element_count`] applied to the subslice `shape[start..end]`: the
+/// product accumulates left to right with checked multiplication, so it is
+/// `None` exactly when some partial product of the range exceeds `u64::MAX`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(product =>
+    requires
+        start <= end <= shape@.len(),
+    ensures
+        match product {
+            Some(n) => n as int == range_product(shape@, start as int, end as int)
+                && range_fits(shape@, start as int, end as int),
+            None => exists|k: int| start <= k <= end
+                && #[trigger] range_product(shape@, start as int, k) > u64::MAX,
+        }
+))]
+pub(crate) fn checked_range_product(shape: &[u64], start: usize, end: usize) -> Option<u64> {
+    let mut product: u64 = 1;
+    let mut index = start;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            start <= index <= end,
+            end <= shape@.len(),
+            product as int == range_product(shape@, start as int, index as int),
+            forall|k: int| start <= k <= index
+                ==> #[trigger] range_product(shape@, start as int, k) <= u64::MAX,
+        decreases end - index,
+    ))]
+    while index < end {
+        match product.checked_mul(shape[index]) {
+            Some(next) => product = next,
+            None => {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    assert(range_product(shape@, start as int, index as int + 1) > u64::MAX);
+                }
+                return None;
+            }
+        }
+        index += 1;
+    }
+    Some(product)
+}
+
+/// A row-major shape viewed as `[outer, axis, inner]` around one axis, in host units.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AxisExtents {
+    /// Product of the dimensions before the axis.
+    pub(crate) outer: usize,
+    /// Length of the axis itself.
+    pub(crate) axis: usize,
+    /// Product of the dimensions after the axis.
+    pub(crate) inner: usize,
+}
+
+/// First reason a shape cannot be viewed as `[outer, axis, inner]` on this host.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AxisViewError {
+    /// The axis is not below the rank.
+    AxisOutOfBounds,
+    /// A running product of the dimensions before the axis overflows `u64`.
+    OuterOverflow,
+    /// The product of the dimensions before the axis does not fit `usize`.
+    OuterTooLarge {
+        /// The exact product.
+        value: u64,
+    },
+    /// The axis length does not fit `usize`.
+    AxisTooLarge {
+        /// The axis length.
+        value: u64,
+    },
+    /// A running product of the dimensions after the axis overflows `u64`.
+    InnerOverflow,
+    /// The product of the dimensions after the axis does not fit `usize`.
+    InnerTooLarge {
+        /// The exact product.
+        value: u64,
+    },
+    /// `outer * axis` or `outer * axis * inner` does not fit `usize`.
+    ElementsTooLarge,
+}
+
+/// Splits `shape` around `axis` into host-sized `[outer, axis, inner]` extents.
+///
+/// The checks run in a fixed order (axis bound, outer product, outer host
+/// size, axis host size, inner product, inner host size, element count), and
+/// the first failure is returned.
+///
+/// Verified: on success the extents are the exact products of the dimensions
+/// before and after the axis and the axis length itself, `outer * axis` and
+/// `outer * axis * inner` fit `usize` (exactly [`slice_block`]'s
+/// preconditions for this view), and `outer * axis * inner` is the shape's
+/// full product; each error names the first failed check.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(view =>
+    ensures
+        match view {
+            Ok(extents) => {
+                &&& axis < shape@.len()
+                &&& extents.outer as int == range_product(shape@, 0, axis as int)
+                &&& extents.axis == shape@[axis as int]
+                &&& extents.inner as int
+                    == range_product(shape@, axis as int + 1, shape@.len() as int)
+                &&& extents.outer * extents.axis <= usize::MAX
+                &&& extents.outer * extents.axis * extents.inner <= usize::MAX
+                &&& extents.outer * extents.axis * extents.inner
+                    == range_product(shape@, 0, shape@.len() as int)
+                &&& extents.outer * extents.axis * extents.inner
+                    == shape_product(shape@, shape@.len() as int)
+            },
+            Err(AxisViewError::AxisOutOfBounds) => axis >= shape@.len(),
+            Err(AxisViewError::OuterOverflow) => axis < shape@.len()
+                && !range_fits(shape@, 0, axis as int),
+            Err(AxisViewError::OuterTooLarge { value }) => axis < shape@.len()
+                && range_fits(shape@, 0, axis as int)
+                && value as int == range_product(shape@, 0, axis as int)
+                && value > usize::MAX,
+            Err(AxisViewError::AxisTooLarge { value }) => axis < shape@.len()
+                && range_product(shape@, 0, axis as int) <= usize::MAX
+                && value == shape@[axis as int]
+                && value > usize::MAX,
+            Err(AxisViewError::InnerOverflow) => axis < shape@.len()
+                && range_product(shape@, 0, axis as int) <= usize::MAX
+                && shape@[axis as int] <= usize::MAX
+                && !range_fits(shape@, axis as int + 1, shape@.len() as int),
+            Err(AxisViewError::InnerTooLarge { value }) => axis < shape@.len()
+                && value as int == range_product(shape@, axis as int + 1, shape@.len() as int)
+                && value > usize::MAX,
+            Err(AxisViewError::ElementsTooLarge) => axis < shape@.len() && {
+                let outer = range_product(shape@, 0, axis as int);
+                let inner = range_product(shape@, axis as int + 1, shape@.len() as int);
+                ||| outer * shape@[axis as int] > usize::MAX
+                ||| outer * shape@[axis as int] * inner > usize::MAX
+            },
+        }
+))]
+pub(crate) fn axis_view(shape: &[u64], axis: usize) -> Result<AxisExtents, AxisViewError> {
+    if axis >= shape.len() {
+        return Err(AxisViewError::AxisOutOfBounds);
+    }
+    let Some(outer) = checked_range_product(shape, 0, axis) else {
+        return Err(AxisViewError::OuterOverflow);
+    };
+    if outer > usize::MAX as u64 {
+        return Err(AxisViewError::OuterTooLarge { value: outer });
+    }
+    let axis_len = shape[axis];
+    if axis_len > usize::MAX as u64 {
+        return Err(AxisViewError::AxisTooLarge { value: axis_len });
+    }
+    let Some(inner) = checked_range_product(shape, axis + 1, shape.len()) else {
+        return Err(AxisViewError::InnerOverflow);
+    };
+    if inner > usize::MAX as u64 {
+        return Err(AxisViewError::InnerTooLarge { value: inner });
+    }
+    let extents = AxisExtents {
+        outer: outer as usize,
+        axis: axis_len as usize,
+        inner: inner as usize,
+    };
+    let Some(_) = axis_elements(extents.outer, extents.axis, extents.inner) else {
+        return Err(AxisViewError::ElementsTooLarge);
+    };
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_range_product_split(shape@, 0, axis as int, axis as int + 1);
+        lemma_range_product_split(shape@, 0, axis as int + 1, shape@.len() as int);
+        lemma_shape_product_is_range(shape@, shape@.len() as int);
+        assert(range_product(shape@, axis as int, axis as int) == 1);
+        assert(range_product(shape@, axis as int, axis as int + 1) == shape@[axis as int]);
+    }
+    Ok(extents)
+}
+
+/// Returns `outer * axis_len * inner`, or `None` when `outer * axis_len` or the whole product overflows.
+///
+/// Verified: `Some` exactly when both products fit `usize`, with the exact product.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(elements =>
+    ensures
+        match elements {
+            Some(n) => outer * axis_len <= usize::MAX
+                && outer * axis_len * inner <= usize::MAX
+                && n == outer * axis_len * inner,
+            None => outer * axis_len > usize::MAX || outer * axis_len * inner > usize::MAX,
+        }
+))]
+pub(crate) fn axis_elements(outer: usize, axis_len: usize, inner: usize) -> Option<usize> {
+    match outer.checked_mul(axis_len) {
+        Some(rows) => rows.checked_mul(inner),
+        None => None,
+    }
+}
+
+/// Returns whether `[start, start + length)` lies inside `[0, limit)`, without overflow.
+///
+/// Verified: true exactly when `start + length <= limit` mathematically, so a
+/// `true` answer supplies [`slice_block`]'s range precondition.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(fits =>
+    ensures
+        fits == (start + length <= limit),
+))]
+pub(crate) fn range_within(start: usize, length: usize, limit: usize) -> bool {
+    match start.checked_add(length) {
+        Some(end) => end <= limit,
+        None => false,
+    }
+}
+
+/// Why a concatenation source cannot extend the running target shape.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConcatError {
+    /// The source rank differs, or a non-axis dimension disagrees.
+    Incompatible,
+    /// The concatenated axis length exceeds `u64::MAX`.
+    Overflow,
+}
+
+/// Adds one concatenation source to the running target `shape` along `axis`.
+///
+/// Verified: success exactly when the source has the target's rank, agrees on
+/// every other axis, and the summed axis length fits `u64`; it then adds the
+/// source's axis length to `shape[axis]` and changes nothing else. On either
+/// error `shape` is unchanged, and `Incompatible` takes precedence.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        axis < old(shape)@.len(),
+    ensures
+        final(shape)@.len() == old(shape)@.len(),
+        match result {
+            Ok(()) => {
+                &&& source@.len() == old(shape)@.len()
+                &&& other_axes_agree(old(shape)@, source@, axis as int, source@.len() as int)
+                &&& old(shape)@[axis as int] + source@[axis as int] <= u64::MAX
+                &&& final(shape)@[axis as int]
+                    == old(shape)@[axis as int] + source@[axis as int]
+                &&& other_axes_agree(
+                    old(shape)@,
+                    final(shape)@,
+                    axis as int,
+                    old(shape)@.len() as int,
+                )
+            },
+            Err(ConcatError::Incompatible) => {
+                &&& !(source@.len() == old(shape)@.len()
+                    && other_axes_agree(old(shape)@, source@, axis as int, source@.len() as int))
+                &&& final(shape)@ == old(shape)@
+            },
+            Err(ConcatError::Overflow) => {
+                &&& source@.len() == old(shape)@.len()
+                &&& other_axes_agree(old(shape)@, source@, axis as int, source@.len() as int)
+                &&& old(shape)@[axis as int] + source@[axis as int] > u64::MAX
+                &&& final(shape)@ == old(shape)@
+            },
+        }
+))]
+pub(crate) fn extend_concatenation(
+    shape: &mut [u64],
+    source: &[u64],
+    axis: usize,
+) -> Result<(), ConcatError> {
+    if source.len() != shape.len() {
+        return Err(ConcatError::Incompatible);
+    }
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= source@.len(),
+            source@.len() == shape@.len(),
+            axis < shape@.len(),
+            other_axes_agree(shape@, source@, axis as int, index as int),
+        decreases source@.len() - index,
+    ))]
+    while index < source.len() {
+        if index != axis && source[index] != shape[index] {
+            return Err(ConcatError::Incompatible);
+        }
+        index += 1;
+    }
+    let Some(total) = shape[axis].checked_add(source[axis]) else {
+        return Err(ConcatError::Overflow);
+    };
+    shape[axis] = total;
+    Ok(())
+}
+
+/// Computes the dense byte length `product(shape) * width`, or `None` on overflow.
+///
+/// The product accumulates left to right with checked multiplication (rank
+/// zero is one scalar), then multiplies by the scalar width.
+///
+/// Verified: `Some` exactly when every running product and the final byte
+/// count fit `usize`, with the exact byte count.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(bytes =>
+    ensures
+        match bytes {
+            Some(n) => {
+                &&& n == host_product(shape@, shape@.len() as int) * width
+                &&& forall|k: int| 0 <= k <= shape@.len()
+                    ==> #[trigger] host_product(shape@, k) <= usize::MAX
+            },
+            None => {
+                ||| exists|k: int| 0 <= k <= shape@.len()
+                    && #[trigger] host_product(shape@, k) > usize::MAX
+                ||| host_product(shape@, shape@.len() as int) * width > usize::MAX
+            },
+        }
+))]
+pub(crate) fn dense_byte_len(shape: &[usize], width: usize) -> Option<usize> {
+    match checked_host_product(shape) {
+        Some(elements) => elements.checked_mul(width),
+        None => None,
+    }
+}
+
+/// Computes `product(shape)` over host dimensions, or `None` when a running product overflows.
+///
+/// Verified: `Some` exactly when every left-to-right partial product fits
+/// `usize`, with the exact product; rank zero is one scalar.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(count =>
+    ensures
+        match count {
+            Some(n) => n as int == host_product(shape@, shape@.len() as int)
+                && forall|k: int| 0 <= k <= shape@.len()
+                    ==> #[trigger] host_product(shape@, k) <= usize::MAX,
+            None => exists|k: int| 0 <= k <= shape@.len()
+                && #[trigger] host_product(shape@, k) > usize::MAX,
+        }
+))]
+pub(crate) fn checked_host_product(shape: &[usize]) -> Option<usize> {
+    let mut product: usize = 1;
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= shape@.len(),
+            product as int == host_product(shape@, index as int),
+            forall|k: int| 0 <= k <= index ==> #[trigger] host_product(shape@, k) <= usize::MAX,
+        decreases shape@.len() - index,
+    ))]
+    while index < shape.len() {
+        match product.checked_mul(shape[index]) {
+            Some(next) => product = next,
+            None => {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    assert(host_product(shape@, index as int + 1) > usize::MAX);
+                }
+                return None;
+            }
+        }
+        index += 1;
+    }
+    Some(product)
+}
+
+/// The data section of a SafeTensors file: its absolute start and byte length.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DataSection {
+    /// Absolute offset of the first data byte, `8 + header_bytes`.
+    pub(crate) start: u64,
+    /// Bytes from `start` to the end of the file.
+    pub(crate) bytes: u64,
+}
+
+/// Why a header length cannot delimit a data section.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataSectionError {
+    /// `8 + header_bytes` exceeds `u64::MAX`.
+    Overflow,
+    /// The header is empty or extends past the end of the file.
+    InvalidHeaderLength,
+}
+
+/// Locates the data section of a `file_bytes`-byte file with a `header_bytes` JSON header.
+///
+/// Verified: success exactly when the header is nonempty and the eight-byte
+/// prefix plus header fit in the file; the section then starts at
+/// `8 + header_bytes` and its length reaches exactly the end of the file.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(section =>
+    ensures
+        match section {
+            Ok(found) => {
+                &&& header_bytes > 0
+                &&& 8 + header_bytes <= file_bytes
+                &&& found.start == 8 + header_bytes
+                &&& found.start + found.bytes == file_bytes
+            },
+            Err(DataSectionError::Overflow) => 8 + header_bytes > u64::MAX,
+            Err(DataSectionError::InvalidHeaderLength) => 8 + header_bytes <= u64::MAX
+                && (header_bytes == 0 || 8 + header_bytes > file_bytes),
+        }
+))]
+pub(crate) fn data_section(
+    header_bytes: u64,
+    file_bytes: u64,
+) -> Result<DataSection, DataSectionError> {
+    let Some(start) = 8_u64.checked_add(header_bytes) else {
+        return Err(DataSectionError::Overflow);
+    };
+    if header_bytes == 0 || start > file_bytes {
+        return Err(DataSectionError::InvalidHeaderLength);
+    }
+    Ok(DataSection {
+        start,
+        bytes: file_bytes - start,
+    })
+}
 
 #[cfg(test)]
 #[path = "layout_tests.rs"]

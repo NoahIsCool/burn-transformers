@@ -28,7 +28,10 @@ use super::{
         validate_cast, with_scalar_conversion,
     },
 };
-use crate::checkpoint::layout::{element_count, slice_block};
+use crate::checkpoint::layout::{
+    AxisViewError, ConcatError, axis_elements, axis_view, element_count, extend_concatenation,
+    range_within, slice_block,
+};
 use crate::checkpoint::mxfp4::{
     Mxfp4Geometry, Mxfp4Table, decode_transposed, decoded_shape, mxfp4_geometry,
 };
@@ -491,23 +494,20 @@ fn validate_concatenation(tensor: &PlannedTensor, axis: usize) -> Result<()> {
                 tensor.target
             ));
         }
-        if source.shape.len() != expected.len()
-            || source
-                .shape
-                .iter()
-                .enumerate()
-                .any(|(index, value)| index != axis && *value != expected[index])
-        {
-            return invalid_plan(format!(
-                "concatenation source `{}` has incompatible shape",
-                source.name
-            ));
+        match extend_concatenation(&mut expected, &source.shape, axis) {
+            Ok(()) => {}
+            Err(ConcatError::Incompatible) => {
+                return invalid_plan(format!(
+                    "concatenation source `{}` has incompatible shape",
+                    source.name
+                ));
+            }
+            Err(ConcatError::Overflow) => {
+                return Err(CheckpointError::ArithmeticOverflow {
+                    context: "summing runtime concatenation dimensions",
+                });
+            }
         }
-        expected[axis] = expected[axis].checked_add(source.shape[axis]).ok_or(
-            CheckpointError::ArithmeticOverflow {
-                context: "summing runtime concatenation dimensions",
-            },
-        )?;
     }
     if tensor.shape != expected {
         return invalid_plan(format!(
@@ -674,10 +674,7 @@ fn materialize_slice_payload(
     let axis_view = AxisView::new(shape, axis, &tensor.target)?;
     let start = host_dimension(start, &tensor.target, "slice start")?;
     let length = host_dimension(length, &tensor.target, "slice length")?;
-    if start
-        .checked_add(length)
-        .is_none_or(|end| end > axis_view.axis)
-    {
+    if !range_within(start, length, axis_view.axis) {
         return invalid_plan(format!(
             "slice target `{}` exceeds source axis {axis} of length {}",
             tensor.target, axis_view.axis
@@ -722,10 +719,7 @@ fn materialize_concatenate<S: TensorSource>(
         let payload = read_verified(source, planned, stats)?;
         observe_peak(stats, payload.byte_len(), output_len, &tensor.target)?;
         let source_axis = AxisView::new(payload.shape(), axis, &tensor.target)?.axis;
-        if axis_offset
-            .checked_add(source_axis)
-            .is_none_or(|end| end > target_view.axis)
-        {
+        if !range_within(axis_offset, source_axis, target_view.axis) {
             return invalid_plan(format!(
                 "concatenation sources exceed target `{}` axis {axis}",
                 tensor.target
@@ -768,31 +762,50 @@ impl AxisView {
     /// Splits `shape` around `axis`, requiring `outer * axis * inner` to be host-addressable.
     ///
     /// These are exactly the preconditions of [`slice_block`]: every block
-    /// offset is then bounded by the element count and cannot overflow.
+    /// offset is then bounded by the element count and cannot overflow. The
+    /// verified [`axis_view`] computes the extents and proves them exact.
     fn new(shape: &[u64], axis: usize, tensor: &str) -> Result<Self> {
-        let Some(&axis_len) = shape.get(axis) else {
-            return invalid_plan(format!(
-                "axis {axis} is out of bounds for `{tensor}` shape {shape:?}"
-            ));
-        };
-        let view = Self {
-            outer: host_len(checked_elements(&shape[..axis], tensor)?)?,
-            axis: host_dimension(axis_len, tensor, "axis length")?,
-            inner: host_len(checked_elements(&shape[axis + 1..], tensor)?)?,
-        };
-        let _ = view.elements_with_axis(view.axis, tensor)?;
-        Ok(view)
+        let extents = axis_view(shape, axis).map_err(|error| match error {
+            AxisViewError::AxisOutOfBounds => CheckpointError::InvalidMapping {
+                message: format!("axis {axis} is out of bounds for `{tensor}` shape {shape:?}"),
+            },
+            AxisViewError::OuterOverflow | AxisViewError::InnerOverflow => {
+                CheckpointError::InvalidTensorPayload {
+                    tensor: tensor.to_owned(),
+                    reason: "shape element count overflows u64".into(),
+                }
+            }
+            AxisViewError::OuterTooLarge { value } | AxisViewError::InnerTooLarge { value } => {
+                CheckpointError::AllocationFailed {
+                    bytes: value,
+                    context: "addressing a transformed tensor on this host",
+                }
+            }
+            AxisViewError::AxisTooLarge { value } => CheckpointError::InvalidTensorPayload {
+                tensor: tensor.to_owned(),
+                reason: format!("axis length {value} does not fit in usize"),
+            },
+            AxisViewError::ElementsTooLarge => axis_elements_overflow(tensor),
+        })?;
+        Ok(Self {
+            outer: extents.outer,
+            axis: extents.axis,
+            inner: extents.inner,
+        })
     }
 
     /// Returns `outer * axis_len * inner`, checking `outer * axis_len` separately.
     fn elements_with_axis(self, axis_len: usize, tensor: &str) -> Result<usize> {
-        self.outer
-            .checked_mul(axis_len)
-            .and_then(|rows| rows.checked_mul(self.inner))
-            .ok_or_else(|| CheckpointError::InvalidTensorPayload {
-                tensor: tensor.to_owned(),
-                reason: "axis view element count does not fit in usize".into(),
-            })
+        axis_elements(self.outer, axis_len, self.inner)
+            .ok_or_else(|| axis_elements_overflow(tensor))
+    }
+}
+
+/// Reports an axis view whose element count does not fit `usize`.
+fn axis_elements_overflow(tensor: &str) -> CheckpointError {
+    CheckpointError::InvalidTensorPayload {
+        tensor: tensor.to_owned(),
+        reason: "axis view element count does not fit in usize".into(),
     }
 }
 
