@@ -129,7 +129,7 @@ mod autodiff {
         nn::{Linear, LinearConfig, LinearLayout},
         optim::{AdamConfig, GradientsParams, Optimizer, SgdConfig},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
-        tensor::backend::Backend,
+        tensor::{Tolerance, backend::Backend},
     };
     /// Differentiable wrapper around the stable-loss fixture backend.
     type Ad = Autodiff<Cpu>;
@@ -637,9 +637,15 @@ mod autodiff {
         }
     }
 
-    /// Records saved from the training owner retain column mapping, evaluation values, and exact Adam resumption.
+    /// Records saved from the training owner restore exact weights, then evaluate and resume Adam to F32 rounding.
+    ///
+    /// The reloaded weight is bit-identical, but Burn's column mapper hands it
+    /// back as a transposed view of what training left contiguous. On x86 AVX
+    /// the GEMM then sums in another order, so outputs and the next Adam step
+    /// agree to F32 rounding rather than bit for bit; a lost mapper would
+    /// transpose the weight and differ at O(1).
     #[test]
-    fn column_records_saved_from_training_owner_reload_evaluate_and_resume_exactly() {
+    fn column_records_saved_from_training_owner_reload_exactly_and_resume() {
         let device = Default::default();
         for (input_width, output_width) in [(2, 3), (3, 3)] {
             Ad::seed(&device, 991);
@@ -677,9 +683,17 @@ mod autodiff {
                 [input_width, output_width]
             );
             assert_eq!(
-                restored.valid().forward(input().inner()).into_data(),
-                model.forward(input()).into_data()
+                restored.projection.weight.val().into_data(),
+                model.projection.weight.val().into_data()
             );
+            restored
+                .valid()
+                .forward(input().inner())
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &model.forward(input()).into_data(),
+                    Tolerance::rel_abs(1e-5, 1e-6),
+                );
             let grads = GradientsParams::from_grads(
                 model.forward(input()).square().mean().backward(),
                 &model,
@@ -690,10 +704,15 @@ mod autodiff {
             );
             model = optimizer.step(0.01, model, grads);
             restored = restored_optimizer.step(0.01, restored, restored_grads);
-            assert_eq!(
-                restored.projection.weight.val().into_data(),
-                model.projection.weight.val().into_data()
-            );
+            restored
+                .projection
+                .weight
+                .val()
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &model.projection.weight.val().into_data(),
+                    Tolerance::rel_abs(1e-5, 1e-6),
+                );
         }
     }
 

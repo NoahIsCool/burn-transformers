@@ -195,11 +195,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .classify(SymbolBatcher.batch(items(true), &device))
         .output;
     let evaluation_repeat_error = (expected.clone() - repeated).abs().max().into_scalar();
+    let logit_scale = expected.clone().abs().max().into_scalar().max(1.0);
     let checkpoint_reload_error = (expected - restored).abs().max().into_scalar();
     assert_eq!(evaluation_repeat_error, 0.0, "evaluation disables dropout");
-    assert_eq!(
-        checkpoint_reload_error, 0.0,
-        "native checkpoint preserves logits"
+    // The reloaded weights hold identical values, but a mapped projection can
+    // be a transposed view of what training left contiguous, and x86 AVX GEMM
+    // kernels then sum in another order. Agreement is to F32 rounding: a few
+    // units in the last place of the largest logit, far below a lost mapper.
+    assert!(
+        checkpoint_reload_error <= 2e-6 * logit_scale,
+        "native checkpoint preserves logits: deviation {checkpoint_reload_error} at scale {logit_scale}"
     );
     println!(
         "Held-out symbolic task: loss {:.6} -> {:.6}; accuracy {:.1}% -> {:.1}%",

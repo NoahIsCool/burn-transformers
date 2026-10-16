@@ -399,7 +399,10 @@ fn tied_models_project_with_the_embedding() {
     let hidden = output.final_hidden_state.unwrap().narrow(1, 2, 1);
     let table = model.model.embed_tokens.weight.val();
     let expected = burn::tensor::module::linear(hidden, table.transpose(), None);
-    assert_close(output.logits, expected, 1e-6, "tied head");
+    // The tied head reads the embedding as a transposed view while the oracle
+    // copies it contiguous, so x86 GEMM kernels may round differently.
+    let scale = expected.clone().abs().max().into_scalar().max(1.0);
+    assert_close(output.logits, expected, 1e-5 * scale, "tied head");
 }
 
 /// Hooks expose every listed point; captures and edits act on the forward pass.

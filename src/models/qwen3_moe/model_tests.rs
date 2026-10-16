@@ -1417,7 +1417,8 @@ fn tied_readout_matches_reshaping_linear_oracle() {
         .project_logits(hidden)
         .expect("tied head")
         .into_data()
-        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&oracle, Tolerance::rel_abs(1e-5, 1e-6));
 }
 
 /// Message carried by the deliberately failing hook callbacks below.

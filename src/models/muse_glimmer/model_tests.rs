@@ -2286,7 +2286,8 @@ fn tied_projection_matches_reshaping_linear_oracle() {
     tied_projection(hidden.clone(), embedding)
         .expect("tied projection")
         .into_data()
-        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&oracle, Tolerance::rel_abs(1e-5, 1e-6));
     let narrow = Tensor::<TestBackend, 2>::zeros([6, 7], &device);
     assert!(matches!(
         tied_projection(hidden, narrow),

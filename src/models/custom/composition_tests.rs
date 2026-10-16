@@ -14,7 +14,7 @@ use crate::{
 use burn::{
     nn::{Linear, LinearConfig},
     record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
-    tensor::Int,
+    tensor::{Int, Tolerance},
 };
 
 /// Resuming a decoder at the next layer matches full execution and rejects replay or repeated final normalization.
@@ -341,10 +341,13 @@ fn open_mixer_and_width_adapters_are_registered_and_survive_record_roundtrip() {
     let bytes = recorder.record(module.clone().into_record(), ()).unwrap();
     let restored =
         open_composition().load_record(recorder.load(bytes, &Default::default()).unwrap());
-    assert_close(
-        restored.run(input, &context, Layer::encoder(0)).unwrap(),
-        output,
-    );
+    // Reloaded column-layout projections are transposed views of contiguous
+    // originals, so x86 GEMM kernels may round differently: compare to F32 rounding.
+    restored
+        .run(input, &context, Layer::encoder(0))
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&output.into_data(), Tolerance::rel_abs(1e-5, 1e-6));
     let mut invalid_context = context.clone();
     invalid_context.positions = invalid_context.positions.slice([0..1, 0..2]);
     assert!(

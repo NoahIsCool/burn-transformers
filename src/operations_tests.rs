@@ -837,7 +837,8 @@ fn inference_flex_random_column_projections_are_contiguous() {
     linear(probe, &restored)
         .unwrap()
         .into_data()
-        .assert_approx_eq::<f32>(&expected, Tolerance::absolute(1e-6));
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&expected, Tolerance::rel_abs(1e-5, 1e-6));
     assert!(
         !flex_primitive(restored_weight).is_contiguous(),
         "Burn-record loads keep the load mapper's strided view"

@@ -533,7 +533,8 @@ fn tied_readouts_match_reshaping_linear_oracle() {
         None,
     )
     .into_data();
-    let tolerance = burn::tensor::Tolerance::absolute(1e-6);
+    // The tied view and the contiguous oracle may take different x86 GEMM kernels.
+    let tolerance = burn::tensor::Tolerance::rel_abs(1e-5, 1e-6);
     model
         .project_hidden(hidden.clone())
         .expect("tied head")

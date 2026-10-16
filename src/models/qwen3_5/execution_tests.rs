@@ -313,12 +313,15 @@ fn explicit_independent_vocabulary_head_starts_equal_and_then_can_diverge() {
     let original = operations::linear(hidden.clone(), &head).unwrap().to_data();
     // The weights above are equal exactly. The tied projection reads the
     // embedding through a transposed view while the head is contiguous, so an
-    // x86 AVX GEMM may sum in another order: agreement is to F32 rounding.
+    // x86 AVX GEMM may sum the eight products in another order. The logits are
+    // small sums of partly cancelling O(0.02) terms, so reordering moves them
+    // by a few 1e-7 absolutely; a head that differed from the embedding would
+    // move them by O(1e-2).
     model
         .tied_vocabulary_projection(hidden.clone())
         .unwrap()
         .to_data()
-        .assert_approx_eq::<f32>(&original, Tolerance::rel_abs(1e-6, 1e-7));
+        .assert_approx_eq::<f32>(&original, Tolerance::absolute(1e-5));
     model.embed_tokens.weight = Param::from_tensor(Tensor::zeros([16, 8], &device));
     assert_eq!(
         operations::linear(hidden.clone(), &head).unwrap().to_data(),
