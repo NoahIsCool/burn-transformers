@@ -381,9 +381,10 @@ impl<M> LoadedModel<M> {
     /// `generation_config.json` (beam search, `typical_p`, `max_length`, ...)
     /// whose values differ from Hugging Face's neutral defaults, so callers can
     /// see where generation may diverge from the reference implementation.
-    /// Seq2seq loads also report the logits-processor constraints (`min_p`,
-    /// `no_repeat_ngram_size`, `min_new_tokens`) that their beam search does
-    /// not read.
+    /// Seq2seq loads also report what their beam search does not read: the
+    /// logits-processor constraints (`min_p`, `no_repeat_ngram_size`,
+    /// `min_new_tokens`), `repetition_penalty`, and `do_sample` with its
+    /// non-neutral `temperature`, `top_k`, and `top_p`.
     #[must_use]
     pub fn with_unsupported_generation_settings(
         mut self,

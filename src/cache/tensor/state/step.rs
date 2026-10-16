@@ -19,10 +19,8 @@
 //!
 //! A rejected step changes no length and no readable cache position; only
 //! write-ahead (below) may leave bytes in slots beyond the lengths. The step
-//! API is intended to replace the per-family `PendingKvWrite` structs and
-//! coverage checks (families migrate to it next); it works for any number of
-//! KV, latent, and recurrent groups and makes speculative staging
-//! all-or-nothing per step.
+//! API works for any number of KV, latent, and recurrent groups and makes
+//! speculative staging all-or-nothing per step.
 //!
 //! # Step validity
 //!

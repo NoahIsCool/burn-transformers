@@ -320,8 +320,9 @@ fn initialization_follows_the_policy_and_hugging_face() {
 
 /// Applying [`GptNeoXConfig::init_policy`] re-samples projections but keeps LayerNorm parameters.
 ///
-/// Pins the documented limit of the policy: it cannot express LayerNorm's
-/// ones, so re-initializing an edited model leaves its norms untouched.
+/// Pins the documented limit of the policy: role rules cannot tell a
+/// LayerNorm scale from its shift (see [`GptNeoXConfig::reinit_policy`]), so
+/// re-initializing an edited model leaves its norms untouched.
 #[test]
 fn applying_the_initialization_policy_keeps_layer_norm_parameters() {
     use burn::module::Param;
