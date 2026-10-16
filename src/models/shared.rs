@@ -17,6 +17,18 @@
 //!   readback;
 //! * [`plan`] holds the dependency-free index planning, verified in place by
 //!   Verus through `verus/models.rs`;
+//! * [`decoder_plan`] holds the verified cache-group numbering, step
+//!   context, and checkpoint extents of the dense cached decoders (Llama
+//!   family, Gemma, gpt-oss);
+//! * [`block_plan`] and [`block`] pack ragged cached rows into one left-aligned
+//!   `[B, T]` block with exact cache slots and position-ordered key limits
+//!   (the verified host plan and its tensor application), shared by every
+//!   family whose cached attention bounds key prefixes (DeepSeek-V2, Muse
+//!   Glimmer); its per-row maps also back Qwen3.5's compact batches, which
+//!   gpt-oss and Qwen3-MoE reuse;
+//! * [`scaling`] rounds scalar multipliers (Gemma's `sqrt(d)` embedding
+//!   scale) to an activation dtype exactly as the references' scalar tensors
+//!   are rounded, and applies `c · tanh(z / c)` logit soft caps;
 //! * [`load_audit`] holds the verified counter arithmetic that
 //!   [`LoadedModel`](crate::LoadedModel) audits use for every loaded family.
 //!
@@ -33,12 +45,16 @@
 //! The module deliberately contains no model-name branches: a family passes
 //! its tensor names and numbering policy as data.
 
+pub(crate) mod block;
+pub(crate) mod block_plan;
 pub(crate) mod checks;
+pub(crate) mod decoder_plan;
 pub(crate) mod input;
 pub(crate) mod load_audit;
 pub(crate) mod logits;
 pub(crate) mod plan;
 pub(crate) mod rows;
+pub(crate) mod scaling;
 #[cfg(test)]
 pub(crate) mod test_support;
 

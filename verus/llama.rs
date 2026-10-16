@@ -2,7 +2,9 @@
 //! batched-step planning.
 //!
 //! Verifies, in place, the specifications attached to
-//! `src/models/llama/plan.rs`:
+//! `src/models/llama/plan.rs` and to the shared planning it re-exports
+//! (`src/models/shared/decoder_plan.rs`, and `signed_indices` of
+//! `src/models/shared/plan.rs`):
 //!
 //! - schedules: the SmolLM3 NoPE period rule (`rotary_by_interval`) and the
 //!   Qwen sliding-layer rule (`sliding_from_layer`), and the whole-model
@@ -56,8 +58,13 @@
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
-//! The planning file is dependency-free, so it is included as a single
-//! module. The Burn tensor programs driven by these plans (block slices and
+//! The family plan reuses the shared decoder planning
+//! (`src/models/shared/decoder_plan.rs`: `cache_slots`, `group_indices`,
+//! `truncation_leaves_bytes`, `widest_context`, the checkpoint extents,
+//! `derived_head_dim`, and the counting vocabulary of their proofs) and the
+//! shared `signed_indices` (`src/models/shared/plan.rs`); both are included
+//! at their crate paths and re-verified here, and `verus/models.rs` is
+//! their home harness. The Burn tensor programs driven by these plans (block slices and
 //! gathers, cache write-ahead and ring segments, masks, and the restoring
 //! gather) remain covered by `src/models/llama/model/step_tests.rs` and the
 //! parity tests in `src/models/llama/model/decode_tests.rs`; the mapping from
@@ -68,6 +75,21 @@
 // Loop invariants are attributes on `while` statements, which Verus parses as
 // expression attributes; ordinary builds never see these attributes.
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+
+#[path = "../src/models/shared/decoder_plan.rs"]
+pub mod shared_decoder_plan;
+
+#[path = "../src/models/shared/plan.rs"]
+pub mod shared_plan;
+
+/// Mirrors the crate paths `crate::models::shared::*` used by the family plan.
+pub mod models {
+    /// Model-independent family glue.
+    pub mod shared {
+        pub use crate::shared_decoder_plan as decoder_plan;
+        pub use crate::shared_plan as plan;
+    }
+}
 
 #[path = "../src/models/llama/plan.rs"]
 pub mod plan;

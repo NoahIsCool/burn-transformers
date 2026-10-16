@@ -61,9 +61,6 @@ fn block_helpers_match_their_definitions() {
         implicit_positions(&[4, 0, 9], &[2, 1, 0], 2),
         [vec![4, 5], vec![0, 0], vec![0, 0]]
     );
-    assert_eq!(signed_indices(&[0, 7]), Some(vec![0, 7]));
-    assert_eq!(signed_indices(&[]), Some(Vec::new()));
-    assert_eq!(signed_indices(&[1, usize::MAX]), None);
     assert_eq!(clamp_limits(&[1, 3, 9], 4), [1, 3, 4]);
     assert_eq!(clamp_limits(&[], 4), Vec::<usize>::new());
 }

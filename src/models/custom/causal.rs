@@ -11,7 +11,7 @@ use std::ops::Range;
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{Tensor, backend::Backend},
+    tensor::{Int, Tensor, backend::Backend},
 };
 
 use crate::{
@@ -25,10 +25,12 @@ use crate::{
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
+use crate::models::shared::scaling::soft_cap;
+
 use super::{
     common::{
-        BackboneOutput, causal_output, embedded_state, router_diagnostics, select_hidden,
-        tied_projection, validate_and_resolve_input, validate_forward_options,
+        BackboneOutput, causal_output, embed_tokens, embedded_state, router_diagnostics,
+        select_hidden, tied_projection, validate_and_resolve_input, validate_forward_options,
         validate_stack_execution, validate_staged_positions,
     },
     init::scaled_init_policy,
@@ -50,7 +52,7 @@ enum Direction {
 /// A heterogeneous decoder-only transformer assembled from [`DecoderSpec`].
 #[derive(Module, Debug)]
 pub struct ModularCausalLm<B: Backend> {
-    /// Token lookup table.
+    /// Token lookup table `E`; lookups are multiplied by the spec's optional `embedding_scale`.
     pub embed_tokens: Embedding<B>,
     /// Ordered heterogeneous residual blocks.
     layers: Vec<ModularLayer<B>>,
@@ -186,10 +188,7 @@ impl<B: Backend> ModularCausalLm<B> {
                 self.spec.max_position_embeddings,
                 "custom.embed",
             )?;
-            let hidden = hooks.apply(
-                Stack::Decoder.embedding(),
-                self.embed_tokens.forward(input.token_ids),
-            )?;
+            let hidden = hooks.apply(Stack::Decoder.embedding(), self.lookup(input.token_ids))?;
             embedded_state(hidden, positions, input.token_mask, evaluated_context, None)
         })
     }
@@ -360,7 +359,7 @@ impl<B: Backend> ModularCausalLm<B> {
             self.spec.max_position_embeddings,
             "custom.causal",
         )?;
-        let hidden = self.embed_tokens.forward(input.token_ids.clone());
+        let hidden = self.lookup(input.token_ids.clone());
         let mut pass = StackPass::new(
             positions,
             input.token_mask.as_ref(),
@@ -401,12 +400,25 @@ impl<B: Backend> ModularCausalLm<B> {
         })
     }
 
-    /// Applies an independent or exactly tied vocabulary projection.
+    /// Looks up `[batch, token]` IDs and applies the spec's optional embedding scale.
+    ///
+    /// Every execution mode embeds through this method, so the stateless,
+    /// staged, and cached paths see the same layer-0 input.
+    fn lookup(&self, token_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        embed_tokens(&self.embed_tokens, token_ids, self.spec.embedding_scale)
+    }
+
+    /// Applies an independent or exactly tied vocabulary projection, then the optional soft cap.
+    ///
+    /// A tied projection reads the unscaled embedding table; the spec's
+    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`
+    /// through the shared [`soft_cap`].
     pub(super) fn project(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
-        match &self.lm_head {
+        let logits = match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
             None => tied_projection(hidden, self.embed_tokens.weight.val()),
-        }
+        }?;
+        Ok(soft_cap(logits, self.spec.final_logit_softcap))
     }
 
     /// Evaluates the stateless, differentiable decoder graph.

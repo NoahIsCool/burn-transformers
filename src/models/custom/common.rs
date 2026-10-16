@@ -6,11 +6,14 @@
 //! with one device read, assembles public outputs and router diagnostics, and
 //! provides the readout helpers both models share.
 
-use burn::tensor::{Bool, Int, Tensor, backend::Backend};
+use burn::{
+    nn::Embedding,
+    tensor::{Bool, Int, Tensor, backend::Backend},
+};
 
 use crate::{
     CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
-    architecture::{DecoderSpec, FeedForwardSpec, RouterDiagnostics, TokenMask},
+    architecture::{DecoderSpec, RouterDiagnostics, TokenMask},
     attention::AttentionConnectivity,
     experiment::{EncoderContext, ExecutionContext, HiddenState, read_int_scalars},
     intervention::Stack,
@@ -20,7 +23,7 @@ use crate::{
 pub(super) use crate::models::shared::select_hidden;
 use crate::models::shared::{
     DeferredChecks, InputContract, InputNames, PaddedPositions, defer_input,
-    validate_position_values,
+    scaling::round_to_dtype, validate_position_values,
 };
 
 use super::layer::{ENCODER_SLIDING_WINDOW, ensure_executable};
@@ -243,11 +246,32 @@ pub(super) fn validate_forward_options(options: &ForwardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Returns whether a stack contains sparse experts.
+/// Returns whether a stack contains sparse experts, plain or clamped.
 pub(super) fn has_moe(spec: &DecoderSpec) -> bool {
     spec.layers
         .iter()
-        .any(|layer| matches!(&layer.feed_forward, FeedForwardSpec::MixtureOfExperts(_)))
+        .any(|layer| layer.feed_forward.experts().is_some())
+}
+
+/// Looks up `[batch, token]` IDs in `table` and applies a stack's optional embedding multiplier.
+///
+/// Computes `h_0 = s · E[token]` in the table's dtype, with `s`
+/// ([`DecoderSpec::embedding_scale`]) first rounded to that dtype as
+/// `torch.tensor(s, dtype=...)` rounds it (the shared
+/// [`round_to_dtype`]); `None` returns the plain lookup.
+pub(super) fn embed_tokens<B: Backend>(
+    table: &Embedding<B>,
+    token_ids: Tensor<B, 2, Int>,
+    scale: Option<f64>,
+) -> Tensor<B, 3> {
+    let embeddings = table.forward(token_ids);
+    match scale {
+        Some(scale) => {
+            let scale = round_to_dtype(scale, embeddings.dtype());
+            embeddings.mul_scalar(scale)
+        }
+        None => embeddings,
+    }
 }
 
 /// Applies an ordinary tied vocabulary projection with a `[vocabulary, hidden]` embedding table.

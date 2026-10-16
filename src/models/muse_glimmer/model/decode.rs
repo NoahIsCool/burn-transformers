@@ -13,8 +13,8 @@
 //!
 //! # Batched execution
 //!
-//! A call packs every row's valid tokens into one `[B, T]` block (shared with
-//! DeepSeek, see `deepseek_v2::model::block`), runs each layer once for the
+//! A call packs every row's valid tokens into one `[B, T]` block (the shared
+//! [`BlockLayout`] of `models::shared::block`), runs each layer once for the
 //! whole batch, and scatters results back to `[B, S]` with exact zeros at
 //! padding and for finished rows. Global layers write their new keys and
 //! values ahead into full storage and attend over one zero-copy slot-ordered
@@ -51,15 +51,12 @@ use crate::{
         CacheConfig, KvBatchSegment, KvCacheStorage, NativeKvCacheSpec, StepBank, TensorCacheError,
         TensorDecodeState,
     },
-    models::{
-        deepseek_v2::model::{
-            batch::{first_uncacheable_context, rotary_contexts},
-            block::BlockLayout,
-        },
-        shared::{
-            EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
-            select_hidden_with_last_columns, validate_logits_selection,
-        },
+    models::shared::{
+        EmptyRows, StatefulContract, StatefulRows,
+        block::BlockLayout,
+        block_plan::{first_uncacheable_context, rotary_contexts},
+        ensure_same_device, prepare_stateful_rows, select_hidden_with_last_columns,
+        validate_logits_selection,
     },
     position::{RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };

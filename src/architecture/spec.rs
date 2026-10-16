@@ -21,6 +21,8 @@
 //! | every shared RoPE scaling rule (linear, dynamic NTK, YaRN, Llama 3, LongRoPE, proportional) | [`RopeScaling`] |
 //! | ungated MLP, clamped SwiGLU, attention-only blocks | [`FeedForwardSpec::Ungated`], [`FeedForwardSpec::ClampedSwiGlu`], [`FeedForwardSpec::None`] |
 //! | router policy, shared-expert gate, expert biases | [`MixtureOfExpertsSpec`] |
+//! | embedding multiplier and final logit soft cap (Gemma) | [`DecoderSpec::embedding_scale`], [`DecoderSpec::final_logit_softcap`] |
+//! | clamped SwiGLU routed and shared experts (gpt-oss) | [`FeedForwardSpec::ClampedMixtureOfExperts`] |
 //! | cross-attention scale, soft cap, sinks, biases | [`Seq2SeqSpec::cross_attention_options`], [`CrossAttentionSpec`] |
 //!
 //! # Roles of the stack types
@@ -44,10 +46,25 @@
 //! checks validation against direct construction of each component in both
 //! directions.
 //!
-//! `validate` checks that a spec is well formed. A few well-formed variants
-//! ([`ResidualTopology::Gated`], [`MixerSpec::Mamba2`]) are describable but not
-//! yet executable by the modular models, whose `init` rejects them with a
-//! capability error before allocating parameters.
+//! `validate` checks that a spec is well formed. One well-formed variant,
+//! [`ResidualTopology::Gated`], is describable but not executable by the
+//! modular models, whose `init` rejects it with a capability error before
+//! allocating parameters. Every other variant, [`MixerSpec::Mamba2`]
+//! included, builds and runs.
+//!
+//! # Not expressible
+//!
+//! Some mechanisms of shipped families have no spec form; their family
+//! models remain the only implementation:
+//!
+//! | mechanism | family |
+//! | --- | --- |
+//! | scale-free embedding RMS norm and the bounded logit map `T · tanh(m · z / T)` | Muse Glimmer |
+//! | learned absolute position embeddings | GPT-2 |
+//! | parallel attention and MLP branches on one residual | GPT-NeoX |
+//! | output-only sublayer norm `x + N(F(x))` | OLMo 2 |
+//! | multi-token-prediction heads | Qwen3.5, Nemotron-H |
+//! | a learned residual gate ([`ResidualTopology::Gated`]) | none; its gate is unspecified |
 
 use super::constraints::{
     ExpertCheck, HeadCheck, MlaCheck, StackCheck, attention_heads, cross_projection_fits,
@@ -1054,8 +1071,14 @@ pub enum MixerSpec {
     },
     /// Mamba2 structured state-space mixing.
     ///
-    /// Describable and validated, but not yet executable: the modular models
-    /// reject it at `init` with a capability error.
+    /// Executable: the modular models run it on the shared [`crate::mamba2`]
+    /// kernel. Settings this spec does not carry (SSD chunk width 256, the
+    /// no-op time-step bound, no projection bias, a convolution bias) take the
+    /// Hugging Face `Mamba2Config` defaults, and the gated group norm reuses
+    /// the block's mixer-norm epsilon. Construction rejects a
+    /// `convolution_kernel` below two, which the kernel cannot run. The scan
+    /// is intrinsically causal: an encoder stack or a bidirectional or custom
+    /// attention policy is rejected with a capability error.
     Mamba2(
         /// Recurrent state, head grouping, and convolution dimensions.
         Mamba2Spec,
@@ -1288,10 +1311,15 @@ impl ClampedSwiGluSpec {
     /// The shared clamped gated unit this spec describes.
     #[must_use]
     pub fn glu(&self) -> ClampedSwiGlu {
-        ClampedSwiGlu::new(self.limit)
-            .with_alpha(self.alpha)
-            .with_up_offset(self.up_offset)
+        clamped_glu(self.limit, self.alpha, self.up_offset)
     }
+}
+
+/// The shared clamped gated unit with upper gate clamp `limit`, sharpness `alpha`, and `up_offset`.
+fn clamped_glu(limit: f64, alpha: f64, up_offset: f64) -> ClampedSwiGlu {
+    ClampedSwiGlu::new(limit)
+        .with_alpha(alpha)
+        .with_up_offset(up_offset)
 }
 
 /// Sparse routed mixture-of-experts topology.
@@ -1342,6 +1370,40 @@ impl MixtureOfExpertsSpec {
         config.expert_bias = self.expert_bias;
         config
     }
+
+    /// Validates cardinalities, the routed scale, and the shared config at `hidden_size`.
+    ///
+    /// Errors name fields below `field`, such as `field.experts_per_token`.
+    fn validate_in_block(&self, field: &str, hidden_size: usize) -> Result<()> {
+        match expert_counts(
+            self.routed_experts,
+            self.experts_per_token,
+            self.expert_intermediate_size,
+        ) {
+            ExpertCheck::Empty => {
+                return Err(Error::configuration(
+                    field,
+                    "routed_experts and expert_intermediate_size must be non-zero",
+                ));
+            }
+            ExpertCheck::SelectionOutOfRange => {
+                return Err(Error::configuration(
+                    format!("{field}.experts_per_token"),
+                    "must be in 1..=routed_experts",
+                ));
+            }
+            ExpertCheck::Valid => {}
+        }
+        if !self.routed_scale.is_finite() || self.routed_scale <= 0.0 {
+            return Err(Error::configuration(
+                format!("{field}.routed_scale"),
+                "must be finite and greater than zero",
+            ));
+        }
+        self.sparse_config(hidden_size)
+            .validate()
+            .map_err(|error| nested(field, error))
+    }
 }
 
 /// Feed-forward operation attached to a transformer block.
@@ -1372,6 +1434,28 @@ pub enum FeedForwardSpec {
     ///
     /// The layer's `feed_forward_norm` is still validated but allocates no parameters.
     None,
+    /// Sparse experts whose every routed and shared expert is a clamped SwiGLU (gpt-oss).
+    ///
+    /// The sparse counterpart of [`Self::ClampedSwiGlu`]: the router, widths,
+    /// biases, and routing policy are those of `experts`, and with
+    /// `g = min(gate x, limit)` each expert computes
+    /// `down((clamp(up x, -limit, limit) + up_offset) * g * sigmoid(alpha * g))`.
+    /// gpt-oss uses `limit = 7`, `alpha = 1.702`, `up_offset = 1`. The unit
+    /// replaces the expert activation, so `experts.activation` must be
+    /// [`Activation::Silu`] (the unit's `alpha = 1` form); any other value
+    /// would be ignored and is rejected.
+    ClampedMixtureOfExperts {
+        /// Router selection and per-expert widths, biases, and routing policy.
+        experts: MixtureOfExpertsSpec,
+        /// Upper clamp of every expert's gate and symmetric clamp of its up projection.
+        limit: f64,
+        /// Sigmoid sharpness; one gives SiLU.
+        #[serde(default = "default_alpha")]
+        alpha: f64,
+        /// Constant added to every expert's clamped up projection.
+        #[serde(default)]
+        up_offset: f64,
+    },
 }
 
 impl FeedForwardSpec {
@@ -1406,37 +1490,50 @@ impl FeedForwardSpec {
                     .validate()
                     .map_err(|error| nested(field, error))
             }
-            Self::MixtureOfExperts(spec) => {
-                match expert_counts(
-                    spec.routed_experts,
-                    spec.experts_per_token,
-                    spec.expert_intermediate_size,
-                ) {
-                    ExpertCheck::Empty => {
-                        return Err(Error::configuration(
-                            field,
-                            "routed_experts and expert_intermediate_size must be non-zero",
-                        ));
-                    }
-                    ExpertCheck::SelectionOutOfRange => {
-                        return Err(Error::configuration(
-                            format!("{field}.experts_per_token"),
-                            "must be in 1..=routed_experts",
-                        ));
-                    }
-                    ExpertCheck::Valid => {}
-                }
-                if !spec.routed_scale.is_finite() || spec.routed_scale <= 0.0 {
+            Self::MixtureOfExperts(spec) => spec.validate_in_block(field, hidden_size),
+            Self::ClampedMixtureOfExperts {
+                experts,
+                limit,
+                alpha,
+                up_offset,
+            } => {
+                experts.validate_in_block(&format!("{field}.experts"), hidden_size)?;
+                if experts.activation != Activation::Silu {
                     return Err(Error::configuration(
-                        format!("{field}.routed_scale"),
-                        "must be finite and greater than zero",
+                        format!("{field}.experts.activation"),
+                        "the clamped unit replaces the expert activation; use silu",
                     ));
                 }
-                spec.sparse_config(hidden_size)
+                clamped_glu(*limit, *alpha, *up_offset)
                     .validate()
-                    .map_err(|error| nested(field, error))
+                    .map_err(|error| Error::configuration(format!("{field}.glu"), reason_of(error)))
             }
             Self::None => Ok(()),
+        }
+    }
+
+    /// The sparse experts of either expert variant, or `None` for dense and absent branches.
+    #[must_use]
+    pub const fn experts(&self) -> Option<&MixtureOfExpertsSpec> {
+        match self {
+            Self::MixtureOfExperts(experts) | Self::ClampedMixtureOfExperts { experts, .. } => {
+                Some(experts)
+            }
+            Self::Dense(_) | Self::Ungated(_) | Self::ClampedSwiGlu(_) | Self::None => None,
+        }
+    }
+
+    /// The clamped unit of [`Self::ClampedMixtureOfExperts`] experts, or `None` for other branches.
+    #[must_use]
+    pub fn expert_glu(&self) -> Option<ClampedSwiGlu> {
+        match self {
+            Self::ClampedMixtureOfExperts {
+                limit,
+                alpha,
+                up_offset,
+                ..
+            } => Some(clamped_glu(*limit, *alpha, *up_offset)),
+            _ => None,
         }
     }
 }
@@ -1465,8 +1562,14 @@ pub enum ResidualTopology {
     Add,
     /// Apply a learned multiplicative gate before the residual addition.
     ///
-    /// Reserved: the gate's activation, shape, and initialization are not yet
-    /// specified, so the modular models reject it at `init`.
+    /// Reserved, and rejected by the modular models' `init` with a capability
+    /// error. No shipped family or pinned reference uses a learned residual
+    /// gate, so its activation, shape, and initialization are unspecified
+    /// (LayerScale's per-channel `x + γ ⊙ F(x)`, ReZero's scalar, and
+    /// input-dependent highway gates are all candidates), and executing one
+    /// would add gate parameters to every block, changing the binary record
+    /// layout of existing modular checkpoints. A gate added later should be a
+    /// separately named, fully specified variant.
     Gated,
 }
 
@@ -1520,6 +1623,65 @@ impl DecoderLayerSpec {
 ///
 /// [`Seq2SeqSpec`] reuses this type for its bidirectional encoder stack; the
 /// vocabulary then describes the source tokens.
+///
+/// # Example
+///
+/// The README's two-block grouped-query decoder with RoPE, Q/K norms, and
+/// SwiGLU. Its readout multipliers stay `None`; a Gemma 2 recipe sets
+/// `embedding_scale: Some((hidden_size as f64).sqrt())` and
+/// `final_logit_softcap: Some(30.0)`.
+///
+/// ```
+/// use burn::backend::Flex;
+/// use transformers::{
+///     architecture::{
+///         Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+///         FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+///         ResidualTopology, RopeScaling,
+///     },
+///     models::custom::ModularCausalLm,
+/// };
+///
+/// let norm = NormalizationSpec::Rms { epsilon: 1e-6, zero_centered: false };
+/// let block = DecoderLayerSpec {
+///     mixer: MixerSpec::Attention(AttentionSpec {
+///         query_heads: 4,
+///         key_value_heads: 2,
+///         head_dim: 16,
+///         query_key_norm: true,
+///         output_gate: false,
+///         position: PositionEncodingSpec::Rope {
+///             theta: 10_000.0,
+///             rotary_dim: 16,
+///             scaling: RopeScaling::None,
+///         },
+///     }),
+///     feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+///         intermediate_size: 128,
+///         activation: Activation::Silu,
+///         bias: false,
+///     }),
+///     mixer_norm: norm,
+///     feed_forward_norm: norm,
+///     norm_placement: NormPlacement::Pre,
+///     residual: ResidualTopology::Add,
+/// };
+/// let spec = DecoderSpec {
+///     vocabulary_size: 256,
+///     hidden_size: 64,
+///     layers: vec![block; 2],
+///     final_norm: norm,
+///     tie_word_embeddings: true,
+///     max_position_embeddings: 128,
+///     embedding_scale: None,
+///     final_logit_softcap: None,
+/// };
+/// // N(0, 0.02^2) weights with GPT-2 depth scaling of the residual writers.
+/// let policy = ModularCausalLm::<Flex>::scaled_init_policy(&spec, 0.02);
+/// let model = ModularCausalLm::<Flex>::init_with(spec, &policy, &Default::default())?;
+/// assert_eq!(model.spec().layers.len(), 2);
+/// # Ok::<(), transformers::Error>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DecoderSpec {
     /// Token vocabulary cardinality.
@@ -1534,10 +1696,35 @@ pub struct DecoderSpec {
     pub tie_word_embeddings: bool,
     /// Maximum supported logical position.
     pub max_position_embeddings: usize,
+    /// Optional multiplier `s` on looked-up token embeddings: `h_0 = s · E[token]`.
+    ///
+    /// Gemma 2 and 3 use `s = sqrt(hidden_size)`. The product runs in the
+    /// embedding dtype with `s` rounded to that dtype through F32 (F64 keeps
+    /// it exact), as the Gemma family and Gemma 3's F32 normalizer buffer
+    /// round it, so a BF16 stack with `hidden_size = 3072` scales by `55.5`.
+    /// For every shipped Gemma width this also equals Gemma 2's direct
+    /// rounding of the `f64` root. The scaled embedding
+    /// is the stack's `embedding` activation point and the input of block 0;
+    /// a tied vocabulary projection still reads the unscaled table. `None`,
+    /// the default and the form of every earlier serialized spec, leaves
+    /// embeddings unscaled. A present value must be finite and positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_scale: Option<f64>,
+    /// Optional tanh soft cap `c` on vocabulary logits: `logits = c · tanh(z / c)`.
+    ///
+    /// Gemma 2 caps final logits with `c = 30`. The cap follows the tied or
+    /// independent vocabulary projection and runs in the logits' dtype, so
+    /// every logit lies in `[-c, c]` (`tanh` saturates to one in floating
+    /// point). `None`, the default and the form of every earlier serialized
+    /// spec, leaves logits uncapped. A present value must be finite and
+    /// positive; the encoder stack of a [`Seq2SeqSpec`] has no vocabulary
+    /// readout and rejects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_logit_softcap: Option<f64>,
 }
 
 impl DecoderSpec {
-    /// Validates global dimensions and every layer specification.
+    /// Validates global dimensions, the readout multipliers, and every layer specification.
     pub fn validate(&self) -> Result<()> {
         let failure = match stack_dimensions(
             self.vocabulary_size,
@@ -1555,6 +1742,17 @@ impl DecoderSpec {
             return Err(Error::configuration(field, reason));
         }
         self.final_norm.validate("final_norm")?;
+        for (field, value) in [
+            ("embedding_scale", self.embedding_scale),
+            ("final_logit_softcap", self.final_logit_softcap),
+        ] {
+            if value.is_some_and(|value| !(value.is_finite() && value > 0.0)) {
+                return Err(Error::configuration(
+                    field,
+                    "must be finite and greater than zero when present",
+                ));
+            }
+        }
         for (index, layer) in self.layers.iter().enumerate() {
             layer.validate_at(&format!("layers[{index}]"), self.hidden_size)?;
         }
@@ -1587,9 +1785,18 @@ impl Seq2SeqSpec {
     /// Cross-attention projects `hidden_size -> heads * head_dim -> hidden_size`,
     /// so the inner width may differ from the residual width (as in T5-3B/11B);
     /// it must only be nonzero and its projection matrices must not overflow.
+    ///
+    /// The encoder stack has no vocabulary readout, so an encoder
+    /// `final_logit_softcap` would be ignored and is rejected.
     pub fn validate(&self) -> Result<()> {
         self.encoder.validate()?;
         self.decoder.validate()?;
+        if self.encoder.final_logit_softcap.is_some() {
+            return Err(Error::configuration(
+                "encoder.final_logit_softcap",
+                "the encoder stack has no vocabulary readout; cap the decoder's logits instead",
+            ));
+        }
         if self.encoder.hidden_size != self.decoder.hidden_size {
             return Err(Error::configuration(
                 "decoder.hidden_size",

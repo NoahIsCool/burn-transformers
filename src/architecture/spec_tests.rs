@@ -47,6 +47,8 @@ fn decoder() -> DecoderSpec {
         },
         tie_word_embeddings: false,
         max_position_embeddings: 256,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 
@@ -1257,6 +1259,12 @@ fn legacy_serialized_specs_load_with_default_options() {
     let spec: Seq2SeqSpec = serde_json::from_str(json).unwrap();
     spec.validate().unwrap();
     assert_eq!(spec.cross_attention_options, AttentionOptions::default());
+    for stack in [&spec.encoder, &spec.decoder] {
+        assert_eq!(
+            (stack.embedding_scale, stack.final_logit_softcap),
+            (None, None)
+        );
+    }
     let MixerSpec::Mla(mla) = &spec.encoder.layers[0].mixer else {
         panic!("expected MLA");
     };
@@ -1553,6 +1561,194 @@ fn feed_forward_variants_report_each_invalid_field() {
         panic!("expected clamped SwiGLU");
     };
     assert_eq!((defaults.alpha, defaults.up_offset), (1.0, 0.0));
+}
+
+/// gpt-oss-shaped experts: four routed experts, two per token, biased router and projections.
+fn gpt_oss_experts() -> MixtureOfExpertsSpec {
+    MixtureOfExpertsSpec {
+        routed_experts: 4,
+        experts_per_token: 2,
+        shared_experts: 0,
+        expert_intermediate_size: 16,
+        activation: Activation::Silu,
+        renormalize_selected: false,
+        routed_scale: 1.0,
+        routing: RoutingPolicy {
+            router_bias: true,
+            ..RoutingPolicy::default()
+        },
+        shared_expert_gate: false,
+        expert_bias: true,
+    }
+}
+
+/// Clamped experts validate their expert bank below `experts`, require SiLU, and check the unit.
+///
+/// Expert-bank errors keep the plain variant's field names one level deeper,
+/// an activation the unit would ignore names `experts.activation`, and an
+/// invalid clamp names `glu`, as the dense clamped variant does.
+#[test]
+fn clamped_experts_report_each_invalid_field() {
+    let clamped = |experts: MixtureOfExpertsSpec, limit: f64, alpha: f64| {
+        FeedForwardSpec::ClampedMixtureOfExperts {
+            experts,
+            limit,
+            alpha,
+            up_offset: 1.0,
+        }
+    };
+    let valid = clamped(gpt_oss_experts(), 7.0, 1.702);
+    valid.validate("ffn").unwrap();
+    assert_eq!(valid.experts(), Some(&gpt_oss_experts()));
+    assert_eq!(
+        valid.expert_glu(),
+        Some(
+            ClampedSwiGlu::new(7.0)
+                .with_alpha(1.702)
+                .with_up_offset(1.0)
+        )
+    );
+    let too_many = MixtureOfExpertsSpec {
+        experts_per_token: 5,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(too_many, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.experts_per_token",
+    );
+    let empty = MixtureOfExpertsSpec {
+        routed_experts: 0,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(clamped(empty, 7.0, 1.702).validate("ffn"), "ffn.experts");
+    let unscaled = MixtureOfExpertsSpec {
+        routed_scale: 0.0,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(unscaled, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.routed_scale",
+    );
+    let gelu = MixtureOfExpertsSpec {
+        activation: Activation::Gelu,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(gelu, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.activation",
+    );
+    assert_configuration_field(
+        clamped(gpt_oss_experts(), 0.0, 1.702).validate("ffn"),
+        "ffn.glu",
+    );
+    assert_configuration_field(
+        clamped(gpt_oss_experts(), 7.0, f64::INFINITY).validate("ffn"),
+        "ffn.glu",
+    );
+    // Shared-config checks (here a gate without shared experts) are nested too.
+    let ungated_gate = MixtureOfExpertsSpec {
+        shared_expert_gate: true,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(ungated_gate, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.moe.shared_expert_gate",
+    );
+    // Dense and absent branches have neither experts nor an expert unit.
+    for other in [FeedForwardSpec::None, dense_layer().feed_forward] {
+        assert!(other.experts().is_none() && other.expert_glu().is_none());
+    }
+    let plain = FeedForwardSpec::MixtureOfExperts(gpt_oss_experts());
+    assert_eq!(plain.experts(), Some(&gpt_oss_experts()));
+    assert!(plain.expert_glu().is_none());
+}
+
+/// Clamped experts round-trip through JSON, and `alpha` and `up_offset` default to SiLU, no offset.
+#[test]
+fn clamped_experts_round_trip_and_default_their_unit() {
+    let mut spec = decoder();
+    spec.layers[0].feed_forward = FeedForwardSpec::ClampedMixtureOfExperts {
+        experts: gpt_oss_experts(),
+        limit: 7.0,
+        alpha: 1.702,
+        up_offset: 1.0,
+    };
+    spec.validate().unwrap();
+    let json = serde_json::to_string(&spec).unwrap();
+    assert!(
+        json.contains(r#""kind":"clamped_mixture_of_experts""#),
+        "{json}"
+    );
+    assert_eq!(serde_json::from_str::<DecoderSpec>(&json).unwrap(), spec);
+    let minimal: FeedForwardSpec = serde_json::from_str(
+        r#"{"kind": "clamped_mixture_of_experts", "limit": 7.0, "experts": {
+            "routed_experts": 4, "experts_per_token": 2, "shared_experts": 0,
+            "expert_intermediate_size": 16, "activation": "silu",
+            "renormalize_selected": false, "routed_scale": 1.0}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        minimal.expert_glu(),
+        Some(ClampedSwiGlu::new(7.0).with_alpha(1.0).with_up_offset(0.0))
+    );
+}
+
+/// Embedding scales and final logit caps must be finite and positive when present.
+#[test]
+fn readout_multipliers_must_be_finite_and_positive() {
+    for field in ["embedding_scale", "final_logit_softcap"] {
+        let with = |value: f64| {
+            let mut spec = decoder();
+            match field {
+                "embedding_scale" => spec.embedding_scale = Some(value),
+                _ => spec.final_logit_softcap = Some(value),
+            }
+            spec
+        };
+        with(30.0).validate().unwrap();
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_configuration_field(with(invalid).validate(), field);
+        }
+    }
+    // A cap on the encoder, which has no vocabulary readout, would be ignored.
+    let mut seq2seq = Seq2SeqSpec {
+        encoder: decoder(),
+        decoder: decoder(),
+        cross_attention_heads: 4,
+        cross_attention_head_dim: 8,
+        cross_attention_options: AttentionOptions::default(),
+    };
+    seq2seq.encoder.embedding_scale = Some(2.0);
+    seq2seq.decoder.final_logit_softcap = Some(30.0);
+    seq2seq.validate().unwrap();
+    seq2seq.encoder.final_logit_softcap = Some(30.0);
+    assert_configuration_field(seq2seq.validate(), "encoder.final_logit_softcap");
+}
+
+/// Readout multipliers round-trip, are omitted from JSON when absent, and default to absent.
+///
+/// Omitting `None` keeps the serialized form of every earlier spec
+/// byte-for-byte, and specs serialized before the fields existed load with
+/// both absent (see also [`legacy_serialized_specs_load_with_default_options`]).
+#[test]
+fn readout_multipliers_round_trip_and_default_to_absent() {
+    let plain = serde_json::to_string(&decoder()).unwrap();
+    assert!(
+        !plain.contains("embedding_scale") && !plain.contains("final_logit_softcap"),
+        "{plain}"
+    );
+    let gemma = DecoderSpec {
+        embedding_scale: Some(32f64.sqrt()),
+        final_logit_softcap: Some(30.0),
+        ..decoder()
+    };
+    let json = serde_json::to_string(&gemma).unwrap();
+    assert_eq!(serde_json::from_str::<DecoderSpec>(&json).unwrap(), gemma);
+    let legacy: DecoderSpec = serde_json::from_str(&plain).unwrap();
+    assert_eq!(
+        (legacy.embedding_scale, legacy.final_logit_softcap),
+        (None, None)
+    );
 }
 
 /// Cross-attention options must keep global connectivity and name their own fields.

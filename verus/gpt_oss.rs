@@ -77,18 +77,23 @@
 //!   exactly `⌊L / 2⌋` layers are full-attention layers;
 //! - `ring_assignment` activates the ring exactly for a shared window
 //!   `0 < W < capacity` and then puts exactly the sliding layers in it;
-//!   `cache_slots` numbers each KV group's layers by an order-preserving
-//!   bijection onto `0..size`, and the two sizes partition the layers;
-//!   `group_indices` numbers the allocated groups densely, full storage
-//!   first; `truncation_leaves_bytes` is exactly "some row is shortened to a
-//!   nonzero length", the condition that clears clean tails;
+//!   `cache_slots` (shared, see below) numbers each KV group's layers by an
+//!   order-preserving bijection onto `0..size`, and the two sizes partition
+//!   the layers; `group_indices` numbers the allocated groups densely, full
+//!   storage first; `truncation_leaves_bytes` is exactly "some row is
+//!   shortened to a nonzero length", the condition that clears clean tails;
 //! - `fused_expert_elements` returns `2f · d · E` exactly when every partial
 //!   product (`2f`, `2f · d`, `2f · d · E`) fits `usize` (the configuration's
 //!   overflow check); `checkpoint_extent` is `Some(v)` exactly when `v` fits
 //!   `u64`, and `projection_extent` is exactly `heads · head_dim` or names
 //!   the `usize` or `u64` overflow; `derived_head_dim` is `hidden / heads`,
 //!   or zero without heads; `widest_context` is the largest active row's
-//!   rotary context, 1 when no row is active;
+//!   rotary context, 1 when no row is active. `cache_slots`,
+//!   `group_indices`, `truncation_leaves_bytes`, the checkpoint extents,
+//!   `derived_head_dim`, and `widest_context` are the shared decoder
+//!   planning (`src/models/shared/decoder_plan.rs`) that the family plan
+//!   re-exports; it is included at its crate path and re-verified here, with
+//!   `verus/models.rs` as its home harness;
 //! - `interleaved_offset` locates gate output `j` at column `2j` and up output
 //!   `j` at column `2j + 1` of a row of the stacked `gate_up_proj`, provably
 //!   inside the `[experts, rows, 2 · width]` tensor; the lemmas
@@ -126,6 +131,17 @@
 
 #[path = "../src/checkpoint/mxfp4.rs"]
 pub mod mxfp4;
+
+#[path = "../src/models/shared/decoder_plan.rs"]
+pub mod shared_decoder_plan;
+
+/// Mirrors the crate paths `crate::models::shared::*` used by the family plan.
+pub mod models {
+    /// Model-independent family glue.
+    pub mod shared {
+        pub use crate::shared_decoder_plan as decoder_plan;
+    }
+}
 
 #[path = "../src/models/gpt_oss/plan.rs"]
 pub mod plan;
