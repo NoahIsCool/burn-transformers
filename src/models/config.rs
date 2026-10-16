@@ -917,7 +917,7 @@ pub const MAX_LAYERS: usize = 1 << 18;
 /// experts exactly, as the length of their whole contract.
 pub const MAX_EXPERTS: usize = 1 << 20;
 
-// `MAX_LAYERS` is the largest power of two whose densest contract fits the limit.
+/// Compile-time check of the [`MAX_LAYERS`] derivation: the largest power of two that fits.
 const _: () = assert!(
     MAX_LAYERS.is_power_of_two()
         && MAX_LAYERS * MAX_TENSORS_PER_LAYER <= MAX_CHECKPOINT_TENSORS
