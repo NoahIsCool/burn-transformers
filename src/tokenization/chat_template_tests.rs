@@ -288,6 +288,11 @@ fn keyword_rewrite_is_minimal_and_skips_text_comments_and_strings() {
             "{{ f('k=v if c else d', k=x == y) }}{{ a if b else c }}",
         ),
         ("{{ é(k=v if c else 'é') }}", "{{ é(k=(v if c else 'é')) }}"),
+        // Underscore identifiers are keywords; a number may end the tag body.
+        (
+            "{{ f(_k=v if c else 2, m=1) if d else 42}}",
+            "{{ f(_k=(v if c else 2), m=1) if d else 42}}",
+        ),
         ("{{ f(k=v if c else d", "{{ f(k=v if c else d"),
         (
             "plain text without conditionals",

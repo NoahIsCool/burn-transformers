@@ -764,3 +764,97 @@ fn namespace_registry_clears_identifier_attributes() {
         !is_identifier("") && !is_identifier("1a") && !is_identifier("a b") && !is_identifier("é")
     );
 }
+
+/// Asserts that rendering `source` under generous limits fails with exactly `detail`.
+fn assert_render_error(source: &str, detail: &str) {
+    let error = render(source).expect_err(source);
+    assert!(format!("{error:#}").contains(detail), "{source}: {error:#}");
+}
+
+/// Repetition is commutative over a sequence and refuses counts whose size overflows.
+#[test]
+fn repetition_accepts_either_operand_order_and_refuses_overflowing_counts() {
+    assert_eq!(render("{{ 3 * [1, 2] }}").unwrap(), "[1, 2, 1, 2, 1, 2]");
+    assert_eq!(render("{{ 2 * 'ab' }}").unwrap(), "abab");
+    // `usize::MAX / 2 < 9223372036854775807 * 3`, so the byte and item counts overflow.
+    assert_render_error(
+        "{{ 'abc' * 9223372036854775807 }}",
+        "string repetition `*` of 3 bytes 9223372036854775807 times overflows",
+    );
+    assert_render_error(
+        "{{ [1, 2, 3] * 9223372036854775807 }}",
+        "sequence repetition `*` of 3 items 9223372036854775807 times overflows",
+    );
+}
+
+/// Operand mixes MiniJinja rejects remain its errors rather than resource-limit errors.
+#[test]
+fn rejected_operand_mixes_are_minijinja_errors() {
+    for source in [
+        "{{ [1] + 2 }}",
+        "{{ [1]|dictsort }}",
+        "{{ 'abc' is startingwith(x=1) }}",
+        "{{ 'abc'|replace('a', x='b') }}",
+    ] {
+        let error = render(source).expect_err(source);
+        assert!(
+            !format!("{error:#}").contains("resource limit"),
+            "{source}: {error:#}"
+        );
+    }
+    assert_render_error(
+        "{{ 'abc' is startingwith(x=1) }}",
+        "cannot convert kwargs to string",
+    );
+}
+
+/// `chain` merges maps lazily but materializes a map mixed with a sequence.
+#[test]
+fn chain_materializes_a_map_mixed_with_a_sequence() {
+    assert_eq!(render("{{ {'a': 1}|chain([2]) }}").unwrap(), "['a', 2]");
+    assert_eq!(
+        render("{{ ({'a': 1}|chain({'b': 2}))|list }}").unwrap(),
+        "['a', 'b']"
+    );
+}
+
+/// Namespace attributes that templates cannot assign by name are left to the drop.
+///
+/// `{% set ns.name = ... %}` accepts identifiers only, so a key such as
+/// `"not an id"` (from `namespace(mapping)`) can never close a cycle and the
+/// cleanup plan skips it, while the identifier key holding a list is cleared.
+#[test]
+fn namespace_cleanup_skips_attributes_without_identifier_names() {
+    let registry = Arc::new(NamespaceRegistry::default());
+    let budget = Arc::new(RenderBudget::new(RenderLimits::for_context_bytes(0)));
+    let mut environment = Environment::new();
+    install_namespace_registry(&mut environment, &registry, &budget);
+    environment
+        .render_str(
+            "{% set ns = namespace({'not an id': [1], 'ok': [2]}) %}{{ ns['not an id'] }}",
+            (),
+        )
+        .unwrap();
+    let plan = registry.cleanup_plan();
+    assert_eq!(plan.names().collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(plan.assignments(), 1);
+}
+
+/// Printing failures name the operation and tell a limit apart from a value's own failure.
+#[test]
+fn printing_errors_distinguish_limits_from_failing_values() {
+    let budget = RenderBudget::new(SMALL);
+    let failed = printing_error(&budget, "pprint", false);
+    assert_eq!(failed.kind(), ErrorKind::InvalidOperation);
+    assert_eq!(failed.detail(), Some("pprint failed to print a value"));
+    let limited = printing_error(&budget, "pprint", true);
+    assert!(
+        limited
+            .detail()
+            .is_some_and(|detail| detail.contains("pprint would print more than the 64 bytes")),
+        "{limited:#}"
+    );
+    let bare = without_location(&Error::from(ErrorKind::UndefinedError));
+    assert_eq!(bare.kind(), ErrorKind::UndefinedError);
+    assert_eq!(bare.detail(), None);
+}

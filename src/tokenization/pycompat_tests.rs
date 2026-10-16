@@ -463,3 +463,82 @@ fn json_value() -> impl Strategy<Value = serde_json::Value> {
         ]
     })
 }
+
+/// Reprs escape carriage returns and invisible format characters as CPython does.
+///
+/// Expected text: CPython 3.11 `str([...])`, `json.dumps`, and `str` methods.
+#[test]
+fn reprs_escape_invisible_characters_and_non_finite_numbers() {
+    assert_eq!(
+        rendered(
+            "{{ [s] }}|{{ [1e308 * 10, -1e308 * 10, (1e308 * 10) - (1e308 * 10)] }}|{{ [1e308 * 10, (1e308 * 10) - (1e308 * 10)] | tojson }}",
+            json!({"s": "a\rb|\u{200b}|\u{2028}|\u{2060}|\u{feff}|\u{200f}|\u{202e}|\u{206f}"}),
+        ),
+        "['a\\rb|\\u200b|\\u2028|\\u2060|\\ufeff|\\u200f|\\u202e|\\u206f']|[inf, -inf, nan]|[Infinity, NaN]"
+    );
+}
+
+/// `tojson` follows `json.dumps` for boolean indents, explicit `None`s, and boolean keys.
+#[test]
+fn tojson_accepts_boolean_indents_explicit_nones_and_boolean_keys() {
+    assert_eq!(
+        rendered(
+            "{{ v | tojson(false, true) }}|{{ v | tojson(indent=false) }}|{{ v | tojson(indent=none, separators=none) }}|{{ {false: 2, true: 1} | tojson }}|{{ s | tojson }}",
+            json!({"v": {"a": [1]}, "s": "a\u{8}b\u{c}c"}),
+        ),
+        "{\n \"a\": [\n  1\n ]\n}|{\n\"a\": [\n1\n]\n}|{\"a\": [1]}|{\"false\": 2, \"true\": 1}|\"a\\bb\\fc\""
+    );
+    // An unserializable member fails the whole value, as `json.dumps` raises.
+    let error = render("{{ {'a': missing} | tojson }}", json!({})).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is not JSON serializable"),
+        "{error:#}"
+    );
+}
+
+/// `join` and `trim` accept positional attributes and explicit `None` like Jinja2.
+///
+/// A digit-only attribute part indexes a list; any other part, such as `-1`,
+/// is a string key and yields an undefined (empty) item, as in Jinja2's
+/// `make_attrgetter`. A non-string attribute indexes the item directly.
+#[test]
+fn join_and_trim_accept_positional_and_none_arguments() {
+    assert_eq!(
+        rendered(
+            "{{ rows | join(', ', 'name') }}|{{ [1, 2] | join(',', none) }}|{{ pairs | join(',', 1) }}|{{ pairs | join(',', '-1') }}|{{ '  x  ' | trim(none) }}",
+            json!({"rows": [{"name": "a"}, {"name": "b"}], "pairs": [[1, 2], [3, 4]]}),
+        ),
+        "a, b|1,2|2,4|,|x"
+    );
+}
+
+/// Whitespace-only `rsplit()` is empty, and digits alone are neither lower nor upper case.
+#[test]
+fn uncased_and_whitespace_only_strings_follow_cpython() {
+    assert_eq!(
+        rendered(
+            "{{ '   '.rsplit() }}|{{ '123'.islower() }}|{{ '123'.isupper() }}",
+            json!({}),
+        ),
+        "[]|False|False"
+    );
+}
+
+/// Values without a Python repr keep MiniJinja's spelling, within the printing limit.
+#[test]
+fn foreign_values_print_with_minijinja_spelling_within_the_limit() {
+    let printed = rendered("{% macro m() %}{% endmacro %}{{ [m] }}", json!({}));
+    assert!(
+        printed.starts_with('[') && printed.ends_with(']') && printed.contains('m'),
+        "{printed}"
+    );
+    let mut out = String::new();
+    let error = display_into(&Value::from("abcdef"), &mut out, 3).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("would exceed the 3 bytes"),
+        "{error:#}"
+    );
+    assert!(out.is_empty());
+    display_into(&Value::from("abc"), &mut out, 3).unwrap();
+    assert_eq!(out, "abc");
+}

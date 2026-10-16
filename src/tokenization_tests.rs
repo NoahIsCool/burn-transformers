@@ -451,6 +451,24 @@ fn local_artifacts_reject_escaping_symlinks() {
     );
 }
 
+/// An optional artifact that cannot be resolved is an I/O error, not a missing file.
+///
+/// Only `NotFound` means "absent"; a symlink loop names the unreadable path.
+#[cfg(unix)]
+#[test]
+fn optional_artifacts_that_cannot_be_resolved_are_errors() {
+    let directory = fixture(base_config());
+    let looped = directory.path().join("special_tokens_map.json");
+    std::os::unix::fs::symlink(&looped, &looped).unwrap();
+    let error = LocalTokenizer::from_directory(directory.path()).unwrap_err();
+    assert!(
+        matches!(&error, Error::Io { path, source }
+            if path.ends_with("special_tokens_map.json")
+                && source.kind() != std::io::ErrorKind::NotFound),
+        "{error}"
+    );
+}
+
 /// Metadata objects, sides and standalone template files are validated independently.
 #[test]
 fn validates_metadata_objects_and_standalone_chat_templates() {
@@ -1360,7 +1378,7 @@ fn continue_final_message_leaves_the_final_turn_open() {
         blocks.render_chat(&structured, &options).unwrap(),
         "[first][second"
     );
-    // Whitespace trimmed by the template after the marker is trimmed from the prompt too.
+    // Everything the template renders after the final message is cut.
     let (_directory, trimming) = chat_fixture("{{ messages[0].content | trim }}  END");
     assert_eq!(
         trimming
@@ -1368,6 +1386,20 @@ fn continue_final_message_leaves_the_final_turn_open() {
             .unwrap(),
         "go"
     );
+    // Trailing spacing survives when the template keeps the text intact, and
+    // is trimmed from the prompt when the template trimmed it.
+    let spaced = [ChatMessage::text("assistant", "go ")];
+    for (template, expected) in [
+        ("{{ messages[0].content }}END", "go "),
+        ("{{ messages[0].content | trim }}END", "go"),
+    ] {
+        let (_directory, tokenizer) = chat_fixture(template);
+        assert_eq!(
+            tokenizer.render_chat(&spaced, &options).unwrap(),
+            expected,
+            "{template}"
+        );
+    }
     for (messages, template, expected) in [
         (
             vec![ChatMessage::new("assistant", Value::Null)],
@@ -1735,6 +1767,35 @@ fn decode_stream_withholds_incomplete_trailing_characters() {
     // Unknown IDs decode to nothing, as with `decode`.
     let mut stream = tokenizer.decode_stream(false);
     assert_eq!(stream.step(u32::MAX).unwrap(), None);
+}
+
+/// A decoder that rewrites already-streamed text is reported with the offending token.
+///
+/// `Fuse` then `Replace("helloworld" -> "X")` turns `hello world hello` into
+/// `Xhello`, which no longer begins with the `hello` the stream has emitted.
+#[test]
+fn decode_stream_rejects_decoders_that_rewrite_emitted_text() {
+    use tokenizers::{
+        DecoderWrapper,
+        decoders::{fuse::Fuse, sequence::Sequence},
+        normalizers::replace::Replace,
+    };
+    let directory = fixture_with(base_config(), |tokenizer| {
+        tokenizer.with_decoder(Some(DecoderWrapper::Sequence(Sequence::new(vec![
+            DecoderWrapper::Fuse(Fuse::new()),
+            DecoderWrapper::Replace(Replace::new("helloworld", "X").unwrap()),
+        ]))));
+    });
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    let mut stream = tokenizer.decode_stream(false);
+    assert_eq!(stream.step(4).unwrap().as_deref(), Some("hello"));
+    assert_eq!(stream.step(5).unwrap(), None);
+    let error = stream.step(4).unwrap_err();
+    assert!(
+        matches!(&error, Error::Tokenizer(reason)
+            if reason.starts_with("failed to decode streamed token 4: ")),
+        "{error}"
+    );
 }
 
 proptest::proptest! {
