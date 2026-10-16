@@ -279,6 +279,12 @@ pub fn argmax(probabilities: &[f64]) -> Result<u32> {
 /// For `u` in `[0, 1)` the threshold rounds strictly below the total, and the
 /// running sum only grows at positive weights, so the result always has
 /// positive weight; zero-weight tokens are never returned.
+///
+/// # Errors
+///
+/// Returns [`Error::Generation`] when `uniform` is outside `[0, 1)`, a weight
+/// is negative or non-finite, the weights sum to zero, or the sum of the
+/// finite weights overflows `f64`.
 pub fn sample_weights(weights: &[f64], uniform: f64) -> Result<u32> {
     if !(0.0..1.0).contains(&uniform) {
         return Err(Error::Generation(format!(
@@ -293,8 +299,15 @@ pub fn sample_weights(weights: &[f64], uniform: f64) -> Result<u32> {
             "sampling weights must be finite and non-negative".into(),
         ));
     }
+    // Every weight is finite and non-negative here, so the total is either
+    // `+inf` (the finite weights overflowed when summed) or finite and >= 0.
     let total = weights.iter().sum::<f64>();
-    if !(total.is_finite() && total > 0.0) {
+    if total == f64::INFINITY {
+        return Err(Error::Generation(
+            "sampling weights sum overflows f64".into(),
+        ));
+    }
+    if total <= 0.0 {
         return Err(Error::Generation(
             "sampling weights have no positive probability mass".into(),
         ));
