@@ -545,10 +545,14 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
         # is diagnostic; the verified final archive still requires clean Git.
         # Cargo's verification only builds the extracted archive, so its test
         # suite runs there too: tests must not read files the archive omits.
+        # Like the verification build, the tests share Cargo's normal target
+        # directory; otherwise every dependency would be rebuilt inside the
+        # archive directory, which the next `cargo package` deletes.
         return [
             cargo + ["package"] + manifest + locked + ["--list"],
             cargo + ["package"] + manifest + locked,
-            cargo + ["test", "--manifest-path", str(package_directory() / "Cargo.toml")] + locked,
+            cargo + ["test", "--manifest-path", str(package_directory() / "Cargo.toml")] + locked
+            + ["--target-dir", str(cargo_target_directory())],
         ]
     if gate == "guides":
         # write_guide_doctests prepares this scratch crate before the command

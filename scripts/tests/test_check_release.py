@@ -751,7 +751,12 @@ class ReleaseGateTests(unittest.TestCase):
                 GATES.validate_package_listing(base + entry + "\n")
 
     def test_package_gate_runs_the_archive_test_suite(self):
-        """Cargo's verification only builds the archive; the gate also runs its tests."""
+        """Cargo's verification only builds the archive; the gate also runs its tests.
+
+        The tests reuse Cargo's normal target directory, as package verification
+        does: without it Cargo would build every dependency again inside the
+        extracted archive, which the next ``cargo package`` deletes.
+        """
 
         for target, expected in ((None, GATES.CRATE / "target"), ("/explicit/target", Path("/explicit/target")),
                                  ("relative-target", GATES.CRATE / "relative-target")):
@@ -763,6 +768,8 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertEqual(archive_tests[:3], ["cargo", "+stable", "test"])
             manifest = Path(archive_tests[archive_tests.index("--manifest-path") + 1])
             self.assertEqual(manifest, expected / "package/transformers-0.1.0/Cargo.toml")
+            self.assertEqual(archive_tests.count("--target-dir"), 1)
+            self.assertEqual(Path(archive_tests[archive_tests.index("--target-dir") + 1]), expected)
             self.assertIn("--locked", archive_tests)
             self.assertIn("--offline", archive_tests)
             self.assertTrue(GATES.command_compiles(archive_tests))

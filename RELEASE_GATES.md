@@ -241,7 +241,8 @@ Source/MSRV audit groups require the full repository checkout: Cargo excludes
 nested standalone packages from source archives, including the development-only
 Rust classifier. The archive does carry the Verus harnesses and their guide,
 because `tests/verus_harness.rs` reads them. After `cargo package` builds the
-extracted archive, the package gate runs its default `cargo test` there, so a
+extracted archive, the package gate runs its default `cargo test` there (in
+Cargo's normal target directory, as the verification build does), so a
 test that reads a file the archive omits fails the gate; the archive still does
 not run repository-only tooling (fuzzing, CI, the coverage classifier).
 The archive is about 28 MiB compressed, mostly `acceptance/` records that the
