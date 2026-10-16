@@ -637,24 +637,28 @@ The supervised memory run (`scripts/profile_process_memory.py`
 around `qwen::qwen35_metal_baseline_benchmark`, one Metal job at a time) was
 repeated on today's host for three source revisions: `103c6ff` (this
 repository's September 10 state), `5ab1fa6` (the pre-polish `main`, September
-12) and `ac07281`. Sampled
-per-phase maxima of physical footprint (resident set in parentheses), in GB:
+12) and `ac07281`, and once more at this branch's `9e04750` after review
+fixes (22:54–22:58 local time, AC power, load averages 19–26, no other test
+binary running). Sampled per-phase maxima of physical footprint (resident set
+in parentheses), in GB of 10⁹ bytes, each the maximum over all repetitions of
+that phase:
 
-| Phase | September 9 supervised run, macOS 15.7.9 | `103c6ff` | `5ab1fa6` | `ac07281` |
-| --- | ---: | ---: | ---: | ---: |
-| strict load | 2.781 (2.518) | 4.310 (2.546) | 4.309 (2.564) | 4.369 (2.642) |
-| cold prefill | 2.622 | 4.162 (1.844) | 4.162 (1.842) | 4.184 (1.845) |
-| 32 tokens, decode | 2.818 | 4.218 (1.870) | 4.197 (1.855) | 4.205 (1.861) |
-| 128 tokens, prefill | 2.679 | 2.591 (0.269) | 3.164 (0.836) | 2.589 (0.259) |
-| 512 tokens, decode | 3.000 | 2.737 (0.269) | 2.770 (0.292) | 2.806 (0.263) |
-| natural greedy | 3.014 | 2.736 (0.269) | 2.766 (0.292) | 2.801 (0.263) |
-| kernel lifetime maximum | 3.014 | 4.310 | 4.309 | 4.369 |
+| Phase | September 9 supervised run, macOS 15.7.9 | `103c6ff` | `5ab1fa6` | `ac07281` | `9e04750` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| strict load | 2.781 (2.518) | 4.310 (2.546) | 4.309 (2.564) | 4.369 (2.642) | 4.367 (2.641) |
+| cold prefill | 2.622 | 4.162 (1.844) | 4.162 (1.842) | 4.184 (1.845) | 4.176 (1.842) |
+| 32 tokens, decode | 2.818 | 4.218 (1.871) | 4.197 (1.855) | 4.205 (1.862) | 4.197 (1.857) |
+| 128 tokens, prefill | 2.679 | 2.591 (0.269) | 3.164 (0.838) | 2.589 (0.259) | 2.588 (0.254) |
+| 512 tokens, decode | 3.000 | 2.737 (0.269) | 2.770 (0.292) | 2.806 (0.263) | 2.804 (0.258) |
+| natural greedy | 3.014 | 2.736 (0.269) | 2.766 (0.292) | 2.801 (0.263) | 2.789 (0.258) |
+| kernel lifetime maximum | 3.014 | 4.310 | 4.309 | 4.369 | 4.367 |
 
 Source code from September 10 reproduces the 4.31 GB peak on macOS 27.0.1
 (Metal 4), so the increase follows the operating-system change from macOS
 15.7.9 (Metal 3). On the current OS about 1.6 GB of CPU-visible memory
 (resident set 1.84 GB after load) stays allocated after strict load and is
-released later, between the 32- and 128-token series, without any call from
+released later, during the warm 32-token series (at its 5th to 10th of 13
+prefill/decode repetitions in these four runs), without any call from
 this crate, consistent with the CubeCL memory pool's periodic deallocation;
 steady-state footprint afterwards (2.59–2.81 GB) is below the September
 values. The polish pass adds 60 MB (1.4%) to the load peak and changes the
@@ -664,17 +668,38 @@ dropping the loaded model, release none of it (footprint 4.12–4.13 GB before
 and after), so the retention lies in the backend's allocator rather than in
 any tensor this crate keeps alive.
 
+The `9e04750` run also checks the tied vocabulary readout on Metal. This
+branch computes Qwen3.5-0.8B's tied head as one rank-2 product against the
+transposed embedding view instead of `module::linear`'s rank-3 broadcast.
+The benchmark's in-run official-reference checks reproduce the `ac07281` run
+digit for digit: prompt-logit cosine `0.9999985227492314`, minimum cached-row
+cosine `0.9999976706692852` and minimum teacher-row cosine
+`0.9999962022545661` over the 32 reference rows, the same 32 greedy tokens,
+and identical predicted tokens in every timed series. On this batch-one path
+both formulations issue the same `[source, 1024] · [1024, 248,320]` product
+to CubeCL's non-autotuned matmul, so identical F16 logits are expected. With
+several rows the former formulation ran a broadcast batch of per-row products
+while the new one runs a single `[rows · positions, 1024]` product, so CubeCL
+may choose a different kernel there; the padded two-row case in
+`tests/qwen35_release_api.rs` was not run here and remains for the
+release-gate rerun. The run recorded commit `9e04750` with a clean worktree
+and rustc 1.92.0. Peak footprint is unchanged (4.367 GB versus 4.369 GB).
+
 ### Evidence manifest (follow-ups)
 
 Every report, log, supervisor sample file, probe source and timed executable
 behind this section is listed with its SHA-256 in `SHA256SUMS` in the
 raw-evidence directory named above; that manifest itself has SHA-256
-`127fbc75a1bd37dc57d66a85d3177b6fb6e27c4ff05ae5478085d7b097038250`.
+`f6b95fbb14bc0cb8e3566b20db0e0a9abdd6ad7e8a128a48fdf51906b1ae99f0`. (It
+extends the first published manifest, SHA-256 `127fbc75…8250`, with the
+`9e04750` Metal run, its executable, the final FLAN-T5-small gate log and the
+run-comparison script; the earlier entries are unchanged.)
 Executables of note: FLAN Flex `ac07281` `6c79ea31…9bdb` and `dc6a91f`
 `7cd9c072…3069`; library timing binaries
 `26fefbbb…4e7f` (`ac07281` + harness), `1c8e918f…6f47` (`bba1f70` + harness)
 and `f7eafb90…af4a` (`dc6a91f` + harness); Qwen Metal `103c6ff`
-`f2517245…4663`, `5ab1fa6` `ad783adc…2bcf` and `ac07281` `ad1e4c5f…444b`;
+`f2517245…4663`, `5ab1fa6` `ad783adc…2bcf`, `ac07281` `ad1e4c5f…444b` and
+`9e04750` `cf1f04a5…9de6`;
 Qwen Flex probe `ac07281` `0fdd0d03…d077` and `ce602d1` `8938eac6…db5b`.
 
 ## Current smoke evidence
