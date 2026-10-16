@@ -1503,6 +1503,7 @@ fn dense_family_configs_initialize_through_the_registry() {
         ),
     ] {
         let model = AutoCausalLm::<TestBackend>::from_config_json(json, &device).unwrap();
+        assert_eq!(model.family(), family);
         assert_eq!(model.config().family(), family);
         let declared: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -1514,6 +1515,27 @@ fn dense_family_configs_initialize_through_the_registry() {
             AutoCausalConfig::from_model_type(declared["model_type"].as_str().unwrap()),
             Some(family)
         );
+        let state = model
+            .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+            .unwrap();
+        let (graph, cache) = match family {
+            AutoCausalConfig::Llama => (
+                matches!(model, AutoCausalLm::Llama(_)),
+                matches!(state, AutoCausalDecodeState::Llama(_)),
+            ),
+            AutoCausalConfig::Gemma => (
+                matches!(model, AutoCausalLm::Gemma(_)),
+                matches!(state, AutoCausalDecodeState::Gemma(_)),
+            ),
+            AutoCausalConfig::GptOss => (
+                matches!(model, AutoCausalLm::GptOss(_)),
+                matches!(state, AutoCausalDecodeState::GptOss(_)),
+            ),
+            other => panic!("unexpected dense family {other:?}"),
+        };
+        assert!(graph && cache, "{declared}: graph {graph}, cache {cache}");
+        assert_eq!((state.batch_size(), state.capacity()), (1, 4));
+        assert_eq!(state.lengths(), [0]);
     }
 }
 
