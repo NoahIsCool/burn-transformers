@@ -4,24 +4,87 @@
 //! allocates, so the arithmetic that computes those sizes must itself never
 //! overflow: a wrapped product would let `'ab' * 2^63` pass as a tiny string.
 //! Every function here either saturates at `usize::MAX` (a bound that then
-//! fails any limit check) or reports overflow as `None`.
+//! fails any limit check) or reports overflow as `None`. The module also holds
+//! the integer cores of the render budget's bookkeeping: the per-render
+//! [`RenderLimits`], the text allowance, the byte charge of copied items, the
+//! write check of the bounded output buffers, and the fuel of the namespace
+//! cleanup.
 //!
 //! # Verified behavior
 //!
-//! Every function is checked in place by Verus through `verus/robustness.rs`
-//! (see `verus/README.md`). For all inputs the proofs establish that no
-//! operation overflows; that the limits are at least their floors and exact
-//! below saturation; that a budget charge succeeds exactly when the new total
-//! stays within the budget and then adds exactly the charge; that repetition
-//! sizes are exact products or `None` on overflow; that the replacement and
-//! indentation bounds are at least the input length; and that the
-//! indentation bound is also exact below saturation (the replacement bound
-//! is only proved to be at least the input length). Whether these bounds
-//! dominate the text MiniJinja's `replace` and `indent` produce is a
-//! property of string semantics, covered by the sandbox's Rust tests.
+//! Every function is checked in place by Verus (see `verus/README.md`). For
+//! all inputs the proofs establish that no operation overflows and that each
+//! result is exact:
+//!
+//! - the limits are their formulas below saturation and `usize::MAX` above
+//!   it; [`render_limits`] derives every per-render limit from them, so the
+//!   cumulative budget always admits one maximal value;
+//! - a budget charge succeeds exactly when the new total stays within the
+//!   budget and then adds exactly the charge;
+//! - [`text_allowance`] is exactly the largest text a reservation accepts:
+//!   while the counter is within its budget, `bytes <= allowance` holds
+//!   exactly when `bytes` fits the per-value limit and the charge succeeds;
+//! - repetition sizes are exact products or `None` on overflow, and copy
+//!   charges are the saturated product `items * values * item_bytes`;
+//! - the replacement and indentation bounds are their saturated formulas;
+//! - a bounded buffer accepts a write exactly when the grown length stays
+//!   within its limit (below `usize::MAX`), so its length never passes it;
+//! - the cleanup fuel is the saturated `32 * (assignments + groups + 1)`.
+//!
+//! Whether the replacement and indentation formulas dominate the text
+//! MiniJinja's `replace` and `indent` produce is a property of string
+//! semantics, covered by the sandbox's Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// `value` clamped to `usize::MAX`: the result of a saturating computation.
+pub(crate) open spec fn saturated(value: int) -> int {
+    if value > usize::MAX {
+        usize::MAX as int
+    } else {
+        value
+    }
+}
+
+/// Whether the sandbox's text reservation of `bytes` succeeds after `produced` bytes.
+///
+/// `RenderBudget::reserve_text` first checks the per-value limit and then
+/// charges the budget with [`charged_total`], which accepts exactly when
+/// `produced + bytes <= total_bytes`.
+pub(crate) open spec fn text_reservable(limits: RenderLimits, produced: usize, bytes: usize) -> bool {
+    bytes <= limits.value_bytes && produced + bytes <= limits.total_bytes
+}
+
+/// Matches a replacement may make: every possible match, capped by `count`.
+///
+/// An empty pattern matches before every character and at the end
+/// (`characters + 1`, saturated); otherwise at most `length / from` matches fit.
+pub(crate) open spec fn replacement_matches(
+    length: usize,
+    characters: usize,
+    from: usize,
+    count: Option<usize>,
+) -> int {
+    let possible = if from == 0 {
+        saturated(characters + 1)
+    } else {
+        length as int / from as int
+    };
+    match count {
+        Some(count) => if count < possible {
+            count as int
+        } else {
+            possible
+        },
+        None => possible,
+    }
+}
+
+} // verus!
 
 /// Smallest rendered-prompt limit, whatever the context size: 1 MiB.
 ///
@@ -43,6 +106,35 @@ pub(crate) const OUTPUT_BYTES_PER_CONTEXT_BYTE: usize = 4;
 /// Cumulative production allowed per byte of the rendered-prompt limit.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 pub(crate) const TOTAL_BYTES_PER_OUTPUT_BYTE: usize = 16;
+/// Fewest items one sequence may always hold, `2^20` (24 MiB of `Value`s).
+///
+/// A sequence may hold as many items as one value may hold bytes, so a list
+/// of the characters (or the split parts) of any string a render may build
+/// fits; for an empty context that is exactly this floor, the size of the
+/// smallest output limit. A chat has at most a few thousand messages.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub(crate) const MIN_SEQUENCE_ITEMS: usize = 1 << 20;
+
+/// Size limits of one render, derived from the size of its template context.
+///
+/// With `c` the serialized context bytes, the rendered prompt may hold
+/// `1 MiB + 4c` bytes ([`Self::output_bytes`]), and so may any single string
+/// ([`Self::value_bytes`]); a sequence may hold as many items as a string may
+/// hold bytes (at least `2^20`); and every bounded operation together may
+/// produce `16` times the prompt limit ([`Self::total_bytes`]), counting
+/// sequence items as 24 bytes each. See [`render_limits`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RenderLimits {
+    /// Largest rendered prompt, in bytes.
+    pub(crate) output_bytes: usize,
+    /// Largest string one operation may produce, in bytes.
+    pub(crate) value_bytes: usize,
+    /// Longest sequence one operation may produce, in items.
+    pub(crate) sequence_items: usize,
+    /// Cumulative bytes all bounded operations may produce in one render.
+    pub(crate) total_bytes: usize,
+}
 
 /// The rendered-prompt limit for a context of `context_bytes`: `1 MiB + 4 * context_bytes`.
 ///
@@ -77,6 +169,90 @@ pub(crate) fn total_budget(output_bytes: usize) -> usize {
     } else {
         output_bytes * TOTAL_BYTES_PER_OUTPUT_BYTE
     }
+}
+
+/// The limits of a render whose template context serializes to `context_bytes`.
+///
+/// Every product saturates, so even an absurd context size yields valid
+/// (merely huge) limits rather than an overflow. Verified: each limit is its
+/// formula (saturated), and the cumulative budget is at least the per-value
+/// limit, so a fresh render can always produce one maximal value.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(limits =>
+    ensures
+        limits.output_bytes == saturated(OUTPUT_FLOOR_BYTES + 4 * context_bytes),
+        limits.value_bytes == limits.output_bytes,
+        limits.sequence_items == if limits.output_bytes >= MIN_SEQUENCE_ITEMS {
+            limits.output_bytes
+        } else {
+            MIN_SEQUENCE_ITEMS
+        },
+        limits.total_bytes == saturated(16 * limits.output_bytes),
+        limits.total_bytes >= limits.value_bytes,
+        limits.sequence_items >= MIN_SEQUENCE_ITEMS,
+))]
+pub(crate) fn render_limits(context_bytes: usize) -> RenderLimits {
+    let output_bytes = output_limit(context_bytes);
+    RenderLimits {
+        output_bytes,
+        value_bytes: output_bytes,
+        sequence_items: output_bytes.max(MIN_SEQUENCE_ITEMS),
+        total_bytes: total_budget(output_bytes),
+    }
+}
+
+/// Largest text an operation may still produce: the per-value limit or the remaining budget.
+///
+/// This is `min(value_bytes, total_bytes - produced)`, the remainder
+/// saturating at zero. Verified: while the counter is within its budget,
+/// `bytes <= allowance` holds exactly when a text reservation of `bytes`
+/// succeeds (`text_reservable`: `bytes` fits the per-value limit and
+/// [`charged_total`] accepts it); so printing into an allowance-sized buffer never builds text
+/// that the following reservation then refuses, and vice versa.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(allowance =>
+    ensures
+        allowance <= limits.value_bytes,
+        produced <= limits.total_bytes ==> allowance <= limits.total_bytes - produced,
+        produced <= limits.total_bytes ==> (allowance == limits.value_bytes
+            || allowance == limits.total_bytes - produced),
+        produced > limits.total_bytes ==> allowance == 0,
+        produced <= limits.total_bytes ==> forall|bytes: usize|
+            (bytes <= allowance) == #[trigger] text_reservable(limits, produced, bytes),
+))]
+pub(crate) fn text_allowance(limits: RenderLimits, produced: usize) -> usize {
+    limits
+        .value_bytes
+        .min(limits.total_bytes.saturating_sub(produced))
+}
+
+/// Bytes charged for `items` new items of `values_per_item` values of `item_bytes` each.
+///
+/// Verified: exactly the product `items * values_per_item * item_bytes`,
+/// saturated at `usize::MAX`, so a charge never undercounts what it copies.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(bytes =>
+    ensures
+        bytes == saturated(items * values_per_item * item_bytes),
+))]
+pub(crate) fn copy_charge(items: usize, values_per_item: usize, item_bytes: usize) -> usize {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let pairs = items * values_per_item;
+        assert(items * values_per_item * item_bytes == pairs * item_bytes);
+        if item_bytes == 0 {
+            assert(pairs * item_bytes == 0) by (nonlinear_arith)
+                requires item_bytes == 0;
+        } else if pairs > usize::MAX {
+            assert(pairs * item_bytes >= pairs) by (nonlinear_arith)
+                requires item_bytes > 0, pairs > usize::MAX;
+            assert(usize::MAX * item_bytes >= usize::MAX) by (nonlinear_arith)
+                requires item_bytes > 0;
+        }
+    }
+    items
+        .saturating_mul(values_per_item)
+        .saturating_mul(item_bytes)
 }
 
 /// The produced total after charging `bytes`, or `None` when it would pass `total`.
@@ -114,9 +290,16 @@ pub(crate) fn repeated_size(length: usize, count: usize) -> Option<usize> {
 /// matches before every character and at the end (`characters + 1` matches);
 /// otherwise at most `length / from` matches fit. Each match grows the text by
 /// `to - from` bytes when `to` is longer. Saturates at `usize::MAX`.
+///
+/// Verified: the bound is exactly `length + matches * max(to - from, 0)`,
+/// saturated, where `matches` is the possible match count (`characters + 1`,
+/// saturated, for an empty pattern; `length / from` otherwise) lowered to
+/// `count` when that is smaller; so it is never below `length`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(bound =>
     ensures
+        bound == saturated(length + replacement_matches(length, characters, from, count) * (
+            if to > from { to - from } else { 0 })),
         bound >= length,
 ))]
 pub(crate) fn replacement_bound(
@@ -151,11 +334,14 @@ pub(crate) fn replacement_bound(
 ///
 /// Every line gains at most `width` spaces and a newline. Saturates at `usize::MAX`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
+///
+/// Verified: the bound is exactly `lines * (width + 1) + length`, saturated
+/// (and `usize::MAX` for a width of `usize::MAX`), so never below `length`.
 #[cfg_attr(verus_keep_ghost, verus_spec(bound =>
     ensures
         bound >= length,
-        width < usize::MAX && lines * (width + 1) + length <= usize::MAX
-            ==> bound == lines * (width + 1) + length,
+        width < usize::MAX ==> bound == saturated(lines * (width + 1) + length),
+        width == usize::MAX ==> bound == usize::MAX,
 ))]
 pub(crate) fn indentation_bound(length: usize, lines: usize, width: usize) -> usize {
     if width == usize::MAX {
@@ -165,6 +351,42 @@ pub(crate) fn indentation_bound(length: usize, lines: usize, width: usize) -> us
         Some(padding) if padding <= usize::MAX - length => padding + length,
         _ => usize::MAX,
     }
+}
+
+/// Whether a buffer of `current` bytes may grow by `added` bytes within `limit`.
+///
+/// This is the write check of the sandbox's bounded buffers (the rendered
+/// prompt and printed values): the sum saturates, so it never wraps.
+/// Verified: below `usize::MAX`, a write is accepted exactly when the grown
+/// length stays within the limit, so a buffer that starts within its limit
+/// never passes it.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(accepted =>
+    ensures
+        accepted == (saturated(current + added) <= limit),
+        limit < usize::MAX ==> accepted == (current + added <= limit),
+))]
+pub(crate) fn appended_within(current: usize, added: usize, limit: usize) -> bool {
+    current.saturating_add(added) <= limit
+}
+
+/// Fuel granted to the namespace cleanup: `fuel_per_step` per assignment, per group, and once more.
+///
+/// Verified: exactly `fuel_per_step * (assignments + groups + 1)`, with the
+/// step count saturated at `usize::MAX` and the product at `u64::MAX`, so the
+/// cleanup always receives at least its accounted work (until saturation).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(fuel =>
+    ensures
+        fuel == if saturated(assignments + groups + 1) * fuel_per_step > u64::MAX {
+            u64::MAX as int
+        } else {
+            saturated(assignments + groups + 1) * fuel_per_step
+        },
+))]
+pub(crate) fn cleanup_fuel(assignments: usize, groups: usize, fuel_per_step: u64) -> u64 {
+    let steps = assignments.saturating_add(groups).saturating_add(1);
+    (steps as u64).saturating_mul(fuel_per_step)
 }
 
 #[cfg(test)]

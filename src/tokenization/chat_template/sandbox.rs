@@ -58,6 +58,7 @@ use minijinja::{
 };
 
 use super::limits;
+pub(crate) use super::limits::RenderLimits;
 
 /// Filter that implements `left + right` (see [`bounded_add`]).
 pub(crate) const ADD_FILTER: &str = "__bounded_add";
@@ -70,35 +71,8 @@ pub(crate) const SLICE_FILTER: &str = "__bounded_slice";
 /// Filter that charges a `*sequence` or `**mapping` call argument (see [`bounded_splat`]).
 pub(crate) const SPLAT_FILTER: &str = "__bounded_splat";
 
-/// Fewest items one sequence may always hold, `2^20` (24 MiB of `Value`s).
-///
-/// A sequence may hold as many items as one value may hold bytes, so a list
-/// of the characters (or the split parts) of any string a render may build
-/// fits; for an empty context that is exactly this floor, the size of the
-/// smallest output limit. A chat has at most a few thousand messages.
-const MIN_SEQUENCE_ITEMS: usize = 1 << 20;
 /// Bytes charged per sequence item: one MiniJinja `Value`.
 const ITEM_BYTES: usize = size_of::<Value>();
-
-/// Size limits of one render, derived from the size of its template context.
-///
-/// With `c` the serialized context bytes, the rendered prompt may hold
-/// `1 MiB + 4c` bytes ([`Self::output_bytes`]), and so may any single string
-/// ([`Self::value_bytes`]); a sequence may hold as many items as a string may
-/// hold bytes (at least `2^20`); and every bounded operation together may
-/// produce `16` times the prompt limit ([`Self::total_bytes`]), counting
-/// sequence items as 24 bytes each.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RenderLimits {
-    /// Largest rendered prompt, in bytes.
-    pub(crate) output_bytes: usize,
-    /// Largest string one operation may produce, in bytes.
-    pub(crate) value_bytes: usize,
-    /// Longest sequence one operation may produce, in items.
-    pub(crate) sequence_items: usize,
-    /// Cumulative bytes all bounded operations may produce in one render.
-    pub(crate) total_bytes: usize,
-}
 
 impl RenderLimits {
     /// Limits for a template context that serializes to `context_bytes` of JSON.
@@ -106,13 +80,7 @@ impl RenderLimits {
     /// Every product saturates, so even an absurd context size yields valid
     /// (merely huge) limits rather than an overflow.
     pub(crate) fn for_context_bytes(context_bytes: usize) -> Self {
-        let output_bytes = limits::output_limit(context_bytes);
-        Self {
-            output_bytes,
-            value_bytes: output_bytes,
-            sequence_items: output_bytes.max(MIN_SEQUENCE_ITEMS),
-            total_bytes: limits::total_budget(output_bytes),
-        }
+        limits::render_limits(context_bytes)
     }
 
     /// Limits for `context`, measured as its compact JSON serialization.
@@ -172,10 +140,11 @@ impl RenderBudget {
     }
 
     /// Largest text an operation may still produce: the per-value limit or the remaining budget.
+    ///
+    /// Exactly the largest `bytes` that [`Self::reserve_text`] accepts now
+    /// (see [`limits::text_allowance`]).
     pub(crate) fn text_allowance(&self) -> usize {
-        self.limits
-            .value_bytes
-            .min(self.limits.total_bytes.saturating_sub(self.produced()))
+        limits::text_allowance(self.limits, self.produced())
     }
 
     /// Charges a string of `bytes` produced by `operation`, or explains which limit it exceeds.
@@ -212,9 +181,7 @@ impl RenderBudget {
             )));
         }
         self.charge(
-            items
-                .saturating_mul(values_per_item)
-                .saturating_mul(ITEM_BYTES),
+            limits::copy_charge(items, values_per_item, ITEM_BYTES),
             operation,
         )
     }
@@ -282,7 +249,7 @@ impl LimitedText {
 impl fmt::Write for LimitedText {
     /// Appends `text` if it fits, else records the overflow and fails.
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        if self.text.len().saturating_add(text.len()) > self.limit {
+        if !limits::appended_within(self.text.len(), text.len(), self.limit) {
             self.exceeded = true;
             return Err(fmt::Error);
         }
@@ -1197,13 +1164,7 @@ impl CleanupPlan {
 
     /// Fuel for the generated template: [`Self::FUEL_PER_STEP`] per assignment and per group.
     pub(crate) fn fuel(&self) -> u64 {
-        let steps = self
-            .assignments
-            .saturating_add(self.groups.len())
-            .saturating_add(1);
-        u64::try_from(steps)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(Self::FUEL_PER_STEP)
+        limits::cleanup_fuel(self.assignments, self.groups.len(), Self::FUEL_PER_STEP)
     }
 
     /// Runs the assignments in a fresh, fuel-limited environment, ignoring failures.
@@ -1330,7 +1291,7 @@ impl BoundedOutput {
 impl io::Write for BoundedOutput {
     /// Appends `buffer` if it fits, else records the overflow and fails.
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self.bytes.len().saturating_add(buffer.len()) > self.limit {
+        if !limits::appended_within(self.bytes.len(), buffer.len(), self.limit) {
             self.exceeded = true;
             return Err(io::Error::other("rendered chat template output limit"));
         }
