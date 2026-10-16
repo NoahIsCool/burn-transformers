@@ -3,10 +3,13 @@
 //! Verifies, in place, the specifications attached to
 //! `src/checkpoint/runtime/tiles.rs`:
 //!
-//! - `ceiling_division` returns `⌈n / d⌉` without forming `n + d - 1`, never
-//!   exceeds `n`, and is positive for positive `n`;
-//! - `transpose_plan` splits a `[rows, columns]` transpose into cache blocks of
-//!   `min(columns, 32)` columns and per-thread bands that are whole blocks
+//! - `ceiling_division` returns exactly `⌈n / d⌉` without forming `n + d - 1`,
+//!   never exceeds `n`, and is positive for positive `n`;
+//! - `transpose_plan` equals its documented formulas exactly: `t = 1` below the
+//!   parallel threshold and `min(available, ⌈columns / b⌉)` above it,
+//!   `w = ⌈⌈columns / b⌉ / t⌉ · b` (or every column when that covers all blocks),
+//!   and `n = ⌈columns / w⌉`. It splits a `[rows, columns]` transpose into cache
+//!   blocks of `min(columns, 32)` columns and per-thread bands that are whole blocks
 //!   (unless one band spans every column), cover every column exactly once
 //!   (`(n - 1) · w < columns <= n · w`), number at most the planned threads,
 //!   which never exceed the caller's available parallelism and are one below the

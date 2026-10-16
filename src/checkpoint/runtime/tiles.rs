@@ -19,6 +19,8 @@
 //!
 //! Verus checks [`transpose_plan`] in place through `verus/perf.rs` (see
 //! `verus/README.md`). For every admissible geometry the proofs establish that
+//! the plan equals the formulas above exactly (`t`, `w`, and `n` are pinned, so
+//! a plan that silently stayed on one thread would fail verification); that
 //! its arithmetic cannot overflow; that `1 <= w <= columns` and `w` is a whole
 //! number of blocks unless it is the entire width; that the `n` bands cover the
 //! columns exactly, `(n - 1) · w < columns <= n · w`, so every band is nonempty
@@ -35,6 +37,20 @@
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: the exact rounded-up quotient `⌈dividend / divisor⌉` for `divisor > 0`.
+pub open spec fn ceiling(dividend: int, divisor: int) -> int {
+    if dividend % divisor == 0 {
+        dividend / divisor
+    } else {
+        dividend / divisor + 1
+    }
+}
+
+} // verus!
 
 /// Maximum tile edge in scalars, independent of byte width.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -63,11 +79,15 @@ pub(crate) struct TransposePlan {
 }
 
 /// Returns `⌈dividend / divisor⌉` without forming the overflow-prone `dividend + divisor - 1`.
+///
+/// Verified: the result is exactly the mathematical ceiling, never exceeds
+/// `dividend`, and is positive whenever `dividend` is.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(quotient =>
     requires
         divisor > 0,
     ensures
+        quotient == ceiling(dividend as int, divisor as int),
         dividend <= quotient * divisor,
         quotient == 0 || (quotient - 1) * divisor < dividend,
         dividend > 0 ==> quotient > 0,
@@ -102,6 +122,23 @@ fn ceiling_division(dividend: usize, divisor: usize) -> usize {
         rows * columns <= usize::MAX,
     ensures
         plan.block_columns == (if columns < TILE_EDGE { columns } else { TILE_EDGE }),
+        plan.threads == (if rows * columns < PARALLEL_MIN_SCALARS {
+            1
+        } else if available < ceiling(columns as int, plan.block_columns as int) {
+            available as int
+        } else {
+            ceiling(columns as int, plan.block_columns as int)
+        }),
+        plan.band_columns == (if ceiling(
+            ceiling(columns as int, plan.block_columns as int),
+            plan.threads as int,
+        ) >= ceiling(columns as int, plan.block_columns as int) {
+            columns as int
+        } else {
+            ceiling(ceiling(columns as int, plan.block_columns as int), plan.threads as int)
+                * plan.block_columns
+        }),
+        plan.bands == ceiling(columns as int, plan.band_columns as int),
         1 <= plan.band_columns <= columns,
         plan.band_columns == columns || plan.band_columns % plan.block_columns == 0,
         1 <= plan.bands,

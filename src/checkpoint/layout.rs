@@ -38,6 +38,35 @@ pub open spec fn shape_product(shape: Seq<u64>, len: int) -> int
     }
 }
 
+/// First byte not covered by a contiguous chain of the first `count` intervals.
+///
+/// Zero for the empty chain, otherwise the end of interval `count - 1`.
+pub open spec fn chain_end(intervals: Seq<(u64, u64)>, count: int) -> int {
+    if count <= 0 {
+        0
+    } else {
+        intervals[count - 1].1 as int
+    }
+}
+
+/// The first `count` intervals chain from zero inside `[0, data_bytes)`.
+///
+/// Interval `j` begins exactly where the chain before it ends, is not
+/// reversed, and ends inside the data section.
+pub open spec fn chains(intervals: Seq<(u64, u64)>, count: int, data_bytes: u64) -> bool {
+    forall|j: int| 0 <= j < count ==> {
+        &&& #[trigger] intervals[j].0 as int == chain_end(intervals, j)
+        &&& intervals[j].0 <= intervals[j].1
+        &&& intervals[j].1 <= data_bytes
+    }
+}
+
+/// The sorted intervals tile `[0, data_bytes)` exactly.
+pub open spec fn tiles(intervals: Seq<(u64, u64)>, data_bytes: u64) -> bool {
+    &&& chains(intervals, intervals.len() as int, data_bytes)
+    &&& chain_end(intervals, intervals.len() as int) == data_bytes
+}
+
 /// Total bytes accounted for by the first `count` intervals: `sum(end - begin)`.
 pub open spec fn covered_bytes(intervals: Seq<(u64, u64)>, count: int) -> int
     decreases count,
@@ -167,9 +196,44 @@ pub(crate) enum TilingError {
 /// `data_bytes`, so the intervals are disjoint and cover every data byte: their
 /// lengths sum exactly to `data_bytes` (the byte accounting is exact). Empty
 /// intervals are allowed anywhere inside the section.
+///
+/// Verified: the result is `Ok` exactly when the intervals tile the section
+/// (soundness and completeness), and each error names the first violation:
+/// every interval before `index` chains correctly, and interval `index` is
+/// reversed, begins away from the next uncovered byte `expected`, or ends past
+/// the section; `Uncovered` means the whole chain is valid but ends at
+/// `covered < data_bytes`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
+        result is Ok <==> tiles(intervals@, data_bytes),
+        match result {
+            Ok(()) => true,
+            Err(TilingError::Reversed { index }) => {
+                &&& index < intervals@.len()
+                &&& chains(intervals@, index as int, data_bytes)
+                &&& intervals@[index as int].1 < intervals@[index as int].0
+            },
+            Err(TilingError::Discontiguous { index, expected }) => {
+                &&& index < intervals@.len()
+                &&& chains(intervals@, index as int, data_bytes)
+                &&& expected as int == chain_end(intervals@, index as int)
+                &&& intervals@[index as int].0 <= intervals@[index as int].1
+                &&& intervals@[index as int].0 != expected
+            },
+            Err(TilingError::OutOfBounds { index }) => {
+                &&& index < intervals@.len()
+                &&& chains(intervals@, index as int, data_bytes)
+                &&& intervals@[index as int].0 as int == chain_end(intervals@, index as int)
+                &&& intervals@[index as int].0 <= intervals@[index as int].1
+                &&& intervals@[index as int].1 > data_bytes
+            },
+            Err(TilingError::Uncovered { covered }) => {
+                &&& chains(intervals@, intervals@.len() as int, data_bytes)
+                &&& covered as int == chain_end(intervals@, intervals@.len() as int)
+                &&& covered < data_bytes
+            },
+        },
         result is Ok ==> {
             &&& intervals@.len() == 0 ==> data_bytes == 0
             &&& intervals@.len() > 0 ==> intervals@[0].0 == 0
@@ -198,6 +262,8 @@ pub(crate) fn validate_contiguous_tiling(
             forall|k: int| 0 < k < index ==> #[trigger] intervals@[k].0 == intervals@[k - 1].1,
             index > 0 ==> intervals@[0].0 == 0,
             cursor as int == covered_bytes(intervals@, index as int),
+            cursor as int == chain_end(intervals@, index as int),
+            chains(intervals@, index as int, data_bytes),
         decreases intervals@.len() - index,
     ))]
     while index < intervals.len() {
