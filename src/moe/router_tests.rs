@@ -877,6 +877,84 @@ fn router_projection_precision_controls_logit_dtype() {
     assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "moe.router.weight"));
 }
 
+/// The rank-2 F32 router product reproduces Burn's `module::linear` bit for bit.
+///
+/// The FP32 projection moved from `burn::tensor::module::linear` (a batched
+/// product against an unsqueezed weight) to one flattened `[rows, I] · W`
+/// GEMM to keep router gradients on every backward pass. On Flex both reduce
+/// each logit over the same input axis in the same order, so DeepSeek-V2 and
+/// Nemotron-H router logits, and therefore expert selection, are unchanged.
+/// Covers F32, F16, and BF16 activations, rank-two and rank-three inputs, and
+/// biased and unbiased routers.
+#[test]
+fn fp32_router_projection_matches_module_linear_bitwise() {
+    use burn::nn::{LinearConfig, LinearLayout};
+    let device = Default::default();
+    let hidden = 24;
+    let experts = 10;
+    let values = |count: usize, salt: f32| {
+        (0..count)
+            .map(|index| (index as f32 * 0.731 + salt).sin() * 1.7)
+            .collect::<Vec<_>>()
+    };
+    for bias in [false, true] {
+        let mut linear = LinearConfig::new(hidden, experts)
+            .with_bias(bias)
+            .with_layout(LinearLayout::Col)
+            .init::<TestBackend>(&device);
+        linear.weight = burn::module::Param::from_tensor(Tensor::from_data(
+            TensorData::new(values(hidden * experts, 0.3), [hidden, experts]),
+            &device,
+        ));
+        if bias {
+            linear.bias = Some(burn::module::Param::from_tensor(Tensor::from_data(
+                TensorData::new(values(experts, 1.1), [experts]),
+                &device,
+            )));
+        }
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let input = Tensor::<TestBackend, 3>::from_data(
+                TensorData::new(values(2 * 5 * hidden, 2.9), [2, 5, hidden]),
+                &device,
+            )
+            .cast(dtype);
+            let reference = burn::tensor::module::linear(
+                input.clone().cast(DType::F32),
+                linear.weight.val().cast(DType::F32),
+                linear.bias.as_ref().map(|bias| bias.val().cast(DType::F32)),
+            );
+            let actual = router_logits(input.clone(), &linear, RouterProjectionPrecision::Fp32)
+                .expect("rank-three projection");
+            assert_eq!(actual.dims(), [2, 5, experts]);
+            let bits = |tensor: Tensor<TestBackend, 3>| {
+                tensor
+                    .into_data()
+                    .to_vec::<f32>()
+                    .expect("F32 logits")
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                bits(actual),
+                bits(reference.clone()),
+                "{dtype:?}, bias {bias}"
+            );
+            let flat = router_logits(
+                input.reshape([10, hidden]),
+                &linear,
+                RouterProjectionPrecision::Fp32,
+            )
+            .expect("rank-two projection");
+            assert_eq!(
+                bits(flat.reshape([2, 5, experts])),
+                bits(reference),
+                "rank two, {dtype:?}, bias {bias}"
+            );
+        }
+    }
+}
+
 /// Keeping every group is the identity, so group-limited routing then equals greedy routing.
 ///
 /// Nemotron-H configures `n_group = topk_group = 1`; any `top_groups ==

@@ -340,6 +340,62 @@ fn routing_extensions_train_their_parameters_but_not_the_correction_bias() {
     }
 }
 
+/// Every projection precision trains the router on every backward pass of a logits-only loss.
+///
+/// Regression for the FP32 projection: it used to call
+/// `burn::tensor::module::linear`, and on `Autodiff<Flex>` the router weight
+/// then received a gradient on the first backward pass but intermittently
+/// none afterwards whenever the loss reached the router only through its
+/// logits (an auxiliary-only or z-loss phase, router distillation, logit
+/// attribution), while the routed dispatch graph was left without a loss.
+/// The failure was nondeterministic, so the loop runs many consecutive
+/// forward/backward passes on one module, for an unbiased and a biased
+/// router, with both a plain logit sum and the load-balancing loss.
+#[cfg(feature = "autodiff")]
+#[test]
+fn router_projection_receives_gradients_on_every_logits_only_backward_pass() {
+    use burn::backend::Autodiff;
+
+    use super::RouterProjectionPrecision;
+
+    /// Differentiable CPU backend used to inspect router-parameter gradients.
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let input = (Tensor::<AdBackend, 1, Int>::arange(0..48, &device).float() * 0.37)
+        .sin()
+        .reshape([2, 3, 8]);
+    for projection in [
+        RouterProjectionPrecision::ModelDtype,
+        RouterProjectionPrecision::Fp32,
+    ] {
+        for router_bias in [false, true] {
+            let mut config = SparseMoeConfig::new(8, 16, 4, 2);
+            config.routing.projection = projection;
+            config.routing.router_bias = router_bias;
+            let module = config.init::<AdBackend>(&device).expect("valid MoE");
+            for step in 0..24 {
+                let output = module.forward(input.clone()).expect("finite routing");
+                let loss = if step % 2 == 0 {
+                    output.router_logits.sum()
+                } else {
+                    output.load_balancing_loss(None).expect("valid loss")
+                };
+                let gradients = loss.backward();
+                assert!(
+                    module.router.weight.grad(&gradients).is_some(),
+                    "{projection:?} router (bias {router_bias}) lost its weight gradient at step {step}"
+                );
+                if let Some(bias) = &module.router.bias {
+                    assert!(
+                        bias.grad(&gradients).is_some(),
+                        "{projection:?} router lost its bias gradient at step {step}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Load-balancing diagnostics reject mismatched masks before broadcasting.
 #[test]
 fn auxiliary_loss_validates_mask_shape() {

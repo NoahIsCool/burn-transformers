@@ -370,7 +370,11 @@ pub fn matmul_transposed<B: Backend, const D: usize>(
 }
 
 /// Returns the product of every axis but the last, the row count of a flattened input.
-fn leading_rows(tensor: &str, shape: &[usize]) -> Result<usize> {
+///
+/// # Errors
+///
+/// Returns a shape error naming `tensor` when the product overflows `usize`.
+pub(crate) fn leading_rows(tensor: &str, shape: &[usize]) -> Result<usize> {
     shape[..shape.len().saturating_sub(1)]
         .iter()
         .try_fold(1_usize, |product, dimension| {
