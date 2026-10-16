@@ -1030,9 +1030,11 @@ while streaming one tensor at a time, bit for bit equal to Transformers'
 experts occupy full load-dtype memory.
 
 **Implementation:** [`checkpoint/mxfp4.rs`](src/checkpoint/mxfp4.rs), whose
-integer core (shape acceptance, offsets, nibble split, and the exact binary64
-encoding of each value) is Verus-verified. **Reference:** the pinned
-Transformers MXFP4 integration linked above.
+integer core is Verus-verified: shape acceptance with exact error classes;
+block, scale, and value counts and offsets; the decode table's index
+bijection; the thread partition and each unit's non-overlapping output slots;
+the nibble split; and the exact binary64 encoding of each finite-scale value.
+**Reference:** the pinned Transformers MXFP4 integration linked above.
 
 <a id="innovation-selected-dispatch"></a>
 ### Selected-expert-only dispatch
