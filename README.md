@@ -104,6 +104,15 @@ fn complete(root: &Path, text: &str) -> Result<String, Box<dyn Error>> {
 }
 ```
 
+The default `DTypePolicy::Auto` keeps a checkpoint's stored float dtype, so a
+BF16 checkpoint runs in BF16 even on `Flex<f32>`; `Cast(TensorDType::F32)`, as
+above, executes in F32. A load failure is a typed error:
+`Error::CheckpointPlan` carries the `CheckpointError` of discovery or strict
+planning (for example `ArtifactNotFound`), and `Error::CheckpointExecution`
+keeps the partial load report of a failed tensor stream. To load a known family
+directly, initialize it from its configuration and call `load_checkpoint` (see
+the `checkpoint` module's "Loading a concrete family").
+
 ### 3. Capture and edit an activation on any model
 
 Experiments are written once against the `HookedModel` trait. Points have
@@ -276,7 +285,7 @@ mechanism's equations, reference, and implementation.
 | Area | Mechanisms |
 | --- | --- |
 | Attention | MHA/GQA/MQA computed on native KV heads; global, sliding-window, and chunked-local connectivity; learned sinks; logit soft caps; Q/K RMSNorm per head or full width; output gates; projection biases; differential attention; multi-head latent attention with absorbed decoding; score-bounded chunked execution. |
-| Positions | RoPE with linear, dynamic-NTK, YaRN, Llama 3, LongRoPE, and proportional scaling (one translator for every Hugging Face `rope_type`); partial and multi-axis RoPE; NoPE; T5 relative buckets. |
+| Positions | RoPE with linear, dynamic-NTK, YaRN, Llama 3, LongRoPE, and proportional scaling (one translator for every Hugging Face `rope_type`); partial and multi-axis RoPE; NoPE; T5 relative buckets. Dynamic NTK is translated for every family but rescales only in custom compositions: the built-in families refuse positions beyond `max_position_embeddings`, where it would take effect. |
 | Mixers | Gated DeltaNet with block-parallel chunked prefill; Mamba-2 with a vectorized chunk scan; fixed-state recurrent decoding. |
 | Feed-forward | SwiGLU/GeGLU, ungated, ReLU², and clamped SwiGLU; sparse experts with one router covering softmax or sigmoid scoring, top-k before or after scoring, group-limited selection, correction bias, renormalization, and shared experts, dispatched in memory-bounded expert blocks. |
 | State | Preallocated KV, ring, latent, recurrent, and cross-attention caches outside the parameters; atomic multi-layer step writes; transactional speculative staging ([used by](TRANSFORMER_INNOVATIONS.md#innovation-transactional-cache) DeepSeek-V2, Qwen3.5, and Nemotron-H); reorder, truncate, and reset. |
@@ -336,6 +345,8 @@ masks, cache transactions, SafeTensors headers, chat templates, and generation.
 | `train` | Adds Burn's native Learner/TrainStep framework; implies `std` and `autodiff`. |
 | `tokenizers` | Adds local `tokenizer.json` loading through the `tokenizers` crate. |
 | `chat-templates` | Adds bounded local chat-template rendering with MiniJinja and implies `tokenizers`. |
+| `kernel-tracing` | Test-only. Implies `metal` and Burn tracing so opt-in tests can observe CubeCL kernel launches. |
+| `attention-kernel-tracing` | Test-only. Implies `kernel-tracing` and enables CubeCL autotuning (`burn/autotune`) for the fused-attention parity gate; it is not a certified packed-Metal build. |
 
 A consumer in a sibling directory selecting only Metal and local tokenization
 can use (adjust the path for your checkout):
@@ -379,10 +390,11 @@ generation loop written against them runs on any of these models (GPT-2 and
 GPT-NeoX are stateless study modules without decode state):
 
 - `CausalLanguageModel`: a stateless, differentiable `forward`, plus
-  `new_decode_state`, `prefill` (a prompt), and `decode` (one or more new
-  tokens) over external decode state.
+  `new_decode_state_for` (a decode state sized by a `CacheConfig`), `prefill`
+  (a prompt), and `decode` (one or more new tokens) over external decode
+  state.
 - `Seq2SeqLanguageModel` (T5): `encode`, a stateless `forward`,
-  `new_decode_state`, `prefill_decoder`, and `decode`.
+  `new_decode_state_for`, `prefill_decoder`, and `decode`.
 
 Inputs are `[batch, sequence]` token IDs with optional explicit positions and
 an optional `TokenMask` in which `true` marks a valid token, so ragged rows can
@@ -396,8 +408,7 @@ cache slot unchanged.
 ```rust
 use burn::tensor::{Int, Tensor, backend::Backend};
 use transformers::{
-    CausalLanguageModel, CausalLmInput, DecodeInput, Error, ForwardOptions, Result,
-    cache::CacheConfig,
+    CausalLanguageModel, CausalLmInput, DecodeInput, ForwardOptions, Result, cache::CacheConfig,
 };
 
 /// Greedily appends `steps >= 1` tokens to every row, keeping the cache external.
@@ -409,9 +420,8 @@ fn greedy<B: Backend, M: CausalLanguageModel<B>>(
     let device = prompt.token_ids.device();
     let [batch, prompt_tokens] = prompt.token_ids.dims();
     // The last sampled token is never fed back, so it needs no cache slot.
-    let cache = CacheConfig::new(batch, prompt_tokens + steps.saturating_sub(1))
-        .map_err(|error| Error::Cache(error.to_string()))?;
-    let mut state = model.new_decode_state(cache, batch, &device)?;
+    let cache = CacheConfig::new(batch, prompt_tokens + steps.saturating_sub(1))?;
+    let mut state = model.new_decode_state_for(cache, &device)?;
     // The defaults project only each row's last valid position: [batch, 1, vocabulary].
     let options = ForwardOptions::default();
     let mut logits = model.prefill(prompt, &mut state, &options)?.logits;
@@ -439,14 +449,17 @@ points are the general route
 `generate_causal` (and `generate_causal_streaming`) wrap this loop with
 sampling, penalties, stop sequences, and per-token log probabilities;
 `prefill_chunk_size: Some(256)` bounds long prompts while keeping each ragged
-row's last valid logits. For T5,
+row's last valid logits, for every `CausalLanguageModel`, `ModularCausalLm`
+included. For T5,
 `generate_t5_beam_search` reads the decoder-start, EOS, and PAD IDs from the
 configuration, encodes once, and decodes `source_batch * num_beams` rows; each
 step reorders the decoder cache within each source's beams while the encoder
 output and projected cross-attention keys and values stay in place.
 `num_beams = 1` gives deterministic greedy decoding through the same path, and
 `generation::generate_seq2seq_beam_search` accepts a longer decoder prompt and
-an explicit `BeamSearchConfig`. An `EncoderOutput` passed to T5 must have the
+an explicit `BeamSearchConfig`; over `AutoSeq2SeqLm` it also keeps the
+cross-attention keys and values in place. Both stop with Transformers'
+`EarlyStopping::Heuristic` by default. An `EncoderOutput` passed to T5 must have the
 dtype of the model's parameters (states are never cast silently). The first
 successful `prefill_decoder` binds it to the state; later calls must pass an
 output of the same shape, device, dtype, and mask layout, and the state keeps
@@ -465,16 +478,25 @@ load from the original SafeTensors. Automatic packed loading is enabled for
 [status page](ARCHITECTURE_COMPATIBILITY.md#quantized-checkpoints) records
 their evidence. No quantized profile is advertised.
 
+Every packed projection is installed as exactly the artifact's values. On
+Metal it stays packed QFloat. On Burn Flex 0.21, whose quantized transpose
+would re-block the weights, the packed Qwen3.5, Qwen3-MoE, and Muse
+projections are held as their exact dequantized F32 values, about 3.6 times
+the packed projection bytes. The load report's quantized records describe the
+artifact's packed form, not the in-memory storage. No prefill speed figure is
+claimed for this path until an idle-host benchmark exists.
+
 The only certified packed-Metal build is an exact single-backend build:
 
 ```sh
 cargo build --release --no-default-features --features std,metal,tokenizers
 ```
 
-Do not include `rocm` in that binary: Burn 0.21 feature-unifies CubeCL
-autotuning from ROCm, which can select invalid packed Q4/Q8 Metal kernels. The
-crate rejects the known `metal + rocm` packed path before dispatch; a
-downstream crate that enables CubeCL autotuning directly is not certified.
+Do not include `rocm` or `attention-kernel-tracing` in that binary: Burn 0.21
+feature-unifies CubeCL autotuning from either, which can select invalid packed
+Q4/Q8 Metal kernels. The crate rejects packed Q4/Q8 Metal execution in builds
+with either feature before dispatch; a downstream crate that enables CubeCL
+autotuning directly is not certified.
 
 gpt-oss's MXFP4 experts are decoded exactly to the load dtype; there is no
 packed MXFP4 execution yet.

@@ -124,6 +124,33 @@ gates establish experimental validation only; none promotes a checkpoint.
 The Metal F32 runs at `ade8696` (below) are experimental evidence on the same
 terms.
 
+### Artifact-gated tokenizer and chat-template parity
+
+Ignored tokenization tests compare the pinned checkpoints' tokenizers and
+official chat templates with goldens from Transformers 5.2.0. They are
+required before advertising tokenizer or template parity for these
+checkpoints:
+
+```sh
+cargo test --locked --features tokenizers,chat-templates --lib tokenization::tests -- --ignored
+```
+
+| Environment variable | Pinned checkpoint |
+| --- | --- |
+| `TRANSFORMERS_FLAN_T5_SMALL_DIR` | `google/flan-t5-small` at `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab` |
+| `TRANSFORMERS_QWEN35_DIR` | `Qwen/Qwen3.5-0.8B` at `2fc06364715b967f1860aea9cf38778875588b17` |
+| `TRANSFORMERS_NEMOTRON_H_DIR` | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` |
+| `TRANSFORMERS_MUSE_GLIMMER_DIR` | `meta-models/Muse-Glimmer-30B` at `a4e59da52a7bc87ae7251dd5545c0dd437c44b68` |
+
+The goldens and the DiffLlama attention references are regenerated and
+checked against the test sources, with the pinned Python packages and the
+same local directories, by:
+
+```sh
+python3 -I scripts/generate_tokenization_goldens.py --check src/tokenization_tests.rs
+python3 -I scripts/generate_diffllama_reference.py --check src/attention/differential_tests.rs
+```
+
 ### Replays required after the polish cycle
 
 The batched-execution, attention, position, DeltaNet, Mamba-2, and loader

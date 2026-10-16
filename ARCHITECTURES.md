@@ -152,10 +152,11 @@ recorded in [QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md).
 GPT-2 and GPT-NeoX/Pythia are stateless modules for the published-weight
 interpretability studies, with strict local imports, hooks, and staged
 execution; they are not registered in `AutoCausalLm` because they have no
-external decode state. GPT-NeoX's model type is `GptNeoXForCausalLm`
-(`GptNeoXModel` remains an alias). Both configurations provide `init_policy()`
-reproducing Hugging Face random initialization (GPT-2 with its depth-scaled
-residual projections); the policies keep LayerNorm parameters as constructed.
+external decode state. GPT-NeoX's model type is `GptNeoXForCausalLm`; the
+pre-release alias `GptNeoXModel` was removed. Both configurations provide
+`init_policy()` reproducing Hugging Face random initialization (GPT-2 with its
+depth-scaled residual projections), which keeps LayerNorm parameters as
+constructed, and `reinit_policy()`, which also resets every LayerNorm.
 
 ## Primary references
 

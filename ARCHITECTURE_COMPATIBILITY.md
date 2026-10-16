@@ -133,7 +133,11 @@ DiffLlama. These establish mechanism parity, not checkpoint support.
 ## Quantized checkpoints
 
 Native Q8/Q4 Burnpack sidecars and automatic packed loading are described in
-the [README](README.md#quantization). Their real-checkpoint evidence:
+the [README](README.md#quantization). Automatic packed loading of
+`qwen3_5_text`, `qwen3_moe`, and `muse_glimmer_text` installs every packed
+projection exactly: as packed QFloat on Metal, and as the exact dequantized
+F32 values on Burn Flex 0.21, whose quantized transpose would re-block them.
+Their real-checkpoint evidence:
 
 - Qwen3.5-0.8B Q4 has passed a finite full-model Metal smoke test and exact
   cached/stateless consistency, but its first token differs from F16 and the
@@ -196,7 +200,7 @@ loads or computes the right logits.
 | Muse Glimmer text decoder | [Muse-Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/config.json), [Transformers attention reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modeling_muse_glimmer.py) | Inner `muse_glimmer_text` | Nested `text_config` or direct text config; `hidden_act` and `rope_scaling` aliases | GQA, explicit or backward-derived sliding/full schedule, per-layer RoPE/NoPE, sliding window, QK scaling, FP32 softmax for half inputs, post norms, and final-logit scaling/softcap |
 | T5 / T5 v1.1 / FLAN-T5 | [FLAN-T5-XL](https://huggingface.co/google/flan-t5-xl/blob/8772db7a7a11f7b08e6be7d7088f7a7fd4813bc5/config.json), [pinned upstream T5 schema](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/configuration_t5.py) | `t5` | Canonical names plus `hidden_size`, `head_dim`, `intermediate_size`, and standard head/depth aliases | Independent residual and attention-inner widths, asymmetric encoder/decoder depth, relative-position buckets/range, dense versus gated FFN layout, output-scaling flag, and decoder start/token IDs |
 | UL2 | [Google UL2](https://huggingface.co/google/ul2/blob/71c34c5c6e3e54c5bf2cee360c3edfaa42acc1b3/config.json) | `t5` | `Ul2Config` Rust alias; accepts historic derived `dense_act_fn` and `is_gated_act` | T5 encoder-decoder topology plus gated-SiLU FFN consistency |
-| Nemotron-H / Nemotron Nano | [Nemotron 3.5 Lightning](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json), [Nemotron 3 Nano](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | `nemotron_h` | Compact `hybrid_override_pattern` or modern `layers_block_type`/`layer_types`; historic `mamba_*` aliases; `attention_head_dim`; bare legacy `Infinity` | Exact heterogeneous Mamba/attention/MLP/MoE sequence, NoPE attention with GQA, Mamba state/head/group/convolution/time-step topology, expert routing, redundant norm consistency, and optional MTP block sequence |
+| Nemotron-H / Nemotron Nano | [Nemotron 3.5 Lightning](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json), [Nemotron 3 Nano](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | `nemotron_h` | Compact `hybrid_override_pattern` or modern `layers_block_type`/`layer_types`; historic `mamba_*` aliases; `attention_head_dim`; bare legacy `Infinity` and Transformers 5's `{"__float__": "Infinity"}`; `sliding_window` accepted and ignored, as in the pinned `cfa309` graph (experiments opt into a window with `NemotronHConfig::attention_window`) | Exact heterogeneous Mamba/attention/MLP/MoE sequence, NoPE attention with GQA, Mamba state/head/group/convolution/time-step topology, expert routing, redundant norm consistency, and optional MTP block sequence |
 | Llama family | [SmolLM-135M](https://huggingface.co/HuggingFaceTB/SmolLM-135M/blob/1d461723eec654e65efdc40cf49301c89c0c92f4/config.json), [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B/blob/531c80e289d6cff3a7cd8c0db8110231d23a6f7a/config.json), [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/1fa6fa281b5c635c89171a2b53769609cc1199c6/config.json), [Qwen2-7B](https://huggingface.co/Qwen/Qwen2-7B/blob/453ed1575b739b5b03ce3758b23befdb0967f40e/config.json); Transformers 5.2.0 `configuration_*.py` | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | One superset schema whose absent fields take the checkpoint's own `model_type` defaults; `rope_scaling` and `rope_parameters` through the shared RoPE translator | GQA and `head_dim`, attention/MLP bias or Q/K/V-only bias, per-head (Qwen3) or full-width (OLMo 2) Q/K RMSNorm, post-sublayer norms, every Hugging Face RoPE type, Mistral and Qwen sliding-window schedules (`sliding_window`, `use_sliding_window`, `max_window_layers`, `layer_types`), SmolLM3 NoPE layers, tied heads; `quantization_config` is rejected |
 | Gemma 2 / Gemma 3 text | [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it/blob/093f9f388b31de276ce2de164bdc2081324b9767/config.json); Transformers 5.2.0 `configuration_gemma2.py` / `configuration_gemma3.py` | `gemma2`, `gemma3_text`; multimodal `gemma3` through `text_config` | Gemma 3 RoPE mappings exactly as Transformers 5.2 `save_pretrained` writes them, including inert `rope_type`/`rope_theta` keys beside per-layer-type objects | Sandwich norms, `query_pre_attn_scalar`, attention and final soft caps (rejected where the reference never applies them), `sliding_window_pattern` or `layer_types` schedules, separate local/global RoPE bases with scaling on global layers, per-head Q/K norm (Gemma 3) |
 | gpt-oss | [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b/blob/6cee5e81ee83917806bbde320786a8fb61efebee/config.json); Transformers 5.2.0 `configuration_gpt_oss.py` | `gpt_oss` | Dense or MXFP4 (`quantization_config.quant_method = "mxfp4"`) expert weights | GQA with learned sinks and biased projections, `layer_types` sliding/full schedule, YaRN with `truncate` (legacy `rope_scaling` accepted), expert count and top-k, biased router; `swiglu_limit` and `hidden_act` must equal the values the reference hard-codes (`7.0`, `silu`) |
@@ -206,8 +210,20 @@ loads or computes the right logits.
 `ModelConfig::from_json_str` first parses strict JSON after one deliberately narrow
 compatibility repair: an unquoted positive `Infinity` token is converted to `null`.
 NVIDIA's original Nemotron-H configs used that Python JSON extension for an
-unbounded time-step maximum, while newer artifacts use `null`. Strings containing
-the word `Infinity` are unchanged.
+unbounded time-step maximum. Configs written by Transformers 5 spell the same
+value `{"__float__": "Infinity"}`, which is also read as `null`; a tagged
+`-Infinity` or `NaN`, or an unknown tag, is rejected with its JSON path.
+Strings containing the word `Infinity` are unchanged.
+
+Layer and expert counts are bounded before anything is allocated:
+`models::config::MAX_LAYERS` (2^18 blocks per stack), `MAX_EXPERTS` (2^20
+routed experts), and, for per-expert checkpoint layouts, `MAX_CHECKPOINT_TENSORS`
+(ten million tensors), so no accepted configuration describes a contract
+beyond the artifact limit. Automatic loading also checks, before it builds a
+family's tensor contract, that the discovered checkpoint holds at least as
+many tensors as the configuration's depth (or exact one-to-one inventory)
+needs, failing with `CheckpointError::TooFewTensors` unless an `allow_missing`
+matcher could excuse them.
 
 For a multimodal repository, only `text_config` is consumed. The compatibility
 aliases `language_config` and `llm_config` support older/custom wrappers. Vision
@@ -221,9 +237,11 @@ not break loading; unknown enum values and contradictory shape fields fail close
 `qwen3_moe`. `AutoSeq2SeqLm::load_local` dispatches `t5`. Both APIs are
 local-only: they discover SafeTensors, validate the architecture-owned mapping
 before applying weights, attach an optional local tokenizer, and return the
-final strict `LoadReport`. Unknown checkpoint tensors fail closed unless an
-architecture explicitly allowlists them, as Qwen, Muse, and multimodal Gemma 3
-do for their vision towers. For an alias family, `AutoCausalConfig::model_type`
+final strict `LoadReport`. Planning failures are `Error::CheckpointPlan` with
+the typed `CheckpointError`, and a failed tensor stream is
+`Error::CheckpointExecution` with its partial report. Unknown checkpoint
+tensors fail closed unless an architecture explicitly allowlists them, as
+Qwen, Muse, and multimodal Gemma 3 do for their vision towers. For an alias family, `AutoCausalConfig::model_type`
 returns the primary type (`llama`); the checkpoint's own type is available from
 `LoadedModel::source().model_type()`.
 
@@ -231,25 +249,33 @@ Discovery prefers neither artifact silently: when a directory holds both
 `model.safetensors` and `model.safetensors.index.json`, it loads through the
 index only if the index names exactly that single file, and otherwise reports
 ambiguous artifacts. An index in a subdirectory resolves its shards beside
-itself. Header-entry errors name the shard and tensor, and element counts
-follow SafeTensors' left-to-right overflow rule.
+itself. Header-entry errors name the shard and tensor and are reported before
+any layout error; element counts follow SafeTensors' left-to-right overflow
+rule, and out-of-section byte ranges are reported at the first violation in
+byte-offset order.
 
 `generation_config.json` is normalized with Hugging Face semantics: sampling
 defaults for `top_k`/`top_p`, and, for causal loads, `min_p` (when sampling),
 `no_repeat_ngram_size`, and `min_new_tokens` (clamped to `max_new_tokens`, with
 the declared value reported). Settings the runtime does not apply are kept in
 `LoadedModel::unsupported_generation_settings()` instead of being dropped
-silently; seq2seq loads report the three processor settings because beam
-search does not apply them.
+silently. Seq2seq loads keep `repetition_penalty`, `presence_penalty`, and
+sampling neutral in their defaults and report the three processor settings,
+`repetition_penalty`, and `do_sample` with its non-neutral `temperature`,
+`top_k`, and `top_p`, because beam search does not apply them.
 
 Chat templates render through a sandboxed MiniJinja environment with Hugging
 Face `apply_chat_template` semantics (Python `str()` conversions in filters,
 `tojson`, `strftime_now`, tool calls, `continue_final_message`, documents).
+Template discovery (`chat_template.jinja` and `additional_chat_templates/*.jinja`
+over `tokenizer_config.json`, skipping paths that are not regular files) and
+selection (`tool_use` when tools are passed) follow Transformers 5.2.
 On the pinned Qwen3.5, Muse Glimmer, and Nemotron-H templates the rendered
 text matches Transformers 5.2.0 byte for byte when mapping keys are supplied in
 sorted order; templates see mapping keys sorted, which is the main remaining
-difference. This is tokenizer/template parity evidence, not checkpoint
-support.
+difference. The tokenization module documentation lists the others and the
+deliberate differences for artifacts it treats as unsafe or malformed. This is
+tokenizer/template parity evidence, not checkpoint support.
 
 ## Known gaps and non-claims
 
@@ -267,8 +293,9 @@ support.
 - Muse Glimmer vision topology is intentionally not represented. Only its nested
   text decoder is extracted.
 - Nemotron-H's historical configs are not RFC-compliant JSON because they contain
-  `Infinity`; only the published positive-infinity case is repaired. `NaN` and
-  negative infinity remain errors.
+  `Infinity`; only the published positive-infinity case is repaired, in both
+  the bare and the Transformers 5 tagged spelling. `NaN` and negative infinity
+  remain errors in both spellings.
 - Qwen3 MoE's pinned 30B-A3B artifact has passed complete F16 weight application,
   provenance-bound Q8/Q4 conversion, and short Metal stateless/cached/decode
   smokes in both packed formats. Q4 and Q8 both passed their 1,345-launch
@@ -296,7 +323,8 @@ support.
 - MTP execution, tokenization, cached generation, T5 beam search, and native Q4/Q8
   are runtime facilities rather than configuration claims. Automatic packed
   checkpoint loading is limited to `muse_glimmer_text`, `qwen3_5_text`, and
-  `qwen3_moe`; v2 sidecars bind exact checkpoint, load-plan, and payload hashes,
+  `qwen3_moe` (exact dequantized F32 projections on Flex, packed QFloat on
+  Metal); v2 sidecars bind exact checkpoint, load-plan, and payload hashes,
   while legacy v1 artifacts retain full source-payload validation. Qwen3.8 and
   Qwen3-MoE Q8/Q4 Metal smokes passed, while Muse has traced Q8 and Q4 Metal
   evidence; their quantized-reference and quality gates remain open.

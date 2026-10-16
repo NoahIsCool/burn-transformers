@@ -325,6 +325,20 @@ profile are the tied readout (30% of samples), the feed-forward projections
 (41%, single-threaded below Flex's parallel threshold), naive attention copying
 cache views (4%), and whole-buffer KV writes (2%).
 
+The KV writes were whole-buffer because Burn Flex 0.21's `slice_assign` copies
+its entire destination (an `Arc` clone followed by `Arc::make_mut`), so a
+one-token write cost O(capacity), about 1.3 ms per 64 MiB plane. Cache writes
+now go through `operations::assign_region`, which writes only the addressed
+region: a one-token write into a `[1, 8, C, 128]` F32 plane takes 1.1–4.4 µs
+for `C` from 256 to 65,536, against 15 µs–4.9 ms before
+(`operations::tests::region_write_timing`, Flex release build on a shared
+host). On Flex, cache capacity now costs memory, not time per token. The same
+fix package added Flex timing tests for the Mamba-2 recurrent update
+(`recurrent_update_timing`), segment transitions (`segment_transition_timing`),
+the one-token depthwise convolution column (`depthwise_column_timing`), and
+fused RoPE prefill (`rotary_prefill_timing`); the [changelog](CHANGELOG.md#performance)
+lists their speedups.
+
 ### SmolLM-135M on Flex/F32
 
 `causal_lm_flex_decode_benchmark` with `TRANSFORMERS_CAUSAL_LM_BENCH_DIR`
