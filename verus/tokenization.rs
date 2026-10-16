@@ -1,4 +1,4 @@
-//! Verus harness for the tokenizer's pure layout, calendar, decimal, and scanning arithmetic.
+//! Verus harness for the tokenizer's pure integer and byte-scanning cores.
 //!
 //! Verifies, in place, the specifications attached to
 //! `src/tokenization/layout.rs`:
@@ -99,9 +99,19 @@
 //!   and reports a float exactly for a decimal number containing `.` or an
 //!   exponent; number tokens carry these facts.
 //!
-//! Tokenizer encoding, special-token insertion, and the Burn tensor
-//! constructors are outside the proof and remain covered by the Rust tests. See
-//! `verus/README.md` for the method, toolchain, and command.
+//! The sandbox's size and budget arithmetic in
+//! `src/tokenization/chat_template/limits.rs` is checked by
+//! `verus/robustness.rs`.
+//!
+//! Outside the proofs, and covered by the Rust tests: tokenizer encoding,
+//! truncation, and post-processing (the `tokenizers` crate), streamed
+//! decoding (`tokenizers::DecodeStream`), the Burn tensor constructors, which
+//! tags `next_tag` skips as comments and raw sections (its contract covers
+//! delimiters and progress, not that classification), the guard's recursive
+//! parser and its nesting counters, the keyword-argument rewrite's lexer, the
+//! `format` filter's printf width scan, `strftime` and float formatting, and
+//! the MiniJinja engine itself. See `verus/README.md` for the method,
+//! toolchain, and command.
 
 #![allow(unused)]
 // Loop invariants are attributes on `while` expressions, which stable Rust
