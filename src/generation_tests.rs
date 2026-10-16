@@ -1931,6 +1931,43 @@ fn frequency_products_saturate_before_subtraction() {
     );
 }
 
+/// F16 occurrence counts above 65504 saturate before they are cast to the logits dtype.
+///
+/// Review finding GEN-F16-COUNT-INF: a count of 65600 became `inf` in F16,
+/// and a frequency penalty that rounds to zero there (`1e-8`) turned it into
+/// `inf * 0 = NaN`, which the product clamp then mapped to the *largest*
+/// logit, so the most repeated token became the most likely. Counts now
+/// saturate at the dtype's largest value first, so the product is finite or
+/// saturates, and a zero penalty leaves logits unchanged.
+#[test]
+fn half_precision_counts_saturate_before_the_cast() {
+    let device = Default::default();
+    let history = Tensor::<TestBackend, 2, Int>::zeros([1, 65_600], &device);
+    for (penalty, expected) in [
+        (1e-8, [1.0, 2.0, 3.0]),
+        // 65504 * 0.5 = 32752 is exact in F16; 1 - 32752 rounds to -32752.
+        (0.5, [-32_752.0, 2.0, 3.0]),
+        // 65504 * 2 overflows F16 and saturates at 65504.
+        (2.0, [-65_504.0, 2.0, 3.0]),
+        (-2.0, [65_504.0, 2.0, 3.0]),
+    ] {
+        let config = GenerationConfig {
+            frequency_penalty: penalty,
+            ..Default::default()
+        };
+        let processor = LogitsProcessor::<TestBackend>::new(config, 3, &device).unwrap();
+        let logits =
+            Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0]], &device).cast(DType::F16);
+        let processed = processor.process(logits, Some(history.clone())).unwrap();
+        assert_eq!(processed.dtype(), DType::F16);
+        assert_eq!(
+            host_values(processed.cast(DType::F32)),
+            expected,
+            "penalty {penalty}"
+        );
+    }
+}
+
 /// Half-precision logits processed in their own dtype check controls against that dtype.
 ///
 /// F16 cannot represent a frequency penalty of `1e5` (its largest finite

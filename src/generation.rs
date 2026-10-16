@@ -828,7 +828,9 @@ impl<B: Backend> LogitsProcessor<B> {
     /// history's count bound says it could overflow (or the counts themselves
     /// exceed the dtype's range), so subtracting it never forms
     /// `inf - inf`. Below that bound the clamp is skipped; it would be a
-    /// no-op anyway.
+    /// no-op anyway. Counts that exceed the dtype's range (only F16's 65504
+    /// is reachable) saturate as integers *before* the float cast: an `inf`
+    /// count times a penalty that rounds to zero in the dtype would be NaN.
     fn apply_token_penalties(
         &self,
         logits: Tensor<B, 2>,
@@ -853,13 +855,21 @@ impl<B: Backend> LogitsProcessor<B> {
         };
         let additive = history.counts(view)?;
         if self.config.frequency_penalty != 0.0 {
-            let frequency = additive
-                .clone()
+            let largest = precision.largest();
+            let bound = history.count_bound() as f64;
+            let counts = if bound > largest {
+                // Every integer element type holds `i32`; a dtype whose range
+                // exceeds it cannot be exceeded by a count anyway.
+                additive
+                    .clone()
+                    .clamp_max(largest.min(f64::from(i32::MAX)) as i32)
+            } else {
+                additive.clone()
+            };
+            let frequency = counts
                 .float()
                 .cast(dtype)
                 .mul_scalar(self.config.frequency_penalty);
-            let largest = precision.largest();
-            let bound = history.count_bound() as f64;
             // Half of `largest` leaves room for rounding `c`, `f`, and their product.
             let may_overflow =
                 bound > largest || self.config.frequency_penalty.abs() * bound > largest / 2.0;
