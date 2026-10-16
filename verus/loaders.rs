@@ -26,6 +26,10 @@
 //!   is fused, and T5's `feed_forward_sublayer` (shared by the contract and
 //!   the tensor sink) numbers the feed-forward network after the block's
 //!   attention sublayers.
+//! - `src/models/qwen3_5/checkpoint/mtp.rs`: `mtp_inventory` rejects exactly
+//!   a dedicated-embedding MTP request and otherwise loads the MTP tensors
+//!   exactly when requested and declared, exempts the `mtp.` namespace
+//!   exactly when declared but not requested, and covers nothing otherwise.
 //! - `src/models/auto/load/report.rs`: automatic generation defaults report a
 //!   positive `min_new_tokens` exactly when the consumer ignores it or applies
 //!   a smaller value (for causal loads, exactly when it exceeds
@@ -66,3 +70,6 @@ pub mod t5_dimensions;
 
 #[path = "../src/models/auto/load/report.rs"]
 pub mod auto_report;
+
+#[path = "../src/models/qwen3_5/checkpoint/mtp.rs"]
+pub mod qwen3_5_mtp;

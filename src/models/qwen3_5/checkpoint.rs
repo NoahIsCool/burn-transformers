@@ -133,13 +133,18 @@ impl Qwen3_5TextConfig {
         options: Qwen3_5CheckpointOptions,
     ) -> Result<Qwen3_5CheckpointContract, ConfigError> {
         self.validate()?;
-        if options.include_mtp && self.mtp_use_dedicated_embeddings {
-            return Err(ConfigError::new(
+        let mtp = mtp_inventory(
+            options.include_mtp,
+            self.mtp_use_dedicated_embeddings,
+            self.mtp_num_hidden_layers,
+        )
+        .map_err(|_| {
+            ConfigError::new(
                 FAMILY,
                 "mtp_use_dedicated_embeddings",
                 "dedicated MTP embedding checkpoints have no released Qwen3.5 tensor contract",
-            ));
-        }
+            )
+        })?;
 
         let dimensions = Dimensions::try_from(self)?;
         let mut builder = ContractBuilder::new(options.source);
@@ -165,10 +170,10 @@ impl Qwen3_5TextConfig {
             builder.mappings.map("lm_head.weight", "lm_head.weight");
         }
 
-        if options.include_mtp {
-            builder.mtp(self, &dimensions);
-        } else if self.mtp_num_hidden_layers > 0 {
-            builder.allow_unexpected.push(KeyMatcher::prefix("mtp."));
+        match mtp {
+            MtpInventory::Load => builder.mtp(self, &dimensions),
+            MtpInventory::Exempt => builder.allow_unexpected.push(KeyMatcher::prefix("mtp.")),
+            MtpInventory::Absent => {}
         }
 
         Ok(builder.finish())
@@ -180,6 +185,10 @@ impl Qwen3_5TextConfig {
 mod dimensions; // Verified fused-width arithmetic of the tensor contract.
 
 use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions, query_projection};
+
+mod mtp; // Verified MTP tensor coverage policy.
+
+use mtp::{MtpInventory, mtp_inventory};
 
 impl TryFrom<&Qwen3_5TextConfig> for Dimensions {
     /// Configuration field and reason for an overflowing dimension.
@@ -422,11 +431,9 @@ impl ContractBuilder {
     /// Adds the shared embedding/hidden fusion and configured MTP decoder blocks.
     ///
     /// The fusion projection maps concatenated width `2 * hidden` back to
-    /// `hidden`; zero MTP depth contributes no parameters.
+    /// `hidden`. Called only for [`MtpInventory::Load`], so the configuration
+    /// declares at least one MTP layer.
     fn mtp(&mut self, config: &Qwen3_5TextConfig, dimensions: &Dimensions) {
-        if config.mtp_num_hidden_layers == 0 {
-            return;
-        }
         self.mtp_tensor(
             "fc.weight",
             vec![dimensions.hidden, dimensions.double_hidden],
