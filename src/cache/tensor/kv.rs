@@ -47,7 +47,8 @@ pub(crate) use batch::{PreparedNativeKvBatchWrite, left_padded_columns, token_se
 pub use plan::KvCacheStorage;
 
 use plan::{
-    TimeSlotViolation, mirrored_window_slots, staged_read_ranges, visible_count, working_window,
+    TimeExtent, TimeSlotViolation, mirrored_window_slots, staged_read_ranges, visible_count,
+    working_window,
 };
 pub(crate) use plan::{WriteAheadViolation, write_ahead_allowed};
 
@@ -265,12 +266,14 @@ impl NativeKvCacheSpec {
     /// window; full storage has no ring width.
     #[must_use]
     pub fn effective_window(self, config: CacheConfig) -> Option<NonZeroUsize> {
-        match self.storage {
-            KvCacheStorage::Full => None,
-            KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => {
-                self.sliding_window.or(config.sliding_window())
-            }
-        }
+        // The Verus-verified selector; both inputs are nonzero, so
+        // `NonZeroUsize::new` restores the selected width exactly.
+        plan::effective_window_of(
+            self.storage,
+            self.sliding_window.map(NonZeroUsize::get),
+            config.sliding_window().map(NonZeroUsize::get),
+        )
+        .and_then(NonZeroUsize::new)
     }
 
     /// Returns the exact time-axis extent allocated for committed tensors.
@@ -286,9 +289,17 @@ impl NativeKvCacheSpec {
     /// than the logical capacity, a window on full storage, in-place staging
     /// on ring storage, or `2W` overflow.
     pub fn committed_time_slots(self, config: CacheConfig) -> TensorCacheResult<usize> {
+        self.time_extent(config).map(|extent| extent.slots)
+    }
+
+    /// Returns the validated time extent together with the width that sized it.
+    ///
+    /// [`NativeKvCache::new`] stores this width, so every ring read and write
+    /// uses exactly the `W` whose `W` or `2W` extent was allocated.
+    fn time_extent(self, config: CacheConfig) -> TensorCacheResult<TimeExtent> {
         let storage = self.storage.as_str();
         let capacity = config.capacity();
-        // The extent and every rejection are the Verus-verified planner's.
+        // The extent, its width, and every rejection are the Verus-verified planner's.
         plan::committed_time_slots(
             self.storage,
             self.in_place_staging,
@@ -582,7 +593,8 @@ impl<B: Backend> NativeKvCache<B> {
                 dtype: spec.dtype(),
             });
         }
-        let committed_time_slots = spec.committed_time_slots(config)?;
+        let extent = spec.time_extent(config)?;
+        let committed_time_slots = extent.slots;
         let committed_shape = [
             batch_size,
             spec.key_value_heads(),
@@ -657,7 +669,9 @@ impl<B: Backend> NativeKvCache<B> {
             staged_lengths: vec![vec![0; batch_size]; spec.layers()],
             staging_active: false,
             committed_time_slots,
-            window: spec.effective_window(config),
+            // The width that sized the extent; it came from nonzero windows,
+            // so `NonZeroUsize::new` restores it exactly.
+            window: extent.window.and_then(NonZeroUsize::new),
             staging_baseline: None,
             identity: IdentityToken::new(),
             staging_epoch: 0,

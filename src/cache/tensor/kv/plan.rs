@@ -10,7 +10,8 @@
 //! This module answers the integer questions every KV read and write asks:
 //!
 //! * **Allocation extent.** [`committed_time_slots`] validates the storage
-//!   mode against the windows and returns the exact time extent.
+//!   mode against the windows and returns the exact time extent together
+//!   with the effective width `W` that every later read and write uses.
 //! * **Visible windows.** A committed read of a row of length `L` sees its
 //!   newest `min(L, W)` positions (all `L` for full storage); a working read
 //!   during speculation sees the window of `C + P` tokens split into a
@@ -171,16 +172,65 @@ pub(crate) open spec fn working_window_for(
 
 } // verus!
 
-/// Returns the exact committed time extent of a group, validating its windows.
+/// Returns the ring width a group uses: its own window, else the bank's.
+///
+/// Proved: exactly `effective_window` above, so full storage has no ring
+/// width and a group window always takes precedence over the bank's.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(window =>
+    ensures
+        window == effective_window(storage, group_window, config_window),
+))]
+pub(crate) fn effective_window_of(
+    storage: KvCacheStorage,
+    group_window: Option<usize>,
+    config_window: Option<usize>,
+) -> Option<usize> {
+    match storage {
+        KvCacheStorage::Full => None,
+        KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => match group_window {
+            Some(window) => Some(window),
+            None => config_window,
+        },
+    }
+}
+
+/// Validated committed time extent and ring width of a KV group.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TimeExtent {
+    /// Committed time-axis slots: the capacity, `W`, or `2W`.
+    pub(crate) slots: usize,
+    /// Effective ring width `W`; `None` for full storage.
+    pub(crate) window: Option<usize>,
+}
+
+/// Returns the exact committed time extent and ring width of a group.
 ///
 /// `group_window` is the group's own window and `config_window` the bank's.
-/// Proved: the result equals `time_slots` above for every input, so the
-/// extent is exactly `capacity`, `W`, or `2W` and every inconsistent
-/// configuration is rejected with the first violated rule.
+/// Proved: the extent equals `time_slots` above for every input, so it is
+/// exactly `capacity`, `W`, or `2W` and every inconsistent configuration is
+/// rejected with the first violated rule. The returned width is the same
+/// `effective_window` that sized the extent, so a mirrored group's `2W` is
+/// representable for exactly the width its reads and writes later use.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
-        result == time_slots(storage, in_place, group_window, config_window, capacity),
+        match result {
+            Ok(extent) => {
+                &&& time_slots(storage, in_place, group_window, config_window, capacity)
+                    == Ok::<usize, TimeSlotViolation>(extent.slots)
+                &&& extent.window == effective_window(storage, group_window, config_window)
+                &&& match storage {
+                    KvCacheStorage::Full => extent.window is None && extent.slots == capacity,
+                    KvCacheStorage::SlidingRing => extent.window == Some(extent.slots),
+                    KvCacheStorage::MirroredSlidingRing => extent.window matches Some(width)
+                        && extent.slots == 2 * width,
+                }
+            },
+            Err(violation) => time_slots(storage, in_place, group_window, config_window, capacity)
+                == Err::<usize, TimeSlotViolation>(violation),
+        },
 ))]
 pub(crate) fn committed_time_slots(
     storage: KvCacheStorage,
@@ -188,7 +238,7 @@ pub(crate) fn committed_time_slots(
     group_window: Option<usize>,
     config_window: Option<usize>,
     capacity: usize,
-) -> Result<usize, TimeSlotViolation> {
+) -> Result<TimeExtent, TimeSlotViolation> {
     let full = match storage {
         KvCacheStorage::Full => true,
         KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => false,
@@ -204,24 +254,25 @@ pub(crate) fn committed_time_slots(
             return Err(TimeSlotViolation::WindowExceedsCapacity { window });
         }
     }
-    let effective = match group_window {
-        Some(window) => Some(window),
-        None => config_window,
-    };
-    match storage {
-        KvCacheStorage::Full => Ok(capacity),
+    let effective = effective_window_of(storage, group_window, config_window);
+    let slots = match storage {
+        KvCacheStorage::Full => capacity,
         KvCacheStorage::SlidingRing => match effective {
-            Some(window) => Ok(window),
-            None => Err(TimeSlotViolation::WindowRequired),
+            Some(window) => window,
+            None => return Err(TimeSlotViolation::WindowRequired),
         },
         KvCacheStorage::MirroredSlidingRing => match effective {
             Some(window) => match window.checked_mul(2) {
-                Some(slots) => Ok(slots),
-                None => Err(TimeSlotViolation::MirroredOverflow { window }),
+                Some(slots) => slots,
+                None => return Err(TimeSlotViolation::MirroredOverflow { window }),
             },
-            None => Err(TimeSlotViolation::WindowRequired),
+            None => return Err(TimeSlotViolation::WindowRequired),
         },
-    }
+    };
+    Ok(TimeExtent {
+        slots,
+        window: effective,
+    })
 }
 
 /// Returns the newest positions a committed read of length `length` sees.
@@ -434,8 +485,8 @@ pub(crate) fn working_read_rows(
 /// Physical index `q < 2W` of a mirrored ring holds slot `q mod W`, so the run
 /// begins at `start mod W` and stays contiguous. The caller guarantees
 /// `keep <= W` (a read never sees more than the window) and that `2W` is
-/// representable, which [`committed_time_slots`] established when the group
-/// was allocated.
+/// representable, which [`committed_time_slots`] proved for the very width it
+/// returned and the group stored when it was allocated.
 ///
 /// Proved: the range has exactly `keep` slots, ends at or below `2W`, and its
 /// offset `j` holds the slot of absolute position `start + j`.

@@ -4,23 +4,38 @@ use proptest::prelude::*;
 
 use super::*;
 
-/// Every storage mode reports its exact extent or its first invalid rule.
+/// Builds the expected extent of a valid group.
+fn extent(slots: usize, window: Option<usize>) -> Result<TimeExtent, TimeSlotViolation> {
+    Ok(TimeExtent { slots, window })
+}
+
+/// Every storage mode reports its exact extent and width or its first invalid rule.
 #[test]
 fn committed_time_slots_cover_every_storage_rule() {
     use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
-    assert_eq!(committed_time_slots(Full, false, None, Some(4), 16), Ok(16));
-    assert_eq!(committed_time_slots(Full, true, None, None, 16), Ok(16));
+    assert_eq!(
+        committed_time_slots(Full, false, None, Some(4), 16),
+        extent(16, None)
+    );
+    assert_eq!(
+        committed_time_slots(Full, true, None, None, 16),
+        extent(16, None)
+    );
     assert_eq!(
         committed_time_slots(SlidingRing, false, None, Some(4), 16),
-        Ok(4)
+        extent(4, Some(4))
     );
     assert_eq!(
         committed_time_slots(SlidingRing, false, Some(8), Some(4), 16),
-        Ok(8)
+        extent(8, Some(8))
     );
     assert_eq!(
         committed_time_slots(MirroredSlidingRing, false, None, Some(4), 16),
-        Ok(8)
+        extent(8, Some(4))
+    );
+    assert_eq!(
+        committed_time_slots(MirroredSlidingRing, false, Some(3), Some(4), 16),
+        extent(6, Some(3))
     );
     assert_eq!(
         committed_time_slots(SlidingRing, true, Some(32), None, 16),
@@ -43,6 +58,19 @@ fn committed_time_slots_cover_every_storage_rule() {
         committed_time_slots(MirroredSlidingRing, false, None, Some(huge), usize::MAX),
         Err(TimeSlotViolation::MirroredOverflow { window: huge })
     );
+}
+
+/// The effective width is the group's own window, else the bank's, and none for full storage.
+#[test]
+fn effective_window_prefers_the_group_window() {
+    use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
+    assert_eq!(effective_window_of(Full, Some(3), Some(4)), None);
+    assert_eq!(effective_window_of(Full, None, Some(4)), None);
+    for ring in [SlidingRing, MirroredSlidingRing] {
+        assert_eq!(effective_window_of(ring, Some(3), Some(4)), Some(3));
+        assert_eq!(effective_window_of(ring, None, Some(4)), Some(4));
+        assert_eq!(effective_window_of(ring, None, None), None);
+    }
 }
 
 /// Committed reads keep `min(L, W)` positions and retain the newest suffix.
