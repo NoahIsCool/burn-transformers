@@ -247,7 +247,13 @@ Per-layer localization first falls below 0.999 at decision 1 after MoE layer 27
 `0.4501431751762463` at the following MoE boundary. This proves the recurrent
 versus chunk-scan difference begins in Mamba and is amplified across the next
 MoE block; expert-ID hooks were not captured, so it does not by itself prove
-that different experts were selected.
+that different experts were selected. The difference is semantic, not only
+floating-point reassociation: the pinned reference clamps $\Delta$ to
+`time_step_min` in the chunk scan but not in the single-token update, and its
+F16 recurrent update keeps several products in the activation dtype. Which of
+the two dominates here is not yet measured; the fraction of Mamba layer 0 heads
+and tokens with `softplus(dt + dt_bias) < time_step_min` at decision 14 would
+decide it (see [chunk-parallel recurrent prefill](TRANSFORMER_INNOVATIONS.md#innovation-chunked-prefill)).
 
 This source self-divergence is diagnostic, not a relaxed parity threshold. A
 Burn cached run must match the official cached rows, and a Burn stateless run

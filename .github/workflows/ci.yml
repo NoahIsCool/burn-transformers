@@ -17,9 +17,13 @@
 # item, including Verus proof functions, exactly as the release gate
 # (scripts/check_release.py --gate source) does.
 #
-# The Verus proofs need a pinned prover release and its own Rust toolchain;
-# start them from the Actions tab ("Run workflow", then tick "verus"). All 25
-# harnesses (1,877 verified items) take 35 to 55 seconds on the development Mac.
+# The Verus proofs are attached to production functions, so any change to
+# src/ can break one. The `verus` job runs them on every push and pull request
+# that touches src/, verus/, the structural test, the release gate, or this
+# workflow, and on manual and scheduled runs. It caches the pinned prover
+# release and runs `scripts/check_release.py --gate verus`, which also requires
+# each harness's verified count to match verus/README.md. The 25 harnesses
+# take 35 to 55 seconds on the development Mac.
 
 name: CI
 
@@ -31,11 +35,6 @@ on:
     # Weekly, to surface new advisories and stable-toolchain lints early.
     - cron: "17 5 * * 1"
   workflow_dispatch:
-    inputs:
-      verus:
-        description: Also run the Verus proofs (macOS; downloads the pinned 450 MB release)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -156,11 +155,18 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
@@ -168,6 +174,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The docs.rs feature set from Cargo.toml's package.metadata.
       - run: cargo doc --locked --no-deps --no-default-features --features std,flex,tokenizers,chat-templates
+      # Compiles every Rust block of README.md, EXPERIMENTS.md, TRAINING.md,
+      # and V0_2_INTERFACE.md as a doctest against this crate.
+      - name: Guide snippets
+        run: python3 scripts/check_release.py --gate guides
+      - name: Show the guide doctest log
+        if: failure()
+        run: cat target/release-gates/*/*.log
 
   examples:
     name: Examples
@@ -324,9 +337,43 @@ jobs:
       - name: Licenses and sources
         run: cargo deny --locked --config deny.toml check licenses sources
 
+  proof-changes:
+    name: Detect proof-relevant changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      verus: ${{ steps.changes.outputs.verus }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Pushes compare with the previous tip and pull requests with their base.
+      # Anything else (manual, scheduled, a new branch, an unreachable base)
+      # runs the proofs.
+      - id: changes
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+          PULL_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            push) base="$PUSH_BEFORE" ;;
+            pull_request) base="$PULL_BASE" ;;
+            *) base="" ;;
+          esac
+          verus=true
+          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            if git diff --quiet "$base" "$GITHUB_SHA" -- src verus tests/verus_harness.rs \
+              scripts/check_release.py .github/workflows/ci.yml; then
+              verus=false
+            fi
+          fi
+          echo "verus=$verus" >> "$GITHUB_OUTPUT"
+          echo "Run the Verus proofs: $verus"
+
   verus:
     name: Verus proofs
-    if: github.event_name == 'workflow_dispatch' && inputs.verus
+    needs: proof-changes
+    if: needs.proof-changes.outputs.verus == 'true'
     # macos-latest is Apple silicon, matching the pinned arm64 macOS release.
     runs-on: macos-latest
     timeout-minutes: 60
@@ -337,25 +384,40 @@ jobs:
       VERUS_TOOLCHAIN: 1.98.1-aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Install the Rust toolchain the Verus release pins
         run: rustup toolchain install "$VERUS_TOOLCHAIN" --profile minimal --no-self-update
+      # The 450 MB archive is downloaded once per pinned SHA-256 and checked
+      # before it is extracted into the cache.
+      - name: Restore the pinned Verus release
+        id: verus-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/verus-release
+          key: verus-${{ runner.os }}-${{ runner.arch }}-${{ env.VERUS_SHA256 }}
       - name: Download and verify the pinned Verus release
+        if: steps.verus-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$VERUS_RELEASE" --repo verus-lang/verus \
             --pattern "$VERUS_ARCHIVE" --dir "$RUNNER_TEMP"
           echo "$VERUS_SHA256  $RUNNER_TEMP/$VERUS_ARCHIVE" | shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/$VERUS_ARCHIVE" -d "$RUNNER_TEMP/verus"
+          unzip -q "$RUNNER_TEMP/$VERUS_ARCHIVE" -d ~/verus-release
+      # The gate checks the prover version, runs every harness with
+      # --no-cheating, and compares each count with verus/README.md.
       - name: Verify every harness
         run: |
-          verus="$(find "$RUNNER_TEMP/verus" -type f -name verus -perm -u+x | head -n 1)"
+          verus="$(find ~/verus-release -type f -name verus -perm -u+x | head -n 1)"
           test -n "$verus" || { echo "verus binary not found in the archive"; exit 1; }
-          "$verus" --version
-          status=0
-          for harness in verus/*.rs; do
-            echo "::group::$harness"
-            "$verus" --crate-type lib --no-cheating --triggers-mode silent "$harness" || status=1
+          VERUS="$verus" python3 scripts/check_release.py --gate verus
+      - name: Show the prover logs
+        if: failure()
+        run: |
+          for log in target/release-gates/*/*.log; do
+            echo "::group::$log"
+            cat "$log"
             echo "::endgroup::"
           done
-          exit "$status"

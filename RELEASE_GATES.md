@@ -66,15 +66,20 @@ PROPTEST_CASES=20000 cargo test --locked --release \
   --test generation_properties --test rope_properties --test connectivity_properties
 ```
 
-**Verus.** Every harness must verify with the pinned release (see
-[verus/README.md](verus/README.md)); 18 harnesses, 408 obligations, 0 errors at
-`33f620f`:
+**Verus.** Every harness must verify with the pinned release, and each
+harness's verified count must equal the one recorded in the
+[harness table](verus/README.md#harnesses): 25 harnesses, 1,877 verified,
+0 errors at `fbcdb12`. The gate checks the prover version, runs every harness
+with `--no-cheating`, compares the counts, and writes `verus.json` with the
+per-harness counts and the SHA-256 of every harness and included source:
 
 ```sh
-for harness in verus/*.rs; do
-  "$VERUS" --crate-type lib --no-cheating --triggers-mode silent "$harness" || exit 1
-done
+VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
 ```
+
+CI runs the same gate on every push and pull request that changes `src/`,
+`verus/`, the gate, or the workflow. A proof change that alters a count must
+update the table in the same commit.
 
 **Fuzzing.** Run bounded campaigns for all twelve targets listed in
 [fuzz/README.md](fuzz/README.md): `configuration`, `index_artifacts`,
@@ -97,7 +102,7 @@ writes from Transformers on CPU with eager attention:
 ```sh
 python3 -I scripts/generate_causal_lm_reference.py --model-dir MODEL_DIR \
   --output BUNDLE_DIR --repository OWNER/NAME --revision COMMIT \
-  [--dtype {float32,bfloat16}] [--num-hidden-layers N] [--prompt TEXT ...] [--greedy-tokens N]
+  [--dtype {float32,float64,bfloat16}] [--num-hidden-layers N] [--prompt TEXT ...] [--greedy-tokens N]
 ```
 
 Each test verifies the checkpoint/bundle pairing through the bundle's
@@ -106,7 +111,7 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 
 | Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
 | --- | --- | --- | --- |
-| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift `9.1e-5` to `3.8e-4` on SmolLM-135M, Qwen3-4B, and SmolLM3-3B; Qwen2-7B reaches `1.80e-3` on one prompt and **fails** this default, an open item: investigate it or raise the tolerance with a rationale); at least 2 decisive greedy tokens |
+| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift `7.6e-5` to `3.83e-4` on SmolLM-135M, Qwen3-4B, SmolLM3-3B, and Llama-3.1-8B, Flex and Metal); at least 2 decisive greedy tokens. Qwen2-7B's first-position activations reach about 7,000, so an F32 bundle's own rounding (`1.6e-3`) exceeds the tolerance: qualify it against a `--dtype float64` bundle, where Flex stays within `2.9e-4` and Metal reaches `1.9e-3` at one first-position logit, run with `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3` |
 | Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY` | `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3` |
 | gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.5` max, `0.15` mean (provisional, calibrated on four blocks) |
 
@@ -116,26 +121,52 @@ Qualify half-precision gpt-oss runs (including Metal F16, with
 `TRANSFORMERS_GPT_OSS_DTYPE=f16`) against a truncated F32 bundle; the full
 24-block BF16 bundle needs about 55 GiB of host memory to generate. These
 gates establish experimental validation only; none promotes a checkpoint.
+The Metal F32 runs at `ade8696` (below) are experimental evidence on the same
+terms.
 
 ### Replays required after the polish cycle
 
 The batched-execution, attention, position, DeltaNet, Mamba-2, and loader
 changes touch real-checkpoint paths whose recorded evidence predates them.
-Before the next release, replay on the integrated source:
+These replays ran on source `ade8696` and passed:
 
-- Qwen3.5-0.8B Metal/F16 official-reference parity (minimum cosine
-  `0.999996`, 32/32 decisions) and its public example; Qwen3.8 and Qwen3-MoE
-  Metal smokes, including packed Q4/Q8 (Qwen3.5 packed overrides now install
-  exactly).
-- FLAN-T5-small on Metal/F32 (its Flex/F32 gate was re-run with byte-identical
-  digests) and FLAN-T5-XXL.
+- Qwen3.5-0.8B Metal/F16 official-reference parity: prompt cosine
+  `0.999998523`, cached decisions at least `0.999997671`, teacher-forced rows
+  at least `0.999997517` (gate minimum `0.999996`).
+- FLAN-T5-small's official-reference gate on Flex/F32 and Metal/F32, with zero
+  `1e-4` tolerance failures.
+- The Llama-family gate on Flex and Metal in F32, at every prompt position and
+  with 32/32 greedy tokens: SmolLM-135M within `1.34e-4`, Qwen3-4B `1.41e-4`,
+  SmolLM3-3B `3.83e-4`, Llama-3.1-8B `7.6e-5`, and Qwen2-7B against an F64
+  bundle (Flex `2.9e-4`; Metal `1.9e-3` at one first-position logit, where F32
+  Transformers itself deviates by `1.6e-3`, under the `2.5e-3` override).
+- gemma-3-4b-it on Flex and Metal in F32, including 1,237-token prompts across
+  the 1,024-token window (largest deviation beyond the window `1.18e-3`, 8/8
+  long greedy tokens).
+- gpt-oss-20b truncated to one and four blocks on Flex and Metal against F32
+  bundles: within `1.3e-4`, 32/32 greedy tokens, batched and long cached
+  decoding.
+- DeepSeek-V2-Lite's metadata gate and Metal/F16 smoke: cached/stateless
+  cosine `1.0`, absorbed decode `0.999998964`.
+
+None has an `acceptance/measurements/` record yet. Each needs one, with its
+source commit, binary, bundle `config.json` SHA-256, backend, dtype, and any
+tolerance override, before it counts as release evidence. Commits after
+`ade8696` are mostly tests and documentation but include small host-side
+refactors, so each record names the source it actually ran.
+
+Still to replay on the integrated source:
+
+- the Qwen3.5-0.8B public example; Qwen3.8 and Qwen3-MoE Metal smokes,
+  including packed Q4/Q8 (Qwen3.5 packed overrides now install exactly);
+- FLAN-T5-XXL;
 - Nemotron 3.5 Lightning Metal stateless, cached-prefill, one-token decode, and
   official-reference gates (the Mamba-2 scan, `dt` softplus, and cached
-  attention changed); real-weight MTP parity remains open.
-- Muse Glimmer and DeepSeek-V2-Lite Metal gates (batched decoding, shared
-  router, bounded attention).
-- The Metal variants of the Llama-family, Gemma, and gpt-oss gates, the
-  remaining Llama-family checkpoints, and the full gpt-oss-20b BF16 reference.
+  attention changed); real-weight MTP parity remains open;
+- Muse Glimmer's Metal gates (batched decoding, shared router, bounded
+  attention);
+- the full gpt-oss-20b BF16 reference, F16/BF16 runs of the Llama-family and
+  Gemma gates, and real Mistral and OLMo 2 checkpoints (tiny goldens only).
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
@@ -190,7 +221,17 @@ python3 scripts/check_release.py --gate coverage --toolchain nightly --offline
 python3 scripts/check_release.py --gate dependencies
 python3 scripts/check_release.py --gate accelerator-compile --offline
 python3 scripts/check_release.py --gate package --offline
+python3 scripts/check_release.py --gate guides --offline
+VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
 ```
+
+The `guides` gate compiles every Rust block of `README.md`, `EXPERIMENTS.md`,
+`TRAINING.md`, and `V0_2_INTERFACE.md` as a doctest of a scratch crate that
+depends on this one by path, as a downstream user would. A fragment that
+assumes a model or an input is compiled inside the context named by a hidden
+`doctest NAME` comment above it, defined by a `doctest-context NAME` comment in
+the same guide; an unknown or unused context fails the gate. CI runs it in the
+documentation job.
 
 Run from this crate or use its full script path from the repository root. Install
 tools separately; the runner does not install or update them. The reviewed tool
@@ -198,8 +239,16 @@ versions are `cargo-llvm-cov 0.6.21`, `cargo-audit 0.22.2`, `cargo-deny 0.20.2`,
 and `cargo-fuzz 0.13.2`. LLVM tools must match the selected Rust toolchain.
 Source/MSRV audit groups require the full repository checkout: Cargo excludes
 nested standalone packages from source archives, including the development-only
-Rust classifier. Ordinary library tests and package checks remain usable from
-the archive; archive verification does not claim to run repository-only tooling.
+Rust classifier. The archive does carry the Verus harnesses and their guide,
+because `tests/verus_harness.rs` reads them. After `cargo package` builds the
+extracted archive, the package gate runs its default `cargo test` there (in
+Cargo's normal target directory, as the verification build does), so a
+test that reads a file the archive omits fails the gate; the archive still does
+not run repository-only tooling (fuzzing, CI, the coverage classifier).
+The archive is about 28 MiB compressed, mostly `acceptance/` records that the
+packaged Python record tests read. That exceeds crates.io's 10 MB upload limit,
+so publishing would first need a narrower `include` and repository-only record
+tests; this is an open release decision, not a gate.
 The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is
 permitted only while that local alias actually resolves to Rust **1.92.0**.
 Coverage export warnings (including mismatched profile data) fail validation
@@ -342,7 +391,10 @@ An unrelated change outside this standalone crate is not permission to stage it.
 Every include pattern is root-anchored: Cargo otherwise matches slash-free
 patterns such as `*.md` inside the external `models` symlink. The runner validates
 the actual file listing before archive creation and rejects artifact directories,
-weights, generated bytecode, traversal, duplicates, and unallowlisted roots.
+weights, generated bytecode, traversal, duplicates, and unallowlisted roots. The
+one weight exception is the tiny random-weight goldens the packaged tests read:
+regular `tests/fixtures/tiny_goldens/<case>/*.safetensors` files of at most
+1 MiB each (the largest is about 0.5 MiB).
 
 ## Coverage qualification is separate from a passing aggregate
 

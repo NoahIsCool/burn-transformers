@@ -5,6 +5,12 @@ and task head use Burn's autodiff, optimizers, records, and data loaders. The
 crate supplies transformer computation and activation access; the training
 procedure stays in your application. These workflows use pinned Burn 0.21.
 
+<!-- Maintainers: `python3 scripts/check_release.py --gate guides` compiles
+every Rust block in this guide. A fragment names the hidden context it compiles
+in with a `doctest NAME` comment directly above its fence; the matching
+`doctest-context NAME` comment, beside the fragment that first uses it, holds
+that context with `__FRAGMENT__` where the fragment goes. -->
+
 ## Start with a working example
 
 All four commands below train small models locally without downloads:
@@ -31,6 +37,22 @@ These commands use default `std,flex`. With defaults disabled, select
 Derive `Module` on a struct containing the backbone, adapter, and head. Create
 hooks inside its forward method and borrow the adapter from `self`:
 
+<!-- doctest-context adapter-method
+use burn::{nn::Linear, tensor::backend::Backend};
+use transformers::intervention::{Hooks, Layer};
+
+struct Experiment<B: Backend> {
+    adapter: Linear<B>,
+}
+
+impl<B: Backend> Experiment<B> {
+    fn fragment(&self) {
+        let mut hooks = Hooks::<B>::new();
+        __FRAGMENT__
+    }
+}
+-->
+<!-- doctest adapter-method -->
 ```rust
 hooks.edit(Layer::decoder(0).residual_post(), |hidden| {
     hidden.clone() + self.adapter.forward(hidden) * 0.1
@@ -43,6 +65,24 @@ inside the callback or leave learned tensors in an unregistered closure.
 Build a fresh forward graph for every update. After computing your scalar loss,
 the update is standard Burn:
 
+<!-- doctest-context optimizer-step
+use burn::{
+    module::AutodiffModule,
+    optim::{GradientsParams, Optimizer},
+    tensor::{Tensor, backend::AutodiffBackend},
+};
+
+fn fragment<B: AutodiffBackend, M: AutodiffModule<B>, O: Optimizer<M, B>>(
+    mut model: M,
+    optimizer: &mut O,
+    loss: Tensor<B, 1>,
+    learning_rate: f64,
+) -> M {
+    __FRAGMENT__
+    model
+}
+-->
+<!-- doctest optimizer-step -->
 ```rust
 let gradients = GradientsParams::from_grads(loss.backward(), &model);
 model = optimizer.step(learning_rate, model, gradients);
@@ -60,6 +100,17 @@ such trainable duplicates; inspecting duplicate owners can initialize them.
 `capture()` returns a detached observation. `capture_with_grad()` keeps the
 selected tensor connected, so an auxiliary loss can update preceding parameters:
 
+<!-- doctest-context connected-capture
+use burn::tensor::{Tensor, backend::Backend};
+use transformers::{Result, intervention::{Hooks, Layer}};
+
+fn fragment<B: Backend>(task_loss: Tensor<B, 1>) -> Result<()> {
+    let mut hooks = Hooks::<B>::new();
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest connected-capture -->
 ```rust
 let selected = Layer::decoder(0).residual_post().token(0);
 let capture = hooks.capture_with_grad(selected);
@@ -106,6 +157,15 @@ and 6.33 nats, close to the uniform `ln V = 6.24`.
 module by parameter role (embedding, projection, residual projection, bias,
 other), with path overrides taking precedence:
 
+<!-- doctest-context init-policy
+use burn::{module::Module, tensor::backend::Backend};
+
+fn fragment<B: Backend, M: Module<B>>(model: M, layers: usize) -> transformers::Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest init-policy -->
 ```rust
 use transformers::initialization::{InitPolicy, ParameterInit};
 
@@ -139,11 +199,27 @@ let (model, report) = policy.apply(model)?;
 - Seed the backend first (`B::seed(&device, seed)`) for reproducible draws.
   Different backends need not produce the same weights from a seed.
 
-Model helpers build the matching policy: `ModularCausalLm::init_with(spec,
-&ModularCausalLm::scaled_init_policy(&spec, 0.02), &device)` (and the seq2seq
-equivalent) names the residual projections the spec actually contains, and
-`Gpt2Config::init_policy()` / `GptNeoXConfig::init_policy()` reproduce those
-families' Hugging Face initialization. The GPT policies keep LayerNorm
+Model helpers build the matching policy. For a modular causal model
+(`ModularSeq2SeqLm` has the same pair):
+
+<!-- doctest-context modular-spec
+use burn::tensor::backend::Backend;
+use transformers::{Result, architecture::DecoderSpec, models::custom::ModularCausalLm};
+
+fn fragment<B: Backend>(spec: DecoderSpec, device: B::Device) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest modular-spec -->
+```rust
+let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+let model = ModularCausalLm::<B>::init_with(spec, &policy, &device)?;
+```
+
+`scaled_init_policy` names the residual projections the spec actually
+contains, and `Gpt2Config::init_policy()` / `GptNeoXConfig::init_policy()`
+reproduce those families' Hugging Face initialization. The GPT policies keep LayerNorm
 parameters as constructed; add `ParameterInit::Ones` and `Zeros` overrides to
 reset them as well. Modular T5 relative-position biases start from
 `N(0, 1/hidden_size)`, the reference initialization.
@@ -158,6 +234,14 @@ training dropout. Add regularization explicitly to the experiment when needed.
 
 **Save the original training owner before converting to evaluation:**
 
+<!-- doctest-context records
+use burn::{module::AutodiffModule, optim::Optimizer, tensor::backend::AutodiffBackend};
+
+fn fragment<B: AutodiffBackend, M: AutodiffModule<B>, O: Optimizer<M, B>>(model: M, optimizer: O) {
+    __FRAGMENT__
+}
+-->
+<!-- doctest records -->
 ```rust
 let model_record = model.clone().into_record();
 let optimizer_record = optimizer.to_record();

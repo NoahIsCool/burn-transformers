@@ -84,13 +84,15 @@ description below.
 | **Q3-4** | [Qwen/Qwen3-4B @ `531c80…`](https://huggingface.co/Qwen/Qwen3-4B/blob/531c80e289d6cff3a7cd8c0db8110231d23a6f7a/config.json) | [Qwen3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen3/modeling_qwen3.py) | [`llama`](src/models/llama/model.rs) |
 | **SmolLM3-3** | [HuggingFaceTB/SmolLM3-3B @ `1fa6fa…`](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/1fa6fa281b5c635c89171a2b53769609cc1199c6/config.json) | [SmolLM3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/smollm3/modeling_smollm3.py) | [`llama`](src/models/llama/model.rs) |
 | **Q2-7** | [Qwen/Qwen2-7B @ `453ed1…`](https://huggingface.co/Qwen/Qwen2-7B/blob/453ed1575b739b5b03ce3758b23befdb0967f40e/config.json) | [Qwen2 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen2/modeling_qwen2.py) | [`llama`](src/models/llama/model.rs) |
+| **L3.1-8** | [meta-llama/Llama-3.1-8B @ `d04e59…`](https://huggingface.co/meta-llama/Llama-3.1-8B/blob/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/config.json) | [Llama reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/llama/modeling_llama.py) | [`llama`](src/models/llama/model.rs) |
 | **Gemma3-4** | [google/gemma-3-4b-it @ `093f9f…`](https://huggingface.co/google/gemma-3-4b-it/blob/093f9f388b31de276ce2de164bdc2081324b9767/config.json), text tower | [Gemma 3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/gemma3/modeling_gemma3.py) | [`gemma`](src/models/gemma/model.rs) |
 | **gpt-oss-20** | [openai/gpt-oss-20b @ `6cee5e…`](https://huggingface.co/openai/gpt-oss-20b/blob/6cee5e81ee83917806bbde320786a8fb61efebee/config.json) | [gpt-oss reference](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/gpt_oss/modeling_gpt_oss.py) and [MXFP4 integration](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/integrations/mxfp4.py), Transformers 5.2.0 | [`gpt_oss`](src/models/gpt_oss/model.rs) |
 
-The last six checkpoints were added after v0.1. Their columns appear in the
-[second matrix](#families-added-after-v01); Mistral, OLMo 2, Llama 3 RoPE
-scaling, and Gemma 2 are covered by tiny Transformers 5.2.0 goldens only and
-have no pinned-checkpoint column.
+The last seven checkpoints were added after v0.1. Their columns appear in the
+[second matrix](#families-added-after-v01); Mistral, OLMo 2, and Gemma 2 are
+covered by tiny Transformers 5.2.0 goldens only and have no pinned-checkpoint
+column. L3.1-8 is the pinned real checkpoint for Llama 3 RoPE scaling, which
+also has a Llama 3.1-style tiny golden.
 
 Qwen3.8's inner text model is officially serialized as `qwen3_5_text`, not
 `qwen3_8_text`. Nemotron Nano is included because the crate validates its
@@ -158,7 +160,7 @@ mathematical and implementation description.
 | [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | ✓ | — | — | — | — | — |
 | [Immutable cross-attention KV cache](#innovation-cross-kv-cache) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
 | [External recurrent-state cache](#innovation-recurrent-cache) | Delta | Delta | — | — | — | — | — | — | Mamba2 | Mamba2 |
-| [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | — | — | — | — | — | target + MTP | — |
+| [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | target only | — | — | — | — | target + MTP | — |
 | [Lossless speculative decoding](#innovation-speculative-decoding) | MTP, batch 1 | MTP, batch 1 | — | — | — | — | — | — | MTP, batch 1 | — |
 | [Cache-aware beam search](#innovation-beam-search) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
 
@@ -166,36 +168,36 @@ mathematical and implementation description.
 <a id="families-added-after-v01"></a>
 ### Families added after v0.1
 
-Same legend. Every column is a Flex/F32 real-weight gate subject; see the
+Same legend. Every column is a real-weight gate subject, run on Flex and Metal in F32; see the
 [status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence) for its
 measured parity.
 
-| Transformer innovation | SmolLM-135 | Q3-4 | SmolLM3-3 | Q2-7 | Gemma3-4 | gpt-oss-20 |
-|---|---:|---:|---:|---:|---:|---:|
-| [Decoder-only causal stack](#innovation-decoder-only) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [Pre-normalized residual path](#innovation-pre-norm) | ✓ | ✓ | ✓ | ✓ | ✓ + post-norms | ✓ |
-| [Grouped-query attention (GQA)](#innovation-gqa) | 9 q / 3 kv | 32 / 8 | 16 / 4 | 28 / 4 | 8 / 4 | 64 / 8 |
-| [Sliding-window attention](#innovation-sliding-attention) | — | — | — | — | 29/34, window 1024 | 12/24, window 128 |
-| [NoPE attention](#innovation-nope) | — | — | 9/36 | — | — | — |
-| [Per-head Q/K normalization](#innovation-qk-norm) | — | 36/36 | — | — | 34/34 | — |
-| [Attention projection biases](#innovation-projection-bias) | — | — | — | Q/K/V | — | Q/K/V/O |
-| [Learned attention sinks](#innovation-attention-sinks) | — | — | — | — | — | 24/24 |
-| [Rotary position embedding (RoPE)](#innovation-rope) | θ 1e4 | θ 1e6 | θ 5e6, 27/36 | θ 1e6 | local θ 1e4; global θ 1e6, linear ×8 | YaRN |
-| [YaRN context scaling](#innovation-yarn) | — | — | — | — | — | factor 32, untruncated |
-| [SwiGLU / gated-SiLU feed-forward](#innovation-swiglu) | ✓ | ✓ | ✓ | ✓ | — | — |
-| [Gated-GELU feed-forward](#innovation-gated-gelu) | — | — | — | — | ✓ (tanh GELU) | — |
-| [Clamped SwiGLU](#innovation-clamped-swiglu) | — | — | — | — | — | experts |
-| [Sparse top-k mixture of experts](#innovation-sparse-moe) | — | — | — | — | — | 4/32 |
-| [Shared router policies](#innovation-router-policies) | — | — | — | — | — | biased, top-k then softmax |
-| [MXFP4 expert weights](#innovation-mxfp4) | — | — | — | — | — | ✓ |
-| [RMS normalization](#innovation-rmsnorm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [Zero-centered RMSNorm parameters](#innovation-zero-centered-rmsnorm) | — | — | — | — | ✓ | — |
-| [Sandwich normalization](#innovation-sandwich-norm) | — | — | — | — | ✓ | — |
-| [Scaled token embedding](#innovation-embedding-scale) | — | — | — | — | `sqrt(d)` | — |
-| [Tied input embedding and LM head](#innovation-tied-lm-head) | ✓ | ✓ | ✓ | — | ✓ | — |
-| [Preallocated projected-KV cache](#innovation-kv-cache) | ✓ | ✓ | ✓ | ✓ | 5 global layers | 12 full layers |
-| [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | 29 rings | 12 rings |
-| [Batched cached decoding](#innovation-batched-decoding) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Transformer innovation | SmolLM-135 | Q3-4 | SmolLM3-3 | Q2-7 | L3.1-8 | Gemma3-4 | gpt-oss-20 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| [Decoder-only causal stack](#innovation-decoder-only) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Pre-normalized residual path](#innovation-pre-norm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ + post-norms | ✓ |
+| [Grouped-query attention (GQA)](#innovation-gqa) | 9 q / 3 kv | 32 / 8 | 16 / 4 | 28 / 4 | 32 / 8 | 8 / 4 | 64 / 8 |
+| [Sliding-window attention](#innovation-sliding-attention) | — | — | — | — | — | 29/34, window 1024 | 12/24, window 128 |
+| [NoPE attention](#innovation-nope) | — | — | 9/36 | — | — | — | — |
+| [Per-head Q/K normalization](#innovation-qk-norm) | — | 36/36 | — | — | — | 34/34 | — |
+| [Attention projection biases](#innovation-projection-bias) | — | — | — | Q/K/V | — | — | Q/K/V/O |
+| [Learned attention sinks](#innovation-attention-sinks) | — | — | — | — | — | — | 24/24 |
+| [Rotary position embedding (RoPE)](#innovation-rope) | θ 1e4 | θ 1e6 | θ 5e6, 27/36 | θ 1e6 | θ 5e5, Llama 3 ×8 | local θ 1e4; global θ 1e6, linear ×8 | YaRN |
+| [YaRN context scaling](#innovation-yarn) | — | — | — | — | — | — | factor 32, untruncated |
+| [SwiGLU / gated-SiLU feed-forward](#innovation-swiglu) | ✓ | ✓ | ✓ | ✓ | ✓ | — | — |
+| [Gated-GELU feed-forward](#innovation-gated-gelu) | — | — | — | — | — | ✓ (tanh GELU) | — |
+| [Clamped SwiGLU](#innovation-clamped-swiglu) | — | — | — | — | — | — | experts |
+| [Sparse top-k mixture of experts](#innovation-sparse-moe) | — | — | — | — | — | — | 4/32 |
+| [Shared router policies](#innovation-router-policies) | — | — | — | — | — | — | biased, top-k then softmax |
+| [MXFP4 expert weights](#innovation-mxfp4) | — | — | — | — | — | — | ✓ |
+| [RMS normalization](#innovation-rmsnorm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Zero-centered RMSNorm parameters](#innovation-zero-centered-rmsnorm) | — | — | — | — | — | ✓ | — |
+| [Sandwich normalization](#innovation-sandwich-norm) | — | — | — | — | — | ✓ | — |
+| [Scaled token embedding](#innovation-embedding-scale) | — | — | — | — | — | `sqrt(d)` | — |
+| [Tied input embedding and LM head](#innovation-tied-lm-head) | ✓ | ✓ | ✓ | — | — | ✓ | — |
+| [Preallocated projected-KV cache](#innovation-kv-cache) | ✓ | ✓ | ✓ | ✓ | ✓ | 5 global layers | 12 full layers |
+| [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | — | 29 rings | 12 rings |
+| [Batched cached decoding](#innovation-batched-decoding) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 <a id="shared-mechanisms-beyond-the-pinned-graphs"></a>
 ### Shared mechanisms beyond the pinned graphs
@@ -206,7 +208,7 @@ checkpoint column above uses them. They make no checkpoint claim.
 
 | Mechanism | Validation | Where it is available |
 | --- | --- | --- |
-| [Llama 3, LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional); a Llama 3.1-style tiny golden | Every RoPE family through the shared translator; custom specs; `RotaryAttention` |
+| [LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional). Llama 3 scaling has the same goldens and a Llama 3.1-style tiny golden, and runs in the L3.1-8 column | Every RoPE family through the shared translator; custom specs; `RotaryAttention` |
 | [Attention logit soft cap](#innovation-attention-softcap) | Gemma 2 tiny golden, including a saturated cap | Gemma 2; custom specs |
 | [Post-sublayer norms and full-width Q/K norm](#innovation-post-norm) | OLMo 2 tiny golden | Llama family (`olmo2`); custom specs |
 | [Chunked-local connectivity](#innovation-sliding-attention) | Scalar mask oracle, property tests, fuzzing | Custom specs and shared attention |
@@ -665,8 +667,11 @@ pair, following Transformers' `modeling_rope_utils.py`:
 
 **Implementation:** [`position/rope_scaling.rs`](src/position/rope_scaling.rs)
 and [`position/frequencies.rs`](src/position/frequencies.rs). Each rule is
-checked against inverse frequencies generated by the reference; no pinned
-checkpoint above uses Llama 3, LongRoPE, or proportional scaling.
+checked against inverse frequencies generated by the reference. Llama 3
+scaling runs end to end in the L3.1-8 column (Llama-3.1-8B: factor 8,
+frequency factors 1 and 4, original context 8,192; see the
+[status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence)); no
+checkpoint column uses LongRoPE or proportional scaling.
 
 <a id="innovation-partial-rope"></a>
 ### Partial RoPE
@@ -886,19 +891,36 @@ Token-by-token recurrence is poor at exploiting accelerator parallelism over a
 long prompt. DeltaNet algebraically resolves the within-chunk updates as a
 causal triangular system followed by batched matrix products. Mamba2 constructs
 a masked semiseparable transfer matrix within each chunk and carries only the
-terminal state between chunks. Both paths are mathematically equivalent to the
-transparent recurrence up to floating-point reassociation.
+terminal state between chunks. Each chunked form equals the transparent
+recurrence up to floating-point reassociation only when both apply the same
+$\Delta$ interval and the same precision policy. DeltaNet always does. The
+pinned Mamba-2 references do not: at `cfa309…` Nemotron-H's chunk scan clamps
+$\Delta$ to $[\Delta_{min},\infty)$ while its single-token update is
+unclamped (see the $\Delta$ clamp above), and in F16 the recurrent update keeps
+$(\Delta B)x$, the $C$ contraction, and the $D$ skip in the activation dtype
+while the chunk scan works in FP32. Prefill and multi-token decode steps run
+the clamped scan; single-token decode steps and transactional verification
+steps run the unclamped update. Whenever
+$\operatorname{softplus}(dt+dt_{bias})<\Delta_{min}$, the same tokens therefore
+give semantically different outputs depending on how they are grouped into
+calls. The crate reproduces each reference path separately (`TimeStepClamp`
+states the choice), and the Nemotron-H decode tests pin the disagreement with
+a model whose steps fall below $\Delta_{min}$.
 
-That qualification is operationally important for sparse hybrids. In the
-authenticated Lightning F16 oracle, cached recurrent and teacher-forced chunked
-execution retained identical top-1 tokens for 32 decisions but reached logit
-cosine `0.9215047947571176` at decision 22. Hidden localization at decision 14
-first moved from cosine 1.0 to `0.8920338531579629` after Mamba layer 0, then to
+The difference is visible in sparse hybrids. In the authenticated Lightning
+F16 oracle, cached recurrent and teacher-forced chunked execution retained
+identical top-1 tokens for 32 decisions but reached logit cosine
+`0.9215047947571176` at decision 22. Hidden localization at decision 14 first
+moved from cosine 1.0 to `0.8920338531579629` after Mamba layer 0, then to
 `0.4418906779817166` after the following MoE layer. The trace proves that the
 path difference begins in Mamba and is amplified across the next sparse block;
 it does not prove different expert IDs because the oracle did not capture router
-selections. Corresponding-path Burn comparisons therefore keep the 0.999 gate,
-while the two official paths remain separate reference streams.
+selections. Its candidate causes are the clamp asymmetry and the F16 precision
+policy, not reassociation alone. Counting the heads and tokens with
+$\operatorname{softplus}(dt+dt_{bias})<\Delta_{min}$ at Mamba layer 0 for
+decision 14, which the existing hooks can measure, would separate the two; that
+diagnostic has not been run. Corresponding-path Burn comparisons therefore keep
+the 0.999 gate, while the two official paths remain separate reference streams.
 
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
 chunked mode in [`mamba2.rs`](src/mamba2.rs).
@@ -1008,9 +1030,11 @@ while streaming one tensor at a time, bit for bit equal to Transformers'
 experts occupy full load-dtype memory.
 
 **Implementation:** [`checkpoint/mxfp4.rs`](src/checkpoint/mxfp4.rs), whose
-integer core (shape acceptance, offsets, nibble split, and the exact binary64
-encoding of each value) is Verus-verified. **Reference:** the pinned
-Transformers MXFP4 integration linked above.
+integer core is Verus-verified: shape acceptance with exact error classes;
+block, scale, and value counts and offsets; the decode table's index
+bijection; the thread partition and each unit's non-overlapping output slots;
+the nibble split; and the exact binary64 encoding of each finite-scale value.
+**Reference:** the pinned Transformers MXFP4 integration linked above.
 
 <a id="innovation-selected-dispatch"></a>
 ### Selected-expert-only dispatch
@@ -1419,6 +1443,12 @@ commit, and a subsequent rollback remain usable.
 Speculation tentatively advances both the target and draft states. A transaction
 records a mark, stages appends, and then either `commit_prefix(a)` to publish
 only the accepted prefix or `rollback()` to restore the committed logical state.
+DeepSeek-V2's decode state implements this as the `cache::TransactionalCache`
+trait, with one uniform accepted prefix. Qwen3.5 and Nemotron-H expose inherent
+`mark`, `commit_prefixes(mark, target, mtp)`, and `rollback` instead, because
+their MTP bank commits a prefix of its own; generic code bounded on the trait
+reaches only DeepSeek-V2. The other families' decode states have no
+transactions and roll back with `truncate`.
 Rollback leaves committed cache tensors unchanged and discards staging metadata;
 rejected staging bytes may remain allocated but are no longer addressable. Qwen
 maintains an independent MTP KV cache alongside target GQA/DeltaNet state;

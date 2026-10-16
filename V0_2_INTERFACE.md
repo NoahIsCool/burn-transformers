@@ -18,6 +18,21 @@ captures, and caches are separate from the parameter tree.
 
 The intended staged interface is consistent across custom, T5, and Qwen backbones:
 
+<!-- doctest-context staged-head
+use burn::{nn::Linear, tensor::backend::Backend};
+use transformers::{CausalLmInput, Result, architecture::StagedModel, experiment::AttentionPolicy};
+
+fn fragment<B: Backend, M: StagedModel<B>>(
+    model: &M,
+    input: CausalLmInput<B>,
+    layer_count: usize,
+    task_head: &Linear<B>,
+) -> Result<()> {
+    __FRAGMENT__
+    Ok(())
+}
+-->
+<!-- doctest staged-head -->
 ```rust
 let mut state = model.embed(input)?;
 state.context = state.context.with_attention(AttentionPolicy::bidirectional());

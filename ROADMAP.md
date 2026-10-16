@@ -334,20 +334,23 @@ milestones above or the advertised checkpoint support:
   dispatches hooks) and forwarded by `LoadedModel`. The workbench runs one generic experiment on three families.
 - **New families.** The dense-decoder Llama family (`llama`, `mistral`,
   `qwen2`, `qwen3`, `smollm3`, `olmo2`), Gemma 2/3 text, and gpt-oss, each with
-  tiny Transformers goldens and Flex/F32 real-checkpoint gates. Their
-  Metal and F16 acceptance remains open.
+  tiny Transformers goldens and real-checkpoint gates that passed on Flex and
+  Metal in F32 at `ade8696`. Acceptance records and half-precision gates
+  remain open.
 - **Shared mechanisms.** Connectivity masks, sinks, soft caps, differential
   attention, every RoPE scaling rule, one router for softmax/sigmoid and
   grouped routing, clamped SwiGLU, a shared Mamba-2 mixer, MXFP4 decoding, and
   explicit initialization policies, all usable from modular specs.
 - **Batched cached execution.** Every family decodes ragged batches in one
   pass per step through atomic cache step writes.
-- **Verification.** 18 Verus harnesses and twelve fuzz targets.
+- **Verification.** 25 Verus harnesses (1,877 verified, 0 errors at
+  `fbcdb12`), checked in CI on every source change, and twelve fuzz targets.
 
 Open work carried forward: cached-state interventions, T5 staged views on the
 full encoder-decoder model, registering GPT-2 and GPT-NeoX in `AutoCausalLm`
-(they need external decode state), Metal and half-precision acceptance of the
-new families, and the release gates in [RELEASE_GATES.md](RELEASE_GATES.md).
+(they need external decode state), acceptance records and half-precision
+gates for the new families, and the release gates in
+[RELEASE_GATES.md](RELEASE_GATES.md).
 
 ## Scope boundaries
 

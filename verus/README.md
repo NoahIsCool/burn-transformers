@@ -58,7 +58,7 @@ pub(crate) const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
     proof! {
         lemma_ceiling_bounds(value as int, divisor as int);
     }
-    // A named remainder keeps this Verus-checkable (`is_multiple_of` has no spec).
+    // `div_ceil` has no Verus specification, so the rounding is spelled out.
     let remainder = value % divisor;
     value / divisor + if remainder == 0 { 0 } else { 1 }
 }
@@ -100,11 +100,16 @@ Rules that follow from Verus's semantics:
 - Verus checks every machine-integer operation for overflow and underflow
   and every slice index for bounds, so a verified body is also a proof that
   its arithmetic and indexing never panic.
-- `usize::from(bool)`, iterator adaptors, `div_ceil`, `is_multiple_of`,
-  `is_ascii_*`, `RangeInclusive::contains`, and some other standard helpers
-  have no Verus specification. Prefer `if`, index `while` loops, explicit
-  comparisons, and `min`/`max`; the affected Clippy lints are allowed
-  locally with a comment saying why.
+- `usize::from(bool)`, iterator adaptors, `div_ceil`, `is_ascii_*`,
+  `RangeInclusive::contains`, and some other standard helpers have no Verus
+  specification. Prefer `if`, index `while` loops, explicit comparisons, and
+  `min`/`max`; the affected Clippy lints are allowed locally with a comment
+  saying why. `is_multiple_of` does have one (`n.is_multiple_of(d)` is
+  `n % d == 0`, and `n == 0` for `d == 0`), so new verified code can use it.
+  Older bodies, including the `ceil_div_u64` excerpt above, still compare a
+  remainder with zero, and some comments and three
+  `clippy::manual_is_multiple_of` allowances still claim it has no
+  specification. Those predate this correction and are being replaced.
 - Loop invariants are attributes on `while` statements, which needs
   `#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]` at the
   harness root. Only the Verus compiler sees it; ordinary builds are
@@ -133,9 +138,11 @@ module documentation lists its verified functions, their postconditions,
 and what remains covered only by Rust tests.
 
 The 25 harnesses include 87 distinct source files, which are exactly the
-files under `src/` that carry Verus specifications. The counts are the
-"verified" totals Verus reported for each harness on source revision
-`d0129a3` with the release recorded below: **1,877 verified, 0 errors**.
+files under `src/` that contain Verus-only code (`verus_keep_ghost`). The
+counts are the "verified" totals Verus reported for each harness on source
+revision `fbcdb12` with the release recorded below: **1,877 verified, 0 errors**.
+`scripts/check_release.py --gate verus` fails when a harness reports a
+different count, so update this table with the proofs.
 
 | Harness | Verified sources | Verified | What the proofs establish |
 | --- | --- | ---: | --- |
@@ -167,11 +174,20 @@ files under `src/` that carry Verus specifications. The counts are the
 
 ## Rules for proof code
 
-Proof code must not use `admit`, `assume`, `assume_specification`,
-`external_body`, or `external_fn_specification`; the `verus_harness`
-integration test rejects them in harnesses and in every included source
-file. Verification runs with `--no-cheating`, which rejects the same escape
-hatches.
+Proof code must not trust anything Verus has not checked. The
+`verus_harness` integration test rejects these constructs in harnesses and in
+every included source file:
+
+| Rejected | Why |
+| --- | --- |
+| `admit(`, `assume(`, `assume_specification`, `assume_termination`, `external_body` | Assume a fact, a contract, or termination without proof. `--no-cheating` rejects these too. |
+| `exec_allows_no_decreases_clause` | Lets an executable loop or recursion skip its termination proof, so a body that never returns satisfies any postcondition. `--no-cheating` accepts it. |
+| `verifier::external`, `verifier(external)`, and `external` as any argument of `verus_verify(...)` | Removes an item, contract included, from verification without a diagnostic. `--no-cheating` accepts it, so even a false `ensures` under `verus_verify(external)` produces no error. |
+| `external_fn_specification`, `external_type_specification`, `external_trait_specification`, `external_trait_extension` | Trust a hand-written contract for code Verus never checks. |
+| `inline_air_stmt` | Injects unchecked solver input. |
+
+Verification also runs with `--no-cheating`, which rejects the first row's
+constructs in the prover itself.
 
 A contract can verify and still be too weak, so specifications are
 checked by mutation testing. Introduce a deliberate defect into a scratch
@@ -205,11 +221,25 @@ The whole loop takes 35 to 55 seconds on an Apple M3 Max, depending on
 concurrent load; a single harness can be run alone while working on its
 area.
 
+The release gate runs the same loop and records the evidence:
+
+```sh
+VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
+```
+
+It checks that `$VERUS` is the pinned release, runs every harness with the
+flags above, requires each harness's `N verified, 0 errors` to match the
+table above, and writes the per-harness counts, the total, and the SHA-256
+of every harness and included source to `verus.json` in its evidence
+directory. CI runs this gate on every push and pull request that changes
+`src/`, `verus/`, or the gate itself.
+
 Without Verus installed, `cargo test --locked --test verus_harness` still
 checks the harness structure: every harness begins with module
 documentation and includes existing sources, no harness or included source
-uses an escape hatch, and every source file carrying Verus specifications
-is included by some harness.
+uses an escape hatch, every source file with Verus-only code is included by
+some harness, and the table above, its totals, and the counts quoted in the
+top-level documents agree with the harness files.
 
 | Item | Version |
 | --- | --- |

@@ -625,6 +625,13 @@ s. At width 256 neither path changed beyond noise.
 
 ### Qwen3.5-0.8B Metal/F16 process memory
 
+These measurements predate `45ac457`, which uploads checkpoint weights as
+persistent CubeCL allocations instead of carving them from the pool meant for
+activations (on the same host, Qwen2-7B F32 loading fell from a 57.0 GB to a
+45.5 GB peak footprint and from 25.6 s to 10.7 s). The load phase below,
+including the pool retention it attributes after loading, therefore describes
+the earlier loader and must be re-measured; the figures are kept as recorded.
+
 The footprint increase recorded above (4.37 GB at `e4011b9` versus the
 2,907,412,480-byte, 2.91 GB, peak of the September 9 benchmark run) is **not**
 a regression of the polish pass. September's supervised memory runs peaked at

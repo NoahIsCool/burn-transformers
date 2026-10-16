@@ -46,6 +46,7 @@ annotated `v0.21.0` tag at `546cacb55fe00168854d19bdf0a5d79bd8060e03`.
 | Llama family (`qwen3`) | `Qwen/Qwen3-4B` | `531c80e289d6cff3a7cd8c0db8110231d23a6f7a` | Per-head Q/K RMSNorm, explicit `head_dim` 128, RoPE base 1e6 | Strict SafeTensors |
 | Llama family (`smollm3`) | `HuggingFaceTB/SmolLM3-3B` | `1fa6fa281b5c635c89171a2b53769609cc1199c6` | NoPE in every fourth layer (9 of 36) | Strict SafeTensors |
 | Llama family (`qwen2`) | `Qwen/Qwen2-7B` | `453ed1575b739b5b03ce3758b23befdb0967f40e` | Bias on Q/K/V only, untied head | Strict SafeTensors |
+| Llama family (`llama`, Llama 3 RoPE) | `meta-llama/Llama-3.1-8B` | `d04e592bb4f6aa9cfee91e2e20afa771667e1d4b` | 32-layer GQA decoder (32 query / 8 KV heads), Llama 3 RoPE scaling (base 5e5, factor 8, frequency factors 1 and 4, original context 8,192), untied head | Strict sharded SafeTensors; BF16 cast exactly to F32 |
 | Gemma 3 text | `google/gemma-3-4b-it` | `093f9f388b31de276ce2de164bdc2081324b9767` | Sandwich `(1 + w)` RMSNorm, `sqrt(d)` embedding, 5:1 local (window 1024) / global attention, per-layer-type RoPE, Q/K norm, GeGLU | Text tower through `text_config`; the vision tower is reported as intentionally ignored |
 | gpt-oss | `openai/gpt-oss-20b` | `6cee5e81ee83917806bbde320786a8fb61efebee` | 24 layers alternating 128-token sliding and full attention with learned sinks, YaRN, 32 experts with top-4 biased routing, clamped SwiGLU | Strict SafeTensors; MXFP4 experts decoded exactly at load |
 

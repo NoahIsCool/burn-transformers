@@ -19,11 +19,12 @@ real-checkpoint gates.
   feed-forwards with configurable routing. Families are thin wiring over them.
 - **Efficient inference.** Genuinely batched cached prefill and decoding for
   ragged batches, native-KV-head attention, sliding-window ring caches,
-  score-bounded attention for long contexts, and packed Q4/Q8 matmuls on Metal.
+  score-bounded long-context attention (Muse Glimmer, DeepSeek-V2, and custom
+  code), and packed Q4/Q8 matmuls on Metal.
 - **Verified where it matters.** More than 2,500 tests, reference goldens generated
-  with Hugging Face Transformers, property tests, twelve fuzz targets, and 18
-  Verus harnesses that prove the cache, planning, and decoding arithmetic
-  overflow-free and in bounds.
+  with Hugging Face Transformers, property tests, twelve fuzz targets, and 25
+  Verus harnesses that prove the cache, planning, decoding, and checkpoint
+  arithmetic overflow-free and in bounds.
 
 This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. The package version
 is 0.1.0; [support](#model-families-and-status) is deliberately narrower than
@@ -245,12 +246,12 @@ acceptance record for an exact checkpoint, backend, and dtype
 
 | Family | `model_type` | Validation status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; Metal replay on the current source pending. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
-| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 (re-run on later source) and Metal/F32 (replay pending). FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `ade8696`, acceptance record pending. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
+| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `ade8696`, acceptance record pending. FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
 | Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16. |
-| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex/F32 parity for SmolLM-135M, Qwen3-4B, and SmolLM3-3B. |
-| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex/F32 parity across its sliding window. |
-| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex/F32 parity with exact MXFP4 decoding. |
+| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference; on Metal under the documented `2.5e-3` tolerance). |
+| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window. |
+| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex and Metal F32 parity with exact MXFP4 decoding. |
 | Qwen3-MoE | `qwen3_moe` | Experimental: strict real-weight loading and Metal smokes. |
 | DeepSeek-V2 | `deepseek_v2` | Experimental: strict real-weight loading and an internal Metal smoke; tiny goldens for V2 and V3-style routing. |
 | Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading and an internal Metal smoke. |
@@ -258,8 +259,9 @@ acceptance record for an exact checkpoint, backend, and dtype
 | Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
 
 The two supported profiles were qualified on the v0.1.0 source. Later work
-changed their execution paths, so their Metal gates must be replayed on the
-current source before the next release; see
+changed their execution paths; their gates passed again on source `ade8696`,
+and those replays must be recorded as acceptance measurements before the next
+release; see
 [v0.1 release qualification](ARCHITECTURE_COMPATIBILITY.md#v01-release-qualification)
 and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
 
@@ -275,7 +277,7 @@ mechanism's equations, reference, and implementation.
 | Positions | RoPE with linear, dynamic-NTK, YaRN, Llama 3, LongRoPE, and proportional scaling (one translator for every Hugging Face `rope_type`); partial and multi-axis RoPE; NoPE; T5 relative buckets. |
 | Mixers | Gated DeltaNet with block-parallel chunked prefill; Mamba-2 with a vectorized chunk scan; fixed-state recurrent decoding. |
 | Feed-forward | SwiGLU/GeGLU, ungated, ReLU², and clamped SwiGLU; sparse experts with one router covering softmax or sigmoid scoring, top-k before or after scoring, group-limited selection, correction bias, renormalization, and shared experts, dispatched in memory-bounded expert blocks. |
-| State | Preallocated KV, ring, latent, recurrent, and cross-attention caches outside the parameters; atomic multi-layer step writes; transactional speculative staging; reorder, truncate, and reset. |
+| State | Preallocated KV, ring, latent, recurrent, and cross-attention caches outside the parameters; atomic multi-layer step writes; transactional speculative staging ([used by](TRANSFORMER_INNOVATIONS.md#innovation-transactional-cache) DeepSeek-V2, Qwen3.5, and Nemotron-H); reorder, truncate, and reset. |
 | Generation | Greedy, temperature, top-k, top-p, min-p, repetition/presence/frequency penalties, logit bias, `min_new_tokens`, no-repeat n-grams, stop sequences, streaming callbacks, cache-aware beam search, and lossless speculative verification. |
 | Artifacts | Strict local SafeTensors discovery and streaming, exact dtype casts, exact MXFP4 decoding, native Q4/Q8 Burnpack sidecars, local tokenizers, and sandboxed chat templates with Hugging Face semantics. |
 
@@ -291,9 +293,12 @@ mechanism's equations, reference, and implementation.
   [changelog](CHANGELOG.md#performance) lists each measurement.
 - Cached decoding attends over the stored grouped-query KV heads directly,
   never repeating keys and values per query head.
-- Sliding layers keep only their window in ring caches; long attention runs
-  in query chunks whose score planes stay below a configurable bound;
-  `prefill_chunk_size` bounds long causal prompts.
+- Sliding layers keep only their window in ring caches.
+- Muse Glimmer and DeepSeek-V2 (MLA) run long attention in query chunks whose
+  score planes stay below a configurable `AttentionExecutionPolicy` bound, and
+  `GroupedQueryAttention::attend_bounded` offers the same to custom code. The
+  other families evaluate each call's full score plane, so for them
+  `prefill_chunk_size` is what bounds long causal prompts.
 - Input validation and generation bookkeeping read back to the host once per
   step, and speculative drafts are verified in one target pass.
 - Flex runs with SIMD kernels and rayon-parallel matrix products.
@@ -308,8 +313,9 @@ Ordinary tests run on the deterministic Flex backend. Family behavior is
 checked against Hugging Face Transformers 5.2 goldens on tiny random-weight
 checkpoints; optimized and batched paths are compared with stateless and
 row-by-row references; real-checkpoint gates are opt-in. Integer planning in
-the cache, attention, generation, checkpoint, and family modules is proved
-correct in place with [Verus](verus/README.md). [Fuzz targets](fuzz/README.md)
+the cache, attention, mixer, MoE, position, generation, tokenizer, checkpoint,
+transfer, and family modules is proved correct in place with
+[Verus](verus/README.md). [Fuzz targets](fuzz/README.md)
 and property suites cover configuration parsing, RoPE translation, attention
 masks, cache transactions, SafeTensors headers, chat templates, and generation.
 

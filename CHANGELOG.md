@@ -28,8 +28,12 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   experts, router hooks, and `gpt_oss_load_balancing_loss`.
 - All three are registered in `AutoCausalLm`; the Llama family and Gemma
   share one dense-decoder engine. Experimental validation: tiny Transformers 5.2.0 goldens for every
-  type and real-weight Flex/F32 gates (`tests/llama_family_artifacts.rs`,
-  `tests/gemma_artifacts.rs`, `tests/gpt_oss_artifacts.rs`); see the
+  type and real-weight gates (`tests/llama_family_artifacts.rs`,
+  `tests/gemma_artifacts.rs`, `tests/gpt_oss_artifacts.rs`) that passed on
+  Flex and Metal in F32 at `ade8696` for SmolLM-135M, Qwen3-4B, SmolLM3-3B,
+  Llama-3.1-8B, Qwen2-7B (against an F64 reference; on Metal under the
+  documented `2.5e-3` tolerance), gemma-3-4b-it, and
+  truncated gpt-oss-20b; see the
   [model status page](ARCHITECTURE_COMPATIBILITY.md). No new checkpoint is
   advertised as supported.
 - DeepSeek-V2 runs V3-style sigmoid `noaux_tc` routing with a correction bias
@@ -117,8 +121,10 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   and `InvalidTensorName`, `QuantizedCheckpointOptions::unaligned`, and
   `BurnpackArtifactSummary::packed_execution`.
 - Tooling: `scripts/generate_causal_lm_reference.py` (local Transformers
-  references for any causal checkpoint, with `--dtype` and
-  `--num-hidden-layers`) and `scripts/generate_tiny_goldens.py`.
+  references for any causal checkpoint, with `--dtype {float32,float64,bfloat16}`
+  and `--num-hidden-layers`; a `float64` reference measures this crate's
+  error alone when an F32 reference's own rounding is as large as the
+  tolerance, as for Qwen2-7B) and `scripts/generate_tiny_goldens.py`.
 
 #### Earlier in this cycle (v0.2 and v0.3)
 
@@ -302,12 +308,28 @@ code written against unreleased sources.
   registered experiment to survive serialization and reloading.
 - Reject packed quantized autodiff before unsupported Burn operations panic,
   including checkpoint installation; validate the explicit dequantized path.
+- Guides: two inline snippets did not compile. `ModularCausalLm::init_with(spec,
+  &ModularCausalLm::scaled_init_policy(&spec, 0.02), &device)` needed a
+  turbofish and moved `spec` before borrowing it; EXPERIMENTS.md and
+  TRAINING.md now show the two-statement form. EXPERIMENTS.md's
+  `model.activation_points()?` is `HookedModel::activation_points(&model)?`,
+  since concrete types' inherent method returns the list directly. The new
+  `scripts/check_release.py --gate guides`, which CI runs, compiles every Rust
+  block of the guides as a doctest.
+- Packaging: the source archive now includes `verus/*.rs` and
+  `verus/README.md`, which `tests/verus_harness.rs` reads, so `cargo test`
+  passes from the extracted archive (all three Verus structure tests failed
+  there before). The package gate now runs the archive's test suite. Its
+  listing check had rejected the committed tiny-golden `.safetensors`
+  fixtures as weights since they were added, so the gate failed before
+  packaging; it now admits them (regular files of at most 1 MiB under
+  `tests/fixtures/tiny_goldens/<case>/`) and still rejects any other weight.
 
 ### Performance
 
-Measured on Flex CPU in release builds with small random models, on a host
-shared with other builds; ratios are against the earlier row-by-row or
-per-chunk algorithm, which each test keeps as an oracle.
+Unless a bullet says otherwise, measured on Flex CPU in release builds with
+small random models, on a host shared with other builds; ratios are against the
+earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
 
 - Batched cached decoding, eight rows: Qwen3.5 3.1× to 3.6×; Gemma 2.9×
   (ragged) and 3.2× (uniform); DeepSeek 2.5× to 2.7×; Muse 2.2×; Nemotron-H
@@ -329,15 +351,34 @@ per-chunk algorithm, which each test keeps as an oracle.
   sliding attention slices window unions (13.6× fewer score elements at 32K);
   input validation and generation bookkeeping read back to the host once per
   step.
+- On Metal, checkpoint weights upload as persistent allocations (`45ac457`),
+  so CubeCL gives each weight an exact-size page instead of carving it from
+  the pool meant for activations. Loading Qwen2-7B with F32 casts (30.5 GB of
+  weights) on the Apple M3 Max (96 GB) development host: peak footprint 57.0 GB
+  to 45.5 GB and load time 25.6 s to 10.7 s, with the same first-token argmax.
+  Values, layouts, and Flex are unchanged. This is a one-run measurement from
+  the commit, not yet an acceptance record.
 
 ### Verification
 
-- 18 Verus harnesses (408 verified obligations, 0 errors) prove the integer
-  planning of the cache ledger and rings, attention chunking and projection
-  widths, checkpoint layout and MXFP4 decoding, generation bookkeeping and
-  speculative commits, MoE dispatch, position indices, selections, tokenizer
-  layout, and every family's batching and cache-slot plans. See
-  [verus/README.md](verus/README.md).
+- 25 Verus harnesses (1,877 verified, 0 errors, over 87 source files) prove
+  the integer planning of the cache ledger and rings, attention chunking and
+  projection widths, checkpoint layout, naming, and MXFP4 decoding (including
+  its thread partition), generation bookkeeping and speculative commits, MoE
+  dispatch, DeltaNet, Mamba-2, and MLA geometry, position indices,
+  configuration validation, selections, transfer plans, tokenizer layout and
+  chat-template scanning and budgets, family checkpoint loaders, and every
+  family's batching and cache-slot plans. See [verus/README.md](verus/README.md).
+- CI runs the proofs on every push and pull request that changes `src/` or
+  `verus/`, through the new `scripts/check_release.py --gate verus`. The gate
+  pins the prover release, fails when a harness's count differs from the table
+  in `verus/README.md`, and records per-harness counts and input hashes.
+- The `verus_harness` test also rejects `exec_allows_no_decreases_clause`,
+  `verifier::external`, `verus_verify(external)`, `assume_termination`,
+  `inline_air_stmt`, and the external-specification attributes (the first
+  three pass `--no-cheating`),
+  treats every file containing `verus_keep_ghost` as needing a harness, and
+  checks the proof counts quoted by the documentation against the tree.
 
 ### Testing
 
