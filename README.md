@@ -198,7 +198,7 @@ fn tiny_decoder<B: Backend>(device: &B::Device) -> Result<ModularCausalLm<B>> {
         max_position_embeddings: 128,
     };
     // N(0, 0.02^2) weights with GPT-2 depth scaling of the residual writers.
-    let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+    let policy = spec.scaled_init_policy(0.02);
     ModularCausalLm::init_with(spec, &policy, device)
 }
 ```

@@ -628,7 +628,7 @@ fn fragment<B: Backend>(spec: DecoderSpec, device: B::Device) -> Result<()> {
 -->
 <!-- doctest modular-spec -->
 ```rust
-let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+let policy = spec.scaled_init_policy(0.02);
 let model = ModularCausalLm::<B>::init_with(spec, &policy, &device)?;
 ```
 

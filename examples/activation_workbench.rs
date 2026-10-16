@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // every draw to the parameter's first use; only the policy's value is
     // kept, and a parameter overwritten by a loaded record is never drawn.
     let spec = tiny_architecture();
-    let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
+    let policy = spec.scaled_init_policy(0.02);
     let (model, _report) = policy.apply_lazy(ModularCausalLm::init(spec, &device)?)?;
     let experiment = ExperimentModel::<B> {
         model,
