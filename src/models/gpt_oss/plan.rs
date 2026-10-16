@@ -473,7 +473,10 @@ pub(crate) enum GluHalf {
 /// The stacked tensor is `[experts, rows, 2 · width]` row-major with gate and
 /// up outputs interleaved along its last axis (see the module
 /// documentation): gate output `j` is column `2j`, up output `j` column
-/// `2j + 1`. The offset lies inside the tensor.
+/// `2j + 1`. The offset lies inside the tensor, and `interleaved_index` is a
+/// bijection onto its elements (`lemma_interleaved_injective`,
+/// `lemma_interleaved_surjective`), so the two halves of every expert
+/// partition the stacked weights.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(offset =>
     requires
@@ -804,6 +807,103 @@ pub(crate) fn deinterleave(
 
 #[cfg(verus_keep_ghost)]
 verus! {
+
+/// Distinct in-range coordinates have distinct interleaved indices.
+///
+/// With `o = (e·R + i)·2W + 2j + h` and `0 <= 2j + h < 2W`, the quotient
+/// and remainder by `2W` recover `e·R + i` and `2j + h`, which in turn
+/// recover `(e, i)` and `(j, h)`.
+pub proof fn lemma_interleaved_injective(
+    rows: int,
+    width: int,
+    e1: int,
+    i1: int,
+    j1: int,
+    up1: bool,
+    e2: int,
+    i2: int,
+    j2: int,
+    up2: bool,
+)
+    requires
+        rows > 0,
+        width > 0,
+        0 <= e1,
+        0 <= i1 < rows,
+        0 <= j1 < width,
+        0 <= e2,
+        0 <= i2 < rows,
+        0 <= j2 < width,
+        interleaved_index(e1, rows, i1, width, j1, up1) == interleaved_index(e2, rows, i2, width, j2, up2),
+    ensures
+        e1 == e2 && i1 == i2 && j1 == j2 && up1 == up2,
+{
+    let pair = 2 * width;
+    let r1 = 2 * j1 + if up1 { 1int } else { 0int };
+    let r2 = 2 * j2 + if up2 { 1int } else { 0int };
+    let o = interleaved_index(e1, rows, i1, width, j1, up1);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(o, pair, e1 * rows + i1, r1);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(o, pair, e2 * rows + i2, r2);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(e1 * rows + i1, rows, e1, i1);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(e2 * rows + i2, rows, e2, i2);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(r1, 2, j1, if up1 { 1int } else { 0int });
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(r2, 2, j2, if up2 { 1int } else { 0int });
+}
+
+/// Every element of the stacked `[E, R, 2W]` tensor is some coordinate's interleaved index.
+///
+/// Together with [`lemma_interleaved_injective`], the gate and up halves of
+/// all experts partition the stacked tensor: the loader installs every
+/// stacked weight exactly once.
+pub proof fn lemma_interleaved_surjective(experts: int, rows: int, width: int, o: int)
+    requires
+        rows > 0,
+        width > 0,
+        0 <= o < experts * rows * (2 * width),
+    ensures
+        exists|e: int, i: int, j: int, up: bool|
+            0 <= e < experts && 0 <= i < rows && 0 <= j < width
+                && #[trigger] interleaved_index(e, rows, i, width, j, up) == o,
+{
+    let pair = 2 * width;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(o, pair);
+    let q = o / pair;
+    let r = o % pair;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(q, rows);
+    let e = q / rows;
+    let i = q % rows;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(r, 2);
+    let j = r / 2;
+    let up = r % 2 == 1;
+    assert(0 <= q) by {
+        vstd::arithmetic::div_mod::lemma_div_pos_is_pos(o, pair);
+    }
+    assert(q < experts * rows) by (nonlinear_arith)
+        requires
+            o == pair * q + r,
+            0 <= r,
+            o < experts * rows * pair,
+            pair > 0,
+    ;
+    assert(0 <= e) by {
+        vstd::arithmetic::div_mod::lemma_div_pos_is_pos(q, rows);
+    }
+    assert(e < experts) by (nonlinear_arith)
+        requires
+            q == rows * e + i,
+            0 <= i,
+            q < experts * rows,
+            rows > 0,
+    ;
+    assert(0 <= j < width);
+    assert(interleaved_index(e, rows, i, width, j, up) == o) by {
+        assert(r == 2 * j + if up { 1int } else { 0int });
+        assert(q == rows * e + i);
+        assert(o == pair * q + r);
+        assert((e * rows + i) * pair == pair * q) by (nonlinear_arith)
+            requires q == rows * e + i;
+    }
+}
 
 /// Whether `half` is the up projection (odd columns).
 pub(crate) open spec fn is_up(half: GluHalf) -> bool {

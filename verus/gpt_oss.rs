@@ -41,7 +41,11 @@
 //!   row is active;
 //! - `interleaved_offset` locates gate output `j` at column `2j` and up output
 //!   `j` at column `2j + 1` of a row of the stacked `gate_up_proj`, provably
-//!   inside the `[experts, rows, 2 · width]` tensor;
+//!   inside the `[experts, rows, 2 · width]` tensor; the lemmas
+//!   `lemma_interleaved_injective` and `lemma_interleaved_surjective` prove
+//!   that this index is a bijection between `(expert, row, output, half)`
+//!   coordinates and the tensor's elements, so the gate and up halves of all
+//!   experts partition the stacked weights;
 //! - `stacked_layout` computes one expert's and the whole tensor's byte
 //!   counts exactly or reports overflow; `expert_slab` copies exactly bytes
 //!   `[e · span, (e + 1) · span)`; and `deinterleave` copies, for every
