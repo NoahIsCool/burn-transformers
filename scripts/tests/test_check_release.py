@@ -640,14 +640,27 @@ class ReleaseGateTests(unittest.TestCase):
                             self.assertIn("--offline", command)
 
     def test_offline_advisory_limits_are_explicit(self):
-        """Only two reviewed maintenance IDs are waived; stale DBs still fail."""
+        """Only the reviewed IDs are waived lockfile-wide; stale DBs still fail."""
 
         command = GATES.command_plan("dependencies", Path("/tmp/output"), "stable", "1.92.0", True)[0]
         self.assertIn("--no-fetch", command)
         self.assertIn("--no-yanked", command)
         self.assertNotIn("--stale", command)
-        self.assertEqual(command.count("--ignore"), 2)
+        waived = [command[index + 1] for index, part in enumerate(command) if part == "--ignore"]
+        self.assertEqual(waived, list(GATES.MAINTENANCE_NOTICES + GATES.UNREACHABLE_ADVISORIES))
         self.assertIn("--deny", command)
+
+    def test_unreachable_vulnerabilities_stay_denied_in_the_built_graph(self):
+        """Only cargo-audit waives unreachable vulnerabilities; deny.toml and CI agree."""
+
+        policy = (GATES.CRATE / "deny.toml").read_text()
+        workflow = (GATES.CRATE / ".github/workflows/ci.yml").read_text()
+        for advisory in GATES.UNREACHABLE_ADVISORIES:
+            self.assertNotIn(advisory, policy)
+            self.assertIn(f"--ignore {advisory}", workflow)
+        for advisory in GATES.MAINTENANCE_NOTICES:
+            self.assertIn(advisory, policy)
+            self.assertIn(f"--ignore {advisory}", workflow)
 
     def test_built_graph_advisories_include_yanked_checks(self):
         """cargo-deny judges advisories over the built graph, offline without fetching."""

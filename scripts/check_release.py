@@ -45,6 +45,12 @@ SOURCE_EXPERIMENTS = (
 )
 # These are maintenance notices, not vulnerability waivers. New IDs fail.
 MAINTENANCE_NOTICES = ("RUSTSEC-2025-0141", "RUSTSEC-2024-0436")
+# Vulnerabilities in zip 0.6.6 and 7.2.0, which only Burn's optional Candle and
+# LibTorch backends pull in. No feature of this crate activates them, so they are
+# never compiled, and no compatible fixed release exists. Only the whole-lockfile
+# cargo-audit scan waives them; cargo-deny's built-graph check (deny.toml) does
+# not, so it still fails if anything this crate builds ever needs them.
+UNREACHABLE_ADVISORIES = ("RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369")
 UNFILTERED_OPTION_NOTICE = "warning: --disable-default-ignore-filename-regex option is unstable"
 RUNNER_INPUTS = tuple(Path(__file__).resolve().with_name(name) for name in (
     "check_release.py", "coverage_provenance.py", "coverage_binding.py", "coverage_compiler.py", "coverage_dependencies.py",
@@ -530,7 +536,7 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
         audit = ["cargo", "audit", "--file", str(CRATE / "Cargo.lock"), "--deny", "warnings", "--no-yanked"]
         if offline:
             audit += ["--no-fetch"]
-        for advisory in MAINTENANCE_NOTICES:
+        for advisory in MAINTENANCE_NOTICES + UNREACHABLE_ADVISORIES:
             audit += ["--ignore", advisory]
         # `locked` carries `--offline`, which also stops cargo-deny fetching its database.
         deny = ["cargo", "deny"] + manifest + locked + ["--config", str(CRATE / "deny.toml"), "check"]

@@ -872,7 +872,15 @@ Two maintenance notices remain explicitly tracked:
   tokenizers. This is a build-time macro dependency.
 
 The runner waives only these two unmaintained-package notices, not new warnings
-or vulnerabilities.
+or vulnerabilities, with one narrow exception: on 2026-10-17 RustSec published
+`RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`, and `RUSTSEC-2026-0369` (zip
+extraction through symlinks and SUID bits, fixed in `zip 9.0.0`) against the
+`zip 0.6.6` and `zip 7.2.0` entries described below. Those come only from Burn's
+optional Candle and LibTorch backends, are never compiled, and have no
+compatible fixed release, so the whole-lockfile `cargo audit` scan waives these
+three IDs (`UNREACHABLE_ADVISORIES` in `scripts/check_release.py`). `deny.toml`
+deliberately does not, so the built-graph check still fails if anything this
+crate builds ever depends on a vulnerable `zip`.
 
 The check runs in two parts. `cargo audit` checks every lockfile entry for
 vulnerabilities, including Burn's optional backends that no feature here
