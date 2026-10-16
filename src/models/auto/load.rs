@@ -70,6 +70,10 @@ use crate::models::{
 };
 use burn::tensor::backend::Backend;
 
+mod report; // Verified reporting rules for unapplied generation defaults.
+
+use report::{reported_min_new_tokens, reported_no_repeat_ngram, single_token};
+
 /// Maximum accepted architecture JSON size, in bytes, before and after reading.
 const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum accepted generation-default JSON size, in bytes, before and after reading.
@@ -664,18 +668,17 @@ impl LocalGenerationConfig {
             })
             .collect::<BTreeMap<_, _>>();
         // Zero (and, for `min_p`, greedy decoding) leaves Hugging Face unchanged.
-        let min_new_tokens = self.min_new_tokens.filter(|&count| count > 0);
-        if consumer.applies_processor_constraints() {
-            if let Some(count) = min_new_tokens.filter(|&count| count > applied.min_new_tokens) {
-                report.insert("min_new_tokens".to_owned(), Value::from(count));
-            }
-            return report;
-        }
-        if let Some(count) = min_new_tokens {
+        let constraints = consumer.applies_processor_constraints();
+        if let Some(count) =
+            reported_min_new_tokens(self.min_new_tokens, applied.min_new_tokens, constraints)
+        {
             report.insert("min_new_tokens".to_owned(), Value::from(count));
         }
-        if let Some(size) = self.no_repeat_ngram_size.filter(|&size| size > 0) {
+        if let Some(size) = reported_no_repeat_ngram(self.no_repeat_ngram_size, constraints) {
             report.insert("no_repeat_ngram_size".to_owned(), Value::from(size));
+        }
+        if constraints {
+            return report;
         }
         if let Some(min_p) = self.min_p.filter(|&min_p| sampling && min_p != 0.0) {
             report.insert("min_p".to_owned(), Value::from(min_p));
@@ -780,14 +783,8 @@ fn normalize_pad_token_named(
     field: &str,
 ) -> Result<Option<u32>> {
     let normalized = normalize_token_list(ids, vocabulary_size, field)?;
-    match normalized.as_slice() {
-        [] => Ok(None),
-        [token] => Ok(Some(*token)),
-        _ => Err(Error::configuration(
-            field,
-            "padding requires exactly one token ID",
-        )),
-    }
+    single_token(&normalized)
+        .map_err(|_| Error::configuration(field, "padding requires exactly one token ID"))
 }
 
 #[cfg(test)]

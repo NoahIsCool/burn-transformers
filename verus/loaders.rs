@@ -26,6 +26,11 @@
 //!   is fused, and T5's `feed_forward_sublayer` (shared by the contract and
 //!   the tensor sink) numbers the feed-forward network after the block's
 //!   attention sublayers.
+//! - `src/models/auto/load/report.rs`: automatic generation defaults report a
+//!   positive `min_new_tokens` exactly when the consumer ignores it or applies
+//!   a smaller value (for causal loads, exactly when it exceeds
+//!   `max_new_tokens`), report a positive `no_repeat_ngram_size` exactly when
+//!   it is not applied, and accept at most one padding token.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. String
 //! parsing of tensor names, `format!`-built inventories, Burn tensor
@@ -58,3 +63,6 @@ pub mod nemotron_h_dimensions;
 
 #[path = "../src/models/t5/checkpoint/dimensions.rs"]
 pub mod t5_dimensions;
+
+#[path = "../src/models/auto/load/report.rs"]
+pub mod auto_report;
