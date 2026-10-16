@@ -26,10 +26,7 @@ use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::identity::IdentityToken;
 use crate::cache::retention::first_unsafe_ring_rewind;
-use crate::cache::{
-    CacheConfig, DecodeStateError, plan_mirrored_ring_write, plan_ring_read, plan_ring_write,
-    plan_staged_ring_transaction,
-};
+use crate::cache::{CacheConfig, DecodeStateError, plan_ring_read};
 
 use super::plan::{
     check_staged_commit, first_index_out_of_range, next_version, portable_indices,
@@ -47,7 +44,8 @@ pub(crate) use batch::{PreparedNativeKvBatchWrite, left_padded_columns, token_se
 pub use plan::KvCacheStorage;
 
 use plan::{
-    TimeExtent, TimeSlotViolation, mirrored_window_slots, staged_read_ranges, visible_count,
+    DirectSegment, DirectWriteViolation, TimeExtent, TimeSlotViolation, commit_write_segments,
+    direct_write_segments, mirrored_window_slots, staged_read_ranges, visible_count,
     working_window,
 };
 pub(crate) use plan::{WriteAheadViolation, write_ahead_allowed};
@@ -493,6 +491,18 @@ struct PreparedDirectSegment {
     destinations: Vec<Range<usize>>,
 }
 
+impl From<DirectSegment> for PreparedDirectSegment {
+    /// Lists the verified primary destination, then its mirror copy if any.
+    fn from(segment: DirectSegment) -> Self {
+        Self {
+            input: segment.input,
+            destinations: core::iter::once(segment.primary)
+                .chain(segment.mirror)
+                .collect(),
+        }
+    }
+}
+
 /// Fully validated physical writes for one sequence's accepted prefix.
 #[derive(Debug)]
 struct KvSequenceCommitPlan {
@@ -507,6 +517,18 @@ struct KvCommitSegment {
     input: Range<usize>,
     /// One committed interval, or both copies for mirrored storage.
     destinations: Vec<Range<usize>>,
+}
+
+impl From<DirectSegment> for KvCommitSegment {
+    /// Lists the verified primary destination, then its mirror copy if any.
+    fn from(segment: DirectSegment) -> Self {
+        Self {
+            input: segment.input,
+            destinations: core::iter::once(segment.primary)
+                .chain(segment.mirror)
+                .collect(),
+        }
+    }
 }
 
 /// Opaque, prevalidated commit capability consumed by the cache coordinator.
@@ -1166,42 +1188,23 @@ impl<B: Backend> NativeKvCache<B> {
                 sequences: Vec::new(),
             });
         }
+        let storage = self.spec.storage();
+        let window = self.window.map(NonZeroUsize::get);
+        let capacity = self.config.capacity();
         let mut sequences = Vec::with_capacity(self.config.sequence_count());
         for sequence in 0..self.config.sequence_count() {
-            let count = accepted[sequence];
-            let staging = plan_staged_ring_transaction(baseline[sequence], proposed[sequence])?;
-            let segments = match self.spec.storage() {
-                KvCacheStorage::Full => {
-                    let end =
-                        validate_write_end(baseline[sequence], count, self.config.capacity())?;
-                    (count > 0)
-                        .then(|| KvCommitSegment {
-                            input: 0..count,
-                            destinations: core::iter::once(baseline[sequence]..end).collect(),
-                        })
-                        .into_iter()
-                        .collect()
-                }
-                KvCacheStorage::SlidingRing => staging
-                    .commit_prefix(count, self.window()?)?
-                    .segments()
-                    .iter()
-                    .map(|segment| KvCommitSegment {
-                        input: segment.input(),
-                        destinations: core::iter::once(segment.physical()).collect(),
-                    })
-                    .collect(),
-                KvCacheStorage::MirroredSlidingRing => {
-                    staging.commit_prefix(count, self.window()?)?;
-                    plan_mirrored_ring_write(baseline[sequence], count, self.window()?)?
-                        .iter()
-                        .map(|segment| KvCommitSegment {
-                            input: segment.input(),
-                            destinations: vec![segment.primary(), segment.mirror()],
-                        })
-                        .collect()
-                }
-            };
+            let (start, count) = (baseline[sequence], accepted[sequence]);
+            // The Verus-verified planner checks the proposal end, then the
+            // capacity (full storage) or the width, accepted prefix, and
+            // mirrored extent (rings), and plans exactly the accepted prefix.
+            let segments =
+                commit_write_segments(storage, start, proposed[sequence], count, window, capacity)
+                    .map_err(|violation| {
+                        direct_write_error(storage, start, count, capacity, violation)
+                    })?
+                    .into_iter()
+                    .map(KvCommitSegment::from)
+                    .collect();
             sequences.push(KvSequenceCommitPlan { segments });
         }
         let layers = self
@@ -1370,36 +1373,28 @@ impl<B: Backend> NativeKvCache<B> {
         start: usize,
         token_count: usize,
     ) -> TensorCacheResult<Vec<PreparedDirectSegment>> {
-        if token_count == 0 {
-            return Ok(Vec::new());
-        }
-        match self.spec.storage() {
-            KvCacheStorage::Full => Ok(vec![PreparedDirectSegment {
-                input: 0..token_count,
-                destinations: core::iter::once(start..start + token_count).collect(),
-            }]),
-            KvCacheStorage::SlidingRing => {
-                let window = self.window()?;
-                Ok(plan_ring_write(start, token_count, window)?
-                    .segments()
-                    .iter()
-                    .map(|segment| PreparedDirectSegment {
-                        input: segment.input(),
-                        destinations: core::iter::once(segment.physical()).collect(),
-                    })
-                    .collect())
-            }
-            KvCacheStorage::MirroredSlidingRing => {
-                let window = self.window()?;
-                Ok(plan_mirrored_ring_write(start, token_count, window)?
-                    .into_iter()
-                    .map(|segment| PreparedDirectSegment {
-                        input: segment.input(),
-                        destinations: vec![segment.primary(), segment.mirror()],
-                    })
-                    .collect())
-            }
-        }
+        let storage = self.spec.storage();
+        // The Verus-verified planner; a single-row input starts at column zero.
+        let segments = direct_write_segments(
+            storage,
+            start,
+            token_count,
+            0,
+            self.window.map(NonZeroUsize::get),
+        )
+        .map_err(|violation| {
+            direct_write_error(
+                storage,
+                start,
+                token_count,
+                self.config.capacity(),
+                violation,
+            )
+        })?;
+        Ok(segments
+            .into_iter()
+            .map(PreparedDirectSegment::from)
+            .collect())
     }
 
     /// Clears one batch row in all committed and staging tensors.
@@ -1436,6 +1431,25 @@ impl<B: Backend> NativeKvCache<B> {
         }
         self.staging_baseline = None;
         self.staging_active = false;
+    }
+}
+
+/// Names a verified committed-write violation of `tokens` at `start` in a `storage` group.
+fn direct_write_error(
+    storage: KvCacheStorage,
+    start: usize,
+    tokens: usize,
+    capacity: usize,
+    violation: DirectWriteViolation,
+) -> TensorCacheError {
+    match violation {
+        DirectWriteViolation::WindowRequired => TensorCacheError::SlidingWindowRequired {
+            storage: storage.as_str(),
+        },
+        DirectWriteViolation::WriteEnd(violation) => {
+            TensorCacheError::write_end(start, tokens, capacity, violation)
+        }
+        DirectWriteViolation::Ring(error) => TensorCacheError::Ring(error),
     }
 }
 

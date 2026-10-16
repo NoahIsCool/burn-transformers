@@ -69,10 +69,11 @@ use crate::cache::retention::WorkingWindow;
 use crate::cache::rows::{RowRun, row_runs};
 use crate::cache::tensor::plan::{first_index_above, portable_indices};
 
-use super::plan::{committed_read_rows, working_read_rows};
+use super::plan::{committed_read_rows, plan_direct_run, working_read_rows};
 use super::{
     NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError, TensorCacheResult,
-    validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
+    direct_write_error, validate_plane_count, validate_sequence, validate_tensor,
+    validate_write_end,
 };
 
 mod layout;
@@ -643,20 +644,38 @@ impl<B: Backend> NativeKvCache<B> {
 
     /// Plans the physical segments of one run, shifting inputs to the run's column.
     ///
-    /// Input row `b - source_offset` feeds destination row `b`.
+    /// Input row `b - source_offset` feeds destination row `b`. Every run
+    /// comes from `row_runs`, so it holds only active rows; a batched input
+    /// uses offset zero and a single-row input's one-hot counts make its row
+    /// the only active one, so every run starts at or after `source_offset`.
+    /// Validated layouts keep each run's columns inside the input block.
     fn prepare_run(&self, run: RowRun, source_offset: usize) -> TensorCacheResult<PreparedRun> {
-        let segments = self
-            .prepare_direct_segments(run.start, run.count)?
-            .into_iter()
-            .map(|segment| PreparedDirectSegment {
-                input: segment.input.start + run.column..segment.input.end + run.column,
-                destinations: segment.destinations,
-            })
-            .collect();
+        let storage = self.spec.storage();
+        // The Verus-verified planner shifts the inputs and rows and writes
+        // each token to its storage slot.
+        let plan = plan_direct_run(
+            run,
+            source_offset,
+            storage,
+            self.window.map(NonZeroUsize::get),
+        )
+        .map_err(|violation| {
+            direct_write_error(
+                storage,
+                run.start,
+                run.count,
+                self.config.capacity(),
+                violation,
+            )
+        })?;
         Ok(PreparedRun {
-            rows: run.first_row..run.end_row,
-            source_rows: run.first_row - source_offset..run.end_row - source_offset,
-            segments,
+            rows: plan.rows,
+            source_rows: plan.source_rows,
+            segments: plan
+                .segments
+                .into_iter()
+                .map(PreparedDirectSegment::from)
+                .collect(),
         })
     }
 

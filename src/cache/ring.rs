@@ -84,7 +84,7 @@ proof fn lemma_slot_after_offset(a: int, k: int, c: int)
 /// exactly the retained suffix `[token_count - retained, token_count)` of the
 /// input; input `j` lands in slot `(start_position + j) mod capacity`; and the
 /// two physical ranges never overlap, tiling the whole ring when it is full.
-spec fn write_plan_correct(
+pub(crate) open spec fn write_plan_correct(
     plan: RingWritePlan,
     start_position: usize,
     token_count: usize,
@@ -132,9 +132,9 @@ pub open spec fn window_start(length: int, window: int) -> int {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingWriteSegment {
     /// Contiguous interval within the incoming token chunk.
-    input: Range<usize>,
+    pub(crate) input: Range<usize>,
     /// Equally sized destination interval inside the physical ring.
-    physical: Range<usize>,
+    pub(crate) physical: Range<usize>,
 }
 
 impl RingWriteSegment {
@@ -160,11 +160,11 @@ impl RingWriteSegment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingWritePlan {
     /// Absolute positions covered by the entire incoming chunk.
-    appended_positions: Range<usize>,
+    pub(crate) appended_positions: Range<usize>,
     /// Newest incoming suffix that survives ring eviction.
-    retained_input: Range<usize>,
+    pub(crate) retained_input: Range<usize>,
     /// Contiguous destination writes in incoming-token order.
-    segments: Vec<RingWriteSegment>,
+    pub(crate) segments: Vec<RingWriteSegment>,
 }
 
 /// Safe commit planning for speculative writes targeting a wrapped ring.
@@ -336,11 +336,11 @@ impl RingReadPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirroredRingWriteSegment {
     /// Contiguous interval within the incoming token chunk.
-    input: Range<usize>,
+    pub(crate) input: Range<usize>,
     /// Destination interval in the first ring half.
-    primary: Range<usize>,
+    pub(crate) primary: Range<usize>,
     /// Duplicate destination offset by one ring capacity.
-    mirror: Range<usize>,
+    pub(crate) mirror: Range<usize>,
 }
 
 impl MirroredRingWriteSegment {
@@ -449,7 +449,7 @@ pub fn plan_ring_write(
             Ok(plan) => write_plan_correct(plan, start_position, token_count, capacity),
         }
 ))]
-fn plan_ring_write_slots(
+pub(crate) fn plan_ring_write_slots(
     start_position: usize,
     token_count: usize,
     capacity: usize,
@@ -749,7 +749,7 @@ pub fn plan_mirrored_ring_write(
             }
         },
 ))]
-fn mirrored_write_slots(
+pub(crate) fn mirrored_write_slots(
     start_position: usize,
     token_count: usize,
     capacity: usize,

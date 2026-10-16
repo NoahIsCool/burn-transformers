@@ -1,5 +1,7 @@
 //! KV planning against hand-picked configurations and naive oracles.
 
+use core::ops::Range;
+
 use proptest::prelude::*;
 
 use super::*;
@@ -184,5 +186,235 @@ proptest! {
         for (offset, physical) in slots.enumerate() {
             prop_assert_eq!(physical % window, (start + offset) % window);
         }
+    }
+}
+
+/// Builds a direct segment for expectations.
+fn segment(
+    input: Range<usize>,
+    primary: Range<usize>,
+    mirror: Option<Range<usize>>,
+) -> DirectSegment {
+    DirectSegment {
+        input,
+        primary,
+        mirror,
+    }
+}
+
+/// Direct appends write full slots, wrapped ring slots, or both mirrored halves.
+#[test]
+fn direct_writes_address_each_storage_mode() {
+    use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
+    assert_eq!(
+        direct_write_segments(Full, 5, 3, 2, None),
+        Ok(vec![segment(2..5, 5..8, None)])
+    );
+    // Positions 6..10 in a ring of 4 wrap after slot 3; columns start at 1.
+    assert_eq!(
+        direct_write_segments(SlidingRing, 6, 4, 1, Some(4)),
+        Ok(vec![segment(1..3, 2..4, None), segment(3..5, 0..2, None)])
+    );
+    assert_eq!(
+        direct_write_segments(MirroredSlidingRing, 6, 4, 0, Some(4)),
+        Ok(vec![
+            segment(0..2, 2..4, Some(6..8)),
+            segment(2..4, 0..2, Some(4..6)),
+        ])
+    );
+    // An oversized chunk keeps only its newest `W` tokens.
+    assert_eq!(
+        direct_write_segments(SlidingRing, 0, 6, 0, Some(4)),
+        Ok(vec![segment(2..4, 2..4, None), segment(4..6, 0..2, None)])
+    );
+    // An empty append checks nothing, even a missing width.
+    assert_eq!(
+        direct_write_segments(SlidingRing, 3, 0, 0, None),
+        Ok(vec![])
+    );
+}
+
+/// Direct appends report the first failed check.
+#[test]
+fn direct_writes_reject_the_first_failed_check() {
+    use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
+    for ring in [SlidingRing, MirroredSlidingRing] {
+        assert_eq!(
+            direct_write_segments(ring, 0, 1, 0, None),
+            Err(DirectWriteViolation::WindowRequired)
+        );
+    }
+    let overflow = DirectWriteViolation::Ring(RingPlanError::PositionOverflow {
+        start_position: usize::MAX,
+        token_count: 1,
+    });
+    assert_eq!(
+        direct_write_segments(Full, usize::MAX, 1, 0, None),
+        Err(overflow)
+    );
+    assert_eq!(
+        direct_write_segments(SlidingRing, usize::MAX, 1, 0, Some(4)),
+        Err(overflow)
+    );
+    let huge = usize::MAX / 2 + 1;
+    assert_eq!(
+        direct_write_segments(MirroredSlidingRing, usize::MAX, 1, 0, Some(huge)),
+        Err(DirectWriteViolation::Ring(
+            RingPlanError::DoubledCapacityOverflow { capacity: huge }
+        ))
+    );
+}
+
+/// A run writes its rows from input rows shifted down by the source offset.
+#[test]
+fn direct_runs_shift_source_rows() {
+    let run = RowRun {
+        first_row: 2,
+        end_row: 4,
+        start: 7,
+        column: 1,
+        count: 2,
+    };
+    let plan = plan_direct_run(run, 2, KvCacheStorage::Full, None).expect("representable");
+    assert_eq!(plan.rows, 2..4);
+    assert_eq!(plan.source_rows, 0..2);
+    assert_eq!(plan.segments, [segment(1..3, 7..9, None)]);
+    assert_eq!(
+        plan_direct_run(run, 0, KvCacheStorage::SlidingRing, None),
+        Err(DirectWriteViolation::WindowRequired)
+    );
+}
+
+/// Commits check the proposal end, then capacity or width, prefix, and extent.
+#[test]
+fn commit_writes_reject_the_first_failed_check() {
+    use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
+    assert_eq!(
+        commit_write_segments(Full, 4, 3, 2, None, 16),
+        Ok(vec![segment(0..2, 4..6, None)])
+    );
+    assert_eq!(commit_write_segments(Full, 4, 3, 0, None, 16), Ok(vec![]));
+    assert_eq!(
+        commit_write_segments(SlidingRing, 3, 3, 3, Some(4), 16),
+        Ok(vec![segment(0..1, 3..4, None), segment(1..3, 0..2, None)])
+    );
+    assert_eq!(
+        commit_write_segments(Full, usize::MAX, 1, 0, None, 16),
+        Err(DirectWriteViolation::Ring(
+            RingPlanError::PositionOverflow {
+                start_position: usize::MAX,
+                token_count: 1,
+            }
+        ))
+    );
+    assert_eq!(
+        commit_write_segments(Full, 15, 3, 2, None, 16),
+        Err(DirectWriteViolation::WriteEnd(
+            WriteEndViolation::ExceedsCapacity { end: 17 }
+        ))
+    );
+    // Ring storage checks the width before the accepted prefix.
+    assert_eq!(
+        commit_write_segments(SlidingRing, 0, 1, 2, None, 16),
+        Err(DirectWriteViolation::WindowRequired)
+    );
+    assert_eq!(
+        commit_write_segments(MirroredSlidingRing, 0, 1, 2, Some(4), 16),
+        Err(DirectWriteViolation::Ring(
+            RingPlanError::CommitPrefixExceedsStaged {
+                accepted: 2,
+                staged: 1,
+            }
+        ))
+    );
+    let huge = usize::MAX / 2 + 1;
+    assert_eq!(
+        commit_write_segments(MirroredSlidingRing, 0, 1, 0, Some(huge), 16),
+        Err(DirectWriteViolation::Ring(
+            RingPlanError::DoubledCapacityOverflow { capacity: huge }
+        ))
+    );
+}
+
+/// Simulates writing `count` tokens (labelled by input column) into `slots` physical slots.
+fn apply_segments(segments: &[DirectSegment], slots: usize) -> Vec<Option<usize>> {
+    let mut storage = vec![None; slots];
+    for segment in segments {
+        let mut destinations = vec![segment.primary.clone()];
+        destinations.extend(segment.mirror.clone());
+        for destination in destinations {
+            assert_eq!(destination.len(), segment.input.len());
+            for (column, slot) in segment.input.clone().zip(destination) {
+                storage[slot] = Some(column);
+            }
+        }
+    }
+    storage
+}
+
+proptest! {
+    /// Ring and mirrored writes leave every slot holding its newest token.
+    #[test]
+    fn direct_ring_writes_match_sequential_simulation(
+        start in 0_usize..40,
+        count in 0_usize..12,
+        column in 0_usize..5,
+        width in 1_usize..7,
+        mirrored in any::<bool>(),
+    ) {
+        let storage = if mirrored {
+            KvCacheStorage::MirroredSlidingRing
+        } else {
+            KvCacheStorage::SlidingRing
+        };
+        let segments = direct_write_segments(storage, start, count, column, Some(width))
+            .expect("representable");
+        let slots = if mirrored { 2 * width } else { width };
+        let written = apply_segments(&segments, slots);
+        // Sequentially writing column `column + j` at position `start + j`.
+        let mut expected = vec![None; slots];
+        for j in 0..count {
+            let slot = (start + j) % width;
+            expected[slot] = Some(column + j);
+            if mirrored {
+                expected[slot + width] = Some(column + j);
+            }
+        }
+        prop_assert_eq!(written, expected);
+    }
+
+    /// Commits plan exactly what the public staged-commit and mirrored planners plan.
+    #[test]
+    fn commit_writes_match_public_ring_planners(
+        baseline in 0_usize..40,
+        proposed in 0_usize..10,
+        accepted in 0_usize..10,
+        width in 1_usize..7,
+        mirrored in any::<bool>(),
+    ) {
+        let window = core::num::NonZeroUsize::new(width).expect("positive");
+        let storage = if mirrored {
+            KvCacheStorage::MirroredSlidingRing
+        } else {
+            KvCacheStorage::SlidingRing
+        };
+        let planned = commit_write_segments(storage, baseline, proposed, accepted, Some(width), 64);
+        let staging = crate::cache::plan_staged_ring_transaction(baseline, proposed)
+            .expect("representable");
+        let expected = staging.commit_prefix(accepted, window).map(|plan| {
+            if mirrored {
+                crate::cache::plan_mirrored_ring_write(baseline, accepted, window)
+                    .expect("representable")
+                    .into_iter()
+                    .map(|part| segment(part.input(), part.primary(), Some(part.mirror())))
+                    .collect::<Vec<_>>()
+            } else {
+                plan.segments()
+                    .iter()
+                    .map(|part| segment(part.input(), part.physical(), None))
+                    .collect()
+            }
+        });
+        prop_assert_eq!(planned, expected.map_err(DirectWriteViolation::Ring));
     }
 }

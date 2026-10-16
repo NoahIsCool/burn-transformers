@@ -18,6 +18,12 @@
 //!   committed and a staged part (the verified `ring_working_window`).
 //! * **Mirrored slices.** The newest `k <= W` positions before `L` start at
 //!   physical slot `(L - k) mod W` and stay below `2W`.
+//! * **Committed writes.** A direct append of `n` tokens at `s`, read from
+//!   input columns `[c, c + n)`, writes slots `[s, s + n)` under full
+//!   storage; a ring of width `W` keeps the newest `min(n, W)` tokens and
+//!   writes column `j` to slot `(s + j - c) mod W` (and again at `+ W` when
+//!   mirrored). Committing an accepted prefix of staged proposals plans the
+//!   same writes from staging offset zero after its own admission checks.
 //!
 //! The module is burn-free so Verus checks it in place through
 //! `verus/cache.rs`; the tensor slicing driven by these plans remains covered
@@ -31,6 +37,12 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use crate::cache::retention::working_window_correct;
 use crate::cache::retention::{WorkingWindow, ring_working_window};
+use crate::cache::ring::{RingPlanError, mirrored_write_slots, plan_ring_write_slots};
+#[cfg(verus_keep_ghost)]
+use crate::cache::ring::{ring_slot, write_plan_correct};
+use crate::cache::rows::RowRun;
+#[cfg(verus_keep_ghost)]
+use crate::cache::tensor::plan::write_end_violation_exact;
 use crate::cache::tensor::plan::{WriteEndViolation, write_end};
 
 /// Physical time-axis strategy used by a native key/value cache.
@@ -589,6 +601,567 @@ pub(crate) fn write_ahead_allowed(
         return Err(WriteAheadViolation::SeparateStaging);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Committed writes: direct appends and staged-prefix commits
+// ---------------------------------------------------------------------------
+
+/// One input interval of a committed KV write and its one or two destinations.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectSegment {
+    /// Input columns read (staging offsets for a commit).
+    pub(crate) input: Range<usize>,
+    /// Committed time slots written.
+    pub(crate) primary: Range<usize>,
+    /// The copy `primary + W` written by a mirrored ring; `None` otherwise.
+    pub(crate) mirror: Option<Range<usize>>,
+}
+
+/// Integer reason a committed KV write cannot be planned.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectWriteViolation {
+    /// Ring storage has no resolved width.
+    WindowRequired,
+    /// A full-storage commit leaves the logical capacity.
+    WriteEnd(WriteEndViolation),
+    /// Ring planning rejected the write: an unrepresentable end, a doubled
+    /// mirrored extent, or a commit beyond the staged proposals.
+    Ring(RingPlanError),
+}
+
+/// One run of rows written by the same committed segments.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectRun {
+    /// Destination rows written together.
+    pub(crate) rows: Range<usize>,
+    /// Matching input rows, `rows` shifted down by the source offset.
+    pub(crate) source_rows: Range<usize>,
+    /// Input columns and destinations shared by every row of the run.
+    pub(crate) segments: Vec<DirectSegment>,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// `segments` is the exact ring write of `count` tokens at `start`, read from columns `[column, column + count)`.
+///
+/// Only the newest `min(count, width)` tokens survive. The at most two
+/// segments are non-empty, ordered, contiguous, and cover exactly input
+/// columns `[column + count - min(count, width), column + count)`; column `j`
+/// lands in slot `(start + j - column) mod width`; primary ranges never
+/// overlap and stay below `width`. A mirrored ring writes each segment again
+/// at `primary + width`; a standard ring writes no copy.
+pub(crate) open spec fn ring_segments_correct(
+    segments: Seq<DirectSegment>,
+    mirrored: bool,
+    start: usize,
+    count: usize,
+    column: usize,
+    width: usize,
+) -> bool {
+    let retained = if count <= width { count } else { width };
+    &&& segments.len() <= 2
+    &&& (segments.len() == 0) == (count == 0)
+    &&& segments.len() >= 1 ==> segments[0].input.start == column + count - retained
+    &&& segments.len() >= 1 ==> segments[segments.len() - 1].input.end == column + count
+    &&& segments.len() == 2 ==> segments[1].input.start == segments[0].input.end
+    &&& segments.len() == 2 ==> segments[1].primary.end <= segments[0].primary.start
+    &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
+        &&& segments[i].input.start < segments[i].input.end
+        &&& segments[i].primary.start < segments[i].primary.end
+        &&& segments[i].primary.end <= width
+        &&& segments[i].input.end - segments[i].input.start
+            == segments[i].primary.end - segments[i].primary.start
+        &&& forall|j: int| segments[i].input.start <= j < segments[i].input.end ==>
+            #[trigger] ring_slot(start as int, j - column, width as int)
+                == segments[i].primary.start + (j - segments[i].input.start)
+        &&& if mirrored {
+            &&& segments[i].mirror is Some
+            &&& segments[i].mirror->0.start == segments[i].primary.start + width
+            &&& segments[i].mirror->0.end == segments[i].primary.end + width
+        } else {
+            segments[i].mirror is None
+        }
+    }
+}
+
+/// `segments` is the exact committed write of `count` tokens at `start`, read from columns `[column, column + count)`.
+///
+/// An empty write has no segments. Full storage writes one segment from
+/// columns `[column, column + count)` to slots `[start, start + count)`; ring
+/// storage writes the `ring_segments_correct` plan of its width.
+pub(crate) open spec fn direct_segments_correct(
+    segments: Seq<DirectSegment>,
+    storage: KvCacheStorage,
+    start: usize,
+    count: usize,
+    column: usize,
+    window: Option<usize>,
+) -> bool {
+    if count == 0 {
+        segments.len() == 0
+    } else {
+        match storage {
+            KvCacheStorage::Full => {
+                &&& segments.len() == 1
+                &&& segments[0].input.start == column
+                &&& segments[0].input.end == column + count
+                &&& segments[0].primary.start == start
+                &&& segments[0].primary.end == start + count
+                &&& segments[0].mirror is None
+            },
+            KvCacheStorage::SlidingRing => window is Some && ring_segments_correct(segments,
+                false, start, count, column, window->0),
+            KvCacheStorage::MirroredSlidingRing => window is Some && ring_segments_correct(
+                segments, true, start, count, column, window->0),
+        }
+    }
+}
+
+/// A direct append of `count` tokens at `start` can be planned.
+pub(crate) open spec fn direct_write_accepted(
+    storage: KvCacheStorage,
+    start: usize,
+    count: usize,
+    window: Option<usize>,
+) -> bool {
+    count == 0 || match storage {
+        KvCacheStorage::Full => start + count <= usize::MAX,
+        KvCacheStorage::SlidingRing => window is Some && start + count <= usize::MAX,
+        KvCacheStorage::MirroredSlidingRing => window is Some && 2 * window->0 <= usize::MAX
+            && start + count <= usize::MAX,
+    }
+}
+
+/// `violation` is the first failed check of a direct append.
+///
+/// The checks run in order: ring storage needs a width, a mirrored ring
+/// needs a representable `2W`, and the end `start + count` must be
+/// representable.
+pub(crate) open spec fn direct_violation_exact(
+    storage: KvCacheStorage,
+    start: usize,
+    count: usize,
+    window: Option<usize>,
+    violation: DirectWriteViolation,
+) -> bool {
+    &&& count > 0
+    &&& if storage != KvCacheStorage::Full && window is None {
+        violation == DirectWriteViolation::WindowRequired
+    } else if storage == KvCacheStorage::MirroredSlidingRing && 2 * window->0 > usize::MAX {
+        violation == DirectWriteViolation::Ring(
+            RingPlanError::DoubledCapacityOverflow { capacity: window->0 })
+    } else {
+        &&& start + count > usize::MAX
+        &&& violation == DirectWriteViolation::Ring(
+            RingPlanError::PositionOverflow { start_position: start, token_count: count })
+    }
+}
+
+/// Committing `accepted` of `proposed` staged tokens after `baseline` can be planned.
+pub(crate) open spec fn commit_write_accepted(
+    storage: KvCacheStorage,
+    baseline: usize,
+    proposed: usize,
+    accepted: usize,
+    window: Option<usize>,
+    capacity: usize,
+) -> bool {
+    &&& baseline + proposed <= usize::MAX
+    &&& match storage {
+        KvCacheStorage::Full => baseline + accepted <= capacity,
+        KvCacheStorage::SlidingRing => window is Some && accepted <= proposed,
+        KvCacheStorage::MirroredSlidingRing => window is Some && accepted <= proposed
+            && 2 * window->0 <= usize::MAX,
+    }
+}
+
+/// `violation` is the first failed check of a staged-prefix commit.
+///
+/// The checks run in order: the proposal end `baseline + proposed` must be
+/// representable; full storage then needs the accepted end within the
+/// capacity; ring storage needs a width, an accepted prefix within the
+/// proposal, and, when mirrored, a representable `2W`.
+pub(crate) open spec fn commit_violation_exact(
+    storage: KvCacheStorage,
+    baseline: usize,
+    proposed: usize,
+    accepted: usize,
+    window: Option<usize>,
+    capacity: usize,
+    violation: DirectWriteViolation,
+) -> bool {
+    if baseline + proposed > usize::MAX {
+        violation == DirectWriteViolation::Ring(
+            RingPlanError::PositionOverflow { start_position: baseline, token_count: proposed })
+    } else if storage == KvCacheStorage::Full {
+        match violation {
+            DirectWriteViolation::WriteEnd(end) =>
+                write_end_violation_exact(baseline, accepted, capacity, end),
+            _ => false,
+        }
+    } else if window is None {
+        violation == DirectWriteViolation::WindowRequired
+    } else if accepted > proposed {
+        violation == DirectWriteViolation::Ring(
+            RingPlanError::CommitPrefixExceedsStaged { accepted, staged: proposed })
+    } else {
+        &&& storage == KvCacheStorage::MirroredSlidingRing
+        &&& 2 * window->0 > usize::MAX
+        &&& violation == DirectWriteViolation::Ring(
+            RingPlanError::DoubledCapacityOverflow { capacity: window->0 })
+    }
+}
+
+} // verus!
+
+/// Plans a standard ring write read from input columns starting at `column`.
+///
+/// Proved: fails exactly when `start + count` is unrepresentable; otherwise
+/// returns the verified ring plan with every input interval shifted by
+/// `column`, satisfying `ring_segments_correct`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        width > 0,
+        column + count <= usize::MAX,
+    ensures
+        match result {
+            Ok(segments) => {
+                &&& start + count <= usize::MAX
+                &&& ring_segments_correct(segments@, false, start, count, column, width)
+            },
+            Err(error) => {
+                &&& start + count > usize::MAX
+                &&& error == (RingPlanError::PositionOverflow {
+                    start_position: start,
+                    token_count: count,
+                })
+            },
+        },
+))]
+fn ring_direct_segments(
+    start: usize,
+    count: usize,
+    column: usize,
+    width: usize,
+) -> Result<Vec<DirectSegment>, RingPlanError> {
+    let plan = plan_ring_write_slots(start, count, width)?;
+    let mut segments: Vec<DirectSegment> = Vec::with_capacity(plan.segments.len());
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= plan.segments.len(),
+            width > 0,
+            column + count <= usize::MAX,
+            write_plan_correct(plan, start, count, width),
+            segments.len() == index,
+            forall|i: int| #![auto] 0 <= i < index ==> {
+                &&& segments[i].input.start == plan.segments[i].input.start + column
+                &&& segments[i].input.end == plan.segments[i].input.end + column
+                &&& segments[i].primary == plan.segments[i].physical
+                &&& segments[i].mirror is None
+            },
+        decreases plan.segments.len() - index,
+    ))]
+    while index < plan.segments.len() {
+        let segment = &plan.segments[index];
+        segments.push(DirectSegment {
+            input: segment.input.start + column..segment.input.end + column,
+            primary: segment.physical.start..segment.physical.end,
+            mirror: None,
+        });
+        index += 1;
+    }
+    Ok(segments)
+}
+
+/// Plans a mirrored ring write read from input columns starting at `column`.
+///
+/// Proved: fails exactly as the verified mirrored planner does (a doubled
+/// extent `2 * width` first, then the end `start + count`); otherwise returns
+/// its segments with every input interval shifted by `column` and the copy
+/// at `primary + width`, satisfying `ring_segments_correct`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        width > 0,
+        column + count <= usize::MAX,
+    ensures
+        match result {
+            Ok(segments) => {
+                &&& 2 * width <= usize::MAX
+                &&& start + count <= usize::MAX
+                &&& ring_segments_correct(segments@, true, start, count, column, width)
+            },
+            Err(error) => if 2 * width > usize::MAX {
+                error == (RingPlanError::DoubledCapacityOverflow { capacity: width })
+            } else {
+                &&& start + count > usize::MAX
+                &&& error == (RingPlanError::PositionOverflow {
+                    start_position: start,
+                    token_count: count,
+                })
+            },
+        },
+))]
+fn mirrored_direct_segments(
+    start: usize,
+    count: usize,
+    column: usize,
+    width: usize,
+) -> Result<Vec<DirectSegment>, RingPlanError> {
+    let plan = mirrored_write_slots(start, count, width)?;
+    let mut segments: Vec<DirectSegment> = Vec::with_capacity(plan.len());
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= plan.len(),
+            width > 0,
+            2 * width <= usize::MAX,
+            column + count <= usize::MAX,
+            plan.len() <= 2,
+            (plan.len() == 0) == (count == 0),
+            plan.len() >= 1 ==> plan[0].input.start
+                == count - (if count <= width { count } else { width }),
+            plan.len() >= 1 ==> plan[plan.len() - 1].input.end == count,
+            plan.len() == 2 ==> plan[1].input.start == plan[0].input.end,
+            plan.len() == 2 ==> plan[1].primary.end <= plan[0].primary.start,
+            forall|i: int| #![auto] 0 <= i < plan.len() ==> {
+                &&& plan[i].input.start < plan[i].input.end <= count
+                &&& plan[i].primary.start < plan[i].primary.end
+                &&& plan[i].primary.end <= width
+                &&& plan[i].input.end - plan[i].input.start
+                    == plan[i].primary.end - plan[i].primary.start
+                &&& plan[i].mirror.start == plan[i].primary.start + width
+                &&& plan[i].mirror.end == plan[i].primary.end + width
+                &&& forall|j: int| plan[i].input.start <= j < plan[i].input.end ==>
+                    #[trigger] ring_slot(start as int, j, width as int)
+                        == plan[i].primary.start + (j - plan[i].input.start)
+            },
+            segments.len() == index,
+            forall|i: int| #![auto] 0 <= i < index ==> {
+                &&& segments[i].input.start == plan[i].input.start + column
+                &&& segments[i].input.end == plan[i].input.end + column
+                &&& segments[i].primary == plan[i].primary
+                &&& segments[i].mirror == Some(plan[i].mirror)
+            },
+        decreases plan.len() - index,
+    ))]
+    while index < plan.len() {
+        let segment = &plan[index];
+        segments.push(DirectSegment {
+            input: segment.input.start + column..segment.input.end + column,
+            primary: segment.primary.start..segment.primary.end,
+            mirror: Some(segment.mirror.start..segment.mirror.end),
+        });
+        index += 1;
+    }
+    Ok(segments)
+}
+
+/// Plans the committed segments of a direct append of `count` tokens at `start`.
+///
+/// The tokens are read from input columns `[column, column + count)`; the
+/// caller's layout guarantees that range is representable, and a ring width
+/// is positive. An empty append writes nothing and checks nothing, matching
+/// the runtime's early return.
+///
+/// Proved: the write is planned exactly when `direct_write_accepted` holds,
+/// the plan is exactly `direct_segments_correct` (full storage writes slots
+/// `[start, start + count)`, a ring writes column `j` to slot
+/// `(start + j - column) mod W`), and a rejection is the first failed check.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        window matches Some(width) ==> width > 0,
+        column + count <= usize::MAX,
+    ensures
+        result is Ok <==> direct_write_accepted(storage, start, count, window),
+        result matches Ok(segments) ==>
+            direct_segments_correct(segments@, storage, start, count, column, window),
+        result matches Err(violation) ==>
+            direct_violation_exact(storage, start, count, window, violation),
+))]
+pub(crate) fn direct_write_segments(
+    storage: KvCacheStorage,
+    start: usize,
+    count: usize,
+    column: usize,
+    window: Option<usize>,
+) -> Result<Vec<DirectSegment>, DirectWriteViolation> {
+    let mut segments: Vec<DirectSegment> = Vec::new();
+    if count == 0 {
+        return Ok(segments);
+    }
+    match storage {
+        KvCacheStorage::Full => {
+            let Some(end) = start.checked_add(count) else {
+                return Err(DirectWriteViolation::Ring(
+                    RingPlanError::PositionOverflow {
+                        start_position: start,
+                        token_count: count,
+                    },
+                ));
+            };
+            segments.push(DirectSegment {
+                input: column..column + count,
+                primary: start..end,
+                mirror: None,
+            });
+            Ok(segments)
+        }
+        KvCacheStorage::SlidingRing => {
+            let Some(width) = window else {
+                return Err(DirectWriteViolation::WindowRequired);
+            };
+            match ring_direct_segments(start, count, column, width) {
+                Ok(segments) => Ok(segments),
+                Err(error) => Err(DirectWriteViolation::Ring(error)),
+            }
+        }
+        KvCacheStorage::MirroredSlidingRing => {
+            let Some(width) = window else {
+                return Err(DirectWriteViolation::WindowRequired);
+            };
+            match mirrored_direct_segments(start, count, column, width) {
+                Ok(segments) => Ok(segments),
+                Err(error) => Err(DirectWriteViolation::Ring(error)),
+            }
+        }
+    }
+}
+
+/// Plans one run of a batched committed write.
+///
+/// Every row of `run` shares its start, column, and count, so one set of
+/// segments serves the whole run. Input row `b - source_offset` feeds
+/// destination row `b`; the caller passes runs of active rows at or after
+/// `source_offset` (a batched input uses offset zero, a single-row input
+/// its row, the only active one) whose columns fit the input block.
+///
+/// Proved: the run is planned exactly when `direct_write_accepted` holds;
+/// it then writes rows `[first_row, end_row)` from input rows shifted down by
+/// `source_offset`, with exactly the `direct_segments_correct` segments, and
+/// a rejection is the first failed check.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        source_offset <= run.first_row,
+        run.first_row <= run.end_row,
+        run.column + run.count <= usize::MAX,
+        window matches Some(width) ==> width > 0,
+    ensures
+        result is Ok <==> direct_write_accepted(storage, run.start, run.count, window),
+        result matches Ok(plan) ==> {
+            &&& plan.rows.start == run.first_row
+            &&& plan.rows.end == run.end_row
+            &&& plan.source_rows.start == run.first_row - source_offset
+            &&& plan.source_rows.end == run.end_row - source_offset
+            &&& direct_segments_correct(plan.segments@, storage, run.start, run.count,
+                run.column, window)
+        },
+        result matches Err(violation) ==>
+            direct_violation_exact(storage, run.start, run.count, window, violation),
+))]
+pub(crate) fn plan_direct_run(
+    run: RowRun,
+    source_offset: usize,
+    storage: KvCacheStorage,
+    window: Option<usize>,
+) -> Result<DirectRun, DirectWriteViolation> {
+    let segments = direct_write_segments(storage, run.start, run.count, run.column, window)?;
+    Ok(DirectRun {
+        rows: run.first_row..run.end_row,
+        source_rows: run.first_row - source_offset..run.end_row - source_offset,
+        segments,
+    })
+}
+
+/// Plans the committed writes of one row's accepted staging prefix.
+///
+/// Row `b` staged `proposed` tokens after its committed `baseline` and
+/// accepts the first `accepted`; they are read from staging offsets
+/// `[0, accepted)`. A ring width is positive.
+///
+/// Proved: the commit is planned exactly when `commit_write_accepted`
+/// holds, the plan is exactly the direct write of the accepted prefix at
+/// `baseline` from column zero (`direct_segments_correct`), and a rejection
+/// is the first failed check (`commit_violation_exact`) in the order the
+/// runtime always used.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        window matches Some(width) ==> width > 0,
+    ensures
+        result is Ok <==>
+            commit_write_accepted(storage, baseline, proposed, accepted, window, capacity),
+        result matches Ok(segments) ==>
+            direct_segments_correct(segments@, storage, baseline, accepted, 0, window),
+        result matches Err(violation) ==> commit_violation_exact(storage, baseline, proposed,
+            accepted, window, capacity, violation),
+))]
+pub(crate) fn commit_write_segments(
+    storage: KvCacheStorage,
+    baseline: usize,
+    proposed: usize,
+    accepted: usize,
+    window: Option<usize>,
+    capacity: usize,
+) -> Result<Vec<DirectSegment>, DirectWriteViolation> {
+    if baseline.checked_add(proposed).is_none() {
+        return Err(DirectWriteViolation::Ring(
+            RingPlanError::PositionOverflow {
+                start_position: baseline,
+                token_count: proposed,
+            },
+        ));
+    }
+    let width = match storage {
+        KvCacheStorage::Full => {
+            let end = match write_end(baseline, accepted, capacity) {
+                Ok(end) => end,
+                Err(violation) => return Err(DirectWriteViolation::WriteEnd(violation)),
+            };
+            let mut segments: Vec<DirectSegment> = Vec::new();
+            if accepted > 0 {
+                segments.push(DirectSegment {
+                    input: 0..accepted,
+                    primary: baseline..end,
+                    mirror: None,
+                });
+            }
+            return Ok(segments);
+        }
+        KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => match window {
+            Some(width) => width,
+            None => return Err(DirectWriteViolation::WindowRequired),
+        },
+    };
+    if accepted > proposed {
+        return Err(DirectWriteViolation::Ring(
+            RingPlanError::CommitPrefixExceedsStaged {
+                accepted,
+                staged: proposed,
+            },
+        ));
+    }
+    let planned = match storage {
+        KvCacheStorage::MirroredSlidingRing => {
+            mirrored_direct_segments(baseline, accepted, 0, width)
+        }
+        KvCacheStorage::Full | KvCacheStorage::SlidingRing => {
+            ring_direct_segments(baseline, accepted, 0, width)
+        }
+    };
+    match planned {
+        Ok(segments) => Ok(segments),
+        Err(error) => Err(DirectWriteViolation::Ring(error)),
+    }
 }
 
 #[cfg(test)]
