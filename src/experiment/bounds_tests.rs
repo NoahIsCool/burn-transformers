@@ -16,6 +16,38 @@ fn extents_follow_the_maximum_position() {
     }
 }
 
+/// Position readbacks need the requested count, then a target range, then a nonnegative source.
+#[test]
+fn position_extrema_check_count_then_target_then_source() {
+    assert_eq!(position_extrema(&[], 4, false), PositionExtrema::Incomplete);
+    assert_eq!(
+        position_extrema(&[0, 1], 4, true),
+        PositionExtrema::Incomplete
+    );
+    assert_eq!(
+        position_extrema(&[0, 1, 0], 4, false),
+        PositionExtrema::Incomplete
+    );
+    assert_eq!(position_extrema(&[0, 3], 4, false), PositionExtrema::Valid);
+    assert_eq!(
+        position_extrema(&[0, 4, -1], 4, true),
+        PositionExtrema::OutOfRange { low: 0, high: 4 },
+        "the target range is reported before the source minimum"
+    );
+    assert_eq!(
+        position_extrema(&[-1, 2], 4, false),
+        PositionExtrema::OutOfRange { low: -1, high: 2 }
+    );
+    assert_eq!(
+        position_extrema(&[1, 2, -1], 4, true),
+        PositionExtrema::NegativeSource
+    );
+    assert_eq!(
+        position_extrema(&[1, 2, 0], 4, true),
+        PositionExtrema::Valid
+    );
+}
+
 /// Broadcasting accepts singleton or equal axes of equal rank only.
 #[test]
 fn broadcast_compatibility_is_axiswise() {
@@ -121,6 +153,25 @@ proptest::proptest! {
         let rows = reduction_rows(&shape, dim);
         proptest::prop_assert_eq!(rows, swapped[..last].iter().product::<usize>());
         proptest::prop_assert_eq!(rows * shape[dim], shape.iter().product::<usize>());
+    }
+
+    /// Position classification matches the direct definition of each outcome.
+    #[test]
+    fn position_extrema_match_their_definition(
+        values in proptest::collection::vec(-3i64..6, 0..5),
+        extent in 0usize..6,
+        with_source in proptest::bool::ANY,
+    ) {
+        let expected = if values.len() != 2 + usize::from(with_source) {
+            PositionExtrema::Incomplete
+        } else if !(values[0] >= 0 && values[0] <= values[1] && (values[1] as usize) < extent) {
+            PositionExtrema::OutOfRange { low: values[0], high: values[1] }
+        } else if with_source && values[2] < 0 {
+            PositionExtrema::NegativeSource
+        } else {
+            PositionExtrema::Valid
+        };
+        proptest::prop_assert_eq!(position_extrema(&values, extent, with_source), expected);
     }
 
     /// Folding a row with the runtime layout preserves its sum and yields `next` columns.

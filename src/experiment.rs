@@ -29,6 +29,7 @@ pub(crate) mod bounds;
 pub(crate) mod precedence;
 mod rotary;
 pub use block::{ResidualBlock, WidthAdapter};
+use bounds::PositionExtrema;
 pub use rotary::RotaryAttention;
 
 /// Attention connectivity and additive bias for a stateless operation.
@@ -360,30 +361,32 @@ impl<B: Backend> ExecutionContext<B> {
     /// Checks that target positions lie in `0..evaluated_context` and source positions are nonnegative.
     ///
     /// All extrema are concatenated and read back together: one synchronization
-    /// regardless of whether an encoder is attached.
+    /// regardless of whether an encoder is attached. The verified
+    /// `bounds::position_extrema` classifies the readback, checking the target
+    /// range before the source minimum.
     fn validate_position_values(&self) -> Result<()> {
         let mut extrema = vec![self.positions.clone().min(), self.positions.clone().max()];
         if let Some(encoder) = &self.encoder {
             extrema.push(encoder.positions.clone().min());
         }
         let values = read_int_scalars(extrema, "execution positions")?;
-        let (low, high) = (values[0], values[1]);
-        if !bounds::range_within(low, high, self.evaluated_context) {
-            return Err(Error::configuration(
+        match bounds::position_extrema(&values, self.evaluated_context, self.encoder.is_some()) {
+            PositionExtrema::Incomplete => Err(Error::BackendCapability(
+                "position range readback is incomplete".into(),
+            )),
+            PositionExtrema::OutOfRange { low, high } => Err(Error::configuration(
                 "execution.positions",
                 format!(
                     "positions must lie within the nonnegative evaluated context 0..{}, found {low}..={high}",
                     self.evaluated_context
                 ),
-            ));
-        }
-        if values.get(2).is_some_and(|source_low| *source_low < 0) {
-            return Err(Error::configuration(
+            )),
+            PositionExtrema::NegativeSource => Err(Error::configuration(
                 "execution.encoder.positions",
                 "source positions must be nonnegative",
-            ));
+            )),
+            PositionExtrema::Valid => Ok(()),
         }
-        Ok(())
     }
 
     /// Validate shapes, devices, and the evaluated extent without reading device values.

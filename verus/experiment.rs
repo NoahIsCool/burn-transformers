@@ -13,10 +13,11 @@
 //!   accepted selection each requested range is the only one naming its
 //!   dimension.
 //! - `src/experiment/bounds.rs`: positional extents (`max + 1` without
-//!   overflow), position/label range checks, broadcast compatibility of masks
-//!   and attention planes, and staged block cursors, whose consecutively
-//!   accepted ranges run every block below the cursor exactly once and in
-//!   order. A loss reduction's row count is the
+//!   overflow), position/label range checks, the exact classification of a
+//!   position readback (value count, then target range, then source minimum),
+//!   broadcast compatibility of masks and attention planes, and staged block
+//!   cursors, whose consecutively accepted ranges run every block below the
+//!   cursor exactly once and in order. A loss reduction's row count is the
 //!   product of every other extent, so `rows * width` is exactly the element
 //!   count and no partial product overflows. Each pairwise-reduction level
 //!   sends output column `j` exactly input columns `j` and

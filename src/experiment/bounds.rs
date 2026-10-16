@@ -10,6 +10,9 @@
 //!
 //! - [`extent_after`] returns `high + 1` exactly when that fits in `usize`.
 //! - [`range_within`] accepts exactly the ranges `0 <= low <= high < extent`.
+//! - [`position_extrema`] classifies a position readback exactly: a value
+//!   count other than the request, then a target range outside the extent,
+//!   then a negative source minimum, so callers never index the readback.
 //! - [`broadcasts_to`] accepts exactly the shapes whose every axis is one or equal.
 //! - [`follows_cursor`] accepts exactly the ranges that resume at the cursor and
 //!   stay within the stack; `lemma_accepted_run_tiles` proves that ranges
@@ -61,6 +64,73 @@ pub(crate) fn extent_after(high: i64) -> Option<usize> {
 ))]
 pub(crate) fn range_within(low: i64, high: i64, extent: usize) -> bool {
     low >= 0 && low <= high && (high as u64) < (extent as u64)
+}
+
+/// Outcome of checking position extrema read back from the device.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PositionExtrema {
+    /// The readback returned a different number of values than were requested.
+    Incomplete,
+    /// The target positions `low..=high` do not lie in `0..extent`.
+    OutOfRange {
+        /// Smallest target position.
+        low: i64,
+        /// Largest target position.
+        high: i64,
+    },
+    /// The minimum source (encoder) position is negative.
+    NegativeSource,
+    /// Target positions lie in `0..extent` and any source minimum is nonnegative.
+    Valid,
+}
+
+/// Classifies `[min, max]`, or `[min, max, source_min]` with an encoder, against `extent`.
+///
+/// The value count must match the request exactly, then the target range is
+/// checked before the source minimum. The result is exact: each outcome holds
+/// precisely under its stated condition, and the reported range is the one
+/// read back, so the caller indexes nothing itself.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(check =>
+    ensures
+        (check == PositionExtrema::Incomplete)
+            == (values.len() != if with_source { 3int } else { 2int }),
+        match check {
+            PositionExtrema::Incomplete => true,
+            PositionExtrema::OutOfRange { low, high } => {
+                &&& low == values@[0]
+                &&& high == values@[1]
+                &&& !(0 <= low && low <= high && high < extent)
+            },
+            PositionExtrema::NegativeSource => {
+                &&& with_source
+                &&& 0 <= values@[0] && values@[0] <= values@[1] && values@[1] < extent
+                &&& values@[2] < 0
+            },
+            PositionExtrema::Valid => {
+                &&& 0 <= values@[0] && values@[0] <= values@[1] && values@[1] < extent
+                &&& with_source ==> values@[2] >= 0
+            },
+        },
+))]
+pub(crate) fn position_extrema(
+    values: &[i64],
+    extent: usize,
+    with_source: bool,
+) -> PositionExtrema {
+    let expected = if with_source { 3 } else { 2 };
+    if values.len() != expected {
+        return PositionExtrema::Incomplete;
+    }
+    let (low, high) = (values[0], values[1]);
+    if !range_within(low, high, extent) {
+        return PositionExtrema::OutOfRange { low, high };
+    }
+    if with_source && values[2] < 0 {
+        return PositionExtrema::NegativeSource;
+    }
+    PositionExtrema::Valid
 }
 
 /// Whether `actual` broadcasts to `expected`: every axis is one or equal.
