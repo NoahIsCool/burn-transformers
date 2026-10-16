@@ -342,7 +342,8 @@ milestones above or the advertised checkpoint support:
   explicit initialization policies, all usable from modular specs.
 - **Batched cached execution.** Every family decodes ragged batches in one
   pass per step through atomic cache step writes.
-- **Verification.** 18 Verus harnesses and twelve fuzz targets.
+- **Verification.** 25 Verus harnesses (1,877 verified, 0 errors at
+  `fbcdb12`), checked in CI on every source change, and twelve fuzz targets.
 
 Open work carried forward: cached-state interventions, T5 staged views on the
 full encoder-decoder model, registering GPT-2 and GPT-NeoX in `AutoCausalLm`

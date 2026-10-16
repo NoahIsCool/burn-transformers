@@ -66,15 +66,20 @@ PROPTEST_CASES=20000 cargo test --locked --release \
   --test generation_properties --test rope_properties --test connectivity_properties
 ```
 
-**Verus.** Every harness must verify with the pinned release (see
-[verus/README.md](verus/README.md)); 18 harnesses, 408 obligations, 0 errors at
-`33f620f`:
+**Verus.** Every harness must verify with the pinned release, and each
+harness's verified count must equal the one recorded in the
+[harness table](verus/README.md#harnesses): 25 harnesses, 1,877 verified,
+0 errors at `fbcdb12`. The gate checks the prover version, runs every harness
+with `--no-cheating`, compares the counts, and writes `verus.json` with the
+per-harness counts and the SHA-256 of every harness and included source:
 
 ```sh
-for harness in verus/*.rs; do
-  "$VERUS" --crate-type lib --no-cheating --triggers-mode silent "$harness" || exit 1
-done
+VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
 ```
+
+CI runs the same gate on every push and pull request that changes `src/`,
+`verus/`, the gate, or the workflow. A proof change that alters a count must
+update the table in the same commit.
 
 **Fuzzing.** Run bounded campaigns for all twelve targets listed in
 [fuzz/README.md](fuzz/README.md): `configuration`, `index_artifacts`,

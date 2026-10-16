@@ -336,12 +336,23 @@ per-chunk algorithm, which each test keeps as an oracle.
 
 ### Verification
 
-- 18 Verus harnesses (408 verified obligations, 0 errors) prove the integer
-  planning of the cache ledger and rings, attention chunking and projection
-  widths, checkpoint layout and MXFP4 decoding, generation bookkeeping and
-  speculative commits, MoE dispatch, position indices, selections, tokenizer
-  layout, and every family's batching and cache-slot plans. See
-  [verus/README.md](verus/README.md).
+- 25 Verus harnesses (1,877 verified, 0 errors, over 87 source files) prove
+  the integer planning of the cache ledger and rings, attention chunking and
+  projection widths, checkpoint layout, naming, and MXFP4 decoding (including
+  its thread partition), generation bookkeeping and speculative commits, MoE
+  dispatch, DeltaNet, Mamba-2, and MLA geometry, position indices,
+  configuration validation, selections, transfer plans, tokenizer layout and
+  chat-template scanning and budgets, family checkpoint loaders, and every
+  family's batching and cache-slot plans. See [verus/README.md](verus/README.md).
+- CI runs the proofs on every push and pull request that changes `src/` or
+  `verus/`, through the new `scripts/check_release.py --gate verus`. The gate
+  pins the prover release, fails when a harness's count differs from the table
+  in `verus/README.md`, and records per-harness counts and input hashes.
+- The `verus_harness` test also rejects `exec_allows_no_decreases_clause`,
+  `verifier::external`, `assume_termination`, `inline_air_stmt`, and the
+  external-specification attributes (the first two pass `--no-cheating`),
+  treats every file containing `verus_keep_ghost` as needing a harness, and
+  checks the proof counts quoted by the documentation against the tree.
 
 ### Testing
 

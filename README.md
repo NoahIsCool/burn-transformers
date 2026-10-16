@@ -21,9 +21,9 @@ real-checkpoint gates.
   ragged batches, native-KV-head attention, sliding-window ring caches,
   score-bounded attention for long contexts, and packed Q4/Q8 matmuls on Metal.
 - **Verified where it matters.** More than 2,500 tests, reference goldens generated
-  with Hugging Face Transformers, property tests, twelve fuzz targets, and 18
-  Verus harnesses that prove the cache, planning, and decoding arithmetic
-  overflow-free and in bounds.
+  with Hugging Face Transformers, property tests, twelve fuzz targets, and 25
+  Verus harnesses that prove the cache, planning, decoding, and checkpoint
+  arithmetic overflow-free and in bounds.
 
 This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. The package version
 is 0.1.0; [support](#model-families-and-status) is deliberately narrower than
@@ -308,8 +308,9 @@ Ordinary tests run on the deterministic Flex backend. Family behavior is
 checked against Hugging Face Transformers 5.2 goldens on tiny random-weight
 checkpoints; optimized and batched paths are compared with stateless and
 row-by-row references; real-checkpoint gates are opt-in. Integer planning in
-the cache, attention, generation, checkpoint, and family modules is proved
-correct in place with [Verus](verus/README.md). [Fuzz targets](fuzz/README.md)
+the cache, attention, mixer, MoE, position, generation, tokenizer, checkpoint,
+transfer, and family modules is proved correct in place with
+[Verus](verus/README.md). [Fuzz targets](fuzz/README.md)
 and property suites cover configuration parsing, RoPE translation, attention
 masks, cache transactions, SafeTensors headers, chat templates, and generation.
 
