@@ -368,7 +368,7 @@ impl InitPolicy {
     /// The initializer for a parameter at `path` with `role`, after overrides and scaling.
     ///
     /// The last matching override wins (the Verus-verified
-    /// [`crate::experiment::precedence::last_match`]); without one, the role rule applies.
+    /// `experiment::precedence::last_match`); without one, the role rule applies.
     pub fn resolve(&self, path: &str, role: ParameterRole) -> ParameterInit {
         let matches = self
             .overrides

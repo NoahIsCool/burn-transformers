@@ -3,9 +3,9 @@
 //! A transfer plan resolves each target parameter against ordered rules and
 //! then reconciles existing parameter sharing. The string matching, tensor
 //! staging, and error formatting stay in [`super`]; the decisions they feed
-//! are integer and enumeration logic, free of Burn types and allocation, so
-//! Verus checks these exact bodies through `verus/transfer.rs` (see
-//! `verus/README.md`).
+//! are integer and enumeration logic, free of Burn types, so Verus checks
+//! these exact bodies through `verus/transfer.rs` (see `verus/README.md`).
+//! Only [`class_leaders`] allocates, for its result vector.
 //!
 //! # Verified properties
 //!

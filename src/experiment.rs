@@ -311,7 +311,7 @@ impl<B: Backend> ExecutionContext<B> {
     /// Resolve one layer's policy while preserving its default when no override exists.
     ///
     /// The most recent override for `layer` wins (the Verus-verified
-    /// [`precedence::last_match`]), then the pass-wide override, then the default.
+    /// `precedence::last_match`), then the pass-wide override, then the default.
     pub fn attention_for(&self, layer: Layer, default_causal: bool) -> AttentionPolicy<B> {
         latest_override(&self.layer_attention, layer)
             .or_else(|| self.attention.clone())
