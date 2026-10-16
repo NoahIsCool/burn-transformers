@@ -440,9 +440,9 @@ impl<B: Backend> TokenHistory<B> {
     /// scatter-add of the `[batch, 1]` new IDs; no data is read back from the
     /// device. See the module documentation for the per-backend cost.
     ///
-    /// The Verus-verified [`first_active_outside_vocabulary`] rejects the
+    /// The Verus-verified `first_active_outside_vocabulary` rejects the
     /// first active row whose token is not a valid scatter index, and
-    /// [`any_valid`] decides whether any row is active at all.
+    /// `any_valid` decides whether any row is active at all.
     pub fn record(&mut self, tokens: &[u32], active: &[bool]) -> Result<()> {
         let batch = self.batch_size();
         if tokens.len() != batch || active.len() != batch {

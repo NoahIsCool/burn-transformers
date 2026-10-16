@@ -306,7 +306,7 @@ const fn stream_start(seed: u64) -> SplitMix64 {
 impl SplitMix64 {
     /// Starts the stream selected by `seed` at its first draw.
     ///
-    /// The verified [`stream_start`] builds the value: seed `seed`, position
+    /// The verified `stream_start` builds the value: seed `seed`, position
     /// zero.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
