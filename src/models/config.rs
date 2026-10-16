@@ -198,11 +198,11 @@ where
 /// `time_step_limit` upper bound) in two non-standard ways, both read as `null`:
 ///
 /// * NVIDIA's original files contain the bare Python literal `Infinity`, which
-///   a lexical pass rewrites before parsing ([`normalize_positive_infinity`]).
+///   a lexical pass rewrites before parsing.
 /// * Transformers 5 (`PreTrainedConfig.to_json_string`, since 5.2 and at the
 ///   pinned `cfa309cf`) writes every non-finite float as a tagged object,
-///   `{"__float__": "Infinity"}`, so every config it saves carries one
-///   ([`decode_float_tags`]).
+///   `{"__float__": "Infinity"}`, so every config it saves carries one; the
+///   tag is decoded after parsing, exactly where Transformers recognizes it.
 ///
 /// The tagged `-Infinity` and `NaN`, which no supported field can hold, are
 /// rejected with the JSON path of the offending value.
@@ -354,6 +354,10 @@ pub enum RopeType {
     #[serde(rename = "linear")]
     Linear,
     /// Dynamic NTK scaling.
+    ///
+    /// It rescales only passes longer than the trained context; the built-in
+    /// families refuse such positions, so for them it is inert (see the
+    /// [`rope`] module documentation).
     #[serde(rename = "dynamic")]
     Dynamic,
     /// YaRN interpolation/extrapolation.

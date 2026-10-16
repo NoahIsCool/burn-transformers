@@ -462,3 +462,113 @@ proptest! {
         }
     }
 }
+
+/// Dynamic NTK is inert in the Llama family: it equals unscaled RoPE wherever positions are accepted.
+///
+/// Review finding NUM-4. Transformers rescales the dynamic-NTK base only for
+/// a pass longer than `max_position_embeddings`, and every built-in family
+/// refuses positions at or beyond that limit, so a translated
+/// `rope_type: dynamic` never changes a frequency here (the module
+/// documentation says so). This pins that behavior with the Transformers
+/// golden of the default-RoPE `llama-bias-tied` fixture: its 12-token pass is
+/// unscaled under dynamic NTK in Transformers too, so the same weights under
+/// `{dynamic, factor 3}` must reproduce it, while a pass that would reach the
+/// scaling branch is refused instead of silently computed without it.
+#[test]
+fn dynamic_ntk_is_inert_within_the_accepted_positions() {
+    use crate::{
+        CausalLmInput, ForwardOptions, LogitsSelection,
+        architecture::TokenMask,
+        models::{AutoCausalLm, AutoLoadOptions, config::ModelConfig},
+    };
+    use burn::{
+        backend::Flex,
+        tensor::{Int, Tensor, TensorData},
+    };
+
+    type B = Flex<f32, i32>;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tiny_goldens/llama-bias-tied");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("config.json")).unwrap())
+            .unwrap();
+    config["rope_parameters"] = serde_json::json!({
+        "rope_type": "dynamic", "factor": 3.0, "rope_theta": 10000.0
+    });
+    let parsed = LlamaFamilyConfig::from_json_str(&config.to_string()).unwrap();
+    assert!(matches!(
+        parsed.architecture().unwrap().rope.scaling(),
+        RopeScaling::DynamicNtk(_)
+    ));
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+    std::fs::copy(
+        fixture.join("model.safetensors"),
+        root.path().join("model.safetensors"),
+    )
+    .unwrap();
+    let model = AutoCausalLm::<B>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .unwrap()
+    .into_model();
+
+    let golden: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("golden.json")).unwrap())
+            .unwrap();
+    let matrix = |key: &str| serde_json::from_value::<Vec<Vec<i64>>>(golden[key].clone()).unwrap();
+    let ints = |rows: &[Vec<i64>]| {
+        Tensor::<B, 2, Int>::from_data(
+            TensorData::new(rows.concat(), [rows.len(), rows[0].len()]),
+            &Default::default(),
+        )
+    };
+    let (input_ids, mask) = (matrix("input_ids"), matrix("attention_mask"));
+    let logits = model
+        .forward(
+            CausalLmInput {
+                token_ids: ints(&input_ids),
+                token_mask: Some(TokenMask::new(ints(&mask).equal_elem(1))),
+                position_ids: Some(ints(&matrix("position_ids"))),
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap()
+        .logits
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let expected = serde_json::from_value::<Vec<f64>>(golden["logits"].clone()).unwrap();
+    let vocabulary = expected.len() / (input_ids.len() * input_ids[0].len());
+    for (index, (actual, expected)) in logits.iter().zip(&expected).enumerate() {
+        let position = index / vocabulary;
+        if mask[position / input_ids[0].len()][position % input_ids[0].len()] == 1 {
+            assert!(
+                (actual - *expected as f32).abs() <= 1e-5,
+                "logit {index}: {actual} vs {expected}"
+            );
+        }
+    }
+    // The first pass long enough for Transformers to rescale is refused.
+    let limit = parsed.max_position_embeddings;
+    let error = model
+        .forward(
+            CausalLmInput {
+                token_ids: ints(&[vec![3; limit + 1]]),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .map(drop)
+        .unwrap_err();
+    assert!(error.to_string().contains("position"), "{error}");
+}

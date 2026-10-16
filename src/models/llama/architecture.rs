@@ -44,8 +44,13 @@
 //!   `default_theta` go through the one shared translator
 //!   [`RopeParameters::to_rope_config`](crate::models::config::RopeParameters::to_rope_config)
 //!   with [`PartialRotary::FullHeadOnly`] and every other reference-faithful
-//!   default, so `llama3`, `linear`, `dynamic`, `yarn`, and `longrope`
-//!   scaling all execute, and a partial factor other than one is rejected.
+//!   default, so `llama3`, `linear`, `yarn`, and `longrope` scaling execute,
+//!   and a partial factor other than one is rejected. `dynamic` (NTK) is
+//!   accepted but inert: Transformers rescales its base only for a pass
+//!   longer than `max_position_embeddings`, and positions at or beyond that
+//!   limit are refused here (stateless and cached), so within every accepted
+//!   input it equals unscaled RoPE, as Transformers computes for those
+//!   lengths.
 //! * **Sliding windows.** A sliding layer sees the `W` newest valid tokens
 //!   (`AttentionConnectivity::SlidingWindow`), matching Transformers'
 //!   `kv_idx > q_idx - W`. Mistral applies `sliding_window` to every layer

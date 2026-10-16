@@ -87,7 +87,14 @@
 //!
 //! Dynamic NTK uses `max_position_embeddings` as `L` in Transformers and in
 //! DeepSeek's reference; see [`DynamicNtkContext`] for the crate's earlier,
-//! legacy-only alternative.
+//! legacy-only alternative. With that `L` the scaling branch is unreachable
+//! in the built-in families, because each refuses positions at or beyond
+//! `max_position_embeddings` in both its stateless and cached paths: within
+//! every accepted input a family's dynamic-NTK frequencies equal unscaled
+//! RoPE, exactly what Transformers computes for passes of those lengths, and
+//! a longer pass (which Transformers would rescale as a whole) is refused
+//! rather than computed unscaled. Compositions with their own position limit,
+//! such as `RotaryAttention` in custom specifications, do reach it.
 //!
 //! # Strictness
 //!

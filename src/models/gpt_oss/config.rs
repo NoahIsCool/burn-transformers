@@ -155,7 +155,7 @@ impl GptOssConfig {
     /// Transformers writes `sliding_attention` when `(l + 1) mod 2 != 0`,
     /// i.e. for even `l`, and `full_attention` otherwise. The result holds
     /// one string per layer: deserialization calls this only for counts up to
-    /// [`MAX_LAYERS`](crate::models::config::MAX_LAYERS), which validation
+    /// [`MAX_LAYERS`], which validation
     /// enforces.
     #[must_use]
     pub fn default_layer_types(layers: usize) -> Vec<String> {

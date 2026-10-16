@@ -886,8 +886,9 @@ pub struct NemotronHNextTokenHead<B: Backend> {
     pub final_layer_norm: RmsNorm<B>,
     /// Optional experiment-only causal window applied by the MTP attention stage.
     ///
-    /// [`Self::init`] copies [`NemotronHConfig::attention_window`], never the
-    /// serialized `sliding_window`, which the reference ignores.
+    /// Building the head from a configuration copies
+    /// [`NemotronHConfig::attention_window`], never the serialized
+    /// `sliding_window`, which the reference ignores.
     pub sliding_window: Option<usize>,
 }
 
