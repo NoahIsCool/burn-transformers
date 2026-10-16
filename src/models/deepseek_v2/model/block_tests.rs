@@ -187,3 +187,39 @@ fn scatter_restores_columns_with_exact_zero_padding() {
         [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 11.0, 11.0, 0.0, 0.0, 0.0, 0.0]
     );
 }
+
+/// Cursors whose appended extent overflows `usize` are a configuration error, not a wrap.
+///
+/// Stateful validation bounds working lengths by the cache capacity, so this
+/// guards the planner's own contract: a row at `usize::MAX` cannot append.
+#[test]
+fn overflowing_cursors_are_rejected() {
+    let device = Default::default();
+    let input = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let rows = prepare_stateful_rows(
+        &input,
+        &device,
+        &[0],
+        64,
+        &StatefulContract {
+            names: INPUT_NAMES,
+            owner: "block fixture",
+            vocabulary: VOCABULARY,
+            position_limit: None,
+            empty_rows: EmptyRows::Permit,
+        },
+    )
+    .unwrap();
+    let error = BlockLayout::<TestBackend>::new(&rows, &[usize::MAX], &device)
+        .err()
+        .expect("the appended cursor does not fit usize");
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "stateful.batch" && reason == "cache cursors overflow usize"),
+        "{error}"
+    );
+}

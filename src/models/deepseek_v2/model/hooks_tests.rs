@@ -361,3 +361,170 @@ fn hooked_forward_is_differentiable() {
     let gradients = logits.sum().backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
+
+/// Message carried by the deliberately failing hook callbacks below.
+const HOOK_FAILURE: &str = "deliberate hook failure";
+
+/// Registers one edit at `point` whose callback fails with [`HOOK_FAILURE`].
+fn failing_hooks(point: &PointInfo) -> Hooks<'static, TestBackend> {
+    /// Builds the callback error returned at every point.
+    fn failure() -> Error {
+        Error::configuration("test.hook", HOOK_FAILURE)
+    }
+    let mut hooks = Hooks::new();
+    match point.rank() {
+        3 => hooks.try_edit(
+            crate::intervention::Point::<3>::custom(
+                point.name.clone(),
+                point.axes.clone().try_into().unwrap(),
+            ),
+            |_| Err(failure()),
+        ),
+        4 => hooks.try_edit(
+            crate::intervention::Point::<4>::custom(
+                point.name.clone(),
+                point.axes.clone().try_into().unwrap(),
+            ),
+            |_| Err(failure()),
+        ),
+        rank => panic!("{}: unexpected rank {rank}", point.name),
+    }
+    hooks
+}
+
+/// Asserts that a hooked call failed with the deliberate callback error.
+fn assert_hook_failure<T: core::fmt::Debug>(result: Result<T>, point: &PointInfo) {
+    let error = result.expect_err(&point.name);
+    assert!(
+        error.to_string().contains(HOOK_FAILURE),
+        "{}: {error}",
+        point.name
+    );
+}
+
+/// A failing callback at any catalog point aborts the fused and staged passes with its error.
+///
+/// Every embedding, MLA-internal, router, branch, residual, and final-norm
+/// point is emitted on both paths, and the user's error is returned rather
+/// than swallowed or replaced.
+#[test]
+fn a_failing_edit_at_any_point_aborts_with_its_error() {
+    let model = model();
+    let points = model.activation_points();
+    for point in &points {
+        let mut hooks = failing_hooks(point);
+        assert_hook_failure(
+            model.forward_with_hooks(input(), &all_logits(), &mut hooks),
+            point,
+        );
+    }
+    for point in &points {
+        let mut hooks = failing_hooks(point);
+        let staged = if *point == Stack::Decoder.embedding().info() {
+            model.embed_with_hooks(input(), &mut hooks).map(|_| ())
+        } else if *point == Stack::Decoder.final_norm().info() {
+            let state = model.embed(input()).unwrap();
+            let state = model.run_layers(state, 0..2).unwrap();
+            model.normalize_with_hooks(state, &mut hooks).map(|_| ())
+        } else {
+            let state = model.embed(input()).unwrap();
+            model
+                .run_layers_with_hooks(state, 0..2, &mut hooks)
+                .map(|_| ())
+        };
+        assert_hook_failure(staged, point);
+    }
+}
+
+/// Staged blocks reject reduced-precision latents and cross-attention sources.
+#[test]
+fn staged_execution_rejects_foreign_dtypes_and_cross_attention() {
+    let model = model();
+    let state = model.embed(input()).unwrap();
+    let mut half = state.clone();
+    half.hidden = half.hidden.cast(burn::tensor::DType::F16);
+    for error in [
+        model.run_layers(half.clone(), 0..1).unwrap_err(),
+        model.normalize(half).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "deepseek_v2.execution.hidden" && reason.contains("model dtype")),
+            "{error}"
+        );
+    }
+    let mut cross = state.clone();
+    cross.context.cross_attention = Some(AttentionPolicy::causal());
+    let mut layer_cross = state.clone();
+    layer_cross
+        .context
+        .layer_cross_attention
+        .push((Layer::decoder(0), AttentionPolicy::causal()));
+    let mut encoded = state;
+    let device = Default::default();
+    encoded.context.encoder = Some(crate::experiment::EncoderContext {
+        hidden: Tensor::zeros([2, 3, 8], &device),
+        positions: Tensor::<TestBackend, 1, Int>::arange(0..3, &device)
+            .reshape([1, 3])
+            .expand([2, 3]),
+        token_mask: None,
+    });
+    for source in [cross, layer_cross, encoded] {
+        let error = model.run_layers(source, 0..1).unwrap_err();
+        assert!(error.to_string().contains("cross-attention"), "{error}");
+    }
+}
+
+/// A causal staged policy with an all-zero score bias reproduces the default block.
+///
+/// The bias moves the block onto the custom-connectivity graph; adding zero
+/// to every score must not change the result beyond reduction rounding.
+#[test]
+fn zero_bias_causal_policy_matches_the_default_block() {
+    let model = model();
+    let state = model.embed(input()).unwrap();
+    let plain = model.run_layers(state.clone(), 0..2).unwrap().hidden;
+    let mut biased = state;
+    biased.context.attention =
+        Some(AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &Default::default())));
+    let biased = model.run_layers(biased, 0..2).unwrap().hidden;
+    // Padded query rows have no valid key on either path; compare valid rows.
+    biased
+        .slice([0..1, 0..4])
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &plain.slice([0..1, 0..4]).into_data(),
+            Tolerance::rel_abs(1e-5, 1e-6),
+        );
+}
+
+/// The generic hooked trait delegates to the family's hooked forward.
+#[test]
+fn hooked_trait_forward_matches_the_family_method() {
+    let model = model();
+    let mut family = Hooks::new();
+    let family_latent = family.capture(Layer::decoder(1).self_attention().kv_latent());
+    let direct = model
+        .forward_with_hooks(input(), &all_logits(), &mut family)
+        .unwrap();
+    let mut generic = Hooks::new();
+    let generic_latent = generic.capture(Layer::decoder(1).self_attention().kv_latent());
+    let through_trait =
+        HookedModel::forward_with_hooks(&model, input(), &all_logits(), &mut generic).unwrap();
+    assert_eq!(through_trait.logits.to_data(), direct.logits.to_data());
+    assert_eq!(
+        generic.get(&generic_latent).unwrap().to_data(),
+        family.get(&family_latent).unwrap().to_data()
+    );
+}
+
+/// The reference fixture builder honors a tied head by aliasing instead of writing it.
+#[test]
+fn tied_reference_fixture_shares_the_embedding_readout() {
+    let mut config = tests_support::reference_v3_config();
+    config.tie_word_embeddings = true;
+    let model = tests_support::reference_model::<TestBackend>(config, &Default::default());
+    assert!(model.lm_head.is_none());
+    let logits = model.forward(input(), &all_logits()).unwrap().logits;
+    assert_eq!(logits.dims()[..2], [2, 4]);
+}
