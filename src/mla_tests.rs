@@ -1414,3 +1414,109 @@ fn windowed_suffix_visibility_matches_the_scalar_rule() {
     assert!(matches!(error, Error::Configuration { .. }));
     assert!(PositionalVisibility::<TestBackend>::suffix(3, 2, &device).is_err());
 }
+
+/// Reference history whose batch, rank, or rotary extent disagrees with the queries is rejected.
+///
+/// Both the full-plane and the bounded reference paths check the latent
+/// history `[batch, key, kv_lora_rank]` and the rotated keys
+/// `[batch, 1, key, qk_rope_head_dim]` against the projected queries before
+/// expanding any key or value head.
+#[test]
+fn unabsorbed_history_extents_are_validated_on_both_reference_paths() {
+    let (mla, _) = deterministic_mla(None);
+    let projection = rotated_projection(&mla, 1, 3);
+    let latents = projection.normalized_latent.clone();
+    let rotary = projection.rotated_key.clone();
+    let cases = [
+        (
+            "latent batch",
+            Tensor::cat(vec![latents.clone(), latents.clone()], 0),
+            rotary.clone(),
+        ),
+        (
+            "latent rank",
+            latents.clone().narrow(2, 0, 4),
+            rotary.clone(),
+        ),
+        (
+            "rotary keys",
+            latents.clone(),
+            rotary.clone().narrow(2, 0, 2),
+        ),
+    ];
+    let device = Default::default();
+    for (case, history, rotated) in cases {
+        let error = mla
+            .mix_unabsorbed(&projection, history.clone(), rotated.clone(), None, false)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "mla.unabsorbed_history"),
+            "{case}: {error:?}"
+        );
+        let visibility = PositionalVisibility::causal_columns(3, None, &device).unwrap();
+        let error = mla
+            .mix_unabsorbed_bounded(
+                &projection,
+                history,
+                rotated,
+                &visibility,
+                AttentionExecutionPolicy::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "mla.unabsorbed_history"),
+            "bounded {case}: {error:?}"
+        );
+    }
+}
+
+/// Ordinal visibility places queries and keys at valid-token ordinals, not columns.
+///
+/// Padding holes consume no position: for the row `[pad, a, pad, b]` the
+/// ordinals are `[0, 0, 0, 1]`. Without a mask the positions are the columns
+/// themselves. Either way the causal key prefix of query `i` is `i + 1`
+/// columns, because a later valid column always has a larger ordinal.
+#[test]
+fn causal_ordinal_visibility_skips_padding_holes() {
+    let device = Default::default();
+    let mask = crate::architecture::TokenMask::new(validity(&[false, true, false, true], [1, 4]));
+    let ordinal =
+        PositionalVisibility::<TestBackend>::causal_ordinals(4, Some(&mask), &device).unwrap();
+    let read = |positions: &Tensor<TestBackend, 2, Int>| {
+        positions.clone().into_data().to_vec::<i32>().unwrap()
+    };
+    assert_eq!(read(&ordinal.query_positions), [0, 0, 0, 1]);
+    assert_eq!(read(&ordinal.key_positions), [0, 0, 0, 1]);
+    assert_eq!(ordinal.key_limits(), [1, 2, 3, 4]);
+    ordinal.validate(1, 4, 4).unwrap();
+
+    let columns = PositionalVisibility::<TestBackend>::causal_ordinals(4, None, &device).unwrap();
+    assert_eq!(read(&columns.query_positions), [0, 1, 2, 3]);
+    assert_eq!(read(&columns.key_positions), [0, 1, 2, 3]);
+    assert!(columns.query_valid.is_none() && columns.key_valid.is_none());
+    assert_eq!(columns.key_limits(), [1, 2, 3, 4]);
+}
+
+/// A failing edit at the expanded query or key point aborts MLA attention with that point.
+#[test]
+fn mla_query_and_key_edit_failures_are_reported_at_their_points() {
+    let (mla, _) = deterministic_mla(Some(4));
+    let points = Layer::decoder(0).self_attention();
+    for failing in [points.query(), points.key()] {
+        let mut hooks = Hooks::new();
+        hooks.try_edit(failing.clone(), |_| {
+            Err(Error::configuration("test.edit", "refused"))
+        });
+        let projection = rotated_projection(&mla, 1, 2);
+        let error = hooks
+            .run(mla.attention_points(points), |hooks| {
+                mla.attend_with_hooks(projection, None, None, true, points, hooks)
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Intervention { point, reason, .. }
+                if *point == failing.info().name && reason.contains("refused")),
+            "{error:?}"
+        );
+    }
+}
