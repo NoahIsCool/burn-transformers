@@ -2388,6 +2388,14 @@ fn crossed_path_summary(
 ///    that disappears is the clamp's and the distance that remains is the
 ///    precision policy's.
 ///
+/// 3. **Official profiles.** Every Burn decision row (teacher, pinned cached,
+///    and clamped cached) is compared with both official streams, so a
+///    corresponding-path failure is seen in full rather than at its first row.
+/// 4. **Router margins.** The hooked teacher pass also captures every MoE
+///    block's input; re-running its router gives, per position, the gap
+///    between the sixth and seventh selection scores. A gap within F16 noise
+///    means an expert choice can flip between two faithful implementations.
+///
 /// Both cached runs share the same chunked prefill, so their decision-0 rows
 /// must be bitwise identical; only one-token updates may differ.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
@@ -2450,6 +2458,15 @@ fn diagnoses_pinned_nemotron_decision_14_time_step_clamp() {
 
     let mut hooks = Hooks::new();
     let mixer_input = hooks.capture(Layer::decoder(0).mixer_input());
+    let moe_inputs = model
+        .model
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.moe.is_some())
+        .map(|(index, _)| (index, hooks.capture(Layer::decoder(index).mlp_input())))
+        .collect::<Vec<_>>();
+    assert_eq!(moe_inputs.len(), 23);
     let teacher = model
         .forward_with_hooks(
             CausalLmInput {
@@ -2525,6 +2542,44 @@ fn diagnoses_pinned_nemotron_decision_14_time_step_clamp() {
         })
         .collect::<BTreeMap<_, _>>();
 
+    // ---- Router selection margins of the Burn teacher pass at every MoE block.
+    // Lightning routes one group, so selection is a plain top-k of
+    // `sigmoid(z) + correction`; the gap between the k-th and (k+1)-th score
+    // is how far F16 noise must move one logit to change an expert.
+    let mut narrowest_selections = Vec::new();
+    let mut minimum_margin_per_position = vec![f32::INFINITY; teacher_length];
+    for (index, capture) in &moe_inputs {
+        let moe = model.model.layers[*index]
+            .moe
+            .as_ref()
+            .expect("captured block is MoE");
+        assert_eq!(
+            moe.groups, moe.top_groups,
+            "Lightning routes without group limits"
+        );
+        let routed = moe
+            .forward(hooks.get(capture).expect("MoE input must be captured"))
+            .expect("re-run the captured MoE routing");
+        let logits = finite_metal_values("Nemotron router logits", &routed.router_logits);
+        let correction =
+            finite_metal_values("Nemotron router correction", &moe.correction_bias.val());
+        let k = moe.experts_per_token;
+        for (position, row) in logits.chunks_exact(correction.len()).enumerate() {
+            let mut scores = row
+                .iter()
+                .zip(&correction)
+                .map(|(&logit, &correction)| 1.0 / (1.0 + (-logit).exp()) + correction)
+                .collect::<Vec<f32>>();
+            scores.sort_by(|left, right| right.total_cmp(left));
+            let margin = scores[k - 1] - scores[k];
+            minimum_margin_per_position[position] =
+                minimum_margin_per_position[position].min(margin);
+            narrowest_selections.push((margin, *index, position));
+        }
+    }
+    narrowest_selections.sort_by(|left, right| left.0.total_cmp(&right.0));
+    narrowest_selections.truncate(8);
+
     assert_eq!(
         teacher.logits.dims(),
         [1, teacher_length, REFERENCE_VOCABULARY_SIZE]
@@ -2573,8 +2628,94 @@ fn diagnoses_pinned_nemotron_decision_14_time_step_clamp() {
         "chunked prefill must not depend on the one-token clamp"
     );
 
-    let pinned = crossed_path_summary(&pinned, &teacher_rows, &teacher_hidden);
-    let clamped_run = crossed_path_summary(&clamped_run, &teacher_rows, &teacher_hidden);
+    let pinned_summary = crossed_path_summary(&pinned, &teacher_rows, &teacher_hidden);
+    let clamped_summary = crossed_path_summary(&clamped_run, &teacher_rows, &teacher_hidden);
+
+    // ---- Every decision against both official streams, without stopping at a failure.
+    let official_teacher = (0..REFERENCE_DECISIONS)
+        .map(|decision| {
+            reference
+                .teacher_row(decision)
+                .expect("official teacher row")
+                .values()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    let official_cached = (0..REFERENCE_DECISIONS)
+        .map(|decision| {
+            reference
+                .cached_row(decision)
+                .expect("official cached row")
+                .values()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    let profiles = [
+        (
+            "Burn teacher vs official teacher (corresponding)",
+            &teacher_rows,
+            &official_teacher,
+        ),
+        (
+            "Burn pinned cached vs official cached (corresponding)",
+            &pinned.logits,
+            &official_cached,
+        ),
+        (
+            "Burn teacher vs official cached (crossed)",
+            &teacher_rows,
+            &official_cached,
+        ),
+        (
+            "Burn pinned cached vs official teacher (crossed)",
+            &pinned.logits,
+            &official_teacher,
+        ),
+        (
+            "Burn clamped cached vs official teacher",
+            &clamped_run.logits,
+            &official_teacher,
+        ),
+        (
+            "Burn clamped cached vs official cached",
+            &clamped_run.logits,
+            &official_cached,
+        ),
+        (
+            "official teacher vs official cached",
+            &official_teacher,
+            &official_cached,
+        ),
+    ];
+    for (label, burn, official) in profiles {
+        let cosines = burn
+            .iter()
+            .zip(official.iter())
+            .map(|(burn, official)| cosine_similarity(burn, official))
+            .collect::<Vec<_>>();
+        let (minimum_decision, minimum) = first_minimum(cosines.iter().copied());
+        eprintln!(
+            "Nemotron official profile ({label}): minimum_cosine={minimum:.9}@{minimum_decision}, \
+             below_0.999={}, top1_agreements={}/{REFERENCE_DECISIONS}, cosines={cosines:.6?}",
+            cosines.iter().filter(|&&cosine| cosine < 0.999).count(),
+            burn.iter()
+                .zip(official.iter())
+                .filter(|(burn, official)| top1(burn) == top1(official))
+                .count(),
+        );
+    }
+    eprintln!(
+        "Nemotron Burn teacher router selection: minimum_margin_per_position={:?}, \
+         narrowest(margin,layer,position)={:?}",
+        minimum_margin_per_position
+            .iter()
+            .map(|margin| format!("{margin:.2e}"))
+            .collect::<Vec<_>>(),
+        narrowest_selections
+            .iter()
+            .map(|(margin, layer, position)| format!("({margin:.2e},{layer},{position})"))
+            .collect::<Vec<_>>(),
+    );
     eprintln!(
         "Nemotron decision-{DIAGNOSED_DECISION} Δ census at Mamba layer 0: \
          time_step_min={time_step_min}, heads={heads}, tokens={teacher_length}, \
@@ -2586,8 +2727,8 @@ fn diagnoses_pinned_nemotron_decision_14_time_step_clamp() {
         teacher_length * heads,
     );
     for (label, summary) in [
-        ("pinned unclamped one-token updates", &pinned),
-        ("one-token updates clamped too", &clamped_run),
+        ("pinned unclamped one-token updates", &pinned_summary),
+        ("one-token updates clamped too", &clamped_summary),
     ] {
         let (worst_boundary, worst_hidden) = summary.worst_boundary();
         eprintln!(
