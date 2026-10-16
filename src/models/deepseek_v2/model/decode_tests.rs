@@ -1239,9 +1239,12 @@ fn transactions_commit_prefixes_and_roll_back_proposals() {
     assert_eq!(state.working_lengths(), &[6]);
     state.commit_prefix(mark, 1).unwrap();
     assert_eq!(state.lengths(), &[4]);
+    // Token 9's cache entry came from a two-token step here and a one-token step
+    // in the reference; F32 GEMMs of different row counts may sum in different
+    // orders, so allow the batched-versus-stateless tolerance used above.
     decode(&mut state, vec![30])
         .into_data()
-        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(1e-6));
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(2e-5));
 
     // A rolled-back proposal leaves no trace.
     let mut state = fresh();

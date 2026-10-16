@@ -657,11 +657,7 @@ impl<B: Backend> GptOssForCausalLm<B> {
                     &device,
                     PARAMETERS,
                 )?;
-                Ok(burn::tensor::module::linear(
-                    hidden,
-                    table.val().transpose(),
-                    None,
-                ))
+                operations::matmul_transposed(hidden, table.val())
             }
         }
     }

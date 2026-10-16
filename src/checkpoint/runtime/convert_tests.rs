@@ -317,6 +317,206 @@ fn scalars(dtype: TensorDType, count: usize, seed: u64) -> Vec<u8> {
     bytes
 }
 
+// ---------------------------------------------------------------------------
+// Multi-threaded transpose
+//
+// `transpose_tiles` splits matrices of at least `PARALLEL_MIN_SCALARS` scalars
+// into column bands, one scoped thread each, sized from the host's available
+// parallelism. These tests drive `transpose_tiles_with_parallelism` with chosen
+// budgets so every band layout runs on any host, including a single-core one.
+// ---------------------------------------------------------------------------
+
+/// Source rows of the threaded-transpose fixtures.
+const THREADED_ROWS: usize = 1031;
+
+/// Source columns of the threaded-transpose fixtures: 33 tile blocks, the last
+/// only 13 columns wide, so every multi-band plan ends in a ragged band.
+const THREADED_COLUMNS: usize = 1037;
+
+/// Parallelism budgets covering one band, two, three, seven, the 14 cores of
+/// the measurement host (fewer bands than threads), and more threads than the
+/// 33 tile blocks (one block per band).
+const THREADED_BUDGETS: [usize; 6] = [1, 2, 3, 7, 14, 64];
+
+/// Runs the production conversion selected for a dtype pair through the
+/// multi-band transpose with an explicit parallelism budget.
+///
+/// This mirrors [`TransposeInto`] except that the budget is injected, so the
+/// conversion closure is exactly the one [`with_scalar_conversion`] selects.
+struct TransposeWithParallelism<'a> {
+    /// Little-endian `[rows, columns]` source scalars.
+    source: &'a [u8],
+    /// Native-endian `[columns, rows]` destination scalars.
+    target: &'a mut [u8],
+    /// Source row count.
+    rows: usize,
+    /// Source column count.
+    columns: usize,
+    /// Most threads the transpose may use.
+    available: usize,
+}
+
+impl ScalarKernel for TransposeWithParallelism<'_> {
+    /// The transpose cannot fail once both buffers are whole scalars.
+    type Output = ();
+
+    /// Views both buffers as whole scalars and transposes with the injected budget.
+    fn run<const SOURCE: usize, const TARGET: usize>(
+        self,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
+    ) {
+        let source = whole_scalars::<SOURCE>("threaded", self.source).unwrap();
+        let target = whole_scalars_mut::<TARGET>("threaded", self.target).unwrap();
+        assert_eq!(source.len(), self.rows * self.columns);
+        assert_eq!(target.len(), self.rows * self.columns);
+        transpose_tiles_with_parallelism(
+            source,
+            target,
+            self.rows,
+            self.columns,
+            self.available,
+            convert,
+        );
+    }
+}
+
+/// Reorders a row-major `[rows, columns]` buffer of `step`-byte scalars into
+/// `[columns, rows]` one scalar at a time, the deliberately naive oracle.
+fn naive_transpose(bytes: &[u8], rows: usize, columns: usize, step: usize) -> Vec<u8> {
+    let mut output = vec![0_u8; bytes.len()];
+    for row in 0..rows {
+        for column in 0..columns {
+            let from = (row * columns + column) * step;
+            let to = (column * rows + row) * step;
+            output[to..to + step].copy_from_slice(&bytes[from..from + step]);
+        }
+    }
+    output
+}
+
+/// The fixtures are large enough to take the threaded path and every budget
+/// above one really splits the columns into several bands, the last ragged.
+#[test]
+fn threaded_fixtures_split_into_several_bands() {
+    const { assert!(THREADED_ROWS * THREADED_COLUMNS >= PARALLEL_MIN_SCALARS) };
+    let blocks = THREADED_COLUMNS.div_ceil(TILE_EDGE);
+    for available in THREADED_BUDGETS {
+        let plan = transpose_plan(THREADED_ROWS, THREADED_COLUMNS, available);
+        assert_eq!(plan.threads, available.min(blocks), "budget {available}");
+        assert_eq!(plan.bands > 1, available > 1, "budget {available}");
+        let last_band = THREADED_COLUMNS - (plan.bands - 1) * plan.band_columns;
+        if available > 1 {
+            assert!(
+                last_band < plan.band_columns,
+                "ragged final band, budget {available}"
+            );
+        }
+    }
+}
+
+/// Every element of a threaded index transpose lands at `c · rows + r`, for
+/// every band layout, so the output is independent of the thread count.
+#[test]
+fn threaded_index_transpose_places_every_element_for_every_budget() {
+    let (rows, columns) = (THREADED_ROWS, THREADED_COLUMNS);
+    let source = (0..rows * columns)
+        .map(|index| u32::try_from(index).unwrap().to_ne_bytes())
+        .collect::<Vec<_>>();
+    for available in THREADED_BUDGETS {
+        let mut target = vec![[0xA5_u8; 4]; rows * columns];
+        transpose_tiles_with_parallelism(&source, &mut target, rows, columns, available, |s| s);
+        for (index, scalar) in target.iter().enumerate() {
+            let (column, row) = (index / rows, index % rows);
+            assert_eq!(
+                u32::from_ne_bytes(*scalar) as usize,
+                row * columns + column,
+                "budget {available}, source ({row}, {column})"
+            );
+        }
+    }
+}
+
+/// Threaded transposes that change dtype (BF16 to F32 and F32 to F64, so the
+/// target scalar is wider than the source) equal the in-order bulk conversion
+/// followed by a naive transpose, byte for byte, for every band layout.
+#[test]
+fn threaded_converting_transpose_matches_bulk_conversion_for_every_budget() {
+    let (rows, columns) = (THREADED_ROWS, THREADED_COLUMNS);
+    for (seed, (source_dtype, target_dtype)) in [
+        (0x7a9e_u64, (TensorDType::BF16, TensorDType::F32)),
+        (0x7a9f_u64, (TensorDType::F32, TensorDType::F64)),
+    ] {
+        let source = scalars(source_dtype, rows * columns, seed);
+        let expected = naive_transpose(
+            &gather_all(&source, source_dtype, target_dtype),
+            rows,
+            columns,
+            width(target_dtype),
+        );
+        for available in THREADED_BUDGETS {
+            let mut target = vec![0xA5_u8; expected.len()];
+            with_scalar_conversion(
+                source_dtype,
+                target_dtype,
+                TransposeWithParallelism {
+                    source: &source,
+                    target: &mut target,
+                    rows,
+                    columns,
+                    available,
+                },
+            )
+            .unwrap();
+            assert!(
+                target == expected,
+                "{source_dtype}->{target_dtype} transpose differs with budget {available}"
+            );
+        }
+    }
+}
+
+/// The production [`TransposeInto`] kernel, with the host's own parallelism,
+/// converts and transposes a matrix above the threading threshold exactly.
+#[test]
+fn transpose_into_converts_large_matrices_exactly() {
+    let (rows, columns) = (THREADED_ROWS, THREADED_COLUMNS);
+    let source = scalars(TensorDType::BF16, rows * columns, 0x0b16);
+    let expected = naive_transpose(
+        &gather_all(&source, TensorDType::BF16, TensorDType::F32),
+        rows,
+        columns,
+        width(TensorDType::F32),
+    );
+    let mut target = vec![0xA5_u8; expected.len()];
+    with_scalar_conversion(
+        TensorDType::BF16,
+        TensorDType::F32,
+        TransposeInto {
+            tensor: "large",
+            source: &source,
+            target: &mut target,
+            rows,
+            columns,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(target == expected, "BF16->F32 TransposeInto differs");
+}
+
+/// A zero budget is treated as one thread rather than rejected.
+#[test]
+fn zero_parallelism_budget_runs_on_the_caller_thread() {
+    let source = (0..6_u32).map(u32::to_ne_bytes).collect::<Vec<_>>();
+    let mut target = vec![[0_u8; 4]; 6];
+    transpose_tiles_with_parallelism(&source, &mut target, 2, 3, 0, |s| s);
+    let values = target
+        .iter()
+        .map(|scalar| u32::from_ne_bytes(*scalar))
+        .collect::<Vec<_>>();
+    assert_eq!(values, [0, 3, 1, 4, 2, 5]);
+}
+
 proptest! {
     /// Random F32 and F64 payloads agree with the per-element reference.
     #[test]

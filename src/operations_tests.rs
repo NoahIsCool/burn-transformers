@@ -1,4 +1,5 @@
-//! Linear-operation tests for dense and packed execution, record layouts, and gradient ownership.
+//! Linear-operation tests for dense and packed execution, record layouts, and gradient ownership,
+//! plus the tied-readout product [`super::matmul_transposed`].
 
 use burn::{
     backend::Flex,
@@ -7,7 +8,7 @@ use burn::{
     tensor::{DType, Tensor, TensorData},
 };
 
-use super::linear;
+use super::{linear, matmul_transposed};
 use crate::checkpoint::quantization::{
     QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
 };
@@ -522,4 +523,127 @@ fn metal_qfloat_projection_covers_qwen35_shapes() {
             "Q4 projection [{input_width}, {output_width}] produced non-finite output"
         );
     }
+}
+
+/// Deterministic `[rows, columns]` values whose products stay exactly representable.
+fn small_integers(rows: usize, columns: usize, salt: usize) -> TensorData {
+    TensorData::new(
+        (0..rows * columns)
+            .map(|index| ((index * 7 + salt) % 11) as f32 - 5.0)
+            .collect::<Vec<_>>(),
+        [rows, columns],
+    )
+}
+
+/// The tied readout equals Burn's `module::linear` against the transposed matrix at every rank.
+#[test]
+fn matmul_transposed_matches_burn_linear_for_every_rank() {
+    let device = Default::default();
+    let matrix = Tensor::<Flex, 2>::from_data(small_integers(5, 4, 3), &device);
+    let reference = |input: Tensor<Flex, 3>| {
+        burn::tensor::module::linear(input, matrix.clone().transpose(), None).into_data()
+    };
+
+    let batched = Tensor::<Flex, 3>::from_data(
+        TensorData::new(small_integers(6, 4, 1).to_vec::<f32>().unwrap(), [2, 3, 4]),
+        &device,
+    );
+    let output = matmul_transposed(batched.clone(), matrix.clone()).unwrap();
+    assert_eq!(output.dims(), [2, 3, 5]);
+    assert_eq!(output.into_data(), reference(batched.clone()));
+
+    let rows = matmul_transposed(batched.clone().reshape([6, 4]), matrix.clone()).unwrap();
+    assert_eq!(rows.reshape([2, 3, 5]).into_data(), reference(batched));
+
+    let vector = Tensor::<Flex, 1>::from_floats([1.0, -2.0, 3.0, 0.5], &device);
+    let expected = matrix
+        .clone()
+        .matmul(vector.clone().reshape([4, 1]))
+        .reshape([5])
+        .into_data();
+    assert_eq!(
+        matmul_transposed(vector, matrix).unwrap().into_data(),
+        expected
+    );
+}
+
+/// Shape, dtype and packing mismatches are contextual errors before any matmul.
+#[test]
+fn matmul_transposed_rejects_invalid_operands() {
+    let device = Default::default();
+    let matrix = Tensor::<Flex, 2>::from_data(small_integers(5, 4, 0), &device);
+    let input = Tensor::<Flex, 2>::from_data(small_integers(2, 4, 0), &device);
+
+    let wrong_width = Tensor::<Flex, 2>::zeros([2, 3], &device);
+    assert!(matches!(
+        matmul_transposed(wrong_width, matrix.clone()),
+        Err(crate::Error::Shape { tensor, .. }) if tensor == "matmul_transposed.matrix"
+    ));
+    let empty_rows =
+        Tensor::<Flex, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, 4]), &device);
+    assert!(matches!(
+        matmul_transposed(input.clone(), empty_rows),
+        Err(crate::Error::Shape { tensor, .. }) if tensor == "matmul_transposed.matrix"
+    ));
+    let empty_input =
+        Tensor::<Flex, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, 4]), &device);
+    assert!(matches!(
+        matmul_transposed(empty_input, matrix.clone()),
+        Err(crate::Error::Shape { tensor, .. }) if tensor == "matmul_transposed.input"
+    ));
+    assert!(matches!(
+        matmul_transposed(input.clone().cast(DType::F64), matrix.clone()),
+        Err(crate::Error::BackendCapability(message)) if message.contains("must match")
+    ));
+    let packed = Tensor::<Flex, 2>::from_data(
+        quantize_tensor_data(
+            &TensorData::new(vec![0.5_f32; 64], [2, 32]),
+            WeightQuantizationConfig {
+                scheme: SymmetricQuantization::Q8,
+                group_size: QuantizationGroupSize::new(32).unwrap(),
+            },
+        )
+        .unwrap()
+        .into_burn_qfloat_data()
+        .unwrap(),
+        &device,
+    );
+    assert!(matches!(
+        matmul_transposed(Tensor::<Flex, 2>::ones([1, 32], &device), packed),
+        Err(crate::Error::BackendCapability(message)) if message.contains("dequantize")
+    ));
+}
+
+/// Gradients of the tied readout reach both the activations and the matrix.
+#[cfg(feature = "autodiff")]
+#[test]
+fn matmul_transposed_differentiates_both_operands() {
+    use burn::backend::Autodiff;
+
+    /// Differentiable CPU backend for the tied-readout gradient check.
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let matrix = Tensor::<AdBackend, 2>::from_data(small_integers(3, 2, 0), &device).require_grad();
+    let input =
+        Tensor::<AdBackend, 3>::from_floats([[[1.0, 2.0], [3.0, 4.0]]], &device).require_grad();
+    let gradients = matmul_transposed(input.clone(), matrix.clone())
+        .unwrap()
+        .sum()
+        .backward();
+    // d(sum)/dM[o, i] = sum over rows of x[r, i]; d(sum)/dx[r, i] = sum over o of M[o, i].
+    assert_eq!(
+        matrix.grad(&gradients).unwrap().to_data(),
+        TensorData::from([[4.0_f32, 6.0], [4.0, 6.0], [4.0, 6.0]])
+    );
+    let column_sums = small_integers(3, 2, 0)
+        .to_vec::<f32>()
+        .unwrap()
+        .chunks(2)
+        .fold([0.0_f32; 2], |sums, row| {
+            [sums[0] + row[0], sums[1] + row[1]]
+        });
+    assert_eq!(
+        input.grad(&gradients).unwrap().to_data(),
+        TensorData::from([[column_sums, column_sums]])
+    );
 }

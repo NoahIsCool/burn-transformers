@@ -398,7 +398,11 @@ pub(crate) trait DecoderGraph<B: Backend> {
 
 /// Applies an independent head, or the transposed embedding when tied.
 ///
-/// `hidden` is `[batch, token, d]`; the result is `[batch, token, V]`.
+/// `hidden` is `[batch, token, d]`; the result is `[batch, token, V]`. A tied
+/// head multiplies by the transposed view of the `[V, d]` table through
+/// [`operations::matmul_transposed`], which never reshapes the table: F32, F16
+/// and F64 products on Flex read the strided view without copying it, while Burn
+/// Flex 0.21 still converts BF16 operands to contiguous F32 on every product.
 ///
 /// # Errors
 ///
@@ -429,11 +433,7 @@ pub(crate) fn vocabulary_projection<B: Backend>(
                 &device,
                 labels.parameters,
             )?;
-            Ok(burn::tensor::module::linear(
-                hidden,
-                table.val().transpose(),
-                None,
-            ))
+            operations::matmul_transposed(hidden, table.val())
         }
     }
 }

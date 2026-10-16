@@ -29,6 +29,7 @@
 use burn::tensor::{bf16, f16};
 
 use super::rounding::{BFLOAT16, BINARY16, round_f64_bits};
+use super::tiles::{PARALLEL_MIN_SCALARS, TILE_EDGE, transpose_plan};
 use crate::checkpoint::{CheckpointError, Result, TensorDType};
 
 /// An element-wise operation instantiated for one statically selected conversion.
@@ -42,9 +43,13 @@ pub(super) trait ScalarKernel {
 
     /// Runs the kernel with `convert` mapping one little-endian `SOURCE`-byte
     /// scalar to one native-endian `TARGET`-byte scalar.
+    ///
+    /// `convert` is a pure function of its scalar (every conversion selected by
+    /// [`with_scalar_conversion`] is a capture-free closure), so it is `Send +
+    /// Sync` and a kernel may apply it from several threads.
     fn run<const SOURCE: usize, const TARGET: usize>(
         self,
-        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
     ) -> Self::Output;
 }
 
@@ -185,7 +190,7 @@ impl<I: Iterator<Item = core::ops::Range<usize>>> ScalarKernel for GatherInterva
     /// Reserves the output once, then appends each converted interval.
     fn run<const SOURCE: usize, const TARGET: usize>(
         self,
-        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
     ) -> Self::Output {
         let scalars = whole_scalars::<SOURCE>(self.tensor, self.source)?;
         let mut output: Vec<[u8; TARGET]> = Vec::new();
@@ -231,7 +236,7 @@ where
     /// Converts each source interval into its target interval.
     fn run<const SOURCE: usize, const TARGET: usize>(
         self,
-        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
     ) -> Self::Output {
         let source = whole_scalars::<SOURCE>(self.tensor, self.source)?;
         let target = whole_scalars_mut::<TARGET>(self.tensor, self.target)?;
@@ -271,7 +276,7 @@ impl ScalarKernel for ConvertInPlace<'_> {
     /// Rewrites every scalar slot through `convert`.
     fn run<const SOURCE: usize, const TARGET: usize>(
         self,
-        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
     ) -> Self::Output {
         if SOURCE != TARGET {
             return Err(CheckpointError::InvalidTensorPayload {
@@ -317,7 +322,7 @@ impl ScalarKernel for TransposeInto<'_> {
     /// Validates both buffers hold exactly `rows * columns` scalars, then transposes.
     fn run<const SOURCE: usize, const TARGET: usize>(
         self,
-        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
     ) -> Self::Output {
         let source = whole_scalars::<SOURCE>(self.tensor, self.source)?;
         let target = whole_scalars_mut::<TARGET>(self.tensor, self.target)?;
@@ -337,27 +342,91 @@ impl ScalarKernel for TransposeInto<'_> {
 
 /// Applies a cache-tiled transpose to buffers already proven to hold `rows * columns` scalars.
 ///
-/// The target is processed in blocks of `TILE_EDGE` target rows (source
-/// columns). Within a block, each band of at most `TILE_EDGE` source rows is
-/// borrowed once and walked with `chunks_exact`, filling the matching segment of
-/// every target row in the block with a sequential write stream. Slice bounds
-/// hold because `row_end <= rows` and every visited column is `< columns`.
-fn transpose_tiles<const SOURCE: usize, const TARGET: usize>(
+/// Target row `c` (of length `rows`) holds source column `c`, i.e. source scalar
+/// `(r, c)` lands at target element `c * rows + r` after `convert`. Target rows
+/// are independent, so [`transpose_plan`] cuts the target into contiguous bands
+/// of whole tile blocks and, for large matrices, assigns them to up to
+/// [`std::thread::available_parallelism`] scoped threads, each owning its band.
+/// The verified plan covers every column exactly once, so every target scalar is
+/// written exactly once and the result is independent of the thread count.
+pub(super) fn transpose_tiles<const SOURCE: usize, const TARGET: usize>(
     source: &[[u8; SOURCE]],
     target: &mut [[u8; TARGET]],
     rows: usize,
     columns: usize,
-    convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+    convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
 ) {
-    /// Maximum tile edge in scalars, independent of byte width.
-    const TILE_EDGE: usize = 32;
+    // The plan stays on one thread below the threshold, so skip the system query there.
+    let available = if rows.saturating_mul(columns) < PARALLEL_MIN_SCALARS {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, usize::from)
+    };
+    transpose_tiles_with_parallelism(source, target, rows, columns, available, convert);
+}
 
+/// Runs [`transpose_tiles`] with an explicit parallelism budget instead of the host's.
+///
+/// `available` is the most threads the transpose may use; values below one are
+/// treated as one. [`transpose_plan`] still keeps matrices below
+/// `PARALLEL_MIN_SCALARS` on the caller's thread and never starts more threads
+/// than there are tile blocks. Production calls go through [`transpose_tiles`];
+/// tests call this directly so the multi-band path runs with chosen thread
+/// counts regardless of the host's core count.
+fn transpose_tiles_with_parallelism<const SOURCE: usize, const TARGET: usize>(
+    source: &[[u8; SOURCE]],
+    target: &mut [[u8; TARGET]],
+    rows: usize,
+    columns: usize,
+    available: usize,
+    convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy + Send + Sync,
+) {
     if rows == 0 || columns == 0 {
         return;
     }
-    let columns_per_block = columns.min(TILE_EDGE);
-    for (block, target_block) in target.chunks_mut(rows * columns_per_block).enumerate() {
-        let column_start = block * columns_per_block;
+    let plan = transpose_plan(rows, columns, available.max(1));
+    std::thread::scope(|scope| {
+        for (band, target_band) in target.chunks_mut(rows * plan.band_columns).enumerate() {
+            let first_column = band * plan.band_columns;
+            let mut work = move || {
+                transpose_band(
+                    source,
+                    target_band,
+                    rows,
+                    columns,
+                    first_column,
+                    plan.block_columns,
+                    convert,
+                );
+            };
+            if plan.threads == 1 {
+                work();
+            } else {
+                scope.spawn(work);
+            }
+        }
+    });
+}
+
+/// Fills the target rows of source columns `first_column..` one tile block at a time.
+///
+/// `target_band` holds whole target rows, starting with the row of source column
+/// `first_column`. It is processed in blocks of `block_columns` target rows
+/// (source columns). Within a block, each band of at most `TILE_EDGE` source rows is
+/// borrowed once and walked with `chunks_exact`, filling the matching segment of
+/// every target row in the block with a sequential write stream. Slice bounds
+/// hold because `row_end <= rows` and every visited column is `< columns`.
+fn transpose_band<const SOURCE: usize, const TARGET: usize>(
+    source: &[[u8; SOURCE]],
+    target_band: &mut [[u8; TARGET]],
+    rows: usize,
+    columns: usize,
+    first_column: usize,
+    block_columns: usize,
+    convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+) {
+    for (block, target_block) in target_band.chunks_mut(rows * block_columns).enumerate() {
+        let column_start = first_column + block * block_columns;
         for row_start in (0..rows).step_by(TILE_EDGE) {
             let row_end = (row_start + TILE_EDGE).min(rows);
             let source_rows = &source[row_start * columns..row_end * columns];
