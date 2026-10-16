@@ -48,6 +48,28 @@ pub enum Error {
         crate::cache::TensorCacheError,
     ),
 
+    /// Invalid decode-cache dimensions passed to [`crate::cache::CacheConfig`].
+    ///
+    /// Converted automatically, so `CacheConfig::new(batch, capacity)?` works
+    /// in any function returning [`Result`].
+    #[error("cache configuration error: {0}")]
+    CacheConfig(
+        /// Typed dimension or window failure retained for programmatic inspection.
+        #[from]
+        crate::cache::CacheConfigError,
+    ),
+
+    /// Invalid rotary-embedding dimensions or context-scaling parameters.
+    ///
+    /// Converted automatically, so `RopeConfig::new(..)?` and the scaling
+    /// constructors compose with `?` in any function returning [`Result`].
+    #[error("rope configuration error: {0}")]
+    Rope(
+        /// Typed rotary failure retained for programmatic inspection.
+        #[from]
+        crate::position::RopeConfigError,
+    ),
+
     /// A local model directory or one of its files is invalid.
     #[error("artifact error at {path}: {reason}")]
     Artifact {
