@@ -17,8 +17,12 @@
 //! - [`canonical_token_ids`] accepts a token list exactly when every ID lies
 //!   in the vocabulary and fits `u32`, reporting the first offending ID
 //!   otherwise, and returns the strictly increasing list of the distinct IDs:
-//!   the same set, sorted and deduplicated by a verified `O(n log n)` merge
-//!   sort, so adversarially long configuration lists stay cheap.
+//!   the same set, sorted and deduplicated by a merge sort whose result is
+//!   verified. Verus also proves the sort's recursion depth is at most
+//!   `⌈log₂ n⌉` (a balanced split) and each merge linear in its inputs, from
+//!   which its `O(n log n)` cost follows by the standard per-level argument,
+//!   so adversarially long configuration lists stay cheap; the total itself is
+//!   exercised by a 400k-ID test rather than proved.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -67,6 +71,48 @@ pub open spec fn sorted_set_of(out: Seq<u32>, values: Seq<u32>, start: int, end:
     &&& strictly_increasing(out)
     &&& forall|i: int| start <= i < end ==> out.contains(#[trigger] values[i])
     &&& forall|k: int| 0 <= k < out.len() ==> occurs_in(values, start, end, #[trigger] out[k])
+}
+
+/// `⌈log₂ n⌉` for `n ≥ 1`, and `0` for `n = 0`.
+///
+/// It counts the rounded-up halvings `n ↦ ⌈n / 2⌉` that reduce `n` to at most
+/// one, so it bounds the depth of a recursion that splits a range in half.
+pub open spec fn ceil_log2(n: nat) -> nat
+    decreases n,
+{
+    if n <= 1 {
+        0
+    } else {
+        1 + ceil_log2(((n + 1) / 2) as nat)
+    }
+}
+
+/// `ceil_log2` is monotonic: `a <= b` implies `⌈log₂ a⌉ <= ⌈log₂ b⌉`.
+pub proof fn lemma_ceil_log2_monotonic(a: nat, b: nat)
+    requires
+        a <= b,
+    ensures
+        ceil_log2(a) <= ceil_log2(b),
+    decreases b,
+{
+    if a > 1 {
+        lemma_ceil_log2_monotonic(((a + 1) / 2) as nat, ((b + 1) / 2) as nat);
+    }
+}
+
+/// Splitting `n ≥ 2` at `n / 2` leaves halves of strictly smaller `⌈log₂⌉`.
+///
+/// The halves have lengths `⌊n / 2⌋` and `⌈n / 2⌉`, and `⌈log₂ ⌈n / 2⌉⌉` is
+/// exactly `⌈log₂ n⌉ - 1`.
+pub proof fn lemma_halves_shrink(n: nat)
+    requires
+        n >= 2,
+    ensures
+        ceil_log2(n / 2) < ceil_log2(n),
+        ceil_log2((n - n / 2) as nat) < ceil_log2(n),
+{
+    assert(n - n / 2 == (n + 1) / 2);
+    lemma_ceil_log2_monotonic(n / 2, ((n + 1) / 2) as nat);
 }
 
 } // verus!
@@ -147,8 +193,10 @@ pub(crate) enum TokenIdError {
 
 /// Merges two strictly increasing lists into the strictly increasing list of their union.
 ///
-/// A value present in both lists appears once; the merge is linear in the
-/// combined length.
+/// A value present in both lists appears once. The proof also bounds the
+/// cost: every iteration consumes the head of at least one list (the loop
+/// measure is the number of unconsumed entries), so the merge runs at most
+/// `|left| + |right|` iterations and its result is no longer than that.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(merged =>
     requires
@@ -159,6 +207,7 @@ pub(crate) enum TokenIdError {
         covers(merged@, left@),
         covers(merged@, right@),
         drawn_from(merged@, left@, right@),
+        merged.len() <= left.len() + right.len(),
 ))]
 fn merge_unique(left: &[u32], right: &[u32]) -> Vec<u32> {
     let mut merged: Vec<u32> = Vec::new();
@@ -174,6 +223,7 @@ fn merge_unique(left: &[u32], right: &[u32]) -> Vec<u32> {
             covers(merged@, left@.subrange(0, i as int)),
             covers(merged@, right@.subrange(0, j as int)),
             drawn_from(merged@, left@, right@),
+            merged.len() <= i + j,
             forall|k: int| 0 <= k < merged.len() ==> {
                 &&& (i < left.len() ==> #[trigger] merged@[k] < left@[i as int])
                 &&& (j < right.len() ==> merged@[k] < right@[j as int])
@@ -261,14 +311,21 @@ fn merge_unique(left: &[u32], right: &[u32]) -> Vec<u32> {
 /// Sorts and deduplicates `values[start..end)` by recursive merging.
 ///
 /// The result is the strictly increasing list of exactly the distinct values
-/// in the range, in `O(n log n)` time.
+/// in the range, no longer than the range. The proof also shows the split is
+/// balanced: its termination measure is `⌈log₂(end - start)⌉`, which strictly
+/// decreases at every recursive call, so the recursion depth is at most
+/// `⌈log₂ n⌉`. Together with each merge's proved bound of `|left| + |right|`
+/// iterations over disjoint subranges, this gives the `O(n log n)` running
+/// time by the standard per-level argument (that final sum is not itself a
+/// Verus theorem; `long_token_lists_canonicalize_quickly` exercises it).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(sorted =>
     requires
         start <= end <= values.len(),
     ensures
         sorted_set_of(sorted@, values@, start as int, end as int),
-    decreases end - start,
+        sorted.len() <= end - start,
+    decreases ceil_log2((end - start) as nat),
 ))]
 fn sorted_unique(values: &[u32], start: usize, end: usize) -> Vec<u32> {
     if end - start == 0 {
@@ -283,6 +340,11 @@ fn sorted_unique(values: &[u32], start: usize, end: usize) -> Vec<u32> {
         return single;
     }
     let middle = start + (end - start) / 2;
+    // Both halves have a strictly smaller depth measure `⌈log₂⌉`.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_halves_shrink((end - start) as nat);
+    }
     let left = sorted_unique(values, start, middle);
     let right = sorted_unique(values, middle, end);
     let merged = merge_unique(left.as_slice(), right.as_slice());
