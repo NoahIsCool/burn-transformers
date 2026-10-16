@@ -185,7 +185,10 @@ fn float_data_takes_the_ordinary_install_path() {
 }
 
 /// CubeCL keeps transposed packed weights as exact strided views (integrator-run).
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires a Metal-capable macOS host"]
 fn metal_quantized_transpose_is_exact_and_stays_packed() {
