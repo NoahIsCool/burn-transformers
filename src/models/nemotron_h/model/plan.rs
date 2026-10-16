@@ -56,24 +56,31 @@
 //!
 //! # Verified planning
 //!
-//! Every function here is dependency-free integer logic, checked in place by
-//! Verus through `verus/nemotron.rs` (see `verus/README.md`). For all
-//! admissible inputs the proofs establish freedom from overflow and the exact
-//! contents of every compact-batch map: `N` is the largest row count, each
-//! `gather`, `unpack`, `packed`, and `last` entry equals its equation above,
-//! `scatter` sends valid column `c_{b,k}` to slot `(b, k)` and every other
-//! column to the zero row, and `unpack` addresses the zero row exactly at
-//! padded slots. The shortcuts of the tensor wrappers are sound: a dense
-//! plan (`T = B N`) has full rows with identity `packed` and `unpack` maps
-//! and `last[b] = b N + N - 1`, and an identity plan (also `N = S`) has
-//! identity `gather` and `scatter` maps. A plan is refused exactly for
-//! malformed columns or unrepresentable extents. They also prove every slot's query position (a
-//! query never lies beyond its row's last readable key), the policies' exact
-//! decision rules, the MTP cursor invariant, that each cache kind's slots
-//! are exactly `0..count` in schedule order (every block addresses a
-//! distinct allocated layer and every layer is used), and the exact results
-//! of the call bookkeeping above. Tensor programs driven by the plans remain
-//! covered by Rust tests.
+//! Every function and method here is dependency-free integer logic, checked
+//! in place by Verus through `verus/nemotron.rs` (see `verus/README.md`).
+//! For all admissible inputs the proofs establish freedom from overflow and
+//! the following properties.
+//!
+//! - **Maps.** `N` is the largest row count. Each `gather`, `unpack`,
+//!   `packed`, and `last` entry equals its equation above. `scatter` sends
+//!   valid column `c_{b,k}` to slot `(b, k)` and every other column to the
+//!   zero row, and `unpack` addresses the zero row exactly at padded slots.
+//! - **Shortcuts.** A dense plan (`T = B N`, [`CompactPlan::is_dense`]) has
+//!   full rows, identity `packed` and `unpack` maps, and
+//!   `last[b] = b N + N - 1`. An identity plan (also `N = S`,
+//!   [`CompactPlan::is_identity`]) has identity `gather` and `scatter` maps.
+//! - **Refusals.** A plan is refused exactly for malformed columns or
+//!   unrepresentable extents.
+//! - **Positions.** Every slot's query position is exact, so a query never
+//!   lies beyond its row's last readable key, and the refusal rule of
+//!   [`query_positions`] holds in both directions.
+//! - **Policies.** The Mamba-2 path, transactional staging, MTP cursor, and
+//!   verification length follow their exact decision rules.
+//! - **Bookkeeping.** Each cache kind's slots are exactly `0..count` in
+//!   schedule order, so every block addresses a distinct allocated layer and
+//!   every layer is used. The call bookkeeping above computes exact results.
+//!
+//! Tensor programs driven by the plans remain covered by Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -356,7 +363,12 @@ proof fn lemma_kind_count_covers(kinds: Seq<CacheKind>, n: int, kind: CacheKind,
 }
 
 /// Some block of `kind` has slot `s`.
-pub(crate) open spec fn slot_used(kinds: Seq<CacheKind>, slots: Seq<usize>, kind: CacheKind, s: int) -> bool {
+pub(crate) open spec fn slot_used(
+    kinds: Seq<CacheKind>,
+    slots: Seq<usize>,
+    kind: CacheKind,
+    s: int,
+) -> bool {
     exists|i: int| 0 <= i < kinds.len() && kinds[i] == kind && #[trigger] slots[i] == s
 }
 
@@ -490,23 +502,52 @@ pub(crate) struct CompactPlan {
     pub(crate) last: Vec<usize>,
 }
 
+// The accessors restate in executable form the predicates under which
+// `plan_compaction` proves its shortcuts, so the tensor wrappers' branches on
+// `is_dense` and `is_identity` select exactly the proved identity maps.
 impl CompactPlan {
     /// Returns the number of rows `B`.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(rows =>
+        ensures
+            rows == self.counts.len(),
+    ))]
     pub(crate) fn batch(&self) -> usize {
         self.counts.len()
     }
 
     /// Returns the number of valid tokens `T`.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(tokens =>
+        ensures
+            tokens == self.packed.len(),
+    ))]
     pub(crate) fn tokens(&self) -> usize {
         self.packed.len()
     }
 
     /// Returns whether every compact slot holds a valid token (`T = B * N`).
+    ///
+    /// This is exactly the dense-plan premise of [`plan_compaction`]'s proof,
+    /// so a dense plan has full rows and identity `packed` and `unpack` maps.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(dense =>
+        ensures
+            dense == (self.packed.len() == self.unpack.len()),
+    ))]
     pub(crate) fn is_dense(&self) -> bool {
         self.packed.len() == self.unpack.len()
     }
 
     /// Returns whether the compact batch equals the rectangular one (`N = S`, all valid).
+    ///
+    /// This is exactly the identity-plan premise of [`plan_compaction`]'s
+    /// proof, so an identity plan also gathers and scatters in place.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(identity =>
+        ensures
+            identity == (self.width == self.sequence && self.packed.len() == self.unpack.len()),
+    ))]
     pub(crate) fn is_identity(&self) -> bool {
         self.width == self.sequence && self.is_dense()
     }
@@ -546,7 +587,14 @@ impl CompactPlan {
                 &&& gathers_rows(plan.gather@, columns@, batch, width, sequence as int)
                 &&& unpacks_rows(plan.unpack@, columns@, batch, width, tokens)
                 &&& packs_rows(plan.packed@, columns@, batch, width)
-                &&& scatters_rows(plan.scatter@, columns@, batch, width, sequence as int, batch * width)
+                &&& scatters_rows(
+                    plan.scatter@,
+                    columns@,
+                    batch,
+                    width,
+                    sequence as int,
+                    batch * width,
+                )
                 &&& lasts_rows(plan.last@, columns@, batch, width, batch * width)
                 &&& forall|b: int, j: int| 0 <= b < batch && 0 <= j < width
                     ==> (#[trigger] plan.unpack@[flat(b, j, width)] == tokens)
@@ -559,15 +607,19 @@ impl CompactPlan {
                 // A dense plan (`T = B N`) has full rows and identity packing maps.
                 &&& plan.packed.len() == plan.unpack.len() ==> {
                     &&& forall|b: int| 0 <= b < batch ==> #[trigger] plan.counts@[b] == plan.width
-                    &&& forall|i: int| 0 <= i < plan.packed.len() ==> #[trigger] plan.packed@[i] == i
-                    &&& forall|i: int| 0 <= i < plan.unpack.len() ==> #[trigger] plan.unpack@[i] == i
+                    &&& forall|i: int| 0 <= i < plan.packed.len()
+                        ==> #[trigger] plan.packed@[i] == i
+                    &&& forall|i: int| 0 <= i < plan.unpack.len()
+                        ==> #[trigger] plan.unpack@[i] == i
                     &&& plan.width > 0 ==> forall|b: int| 0 <= b < batch
                         ==> #[trigger] plan.last@[b] == flat(b, width - 1, width)
                 }
                 // An identity plan (dense with `N = S`) gathers and scatters in place.
                 &&& plan.width == sequence && plan.packed.len() == plan.unpack.len() ==> {
-                    &&& forall|i: int| 0 <= i < plan.gather.len() ==> #[trigger] plan.gather@[i] == i
-                    &&& forall|i: int| 0 <= i < plan.scatter.len() ==> #[trigger] plan.scatter@[i] == i
+                    &&& forall|i: int| 0 <= i < plan.gather.len()
+                        ==> #[trigger] plan.gather@[i] == i
+                    &&& forall|i: int| 0 <= i < plan.scatter.len()
+                        ==> #[trigger] plan.scatter@[i] == i
                 }
             },
             None => {
@@ -673,7 +725,14 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
             gathers_rows(gather@, columns@, row as int, width as int, sequence as int),
             unpacks_rows(unpack@, columns@, row as int, width as int, tokens as int),
             packs_rows(packed@, columns@, row as int, width as int),
-            scatters_rows(scatter@, columns@, row as int, width as int, sequence as int, compact_slots as int),
+            scatters_rows(
+                scatter@,
+                columns@,
+                row as int,
+                width as int,
+                sequence as int,
+                compact_slots as int,
+            ),
             lasts_rows(last@, columns@, row as int, width as int, compact_slots as int),
             all_below(gather@, batch * sequence),
             all_at_most(scatter@, batch * width),
@@ -742,10 +801,18 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 gathers_rows(gather@, columns@, row as int, width as int, sequence as int),
                 unpacks_rows(unpack@, columns@, row as int, width as int, tokens as int),
                 packs_rows(packed@, columns@, row as int, width as int),
-                forall|j: int| 0 <= j < slot ==> #[trigger] gather@[flat(row as int, j, width as int)]
-                    == flat(row as int, if j < count { valid@[j] as int } else { 0 }, sequence as int),
-                forall|j: int| 0 <= j < slot ==> #[trigger] unpack@[flat(row as int, j, width as int)]
-                    == if j < count { packed_index(columns@, row as int, j) } else { tokens as int },
+                forall|j: int| 0 <= j < slot
+                    ==> #[trigger] gather@[flat(row as int, j, width as int)] == flat(
+                        row as int,
+                        if j < count { valid@[j] as int } else { 0 },
+                        sequence as int,
+                    ),
+                forall|j: int| 0 <= j < slot
+                    ==> #[trigger] unpack@[flat(row as int, j, width as int)] == if j < count {
+                        packed_index(columns@, row as int, j)
+                    } else {
+                        tokens as int
+                    },
                 forall|j: int| 0 <= j < slot && j < count
                     ==> #[trigger] packed@[packed_index(columns@, row as int, j)]
                         == flat(row as int, j, width as int),
@@ -790,7 +857,14 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                 next <= count,
                 scatter.len() == row * sequence + column,
                 rows_below(row as int, sequence as int),
-                scatters_rows(scatter@, columns@, row as int, width as int, sequence as int, compact_slots as int),
+                scatters_rows(
+                    scatter@,
+                    columns@,
+                    row as int,
+                    width as int,
+                    sequence as int,
+                    compact_slots as int,
+                ),
                 // Matched columns lie before the cursor; unmatched ones at or after it.
                 forall|k: int| 0 <= k < next ==> #[trigger] valid@[k] < column,
                 forall|k: int| next <= k < count ==> #[trigger] valid@[k] >= column,
@@ -832,16 +906,25 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
         proof! {
             assert((row as int + 1) * width as int == row as int * width as int + width as int)
                 by (nonlinear_arith);
-            assert((row as int + 1) * sequence as int == row as int * sequence as int + sequence as int)
+            assert((row as int + 1) * sequence as int
+                == row as int * sequence as int + sequence as int)
                 by (nonlinear_arith);
             let next_row = row as int + 1;
             assert forall|b: int, j: int| 0 <= b < next_row && 0 <= j < width
                 implies #[trigger] gather@[flat(b, j, width as int)]
-                    == flat(b, if j < columns@[b]@.len() { columns@[b]@[j] as int } else { 0 }, sequence as int)
+                    == flat(
+                        b,
+                        if j < columns@[b]@.len() { columns@[b]@[j] as int } else { 0 },
+                        sequence as int,
+                    )
             by {}
             assert forall|b: int, j: int| 0 <= b < next_row && 0 <= j < width
                 implies #[trigger] unpack@[flat(b, j, width as int)]
-                    == if j < columns@[b]@.len() { packed_index(columns@, b, j) } else { tokens as int }
+                    == if j < columns@[b]@.len() {
+                        packed_index(columns@, b, j)
+                    } else {
+                        tokens as int
+                    }
             by {}
             assert forall|b: int, j: int| 0 <= b < next_row && 0 <= j < columns@[b]@.len()
                 implies #[trigger] packed@[packed_index(columns@, b, j)] == flat(b, j, width as int)
@@ -915,9 +998,11 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                     lemma_sorted_at_least(columns@[b]@, sequence as int, j);
                     lemma_sorted_at_most(columns@[b]@, sequence as int, j);
                     assert(columns@[b]@[j] == j);
-                    assert(gather@[flat(b, j, n)] == flat(b, columns@[b]@[j] as int, sequence as int));
+                    assert(gather@[flat(b, j, n)]
+                        == flat(b, columns@[b]@[j] as int, sequence as int));
                 }
-                assert forall|i: int| 0 <= i < scatter.len() implies #[trigger] scatter@[i] == i by {
+                assert forall|i: int| 0 <= i < scatter.len()
+                    implies #[trigger] scatter@[i] == i by {
                     lemma_flat_cover(i, batch as int, n);
                     let b = i / n;
                     let j = i % n;
@@ -925,7 +1010,8 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
                     lemma_sorted_at_least(columns@[b]@, sequence as int, j);
                     lemma_sorted_at_most(columns@[b]@, sequence as int, j);
                     assert(columns@[b]@[j] == j);
-                    assert(scatter@[flat(b, columns@[b]@[j] as int, sequence as int)] == flat(b, j, n));
+                    assert(scatter@[flat(b, columns@[b]@[j] as int, sequence as int)]
+                        == flat(b, j, n));
                 }
             }
         }
@@ -942,17 +1028,19 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
     })
 }
 
-/// Absolute query position of compact slot `slot` in a row with `count` valid tokens after `baseline`.
+/// Absolute query position of compact slot `slot` of a row with `count` new tokens.
 ///
-/// A valid slot (`slot < count`) sits at `W + slot`. A padded slot repeats the
-/// row's last readable position `max(W + n, 1) - 1`, the position of its last
-/// valid (or, for an inactive row, last cached) key. Every key at or before
-/// that position is readable and the key at that position lies inside any
-/// sliding window, so a padded query of a row with history is never fully
-/// excluded; its output is discarded, but it stays a finite, ordinary softmax
-/// on every backend. Numbering padded slots `W + slot` instead could push a
-/// padded query beyond a sliding window of every valid key. Returns `None`
-/// when `W + n` overflows.
+/// The row's `count = n` valid tokens follow its `W = baseline` cached
+/// ones. A valid slot (`slot < n`) sits at `W + slot`. A padded slot repeats
+/// the row's last readable position `max(W + n, 1) - 1`, the position of its
+/// last valid (or, for an inactive row, last cached) key.
+///
+/// Every key at or before that position is readable, and the key at that
+/// position lies inside any sliding window. A padded query of a row with
+/// history is therefore never fully excluded: its output is discarded, but it
+/// stays a finite, ordinary softmax on every backend. Numbering padded slots
+/// `W + slot` instead could push a padded query beyond a sliding window of
+/// every valid key. Returns `None` exactly when `W + n` overflows.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(position =>
     ensures
@@ -985,7 +1073,9 @@ pub(crate) const fn slot_position(baseline: usize, count: usize, slot: usize) ->
 /// no query of a row with history is ever fully excluded by causality or a
 /// sliding window. Returns `None` exactly when `baselines` and `counts`
 /// differ in length, `B * N` overflows, or some slot's position exceeds
-/// `usize` or `i64`; the proof establishes the exact value of every slot.
+/// `usize` or `i64`. The proof establishes both directions of that rule
+/// (with `N > 0`, every returned row has a representable `W_b + n_b`) and
+/// the exact value of every slot.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(positions =>
     ensures
@@ -997,6 +1087,9 @@ pub(crate) const fn slot_position(baseline: usize, count: usize, slot: usize) ->
                     ==> #[trigger] positions@[flat(b, j, width as int)]
                         == slot_position_spec(baselines@[b] as int, counts@[b] as int, j)
                 &&& forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0
+                // Every slot's `W_b + n_b` was representable.
+                &&& width > 0 ==> forall|b: int| 0 <= b < baselines.len()
+                    ==> #[trigger] baselines@[b] + counts@[b] <= usize::MAX
             },
             None => {
                 ||| counts.len() != baselines.len()
@@ -1028,6 +1121,8 @@ pub(crate) fn query_positions(
                 ==> #[trigger] positions@[flat(b, j, width as int)]
                     == slot_position_spec(baselines@[b] as int, counts@[b] as int, j),
             forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
+            width > 0 ==> forall|b: int| 0 <= b < row
+                ==> #[trigger] baselines@[b] + counts@[b] <= usize::MAX,
         decreases baselines.len() - row,
     ))]
     while row < baselines.len() {
@@ -1052,8 +1147,15 @@ pub(crate) fn query_positions(
                         == slot_position_spec(baselines@[b] as int, counts@[b] as int, j),
                 forall|j: int| 0 <= j < slot
                     ==> #[trigger] positions@[flat(row as int, j, width as int)]
-                        == slot_position_spec(baselines@[row as int] as int, counts@[row as int] as int, j),
+                        == slot_position_spec(
+                            baselines@[row as int] as int,
+                            counts@[row as int] as int,
+                            j,
+                        ),
                 forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
+                width > 0 ==> forall|b: int| 0 <= b < row
+                    ==> #[trigger] baselines@[b] + counts@[b] <= usize::MAX,
+                slot > 0 ==> baselines@[row as int] + counts@[row as int] <= usize::MAX,
             decreases width - slot,
         ))]
         while slot < width {
@@ -1241,7 +1343,11 @@ pub(crate) struct CacheSlots {
         plan.attention == kind_count(kinds@, kinds.len() as int, CacheKind::Attention),
         plan.recurrent == kind_count(kinds@, kinds.len() as int, CacheKind::Recurrent),
         forall|i: int| 0 <= i < kinds.len() ==> #[trigger] plan.slots@[i] == (
-            if kinds@[i] == CacheKind::Stateless { 0 } else { kind_count(kinds@, i, kinds@[i]) }),
+            if kinds@[i] == CacheKind::Stateless {
+                0
+            } else {
+                kind_count(kinds@, i, kinds@[i])
+            }),
         forall|i: int| 0 <= i < kinds.len() && kinds@[i] == CacheKind::Attention
             ==> #[trigger] plan.slots@[i] < plan.attention,
         forall|i: int| 0 <= i < kinds.len() && kinds@[i] == CacheKind::Recurrent
@@ -1267,7 +1373,11 @@ pub(crate) fn plan_cache_slots(kinds: &[CacheKind]) -> CacheSlots {
             recurrent == kind_count(kinds@, block as int, CacheKind::Recurrent),
             attention + recurrent <= block,
             forall|i: int| 0 <= i < block ==> #[trigger] slots@[i] == (
-                if kinds@[i] == CacheKind::Stateless { 0 } else { kind_count(kinds@, i, kinds@[i]) }),
+                if kinds@[i] == CacheKind::Stateless {
+                    0
+                } else {
+                    kind_count(kinds@, i, kinds@[i])
+                }),
         decreases kinds.len() - block,
     ))]
     while block < kinds.len() {
@@ -1335,7 +1445,11 @@ pub(crate) fn plan_cache_slots(kinds: &[CacheKind]) -> CacheSlots {
 #[cfg_attr(verus_keep_ghost, verus_spec(longest =>
     ensures
         ({
-            let rows = if baselines.len() < counts.len() { baselines.len() as int } else { counts.len() as int };
+            let rows = if baselines.len() < counts.len() {
+                baselines.len() as int
+            } else {
+                counts.len() as int
+            };
             &&& forall|b: int| 0 <= b < rows
                 ==> #[trigger] saturated_end(baselines@[b] as int, counts@[b] as int) <= longest
             &&& rows > 0 ==> exists|b: int| 0 <= b < rows
@@ -1412,7 +1526,8 @@ pub(crate) fn all_equal(values: &[usize]) -> bool {
         invariant
             1 <= index,
             values.len() > 0 ==> index <= values.len(),
-            values.len() > 0 ==> forall|i: int| 0 <= i < index ==> #[trigger] values@[i] == values@[0],
+            values.len() > 0 ==> forall|i: int| 0 <= i < index
+                ==> #[trigger] values@[i] == values@[0],
         decreases values.len() - index,
     ))]
     while index < values.len() {
@@ -1433,7 +1548,11 @@ pub(crate) fn all_equal(values: &[usize]) -> bool {
 #[cfg_attr(verus_keep_ghost, verus_spec(exceeds =>
     ensures
         ({
-            let rows = if lengths.len() < counts.len() { lengths.len() as int } else { counts.len() as int };
+            let rows = if lengths.len() < counts.len() {
+                lengths.len() as int
+            } else {
+                counts.len() as int
+            };
             exceeds == exists|b: int| 0 <= b < rows && #[trigger] lengths@[b] + counts@[b] > limit
         }),
 ))]
@@ -1473,7 +1592,11 @@ pub(crate) fn exceeds_limit(lengths: &[usize], counts: &[usize], limit: usize) -
 #[cfg_attr(verus_keep_ghost, verus_spec(lengths =>
     ensures
         ({
-            let rows = if targets.len() < current.len() { targets.len() as int } else { current.len() as int };
+            let rows = if targets.len() < current.len() {
+                targets.len() as int
+            } else {
+                current.len() as int
+            };
             &&& lengths.len() == rows
             &&& forall|b: int| 0 <= b < rows ==> #[trigger] lengths@[b]
                 == mtp_after_truncate(targets@[b] as int, current@[b] as int)

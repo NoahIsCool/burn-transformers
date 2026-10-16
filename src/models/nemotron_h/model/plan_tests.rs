@@ -139,6 +139,10 @@ fn query_positions_follow_working_lengths() {
     );
     assert!(query_positions(&[3], &[1, 1], 2).is_none());
     assert!(query_positions(&[usize::MAX], &[2], 2).is_none());
+    // Every row's `W + n` must be representable, even when each valid slot's
+    // own position fits; a zero-width call reads no slot and needs no check.
+    assert!(query_positions(&[1], &[usize::MAX], 1).is_none());
+    assert_eq!(query_positions(&[1], &[usize::MAX], 0), Some(Vec::new()));
     // A padded slot repeats the last position instead of computing `W + j`.
     assert_eq!(slot_position(usize::MAX - 1, 1, 5), Some(usize::MAX - 1));
     assert_eq!(slot_position(usize::MAX, 1, 0), None);
