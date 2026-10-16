@@ -132,6 +132,7 @@ fn is_flex_primitive<P: 'static>() -> bool {
 /// Without this crate's `flex` feature, no backend is known to prefer contiguous storage.
 #[cfg(not(feature = "flex"))]
 fn is_flex_primitive<P: 'static>() -> bool {
+    let _ = core::any::TypeId::of::<P>();
     false
 }
 
