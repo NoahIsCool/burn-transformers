@@ -28,15 +28,19 @@
 //!
 //! `kv(h) mod half = kv(i)` and `kv(h) mod half + half = kv(i + H / 2)`,
 //!
-//! which holds for every even `G` and, after repetition, for every `G`.
-//! A single key/value head pairs with itself.
+//! which holds for every even `G`. After repetition `n = H` and value head
+//! `m` is a copy of source head `m / (H / G)`, so the identity holds by
+//! definition for every `G`. A single key/value head pairs with itself.
 //!
 //! # Verified properties
 //!
 //! Verus checks every function here through `verus/attention.rs`: group
-//! counts are exact, folding preserves every flat index and is a bijection
-//! between `(head, token)` and `(kv head, folded row)`, unfolding inverts it,
-//! and the pairing plan reproduces the reference pairs for every query head.
+//! counts are exact, repetition reads source head `m / g` for repeated head
+//! `m`, folding preserves every flat index and is a bijection between
+//! `(head, token)` and `(kv head, folded row)`, unfolding inverts it, and
+//! native pairing reproduces the reference pairs for every query head. That
+//! Burn's `reshape` is row-major and `expand` broadcasts is trusted and
+//! covered by tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -49,9 +53,24 @@ pub open spec fn group_size(query_heads: usize, key_value_heads: usize) -> int {
     (query_heads / key_value_heads) as int
 }
 
-/// Row-major flat index of `[batch, head, row]` in a `[_, heads, rows]` layout (trailing axes fixed).
+/// Row-major flat index of `[batch, head, row]` in a `[_, heads, rows]` layout
+/// (trailing axes fixed).
 pub open spec fn flat_index(batch: int, head: int, row: int, heads: int, rows: int) -> int {
     (batch * heads + head) * rows + row
+}
+
+/// Row-major flat index of `[batch, kv_head, member, row]` in a
+/// `[_, kv_heads, groups, rows]` layout.
+pub open spec fn expanded_index(
+    batch: int,
+    kv_head: int,
+    member: int,
+    row: int,
+    kv_heads: int,
+    groups: int,
+    rows: int,
+) -> int {
+    ((batch * kv_heads + kv_head) * groups + member) * rows + row
 }
 
 /// Key/value head read by query head `head` when `groups` query heads share one.
@@ -59,12 +78,14 @@ pub open spec fn kv_head_of(head: int, groups: int) -> int {
     head / groups
 }
 
-/// Folded row of token `row` of query head `head`: member `head mod groups` times `rows`, plus `row`.
+/// Folded row of token `row` of query head `head`: member `head mod groups`
+/// times `rows`, plus `row`.
 pub open spec fn folded_row_of(head: int, row: int, groups: int, rows: int) -> int {
     (head % groups) * rows + row
 }
 
-/// Group member that folded row `folded` belongs to: `floor(folded / rows)` (the sink selector channel).
+/// Group member that folded row `folded` belongs to: `floor(folded / rows)`
+/// (the sink selector channel).
 pub open spec fn member_of(folded: int, rows: int) -> int {
     folded / rows
 }
@@ -153,8 +174,9 @@ proof fn lemma_fold_index(
         requires
             0 <= member < groups,
             0 <= row < rows;
-    assert((batch * query_heads + head) * rows + row == (batch * key_value_heads + kv) * (groups
-        * rows) + member * rows + row) by (nonlinear_arith)
+    assert((batch * query_heads + head) * rows + row
+        == (batch * key_value_heads + kv) * (groups * rows) + member * rows + row)
+        by (nonlinear_arith)
         requires
             head == groups * kv + member,
             query_heads == key_value_heads * groups;
@@ -280,36 +302,15 @@ proof fn lemma_native_pairing(query_heads: int, key_value_heads: int, groups: in
     }
 }
 
-/// With one value head per query head, `W_h` is the reference pair of every head.
-proof fn lemma_repeated_pairing(query_heads: int, head: int)
-    requires
-        query_heads >= 2,
-        query_heads % 2 == 0,
-        0 <= head < query_heads,
-    ensures
-        built_pair(head, 1, query_heads / 2) == reference_pair(head, 1, query_heads / 2),
-{
-    let pairs = query_heads / 2;
-    vstd::arithmetic::div_mod::lemma_mod_pos_bound(head, pairs);
-    assert(head / 1 == head);
-    assert((head % pairs) / 1 == head % pairs);
-    assert((head % pairs + pairs) / 1 == head % pairs + pairs);
-    if head < pairs {
-        vstd::arithmetic::div_mod::lemma_small_mod(head as nat, pairs as nat);
-    } else {
-        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(head, pairs, 1, head - pairs);
-        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
-            head % pairs + pairs,
-            pairs,
-            1,
-            head % pairs,
-        );
-    }
-}
-
 } // verus!
 
 /// Query heads per key/value head, or `None` unless both counts are non-zero and `kv` divides `q`.
+///
+/// Verified: the group size is exact, and repeating key/value heads by
+/// expanding `[b, G, T, x]` to `[b, G, g, T, x]` and reshaping to
+/// `[b, H, T, x]` (as `repeat_key_value` does) places element `[b, m, t]` at
+/// expanded position `[b, m / g, m mod g, t]`. Expansion copies source head
+/// `m / g` into every member, so repeated head `m` reads source head `m / g`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(groups =>
     ensures
@@ -318,6 +319,18 @@ proof fn lemma_repeated_pairing(query_heads: int, head: int)
                 &&& query_heads >= 1 && key_value_heads >= 1
                 &&& groups >= 1
                 &&& groups * key_value_heads == query_heads
+                &&& forall|batch: int, head: int, rows: int, row: int|
+                    0 <= batch && 0 <= head < query_heads && 0 <= row < rows
+                        ==> #[trigger] flat_index(batch, head, row, query_heads as int, rows)
+                        == expanded_index(
+                        batch,
+                        kv_head_of(head, groups as int),
+                        head % (groups as int),
+                        row,
+                        key_value_heads as int,
+                        groups as int,
+                        rows,
+                    )
             },
             None => query_heads == 0 || key_value_heads == 0 || query_heads % key_value_heads != 0,
         }
@@ -336,6 +349,40 @@ pub fn head_groups(query_heads: usize, key_value_heads: usize) -> Option<usize> 
     proof! {
         lemma_group_quotient(query_heads as int, key_value_heads as int);
         assert(groups * key_value_heads == key_value_heads * groups) by (nonlinear_arith);
+        assert forall|batch: int, head: int, rows: int, row: int|
+            0 <= batch && 0 <= head < query_heads && 0 <= row < rows implies #[trigger]
+            flat_index(batch, head, row, query_heads as int, rows) == expanded_index(
+                batch,
+                kv_head_of(head, groups as int),
+                head % (groups as int),
+                row,
+                key_value_heads as int,
+                groups as int,
+                rows,
+            ) by {
+            lemma_fold_index(
+                batch,
+                query_heads as int,
+                key_value_heads as int,
+                groups as int,
+                rows,
+                head,
+                row,
+            );
+            let kv = kv_head_of(head, groups as int);
+            let member = head % (groups as int);
+            // The folded layout `[_, G, g * rows]` is the expanded `[_, G, g, rows]` layout.
+            assert(flat_index(batch, kv, member * rows + row, key_value_heads as int, groups * rows)
+                == expanded_index(
+                batch,
+                kv,
+                member,
+                row,
+                key_value_heads as int,
+                groups as int,
+                rows,
+            )) by (nonlinear_arith);
+        }
     }
     Some(groups)
 }
@@ -435,8 +482,8 @@ pub fn folded_rows(query_heads: usize, key_value_heads: usize, rows: usize) -> u
         }
         let size = group_size(query_heads, key_value_heads);
         assert(size == groups as int);
-        assert forall|head: int, row: int| 0 <= head < query_heads && 0 <= row < rows implies 0
-            <= #[trigger] folded_row_of(head, row, size, rows as int) < groups * rows by {
+        assert forall|head: int, row: int| 0 <= head < query_heads && 0 <= row < rows implies
+            0 <= #[trigger] folded_row_of(head, row, size, rows as int) < groups * rows by {
             lemma_fold_index(
                 0,
                 query_heads as int,
@@ -544,8 +591,13 @@ pub enum ValuePairing {
 ///
 /// Requires an even, grouped head layout. Every query head then reads exactly
 /// the reference pair `[V_kv(i) ; V_kv(i + H/2)]` of its pair index
-/// `i = h mod (H / 2)`: natively when the key/value count is even, after
-/// repetition when it is odd, and trivially for one shared head.
+/// `i = h mod (H / 2)`. Verified: natively, for an even key/value count, this
+/// is a theorem about `kv(h) mod half`; for one shared head both reference
+/// heads are head zero. After repetition (an odd count above one), query
+/// head `h` reads repeated heads `h mod half` and `h mod half + half`, both
+/// valid, with `half = H / 2`; repeated head `m` reads source head `m / g`
+/// (the layout [`head_groups`] proves for `repeat_key_value`), so the source
+/// pair is the reference pair by definition.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(pairing =>
     requires
@@ -559,22 +611,29 @@ pub enum ValuePairing {
             ValuePairing::Shared => forall|head: int| 0 <= head < query_heads ==> #[trigger]
                 reference_pair(head, query_heads as int, (query_heads / 2) as int) == (0int, 0int),
             ValuePairing::Native { half } => {
+                let groups = (query_heads / key_value_heads) as int;
+                let pairs = (query_heads / 2) as int;
                 &&& key_value_heads % 2 == 0
                 &&& half * 2 == key_value_heads
                 &&& forall|head: int| 0 <= head < query_heads ==> #[trigger] built_pair(
                     head,
-                    (query_heads / key_value_heads) as int,
+                    groups,
                     half as int,
-                ) == reference_pair(head, (query_heads / key_value_heads) as int, (query_heads / 2) as int)
+                ) == reference_pair(head, groups, pairs)
             },
             ValuePairing::Repeated { half } => {
+                let groups = (query_heads / key_value_heads) as int;
+                let pairs = (query_heads / 2) as int;
                 &&& key_value_heads % 2 == 1 && key_value_heads > 1
                 &&& half * 2 == query_heads
-                &&& forall|head: int| 0 <= head < query_heads ==> #[trigger] built_pair(
-                    head,
-                    1,
-                    half as int,
-                ) == reference_pair(head, 1, (query_heads / 2) as int)
+                // Repeated heads (one per query head) pair as `(h mod half, h mod half + half)`.
+                &&& forall|head: int| 0 <= head < query_heads ==> {
+                    let repeated = #[trigger] built_pair(head, 1, half as int);
+                    &&& 0 <= repeated.0 < half
+                    &&& repeated.1 == repeated.0 + half
+                    &&& (kv_head_of(repeated.0, groups), kv_head_of(repeated.1, groups))
+                        == reference_pair(head, groups, pairs)
+                }
             },
         },
 ))]
@@ -588,7 +647,10 @@ pub fn value_pairing(query_heads: usize, key_value_heads: usize) -> ValuePairing
                 (query_heads / 2) as int,
             ) == (0int, 0int) by {
                 vstd::arithmetic::div_mod::lemma_mod_pos_bound(head, (query_heads / 2) as int);
-                vstd::arithmetic::div_mod::lemma_basic_div(head % ((query_heads / 2) as int), query_heads as int);
+                vstd::arithmetic::div_mod::lemma_basic_div(
+                    head % ((query_heads / 2) as int),
+                    query_heads as int,
+                );
                 vstd::arithmetic::div_mod::lemma_basic_div(
                     head % ((query_heads / 2) as int) + (query_heads / 2) as int,
                     query_heads as int,
@@ -629,12 +691,14 @@ pub fn value_pairing(query_heads: usize, key_value_heads: usize) -> ValuePairing
     }
     #[cfg(verus_keep_ghost)]
     proof! {
-        assert forall|head: int| 0 <= head < query_heads implies #[trigger] built_pair(
-            head,
-            1,
-            (query_heads / 2) as int,
-        ) == reference_pair(head, 1, (query_heads / 2) as int) by {
-            lemma_repeated_pairing(query_heads as int, head);
+        let half = (query_heads / 2) as int;
+        assert forall|head: int| 0 <= head < query_heads implies {
+            let repeated = #[trigger] built_pair(head, 1, half);
+            &&& 0 <= repeated.0 < half
+            &&& repeated.1 == repeated.0 + half
+        } by {
+            vstd::arithmetic::div_mod::lemma_mod_pos_bound(head, half);
+            assert(head / 1 == head);
         }
     }
     ValuePairing::Repeated {

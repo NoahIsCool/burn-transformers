@@ -19,6 +19,35 @@ fn head_groups_require_exact_division() {
     }
 }
 
+/// Repetition by expand-and-reshape places repeated head `m` at expanded `[m / g, m mod g]`.
+#[test]
+fn repetition_reads_source_head_of_each_group() {
+    for key_value_heads in 1..=4usize {
+        for groups in 1..=4usize {
+            let query_heads = key_value_heads * groups;
+            assert_eq!(head_groups(query_heads, key_value_heads), Some(groups));
+            for rows in 1..=4usize {
+                // Every repeated element is a distinct expanded element.
+                let mut seen = vec![false; 2 * query_heads * rows];
+                for batch in 0..2 {
+                    for head in 0..query_heads {
+                        for row in 0..rows {
+                            let flat = (batch * query_heads + head) * rows + row;
+                            let expanded = ((batch * key_value_heads + head / groups) * groups
+                                + head % groups)
+                                * rows
+                                + row;
+                            assert_eq!(flat, expanded, "G={key_value_heads} g={groups}");
+                            assert!(!seen[expanded]);
+                            seen[expanded] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Folding is a contiguous view: flat indices survive and every folded row has one origin.
 #[test]
 fn folding_preserves_flat_indices_and_inverts() {
@@ -63,21 +92,26 @@ fn unfolding_divides_by_the_group_size() {
     assert_eq!(unfolded_rows(4, 4, 7), 7);
 }
 
-/// The value pair each query head reads after the planned construction.
+/// The source value heads each query head reads after the planned construction.
+///
+/// Repeated plans pair repeated heads `(h mod half, h mod half + half)`;
+/// `repeat_key_value` makes repeated head `m` a copy of source head `m / g`.
 fn built_pairs(query_heads: usize, key_value_heads: usize) -> Vec<(usize, usize)> {
+    let groups = query_heads / key_value_heads;
     match value_pairing(query_heads, key_value_heads) {
         ValuePairing::Shared => vec![(0, 0); query_heads],
-        ValuePairing::Native { half } => {
-            let groups = query_heads / key_value_heads;
-            (0..query_heads)
-                .map(|head| {
-                    let kv = head / groups;
-                    (kv % half, kv % half + half)
-                })
-                .collect()
-        }
+        ValuePairing::Native { half } => (0..query_heads)
+            .map(|head| {
+                let kv = head / groups;
+                (kv % half, kv % half + half)
+            })
+            .collect(),
         ValuePairing::Repeated { half } => (0..query_heads)
-            .map(|head| (head % half, head % half + half))
+            .map(|head| {
+                let (first, second) = (head % half, head % half + half);
+                assert!(second < query_heads, "repeated head out of range");
+                (first / groups, second / groups)
+            })
             .collect(),
     }
 }
@@ -106,11 +140,7 @@ fn value_pairing_reproduces_reference_pairs() {
             let built = built_pairs(query_heads, key_value_heads);
             for (head, pair) in built.into_iter().enumerate() {
                 let low = head % pairs;
-                // Repeated plans index repeated heads, whose source KV head is `head / groups`.
-                let reference = match plan {
-                    ValuePairing::Repeated { .. } => (low, low + pairs),
-                    _ => (low / groups, (low + pairs) / groups),
-                };
+                let reference = (low / groups, (low + pairs) / groups);
                 assert_eq!(
                     pair, reference,
                     "H={query_heads} KV={key_value_heads} h={head}"

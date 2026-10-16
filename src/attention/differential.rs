@@ -359,8 +359,11 @@ impl<B: Backend> DifferentialAttention<B> {
 ///
 /// Returns the keys and paired values to attend with: native heads when the
 /// pairing is a property of each KV head, otherwise K/V repeated to query heads.
-/// The verified plan ([`value_pairing`]) proves that every query head then
-/// reads its reference pair `[V_kv(i) ; V_kv(i + H/2)]`.
+/// Every query head then reads its reference pair `[V_kv(i) ; V_kv(i + H/2)]`.
+/// Verus proves this for native pairing; after repetition it follows from the
+/// verified repeat layout (repeated head `m` reads source head `m / g`, see
+/// [`value_pairing`] and `grouping::head_groups`), and the tensor slicing is
+/// covered by tests.
 fn paired_values<B: Backend>(
     key: Tensor<B, 4>,
     value: Tensor<B, 4>,
