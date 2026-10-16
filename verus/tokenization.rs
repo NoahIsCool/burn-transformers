@@ -11,16 +11,23 @@
 //!   only the padding positions with the pad ID;
 //! - `validity_mask` marks exactly the real-token block as valid.
 //!
-//! and to `src/tokenization/calendar.rs`:
+//! and to `src/tokenization/calendar.rs`, against a transcription of CPython's
+//! `datetime` helpers (`_is_leap`, `_days_before_year`, `_days_in_month`,
+//! `_days_before_month`, `_ymd2ord`):
 //!
-//! - `civil_time` accepts exactly the instants of years 1 through 9999 and,
-//!   with `civil_time_in_supported_range`, computes every calendar field
-//!   without overflow and inside its range (month 1-12, day 1-31, day of year
-//!   1-366, weekday 0-6, hour 0-23, minute and second 0-59);
-//! - `is_leap_year` is total on non-negative years.
+//! - `civil_time` returns a value exactly for the instants of years 1 through
+//!   9999, and `civil_time_in_supported_range` computes, without overflow,
+//!   Python's UTC reading of the instant: a valid date (`1 <= day <=
+//!   days_in_month`) whose proleptic Gregorian ordinal is `floor(t / 86400) +
+//!   719163`, the time of day `hour * 3600 + minute * 60 + second == t mod
+//!   86400`, Python's `weekday()` `(ordinal + 6) mod 7`, and the day of year
+//!   `_days_before_month + day`;
+//! - `is_leap_year` equals Python's `_is_leap` on non-negative years.
 //!
-//! Calendar *correctness* (that the fields name the right date) is not
-//! proved; Python goldens and a day-counting property test cover it.
+//! Hinnant's year-of-era estimate is shown to name the March-based year of
+//! every day of an era from its monotonicity plus a `by (compute_only)`
+//! evaluation of each of the 400 years' first and last days.
+//!
 //! Tokenizer encoding, special-token insertion, and tensor conversion are
 //! outside the proof and remain covered by the Rust tests. See
 //! `verus/README.md` for the method, toolchain, and command.
