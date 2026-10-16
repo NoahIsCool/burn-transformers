@@ -15,9 +15,10 @@
 //!   column validation (`columns_below`, `strictly_increasing`: all below `S`,
 //!   strictly increasing) is decided exactly; `n_b` (`row_counts`),
 //!   `N = max_b n_b` (`widest`, attained), and prefix detection
-//!   (`prefix_rows`) are exact; `compact_row_plan` makes slot `k` gather
-//!   valid column `c_k` and padding slots `c_0` (or `0`), and restoration map
-//!   `c_k` back to `k` and every other column to the zero slot `N`; slot
+//!   (`prefix_rows`) are exact; `compact_row_plan` (the shared `row_maps`
+//!   under Qwen's field names) makes slot `k` gather valid column `c_k` and
+//!   padding slots `c_0` (or `0`), and restoration map `c_k` back to `k` and
+//!   every other column to the zero slot `N`; slot
 //!   validity (`slot_validity`) is `i < n_b`; slot positions
 //!   (`slot_positions`) are `W_b + i`, with `None` exactly when one exceeds
 //!   `usize` or `i64`; the uniform-cursor test (`all_equal`) is exact; and
@@ -45,7 +46,10 @@
 //!   block `i < L` is sparse).
 //!
 //! Both planning files are dependency-free, so they are included as plain
-//! modules. Burn tensor programs driven by these plans (gathers, cache
+//! modules; the shared ragged-block plan (`src/models/shared/block_plan.rs`,
+//! whose `row_maps` and `increasing_below` the Qwen3.5 plan reuses) is
+//! included at its crate path and re-verified here, with `verus/models.rs`
+//! as its home harness. Burn tensor programs driven by these plans (gathers, cache
 //! writes, attention masks, expert dispatch) remain covered by the Rust
 //! tests, including the batched-versus-per-row and stateless parity suites.
 //! The Gated DeltaNet block planner and recurrence heuristic in
@@ -56,6 +60,17 @@
 // Loop invariants are attributes on `while` statements, which Verus parses as
 // expression attributes; ordinary builds never see these attributes.
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+
+#[path = "../src/models/shared/block_plan.rs"]
+pub mod shared_block_plan;
+
+/// Mirrors the crate path `crate::models::shared::block_plan` used by the Qwen3.5 plan.
+pub mod models {
+    /// Model-independent family glue.
+    pub mod shared {
+        pub use crate::shared_block_plan as block_plan;
+    }
+}
 
 #[path = "../src/models/qwen3_5/plan.rs"]
 pub mod qwen3_5_plan;

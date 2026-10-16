@@ -50,16 +50,11 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-verus! {
+use crate::models::shared::block_plan::increasing_below;
+use crate::models::shared::block_plan::row_maps;
 
-/// `s` is strictly increasing and every entry lies below `bound`.
-///
-/// Twin of `increasing_below` in `src/models/deepseek_v2/model/batch.rs`
-/// (checked by `verus/deepseek_muse.rs`); keep the two definitions identical.
-pub open spec fn increasing_below(s: Seq<usize>, bound: int) -> bool {
-    &&& forall|i: int, j: int| 0 <= i < j < s.len() ==> s[i] < s[j]
-    &&& forall|i: int| 0 <= i < s.len() ==> s[i] < bound
-}
+#[cfg(verus_keep_ghost)]
+verus! {
 
 /// Number of entries of `kinds` equal to `kind`.
 ///
@@ -541,6 +536,11 @@ pub(crate) struct CompactRowPlan {
 
 /// Plans one row of the compact right-padded layout.
 ///
+/// This is the shared [`row_maps`] of `models::shared::block_plan` (verified
+/// there and by `verus/models.rs`) under this module's field names: the
+/// families' right-padded compaction and the shared ragged-block layout plan
+/// a row identically.
+///
 /// The row's valid caller columns `c_0 < ... < c_{n-1} < sequence` move to
 /// slots `0..n` of a `width`-slot block (`n <= width`); slots `n..width` are
 /// padding and read the row's first valid column (column 0 for an empty row)
@@ -571,74 +571,12 @@ pub(crate) struct CompactRowPlan {
             || (plan.slots[j] < columns.len() && columns[plan.slots[j] as int] == j),
 ))]
 pub(crate) fn compact_row_plan(columns: &[usize], sequence: usize, width: usize) -> CompactRowPlan {
-    let count = columns.len();
-    let filler = if count > 0 { columns[0] } else { 0 };
-    let mut sources: Vec<usize> = Vec::with_capacity(width);
-    let mut slot: usize = 0;
-    #[cfg_attr(verus_keep_ghost, verus_spec(
-        invariant
-            slot <= width,
-            count == columns.len(),
-            count <= width,
-            filler < sequence,
-            filler == (if count > 0 { columns[0] } else { 0 }),
-            increasing_below(columns@, sequence as int),
-            sources.len() == slot,
-            forall|k: int| 0 <= k < slot && k < count ==> sources[k] == columns[k],
-            forall|k: int| count <= k < slot ==> sources[k] == filler,
-            forall|k: int| 0 <= k < slot ==> sources[k] < sequence,
-        decreases width - slot,
-    ))]
-    while slot < width {
-        if slot < count {
-            sources.push(columns[slot]);
-        } else {
-            sources.push(filler);
-        }
-        slot += 1;
+    // The shared block layout plans exactly this row; only the field names differ.
+    let maps = row_maps(columns, sequence, width);
+    CompactRowPlan {
+        sources: maps.gather,
+        slots: maps.scatter,
     }
-    let mut slots: Vec<usize> = Vec::with_capacity(sequence);
-    let mut next: usize = 0;
-    let mut column: usize = 0;
-    #[cfg_attr(verus_keep_ghost, verus_spec(
-        invariant
-            column <= sequence,
-            next <= count,
-            count == columns.len(),
-            count <= width,
-            increasing_below(columns@, sequence as int),
-            slots.len() == column,
-            next < count ==> columns[next as int] >= column,
-            forall|k: int| 0 <= k < next ==> columns[k] < column,
-            forall|k: int| 0 <= k < next ==> slots[columns[k] as int] == k,
-            forall|j: int| 0 <= j < column ==> slots[j] == width
-                || (slots[j] < count && columns[slots[j] as int] == j),
-        decreases sequence - column,
-    ))]
-    while column < sequence {
-        if next < count && columns[next] == column {
-            slots.push(next);
-            // Strict increase moves the next unmatched column beyond `column`.
-            #[cfg(verus_keep_ghost)]
-            proof! {
-                if next + 1 < count {
-                    assert(columns[next as int] < columns[next + 1]);
-                }
-            }
-            next += 1;
-        } else {
-            slots.push(width);
-        }
-        column += 1;
-    }
-    // Every column is below `sequence`, so the merge matched all of them.
-    #[cfg(verus_keep_ghost)]
-    proof! {
-        if next < count {
-            assert(columns[next as int] < sequence);
-        }
-    }
-    CompactRowPlan { sources, slots }
 }
 
 /// Returns each row's slot validity `i < n_b`, or `None` when no slot is padding.

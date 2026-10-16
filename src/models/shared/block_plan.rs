@@ -40,8 +40,8 @@ verus! {
 
 /// `s` is strictly increasing and every entry lies below `bound`.
 ///
-/// Twin of `increasing_below` in `src/models/qwen3_5/plan.rs` (checked by
-/// `verus/qwen.rs`); keep the two definitions identical.
+/// Qwen3.5's compact-row contract states its precondition with this
+/// definition too.
 pub open spec fn increasing_below(s: Seq<usize>, bound: int) -> bool {
     &&& forall|i: int, j: int| 0 <= i < j < s.len() ==> s[i] < s[j]
     &&& forall|i: int| 0 <= i < s.len() ==> s[i] < bound

@@ -1,7 +1,8 @@
 //! Verus harness for the Gemma layer schedule, rotary sets, and namespace detection.
 //!
 //! Verifies, in place, the specifications attached to
-//! `src/models/gemma/plan.rs`:
+//! `src/models/gemma/plan.rs` and to the shared checkpoint extents it
+//! re-exports (`src/models/shared/decoder_plan.rs`):
 //!
 //! - `sliding_by_pattern`: the overflow-free default local/global rule equals
 //!   the reference's `(l + 1) mod p != 0` for every layer and every positive
@@ -26,8 +27,10 @@
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
-//! The planning file is dependency-free, so it is included as a single
-//! module. The tensor code driven by these plans (the per-layer-type rotary
+//! The checkpoint extents and the counting vocabulary of the schedule proof
+//! are the shared decoder planning (`src/models/shared/decoder_plan.rs`),
+//! included at its crate path and re-verified here; `verus/models.rs` is its
+//! home harness. The tensor code driven by these plans (the per-layer-type rotary
 //! tables and sliding masks), the string matching that sets the namespace
 //! flags, and the mapping of flags to `GemmaLayerType` remain covered by
 //! `src/models/gemma/{architecture,checkpoint,model}_tests.rs` and the tiny
@@ -37,6 +40,17 @@
 // Loop invariants are attributes on `while` statements, which Verus parses as
 // expression attributes; ordinary builds never see these attributes.
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+
+#[path = "../src/models/shared/decoder_plan.rs"]
+pub mod shared_decoder_plan;
+
+/// Mirrors the crate paths `crate::models::shared::*` used by the family plan.
+pub mod models {
+    /// Model-independent family glue.
+    pub mod shared {
+        pub use crate::shared_decoder_plan as decoder_plan;
+    }
+}
 
 #[path = "../src/models/gemma/plan.rs"]
 pub mod plan;

@@ -15,8 +15,9 @@
 //!   that many entries. The tables of one call are indexed by these numbers,
 //!   so an out-of-range index would leave a layer unrotated.
 //! * [`unique_flag`] decides which single published namespace a checkpoint
-//!   uses, and [`checkpoint_extent`]/[`projection_extent`] form the checked
-//!   `u64` extents of its contract.
+//!   uses; the checked `u64` extents of its contract, `checkpoint_extent`
+//!   and `projection_extent`, are re-exported from
+//!   [`crate::models::shared::decoder_plan`].
 //!
 //! # Verified planning
 //!
@@ -28,6 +29,14 @@
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
+
+// The checkpoint extents are shared with the Llama family and gpt-oss; the
+// counting vocabulary also underpins the schedule proof below.
+pub(crate) use crate::models::shared::decoder_plan::{
+    ExtentError, checkpoint_extent, projection_extent,
+};
+#[cfg(verus_keep_ghost)]
+use crate::models::shared::decoder_plan::{count_equal, lemma_count_prefix_stable};
 
 #[cfg(verus_keep_ghost)]
 verus! {
@@ -67,32 +76,6 @@ pub open spec fn set_of(sliding: bool, shared: bool) -> usize {
         0
     } else {
         1
-    }
-}
-
-/// Number of entries of `flags[0..end]` equal to `flag`.
-pub open spec fn count_equal(flags: Seq<bool>, end: int, flag: bool) -> int
-    decreases end,
-{
-    if end <= 0 {
-        0
-    } else {
-        count_equal(flags, end - 1, flag) + if flags[end - 1] == flag { 1int } else { 0int }
-    }
-}
-
-/// `count_equal` reads only the prefix it counts.
-pub proof fn lemma_count_prefix_stable(a: Seq<bool>, b: Seq<bool>, end: int, flag: bool)
-    requires
-        0 <= end <= a.len(),
-        end <= b.len(),
-        forall|i: int| 0 <= i < end ==> a[i] == b[i],
-    ensures
-        count_equal(a, end, flag) == count_equal(b, end, flag),
-    decreases end,
-{
-    if end > 0 {
-        lemma_count_prefix_stable(a, b, end - 1, flag);
     }
 }
 
@@ -372,56 +355,6 @@ pub(crate) fn unique_flag(found: &[bool]) -> UniqueFlag {
         index += 1;
     }
     selection
-}
-
-// Checkpoint extents.
-
-/// Why a projection width cannot be a checkpoint extent.
-#[cfg_attr(verus_keep_ghost, verus_verify)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExtentError {
-    /// `heads · head_dim` overflows `usize`.
-    Overflow,
-    /// The width exceeds the checkpoint format's `u64` extents.
-    Format,
-}
-
-/// Returns `value` as a checkpoint-format `u64` extent, or `None` beyond `u64`.
-///
-/// Proved: `Some(value)` exactly when `value <= u64::MAX`.
-#[cfg_attr(verus_keep_ghost, verus_verify)]
-#[cfg_attr(verus_keep_ghost, verus_spec(extent =>
-    ensures
-        match extent {
-            Some(extent) => extent == value,
-            None => value > u64::MAX,
-        },
-))]
-pub(crate) fn checkpoint_extent(value: usize) -> Option<u64> {
-    u64::try_from(value).ok()
-}
-
-/// Returns the projection width `heads · head_dim` as a checkpoint-format extent.
-///
-/// Proved: exactly `heads · head_dim`, or `Overflow` when the product
-/// exceeds `usize` and `Format` when it fits `usize` but not `u64`.
-#[cfg_attr(verus_keep_ghost, verus_verify)]
-#[cfg_attr(verus_keep_ghost, verus_spec(width =>
-    ensures
-        match width {
-            Ok(width) => width == heads * head_dim,
-            Err(ExtentError::Overflow) => heads * head_dim > usize::MAX,
-            Err(ExtentError::Format) => heads * head_dim <= usize::MAX && heads * head_dim > u64::MAX,
-        },
-))]
-pub(crate) fn projection_extent(heads: usize, head_dim: usize) -> Result<u64, ExtentError> {
-    let Some(width) = heads.checked_mul(head_dim) else {
-        return Err(ExtentError::Overflow);
-    };
-    match checkpoint_extent(width) {
-        Some(extent) => Ok(extent),
-        None => Err(ExtentError::Format),
-    }
 }
 
 #[cfg(test)]

@@ -70,6 +70,26 @@
 //! Index conversion for the uploaded block maps reuses the verified
 //! `plan::signed_indices` above.
 //!
+//! It verifies `src/models/shared/decoder_plan.rs`, the planning shared by
+//! the dense cached decoders (Llama family, Gemma, gpt-oss):
+//!
+//! - `cache_slots` numbers each cache group's layers (full storage and
+//!   sliding ring) by an order-preserving bijection onto `0..size`, and the
+//!   two sizes partition the layers; `group_indices` numbers the allocated
+//!   groups densely, full storage first; `truncation_leaves_bytes` is
+//!   exactly "some row is shortened to a nonzero length", the condition that
+//!   clears a decode state's clean tails;
+//! - `widest_context` is the largest active row's context, 1 when no row is
+//!   active;
+//! - `checkpoint_extent` is `Some(v)` exactly when `v` fits `u64`,
+//!   `projection_extent` is exactly `heads · head_dim` or names the `usize`
+//!   or `u64` overflow, and `derived_head_dim` is `hidden / heads` (zero
+//!   without heads).
+//!
+//! The Llama, Gemma, and gpt-oss harnesses include the same file at its
+//! crate path, because their plans reuse its counting vocabulary, and
+//! re-verify it.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
 //! The planning files are dependency-free, so each is included as a single
@@ -96,3 +116,6 @@ pub mod load_audit;
 
 #[path = "../src/models/shared/block_plan.rs"]
 pub mod block_plan;
+
+#[path = "../src/models/shared/decoder_plan.rs"]
+pub mod decoder_plan;

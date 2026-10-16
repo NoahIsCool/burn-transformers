@@ -480,6 +480,14 @@ pub open spec fn lasts_rows(
 } // verus!
 
 /// Right-padded compact layout of one ragged batch (see the module documentation).
+///
+/// Per row, `gather` and `scatter` are the shared row plan
+/// ([`crate::models::shared::block_plan::row_maps`], which Qwen3.5 and the
+/// DeepSeek/Muse block layout use) in flat `[B * N]` / `[B * S]` form. This
+/// plan stays separate because Nemotron-H also needs what the per-row plan
+/// lacks: one flat select per tensor instead of a per-row gather, the
+/// `packed`/`unpack` maps that feed only the `T` valid tokens to the Mamba-2
+/// scan and restore them, and each row's flat last-token slot.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
 #[derive(Debug, Clone, PartialEq, Eq)]

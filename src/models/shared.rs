@@ -17,6 +17,9 @@
 //!   readback;
 //! * [`plan`] holds the dependency-free index planning, verified in place by
 //!   Verus through `verus/models.rs`;
+//! * [`decoder_plan`] holds the verified cache-group numbering, step
+//!   context, and checkpoint extents of the dense cached decoders (Llama
+//!   family, Gemma, gpt-oss);
 //! * [`block_plan`] and [`block`] pack ragged cached rows into one left-aligned
 //!   `[B, T]` block with exact cache slots and position-ordered key limits
 //!   (the verified host plan and its tensor application), shared by every
@@ -40,6 +43,7 @@
 pub(crate) mod block;
 pub(crate) mod block_plan;
 pub(crate) mod checks;
+pub(crate) mod decoder_plan;
 pub(crate) mod input;
 pub(crate) mod load_audit;
 pub(crate) mod logits;
