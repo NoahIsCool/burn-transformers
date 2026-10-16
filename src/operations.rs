@@ -18,7 +18,10 @@
 //! `[vocabulary, hidden]` embedding table. It never reshapes the matrix: Burn's
 //! `module::linear` prepends unit axes to its weight, which Burn Flex 0.21 cannot
 //! express as a view of a transposed matrix and therefore answers by copying the
-//! complete table on every call.
+//! complete table on every call. Avoiding the reshape removes that copy for the
+//! dtypes whose Flex GEMM reads strided operands directly (F32, F16 and F64);
+//! Burn Flex 0.21 still converts BF16 operands to contiguous F32 on every
+//! product, so a BF16 readout on Flex keeps a per-call conversion copy.
 //!
 //! Dense floating projections remain differentiable through both inputs and
 //! parameters. Packed quantized projections retain their inference representation,
@@ -191,10 +194,15 @@ pub fn linear<B: Backend, const D: usize>(
 /// embedding table this is the tied language-model readout.
 ///
 /// The product is one rank-2 matmul whose right operand is the transposed *view*
-/// of `M`, so no backend copies the matrix: Burn's `module::linear(x, Mᵀ)` instead
-/// reshapes the weight to `[1, ..., I, O]`, which Burn Flex 0.21 can only perform
-/// by materializing `Mᵀ` contiguously on every call (113 MB per decode step for
-/// SmolLM-135M's table, about two thirds of that model's Flex decode time).
+/// of `M`, and the matrix is never reshaped. Burn's `module::linear(x, Mᵀ)`
+/// instead reshapes the weight to `[1, ..., I, O]`, which Burn Flex 0.21 can only
+/// perform by materializing `Mᵀ` contiguously on every call (113 MB per decode
+/// step for SmolLM-135M's table, about two thirds of that model's Flex decode
+/// time). With the reshape gone, Flex's F32, F16 and F64 GEMM reads the strided
+/// view without copying it. Burn Flex 0.21's BF16 matmul still makes both
+/// operands contiguous and converts them to F32 on every product, so a BF16
+/// matrix is copied per call on Flex regardless of this formulation; CubeCL
+/// backends read the transposed view through their own stride handling.
 /// Flattening the activation's leading axes is free for the contiguous hidden
 /// states models produce. Values equal `module::linear(x, Mᵀ, None)` up to F32
 /// reassociation inside the backend's GEMM.

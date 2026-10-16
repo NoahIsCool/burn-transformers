@@ -312,8 +312,11 @@ A Flex CPU profile (`/usr/bin/sample`, 1 ms) of SmolLM-135M cached decode at
 the transposed embedding table by copying all 113 MB of it on every decode
 step. `operations::matmul_transposed` multiplies by the transposed view through
 one rank-2 product and never reshapes the table; the Llama graph (and with it
-Gemma) and gpt-oss use it. CubeCL reshapes the same view by updating strides,
-so Metal never paid this cost. The readout still multiplies by a strided view:
+Gemma) and gpt-oss use it. Flex's F32 (measured here), F16 and F64 GEMM then
+reads the strided view without copying it, but Burn Flex 0.21's BF16 matmul
+still makes both operands contiguous and converts them to F32 on every product,
+so a BF16 readout on Flex keeps a per-call copy. CubeCL reshapes the same view
+by updating strides, so Metal never paid this cost. The readout still multiplies by a strided view:
 the micro-benchmark's `576 -> 49152` single-row product took 1.39–1.51x longer
 strided than from a contiguous transposed copy, which would cost a second copy
 of the table (113 MB for SmolLM-135M, 2.7 GB for Gemma 3 4B in F32) and is not

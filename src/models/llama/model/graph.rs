@@ -400,7 +400,9 @@ pub(crate) trait DecoderGraph<B: Backend> {
 ///
 /// `hidden` is `[batch, token, d]`; the result is `[batch, token, V]`. A tied
 /// head multiplies by the transposed view of the `[V, d]` table through
-/// [`operations::matmul_transposed`], which never copies the table.
+/// [`operations::matmul_transposed`], which never reshapes the table: F32, F16
+/// and F64 products on Flex read the strided view without copying it, while Burn
+/// Flex 0.21 still converts BF16 operands to contiguous F32 on every product.
 ///
 /// # Errors
 ///
