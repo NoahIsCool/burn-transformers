@@ -44,14 +44,50 @@ fn rejects_every_dimension_failure() {
     );
 }
 
-/// Nonpositive and nonfinite frequency bases cannot construct a rotary configuration.
+/// Nonfinite frequency bases and bases below one cannot construct a rotary configuration.
 #[test]
 fn rejects_invalid_theta_values() {
-    for theta in [0.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+    let below_one = 1.0 - f64::EPSILON / 2.0;
+    for theta in [
+        0.0,
+        -1.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        1e-300,
+        0.5,
+        below_one,
+    ] {
         assert!(matches!(
             RopeConfig::new(8, 8, theta, RopeScaling::None),
             Err(RopeConfigError::InvalidTheta { .. })
         ));
+    }
+}
+
+/// Bases of at least one keep every `f32` inverse frequency finite and in `[0, 1]`.
+///
+/// Regression for fuzz finding ROPE-F32-1: `theta = 1e-300` used to validate,
+/// and pair one of a four-wide head had frequency `1e150`, which is `inf` in
+/// `f32` (position zero then had the angle `0 * inf = NaN`). The extreme
+/// accepted bases, one (every frequency is one) and `f64::MAX` (every
+/// frequency but the first underflows to zero), stay finite.
+#[test]
+fn accepted_bases_keep_frequencies_finite() {
+    assert!(matches!(
+        RopeConfig::new(4, 4, 1e-300, RopeScaling::None),
+        Err(RopeConfigError::InvalidTheta { theta }) if theta == 1e-300
+    ));
+    for theta in [1.0, 2.0, 10_000.0, 1e300, f64::MAX] {
+        let config = RopeConfig::new(64, 64, theta, RopeScaling::None).expect("theta >= 1");
+        let frequencies = crate::position::inverse_frequencies(config, 1).expect("frequencies");
+        assert_eq!(frequencies[0], 1.0, "theta {theta}");
+        assert!(
+            frequencies
+                .iter()
+                .all(|omega| omega.is_finite() && (0.0..=1.0).contains(omega)),
+            "theta {theta}: {frequencies:?}"
+        );
     }
 }
 
@@ -172,11 +208,21 @@ fn yarn_defaults_and_overrides_are_validated() {
 #[test]
 fn yarn_rejects_all_invalid_attention_and_beta_values() {
     let yarn = YarnConfig::new(2.0, 4096).expect("valid YaRN config");
-    for attention_factor in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+    // 1e39 overflows the f32 tables it scales (`0 * inf = NaN` at position
+    // zero) and 1e-46 rounds to zero.
+    for attention_factor in [0.0, -1.0, f64::INFINITY, f64::NAN, 1e39, 1e-46] {
         assert!(matches!(
             yarn.with_attention_factor(attention_factor),
             Err(RopeConfigError::InvalidYarnAttentionFactor { .. })
         ));
+    }
+    for attention_factor in [f64::from(f32::MIN_POSITIVE), f64::from(f32::MAX)] {
+        assert_eq!(
+            yarn.with_attention_factor(attention_factor)
+                .expect("normal f32 amplitude")
+                .attention_factor(),
+            attention_factor
+        );
     }
     for beta in [0.0, -1.0, f64::INFINITY, f64::NAN] {
         assert!(matches!(
@@ -219,6 +265,31 @@ fn yarn_cross_validates_frequency_base() {
         Err(RopeConfigError::YarnThetaTooSmall { theta: 1.0 })
     );
     assert!(RopeConfig::new(64, 64, 10_000.0, yarn.into()).is_ok());
+}
+
+/// The `f32` range check rounds like the tables and rejects NaN, zero, and subnormals.
+#[test]
+fn normal_positive_f32_range_is_exact_at_its_boundaries() {
+    let largest = f64::from(f32::MAX);
+    let smallest = f64::from(f32::MIN_POSITIVE);
+    for accepted in [smallest, 1.0, largest, largest * (1.0 + f64::EPSILON)] {
+        assert!(is_normal_positive_f32(accepted), "{accepted}");
+    }
+    for rejected in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        -1.0,
+        // Just below the boundary: a subnormal after rounding (values within
+        // half a subnormal step of it would round up and be accepted).
+        smallest * 0.999,
+        1e-45,
+        largest * 1.000_001,
+    ] {
+        assert!(!is_normal_positive_f32(rejected), "{rejected}");
+    }
 }
 
 /// An extension factor of one is valid for every scaling policy.

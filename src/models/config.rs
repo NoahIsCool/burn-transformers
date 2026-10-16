@@ -17,8 +17,9 @@ pub mod rope;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{DeserializeOwned, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub use rope::{
     DEFAULT_ROPE_THETA, DynamicNtkContext, MropeHandling, PartialRotary, RopeContext,
@@ -297,9 +298,11 @@ pub enum RopeType {
 /// Deserialization accepts the current `rope_type` key, the legacy `type` key,
 /// or both: Hugging Face config constructors copy `type` into `rope_type` and
 /// `save_pretrained` then writes both. When both are present they must agree.
-/// Serialization writes only `rope_type`.
+/// Only a JSON object is accepted, as in Transformers (`[]` or `["yarn"]` is
+/// a type error, not a positional field list). Serialization writes only
+/// `rope_type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(try_from = "RopeParametersRepr")]
+#[serde(try_from = "RopeParametersMapping")]
 pub struct RopeParameters {
     /// RoPE scaling algorithm; legacy configs serialize this key as `type`.
     #[serde(default)]
@@ -436,11 +439,45 @@ struct RopeParametersRepr {
     truncate: Option<bool>,
 }
 
-impl TryFrom<RopeParametersRepr> for RopeParameters {
+/// A [`RopeParametersRepr`] that was read from a mapping and never from a sequence.
+///
+/// Serde's derived struct deserializer also accepts a sequence of field values
+/// in declaration order, so through the derived impl alone `[]` would parse as
+/// default RoPE and `["yarn"]` would set `rope_type` positionally. Asking the
+/// deserializer for a map makes every non-object value (sequence, string,
+/// number, boolean, null) a type error before any field is read.
+struct RopeParametersMapping(RopeParametersRepr);
+
+impl<'de> Deserialize<'de> for RopeParametersMapping {
+    /// Requests a map and reads its entries with the derived field rules.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Accepts only `visit_map`; every other shape uses serde's type error.
+        struct MappingVisitor;
+
+        impl<'de> Visitor<'de> for MappingVisitor {
+            type Value = RopeParametersMapping;
+
+            /// Names the expected shape in serde's `invalid type` message.
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a RoPE parameter object")
+            }
+
+            /// Deserializes the derived representation from the map's entries.
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                RopeParametersRepr::deserialize(MapAccessDeserializer::new(map))
+                    .map(RopeParametersMapping)
+            }
+        }
+
+        deserializer.deserialize_map(MappingVisitor)
+    }
+}
+
+impl TryFrom<RopeParametersMapping> for RopeParameters {
     type Error = String;
 
     /// Reconciles the type keys and moves every other field unchanged.
-    fn try_from(repr: RopeParametersRepr) -> Result<Self, Self::Error> {
+    fn try_from(RopeParametersMapping(repr): RopeParametersMapping) -> Result<Self, Self::Error> {
         let RopeParametersRepr {
             rope_type,
             legacy_type,
@@ -512,7 +549,15 @@ impl RopeParameters {
     ) -> Result<(), ConfigError> {
         nonzero(architecture, "head_dim", head_dim)?;
         let theta = self.rope_theta.or(fallback_theta).unwrap_or(10_000.0);
-        positive_finite(architecture, "rope_theta", theta)?;
+        // A base below one makes `theta^(-2i/d)` grow with `i` and can
+        // overflow the `f32` frequency table (`RopeConfig::new` agrees).
+        if !(theta.is_finite() && theta >= 1.0) {
+            return Err(ConfigError::new(
+                architecture,
+                "rope_theta",
+                "must be finite and at least one",
+            ));
+        }
 
         let factor = self.partial_rotary_factor.unwrap_or(1.0);
         let proportional = self.rope_type == RopeType::Proportional;
@@ -628,15 +673,23 @@ impl RopeParameters {
                     let values = values.ok_or_else(|| {
                         ConfigError::new(architecture, field, "is required for longrope")
                     })?;
+                    // Factors divide `f32` frequencies, so each must round to an
+                    // `f32` that keeps every angle `p * omega / r` finite (see
+                    // `LongRopeScaling::MIN_FACTOR`).
+                    let minimum = crate::position::LongRopeScaling::MIN_FACTOR;
                     if values.len() != expected
-                        || values
-                            .iter()
-                            .any(|value| !value.is_finite() || *value <= 0.0)
+                        || values.iter().any(|&value| {
+                            let rounded = value as f32;
+                            !(rounded.is_finite() && rounded >= minimum)
+                        })
                     {
                         return Err(ConfigError::new(
                             architecture,
                             field,
-                            format!("must contain {expected} positive finite factors"),
+                            format!(
+                                "must contain {expected} factors that round to f32 values in {minimum:e}..={:e} (2^-64 to f32::MAX)",
+                                f32::MAX
+                            ),
                         ));
                     }
                 }

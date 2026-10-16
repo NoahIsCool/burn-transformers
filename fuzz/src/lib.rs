@@ -148,37 +148,37 @@ pub(crate) const INTERESTING_FLOATS: [f64; 24] = [
     10_000.0,
 ];
 
-/// Whether `right` is an acceptable JSON round trip of the float `left`.
+/// Whether `right` is an exact JSON round trip of the float `left`.
 ///
-/// `serde_json` serializes the shortest exact decimal but, without its
-/// `float_roundtrip` feature (which neither crate enables), parses long
-/// mantissas with large exponents approximately: a campaign found
-/// `3.7997969716361836e-262` read back four ulps away. Values must agree to a
-/// relative `1e-14`, or absolutely within `f64::MIN_POSITIVE` for subnormals.
+/// `serde_json` writes the shortest decimal that identifies a float, and the
+/// runtime crate enables its `float_roundtrip` feature (which this package
+/// inherits through feature unification), so parsing returns the same bits.
+/// Without that feature, long mantissas with large exponents were parsed
+/// approximately (about 30% of random finite `f64` values moved, for example
+/// `3.7997969716361846e-262` read back as `3.799796971636185e-262`;
+/// regression `crash-8872c8a0`). JSON has no NaN, and `-0.0` round-trips with
+/// its sign, so the comparison is bitwise.
 pub(crate) fn floats_round_trip(left: f64, right: f64) -> bool {
-    let difference = (left - right).abs();
-    left == right
-        || difference <= 1e-14 * left.abs().max(right.abs())
-        || difference <= f64::MIN_POSITIVE
+    left.to_bits() == right.to_bits()
 }
 
 /// Whether two JSON values are equal, with floats compared by [`floats_round_trip`].
 ///
 /// Integers (`u64`/`i64` numbers) must match exactly, and an integer never
-/// equals a float: only when both numbers are floats does the relative
-/// tolerance apply, so a round trip that turned a token ID or context length
-/// into a float, or moved a large integer, is still reported.
+/// equals a float: a round trip that turned a token ID or context length into
+/// a float, or moved a large integer or any float, is reported.
 pub(crate) fn json_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => {
-            left == right
-                || (left.is_f64()
-                    && right.is_f64()
-                    && matches!(
-                        (left.as_f64(), right.as_f64()),
-                        (Some(left), Some(right)) if floats_round_trip(left, right)
-                    ))
+            if left.is_f64() && right.is_f64() {
+                matches!(
+                    (left.as_f64(), right.as_f64()),
+                    (Some(left), Some(right)) if floats_round_trip(left, right)
+                )
+            } else {
+                left == right
+            }
         }
         (Value::Array(left), Value::Array(right)) => {
             left.len() == right.len() && left.iter().zip(right).all(|(a, b)| json_equal(a, b))

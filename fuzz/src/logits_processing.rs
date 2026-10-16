@@ -26,8 +26,9 @@
 //!    Survivors form a top set of the scaled values (up to near-ties, which
 //!    top-p's rounded probabilities may split: open finding TOPP-TIE-1, since
 //!    Hugging Face ranks by logit and never splits them) whose size equals the
-//!    tie-independent count of top-k, then top-p (sorted mass *before* an item
-//!    below `p`), then min-p (`z >= max + ln(min_p)`); counts within `1e-5` of a
+//!    count of top-k (every value at least the `k`-th greatest, so ties with
+//!    the boundary survive), then top-p (sorted mass *before* an item below
+//!    `p`), then min-p (`z >= max + ln(min_p)`); counts within `1e-5` of a
 //!    boundary may resolve either way.
 //! 5. **Selection.** Greedy picks a row maximum; seeded sampling picks a token
 //!    with positive probability, is reproducible from a cloned processor, and
@@ -37,10 +38,11 @@
 //! the default mode comes from a small table of moderate values, so the
 //! oracle's `f64` arithmetic and the processor's `f32` arithmetic agree to
 //! rounding. A second, *extreme* mode draws parameters from
-//! [`crate::INTERESTING_FLOATS`]; it asserts the absence of panics always and the
-//! absence of NaN only while every parameter stays inside the magnitude envelope
-//! of [`within_f32_envelope`]. Outside that envelope, valid configurations can
-//! produce NaN today; see the ignored regression tests in the sibling test module.
+//! [`crate::INTERESTING_FLOATS`] (including the `f32` boundaries) and checks
+//! that every configuration [`GenerationConfig::validate`] accepts keeps the
+//! processed logits finite or `-inf` and the selection defined (findings
+//! GEN-F32-1..4, fixed: controls whose `f32` rounding was zero or infinite
+//! used to validate and then produce NaN).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -150,8 +152,10 @@ fn parameter(bytes: &mut Bytes<'_>, extreme: bool, table: &[f64]) -> f64 {
 /// Byte layout: strategy, temperature, optional top-k, optional top-p,
 /// optional min-p, repetition, presence, and frequency penalties, scope, n-gram
 /// size (0..=3), `min_new_tokens` (0..=3), up to two logit-bias entries, and up to
-/// two EOS IDs. In extreme mode each float may instead be a boundary value; an
-/// invalid draw falls back to the neutral value, so the result always validates.
+/// two EOS IDs. In extreme mode each float may instead be a boundary value; a
+/// draw the documented rules reject (divisors must round to normal positive
+/// `f32` values, additive controls to finite ones) falls back to the neutral
+/// value, so the result always validates.
 fn decode_config(bytes: &mut Bytes<'_>, vocabulary: usize, extreme: bool) -> GenerationConfig {
     let strategy = if bytes.flag() {
         SamplingStrategy::Sample
@@ -189,10 +193,16 @@ fn decode_config(bytes: &mut Bytes<'_>, vocabulary: usize, extreme: bool) -> Gen
     config.eos_token_ids = (0..bytes.below(3))
         .map(|_| u32::try_from(bytes.below(vocabulary)).expect("small vocabulary"))
         .collect();
-    // Replace invalid extreme draws by neutral values, field by field.
+    // Replace invalid extreme draws by neutral values, field by field, using
+    // the documented F32 rules (independent of the library's implementation).
     let neutral = GenerationConfig::default();
     let positive = |value: f64| value.is_finite() && value > 0.0;
-    if !positive(config.temperature) {
+    let normal_f32 = |value: f64| {
+        let rounded = value as f32;
+        rounded.is_finite() && rounded >= f32::MIN_POSITIVE
+    };
+    let finite_f32 = |value: f64| (value as f32).is_finite();
+    if !normal_f32(config.temperature) {
         config.temperature = neutral.temperature;
     }
     if config.top_p.is_some_and(|p| !(positive(p) && p <= 1.0)) {
@@ -201,16 +211,16 @@ fn decode_config(bytes: &mut Bytes<'_>, vocabulary: usize, extreme: bool) -> Gen
     if config.min_p.is_some_and(|p| !(0.0..=1.0).contains(&p)) {
         config.min_p = None;
     }
-    if !positive(config.repetition_penalty) {
+    if !normal_f32(config.repetition_penalty) {
         config.repetition_penalty = neutral.repetition_penalty;
     }
-    if !config.presence_penalty.is_finite() {
+    if !finite_f32(config.presence_penalty) {
         config.presence_penalty = 0.0;
     }
-    if !config.frequency_penalty.is_finite() {
+    if !finite_f32(config.frequency_penalty) {
         config.frequency_penalty = 0.0;
     }
-    config.logit_bias.retain(|_, bias| bias.is_finite());
+    config.logit_bias.retain(|_, bias| finite_f32(*bias));
     config
 }
 
@@ -258,21 +268,6 @@ fn host(tensor: Tensor<Backend, 2>) -> Vec<f32> {
         .into_data()
         .to_vec::<f32>()
         .expect("F32 logits read back")
-}
-
-/// Whether every scalar parameter keeps `f32` arithmetic finite on this harness's logits.
-///
-/// Logits are at most 4 in magnitude, rows hold at most 6 tokens, and bias adds
-/// at most `|b|`, so magnitudes in `[1e-6, 1e6]` keep every intermediate below
-/// about `1e14`. Outside the envelope the processor can overflow `f32`.
-fn within_f32_envelope(config: &GenerationConfig) -> bool {
-    let bounded = |value: f64| value.abs() <= 1e6;
-    let multiplicative = |value: f64| (1e-6..=1e6).contains(&value);
-    multiplicative(config.temperature)
-        && multiplicative(config.repetition_penalty)
-        && bounded(config.presence_penalty)
-        && bounded(config.frequency_penalty)
-        && config.logit_bias.values().all(|&bias| bounded(bias))
 }
 
 /// Pre-warper processed logits of one row, computed in `f64` from the documented rules.
@@ -411,11 +406,17 @@ fn check_warpers(config: &GenerationConfig, vocabulary: usize, greedy: &[f32], s
             }
         }
     }
-    // Top-k keeps exactly min(k, finite) finite values.
-    let mut count = config
-        .top_k
-        .filter(|&k| k < vocabulary)
-        .map_or(finite.len(), |k| k.min(finite.len()));
+    // Top-k keeps every finite value at least the k-th greatest, so values
+    // tied with that boundary all survive (Hugging Face's `TopKLogitsWarper`
+    // rule, `scores < topk(scores, k)[..., -1]` is removed); with fewer than
+    // `k` finite values all of them survive.
+    let mut count = match config.top_k.filter(|&k| k < vocabulary) {
+        Some(k) if k <= finite.len() => {
+            let boundary = finite[k - 1];
+            finite.iter().filter(|&&value| value >= boundary).count()
+        }
+        _ => finite.len(),
+    };
     let (mut low, mut high) = (count, count);
     // Top-p keeps sorted items whose preceding mass is below p.
     if let Some(top_p) = config.top_p.filter(|&p| p < 1.0)
@@ -712,13 +713,17 @@ fn check_case(case: &Case) {
                 .expect("valid rows"),
         )
     };
-    let safe = within_f32_envelope(&case.config);
     let vocabulary = case.vocabulary;
+    // Every valid configuration keeps processed logits finite or `-inf`.
+    assert!(
+        stateless
+            .iter()
+            .chain(&greedy)
+            .all(|value| value.is_finite() || *value == f32::NEG_INFINITY),
+        "{case:?}: {stateless:?}"
+    );
     for (row_index, (row, &prompt)) in case.rows.iter().zip(&case.prompts).enumerate() {
         let span = row_index * vocabulary..(row_index + 1) * vocabulary;
-        if safe {
-            assert!(stateless.iter().all(|value| !value.is_nan()), "{case:?}");
-        }
         if case.extreme {
             continue;
         }
@@ -733,9 +738,7 @@ fn check_case(case: &Case) {
             );
         }
     }
-    if safe {
-        check_selection(&processor, &stateless, vocabulary);
-    }
+    check_selection(&processor, &stateless, vocabulary);
 }
 
 /// Asserts bitwise equality of two processed tensors.

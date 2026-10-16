@@ -169,6 +169,13 @@ pub struct TokenHistory<B: Backend> {
     ngram_size: usize,
     /// One n-gram index per row, empty when `ngram_size == 0`.
     ngrams: Vec<NgramIndex>,
+    /// Host upper bound on every occurrence count `c[b, v]`.
+    ///
+    /// The widest observed `[batch, width]` prompt (or longest token row)
+    /// plus one per [`Self::record`] call that recorded a token. Penalties use
+    /// it to decide, without reading the counts, whether `count * penalty`
+    /// can overflow the logits dtype.
+    count_bound: usize,
     /// Device holding the count tensors.
     device: B::Device,
 }
@@ -247,6 +254,7 @@ impl<B: Backend> TokenHistory<B> {
             width = width.max(tokens.len());
         }
         history.counts = row_counts(config, vocabulary_size, rows, prompt_lengths, width, device)?;
+        history.count_bound = width;
         Ok(history)
     }
 
@@ -321,6 +329,7 @@ impl<B: Backend> TokenHistory<B> {
             } else {
                 Vec::new()
             },
+            count_bound: 0,
             device: device.clone(),
         }
     }
@@ -356,6 +365,8 @@ impl<B: Backend> TokenHistory<B> {
         }
         let device = tokens.device();
         let mut history = Self::new_unfilled(config, vocabulary_size, batch, &device);
+        // A row holds at most `width` valid tokens, so no count exceeds it.
+        history.count_bound = width;
         let needs_counts = config.reads_count_view(CountView::All)
             || config.reads_count_view(CountView::Generated);
         let ngram_size = history.ngram_size;
@@ -439,6 +450,8 @@ impl<B: Backend> TokenHistory<B> {
         if !active.iter().any(|&is_active| is_active) {
             return Ok(());
         }
+        // Each active row gains one token, so no count grows by more than one.
+        self.count_bound = self.count_bound.saturating_add(1);
         if self.counts.is_tracking() {
             // Inactive rows scatter a zero increment at token zero.
             let ids = tokens
@@ -486,6 +499,11 @@ impl<B: Backend> TokenHistory<B> {
     /// when `min_new_tokens` needs it.
     pub(super) fn generated_lengths(&self) -> &[usize] {
         &self.generated_lengths
+    }
+
+    /// Returns a host upper bound on every occurrence count, without a device read.
+    pub(super) fn count_bound(&self) -> usize {
+        self.count_bound
     }
 
     /// Returns the `[batch, vocabulary]` counts of `view`.

@@ -215,6 +215,128 @@ fn malformed_parameter_sets_name_the_offending_keys() {
     }
 }
 
+/// Non-object JSON is rejected instead of parsing as positional fields.
+///
+/// Regression for fuzz finding ROPE-PARSE-1: serde's derived struct
+/// deserializer also accepts sequences, so `[]` parsed as default RoPE and
+/// `["yarn"]` set `rope_type` positionally. Transformers reads a dict.
+#[test]
+fn non_object_json_is_not_rope_parameters() {
+    for json in [
+        "[]",
+        r#"["yarn"]"#,
+        r#"["linear", 10000.0, 1.0, 2.0]"#,
+        r#""yarn""#,
+        "1.5",
+        "true",
+        "null",
+    ] {
+        let set = serde_json::from_str::<RopeParameterSet>(json)
+            .expect_err("a non-object set must not parse")
+            .to_string();
+        assert!(
+            set.contains("expected a RoPE parameter object"),
+            "{json}: {set}"
+        );
+        let flat = serde_json::from_str::<RopeParameters>(json)
+            .expect_err("non-object parameters must not parse")
+            .to_string();
+        assert!(
+            flat.contains("expected a RoPE parameter object"),
+            "{json}: {flat}"
+        );
+    }
+    // Objects, including the empty one, still parse; unknown keys are dropped.
+    assert_eq!(params("{}"), RopeParameters::default());
+    assert_eq!(
+        params(r#"{"rope_type": "yarn", "factor": 4.0, "unknown": [1]}"#),
+        RopeParameters {
+            rope_type: RopeType::Yarn,
+            factor: Some(4.0),
+            ..RopeParameters::default()
+        }
+    );
+    // An absent mapping is still `None` in an optional config field.
+    let optional: Option<RopeParameters> = serde_json::from_str("null").unwrap();
+    assert!(optional.is_none());
+}
+
+/// Floats with long mantissas and extreme exponents survive a JSON round trip bit for bit.
+///
+/// Without `serde_json`'s `float_roundtrip` parser (enabled in `Cargo.toml`),
+/// about 30% of random finite `f64` values read back an ulp or more away; the
+/// first five values below are such cases (`3.7997969716361846e-262` became
+/// `3.799796971636185e-262`), so a config re-read from JSON could move. The
+/// shortest representation that serde writes now parses to the same bits.
+#[test]
+fn long_exponent_floats_round_trip_exactly() {
+    for value in [
+        3.799_796_971_636_184_6e-262,
+        2.291_712_365_432_881e-9,
+        -1.527_077_339_613_215e-236,
+        3.032_824_792_993_530_5e-68,
+        2.364_662_401_457_127_4e-157,
+        f64::MIN_POSITIVE,
+        5e-324,
+        f64::MAX,
+        8.988_465_674_311_58e307,
+        1.000_000_000_000_000_2,
+        9.007_199_254_740_993e15,
+        0.1,
+        1e23,
+        -2.225_073_858_507_201e-308,
+        -0.0,
+    ] {
+        let parameters = RopeParameters {
+            rope_type: RopeType::Linear,
+            factor: Some(value),
+            mscale_all_dim: Some(value),
+            short_factor: Some(vec![value, -value]),
+            ..RopeParameters::default()
+        };
+        let text = serde_json::to_string(&parameters).unwrap();
+        let restored: RopeParameters = serde_json::from_str(&text).unwrap();
+        for (original, parsed) in [
+            (parameters.factor, restored.factor),
+            (parameters.mscale_all_dim, restored.mscale_all_dim),
+        ] {
+            assert_eq!(
+                original.unwrap().to_bits(),
+                parsed.unwrap().to_bits(),
+                "{text}"
+            );
+        }
+        let factors = |rope: &RopeParameters| {
+            rope.short_factor
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(factors(&parameters), factors(&restored), "{text}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// Every finite `f64` in a RoPE mapping round-trips through JSON bit for bit.
+    #[test]
+    fn every_finite_float_round_trips_exactly(bits in any::<u64>()) {
+        let value = f64::from_bits(bits);
+        prop_assume!(value.is_finite());
+        let parameters = RopeParameters {
+            rope_theta: Some(value),
+            ..RopeParameters::default()
+        };
+        let restored: RopeParameterSet =
+            serde_json::from_str(&serde_json::to_string(&parameters).unwrap()).unwrap();
+        let theta = restored.parameters_for("any").unwrap().rope_theta.unwrap();
+        prop_assert_eq!(theta.to_bits(), bits);
+    }
+}
+
 /// Both shapes serialize back to the form they were parsed from.
 #[test]
 fn parameter_sets_round_trip_through_serialization() {
@@ -1072,6 +1194,99 @@ fn declared_softmax_correction_is_validated_during_translation() {
             .to_string()
             .contains("is not read by linear RoPE")
     );
+}
+
+/// The squared softmax multiplier, not only its root, must be a normal positive `f32`.
+///
+/// Regression for fuzz finding ROPE-SOFTMAX-1: `mscale_all_dim = 1e300` gives a
+/// finite correction `m = 1 + 0.1 * 1e300 * ln 2`, so translation succeeded,
+/// but the multiplier `m^2` is infinite. With `factor = e` (so `ln f = 1`),
+/// `mscale_all_dim = 1e20` gives `m^2 ~= 1e38`, inside the `f32` range, while
+/// `mscale_all_dim = 1e21` gives `m^2 ~= 1e40`, finite in `f64` but not in `f32`.
+#[test]
+fn squared_softmax_multipliers_must_fit_f32() {
+    let squared = context().with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared);
+    let overflowing = params(r#"{"rope_type": "linear", "factor": 2.0, "mscale_all_dim": 1e300}"#);
+    let error = rejects(&overflowing, &squared, "test.rope.mscale_all_dim");
+    assert!(error.to_string().contains("softmax multiplier"), "{error}");
+    assert!(overflowing.softmax_scale_multiplier(&squared).is_err());
+    let e = std::f64::consts::E;
+    let inside = RopeParameters {
+        rope_type: RopeType::Linear,
+        factor: Some(e),
+        mscale_all_dim: Some(1e20),
+        ..RopeParameters::default()
+    };
+    inside
+        .to_rope_config(&squared)
+        .expect("m^2 ~= 1e38 fits f32");
+    let multiplier = inside.softmax_scale_multiplier(&squared).unwrap();
+    assert_eq!(multiplier, yarn_mscale(e, 1e20).powi(2));
+    assert!((multiplier as f32).is_finite());
+    let outside = RopeParameters {
+        mscale_all_dim: Some(1e21),
+        ..inside.clone()
+    };
+    assert!(yarn_mscale(e, 1e21).powi(2).is_finite());
+    rejects(&outside, &squared, "test.rope.mscale_all_dim");
+    // Per-layer entries are checked in their own scope.
+    let mut layers = std::collections::BTreeMap::new();
+    layers.insert("full_attention".to_owned(), overflowing);
+    let layered = RopeParameterSet::from(RopeParametersByLayerType::new(layers).unwrap());
+    rejects_layer(
+        &layered,
+        "full_attention",
+        &squared,
+        "test.rope.full_attention.mscale_all_dim",
+    );
+    // Without the declaration nothing squares the correction, and the
+    // unread value is reported as such.
+    let error = rejects(
+        &params(r#"{"rope_type": "linear", "factor": 2.0, "mscale_all_dim": 1e300}"#),
+        &context(),
+        "test.rope.mscale_all_dim",
+    );
+    assert!(error.to_string().contains("is not read by"), "{error}");
+}
+
+/// Bases below one and subnormal LongRoPE factors fail translation contextually.
+///
+/// Regressions for fuzz findings ROPE-F32-1/2: both used to translate and then
+/// overflow the `f32` inverse frequencies.
+#[test]
+fn bases_and_factors_that_overflow_f32_frequencies_are_rejected() {
+    for theta in ["1e-300", "0.5", "0.9999999999999999"] {
+        let rope = params(&format!(
+            r#"{{"rope_type": "default", "rope_theta": {theta}}}"#
+        ));
+        let error = rejects(&rope, &context(), "test.rope.rope_theta");
+        assert!(error.to_string().contains("at least 1"), "{error}");
+    }
+    params(r#"{"rope_type": "default", "rope_theta": 1.0}"#)
+        .to_rope_config(&context())
+        .expect("a base of one keeps every frequency at one");
+    // A context-supplied base is checked the same way.
+    rejects(
+        &RopeParameters::default(),
+        &context().with_rope_theta(Some(0.25)),
+        "test.rope.rope_theta",
+    );
+    let longrope = |short: &str| {
+        params(&format!(
+            r#"{{"rope_type": "longrope", "short_factor": [{short}, 1, 1, 1, 1, 1, 1, 1], "long_factor": [1, 1, 1, 1, 1, 1, 1, 1], "original_max_position_embeddings": 64}}"#
+        ))
+    };
+    for factor in ["1e-45", "1e-39", "1.1754943508222875e-38", "1e-20", "1e39"] {
+        let error = rejects(&longrope(factor), &context(), "test.rope.short_factor");
+        assert!(error.to_string().contains("2^-64 to f32::MAX"), "{error}");
+    }
+    let config = longrope("5.421010862427522e-20")
+        .to_rope_config(&context())
+        .expect("2^-64 is the smallest valid factor");
+    for evaluated in [1, 64, 65] {
+        let frequencies = crate::position::RotaryFrequencies::new(config, evaluated).unwrap();
+        assert!(frequencies.inverse().iter().all(|omega| omega.is_finite()));
+    }
 }
 
 /// LongRoPE needs both tables, defaults its factor, and honours an explicit amplitude.

@@ -9,12 +9,18 @@ use proptest::prelude::*;
 use serde_json::json;
 
 use super::*;
+use crate::tokenization::chat_template::sandbox::RenderLimits;
+
+/// A budget with the limits of an empty template context.
+fn budget() -> Arc<RenderBudget> {
+    Arc::new(RenderBudget::new(RenderLimits::for_context_bytes(0)))
+}
 
 /// Renders `source` with only this module's callbacks installed.
 fn render(source: &str, context: serde_json::Value) -> Result<String, Error> {
     let mut environment = Environment::new();
     environment.set_undefined_behavior(UndefinedBehavior::Lenient);
-    install(&mut environment);
+    install(&mut environment, &budget());
     environment.render_str(source, context)
 }
 
@@ -190,7 +196,7 @@ fn string_filters_print_python_values() {
     );
     // A safe string stays safe through `string`, as Jinja2's `soft_str` keeps `Markup`.
     let mut environment = Environment::new();
-    install(&mut environment);
+    install(&mut environment, &budget());
     let value = environment
         .render_str("{{ ('<b>' | safe | string) is safe }}", ())
         .unwrap();

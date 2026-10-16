@@ -4,14 +4,18 @@ use serde_json::json;
 
 use super::*;
 
-/// Floats agree within a relative `1e-14`; integers must match exactly.
+/// Floats and integers must both round-trip exactly.
 #[test]
-fn json_equal_tolerates_float_rounding_but_not_integer_changes() {
-    // Floats a few ulps apart (the serde_json round-trip error) are equal.
-    let float = 3.799_796_971_636_183_6e-262;
-    let nearby = 3.799_796_971_636_184_5e-262;
-    assert!(json_equal(&json!(float), &json!(nearby)));
+fn json_equal_requires_exact_floats_and_integers() {
+    // Floats a few ulps apart (the serde_json round-trip error before
+    // `float_roundtrip`) differ; the parser now returns the same bits.
+    let float = 3.799_796_971_636_184_6e-262;
+    let nearby = 3.799_796_971_636_185e-262;
+    assert!(!json_equal(&json!(float), &json!(nearby)));
+    let reparsed: serde_json::Value = serde_json::from_str(&json!(float).to_string()).unwrap();
+    assert!(json_equal(&json!(float), &reparsed));
     assert!(!json_equal(&json!(1.0), &json!(1.0 + 1e-12)));
+    assert!(!json_equal(&json!(0.0), &json!(-0.0)));
     // Integers are exact, even where an f64 view could not tell them apart.
     assert!(json_equal(&json!(u64::MAX), &json!(u64::MAX)));
     assert!(!json_equal(&json!(u64::MAX), &json!(u64::MAX - 1)));
@@ -25,6 +29,10 @@ fn json_equal_tolerates_float_rounding_but_not_integer_changes() {
     assert!(!json_equal(&json!(u64::MAX), &json!(u64::MAX as f64)));
     // Structure must match exactly; numbers nest.
     assert!(json_equal(
+        &json!({"a": [1, float], "b": null}),
+        &json!({"a": [1, float], "b": null})
+    ));
+    assert!(!json_equal(
         &json!({"a": [1, float], "b": null}),
         &json!({"a": [1, nearby], "b": null})
     ));

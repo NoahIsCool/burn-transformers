@@ -140,16 +140,18 @@ fn pseudo_random_inputs_agree_with_the_oracles() {
 }
 
 /// Campaign regression `crash-8872c8a0` (minimized): a JSON float far below one
-/// reads back a few ulps away, which the round-trip check must tolerate.
+/// read back a few ulps away before `serde_json`'s `float_roundtrip` parser was
+/// enabled; the round trip is now exact and checked exactly.
 #[test]
-fn campaign_float_round_trip_is_approximate() {
+fn campaign_float_round_trip_is_exact() {
     exercise(&[
         0x72, 0x65, 0x0a, 0x0a, 0x0a, 0xff, 0x22, 0x54, 0x6f, 0x3a, 0x31, 0x36, 0x7d, 0x0a, 0x54,
         0x3a, 0x0a, 0x0a,
     ]);
-    assert!(crate::floats_round_trip(
-        3.799_796_971_636_183_6e-262,
-        3.799_796_971_636_184_5e-262
-    ));
+    // Without `float_roundtrip` this read back as `3.799796971636185e-262`.
+    let float = 3.799_796_971_636_184_6e-262_f64;
+    let reparsed: f64 = serde_json::from_str(&serde_json::to_string(&float).unwrap()).unwrap();
+    assert_eq!(float.to_bits(), reparsed.to_bits());
+    assert!(!crate::floats_round_trip(float, 3.799_796_971_636_185e-262));
     assert!(!crate::floats_round_trip(1.0, 1.0 + 1e-12));
 }

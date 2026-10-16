@@ -738,7 +738,10 @@ impl RopeParameters {
     /// Returns a configuration error at `architecture.rope.factor` when the
     /// term applies but `factor` is missing or not finite and at least one, and
     /// at `architecture.rope.mscale_all_dim` when `m(f, mscale_all_dim)` is
-    /// not finite and positive.
+    /// not finite and positive or its square, the returned multiplier, does
+    /// not round to a normal positive `f32` (attention applies the scale to
+    /// `f32` or narrower scores). The square is checked, not only `m`:
+    /// `mscale_all_dim = 1e300` gives a finite `m` but `m^2 = inf`.
     pub fn softmax_scale_multiplier(&self, context: &RopeContext) -> Result<f64> {
         softmax_scale_multiplier(
             self,
@@ -787,7 +790,28 @@ fn softmax_scale_multiplier(parameters: &RopeParameters, scope: &Scope<'_>) -> R
         ));
     }
     // `powi(2)` keeps the private DeepSeek translator's exact operation.
-    Ok(correction.powi(2))
+    let squared = correction.powi(2);
+    if !is_normal_positive_f32(squared) {
+        return Err(scope.error(
+            "mscale_all_dim",
+            format!(
+                "gives the softmax multiplier m(factor, mscale_all_dim)^2 = {squared:e}, which must be a normal positive f32 value ({:e}..={:e})",
+                f32::MIN_POSITIVE,
+                f32::MAX
+            ),
+        ));
+    }
+    Ok(squared)
+}
+
+/// Whether `value` rounds to a normal positive `f32`, in `[f32::MIN_POSITIVE, f32::MAX]`.
+///
+/// The softmax multiplier scales attention scores computed in `f32` (or a
+/// narrower dtype), so its `f32` rounding must neither overflow nor vanish.
+/// The comparison rounds exactly as the conversion does; NaN fails it.
+fn is_normal_positive_f32(value: f64) -> bool {
+    let rounded = value as f32;
+    rounded.is_finite() && rounded >= f32::MIN_POSITIVE
 }
 
 /// Resolves every source and builds the validated configuration.
@@ -1200,7 +1224,8 @@ impl<'de> Deserialize<'de> for RopeParametersByLayerType {
 /// [`Self::ByLayerType`] exactly when the JSON object is non-empty and every
 /// value is an object (no flat RoPE key holds an object), rejects objects that
 /// mix both shapes, and otherwise parses [`Self::Uniform`]. An empty object is
-/// uniform default RoPE, as in Transformers.
+/// uniform default RoPE, as in Transformers. Any value that is not an object,
+/// such as `[]` or `["yarn"]`, is rejected: Transformers reads a dict.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 #[allow(
@@ -1251,6 +1276,11 @@ impl<'de> Deserialize<'de> for RopeParameterSet {
 
 impl RopeParameterSet {
     /// Parses a JSON value with the shape detection described on the type.
+    ///
+    /// Only objects are accepted: a non-object value reaches the flat
+    /// [`RopeParameters`] deserializer, which requires a mapping, so `[]`,
+    /// `["yarn"]`, strings, and numbers fail with a type error instead of
+    /// being read as positional fields.
     fn from_json_value(value: serde_json::Value) -> std::result::Result<Self, String> {
         match value {
             serde_json::Value::Object(map)

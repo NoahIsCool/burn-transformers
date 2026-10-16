@@ -27,19 +27,118 @@
 //! The unmatched rows, and smaller Unicode-class approximations, are
 //! described in the `pycompat` module documentation. Official templates
 //! convert values with `| string` before `~`, which is matched exactly.
+//! Sequence `+` and `*` produce lists, as in Python (MiniJinja alone builds
+//! lazy iterables, which print with JSON-style quotes and cannot be indexed).
 //!
-//! Templates are untrusted programs. The environment has no loader, so
-//! templates cannot include files; execution is metered by fuel, recursion is
-//! capped, and printed or serialized values have a bounded nesting depth.
+//! # Sandbox
+//!
+//! Templates are untrusted programs: a checkpoint can ship any template. Each
+//! render is bounded as follows.
+//!
+//! - **Capabilities.** The environment has no loader, so `include`,
+//!   `import`, and `extends` fail; the only globals are `raise_exception`,
+//!   `strftime_now`, and MiniJinja's `range`, `dict`, and `namespace`
+//!   (MiniJinja's `debug()`, which prints the whole engine state without a
+//!   limit and which Hugging Face's environment lacks, is removed).
+//! - **Instructions.** At most 250 000 units of fuel (one per VM
+//!   instruction); macro and call recursion at most 64 levels; `range` at most
+//!   100 000 items (MiniJinja's own limit).
+//! - **Parsing.** The `guard` module refuses expressions nested deeper than
+//!   200 levels or chaining more than 1 024 operators (unary, binary,
+//!   comparison, conditional, postfix, or filter), which would otherwise
+//!   overflow MiniJinja's recursive parser, code generator, or syntax-tree
+//!   destructor (a native stack overflow aborts the process). Flat lists
+//!   (literal items, call arguments, macro parameters) are not limited.
+//! - **Output.** The rendered prompt streams into a buffer of at most
+//!   `1 MiB + 4c` bytes, where `c` is the size of the template context
+//!   (`messages`, `tools`, ...) serialized as JSON; the write that crosses it
+//!   fails the render.
+//! - **Values.** Every operation that builds a new string or container is
+//!   checked against the same per-value limit (and a sequence against as
+//!   many items as a value may hold bytes, at least 2^20), and charged to a
+//!   cumulative budget of 16 times the output limit, counting sequence items
+//!   as 24 bytes. Since every copy is charged when it is made, the budget also
+//!   bounds what a template can keep alive (in namespaces, lists, or
+//!   captures). The charged operations are:
+//!   - the binary operators `+`, `~`, and `*`, string and byte slices
+//!     (`s[a:b:c]`), and `*sequence` / `**mapping` call arguments, all
+//!     rewritten into bounded filters by the `guard` module (so constant
+//!     operands are not folded at compile time either);
+//!   - every `{{ }}` print, including prints into `{% set %}` blocks,
+//!     macros, and `caller()`;
+//!   - the Python-compatible filters and methods (`string`, `join`, `trim`,
+//!     `safe`, `tojson`, and the `str` methods `replace`, `join`, `strip`,
+//!     `split`, `splitlines`, `removeprefix`, `removesuffix`, and case
+//!     changes, and the `dict` methods `items`, `keys`, and `values`);
+//!   - the builtins whose size an argument controls or that print arbitrary
+//!     values (`indent`, `replace`, `format`, `batch`, `slice`, `chain`,
+//!     `upper`, `lower`, `title`, `capitalize`, `escape`, `pprint`, and the
+//!     `startingwith`/`endingwith` tests);
+//!   - the builtins that copy their input (`list`, `sort`, `unique`, `map`,
+//!     `select`, `reject`, `selectattr`, `rejectattr`, `dictsort`, `groupby`,
+//!     `reverse`, `lines`), the `dict()` and `namespace()` functions, and
+//!     `strftime_now`, whose format is checked against its largest possible
+//!     expansion before it is formatted.
+//!
+//!   Checks happen before the value is built, except for string slices,
+//!   which the engine builds (at most one input-sized copy) before the
+//!   result is charged. Sequence slices, `split`, `items`, and `zip` are
+//!   lazy views that copy nothing.
+//! - **Panics.** A panic inside MiniJinja is caught and reported as a
+//!   rendering error; it never unwinds into the caller. MiniJinja's own
+//!   `divisibleby` test panics on an integer divisor of zero, so it is
+//!   replaced by a checked version that reports the error Jinja2 raises.
+//!   Some negative-step slices of empty or short values still panic inside
+//!   MiniJinja (`''[::-1]`); those become rendering errors, not crashes.
+//! - **Cycles.** Namespaces are MiniJinja's only mutable values, so a
+//!   template can make one reference itself (`{% set ns.me = ns %}`), and the
+//!   cycle would outlive the render and leak everything it reaches. Every
+//!   namespace a render creates is recorded (and charged to the budget, since
+//!   the record keeps it alive), and its attributes that can hold a
+//!   reference are cleared when the render ends (even by a panic), as
+//!   MiniJinja already does for macro closures. The clearing costs one
+//!   assignment per such attribute, which the render itself already paid for.
+//!
+//! What remains unbounded, because MiniJinja exposes no hook for it:
+//!
+//! - **Shared structure in comparisons.** Containers can hold one value many
+//!   times (`{% set ns.x = [ns.x, ns.x] %}` doubles the printed size per
+//!   iteration while allocating a constant). Printing such a value is bounded
+//!   as above, but `==`, `<`, `in`, `sort`, `unique`, `min`, `max`, and
+//!   `dictsort` compare element by element and can take time exponential in
+//!   the number of instructions.
+//! - **Literal text replayed into captures.** Template text inside a loop is
+//!   appended to a `{% set %}` block, macro result, or `caller()` without a
+//!   print, so a capture can grow by the template's size per instruction (at
+//!   most fuel times template size); only the rendered prompt itself is
+//!   bounded.
+//! - **Constant-size work per instruction.** Each instruction may still
+//!   allocate a small constant amount that is not charged (a two-item list
+//!   literal, a loop frame, a macro call's argument list); the fuel limit
+//!   bounds the total. Peak memory is therefore about the cumulative budget
+//!   times a small copy factor (MiniJinja's transient copies and Rust's
+//!   string growth) plus fuel times that constant.
+//! - **Allocation failure.** An allocation MiniJinja cannot satisfy aborts
+//!   the process (Rust's allocation-failure behavior), rather than panicking;
+//!   the bounds above keep every allocation they cover below the limits.
 
 use std::{
     borrow::Cow,
+    convert::Infallible,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use minijinja::{Environment, Error, ErrorKind, UndefinedBehavior, Value};
 
 use super::{calendar, pycompat};
+
+mod guard;
+mod limits;
+pub(crate) mod sandbox;
+
+use sandbox::{BoundedOutput, CycleBreaker, NamespaceRegistry, RenderBudget, RenderLimits};
 
 /// Instruction budget limiting each chat-template evaluation.
 const CHAT_TEMPLATE_FUEL: u64 = 250_000;
@@ -50,26 +149,101 @@ const CHAT_TEMPLATE_RECURSION_LIMIT: usize = 64;
 ///
 /// `context` holds the template variables (`messages`, `tools`, special
 /// tokens, ...). `fixed_time` pins the instant `strftime_now` formats, in Unix
-/// seconds; `None` reads the host clock.
+/// seconds; `None` reads the host clock. Resource limits follow from the
+/// context's size; see the module documentation.
+///
+/// # Errors
+///
+/// Returns MiniJinja's error for a template that fails to compile or render,
+/// exceeds a resource limit, or panics inside the engine.
 pub(crate) fn render_template(
     source: &str,
     context: &serde_json::Value,
     fixed_time: Option<i64>,
 ) -> Result<String, Error> {
-    let source =
+    let limits = RenderLimits::for_context(context);
+    render_template_with(source, context, fixed_time, limits, |_| {})
+}
+
+/// [`render_template`] with explicit limits and an environment extension.
+///
+/// Tests use the limits to exercise each bound cheaply and the extension to
+/// register extra callbacks; production passes [`RenderLimits::for_context`]
+/// and no extension. Every source rewrite, the compilation, and the render
+/// run inside `catch_unwind`: a panic in MiniJinja (or in a callback) becomes
+/// an error instead of unwinding into the caller.
+pub(crate) fn render_template_with(
+    source: &str,
+    context: &serde_json::Value,
+    fixed_time: Option<i64>,
+    limits: RenderLimits,
+    extend: impl FnOnce(&mut Environment<'_>),
+) -> Result<String, Error> {
+    catch_unwind(AssertUnwindSafe(|| {
+        render_bounded(source, context, fixed_time, limits, extend)
+    }))
+    .unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a non-text panic payload".to_owned());
+        Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!("the template engine panicked ({detail}); the template was rejected"),
+        ))
+    })
+}
+
+/// Rewrites, compiles, and renders one template under `limits`.
+fn render_bounded(
+    source: &str,
+    context: &serde_json::Value,
+    fixed_time: Option<i64>,
+    limits: RenderLimits,
+    extend: impl FnOnce(&mut Environment<'_>),
+) -> Result<String, Error> {
+    let rewritten =
         parenthesize_conditional_keyword_arguments(&rewrite_generation_blocks(source)).into_owned();
+    let source = guard::guard_operators(&rewritten)
+        .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))?
+        .into_owned();
+    let budget = Arc::new(RenderBudget::new(limits));
+    let registry = Arc::new(NamespaceRegistry::default());
+    // Declared before the environment and template so it drops after them,
+    // once nothing but cycles can still hold the namespaces.
+    let _cycles = CycleBreaker(Arc::clone(&registry));
     let mut environment = Environment::new();
     environment.set_undefined_behavior(UndefinedBehavior::Lenient);
     environment.set_trim_blocks(true);
     environment.set_lstrip_blocks(true);
     environment.set_recursion_limit(CHAT_TEMPLATE_RECURSION_LIMIT);
     environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
-    pycompat::install(&mut environment);
+    pycompat::install(&mut environment, &budget);
+    sandbox::install(&mut environment, &budget);
+    sandbox::install_namespace_registry(&mut environment, &registry, &budget);
     environment.add_function("raise_exception", raise_exception);
+    let shared = Arc::clone(&budget);
     environment.add_function("strftime_now", move |format: &str| {
-        strftime_now(format, fixed_time)
+        strftime_now(format, fixed_time, &shared)
     });
-    environment.render_str(&source, Value::from_serialize(context))
+    extend(&mut environment);
+    let template = environment.template_from_str(&source)?;
+    let mut output = BoundedOutput::new(limits.output_bytes);
+    let rendered = template
+        .render_captured_to(Value::from_serialize(context), &mut output)
+        .map(drop);
+    if output.exceeded() {
+        return Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!(
+                "chat template resource limit: the rendered prompt would exceed {} bytes",
+                limits.output_bytes
+            ),
+        ));
+    }
+    rendered?;
+    output.into_string()
 }
 
 /// Implements Hugging Face's `raise_exception(message)` template global.
@@ -107,6 +281,21 @@ fn rewrite_tags(
     source: &str,
     mut rewrite: impl FnMut(TagKind, &str) -> Option<String>,
 ) -> Cow<'_, str> {
+    match try_rewrite_tags(source, |kind, _, tag| {
+        Ok::<_, Infallible>(rewrite(kind, tag))
+    }) {
+        Ok(rewritten) => rewritten,
+        Err(never) => match never {},
+    }
+}
+
+/// [`rewrite_tags`] with a fallible rewrite that also receives each tag's byte offset.
+///
+/// The first error stops the scan and is returned.
+fn try_rewrite_tags<E>(
+    source: &str,
+    mut rewrite: impl FnMut(TagKind, usize, &str) -> Result<Option<String>, E>,
+) -> Result<Cow<'_, str>, E> {
     let mut rewritten = String::new();
     // Bytes of `source` already copied into `rewritten`; zero until the first change.
     let mut copied = 0;
@@ -139,19 +328,19 @@ fn rewrite_tags(
             break;
         };
         let end = body_start + length + closing.len();
-        if let Some(replacement) = rewrite(kind, &source[start..end]) {
+        if let Some(replacement) = rewrite(kind, start, &source[start..end])? {
             rewritten.push_str(&source[copied..start]);
             rewritten.push_str(&replacement);
             copied = end;
         }
         position = end;
     }
-    if copied == 0 {
+    Ok(if copied == 0 {
         Cow::Borrowed(source)
     } else {
         rewritten.push_str(&source[copied..]);
         Cow::Owned(rewritten)
-    }
+    })
 }
 
 /// Returns the byte offset and delimiter of the first `{{`, `{%`, or `{#` at or after `from`.
@@ -437,8 +626,34 @@ fn conditional_value_span(
 
 // `strftime_now`.
 
+/// Most bytes [`strftime`] writes per byte of its format.
+///
+/// The longest directive, `%c`, writes 24 bytes (`Fri Jul 26 13:05:09 2024`,
+/// years have at most four digits) for its two format bytes; every other
+/// directive writes less, and literal text is copied byte for byte.
+const STRFTIME_EXPANSION: usize = 12;
+
 /// Formats the current (or caller-fixed) UTC instant like Python's `strftime`.
-fn strftime_now(format: &str, fixed_time: Option<i64>) -> Result<String, Error> {
+///
+/// The result is at most [`STRFTIME_EXPANSION`] times the format's length.
+/// That bound must fit the render's remaining text allowance before
+/// formatting starts, and the actual result is charged to `budget`.
+fn strftime_now(
+    format: &str,
+    fixed_time: Option<i64>,
+    budget: &RenderBudget,
+) -> Result<String, Error> {
+    let bound = format.len().saturating_mul(STRFTIME_EXPANSION);
+    if bound > budget.text_allowance() {
+        return Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!(
+                "chat template resource limit: strftime_now with a {}-byte format could produce {bound} bytes, above the {} bytes this render may still produce",
+                format.len(),
+                budget.text_allowance()
+            ),
+        ));
+    }
     let seconds = match fixed_time {
         Some(seconds) => seconds,
         None => host_unix_seconds()?,
@@ -449,7 +664,9 @@ fn strftime_now(format: &str, fixed_time: Option<i64>) -> Result<String, Error> 
             format!("strftime_now instant {seconds} is outside years 1 through 9999"),
         )
     })?;
-    strftime(format, &civil)
+    let text = strftime(format, &civil)?;
+    budget.reserve_text(text.len(), "strftime_now")?;
+    Ok(text)
 }
 
 /// Reads the host clock as whole Unix seconds, rounding toward negative infinity.

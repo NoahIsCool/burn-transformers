@@ -1204,6 +1204,49 @@ fn prompt_length_processing_promotes_half_logits_and_checks_inputs() {
     );
 }
 
+/// Generation floats round-trip through JSON bit for bit, however long their exponent.
+///
+/// `serde_json`'s `float_roundtrip` parser makes the shortest representation
+/// parse back exactly; without it the first two values below read back an ulp
+/// away (`3.7997969716361846e-262` became `3.799796971636185e-262`).
+#[test]
+fn configuration_floats_round_trip_exactly() {
+    for value in [
+        3.799_796_971_636_184_6e-262,
+        2.291_712_365_432_881e-9,
+        5e-324,
+        f64::MAX,
+        0.1,
+        1e-46,
+    ] {
+        let config = GenerationConfig {
+            temperature: value,
+            repetition_penalty: value,
+            presence_penalty: -value,
+            frequency_penalty: value,
+            top_p: Some(value),
+            min_p: Some(value),
+            logit_bias: BTreeMap::from([(3, value)]),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&config).unwrap();
+        let restored: GenerationConfig = serde_json::from_str(&text).unwrap();
+        let bits = |config: &GenerationConfig| {
+            [
+                config.temperature,
+                config.repetition_penalty,
+                config.presence_penalty,
+                config.frequency_penalty,
+                config.top_p.unwrap(),
+                config.min_p.unwrap(),
+                config.logit_bias[&3],
+            ]
+            .map(f64::to_bits)
+        };
+        assert_eq!(bits(&config), bits(&restored), "{text}");
+    }
+}
+
 /// Older serialized configurations load with neutral defaults for the newer controls.
 #[test]
 fn configuration_serde_defaults_and_round_trips_new_controls() {
@@ -1617,4 +1660,483 @@ fn penalty_history_timing() {
         counts.as_secs_f64() * 1e3 / steps as f64,
         one_hot.as_secs_f64() / counts.as_secs_f64()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Finite arithmetic: validation in the processing precision and saturation
+// ---------------------------------------------------------------------------
+
+/// The message of a generation error, or a panic for any other variant.
+fn generation_message(error: crate::Error) -> String {
+    match error {
+        crate::Error::Generation(message) => message,
+        other => panic!("expected a generation error, got {other:?}"),
+    }
+}
+
+/// Finite `f64` controls that round to zero, a subnormal, or infinity in F32 are rejected.
+///
+/// Regressions for fuzz findings GEN-F32-1..4: each of these validated, and
+/// processing then produced NaN (`0 * inf`, `0 / 0`, `inf + -inf`). Every
+/// error names the field, F32, and its representable range; values that are
+/// not even finite and positive keep the established messages.
+#[test]
+fn float_controls_are_validated_in_f32() {
+    let largest = f64::from(f32::MAX);
+    let smallest = f64::from(f32::MIN_POSITIVE);
+    let cases = [
+        (
+            GenerationConfig {
+                frequency_penalty: 1e39,
+                ..Default::default()
+            },
+            "frequency_penalty 1e39 overflows F32; it must round to a finite F32 value in [-3.4028235e38, 3.4028235e38]",
+        ),
+        (
+            GenerationConfig {
+                presence_penalty: -1e39,
+                ..Default::default()
+            },
+            "presence_penalty -1e39 overflows F32",
+        ),
+        (
+            GenerationConfig {
+                repetition_penalty: 1e-46,
+                ..Default::default()
+            },
+            "repetition_penalty 1e-46 rounds to 0.0 in F32; it must round to a normal positive F32 value in [1.1754944e-38, 3.4028235e38]",
+        ),
+        (
+            GenerationConfig {
+                temperature: 1e-46,
+                ..Default::default()
+            },
+            "temperature 1e-46 rounds to 0.0 in F32",
+        ),
+        (
+            GenerationConfig {
+                temperature: smallest / 2.0,
+                ..Default::default()
+            },
+            "temperature",
+        ),
+        (
+            GenerationConfig {
+                repetition_penalty: 1e39,
+                ..Default::default()
+            },
+            "repetition_penalty 1e39 rounds to inf in F32",
+        ),
+        (
+            GenerationConfig {
+                logit_bias: BTreeMap::from([(1, 1e39)]),
+                ..Default::default()
+            },
+            "logit_bias for token 1 1e39 overflows F32",
+        ),
+        (
+            GenerationConfig {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            "temperature must be finite and greater than zero",
+        ),
+        (
+            GenerationConfig {
+                frequency_penalty: f64::NAN,
+                ..Default::default()
+            },
+            "frequency_penalty must be finite, found NaN",
+        ),
+        (
+            GenerationConfig {
+                logit_bias: BTreeMap::from([(2, f64::INFINITY)]),
+                ..Default::default()
+            },
+            "logit_bias for token 2 must be finite, found inf",
+        ),
+    ];
+    for (config, expected) in cases {
+        let message = generation_message(config.validate(4).unwrap_err());
+        assert!(message.starts_with(expected), "{message}");
+    }
+    // Both ends of the range are accepted, including an `f64` just above
+    // `f32::MAX` that rounds down to it.
+    let rounds_to_largest = largest * (1.0 + f64::EPSILON);
+    for value in [smallest, largest, rounds_to_largest] {
+        GenerationConfig {
+            temperature: value,
+            repetition_penalty: value,
+            presence_penalty: -value,
+            frequency_penalty: value,
+            logit_bias: BTreeMap::from([(0, value), (1, -value)]),
+            ..Default::default()
+        }
+        .validate(4)
+        .expect("boundary controls are representable in F32");
+    }
+}
+
+/// Checks that processed logits are finite or `-inf`, and that selection stays defined.
+fn assert_finite_or_excluded(processor: &LogitsProcessor<TestBackend>, processed: Vec<f64>) {
+    assert!(
+        processed
+            .iter()
+            .all(|value| value.is_finite() || *value == f64::NEG_INFINITY),
+        "{processed:?}"
+    );
+    let vocabulary = processor.vocabulary_size();
+    let rows = processed.len() / vocabulary;
+    let tensor = Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(
+            processed
+                .iter()
+                .map(|&value| value as f32)
+                .collect::<Vec<_>>(),
+            [rows, vocabulary],
+        ),
+        &Default::default(),
+    );
+    let selection = processor.select_with_log_probs(tensor).unwrap();
+    let tokens = selection.token_ids.into_data().to_vec::<i32>().unwrap();
+    let log_probabilities = host_values(selection.log_probabilities);
+    for (row, (&token, &log_probability)) in tokens.iter().zip(&log_probabilities).enumerate() {
+        let values = &processed[row * vocabulary..(row + 1) * vocabulary];
+        if values.iter().any(|value| value.is_finite()) {
+            assert!(values[token as usize].is_finite(), "row {row}: {values:?}");
+            assert!(log_probability.is_finite() && log_probability <= 0.0);
+        }
+    }
+}
+
+/// Boundary controls on extreme logits never yield NaN or `+inf`, in either strategy.
+///
+/// Before saturation, `repetition_penalty = f32::MIN_POSITIVE` divided a logit
+/// of four into `+inf`, `frequency_penalty = -f32::MAX` times a count of two
+/// overflowed to `-inf` and met a `-inf` logit (`-inf - -inf = NaN`), and a
+/// `+inf` sum met a constraint's `-inf`.
+#[test]
+fn boundary_controls_keep_processed_logits_finite_or_excluded() {
+    let device = Default::default();
+    let largest = f64::from(f32::MAX);
+    let smallest = f64::from(f32::MIN_POSITIVE);
+    // Token 4 is excluded by the model; tokens 0 and 1 are huge.
+    let logits = [3.0e38_f32, -3.0e38, 4.0, -4.0, f32::NEG_INFINITY, 0.0];
+    let rows: [&[u32]; 2] = [&[0, 1, 2, 3, 4, 4, 2, 2], &[5, 5, 5]];
+    for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+        for (repetition, frequency, presence, bias, temperature) in [
+            (smallest, -largest, largest, largest, smallest),
+            (largest, largest, -largest, -largest, largest),
+            (smallest, largest, 0.0, largest, 0.5),
+            (1.0, -largest, 0.0, 0.0, smallest),
+        ] {
+            let config = GenerationConfig {
+                strategy,
+                temperature,
+                repetition_penalty: repetition,
+                frequency_penalty: frequency,
+                presence_penalty: presence,
+                additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+                logit_bias: BTreeMap::from([(0, bias), (2, bias), (5, -bias)]),
+                no_repeat_ngram_size: 1,
+                min_new_tokens: 2,
+                eos_token_ids: vec![3],
+                top_k: Some(5),
+                top_p: Some(0.9),
+                min_p: Some(0.1),
+                ..Default::default()
+            };
+            let processor =
+                LogitsProcessor::<TestBackend>::new(config.clone(), 6, &device).expect("valid");
+            let batch = Tensor::<TestBackend, 2>::from_data(
+                TensorData::new([logits, logits].concat(), [2, 6]),
+                &device,
+            );
+            let processed = host_values(
+                processor
+                    .process_with_prompt_lengths(batch, &rows, &[7, 3])
+                    .expect("processed"),
+            );
+            // The unigram ban excludes every seen token; EOS (token 3) is
+            // suppressed below two generated tokens in both rows.
+            for (row, seen) in [(0, [0, 1, 2, 3, 4].as_slice()), (1, [5].as_slice())] {
+                for &token in seen.iter().chain([&3]) {
+                    assert_eq!(processed[row * 6 + token], f64::NEG_INFINITY, "{config:?}");
+                }
+            }
+            assert_finite_or_excluded(&processor, processed);
+        }
+    }
+}
+
+/// Saturation and the frequency clamp are exact no-ops when nothing overflows.
+///
+/// Ordinary configurations keep their bits: the expected values are the
+/// documented formulas evaluated in F32.
+#[test]
+fn saturation_preserves_values_that_do_not_overflow() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        strategy: SamplingStrategy::Sample,
+        temperature: 0.5,
+        repetition_penalty: 1.5,
+        frequency_penalty: 0.25,
+        presence_penalty: 0.5,
+        logit_bias: BTreeMap::from([(1, 0.75)]),
+        ..Default::default()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config, 4, &device).unwrap();
+    let logits = Tensor::<TestBackend, 2>::from_floats([[2.0, -1.0, 0.5, 3.0]], &device);
+    let processed = processor
+        .process_with_prompt_lengths(logits, &[&[0, 1, 1]], &[0])
+        .unwrap();
+    let (r, f, p, t) = (1.5_f32, 0.25_f32, 0.5_f32, 0.5_f32);
+    let expected = [
+        (2.0 / r - f - p) / t,
+        ((-1.0 + 0.75) * r - 2.0 * f - p) / t,
+        0.5 / t,
+        3.0 / t,
+    ];
+    assert_eq!(
+        host_values(processed),
+        expected.map(f64::from),
+        "saturation must not change finite results"
+    );
+}
+
+/// The frequency product saturates instead of meeting an infinity of the same sign.
+#[test]
+fn frequency_products_saturate_before_subtraction() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        frequency_penalty: -f64::from(f32::MAX),
+        additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+        ..Default::default()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config, 3, &device).unwrap();
+    let logits = Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(vec![f32::NEG_INFINITY, 1.0, 2.0], [1, 3]),
+        &device,
+    );
+    // Token 0 (logit -inf) and token 1 were seen twice: c * f = -2 * MAX.
+    let processed = host_values(
+        processor
+            .process_with_prompt_lengths(logits, &[&[0, 0, 1, 1]], &[4])
+            .unwrap(),
+    );
+    assert_eq!(
+        processed,
+        [f64::NEG_INFINITY, f64::from(f32::MAX), 2.0],
+        "-inf stays excluded and the overflow saturates"
+    );
+}
+
+/// F16 occurrence counts above 65504 saturate before they are cast to the logits dtype.
+///
+/// Review finding GEN-F16-COUNT-INF: a count of 65600 became `inf` in F16,
+/// and a frequency penalty that rounds to zero there (`1e-8`) turned it into
+/// `inf * 0 = NaN`, which the product clamp then mapped to the *largest*
+/// logit, so the most repeated token became the most likely. Counts now
+/// saturate at the dtype's largest value first, so the product is finite or
+/// saturates, and a zero penalty leaves logits unchanged.
+#[test]
+fn half_precision_counts_saturate_before_the_cast() {
+    let device = Default::default();
+    let history = Tensor::<TestBackend, 2, Int>::zeros([1, 65_600], &device);
+    for (penalty, expected) in [
+        (1e-8, [1.0, 2.0, 3.0]),
+        // 65504 * 0.5 = 32752 is exact in F16; 1 - 32752 rounds to -32752.
+        (0.5, [-32_752.0, 2.0, 3.0]),
+        // 65504 * 2 overflows F16 and saturates at 65504.
+        (2.0, [-65_504.0, 2.0, 3.0]),
+        (-2.0, [65_504.0, 2.0, 3.0]),
+    ] {
+        let config = GenerationConfig {
+            frequency_penalty: penalty,
+            ..Default::default()
+        };
+        let processor = LogitsProcessor::<TestBackend>::new(config, 3, &device).unwrap();
+        let logits =
+            Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0]], &device).cast(DType::F16);
+        let processed = processor.process(logits, Some(history.clone())).unwrap();
+        assert_eq!(processed.dtype(), DType::F16);
+        assert_eq!(
+            host_values(processed.cast(DType::F32)),
+            expected,
+            "penalty {penalty}"
+        );
+    }
+}
+
+/// Half-precision logits processed in their own dtype check controls against that dtype.
+///
+/// F16 cannot represent a frequency penalty of `1e5` (its largest finite
+/// value is 65504) or a temperature of `1e-5` (subnormal in F16); BF16 rounds
+/// `3.4e38` up to infinity. The error names the field and dtype and points at
+/// [`super::upcast_half_precision`], after which the same controls work.
+#[test]
+fn half_precision_logits_check_controls_in_their_dtype() {
+    let device = Default::default();
+    for (config, dtype, field) in [
+        (
+            GenerationConfig {
+                frequency_penalty: 1e5,
+                ..Default::default()
+            },
+            DType::F16,
+            "frequency_penalty 100000.0 overflows F16",
+        ),
+        (
+            GenerationConfig {
+                strategy: SamplingStrategy::Sample,
+                temperature: 1e-5,
+                ..Default::default()
+            },
+            DType::F16,
+            "temperature 1e-5 rounds to",
+        ),
+        (
+            GenerationConfig {
+                logit_bias: BTreeMap::from([(0, 3.4e38)]),
+                ..Default::default()
+            },
+            DType::BF16,
+            "logit_bias for token 0 3.4e38 overflows BF16",
+        ),
+    ] {
+        let processor = LogitsProcessor::<TestBackend>::new(config, 3, &device).unwrap();
+        let logits = Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0]], &device);
+        let error = processor
+            .process(
+                logits.clone().cast(dtype),
+                Some(Tensor::from_ints([[0]], &device)),
+            )
+            .unwrap_err();
+        let message = generation_message(error);
+        assert!(message.starts_with(field), "{message}");
+        assert!(message.contains("upcast_half_precision"), "{message}");
+        let promoted = processor
+            .process(
+                super::upcast_half_precision(logits.cast(dtype)),
+                Some(Tensor::from_ints([[0]], &device)),
+            )
+            .expect("F32 represents the control");
+        assert_eq!(promoted.dtype(), DType::F32);
+        // The coordinators' entry point promotes automatically.
+        let rows: [&[u32]; 1] = [&[0]];
+        let half = Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0]], &device).cast(dtype);
+        assert!(
+            processor
+                .process_with_prompt_lengths(half, &rows, &[0])
+                .is_ok()
+        );
+    }
+}
+
+/// Every scalar-precision range matches the format's own constants.
+#[test]
+fn scalar_precisions_round_like_their_formats() {
+    use super::ScalarPrecision;
+    use burn::tensor::{bf16, f16};
+    assert_eq!(ScalarPrecision::of(DType::F16), ScalarPrecision::F16);
+    assert_eq!(ScalarPrecision::of(DType::BF16), ScalarPrecision::Bf16);
+    assert_eq!(ScalarPrecision::of(DType::F32), ScalarPrecision::F32);
+    assert_eq!(ScalarPrecision::of(DType::Flex32), ScalarPrecision::F32);
+    assert_eq!(ScalarPrecision::of(DType::F64), ScalarPrecision::F64);
+    assert_eq!(ScalarPrecision::F16.largest(), 65504.0);
+    assert_eq!(
+        ScalarPrecision::F16.smallest_normal(),
+        f16::MIN_POSITIVE.to_f64()
+    );
+    assert_eq!(ScalarPrecision::Bf16.largest(), bf16::MAX.to_f64());
+    assert_eq!(ScalarPrecision::F64.round(1e-300), 1e-300);
+    assert_eq!(ScalarPrecision::F32.round(1e-46), 0.0);
+    assert_eq!(ScalarPrecision::F16.round(1e5), f64::INFINITY);
+    assert!(ScalarPrecision::F16.narrower_than_f32());
+    assert!(ScalarPrecision::Bf16.narrower_than_f32());
+    assert!(!ScalarPrecision::F32.narrower_than_f32());
+    assert!(!ScalarPrecision::F64.narrower_than_f32());
+    for precision in [
+        ScalarPrecision::F16,
+        ScalarPrecision::Bf16,
+        ScalarPrecision::F32,
+        ScalarPrecision::F64,
+    ] {
+        precision
+            .check_divisor("x", precision.smallest_normal())
+            .unwrap();
+        precision.check_divisor("x", precision.largest()).unwrap();
+        precision.check_finite("x", -precision.largest()).unwrap();
+        assert!(
+            precision
+                .check_divisor("x", precision.smallest_normal() / 2.0)
+                .is_err()
+        );
+        assert!(precision.check_divisor("x", -1.0).is_err());
+        assert!(precision.check_finite("x", f64::NAN).is_err());
+    }
+    // F64 has no wider rounding: only non-finite values fail.
+    ScalarPrecision::F64.check_finite("x", 1e300).unwrap();
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(96))]
+
+    /// Any valid configuration on finite-or-`-inf` logits yields finite-or-`-inf` output.
+    ///
+    /// Controls are drawn log-uniformly across the whole F32 range (so most
+    /// draws overflow some intermediate), logits across `+-f32::MAX`, and
+    /// histories repeat tokens; the processed logits must never be NaN or
+    /// `+inf`, and selection must pick a finite logit with a finite log
+    /// probability whenever the row keeps one.
+    #[test]
+    fn valid_configurations_never_produce_nan(
+        sample in proptest::bool::ANY,
+        exponents in proptest::collection::vec(-37.0f64..38.0, 5),
+        signs in proptest::collection::vec(proptest::bool::ANY, 3),
+        logit_exponents in proptest::collection::vec(-3.0f64..38.5, 5),
+        logit_signs in proptest::collection::vec(proptest::bool::ANY, 5),
+        excluded in 0usize..6,
+        history in proptest::collection::vec(0u32..5, 0..8),
+        top_p in proptest::option::of(0.05f64..1.0),
+        min_p in proptest::option::of(0.0f64..1.0),
+    ) {
+        let device = Default::default();
+        let signed = |exponent: f64, negative: bool| {
+            let magnitude = 10f64.powf(exponent).min(f64::from(f32::MAX));
+            if negative { -magnitude } else { magnitude }
+        };
+        let config = GenerationConfig {
+            strategy: if sample { SamplingStrategy::Sample } else { SamplingStrategy::Greedy },
+            temperature: 10f64.powf(exponents[0]),
+            repetition_penalty: 10f64.powf(exponents[1]),
+            frequency_penalty: signed(exponents[2], signs[0]),
+            presence_penalty: signed(exponents[3], signs[1]),
+            logit_bias: BTreeMap::from([(1, signed(exponents[4], signs[2]))]),
+            additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+            top_p,
+            min_p,
+            ..Default::default()
+        };
+        proptest::prop_assume!(config.validate(5).is_ok());
+        let processor = LogitsProcessor::<TestBackend>::new(config, 5, &device).unwrap();
+        let mut logits: Vec<f32> = logit_exponents
+            .iter()
+            .zip(&logit_signs)
+            .map(|(&exponent, &negative)| signed(exponent, negative) as f32)
+            .collect();
+        if excluded < 5 {
+            logits[excluded] = f32::NEG_INFINITY;
+        }
+        let processed = host_values(
+            processor
+                .process_with_prompt_lengths(
+                    Tensor::from_data(TensorData::new(logits, [1, 5]), &device),
+                    &[&history],
+                    &[0],
+                )
+                .unwrap(),
+        );
+        assert_finite_or_excluded(&processor, processed);
+    }
 }

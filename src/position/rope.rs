@@ -28,6 +28,33 @@
 //! Configuration uses host F64 scalars with finite-domain checks; tensor dtype
 //! and device conversion occur separately in the rotary tensor module. Dynamic
 //! NTK needs `d > 2` because its exponent contains `d/(d-2)`.
+//!
+//! # Precision envelope
+//!
+//! Frequencies are rounded once to `f32`, angles are formed in `f32`, and the
+//! amplitude multiplies `f32` cosine/sine tables, so validation guarantees
+//! finite tables for every accepted configuration at every integer position,
+//! not only finite `f64` parameters:
+//!
+//! - `theta >= 1` keeps every base frequency `omega_i = theta^(-2i/d)` in
+//!   `(0, 1]` (a base below one makes them grow geometrically: `theta =
+//!   1e-300` gives `omega_1 = 1e150` for `d = 4`, which is infinite in `f32`).
+//!   Every published checkpoint uses `theta >= 10^4`.
+//! - Every policy except LongRoPE divides `omega_i` by a factor of at least
+//!   one or blends it with such a quotient, so it stays in `[0, 1]`.
+//! - LongRoPE divides by searched per-pair factors, which must round to `f32`
+//!   values of at least [`LongRopeScaling::MIN_FACTOR`] (`2^-64`); then
+//!   `omega_i / r_i <= 2^64`. A subnormal factor such as `1e-45` would
+//!   overflow the frequency itself, and GPU kernels may flush it to zero.
+//! - The device forms each angle `p * omega_i` in `f32`. Integer positions
+//!   satisfy `|p| <= 2^63`, so with every frequency at most `2^64` the angle
+//!   stays below `2^127 < f32::MAX`, and its cosine and sine are finite at
+//!   every position, not only at small ones (a LongRoPE factor of
+//!   `f32::MIN_POSITIVE` keeps `omega_i / r_i` finite but overflows the angle
+//!   from position 4 on, and `cos(inf)` is NaN).
+//! - Amplitudes (YaRN and LongRoPE `attention_factor`) must be normal positive
+//!   `f32` values too: an amplitude above `f32::MAX` turns `sin(0) = 0` at
+//!   position zero into `0 * inf = NaN`.
 
 use core::fmt;
 
@@ -187,9 +214,12 @@ impl YarnConfig {
     /// # Errors
     ///
     /// Returns [`RopeConfigError::InvalidYarnAttentionFactor`] unless the value
-    /// is finite and strictly positive.
+    /// rounds to a normal positive `f32` (from [`f32::MIN_POSITIVE`] to
+    /// [`f32::MAX`]), the precision of the cosine/sine tables it scales.
     pub fn with_attention_factor(mut self, attention_factor: f64) -> Result<Self, RopeConfigError> {
-        validate_positive_finite_attention_factor(attention_factor)?;
+        if !is_normal_positive_f32(attention_factor) {
+            return Err(RopeConfigError::InvalidYarnAttentionFactor { attention_factor });
+        }
         self.attention_factor = attention_factor;
         Ok(self)
     }
@@ -433,9 +463,10 @@ impl RopeConfig {
     /// # Errors
     ///
     /// Returns an error for zero dimensions, an odd rotary dimension, a rotary
-    /// subspace wider than the head, a non-positive/non-finite base, or scaling
-    /// constraints that depend on the rotary dimension and base: dynamic NTK
-    /// needs a rotary width above two, YaRN a base above one, LongRoPE exactly
+    /// subspace wider than the head, a base that is not finite and at least
+    /// one (see the module's precision envelope), or scaling constraints that
+    /// depend on the rotary dimension and base: dynamic NTK needs a rotary
+    /// width above two, YaRN a base above one, LongRoPE exactly
     /// `rotary_dimension / 2` factors, and proportional RoPE a full-head
     /// rotary width.
     pub fn new(
@@ -445,7 +476,8 @@ impl RopeConfig {
         scaling: RopeScaling,
     ) -> Result<Self, RopeConfigError> {
         validate_dimensions(head_dimension, rotary_dimension)?;
-        if !theta.is_finite() || theta <= 0.0 {
+        // `!(theta >= 1)` also rejects NaN.
+        if !(theta.is_finite() && theta >= 1.0) {
             return Err(RopeConfigError::InvalidTheta { theta });
         }
         match scaling {
@@ -615,13 +647,17 @@ pub(super) fn validate_original_context(
     }
 }
 
-/// Requires a finite positive YaRN cosine/sine amplitude multiplier.
-fn validate_positive_finite_attention_factor(attention_factor: f64) -> Result<(), RopeConfigError> {
-    if attention_factor.is_finite() && attention_factor > 0.0 {
-        Ok(())
-    } else {
-        Err(RopeConfigError::InvalidYarnAttentionFactor { attention_factor })
-    }
+/// Whether `value` rounds to a normal positive `f32`, in `[f32::MIN_POSITIVE, f32::MAX]`.
+///
+/// This is the representable range for a RoPE divisor or amplitude that is
+/// applied in `f32`: rounding must neither overflow to infinity nor reach a
+/// subnormal or zero, whose reciprocal overflows (and which GPU kernels may
+/// flush to zero). The check rounds exactly as the tables do (`value as f32`),
+/// so a value a hair above `f32::MAX` that rounds down to it is accepted.
+/// NaN fails both comparisons.
+pub(super) fn is_normal_positive_f32(value: f64) -> bool {
+    let rounded = value as f32;
+    rounded.is_finite() && rounded >= f32::MIN_POSITIVE
 }
 
 /// Requires a finite positive YaRN rotation-count bound before logarithmic interpolation.
@@ -652,7 +688,10 @@ pub enum RopeConfigError {
         /// Invalid odd prefix width.
         rotary_dimension: usize,
     },
-    /// The inverse-frequency base must be finite and positive.
+    /// The inverse-frequency base must be finite and at least one.
+    ///
+    /// A base below one makes `theta^(-2i/d)` grow with `i` and can overflow
+    /// the `f32` frequency table; no checkpoint uses one.
     InvalidTheta {
         /// Invalid base.
         theta: f64,
@@ -693,7 +732,7 @@ pub enum RopeConfigError {
         /// Invalid base.
         theta: f64,
     },
-    /// YaRN attention correction must be finite and positive.
+    /// YaRN attention correction must be a normal positive `f32` value.
     InvalidYarnAttentionFactor {
         /// Invalid correction factor.
         attention_factor: f64,
@@ -733,7 +772,7 @@ pub enum RopeConfigError {
         /// Inline table capacity.
         maximum: usize,
     },
-    /// Every LongRoPE factor must be finite and positive in `f32`.
+    /// Every LongRoPE factor must be a normal positive `f32` value.
     InvalidLongRopeFactor {
         /// Table containing the value (`short_factor` or `long_factor`).
         table: &'static str,
@@ -749,7 +788,7 @@ pub enum RopeConfigError {
         /// Supplied factor count.
         actual: usize,
     },
-    /// A LongRoPE amplitude must be finite and positive.
+    /// A LongRoPE amplitude must be a normal positive `f32` value.
     InvalidLongRopeAttentionFactor {
         /// Invalid amplitude.
         attention_factor: f64,
@@ -790,7 +829,7 @@ impl fmt::Display for RopeConfigError {
             Self::InvalidTheta { theta } => {
                 write!(
                     formatter,
-                    "RoPE theta must be finite and positive, got {theta}"
+                    "RoPE theta must be finite and at least 1 (a smaller base overflows the f32 frequencies), got {theta}"
                 )
             }
             Self::InvalidPartialRotaryFactor { factor } => write!(
@@ -821,7 +860,9 @@ impl fmt::Display for RopeConfigError {
             }
             Self::InvalidYarnAttentionFactor { attention_factor } => write!(
                 formatter,
-                "YaRN attention factor must be finite and positive, got {attention_factor}"
+                "YaRN attention factor must be a normal positive f32 value ({:e}..={:e}), got {attention_factor}",
+                f32::MIN_POSITIVE,
+                f32::MAX
             ),
             Self::InvalidYarnBeta { name, value } => write!(
                 formatter,
@@ -855,7 +896,9 @@ impl fmt::Display for RopeConfigError {
                 value,
             } => write!(
                 formatter,
-                "LongRoPE {table}[{index}] must be finite and positive in f32, got {value}"
+                "LongRoPE {table}[{index}] must round to an f32 value in {:e}..={:e} (2^-64 to f32::MAX), got {value}",
+                LongRopeScaling::MIN_FACTOR,
+                f32::MAX
             ),
             Self::LongRopeFactorCount { expected, actual } => write!(
                 formatter,
@@ -863,7 +906,9 @@ impl fmt::Display for RopeConfigError {
             ),
             Self::InvalidLongRopeAttentionFactor { attention_factor } => write!(
                 formatter,
-                "LongRoPE attention factor must be finite and positive, got {attention_factor}"
+                "LongRoPE attention factor must be a normal positive f32 value ({:e}..={:e}), got {attention_factor}",
+                f32::MIN_POSITIVE,
+                f32::MAX
             ),
             Self::InvalidProportionalFraction { fraction } => write!(
                 formatter,

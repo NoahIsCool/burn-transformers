@@ -166,22 +166,51 @@ fn single_row(config: GenerationConfig) -> Vec<f32> {
     processed(&overflow)
 }
 
-/// GEN-F32-1: a finite additive penalty beyond `f32::MAX` turns unseen tokens into NaN.
+/// The message of a generation error, or a panic naming the unexpected variant.
+fn generation_message(error: transformers::Error) -> String {
+    match error {
+        transformers::Error::Generation(message) => message,
+        other => panic!("expected a generation error, got {other:?}"),
+    }
+}
+
+/// GEN-F32-1 (fixed): a finite additive penalty beyond `f32::MAX` turned unseen tokens into NaN.
 ///
-/// `frequency_penalty = 1e39` validates, but the processor multiplies the
+/// `frequency_penalty = 1e39` validated, but the processor multiplied the
 /// `f32` counts by the penalty rounded to `f32` (`inf`): `0 * inf = NaN` for
-/// every unseen token. Fix in `src/generation.rs`: reject additive penalties
-/// whose `f32` rounding is infinite (or bound them, like vLLM's `[-2, 2]`).
+/// every unseen token. Validation now rejects additive penalties whose `f32`
+/// rounding is infinite, naming the field and the range; the largest finite
+/// penalties are accepted and process without NaN.
 #[test]
-#[ignore = "GEN-F32-1: open follow-up in src/generation.rs (NaN from f32-overflowing penalties)"]
 fn finite_additive_penalties_never_produce_nan() {
+    for (config, field) in [
+        (
+            GenerationConfig {
+                frequency_penalty: 1e39,
+                ..GenerationConfig::default()
+            },
+            "frequency_penalty",
+        ),
+        (
+            GenerationConfig {
+                presence_penalty: -1e39,
+                ..GenerationConfig::default()
+            },
+            "presence_penalty",
+        ),
+    ] {
+        let message = generation_message(config.validate(4).unwrap_err());
+        assert!(message.starts_with(field), "{message}");
+        assert!(message.contains("3.4028235e38"), "{message}");
+    }
+    let largest = f64::from(f32::MAX);
     for config in [
         GenerationConfig {
-            frequency_penalty: 1e39,
+            frequency_penalty: largest,
             ..GenerationConfig::default()
         },
         GenerationConfig {
-            presence_penalty: -1e39,
+            presence_penalty: -largest,
             ..GenerationConfig::default()
         },
     ] {
@@ -190,41 +219,57 @@ fn finite_additive_penalties_never_produce_nan() {
     }
 }
 
-/// GEN-F32-2: a positive repetition penalty below the `f32` range divides zero by zero.
+/// GEN-F32-2 (fixed): a positive repetition penalty below the `f32` range divided zero by zero.
 ///
-/// `repetition_penalty = 1e-46` validates but rounds to `0.0_f32`; a seen
-/// token with logit `0` becomes `0 / 0 = NaN` and a positive one `+inf`. Fix:
-/// require the penalty (and the temperature) to stay normal after `f32`
-/// rounding, e.g. `value as f32 >= f32::MIN_POSITIVE`.
+/// `repetition_penalty = 1e-46` validated but rounded to `0.0_f32`; a seen
+/// token with logit `0` became `0 / 0 = NaN`. Divisors must now round to
+/// normal positive `f32` values; the smallest one is accepted, and the
+/// quotients it overflows saturate instead of producing NaN or `+inf`.
 #[test]
-#[ignore = "GEN-F32-2: open follow-up in src/generation.rs (NaN from f32-underflowing penalty)"]
 fn positive_repetition_penalty_never_produces_nan() {
+    let underflow = GenerationConfig {
+        repetition_penalty: 1e-46,
+        ..GenerationConfig::default()
+    };
+    let message = generation_message(underflow.validate(4).unwrap_err());
+    assert!(message.starts_with("repetition_penalty"), "{message}");
     let row: &[u32] = &[0, 1];
-    let mut underflow = case(
+    let mut smallest = case(
         GenerationConfig {
-            repetition_penalty: 1e-46,
+            repetition_penalty: f64::from(f32::MIN_POSITIVE),
             ..GenerationConfig::default()
         },
         4,
         &[row],
         &[0],
     );
-    underflow.logits = vec![0.0, 1.0, -1.0, 2.0];
-    assert!(processed(&underflow).iter().all(|value| !value.is_nan()));
+    smallest.logits = vec![0.0, 1.0, -1.0, 2.0];
+    assert!(
+        processed(&smallest)
+            .iter()
+            .all(|value| value.is_finite() || *value == f32::NEG_INFINITY)
+    );
 }
 
-/// GEN-F32-3: a huge finite logit bias on a constrained token adds `inf + -inf`.
+/// GEN-F32-3 (fixed): a huge finite logit bias on a constrained token added `inf + -inf`.
 ///
-/// Bias and the `-inf` hard constraints share one scatter-add, so a bias of
-/// `1e39` (infinite in `f32`) on an EOS token masked by `min_new_tokens`, or
-/// on an n-gram-banned token, yields NaN instead of `-inf`. Fix: apply the
-/// constraints with `mask_fill(-inf)` after the bias, and reject biases that
-/// are infinite in `f32`.
+/// Bias and the `-inf` hard constraints shared one scatter-add, so a bias of
+/// `1e39` (infinite in `f32`) on a token banned by the n-gram constraint
+/// yielded NaN instead of `-inf`. Biases must now round to finite `f32`
+/// values, positive overflow saturates before the constraints run, and the
+/// constraints come last, so a banned token is exactly `-inf` under the
+/// largest valid bias.
 #[test]
-#[ignore = "GEN-F32-3: open follow-up in src/generation.rs (inf + -inf in sparse adjustments)"]
 fn constrained_tokens_stay_negative_infinity_under_any_valid_bias() {
-    let config = GenerationConfig {
+    let rejected = GenerationConfig {
         logit_bias: BTreeMap::from([(1, 1e39)]),
+        no_repeat_ngram_size: 1,
+        ..GenerationConfig::default()
+    };
+    let message = generation_message(rejected.validate(4).unwrap_err());
+    assert!(message.starts_with("logit_bias for token 1"), "{message}");
+    let config = GenerationConfig {
+        logit_bias: BTreeMap::from([(1, f64::from(f32::MAX))]),
         no_repeat_ngram_size: 1,
         ..GenerationConfig::default()
     };
@@ -232,21 +277,29 @@ fn constrained_tokens_stay_negative_infinity_under_any_valid_bias() {
     assert_eq!(single_row(config)[1], f32::NEG_INFINITY);
 }
 
-/// GEN-F32-4: a positive temperature below the `f32` range divides logits by zero.
+/// GEN-F32-4 (fixed): a positive temperature below the `f32` range divided logits by zero.
 ///
-/// `temperature = 1e-46` validates but rounds to `0.0_f32`, so sampling
-/// processes `0 / 0 = NaN` and `±x / 0 = ±inf`. Fix: require a normal `f32`
-/// temperature (vLLM treats temperatures below `1e-5` as greedy).
+/// `temperature = 1e-46` validated but rounded to `0.0_f32`, so sampling
+/// processed `0 / 0 = NaN` and `+-x / 0 = +-inf`. The temperature must now
+/// round to a normal positive `f32`; the smallest such temperature is
+/// accepted and divides these logits exactly (`2 / 2^-126 = 2^127`).
 #[test]
-#[ignore = "GEN-F32-4: open follow-up in src/generation.rs (NaN from f32-underflowing temperature)"]
 fn positive_temperature_never_produces_nan() {
-    let config = GenerationConfig {
+    let rejected = GenerationConfig {
         strategy: SamplingStrategy::Sample,
         temperature: 1e-46,
         ..GenerationConfig::default()
     };
+    let message = generation_message(rejected.validate(4).unwrap_err());
+    assert!(message.starts_with("temperature"), "{message}");
+    let config = GenerationConfig {
+        temperature: f64::from(f32::MIN_POSITIVE),
+        ..rejected
+    };
     assert!(config.validate(4).is_ok());
-    assert!(single_row(config).iter().all(|value| !value.is_nan()));
+    let values = single_row(config);
+    assert!(values.iter().all(|value| value.is_finite()), "{values:?}");
+    assert_eq!(values[3], 2.0 / f32::MIN_POSITIVE);
 }
 
 /// Campaign regression `crash-cfb301be` (minimized): top-p may split logits one

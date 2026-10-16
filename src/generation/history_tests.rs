@@ -419,7 +419,52 @@ proptest::proptest! {
         for row in 0..batch {
             proptest::prop_assert_eq!(from_rows.banned_tokens(row), incremental.banned_tokens(row));
         }
+        // The host count bound dominates every device count of both histories.
+        for history in [&from_rows, &incremental] {
+            for view in [CountView::All, CountView::Generated] {
+                if history.counts(view).is_ok() {
+                    let largest = counts(history, view).into_iter().max().unwrap_or(0);
+                    proptest::prop_assert!(
+                        usize::try_from(largest).unwrap() <= history.count_bound()
+                    );
+                }
+            }
+        }
     }
+}
+
+/// The count bound grows with the observed width and once per recording step.
+#[test]
+fn count_bound_tracks_widths_and_recorded_steps() {
+    let device = Default::default();
+    let config = penalized();
+    let mut history = TokenHistory::<TestBackend>::empty(&config, 4, 2, &device).unwrap();
+    assert_eq!(history.count_bound(), 0);
+    history.record(&[1, 2], &[true, false]).unwrap();
+    assert_eq!(history.count_bound(), 1);
+    // A step with no active row records nothing and keeps the bound.
+    history.record(&[1, 2], &[false, false]).unwrap();
+    assert_eq!(history.count_bound(), 1);
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 1, 1], [0, 2, 3]], &device);
+    let mut prompted = TokenHistory::from_prompt(&config, 4, prompt, None).unwrap();
+    assert_eq!(prompted.count_bound(), 3);
+    prompted.record(&[1, 0], &[true, true]).unwrap();
+    assert_eq!(prompted.count_bound(), 4);
+    assert_eq!(counts(&prompted, CountView::All)[1], 4);
+    let rows: [&[u32]; 2] = [&[2, 2], &[1, 1, 1, 1, 1]];
+    let from_rows =
+        TokenHistory::<TestBackend>::from_token_rows(&config, 4, &rows, &[1, 0], &device).unwrap();
+    assert_eq!(from_rows.count_bound(), 5);
+    // Controls that read no counts still keep a sound bound.
+    let plain = TokenHistory::<TestBackend>::from_token_rows(
+        &GenerationConfig::default(),
+        4,
+        &rows,
+        &[1, 0],
+        &device,
+    )
+    .unwrap();
+    assert_eq!(plain.count_bound(), 5);
 }
 
 /// Times per-step count updates against the previous clone-and-scatter of both views.

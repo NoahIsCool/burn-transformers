@@ -58,7 +58,7 @@ burn = { version = "=0.21.0", default-features = false }
 burn-flex = { version = "=0.21.0", default-features = false, optional = true }
 burn-store = { version = "=0.21.0", default-features = false, features = ["burnpack", "memmap"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.149", features = ["raw_value"] }
+serde_json = { version = "1.0.149", features = ["float_roundtrip", "raw_value"] }
 safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }
 sha2 = "=0.10.9"
 thiserror = "2.0.18"
