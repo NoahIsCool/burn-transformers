@@ -84,16 +84,15 @@ description below.
 | **Q3-4** | [Qwen/Qwen3-4B @ `531c80…`](https://huggingface.co/Qwen/Qwen3-4B/blob/531c80e289d6cff3a7cd8c0db8110231d23a6f7a/config.json) | [Qwen3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen3/modeling_qwen3.py) | [`llama`](src/models/llama/model.rs) |
 | **SmolLM3-3** | [HuggingFaceTB/SmolLM3-3B @ `1fa6fa…`](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/1fa6fa281b5c635c89171a2b53769609cc1199c6/config.json) | [SmolLM3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/smollm3/modeling_smollm3.py) | [`llama`](src/models/llama/model.rs) |
 | **Q2-7** | [Qwen/Qwen2-7B @ `453ed1…`](https://huggingface.co/Qwen/Qwen2-7B/blob/453ed1575b739b5b03ce3758b23befdb0967f40e/config.json) | [Qwen2 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen2/modeling_qwen2.py) | [`llama`](src/models/llama/model.rs) |
+| **L3.1-8** | [meta-llama/Llama-3.1-8B @ `d04e59…`](https://huggingface.co/meta-llama/Llama-3.1-8B/blob/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/config.json) | [Llama reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/llama/modeling_llama.py) | [`llama`](src/models/llama/model.rs) |
 | **Gemma3-4** | [google/gemma-3-4b-it @ `093f9f…`](https://huggingface.co/google/gemma-3-4b-it/blob/093f9f388b31de276ce2de164bdc2081324b9767/config.json), text tower | [Gemma 3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/gemma3/modeling_gemma3.py) | [`gemma`](src/models/gemma/model.rs) |
 | **gpt-oss-20** | [openai/gpt-oss-20b @ `6cee5e…`](https://huggingface.co/openai/gpt-oss-20b/blob/6cee5e81ee83917806bbde320786a8fb61efebee/config.json) | [gpt-oss reference](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/gpt_oss/modeling_gpt_oss.py) and [MXFP4 integration](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/integrations/mxfp4.py), Transformers 5.2.0 | [`gpt_oss`](src/models/gpt_oss/model.rs) |
 
-The last six checkpoints were added after v0.1. Their columns appear in the
+The last seven checkpoints were added after v0.1. Their columns appear in the
 [second matrix](#families-added-after-v01); Mistral, OLMo 2, and Gemma 2 are
 covered by tiny Transformers 5.2.0 goldens only and have no pinned-checkpoint
-column. Llama 3 RoPE scaling has a tiny golden and, in addition, a real
-Llama-3.1-8B gate run on Flex and Metal in F32 (within `7.6e-5`); that
-checkpoint gets a column once its full revision is recorded (the repository
-names only the prefix `d04e592b`).
+column. L3.1-8 is the pinned real checkpoint for Llama 3 RoPE scaling, which
+also has a Llama 3.1-style tiny golden.
 
 Qwen3.8's inner text model is officially serialized as `qwen3_5_text`, not
 `qwen3_8_text`. Nemotron Nano is included because the crate validates its
@@ -173,32 +172,32 @@ Same legend. Every column is a real-weight gate subject, run on Flex and Metal i
 [status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence) for its
 measured parity.
 
-| Transformer innovation | SmolLM-135 | Q3-4 | SmolLM3-3 | Q2-7 | Gemma3-4 | gpt-oss-20 |
-|---|---:|---:|---:|---:|---:|---:|
-| [Decoder-only causal stack](#innovation-decoder-only) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [Pre-normalized residual path](#innovation-pre-norm) | ✓ | ✓ | ✓ | ✓ | ✓ + post-norms | ✓ |
-| [Grouped-query attention (GQA)](#innovation-gqa) | 9 q / 3 kv | 32 / 8 | 16 / 4 | 28 / 4 | 8 / 4 | 64 / 8 |
-| [Sliding-window attention](#innovation-sliding-attention) | — | — | — | — | 29/34, window 1024 | 12/24, window 128 |
-| [NoPE attention](#innovation-nope) | — | — | 9/36 | — | — | — |
-| [Per-head Q/K normalization](#innovation-qk-norm) | — | 36/36 | — | — | 34/34 | — |
-| [Attention projection biases](#innovation-projection-bias) | — | — | — | Q/K/V | — | Q/K/V/O |
-| [Learned attention sinks](#innovation-attention-sinks) | — | — | — | — | — | 24/24 |
-| [Rotary position embedding (RoPE)](#innovation-rope) | θ 1e4 | θ 1e6 | θ 5e6, 27/36 | θ 1e6 | local θ 1e4; global θ 1e6, linear ×8 | YaRN |
-| [YaRN context scaling](#innovation-yarn) | — | — | — | — | — | factor 32, untruncated |
-| [SwiGLU / gated-SiLU feed-forward](#innovation-swiglu) | ✓ | ✓ | ✓ | ✓ | — | — |
-| [Gated-GELU feed-forward](#innovation-gated-gelu) | — | — | — | — | ✓ (tanh GELU) | — |
-| [Clamped SwiGLU](#innovation-clamped-swiglu) | — | — | — | — | — | experts |
-| [Sparse top-k mixture of experts](#innovation-sparse-moe) | — | — | — | — | — | 4/32 |
-| [Shared router policies](#innovation-router-policies) | — | — | — | — | — | biased, top-k then softmax |
-| [MXFP4 expert weights](#innovation-mxfp4) | — | — | — | — | — | ✓ |
-| [RMS normalization](#innovation-rmsnorm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [Zero-centered RMSNorm parameters](#innovation-zero-centered-rmsnorm) | — | — | — | — | ✓ | — |
-| [Sandwich normalization](#innovation-sandwich-norm) | — | — | — | — | ✓ | — |
-| [Scaled token embedding](#innovation-embedding-scale) | — | — | — | — | `sqrt(d)` | — |
-| [Tied input embedding and LM head](#innovation-tied-lm-head) | ✓ | ✓ | ✓ | — | ✓ | — |
-| [Preallocated projected-KV cache](#innovation-kv-cache) | ✓ | ✓ | ✓ | ✓ | 5 global layers | 12 full layers |
-| [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | 29 rings | 12 rings |
-| [Batched cached decoding](#innovation-batched-decoding) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Transformer innovation | SmolLM-135 | Q3-4 | SmolLM3-3 | Q2-7 | L3.1-8 | Gemma3-4 | gpt-oss-20 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| [Decoder-only causal stack](#innovation-decoder-only) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Pre-normalized residual path](#innovation-pre-norm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ + post-norms | ✓ |
+| [Grouped-query attention (GQA)](#innovation-gqa) | 9 q / 3 kv | 32 / 8 | 16 / 4 | 28 / 4 | 32 / 8 | 8 / 4 | 64 / 8 |
+| [Sliding-window attention](#innovation-sliding-attention) | — | — | — | — | — | 29/34, window 1024 | 12/24, window 128 |
+| [NoPE attention](#innovation-nope) | — | — | 9/36 | — | — | — | — |
+| [Per-head Q/K normalization](#innovation-qk-norm) | — | 36/36 | — | — | — | 34/34 | — |
+| [Attention projection biases](#innovation-projection-bias) | — | — | — | Q/K/V | — | — | Q/K/V/O |
+| [Learned attention sinks](#innovation-attention-sinks) | — | — | — | — | — | — | 24/24 |
+| [Rotary position embedding (RoPE)](#innovation-rope) | θ 1e4 | θ 1e6 | θ 5e6, 27/36 | θ 1e6 | θ 5e5, Llama 3 ×8 | local θ 1e4; global θ 1e6, linear ×8 | YaRN |
+| [YaRN context scaling](#innovation-yarn) | — | — | — | — | — | — | factor 32, untruncated |
+| [SwiGLU / gated-SiLU feed-forward](#innovation-swiglu) | ✓ | ✓ | ✓ | ✓ | ✓ | — | — |
+| [Gated-GELU feed-forward](#innovation-gated-gelu) | — | — | — | — | — | ✓ (tanh GELU) | — |
+| [Clamped SwiGLU](#innovation-clamped-swiglu) | — | — | — | — | — | — | experts |
+| [Sparse top-k mixture of experts](#innovation-sparse-moe) | — | — | — | — | — | — | 4/32 |
+| [Shared router policies](#innovation-router-policies) | — | — | — | — | — | — | biased, top-k then softmax |
+| [MXFP4 expert weights](#innovation-mxfp4) | — | — | — | — | — | — | ✓ |
+| [RMS normalization](#innovation-rmsnorm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Zero-centered RMSNorm parameters](#innovation-zero-centered-rmsnorm) | — | — | — | — | — | ✓ | — |
+| [Sandwich normalization](#innovation-sandwich-norm) | — | — | — | — | — | ✓ | — |
+| [Scaled token embedding](#innovation-embedding-scale) | — | — | — | — | — | `sqrt(d)` | — |
+| [Tied input embedding and LM head](#innovation-tied-lm-head) | ✓ | ✓ | ✓ | — | — | ✓ | — |
+| [Preallocated projected-KV cache](#innovation-kv-cache) | ✓ | ✓ | ✓ | ✓ | ✓ | 5 global layers | 12 full layers |
+| [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | — | 29 rings | 12 rings |
+| [Batched cached decoding](#innovation-batched-decoding) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 <a id="shared-mechanisms-beyond-the-pinned-graphs"></a>
 ### Shared mechanisms beyond the pinned graphs
@@ -209,7 +208,7 @@ checkpoint column above uses them. They make no checkpoint claim.
 
 | Mechanism | Validation | Where it is available |
 | --- | --- | --- |
-| [Llama 3, LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional); a Llama 3.1-style tiny golden; Llama 3 scaling also in a real Llama-3.1-8B gate run (Flex and Metal F32, within `7.6e-5`) | Every RoPE family through the shared translator; custom specs; `RotaryAttention` |
+| [LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional). Llama 3 scaling has the same goldens and a Llama 3.1-style tiny golden, and runs in the L3.1-8 column | Every RoPE family through the shared translator; custom specs; `RotaryAttention` |
 | [Attention logit soft cap](#innovation-attention-softcap) | Gemma 2 tiny golden, including a saturated cap | Gemma 2; custom specs |
 | [Post-sublayer norms and full-width Q/K norm](#innovation-post-norm) | OLMo 2 tiny golden | Llama family (`olmo2`); custom specs |
 | [Chunked-local connectivity](#innovation-sliding-attention) | Scalar mask oracle, property tests, fuzzing | Custom specs and shared attention |
@@ -668,10 +667,11 @@ pair, following Transformers' `modeling_rope_utils.py`:
 
 **Implementation:** [`position/rope_scaling.rs`](src/position/rope_scaling.rs)
 and [`position/frequencies.rs`](src/position/frequencies.rs). Each rule is
-checked against inverse frequencies generated by the reference; no checkpoint
-column above uses Llama 3, LongRoPE, or proportional scaling. Llama 3 scaling
-has also run end to end in the Llama-3.1-8B gate (see the
-[status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence)).
+checked against inverse frequencies generated by the reference. Llama 3
+scaling runs end to end in the L3.1-8 column (Llama-3.1-8B: factor 8,
+frequency factors 1 and 4, original context 8,192; see the
+[status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence)); no
+checkpoint column uses LongRoPE or proportional scaling.
 
 <a id="innovation-partial-rope"></a>
 ### Partial RoPE

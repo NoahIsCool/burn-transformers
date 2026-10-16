@@ -31,7 +31,8 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   type and real-weight gates (`tests/llama_family_artifacts.rs`,
   `tests/gemma_artifacts.rs`, `tests/gpt_oss_artifacts.rs`) that passed on
   Flex and Metal in F32 at `ade8696` for SmolLM-135M, Qwen3-4B, SmolLM3-3B,
-  Llama-3.1-8B, Qwen2-7B (against an F64 reference), gemma-3-4b-it, and
+  Llama-3.1-8B, Qwen2-7B (against an F64 reference; on Metal under the
+  documented `2.5e-3` tolerance), gemma-3-4b-it, and
   truncated gpt-oss-20b; see the
   [model status page](ARCHITECTURE_COMPATIBILITY.md). No new checkpoint is
   advertised as supported.
