@@ -655,6 +655,113 @@ fn decode_state_batch_must_match_the_cache_sequence_count() {
     );
 }
 
+/// Families that reject a `CacheConfig` sliding window until the follow-up to SI-3 lands.
+///
+/// DeepSeek-V2 still fails allocation with `Error::BackendCapability` (its
+/// decode-state constructor checks the field); every other family ignores it.
+const WINDOW_REJECTED: &[&str] = &["DeepSeek-V2"];
+
+/// A `CacheConfig` sliding window never changes a model family's retention.
+///
+/// Families derive per-layer windows from their architecture; the cache-level
+/// window only sizes raw cache-bank rings that have no window of their own.
+/// Allocating with a window of two and decoding past it must therefore give
+/// exactly the logits of the same cache without a window, for every family,
+/// T5, and the modular model.
+#[test]
+fn cache_sliding_window_is_ignored_by_model_families() {
+    let device = Default::default();
+    let plain = CacheConfig::new(2, 8).unwrap();
+    let windowed = plain.with_sliding_window(2).unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let bits = |logits: Tensor<TestBackend, 3>| {
+        logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    };
+    /// Prefills five tokens per row and decodes one more under `cache`.
+    fn run_causal<M: CausalLanguageModel<TestBackend>>(
+        model: &M,
+        cache: CacheConfig,
+        options: &ForwardOptions,
+        device: &RegistryDevice,
+    ) -> Result<Tensor<TestBackend, 3>> {
+        let mut state = model.new_decode_state_for(cache, device)?;
+        model.prefill(
+            registry_tokens([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]], device),
+            &mut state,
+            options,
+        )?;
+        Ok(model
+            .decode(registry_decode([[11], [12]], device), &mut state, options)?
+            .logits)
+    }
+    for (name, model) in tiny_auto_causal_models(&device) {
+        materialize_registry_parameters(&model);
+        let expected = run_causal(&model, plain, &options, &device).unwrap();
+        let windowed_run = run_causal(&model, windowed, &options, &device);
+        if WINDOW_REJECTED.contains(&name) {
+            assert!(
+                matches!(windowed_run, Err(Error::BackendCapability(_))),
+                "{name}: {windowed_run:?}"
+            );
+        } else {
+            assert_eq!(
+                bits(windowed_run.unwrap()),
+                bits(expected),
+                "{name} must ignore the cache window"
+            );
+        }
+    }
+    let modular =
+        crate::models::custom::ModularCausalLm::<TestBackend>::init(tiny_modular(), &device)
+            .unwrap();
+    assert_eq!(
+        bits(run_causal(&modular, windowed, &options, &device).unwrap()),
+        bits(run_causal(&modular, plain, &options, &device).unwrap()),
+        "the modular model must ignore the cache window"
+    );
+    let t5 = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    let encoder = t5
+        .encode(
+            registry_tokens([[8, 9, 10], [11, 12, 13]], &device),
+            &options,
+        )
+        .unwrap();
+    let run_t5 = |cache| {
+        let mut state = t5.new_decode_state_for(cache, &device).unwrap();
+        t5.prefill_decoder(
+            &encoder,
+            registry_tokens([[0, 4, 5, 6], [0, 7, 8, 9]], &device),
+            &mut state,
+            &options,
+        )
+        .unwrap();
+        Seq2SeqLanguageModel::decode(
+            &t5,
+            &encoder,
+            registry_decode([[10], [11]], &device),
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits
+    };
+    assert_eq!(
+        bits(run_t5(windowed)),
+        bits(run_t5(plain)),
+        "T5 must ignore the cache window"
+    );
+}
+
 /// Automatic dispatch preserves the same fresh-state fallback and parity contract.
 #[test]
 fn auto_causal_dispatch_matches_bounded_and_one_shot_prefill() {
