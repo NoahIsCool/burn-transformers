@@ -1181,9 +1181,11 @@ proptest::proptest! {
 ///
 /// Writes one `[1, 8, 1, 128]` F32 token into `[1, 8, C, 128]` planes through
 /// Burn's `slice_assign` (which copies the whole plane on Flex 0.21) and
-/// through `assign_region`, interleaving the two and reporting medians. Run
-/// with `cargo test --release --lib operations::tests::region_write_timing --
-/// --ignored --nocapture`.
+/// through `assign_region`, interleaving the two and reporting medians. A
+/// prefill-sized block from a shared, heads-swapped view checks that large
+/// strided writes, dominated by gathering the source, cost the same on both
+/// paths. Run with `cargo test --release --lib
+/// operations::tests::region_write_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "release-mode timing benchmark"]
 fn region_write_timing() {
@@ -1214,6 +1216,29 @@ fn region_write_timing() {
             burn / ours
         );
     }
+    // A prefill block: 64 tokens of 8 rows from a shared, heads-swapped
+    // projection view, as attention layers write right after prefill.
+    let projected = irregular([8, 64, 2, 64]);
+    let (mut burn_samples, mut crate_samples) = (Vec::new(), Vec::new());
+    for _ in 0..41 {
+        let mut burn_plane = Tensor::<Flex, 4>::zeros([8, 2, 80, 64], &device);
+        let mut crate_plane = Tensor::<Flex, 4>::zeros([8, 2, 80, 64], &device);
+        let ranges = [0..8, 0..2, 0..64, 0..64];
+        let block = projected.clone().swap_dims(1, 2);
+        let started = Instant::now();
+        burn_plane.inplace(|plane| plane.slice_assign(ranges.clone(), block.clone()));
+        burn_samples.push(started.elapsed().as_secs_f64());
+        let started = Instant::now();
+        super::assign_region(&mut crate_plane, ranges, block);
+        crate_samples.push(started.elapsed().as_secs_f64());
+    }
+    burn_samples.sort_by(f64::total_cmp);
+    crate_samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "prefill block [8, 2, 64, 64] (strided, shared) into [8, 2, 80, 64] F32: slice_assign {:.1} us, assign_region {:.1} us",
+        burn_samples[20] * 1e6,
+        crate_samples[20] * 1e6
+    );
 }
 
 // ---------------------------------------------------------------------------
