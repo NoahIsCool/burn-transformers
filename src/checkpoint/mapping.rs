@@ -902,7 +902,10 @@ impl PlanBuilder<'_> {
     /// Aliases are numbered in target-name order and linked to their sources;
     /// the verified [`walk_alias_chain`] follows each chain to its first
     /// owner, dangling source, or repeated alias, so resolution always
-    /// terminates and an owner is reached only along an acyclic chain.
+    /// terminates and an owner is reached only along an acyclic chain. The
+    /// walks share one self-clearing visited buffer, so resolving `A` aliases
+    /// costs one allocation and time proportional to the total chain length
+    /// (at most `A` steps per alias).
     fn resolve_aliases(&mut self) -> Result<Vec<PlannedTensor>> {
         let primary_by_target: BTreeMap<_, _> = self
             .primary
@@ -930,8 +933,10 @@ impl PlanBuilder<'_> {
             })
             .collect::<Vec<_>>();
         let mut aliases = Vec::with_capacity(self.alias_specs.len());
+        // One scratch buffer serves every walk; each walk leaves it clear.
+        let mut visited = vec![false; links.len()];
         for (start, &target) in names.iter().enumerate() {
-            let root_target = match walk_alias_chain(&links, start) {
+            let root_target = match walk_alias_chain(&links, start, &mut visited) {
                 AliasWalk::Owner(last) => sources[last],
                 AliasWalk::Cycle(repeated) => {
                     return Err(CheckpointError::InvalidMapping {

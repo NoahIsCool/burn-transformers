@@ -67,7 +67,10 @@
 //!   the deterministic chain from its start: the aliases before it are distinct
 //!   and each links onward, and the reported alias is the first one that is
 //!   revisited (a cycle), owned by a primary target, or dangling, so every
-//!   resolved alias reaches its storage owner along an acyclic chain;
+//!   resolved alias reaches its storage owner along an acyclic chain; the
+//!   caller's visited buffer is all clear again on return (the walk marks
+//!   exactly its distinct prefix and clears exactly those marks), so one
+//!   buffer serves every walk of a resolution pass;
 //! - `src/checkpoint/mapping/ledger.rs`: the target claim ledger starts with
 //!   every expected target open; `claim` succeeds exactly on an open target and
 //!   changes only that entry, so a primary operation and an alias (or two of
