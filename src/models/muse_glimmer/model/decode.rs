@@ -218,13 +218,18 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
     }
 
     /// Verifies that state geometry belongs to the supplied model.
+    ///
+    /// The model's layout is re-planned with this state's ring window. A
+    /// window the model cannot use (none for a model with sliding layers)
+    /// means the state was allocated for another schedule, so that planning
+    /// failure is reported as the same incompatibility as any layout mismatch.
     fn validate_for_model(&self, model: &MuseGlimmerForCausalLm<B>) -> Result<()> {
-        let expected = cache_layout(model, self.layout.window)?;
+        let incompatible =
+            || Error::Cache("Muse-Glimmer decode state is incompatible with the model".into());
+        let expected = cache_layout(model, self.layout.window).map_err(|_| incompatible())?;
         if expected != self.layout || self.tensors.main().native_kv_count() != expected.groups.len()
         {
-            return Err(Error::Cache(
-                "Muse-Glimmer decode state is incompatible with the model".into(),
-            ));
+            return Err(incompatible());
         }
         for (group, spec) in expected.groups.iter().copied().enumerate() {
             if self.tensors.main().native_kv(group)?.spec() != spec {
