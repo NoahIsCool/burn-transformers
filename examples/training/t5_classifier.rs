@@ -83,6 +83,7 @@ fn train(root: &Path, steps: usize) -> Result<()> {
         &recorder,
         &device,
     )?;
+    let reload_logit_scale = support::max_abs(logits.clone());
     let reload_logit_error =
         support::max_error(logits, reloaded.logits(batch::<Cpu>(&held_out).0)?);
     Report {
@@ -99,6 +100,7 @@ fn train(root: &Path, steps: usize) -> Result<()> {
         final_train_scores,
         parameter_changes,
         reload_logit_error,
+        reload_logit_scale,
         seconds: started.elapsed().as_secs_f64(),
     }
     .save(root)

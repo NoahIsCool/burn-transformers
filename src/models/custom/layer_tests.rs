@@ -624,11 +624,15 @@ fn legacy_binary_block_records_still_load() {
     let bytes = recorder.record(legacy.into_record(), ()).unwrap();
     let fresh = ModularLayer::<TestBackend>::init(&spec, 8, None, &device).unwrap();
     let loaded = fresh.load_record(recorder.load(bytes, &device).unwrap());
+    // The record restores identical values, but a loaded projection can be a
+    // transposed view where the source was contiguous. x86 AVX GEMM kernels
+    // then sum in another order and differ by an F32 unit in the last place
+    // (about 1e-7 relative); a lost or misassigned variant differs at O(1).
     loaded
         .run(hidden(3, &device), &context, Layer::decoder(0))
         .unwrap()
         .into_data()
-        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(0.0));
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-6, 1e-7));
 }
 
 /// A latent-attention block with full-head RoPE over its rotary channels.

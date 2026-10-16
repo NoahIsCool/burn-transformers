@@ -111,6 +111,20 @@ pub fn max_error<const D: usize>(a: Tensor<Cpu, D>, b: Tensor<Cpu, D>) -> f64 {
     (a - b).abs().max().into_scalar() as f64
 }
 
+/// Return the largest absolute F32 element as an F64 reporting scalar.
+pub fn max_abs<const D: usize>(tensor: Tensor<Cpu, D>) -> f64 {
+    tensor.abs().max().into_scalar() as f64
+}
+
+/// Largest reload deviation allowed per unit of logit magnitude.
+///
+/// A reloaded parameter can be a transposed view where the trained one was
+/// contiguous. Values are identical, but a CPU GEMM may then sum in another
+/// order: x86 AVX kernels differ by a few F32 units in the last place, which
+/// is about `1e-7` of the logit. Twenty times that, relative to the largest
+/// logit, still catches any parameter that failed to round-trip.
+const RELOAD_RELATIVE_TOLERANCE: f64 = 2e-6;
+
 /// Synthetic-task evidence saved before learning/reload checks are enforced.
 #[derive(Serialize)]
 pub struct Report {
@@ -140,6 +154,8 @@ pub struct Report {
     pub parameter_changes: BTreeMap<String, f64>,
     /// Maximum absolute held-out logit difference after reloading the model record.
     pub reload_logit_error: f64,
+    /// Largest absolute held-out logit before reloading, which scales the reload tolerance.
+    pub reload_logit_scale: f64,
     /// Elapsed wall time for initialization, training, evaluation, and record checks.
     pub seconds: f64,
 }
@@ -150,7 +166,8 @@ impl Report {
     pub fn save(self, root: &Path) -> Result<()> {
         let passed = self.final_scores.loss < self.initial.loss * 0.5
             && self.final_scores.accuracy >= 0.875
-            && self.reload_logit_error <= 1e-6;
+            && self.reload_logit_error
+                <= RELOAD_RELATIVE_TOLERANCE * self.reload_logit_scale.max(1.0);
         std::fs::write(root.join("result.json"), serde_json::to_vec_pretty(&self)?)?;
         println!(
             "{}: held-out loss {:.4} → {:.4}; accuracy {:.1}% → {:.1}%; {} {} steps in {:.2}s",

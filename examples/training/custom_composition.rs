@@ -83,6 +83,7 @@ fn train(root: &Path, steps: usize) -> Result<()> {
     model.save_file(root.join("model"), &recorder)?;
     let reloaded =
         Classifier::<Cpu>::init(&device)?.load_file(root.join("model"), &recorder, &device)?;
+    let reload_logit_scale = support::max_abs(logits.clone());
     let reload_logit_error = support::max_error(
         logits,
         reloaded.forward(batch::<Cpu>(&held_out).0, &mut Hooks::new())?,
@@ -101,6 +102,7 @@ fn train(root: &Path, steps: usize) -> Result<()> {
         final_train_scores,
         parameter_changes,
         reload_logit_error,
+        reload_logit_scale,
         seconds: started.elapsed().as_secs_f64(),
     }
     .save(root)
