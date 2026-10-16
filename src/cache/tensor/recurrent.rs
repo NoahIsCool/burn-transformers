@@ -16,7 +16,7 @@ use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
 
 use super::kv::validate_batch;
-use super::plan::{check_staged_commit, rows_cleared_by_truncate, staging_end};
+use super::plan::{check_staged_commit, repeated_elements, rows_cleared_by_truncate, staging_end};
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
@@ -822,7 +822,12 @@ impl<B: Backend> RecurrentStateCache<B> {
             })?;
         let selector =
             Tensor::<B, 1, Int>::from_ints(TensorData::new(flat_rows, [batch_size]), &self.device);
-        let flat = batch_size * spec.staging_capacity();
+        // Allocation validated `batch * proposal` as a factor of the staged
+        // shape; the verified product reports any overflow instead of wrapping.
+        let flat =
+            repeated_elements(batch_size, spec.staging_capacity(), 1).map_err(|violation| {
+                TensorCacheError::allocation("staged recurrent snapshots", violation, 1)
+            })?;
         let mut matrix = staged_matrix
             .clone()
             .reshape([
