@@ -69,6 +69,7 @@ use crate::models::config::ConfigError;
 
 use super::architecture::GemmaArchitecture;
 use super::config::GemmaConfig;
+use super::plan::{UniqueFlag, unique_flag};
 
 /// The published SafeTensors namespace a Gemma checkpoint uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -135,19 +136,21 @@ impl GemmaCheckpointSource {
                 found[index] = true;
             }
         }
-        let present: Vec<Self> = Self::ALL
-            .into_iter()
-            .zip(found)
-            .filter_map(|(source, found)| found.then_some(source))
-            .collect();
-        match present.as_slice() {
-            [source] => Ok(*source),
-            [] => Err(format!(
+        match unique_flag(&found) {
+            UniqueFlag::Unique(index) => Ok(Self::ALL[index]),
+            UniqueFlag::Absent => Err(format!(
                 "Gemma checkpoint contains none of the embeddings {embeddings:?}"
             )),
-            _ => Err(format!(
-                "Gemma checkpoint ambiguously contains several language namespaces: {present:?}"
-            )),
+            UniqueFlag::Ambiguous => {
+                let present: Vec<Self> = Self::ALL
+                    .into_iter()
+                    .zip(found)
+                    .filter_map(|(source, found)| found.then_some(source))
+                    .collect();
+                Err(format!(
+                    "Gemma checkpoint ambiguously contains several language namespaces: {present:?}"
+                ))
+            }
         }
     }
 }
