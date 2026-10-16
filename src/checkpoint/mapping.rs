@@ -13,12 +13,14 @@
 //! while dtype conversion follows each architecture's precision contract.
 
 mod aliases;
+mod ledger;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use aliases::{AliasLink, AliasWalk, walk_alias_chain};
+use ledger::{TargetLedger, TargetState, open_ledger};
 
 use super::{
     AliasRecord, ArtifactSource, CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest,
@@ -523,7 +525,7 @@ fn build_load_plan_with_policy(
         expected: expected_inventory(expected)?,
         policy: options.dtype_policy,
         consumed: BTreeSet::new(),
-        produced: BTreeSet::new(),
+        ledger: open_ledger(expected.len()),
         primary: Vec::new(),
         alias_specs: BTreeMap::new(),
     };
@@ -534,7 +536,7 @@ fn build_load_plan_with_policy(
     let PlanBuilder {
         expected,
         mut consumed,
-        produced,
+        ledger,
         mut primary,
         ..
     } = builder;
@@ -548,7 +550,12 @@ fn build_load_plan_with_policy(
             CheckpointEquivalenceRecord::new(&equivalence.alias.name, &equivalence.owner.name)
         })
         .collect();
-    for key in expected.keys().filter(|key| !produced.contains(*key)) {
+    // Verified ledger: produced targets are exactly the primaries and resolved aliases.
+    for key in expected
+        .iter()
+        .filter(|(_, (index, _))| !ledger.is_produced(*index))
+        .map(|(key, _)| key)
+    {
         if matches_any(&options.allow_missing, key) {
             report.allowlisted_missing.push(key.clone());
         } else {
@@ -596,21 +603,22 @@ fn build_load_plan_with_policy(
 /// Temporary state while compiling mapping operations into planned tensors.
 ///
 /// Every operation claims its targets through [`Self::claim_primary`] or
-/// [`Self::declare_alias`], which both consult the primary *and* alias target
-/// sets, so a target collision is rejected regardless of declaration order.
+/// [`Self::declare_alias`], which both claim the target in one verified
+/// [`TargetLedger`], so a target collision is rejected regardless of
+/// declaration order.
 /// Each source is consumed through [`consume`], so no checkpoint tensor is used
 /// twice. Nothing here touches model parameters: a rejected plan is discarded.
 struct PlanBuilder<'a> {
     /// Discovered checkpoint inventory that sources are resolved against.
     manifest: &'a CheckpointManifest,
-    /// Expected model parameters keyed by target name.
-    expected: BTreeMap<String, &'a ExpectedTensor>,
+    /// Expected model parameters keyed by target name, with their ledger index.
+    expected: BTreeMap<String, (usize, &'a ExpectedTensor)>,
     /// Dtype conversion policy applied to every primary target.
     policy: DTypePolicy,
     /// Checkpoint tensors already consumed by an operation.
     consumed: BTreeSet<String>,
-    /// Targets claimed by primary operations, plus aliases once resolved.
-    produced: BTreeSet<String>,
+    /// Claim state of every expected target, indexed by expectation position.
+    ledger: TargetLedger,
     /// Planned storage-owning targets in declaration order.
     primary: Vec<PlannedTensor>,
     /// Declared alias targets mapped to their (possibly aliased) sources.
@@ -832,14 +840,17 @@ impl PlanBuilder<'_> {
     }
 
     /// Records a tied alias; resolution waits until every owner is planned.
+    ///
+    /// Only expected targets are ever claimed, so an unknown target cannot
+    /// collide and is reported as unknown.
     fn declare_alias(&mut self, source_target: &str, target: &str) -> Result<()> {
-        if self.produced.contains(target) || self.alias_specs.contains_key(target) {
-            return Err(CheckpointError::MappingTargetCollision {
+        let Some(&(index, _)) = self.expected.get(target) else {
+            return Err(CheckpointError::UnknownMappingTarget {
                 tensor: target.to_owned(),
             });
-        }
-        if !self.expected.contains_key(target) {
-            return Err(CheckpointError::UnknownMappingTarget {
+        };
+        if !self.ledger.claim(index, TargetState::Alias) {
+            return Err(CheckpointError::MappingTargetCollision {
                 tensor: target.to_owned(),
             });
         }
@@ -860,13 +871,13 @@ impl PlanBuilder<'_> {
         shape: Vec<u64>,
         source_dtype: TensorDType,
     ) -> Result<()> {
-        let expectation =
+        let &(index, expectation) =
             self.expected
                 .get(target)
                 .ok_or_else(|| CheckpointError::UnknownMappingTarget {
                     tensor: target.to_owned(),
                 })?;
-        if self.alias_specs.contains_key(target) || !self.produced.insert(target.to_owned()) {
+        if !self.ledger.claim(index, TargetState::Primary) {
             return Err(CheckpointError::MappingTargetCollision {
                 tensor: target.to_owned(),
             });
@@ -886,7 +897,7 @@ impl PlanBuilder<'_> {
     /// Resolves every alias to its storage-owning primary target.
     ///
     /// Each alias inherits its owner's shape and dtype, which must satisfy the
-    /// alias's own expectation. Resolved alias targets join `produced`.
+    /// alias's own expectation. Resolved alias targets become produced in the ledger.
     ///
     /// Aliases are numbered in target-name order and linked to their sources;
     /// the verified [`walk_alias_chain`] follows each chain to its first
@@ -937,7 +948,7 @@ impl PlanBuilder<'_> {
                 }
             };
             let root = primary_by_target[root_target.as_str()];
-            let expectation = self.expected[target];
+            let (index, expectation) = self.expected[target];
             ensure_shape(target, &expectation.shape, &root.shape)?;
             if let Some(dtype) = expectation.dtype
                 && dtype != root.dtype
@@ -948,7 +959,7 @@ impl PlanBuilder<'_> {
                     expected: dtype,
                 });
             }
-            if !self.produced.insert(target.clone()) {
+            if !self.ledger.resolve(index) {
                 // Unreachable through `declare_alias`/`claim_primary`; kept as
                 // defense in depth so a target can never be planned twice.
                 return Err(CheckpointError::MappingTargetCollision {
@@ -1225,16 +1236,21 @@ fn manifest_accounting_mismatch(reason: String) -> CheckpointError {
 // Validation helpers operate on temporary plans before parameter allocation.
 
 /// Indexes expected targets after checking nonempty unique names and shape products.
-fn expected_inventory(expected: &[ExpectedTensor]) -> Result<BTreeMap<String, &ExpectedTensor>> {
+fn expected_inventory(
+    expected: &[ExpectedTensor],
+) -> Result<BTreeMap<String, (usize, &ExpectedTensor)>> {
     let mut inventory = BTreeMap::new();
-    for tensor in expected {
+    for (index, tensor) in expected.iter().enumerate() {
         if tensor.name.is_empty() {
             return Err(CheckpointError::InvalidMapping {
                 message: "expected tensor names cannot be empty".into(),
             });
         }
         checked_elements(&tensor.shape)?;
-        if inventory.insert(tensor.name.clone(), tensor).is_some() {
+        if inventory
+            .insert(tensor.name.clone(), (index, tensor))
+            .is_some()
+        {
             return Err(CheckpointError::MappingTargetCollision {
                 tensor: tensor.name.clone(),
             });

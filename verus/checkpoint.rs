@@ -64,6 +64,13 @@
 //!   and each links onward, and the reported alias is the first one that is
 //!   revisited (a cycle), owned by a primary target, or dangling, so every
 //!   resolved alias reaches its storage owner along an acyclic chain;
+//! - `src/checkpoint/mapping/ledger.rs`: the target claim ledger starts with
+//!   every expected target open; `claim` succeeds exactly on an open target and
+//!   changes only that entry, so a primary operation and an alias (or two of
+//!   either) can never both own one target, whichever is declared first;
+//!   `resolve` turns exactly a declared alias into a resolved one; and
+//!   `is_produced` holds exactly for primaries and resolved aliases, the
+//!   complement being the targets reported missing;
 //! - `src/checkpoint/runtime/schedule.rs`: `execution_group_indices` returns
 //!   exactly the group of each leader (a classless target, or the first target
 //!   of its shared-source class) in index order, and those groups partition the
@@ -107,8 +114,9 @@
 //!   limits, naming the first breached limit otherwise.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
-//! driven by these plans, file I/O, error mapping, string-keyed planner
-//! bookkeeping (target and source collision sets), and the bit assembly of the
+//! driven by these plans, file I/O, error mapping, the string-keyed planner
+//! bookkeeping around the ledger (name lookups and the consumed-source set),
+//! and the bit assembly of the
 //! floating-point rounding encoder (sign, exponent field, NaN payload; checked
 //! exhaustively at every 16-bit midpoint and against independent oracles)
 //! remain covered by tests rather than proofs.
@@ -135,6 +143,9 @@ pub mod rounding;
 
 #[path = "../src/checkpoint/mapping/aliases.rs"]
 pub mod aliases;
+
+#[path = "../src/checkpoint/mapping/ledger.rs"]
+pub mod ledger;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;
