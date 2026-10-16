@@ -13,15 +13,13 @@
 #   executed by a lint. `cpu` (CubeCL's MLIR backend) downloads a prebuilt
 #   LLVM in its build script.
 #
-# Known gaps are tracked, not hidden. Four fuzz-oracle tests that predate
-# wave-3 behavior are skipped by exact name, and a second step fails once any
-# of them passes again. The documentation audit runs as a ratchet against the
-# gaps that remain in src/ and fuzz/. Both lists only shrink, and the release
-# gate (scripts/check_release.py --gate source) still requires zero.
+# The documentation audit requires a literal doc comment on every authored
+# item, including Verus proof functions, exactly as the release gate
+# (scripts/check_release.py --gate source) does.
 #
 # The Verus proofs need a pinned prover release and its own Rust toolchain;
-# start them from the Actions tab ("Run workflow", then tick "verus"). All
-# harnesses verified in 12 seconds on the development Mac once installed.
+# start them from the Actions tab ("Run workflow", then tick "verus"). All 25
+# harnesses (1,877 verified items) take 35 to 55 seconds on the development Mac.
 
 name: CI
 
@@ -277,76 +275,16 @@ jobs:
           cargo clippy --manifest-path scripts/coverage-layout/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path scripts/coverage-layout/Cargo.toml --locked
           cargo build --manifest-path scripts/coverage-layout/Cargo.toml --locked
-      - name: Documentation standards (no new gaps)
+      - name: Documentation standards
         run: |
-          report="$RUNNER_TEMP/documentation.json"
-          rm -f "$report"
-          audit_status=0
           python3 scripts/check_documentation.py --standards \
             --classifier scripts/coverage-layout/target/debug/transformers-coverage-layout \
-            --output "$report" || audit_status=$?
-          python3 - "$report" "$audit_status" <<'EOF'
-          """Fail on documentation gaps beyond the recorded baseline.
-
-          `check_documentation.py --standards` exits nonzero while any authored
-          item lacks its required doc comment or sits inside a macro the
-          classifier cannot expand. src/ and fuzz/ still have such items, so
-          that exit status cannot gate CI yet. This ratchet reads the JSON report instead
-          and fails when a component has more gaps of a kind than BASELINE
-          records, or when the audit reports a parse diagnostic. Lower BASELINE
-          as gaps close; the release gate still requires zero.
-          """
-          import json
-          import sys
-
-          # component: (missing doc comments, opaque macro functions, opaque macro items)
-          BASELINE = {
-              "checkpoint": (1, 11, 0),
-              "fuzz": (1, 0, 0),
-              "models": (30, 31, 11),
-              "shared": (61, 47, 0),
-          }
-          KINDS = ("missing_style", "unresolved_macro_functions", "unresolved_macro_items")
-
-          report_path, status = sys.argv[1], int(sys.argv[2])
-          if status == 0:
-              print("documentation standards pass in full; empty BASELINE")
-              sys.exit(0)
-          try:
-              with open(report_path, encoding="utf-8") as report_file:
-                  report = json.load(report_file)
-          except OSError as error:
-              sys.exit(f"check_documentation.py failed before writing its report: {error}")
-          failures = [
-              f"diagnostic {d['code']} in {d['file']}: {d['reason']}"
-              for d in report["diagnostics"]
-              if d["code"] != "duplicate_context"
-          ]
-          inventory = report["inventory"]
-          for component, counts in sorted(inventory["groups"].items()):
-              allowed = dict(zip(KINDS, BASELINE.get(component, (0, 0, 0))))
-              allowed["inline_test_bodies"] = 0
-              for kind, limit in allowed.items():
-                  if counts[kind] > limit:
-                      failures.append(f"{component}: {counts[kind]} {kind} (baseline {limit})")
-              print(f"{component}: " + ", ".join(f"{k} {counts[k]}/{v}" for k, v in allowed.items()))
-          if failures:
-              for entry in inventory["missing"]:
-                  print(f"::warning file={entry['path']},line={entry['line']}::"
-                        f"missing {entry['required_style']} doc on {entry['kind']} {entry['name']}")
-              sys.exit("documentation gaps above the baseline:\n  " + "\n  ".join(failures))
-          print("no documentation gaps above the baseline")
-          EOF
+            --output "$RUNNER_TEMP/documentation.json"
 
   fuzz:
     name: Fuzz harnesses
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      # Oracle tests known to fail at this source, skipped by "Harness tests"
-      # and required to keep failing by "Skipped oracle tests still fail".
-      # Remove a name together with its oracle fix; empty means none.
-      STALE_ORACLE_TESTS: ""
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -361,22 +299,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets -- -D warnings
       - name: Harness tests
-        run: |
-          skips=()
-          for test in $STALE_ORACLE_TESTS; do skips+=(--skip "$test"); done
-          cargo test --manifest-path fuzz/Cargo.toml --locked --lib -- --exact "${skips[@]}"
-      # A skipped test that passes again, or no longer exists, fails here
-      # until its name is removed from STALE_ORACLE_TESTS.
-      - name: Skipped oracle tests still fail
-        run: |
-          stale=0
-          for test in $STALE_ORACLE_TESTS; do
-            if cargo test --manifest-path fuzz/Cargo.toml --locked --lib -- --exact "$test" > /dev/null 2>&1; then
-              echo "::error::$test passes or no longer exists; remove it from STALE_ORACLE_TESTS"
-              stale=1
-            fi
-          done
-          exit "$stale"
+        run: cargo test --manifest-path fuzz/Cargo.toml --locked --all-targets
 
   dependencies:
     name: Dependency advisories and licenses
