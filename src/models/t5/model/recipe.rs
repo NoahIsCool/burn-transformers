@@ -28,8 +28,10 @@ use burn::tensor::Int;
 
 use super::*;
 use crate::{
-    experiment::AttentionPolicy, intervention::Stack, models::shared::checks::read_int_tensors,
-    models::t5::buckets::bias_owners,
+    experiment::AttentionPolicy,
+    intervention::Stack,
+    models::shared::checks::read_int_tensors,
+    models::t5::buckets::{bias_owners, positions_within},
 };
 use block::diagnostic_buffer;
 
@@ -630,7 +632,7 @@ impl PositionSummary {
         )?;
         let (low, high) = (values[0], values[1]);
         let context = state.context.evaluated_context;
-        if !(low >= 0 && usize::try_from(high).is_ok_and(|high| high < context)) {
+        if !positions_within(low, high, context) {
             return Err(Error::configuration(
                 "execution.positions",
                 format!(

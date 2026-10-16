@@ -47,7 +47,31 @@ fn bias_owners_share_tables_by_head_count() {
     assert_eq!(bias_owners(&[6]), [0]);
 }
 
+/// Staged positions must be nonnegative and below the evaluated context.
+#[test]
+fn positions_within_requires_the_evaluated_context() {
+    assert!(positions_within(0, 4, 5));
+    assert!(!positions_within(0, 5, 5));
+    assert!(!positions_within(-1, 4, 5));
+    assert!(!positions_within(0, -1, 5));
+    assert!(!positions_within(0, 0, 0));
+    assert!(positions_within(3, 1, 5));
+}
+
 proptest! {
+    /// The range check equals the former checked conversion.
+    #[test]
+    fn positions_within_matches_the_checked_conversion(
+        low in -3_i64..6,
+        high in prop_oneof![-3_i64..6, Just(i64::MAX)],
+        context in prop_oneof![0_usize..6, Just(usize::MAX)],
+    ) {
+        prop_assert_eq!(
+            positions_within(low, high, context),
+            low >= 0 && usize::try_from(high).is_ok_and(|high| high < context)
+        );
+    }
+
     /// Owners equal the map-based first occurrence they replaced.
     #[test]
     fn bias_owners_match_first_occurrences(heads in proptest::collection::vec(1_usize..4, 0..10)) {

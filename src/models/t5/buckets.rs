@@ -232,6 +232,21 @@ pub(crate) fn bias_owners(heads: &[usize]) -> Vec<usize> {
     owners
 }
 
+/// Whether staged positions spanning `low..=high` lie in the evaluated context `0..context`.
+///
+/// Every displacement between such positions is then at most `context - 1`,
+/// the bound the explicit-position bias receives. The proof establishes the
+/// exact rule `0 <= low` and `0 <= high < context`; widening `high` to `u64`
+/// is lossless because `usize` has at most 64 bits.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(within =>
+    ensures
+        within == (0 <= low && 0 <= high && high < context),
+))]
+pub(crate) fn positions_within(low: i64, high: i64, context: usize) -> bool {
+    low >= 0 && high >= 0 && (high as u64) < (context as u64)
+}
+
 #[cfg(test)]
 #[path = "buckets_tests.rs"]
 mod tests;
