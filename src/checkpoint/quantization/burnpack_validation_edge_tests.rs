@@ -119,6 +119,124 @@ fn independent_session_maxima_and_open_limit_are_enforced() {
     ));
 }
 
+/// The original field-by-field session limit checks, as an independent oracle.
+fn reference_limit_verdict(
+    limits: BurnpackSessionLimits,
+) -> Option<(&'static str, u64, &'static str)> {
+    let fields = [
+        (
+            "max_tensors",
+            limits.max_tensors as u64,
+            limits.max_tensors >= UPSTREAM_MAX_TENSORS,
+            "must leave one of Burn Store's 100,000 tensor slots for the manifest",
+        ),
+        (
+            "max_staged_bytes",
+            limits.max_staged_bytes,
+            limits.max_staged_bytes > DEFAULT_MAX_STAGED_BYTES,
+            MAX_STAGED_REASON,
+        ),
+        (
+            "max_tensor_payload_bytes",
+            limits.max_tensor_payload_bytes,
+            limits.max_tensor_payload_bytes > UPSTREAM_MAX_TENSOR_BYTES,
+            "exceeds Burn Store's platform-specific per-tensor reader limit",
+        ),
+        (
+            "max_manifest_bytes",
+            limits.max_manifest_bytes as u64,
+            limits.max_manifest_bytes > DEFAULT_MAX_MANIFEST_BYTES,
+            "must be at most 64 MiB",
+        ),
+        (
+            "max_tensor_name_bytes",
+            limits.max_tensor_name_bytes as u64,
+            limits.max_tensor_name_bytes > DEFAULT_MAX_TENSOR_NAME_BYTES,
+            "must be at most 16 KiB",
+        ),
+    ];
+    for (field, value, above_cap, reason) in fields {
+        if value == 0 {
+            return Some((field, value, "must be greater than zero"));
+        }
+        if above_cap {
+            return Some((field, value, reason));
+        }
+    }
+    None
+}
+
+/// Session limit validation names the same field, value, and reason as the original checks.
+#[test]
+fn session_limits_match_the_field_by_field_checks() {
+    let defaults = BurnpackSessionLimits::default();
+    let tensors = [
+        0,
+        1,
+        UPSTREAM_MAX_TENSORS - 1,
+        UPSTREAM_MAX_TENSORS,
+        usize::MAX,
+    ];
+    let staged = [0, 1, DEFAULT_MAX_STAGED_BYTES, DEFAULT_MAX_STAGED_BYTES + 1];
+    let payload = [
+        0,
+        1,
+        UPSTREAM_MAX_TENSOR_BYTES,
+        UPSTREAM_MAX_TENSOR_BYTES + 1,
+    ];
+    let manifest = [
+        0,
+        1,
+        DEFAULT_MAX_MANIFEST_BYTES,
+        DEFAULT_MAX_MANIFEST_BYTES + 1,
+    ];
+    let names = [
+        0,
+        1,
+        DEFAULT_MAX_TENSOR_NAME_BYTES,
+        DEFAULT_MAX_TENSOR_NAME_BYTES + 1,
+    ];
+    for &max_tensors in &tensors {
+        for &max_staged_bytes in &staged {
+            for &max_tensor_payload_bytes in &payload {
+                for &max_manifest_bytes in &manifest {
+                    for &max_tensor_name_bytes in &names {
+                        let limits = BurnpackSessionLimits {
+                            max_tensors,
+                            max_staged_bytes,
+                            max_tensor_payload_bytes,
+                            max_manifest_bytes,
+                            max_tensor_name_bytes,
+                        };
+                        let actual = match limits.validate() {
+                            Ok(validated) => {
+                                assert_eq!(validated, limits);
+                                None
+                            }
+                            Err(QuantizationError::InvalidSessionLimit {
+                                field,
+                                value,
+                                reason,
+                            }) => Some((field, value, reason)),
+                            Err(other) => panic!("unexpected error {other:?}"),
+                        };
+                        assert_eq!(actual, reference_limit_verdict(limits), "{limits:?}");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(defaults.validate().ok(), Some(defaults));
+    assert!(matches!(
+        QuantizedBurnpackArtifact::open_with_manifest_limit("never-opened.bpk", 0),
+        Err(QuantizationError::InvalidSessionLimit {
+            field: "max_manifest_bytes",
+            value: 0,
+            reason: "must be greater than zero",
+        })
+    ));
+}
+
 /// Dtype, shape and byte count remain separate errors, including mutated TensorData metadata.
 #[test]
 fn payload_descriptor_rejects_each_physical_inconsistency() {

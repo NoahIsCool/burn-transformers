@@ -132,7 +132,9 @@
 //!   sums within a limit (so a running total kept below its limit stays below
 //!   it, with no wraparound), and `admit_tensor` admits a tensor exactly when
 //!   the new count, its payload, and the new staged total are within their
-//!   limits, naming the first breached limit otherwise.
+//!   limits, naming the first breached limit otherwise; `first_limit_violation`
+//!   accepts session limits exactly when each lies in `[1, cap]` and otherwise
+//!   names the first zero or over-cap limit, every earlier one admissible.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
 //! driven by these plans, file I/O, error mapping, the string-keyed planner

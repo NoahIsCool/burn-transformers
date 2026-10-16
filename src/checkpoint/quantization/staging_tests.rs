@@ -82,4 +82,23 @@ proptest! {
             expected
         );
     }
+
+    /// The limit scan names the first zero or over-cap limit, like a direct check.
+    #[test]
+    fn limit_scan_names_the_first_violation(
+        limits in proptest::collection::vec((0_u64..4, 0_u64..4), 0..6),
+    ) {
+        let values = limits.iter().map(|limit| limit.0).collect::<Vec<_>>();
+        let caps = limits.iter().map(|limit| limit.1).collect::<Vec<_>>();
+        let expected = values.iter().zip(&caps).enumerate().find_map(|(index, (&value, &cap))| {
+            if value == 0 {
+                Some((index, LimitViolation::Zero))
+            } else if value > cap {
+                Some((index, LimitViolation::AboveCap))
+            } else {
+                None
+            }
+        });
+        prop_assert_eq!(first_limit_violation(&values, &caps), expected);
+    }
 }

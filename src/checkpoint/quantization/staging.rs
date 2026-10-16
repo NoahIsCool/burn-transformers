@@ -8,6 +8,10 @@
 //! session: no admitted transition can leave a total above its limit or wrap
 //! it around.
 //!
+//! The limits themselves are validated first ([`first_limit_violation`]):
+//! each must be positive and at most a fixed cap derived from Burn Store's
+//! reader bounds.
+//!
 //! The module has no crate or Burn dependencies so that Verus can check it in
 //! place through `verus/checkpoint.rs`; callers map each breach to the
 //! contextual quantization error of the total it concerns.
@@ -147,6 +151,79 @@ pub(crate) fn admit_tensor(
         }),
         Err(breach) => Err(TensorBreach::Staged(breach)),
     }
+}
+
+/// Why a configured session limit is refused.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LimitViolation {
+    /// The limit is zero, which would admit nothing.
+    Zero,
+    /// The limit exceeds its fixed cap.
+    AboveCap,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: `value` is an admissible limit under `cap`, i.e. `1 <= value <= cap`.
+pub open spec fn within_cap(value: u64, cap: u64) -> bool {
+    1 <= value <= cap
+}
+
+} // verus!
+
+/// Returns the first limit outside `[1, cap]`, checking each limit for zero, then its cap.
+///
+/// Limits are checked in order, each first for zero and then against its own
+/// cap, so the result names the same failure a field-by-field check would.
+///
+/// Verified: `None` exactly when every limit lies in `[1, cap]`; otherwise the
+/// index of the first limit that does not, every earlier limit being
+/// admissible, with `Zero` for a zero limit and `AboveCap` for one above its
+/// cap. A validated session therefore has positive limits that never exceed
+/// the reader bounds the caps encode.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(violation =>
+    requires
+        values@.len() == caps@.len(),
+    ensures
+        match violation {
+            None => forall|i: int| 0 <= i < values@.len()
+                ==> within_cap(#[trigger] values@[i], caps@[i]),
+            Some((index, kind)) => {
+                &&& index < values@.len()
+                &&& forall|i: int| 0 <= i < index ==> within_cap(#[trigger] values@[i], caps@[i])
+                &&& match kind {
+                    LimitViolation::Zero => values@[index as int] == 0,
+                    LimitViolation::AboveCap => values@[index as int] != 0
+                        && values@[index as int] > caps@[index as int],
+                }
+            },
+        }
+))]
+pub(crate) fn first_limit_violation(
+    values: &[u64],
+    caps: &[u64],
+) -> Option<(usize, LimitViolation)> {
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= values@.len(),
+            values@.len() == caps@.len(),
+            forall|i: int| 0 <= i < index ==> within_cap(#[trigger] values@[i], caps@[i]),
+        decreases values@.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] == 0 {
+            return Some((index, LimitViolation::Zero));
+        }
+        if values[index] > caps[index] {
+            return Some((index, LimitViolation::AboveCap));
+        }
+        index += 1;
+    }
+    None
 }
 
 #[cfg(test)]

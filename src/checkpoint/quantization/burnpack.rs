@@ -45,7 +45,9 @@ use super::{
     classify_weight_for_quantization,
     provenance::{DigestingWriter, packed_payload_sha256},
     quantize_tensor_data,
-    staging::{BoundBreach, TensorBreach, admit_tensor, bounded_add},
+    staging::{
+        BoundBreach, LimitViolation, TensorBreach, admit_tensor, bounded_add, first_limit_violation,
+    },
 };
 
 /// Reserved Burnpack U8 tensor containing the quantization manifest JSON.
@@ -75,6 +77,35 @@ const MAX_STAGED_REASON: &str =
 const DEFAULT_MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum UTF-8 bytes in one model tensor name.
 const DEFAULT_MAX_TENSOR_NAME_BYTES: usize = 16 * 1024;
+/// Session limit names, in validation order.
+const SESSION_LIMIT_FIELDS: [&str; 5] = [
+    "max_tensors",
+    "max_staged_bytes",
+    "max_tensor_payload_bytes",
+    "max_manifest_bytes",
+    "max_tensor_name_bytes",
+];
+/// Largest admissible value of each session limit, in validation order.
+///
+/// `max_tensors` stays below Burn Store's tensor count so one slot remains for
+/// the manifest tensor.
+const SESSION_LIMIT_CAPS: [u64; 5] = [
+    UPSTREAM_MAX_TENSORS as u64 - 1,
+    DEFAULT_MAX_STAGED_BYTES,
+    UPSTREAM_MAX_TENSOR_BYTES,
+    DEFAULT_MAX_MANIFEST_BYTES as u64,
+    DEFAULT_MAX_TENSOR_NAME_BYTES as u64,
+];
+/// Why each session limit above its cap is refused, in validation order.
+const SESSION_LIMIT_REASONS: [&str; 5] = [
+    "must leave one of Burn Store's 100,000 tensor slots for the manifest",
+    MAX_STAGED_REASON,
+    "exceeds Burn Store's platform-specific per-tensor reader limit",
+    "must be at most 64 MiB",
+    "must be at most 16 KiB",
+];
+/// Position of `max_manifest_bytes` in the session limit tables.
+const MANIFEST_LIMIT: usize = 3;
 /// Maximum individually materialized payload bytes on a 32-bit host.
 #[cfg(target_pointer_width = "32")]
 const UPSTREAM_MAX_TENSOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -126,47 +157,21 @@ pub struct BurnpackSessionLimits {
 
 impl BurnpackSessionLimits {
     /// Validates limits against Burn Store 0.21's documented reader bounds.
+    ///
+    /// Each limit must be positive and at most its cap; the verified
+    /// [`first_limit_violation`] names the first field that is not, checking
+    /// fields in declaration order and each for zero before its cap.
     pub fn validate(self) -> Result<Self> {
-        validate_nonzero_limit("max_tensors", self.max_tensors as u64)?;
-        if self.max_tensors >= UPSTREAM_MAX_TENSORS {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_tensors",
-                value: self.max_tensors as u64,
-                reason: "must leave one of Burn Store's 100,000 tensor slots for the manifest",
-            });
-        }
-        validate_nonzero_limit("max_staged_bytes", self.max_staged_bytes)?;
-        if self.max_staged_bytes > DEFAULT_MAX_STAGED_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_staged_bytes",
-                value: self.max_staged_bytes,
-                reason: MAX_STAGED_REASON,
-            });
-        }
-        validate_nonzero_limit("max_tensor_payload_bytes", self.max_tensor_payload_bytes)?;
-        if self.max_tensor_payload_bytes > UPSTREAM_MAX_TENSOR_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_tensor_payload_bytes",
-                value: self.max_tensor_payload_bytes,
-                reason: "exceeds Burn Store's platform-specific per-tensor reader limit",
-            });
-        }
-        validate_nonzero_limit("max_manifest_bytes", self.max_manifest_bytes as u64)?;
-        if self.max_manifest_bytes > DEFAULT_MAX_MANIFEST_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_manifest_bytes",
-                value: self.max_manifest_bytes as u64,
-                reason: "must be at most 64 MiB",
-            });
-        }
-        validate_nonzero_limit("max_tensor_name_bytes", self.max_tensor_name_bytes as u64)?;
-        if self.max_tensor_name_bytes > DEFAULT_MAX_TENSOR_NAME_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_tensor_name_bytes",
-                value: self.max_tensor_name_bytes as u64,
-                reason: "must be at most 16 KiB",
-            });
-        }
+        validate_session_limits(
+            0,
+            &[
+                self.max_tensors as u64,
+                self.max_staged_bytes,
+                self.max_tensor_payload_bytes,
+                self.max_manifest_bytes as u64,
+                self.max_tensor_name_bytes as u64,
+            ],
+        )?;
         Ok(self)
     }
 }
@@ -1062,14 +1067,7 @@ impl QuantizedBurnpackArtifact {
         path: impl AsRef<Path>,
         max_manifest_bytes: usize,
     ) -> Result<Self> {
-        validate_nonzero_limit("max_manifest_bytes", max_manifest_bytes as u64)?;
-        if max_manifest_bytes > DEFAULT_MAX_MANIFEST_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_manifest_bytes",
-                value: max_manifest_bytes as u64,
-                reason: "must be at most 64 MiB",
-            });
-        }
+        validate_session_limits(MANIFEST_LIMIT, &[max_manifest_bytes as u64])?;
         let path = validate_bpk_path(path.as_ref())?;
         let mut store = BurnpackStore::from_file(&path)
             .auto_extension(false)
@@ -1929,16 +1927,22 @@ fn sync_parent_directory(output: &Path) -> Result<()> {
     })
 }
 
-/// Rejects a zero resource bound before a session or artifact reader is created.
-fn validate_nonzero_limit(field: &'static str, value: u64) -> Result<()> {
-    if value == 0 {
-        Err(QuantizationError::InvalidSessionLimit {
-            field,
-            value,
-            reason: "must be greater than zero",
-        })
-    } else {
-        Ok(())
+/// Validates `values` against the session limit tables starting at entry `first`.
+///
+/// The verified [`first_limit_violation`] finds the first limit outside
+/// `[1, cap]`; this maps it to the contextual error of its field.
+fn validate_session_limits(first: usize, values: &[u64]) -> Result<()> {
+    let caps = &SESSION_LIMIT_CAPS[first..first + values.len()];
+    match first_limit_violation(values, caps) {
+        None => Ok(()),
+        Some((index, violation)) => Err(QuantizationError::InvalidSessionLimit {
+            field: SESSION_LIMIT_FIELDS[first + index],
+            value: values[index],
+            reason: match violation {
+                LimitViolation::Zero => "must be greater than zero",
+                LimitViolation::AboveCap => SESSION_LIMIT_REASONS[first + index],
+            },
+        }),
     }
 }
 
