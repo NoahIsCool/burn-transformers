@@ -232,10 +232,13 @@ pub fn linear<B: Backend, const D: usize>(
             input.dtype()
         )));
     }
-    #[cfg(all(feature = "metal", feature = "rocm"))]
+    #[cfg(all(
+        feature = "metal",
+        any(feature = "rocm", feature = "attention-kernel-tracing")
+    ))]
     if packed_metal_autotune_is_unavailable(weight.dtype(), &B::name(&weight.device())) {
         return Err(Error::BackendCapability(
-            "packed Q4/Q8 Metal matmul is unavailable when the `rocm` crate feature is also enabled: Burn 0.21 feature unification enables a CubeCL autotuner with quantized-unsafe candidates; build the Metal runtime with `--no-default-features --features std,metal` (plus optional tokenizer features)"
+            "packed Q4/Q8 Metal matmul is unavailable when CubeCL autotuning is enabled (the `rocm` or `attention-kernel-tracing` crate feature): Burn 0.21 feature unification enables a CubeCL autotuner with quantized-unsafe candidates; build the Metal runtime with `--no-default-features --features std,metal` (plus optional tokenizer features)"
                 .into(),
         ));
     }
@@ -378,14 +381,19 @@ fn leading_rows(tensor: &str, shape: &[usize]) -> Result<usize> {
 
 /// Detects Burn 0.21's known packed Metal/autotune feature-unification hazard.
 ///
-/// Enabling this crate's ROCm feature activates `burn-cubecl/autotune` for the
-/// shared CubeCL dependency. Cargo then applies that strategy to Metal as well,
-/// where Burn 0.21 can benchmark quantized-incompatible candidate kernels. The
-/// backend name check limits the guard to Metal; non-Metal execution keeps its
-/// independently validated path. Both Q4 and Q8 use packed U32 storage and can
-/// enter candidates whose logical dequantized vector width differs from the
-/// floating activation width.
-#[cfg(all(feature = "metal", feature = "rocm"))]
+/// Two crate features activate `burn-cubecl/autotune` for the shared CubeCL
+/// dependency: `rocm` (through Burn's ROCm backend) and the test-only
+/// `attention-kernel-tracing` (through `burn/autotune`, which Burn forwards to
+/// `burn-wgpu/autotune` and from there to `burn-cubecl/autotune`). Cargo then
+/// applies that strategy to Metal as well, where Burn 0.21 can benchmark
+/// quantized-incompatible candidate kernels. The backend name check limits the
+/// guard to Metal; non-Metal execution keeps its independently validated path.
+/// Both Q4 and Q8 use packed U32 storage and can enter candidates whose logical
+/// dequantized vector width differs from the floating activation width.
+#[cfg(all(
+    feature = "metal",
+    any(feature = "rocm", feature = "attention-kernel-tracing")
+))]
 fn packed_metal_autotune_is_unavailable(dtype: DType, backend_name: &str) -> bool {
     matches!(dtype, DType::QFloat(_)) && backend_name.contains("wgpu<msl>")
 }

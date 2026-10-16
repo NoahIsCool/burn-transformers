@@ -371,7 +371,13 @@ fn projection_contract_bias_width_rejection_preserves_weight_values() {
 }
 
 /// The feature-unification guard distinguishes Q4 Metal from safe paths.
-#[cfg(all(feature = "metal", feature = "rocm"))]
+///
+/// It compiles under both features that enable CubeCL autotuning on Metal:
+/// `rocm` and the test-only `attention-kernel-tracing`.
+#[cfg(all(
+    feature = "metal",
+    any(feature = "rocm", feature = "attention-kernel-tracing")
+))]
 #[test]
 fn packed_metal_autotune_guard_is_narrow() {
     let q4 = quantize_tensor_data(
@@ -416,7 +422,10 @@ fn packed_metal_autotune_guard_is_narrow() {
 /// Burn 0.21's CubeCL `q_matmul` passes packed values and their scale handle
 /// as an `InputBinding::quantized`; this test protects the public call path
 /// and verifies that no API-level conversion changes the parameter dtype.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires a Metal-capable macOS host"]
 fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
@@ -470,7 +479,10 @@ fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
 }
 
 /// Q4 Metal dispatch remains finite for every distinct Qwen3.5 projection shape.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires a Metal-capable macOS host"]
 fn metal_qfloat_projection_covers_qwen35_shapes() {
