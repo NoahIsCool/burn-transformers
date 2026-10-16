@@ -1491,7 +1491,12 @@ impl FeedForwardSpec {
                     .map_err(|error| nested(field, error))
             }
             Self::MixtureOfExperts(spec) => spec.validate_in_block(field, hidden_size),
-            Self::ClampedMixtureOfExperts { experts, .. } => {
+            Self::ClampedMixtureOfExperts {
+                experts,
+                limit,
+                alpha,
+                up_offset,
+            } => {
                 experts.validate_in_block(&format!("{field}.experts"), hidden_size)?;
                 if experts.activation != Activation::Silu {
                     return Err(Error::configuration(
@@ -1499,8 +1504,8 @@ impl FeedForwardSpec {
                         "the clamped unit replaces the expert activation; use silu",
                     ));
                 }
-                self.expert_glu()
-                    .map_or(Ok(()), |glu| glu.validate())
+                clamped_glu(*limit, *alpha, *up_offset)
+                    .validate()
                     .map_err(|error| Error::configuration(format!("{field}.glu"), reason_of(error)))
             }
             Self::None => Ok(()),
@@ -1649,10 +1654,10 @@ pub struct DecoderSpec {
     /// Gemma 2 caps final logits with `c = 30`. The cap follows the tied or
     /// independent vocabulary projection and runs in the logits' dtype, so
     /// every logit lies in `[-c, c]` (`tanh` saturates to one in floating
-    /// point). `None`, the default and the form of
-    /// every earlier serialized spec, leaves logits uncapped. A present value
-    /// must be finite and positive; the encoder stack of a [`Seq2SeqSpec`]
-    /// has no vocabulary readout and rejects it.
+    /// point). `None`, the default and the form of every earlier serialized
+    /// spec, leaves logits uncapped. A present value must be finite and
+    /// positive; the encoder stack of a [`Seq2SeqSpec`] has no vocabulary
+    /// readout and rejects it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_logit_softcap: Option<f64>,
 }
