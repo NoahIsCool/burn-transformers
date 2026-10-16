@@ -235,6 +235,197 @@ replaces a failed observation with zero. Its Python/Rust synthetic checks and
 an end-to-end 8MiB allocation smoke passed. Real-model memory evidence is
 recorded separately only after each supervised run succeeds.
 
+## 2026-10-15 performance-pass series (shared host)
+
+These runs measure the polish branch `claude/tfm-polish-w4-performance` at
+commit `e4011b9` against its base `33f620f` and against the September series
+above. They are **not** a new controlled baseline: other agents compiled and
+tested on the same CPU throughout (load averages between 17 and 55 were sampled
+around every run), while the September runs paused agent compilers. Only one
+Metal job ran at a time. Medians below are paired with their observed
+minimum–maximum so the contention is visible; compare best samples as well as
+medians before drawing conclusions.
+
+| Item | Value |
+| --- | --- |
+| Machine | Mac15,11, Apple M3 Max (10 performance + 4 efficiency cores, 30-core GPU), 103,079,215,104 bytes unified memory |
+| OS / power | macOS 27.0.1 (26A434), OS-provided Metal 4; AC power, battery charged, `pmset` powermode 0 |
+| Toolchain | `rustc 1.92.0 (ded5c06cf 2025-12-08)` (`cargo +stable`) for every end-to-end series and the `e4011b9` micro-benchmark runs; the earlier micro-benchmark runs used the worktree default `rustc 1.94.0-nightly (4f14395c3 2025-12-22)` |
+| Burn | 0.21.0, lockfile unchanged; release profile |
+| Features | FLAN/Qwen Metal: `std,metal,tokenizers,chat-templates`; Flex: `std,flex,tokenizers,chat-templates` |
+| Protocol | The unchanged harnesses: three warmups and ten measured repetitions per shape, 128 forced cached decode steps, `Backend::sync` at every boundary |
+| Raw reports | `/Volumes/bag of holding/cargo-targets/tfm-polish-w4-performance-reports/` on the measurement host, outside the repository; each file's SHA-256 is listed in the integration report |
+
+### Projection weight storage order
+
+A checkpoint stores a projection as `C = [out, in]`; `operations::linear`
+multiplies by `W = Cᵀ`. Burn's `LinearLayout::Col` mapper makes `W` a strided
+view of `C`, and before this pass every family loader installed exactly that
+view. The `linear_layout_*` micro-benchmarks in
+`tests/small_model_benchmarks.rs` time one projection per sample with the
+strided view, contiguous `[in, out]` storage, and the crate installer's result.
+Flex/F32 medians in µs from two runs of the stable-toolchain binary built at
+`e4011b9` (five products per sample, fifteen interleaved samples); the ratio
+range spans those two runs and four earlier runs of the same harness at
+`0472ac1` and `affbb08`:
+
+| Shape (`in -> out`) | Rows | Strided | Installed | Strided / installed |
+| --- | ---: | ---: | ---: | --- |
+| 1024 -> 4096 | 1 | 617 / 601 | 311 / 293 | 1.98–2.08 |
+| 1024 -> 4096 | 8 | 610 / 526 | 763 / 618 | 0.80–0.97 |
+| 1024 -> 1024 | 1 | 152 / 149 | 74 / 73 | 2.02–2.07 |
+| 1024 -> 1024 | 8 | 370 / 224 | 183 / 137 | 1.46–2.03 |
+| 1024 -> 3584 | 1 | 531 / 527 | 257 / 257 | 2.04–2.06 |
+| 1024 -> 3584 | 8 | 724 / 443 | 478 / 339 | 1.16–1.51 |
+| 3584 -> 1024 | 1 | 515 / 519 | 256 / 259 | 2.00–2.02 |
+| 3584 -> 1024 | 8 | 786 / 653 | 632 / 499 | 1.24–1.41 |
+| 2048 -> 1024 | 1 | 295 / 303 | 145 / 143 | 2.03–2.11 |
+| 2048 -> 1024 | 8 | 524 / 432 | 291 / 281 | 0.96–1.80 |
+
+At 128 and 512 rows every shape stayed within 0.77–1.22 across the six runs,
+i.e. within contention noise. The diagnostic `(C · xᵀ)ᵀ` form, which writes a
+column-major result, was the fastest 8-row variant for almost every shape and
+run (for example 298–409 µs for `1024 -> 4096`), a further batched-decode
+opportunity that is not implemented. Single-row products run on one core below Flex's
+`192³` parallel threshold, which is why they are stable; the earlier "4–10x"
+estimate from the gpt-oss package came from multi-row products under heavy
+rayon contention and was not reproduced. `install_float_parameter` therefore
+stores transposing-mapper matrices contiguously on inference Flex (the
+`checkpoint::runtime::storage_order` module); values, saved records, dtypes and
+`Autodiff<Flex>` are unchanged. On Metal (64 products per sample) the strided
+view was equal or faster where it matters for decode: in the first run (a
+nightly build of `33f620f` with the harness), single-row F32 products took 18–27% less time strided than contiguous, and
+single-row F16 products were equal or up to 20% faster strided, while 128- and
+512-row F16 products were 8–15% faster contiguous. Metal therefore keeps the
+zero-copy view. Metal per-call times varied by up to 5x between runs for some
+F32 shapes, 8-row F32 products took about nine times as long as single-row ones
+in every layout, and the diagnostic `(C · xᵀ)ᵀ` form was 2–3x faster for
+single-row F32 products in one run only; these are recorded as follow-ups
+rather than acted on.
+
+### Tied embedding readout
+
+A Flex CPU profile (`/usr/bin/sample`, 1 ms) of SmolLM-135M cached decode at
+`33f620f` spent 1,202 of 1,886 main-thread samples (64%) in
+`FlexTensor::to_contiguous` under `burn::tensor::module::linear`: Burn's default
+`linear` reshapes its weight to the activation rank, and Flex can only reshape
+the transposed embedding table by copying all 113 MB of it on every decode
+step. `operations::matmul_transposed` multiplies by the transposed view through
+one rank-2 product and never reshapes the table; the Llama graph (and with it
+Gemma) and gpt-oss use it. CubeCL reshapes the same view by updating strides,
+so Metal never paid this cost. The readout still multiplies by a strided view:
+the micro-benchmark's `576 -> 49152` single-row product took 1.39–1.51x longer
+strided than from a contiguous transposed copy, which would cost a second copy
+of the table (113 MB for SmolLM-135M, 2.7 GB for Gemma 3 4B in F32) and is not
+made. After both changes the largest remaining Flex decode costs in a SmolLM
+profile are the tied readout (30% of samples), the feed-forward projections
+(41%, single-threaded below Flex's parallel threshold), naive attention copying
+cache views (4%), and whole-buffer KV writes (2%).
+
+### SmolLM-135M on Flex/F32
+
+`causal_lm_flex_decode_benchmark` with `TRANSFORMERS_CAUSAL_LM_BENCH_DIR`
+pointing at `HuggingFaceTB/SmolLM-135M` revision `1d461723` (strict load, F32).
+Medians with minimum–maximum over ten measured repetitions; decode is model-only
+over 128 forced steps per row:
+
+| Shape | `33f620f` prefill ms | `e4011b9` prefill ms (runs 1 / 2) | `33f620f` decode tok/s | `e4011b9` decode tok/s (runs 1 / 2) |
+| --- | ---: | ---: | ---: | ---: |
+| batch 1, 32 tokens | 198.2 (188.4–379.4) | 107.9 (79.5–682.6) / 87.3 (79.6–131.3) | 7.9 (4.9–8.2) | 65.0 (25.4–73.2) / 70.9 (42.6–73.0) |
+| batch 1, 128 tokens | 391.0 (337.1–2,344.6) | 311.1 (234.7–1,115.3) / 280.5 (231.0–1,481.8) | 7.8 (5.5–8.1) | 64.7 (29.5–68.9) / 65.1 (51.2–69.2) |
+| batch 8, 32 tokens | 589.2 (510.7–2,655.0) | 388.9 (367.7–557.2) / 374.3 (363.1–393.6) | 36.7 (24.1–43.3) | 142.6 (119.9–169.2) / 159.7 (128.0–169.4) |
+
+Cached decode is 8.2–9.0x faster at batch one and 3.9–4.4x faster at batch
+eight; warm prefill is 1.3–2.3x faster. Both binaries were built with `cargo
++stable` from `33f620f` and `e4011b9` with the same benchmark sources; the runs
+were interleaved head, base, head between 19:37 and 19:57 local time under load
+averages of 22–50, and their `/usr/bin/time -l` wall times were 172 s, 851 s and
+155 s. Strict load took 0.10 s at `33f620f` and 0.12–0.15 s at `e4011b9`, which
+includes the host transposes.
+
+The final-logit checksums differ between the two binaries only in the last
+digits, as expected from F32 reassociation. With both changes the Flex/F32
+real-checkpoint gates still reproduce their documented maximum logit deviations
+and all 32 greedy tokens: SmolLM-135M `9.1e-5`, Qwen3-4B (`531c80e2`) `1.4e-4`
+(`tests/llama_family_artifacts.rs`), and Gemma 3 4B (`093f9f38`) `7.2e-5`,
+`1.3e-4` and `1.6e-4` over its three prompts plus its long-context ring and
+sliding-window checks (`tests/gemma_artifacts.rs`); Gemma's left-padded batched
+prefill moved from the documented `1.1e-4` to `1.2e-4`, well inside the `1e-3`
+gate. The FLAN-T5-small
+official-reference gate reproduces its earlier Flex output hashes bit for bit.
+
+### FLAN-T5-small and Qwen3.5-0.8B against the September series
+
+No timed code path of either checkpoint changed in this pass (T5 uses
+row-layout projections and an untied head, and Metal keeps the strided view;
+only FLAN loading now probes parameter mappers and may split large transposes
+across threads), so the differences below are the cumulative effect of the
+earlier polish waves, measured under contention. Strict load, cold first token and natural greedy
+generation are single process observations as in the September series.
+
+FLAN-T5-small, Metal/F32, 19:29–19:31 local time under load averages 31–55
+(September 10 controlled series in brackets):
+
+| Source tokens | Prefill median ms (min–max) | First token ms | Model-only decode tok/s (min–max) | Including readback tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 46.66 (45.20–47.55) [48.19] | 49.38 [51.65] | 80.74 (75.17–82.82) [75.11] | 67.79 [65.42] |
+| 128 | 17.54 (16.47–34.20) [21.22] | 20.19 [23.04] | 80.23 (66.19–81.39) [74.83] | 67.35 [65.37] |
+| 512 | 24.95 (24.33–26.87) [31.26] | 27.63 [33.07] | 76.09 (50.79–77.06) [72.77] | 63.90 [63.32] |
+
+The six-token natural greedy translation took a median 0.1164 s against
+1.2042 s on September 10, with identical tokens. Whole-process maximum RSS was
+657,129,472 bytes and peak footprint 1,107,477,680 bytes.
+
+FLAN-T5-small, Flex/F32, 19:31–19:32 local time under load averages 20–31
+(September 10 controlled series in brackets):
+
+| Source tokens | Prefill median ms (min–max) | Model-only decode tok/s (min–max) |
+| ---: | ---: | ---: |
+| 32 | 24.48 (23.35–26.53) [28.86] | 213.96 (199.06–218.41) [233.70] |
+| 128 | 50.04 (48.11–60.47) [91.88] | 145.94 (142.18–150.52) [159.52] |
+| 512 | 212.02 (182.76–1,013.57) [388.82] | 56.23 (40.20–62.46) [68.38] |
+
+Prefill is 1.2–1.8x faster (Flex SIMD and rayon are now enabled) and natural
+greedy generation took 0.0409 s against 0.3523 s, but cached decode is 8–18%
+slower even in its best samples, and the gap grows with source length. A profile
+at 512 source tokens attributes 64% of decode samples to Burn Flex's naive
+attention converting non-contiguous key/value views with `to_contiguous`
+(scalar `StridedIter`): T5 keeps its cross-attention keys and values as
+`swap_dims(1, 2)` views, so every step copies them for every layer. This is a
+recorded follow-up for the T5/attention owners, not fixed here.
+
+Qwen3.5-0.8B, Metal/F16, first run at 19:22–19:27 local time under load
+averages 29–47 (September 10 controlled series, then the September 9 original,
+in brackets):
+
+| Source tokens | Prefill median ms (min–max) | First token ms | Model-only decode tok/s median (min–max) | Including readback tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 60.37 (49.29–330.29) [75.65; 57.73] | 68.46 | 22.06 (7.00–27.61) [26.90; 35.68] | 17.68 [22.01; 27.91] |
+| 128 | 62.45 (58.20–121.09) [178.11; 130.83] | 70.50 | 29.32 (13.21–32.11) [26.96; 35.98] | 23.52 [22.09; 28.10] |
+| 512 | 158.67 (157.55–435.98) [615.80; 517.83] | 167.73 | 25.45 (5.45–31.80) [26.81; 35.70] | 20.80 [22.07; 27.94] |
+
+A second run of the same binary (20:01–20:06 local time, load averages 24–30)
+measured prefill medians of 59.63, 98.46 and 166.42 ms and model-only decode
+medians of 29.23 (21.69–31.77), 16.63 (6.36–30.90) and 30.30 (27.57–31.52)
+tok/s at 32, 128 and 512 tokens; its natural greedy loop took a median 3.304 s.
+
+All reference checks passed before timing in both runs (prompt cosine
+`0.9999985`, minimum cached `0.9999977`, minimum teacher `0.9999962`, 32 greedy
+decisions). Warm prefill is 2.9–3.9x faster than the controlled September 10
+series at 128 and 512 tokens. Decode is host-dispatch bound: the benchmark
+thread was busy in every profile sample, 43% of them inside
+`GatedDeltaNet::forward_with_state` issuing kernels, so CPU contention from the
+concurrent builds directly stretched decode steps (medians swung from 16.6 to
+30.3 tok/s between runs, minimum 5.45 tok/s). The best samples of both runs
+(27.6–32.1 tok/s) exceed every September 10 sample (at most 27.18 tok/s) by up
+to 18% but stay below the original ~36 tok/s. Whether this pass changed the
+historical ~25% slowdown therefore remains **undetermined**: it needs a rerun
+with agent work paused, as in September. Strict load took 1.117 s and 1.163 s,
+cold first token 0.973 s and 0.362 s. Whole-process maximum RSS was about
+2,641,700,000 bytes and peak footprint about 4,366,300,000 bytes in both runs,
+above the September 2,907,412,480-byte footprint; that increase is unexplained
+and recorded as a follow-up.
+
 ## Current smoke evidence
 
 These values establish correctness progress only. They include cold loading or
