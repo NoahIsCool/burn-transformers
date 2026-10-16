@@ -171,8 +171,10 @@ pub open spec fn explicit_row(
 /// Row `row` passes value validation and has rotary extent `context`.
 ///
 /// Valid tokens lie in `0..vocabulary`; explicit valid positions lie in
-/// `0..limit` when a limit is given and the extent is `1 + max p`; without
-/// explicit positions the extent is the row's implicit cursor `end`.
+/// `0..limit` when a limit is given and the extent is `1 + max p`, which must
+/// be a positive `usize` even without a limit (so a row whose largest valid
+/// position is negative never succeeds); without explicit positions the
+/// extent is the row's implicit cursor `end`.
 pub open spec fn row_context_ok(
     tokens: Seq<i64>,
     positions: Option<&[i64]>,
@@ -190,6 +192,7 @@ pub open spec fn row_context_ok(
             &&& (position_limit matches Some(limit)
                 ==> values_within(values, columns, limit as int))
             &&& is_maximum_at(values, columns, context - 1)
+            &&& 1 <= context <= usize::MAX
         },
         None => context == end,
     }
@@ -1388,7 +1391,8 @@ pub(crate) enum RowValueError {
         /// Exclusive position bound.
         limit: usize,
     },
-    /// The greatest valid position has no context extent `max + 1` in `usize`.
+    /// The greatest valid position is negative, or its context extent
+    /// `max + 1` does not fit `usize`.
     Unrepresentable,
 }
 
@@ -1400,6 +1404,11 @@ pub(crate) enum RowValueError {
 /// a limit is given. The extent is `1 + max p` for explicit positions and the
 /// implicit cursor `ends[r]` otherwise. The first failing row's error is
 /// returned, tokens before positions.
+///
+/// The proof covers rows without a position limit too: an explicit-position
+/// row succeeds only when `1 + max p` is a positive `usize`, so a row whose
+/// largest valid position is negative is `Unrepresentable` and is never
+/// skipped in favour of a later row's error.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(contexts =>
     requires

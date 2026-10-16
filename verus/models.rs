@@ -16,8 +16,10 @@
 //!   prefill and decode call returns exactly the specified outcome, with
 //!   errors in precedence order (rejected empty row, first impossible append,
 //!   first row with an out-of-range valid token, out-of-range valid position,
-//!   or unrepresentable extent) and otherwise the per-row columns, counts,
-//!   last columns, and rotary extents `1 + max p` or `L + n`;
+//!   or unrepresentable extent, where an explicit-position row succeeds only
+//!   when `1 + max p` is a positive `usize`, with or without a position
+//!   limit) and otherwise the per-row columns, counts, last columns, and
+//!   rotary extents `1 + max p` or `L + n`;
 //! - `split_readback`: the fused readback splits into its mask, token, and
 //!   position segments exactly;
 //! - `plan_last_selection`, `positions_within`, and `last_valid_column`:
