@@ -225,8 +225,10 @@ mod hardware {
     //!
     //! AArch64 with the `fp16` feature converts binary64 to binary16 with one
     //! correctly rounded `fcvt` (round to nearest, ties to even, with overflow to
-    //! infinity and gradual underflow), so it checks the software rounding for
-    //! every binary64 bit pattern independently of the reference decoder.
+    //! infinity and gradual underflow). The property compares the software
+    //! rounding with it on uniformly sampled binary64 bit patterns (the
+    //! proptest default of 256 cases per run), independently of the reference
+    //! decoder; it is a sampled check, not an exhaustive one.
 
     use super::*;
 
