@@ -93,6 +93,13 @@
 //! Burn block count `rows · (columns / G)`, proved equal to the flat group count
 //! `⌈rows · columns / G⌉` whenever `G` divides the width.
 //!
+//! It verifies `src/checkpoint/mapping/aliases.rs`: `walk_alias_chain` always
+//! terminates (each alias is visited at most once) and returns exactly the
+//! first event of the deterministic chain from its start: the aliases before
+//! it are distinct and each links onward, and the reported alias is the first
+//! one that is revisited (a cycle), owned by a primary target, or dangling, so
+//! every resolved alias reaches its storage owner along an acyclic chain.
+//!
 //! It verifies the rounding step of `src/checkpoint/runtime/rounding.rs`:
 //! `round_shifted` returns the integer nearest `significand / 2^shift` with ties
 //! to even (within half a unit, an exact tie gives an even result), bounded by
@@ -124,6 +131,9 @@ pub mod schedule;
 
 #[path = "../src/checkpoint/runtime/rounding.rs"]
 pub mod rounding;
+
+#[path = "../src/checkpoint/mapping/aliases.rs"]
+pub mod aliases;
 
 #[path = "../src/checkpoint/quantization/packing.rs"]
 pub mod packing;

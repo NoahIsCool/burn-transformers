@@ -12,9 +12,13 @@
 //! cannot allocate or mutate model parameters. Tied aliases resolve to one owner,
 //! while dtype conversion follows each architecture's precision contract.
 
+mod aliases;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+
+use aliases::{AliasLink, AliasWalk, walk_alias_chain};
 
 use super::{
     AliasRecord, ArtifactSource, CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest,
@@ -883,15 +887,55 @@ impl PlanBuilder<'_> {
     ///
     /// Each alias inherits its owner's shape and dtype, which must satisfy the
     /// alias's own expectation. Resolved alias targets join `produced`.
+    ///
+    /// Aliases are numbered in target-name order and linked to their sources;
+    /// the verified [`walk_alias_chain`] follows each chain to its first
+    /// owner, dangling source, or repeated alias, so resolution always
+    /// terminates and an owner is reached only along an acyclic chain.
     fn resolve_aliases(&mut self) -> Result<Vec<PlannedTensor>> {
         let primary_by_target: BTreeMap<_, _> = self
             .primary
             .iter()
             .map(|tensor| (tensor.target.as_str(), tensor))
             .collect();
+        let names = self.alias_specs.keys().collect::<Vec<_>>();
+        let sources = self.alias_specs.values().collect::<Vec<_>>();
+        let index_of = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect::<BTreeMap<_, _>>();
+        // A primary source owns storage; it is checked before alias sources.
+        let links = sources
+            .iter()
+            .map(|source| {
+                if primary_by_target.contains_key(source.as_str()) {
+                    AliasLink::Owner
+                } else if let Some(&next) = index_of.get(source.as_str()) {
+                    AliasLink::Next(next)
+                } else {
+                    AliasLink::Dangling
+                }
+            })
+            .collect::<Vec<_>>();
         let mut aliases = Vec::with_capacity(self.alias_specs.len());
-        for target in self.alias_specs.keys() {
-            let root_target = resolve_alias(target, &self.alias_specs, &primary_by_target)?;
+        for (start, &target) in names.iter().enumerate() {
+            let root_target = match walk_alias_chain(&links, start) {
+                AliasWalk::Owner(last) => sources[last],
+                AliasWalk::Cycle(repeated) => {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!("alias cycle contains `{}`", names[repeated]),
+                    });
+                }
+                AliasWalk::Dangling(last) => {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!(
+                            "alias `{target}` references unknown target `{}`",
+                            sources[last]
+                        ),
+                    });
+                }
+            };
             let root = primary_by_target[root_target.as_str()];
             let expectation = self.expected[target];
             ensure_shape(target, &expectation.shape, &root.shape)?;
@@ -1277,38 +1321,6 @@ fn resolve_dtype(
         });
     }
     Ok(resolved)
-}
-
-/// Follows alias chains to a storage owner and rejects cycles or dangling targets.
-fn resolve_alias<'a>(
-    target: &'a str,
-    aliases: &'a BTreeMap<String, String>,
-    primary: &BTreeMap<&str, &PlannedTensor>,
-) -> Result<&'a String> {
-    let mut cursor = target;
-    let mut visited = BTreeSet::new();
-    loop {
-        if !visited.insert(cursor) {
-            return Err(CheckpointError::InvalidMapping {
-                message: format!("alias cycle contains `{cursor}`"),
-            });
-        }
-        let source = aliases
-            .get(cursor)
-            .ok_or_else(|| CheckpointError::InvalidMapping {
-                message: format!("alias `{target}` has no source target"),
-            })?;
-        if primary.contains_key(source.as_str()) {
-            return Ok(source);
-        }
-        if aliases.contains_key(source) {
-            cursor = source;
-        } else {
-            return Err(CheckpointError::InvalidMapping {
-                message: format!("alias `{target}` references unknown target `{source}`"),
-            });
-        }
-    }
 }
 
 // Auditable transformations and conservative host/parameter storage accounting.
