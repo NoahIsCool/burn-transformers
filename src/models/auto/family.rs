@@ -23,7 +23,7 @@ use std::path::Path;
 use burn::tensor::backend::Backend;
 
 use crate::{
-    Error, Result,
+    Result,
     checkpoint::{
         CheckpointManifest, LanguageNamespace, LoadPlan, TensorSink, require_source_tensors,
     },
@@ -462,15 +462,16 @@ impl<B: Backend> CausalFamily<B> for GemmaForCausalLm<B> {
     /// Plans the text-only, multimodal, or original-release namespace present in the checkpoint.
     ///
     /// A multimodal checkpoint's vision tower is exempted by the contract
-    /// and reported as intentionally ignored.
+    /// and reported as intentionally ignored. A checkpoint with no Gemma
+    /// language embedding, or several, fails as [`crate::Error::CheckpointPlan`]
+    /// like every other planning failure.
     fn plan_checkpoint(
         config: &GemmaConfig,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
         let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
-        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))
-            .map_err(Error::Checkpoint)?;
+        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))?;
         let contract = config.checkpoint_contract(GemmaCheckpointOptions { source })?;
         let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })

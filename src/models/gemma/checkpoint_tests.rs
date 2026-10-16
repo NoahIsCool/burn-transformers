@@ -3,7 +3,7 @@
 //! vision exemptions, and namespace detection.
 
 use super::*;
-use crate::checkpoint::TensorOperation;
+use crate::checkpoint::{CheckpointError, TensorOperation};
 use crate::models::gemma::GemmaVariant;
 
 /// A small configuration of `variant`: `d = 8`, `f = 12`, two layers, `H = 4`, `K = 2`, `h = 2`.
@@ -248,21 +248,49 @@ fn multimodal_sources_refuse_a_final_soft_cap() {
 }
 
 /// Exactly one language embedding identifies the source.
+///
+/// No embedding, or several, is a typed [`CheckpointError`] that lists the
+/// candidate or present embeddings in detection order.
 #[test]
 fn sources_are_detected_from_the_embedding_name() {
     for source in GemmaCheckpointSource::ALL {
         let embedding = format!("{}.embed_tokens.weight", source.language_prefix());
         let names = [embedding.as_str(), "vision_tower.x", "lm_head.weight"];
-        assert_eq!(GemmaCheckpointSource::detect(names), Ok(source));
+        assert_eq!(GemmaCheckpointSource::detect(names).unwrap(), source);
     }
     let none = GemmaCheckpointSource::detect(["model.norm.weight"]).unwrap_err();
-    assert!(none.contains("none of"), "{none}");
+    assert_eq!(
+        none.to_string(),
+        "Gemma checkpoint contains none of the embeddings [\"model.embed_tokens.weight\", \
+         \"model.language_model.embed_tokens.weight\", \
+         \"language_model.model.embed_tokens.weight\"]"
+    );
+    assert!(
+        matches!(
+            &none,
+            CheckpointError::LanguageEmbeddingNotFound { family: "Gemma", embeddings }
+                if embeddings.len() == 3
+        ),
+        "{none:?}"
+    );
     let both = GemmaCheckpointSource::detect([
-        "model.embed_tokens.weight",
         "language_model.model.embed_tokens.weight",
+        "model.norm.weight",
+        "model.embed_tokens.weight",
     ])
     .unwrap_err();
-    assert!(both.contains("ambiguously"), "{both}");
+    assert!(
+        matches!(
+            &both,
+            CheckpointError::AmbiguousLanguageEmbedding { family: "Gemma", embeddings }
+                if embeddings == &[
+                    "model.embed_tokens.weight".to_owned(),
+                    "language_model.model.embed_tokens.weight".to_owned(),
+                ]
+        ),
+        "{both:?}"
+    );
+    assert!(both.to_string().contains("ambiguously"), "{both}");
     assert_eq!(
         GemmaCheckpointSource::default(),
         GemmaCheckpointSource::TextOnly

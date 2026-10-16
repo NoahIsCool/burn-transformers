@@ -87,16 +87,14 @@ pub enum GemmaCheckpointLoadError {
         #[from]
         ConfigError,
     ),
-    /// The manifest holds no (or several) Gemma language namespaces.
-    #[error("{0}")]
-    Namespace(
-        /// Detection diagnostic naming the candidate embeddings.
-        String,
-    ),
-    /// Discovery or expected/observed validation failed.
+    /// Discovery, namespace detection, or expected/observed validation failed.
+    ///
+    /// A manifest with no Gemma language embedding, or with several, is
+    /// [`CheckpointError::LanguageEmbeddingNotFound`] or
+    /// [`CheckpointError::AmbiguousLanguageEmbedding`].
     #[error(transparent)]
     Checkpoint(
-        /// Discovery or planning failure.
+        /// Discovery, detection, or planning failure.
         #[from]
         CheckpointError,
     ),
@@ -115,7 +113,7 @@ impl GemmaCheckpointLoadError {
     pub fn execution_failure(&self) -> Option<&ExecutionFailure<GemmaLoadError>> {
         match self {
             Self::Execution(failure) => Some(failure),
-            Self::Config(_) | Self::Namespace(_) | Self::Checkpoint(_) => None,
+            Self::Config(_) | Self::Checkpoint(_) => None,
         }
     }
 }
@@ -140,8 +138,7 @@ impl<B: Backend> GemmaForCausalLm<B> {
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, GemmaCheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
-        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))
-            .map_err(GemmaCheckpointLoadError::Namespace)?;
+        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))?;
         self.load_discovered(&manifest, options, GemmaCheckpointOptions { source })
     }
 

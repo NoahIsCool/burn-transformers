@@ -36,11 +36,13 @@
 //! - a [`CheckpointError`] from discovery or strict planning. Qwen3.5 and Muse
 //!   also report a failed layout detection this way, as
 //!   [`CheckpointError::LanguageNamespaceNotFound`] or
-//!   [`CheckpointError::AmbiguousLanguageNamespace`];
-//! - family-specific preconditions: Gemma and GPT-2 report a failed layout
-//!   detection as `Namespace`, GPT-2 rejects non-floating storage as
-//!   `NonFloatParameter`, and Qwen3.5 rejects MTP options that disagree with
-//!   the model's MTP graph as `UnloadedMtpGraph` or `MissingMtpGraph`;
+//!   [`CheckpointError::AmbiguousLanguageNamespace`], and Gemma as
+//!   [`CheckpointError::LanguageEmbeddingNotFound`] or
+//!   [`CheckpointError::AmbiguousLanguageEmbedding`];
+//! - family-specific preconditions: GPT-2 reports a failed layout detection
+//!   as `Namespace` and rejects non-floating storage as `NonFloatParameter`,
+//!   and Qwen3.5 rejects MTP options that disagree with the model's MTP graph
+//!   as `UnloadedMtpGraph` or `MissingMtpGraph`;
 //! - an execution failure, whose partial report `execution_failure()` returns.
 //!
 //! Every variant except the execution failure is raised before any parameter

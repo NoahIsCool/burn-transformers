@@ -264,8 +264,7 @@ impl Qwen3_5BackboneRecipe {
             .checkpoint_contract(Qwen3_5CheckpointOptions {
                 source,
                 include_mtp: false,
-            })
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            })?;
         let source_plan = source_contract.build_load_plan(&manifest, &options.checkpoint)?;
         let initialization_dtype = source_plan
             .tensors
@@ -480,12 +479,10 @@ impl Qwen3_5BackboneRecipe {
             ),
         ];
         for (index, config) in configurations.iter().enumerate() {
-            let contract = config
-                .checkpoint_contract(Qwen3_5CheckpointOptions {
-                    source: Qwen3_5CheckpointSource::TextOnly,
-                    include_mtp: false,
-                })
-                .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            let contract = config.checkpoint_contract(Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: false,
+            })?;
             for tensor in contract.expected_tensors() {
                 let Some(suffix) = tensor.name.strip_prefix("model.layers.0.") else {
                     continue;

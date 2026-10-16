@@ -5,19 +5,38 @@ use std::{fs::File, io::Write, path::Path};
 use burn::backend::Flex;
 
 use super::*;
-use crate::checkpoint::{CheckpointError, MappingPlan, TensorOperation};
+use crate::{
+    Error,
+    checkpoint::{CheckpointError, MappingPlan, TensorOperation},
+};
 
 /// Deterministic CPU backend; planning never allocates parameters.
 type B = Flex<f32, i32>;
 
-/// Writes a one-tensor SafeTensors shard whose only name is `lm_head.weight`.
-fn write_namespace_free_checkpoint(root: &Path) {
-    let header = br#"{"lm_head.weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+/// Writes a SafeTensors shard holding one zero F32 scalar under each name, in order.
+fn write_scalar_checkpoint(root: &Path, names: &[&str]) {
+    let entries: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let start = 4 * index;
+            format!(
+                r#""{name}":{{"dtype":"F32","shape":[1],"data_offsets":[{start},{}]}}"#,
+                start + 4
+            )
+        })
+        .collect();
+    let header = format!("{{{}}}", entries.join(","));
     let mut file = File::create(root.join("model.safetensors")).unwrap();
     file.write_all(&(header.len() as u64).to_le_bytes())
         .unwrap();
-    file.write_all(header).unwrap();
-    file.write_all(&[0; 4]).unwrap();
+    file.write_all(header.as_bytes()).unwrap();
+    file.write_all(&vec![0; 4 * names.len()]).unwrap();
+}
+
+/// Writes a one-tensor SafeTensors shard whose only name is `lm_head.weight`.
+fn write_namespace_free_checkpoint(root: &Path) {
+    write_scalar_checkpoint(root, &["lm_head.weight"]);
 }
 
 /// Typed planning failures convert into [`Error::CheckpointPlan`] with their complete message.
@@ -31,6 +50,21 @@ fn typed_planning_errors_convert_into_checkpoint_plan() {
         (
             CheckpointError::AmbiguousLanguageNamespace { family: "Muse" },
             "Muse checkpoint ambiguously contains wrapped and text-only language namespaces",
+        ),
+        (
+            CheckpointError::LanguageEmbeddingNotFound {
+                family: "Gemma",
+                embeddings: vec!["model.embed_tokens.weight".into()],
+            },
+            "Gemma checkpoint contains none of the embeddings [\"model.embed_tokens.weight\"]",
+        ),
+        (
+            CheckpointError::AmbiguousLanguageEmbedding {
+                family: "Gemma",
+                embeddings: vec!["a".into(), "b".into()],
+            },
+            "Gemma checkpoint ambiguously contains the embeddings of several language \
+             namespaces: [\"a\", \"b\"]",
         ),
     ] {
         let error = Error::from(error);
@@ -86,6 +120,54 @@ fn namespace_detection_failures_name_the_family() {
         ),
         "{muse}"
     );
+}
+
+/// Gemma planning reports a missing or ambiguous layout embedding as [`Error::CheckpointPlan`].
+///
+/// Each checkpoint holds as many tensors as the configuration's depth, so
+/// the tensor budget passes and Gemma's three-layout detection is reached;
+/// its failure is then as typed as Qwen3.5's and Muse's.
+#[test]
+fn gemma_layout_detection_failures_are_typed_planning_errors() {
+    let config: GemmaConfig = golden_config("gemma2");
+    let depth = <GemmaForCausalLm<B> as CausalFamily<B>>::minimum_checkpoint_tensors(&config);
+    let layers: Vec<String> = (0..depth)
+        .map(|index| format!("model.layers.{index}.input_layernorm.weight"))
+        .collect();
+    let options = AutoLoadOptions::default();
+    for (embeddings, ambiguous) in [
+        (&[][..], false),
+        (
+            &[
+                "model.embed_tokens.weight",
+                "model.language_model.embed_tokens.weight",
+            ][..],
+            true,
+        ),
+    ] {
+        let root = tempfile::TempDir::new().unwrap();
+        let mut names: Vec<&str> = layers.iter().map(String::as_str).collect();
+        names.extend_from_slice(embeddings);
+        write_scalar_checkpoint(root.path(), &names);
+        let error = <GemmaForCausalLm<B> as CausalFamily<B>>::plan_checkpoint(
+            &config,
+            root.path(),
+            &options,
+        )
+        .err()
+        .expect("Gemma planning needs exactly one layout embedding");
+        match &error {
+            Error::CheckpointPlan(CheckpointError::LanguageEmbeddingNotFound {
+                family: "Gemma",
+                embeddings,
+            }) if !ambiguous => assert_eq!(embeddings.len(), 3),
+            Error::CheckpointPlan(CheckpointError::AmbiguousLanguageEmbedding {
+                family: "Gemma",
+                embeddings: present,
+            }) if ambiguous => assert_eq!(present, embeddings),
+            _ => panic!("unexpected Gemma planning error: {error:?}"),
+        }
+    }
 }
 
 /// Parses a committed tiny-golden `config.json` into a family configuration.

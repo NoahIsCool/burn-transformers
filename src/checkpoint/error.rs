@@ -55,6 +55,28 @@ pub enum CheckpointError {
         /// Model family whose namespaces were probed, such as `Muse`.
         family: &'static str,
     },
+    /// A checkpoint of a family whose published layouts are each identified by
+    /// the name of their token embedding (Gemma's text-only, multimodal, and
+    /// original multimodal releases) contains none of those embeddings.
+    #[error("{family} checkpoint contains none of the embeddings {embeddings:?}")]
+    LanguageEmbeddingNotFound {
+        /// Model family whose layouts were probed, such as `Gemma`.
+        family: &'static str,
+        /// The identifying embedding of every probed layout, in detection order.
+        embeddings: Vec<String>,
+    },
+    /// A checkpoint contains the identifying token embeddings of more than one
+    /// published layout, so its language namespace is ambiguous.
+    #[error(
+        "{family} checkpoint ambiguously contains the embeddings of several language \
+         namespaces: {embeddings:?}"
+    )]
+    AmbiguousLanguageEmbedding {
+        /// Model family whose layouts were probed, such as `Gemma`.
+        family: &'static str,
+        /// The identifying embeddings present, in detection order.
+        embeddings: Vec<String>,
+    },
     /// The configuration needs more source tensors than the checkpoint holds.
     ///
     /// Every layer of every family owns at least one checkpoint tensor, so a

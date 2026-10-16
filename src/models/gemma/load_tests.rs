@@ -270,7 +270,13 @@ fn malformed_checkpoints_fail_before_installation() {
         .load_checkpoint(ambiguous.path(), &LoadOptions::default())
         .unwrap_err();
     assert!(
-        matches!(error, GemmaCheckpointLoadError::Namespace(_)),
+        matches!(
+            &error,
+            GemmaCheckpointLoadError::Checkpoint(CheckpointError::AmbiguousLanguageEmbedding {
+                family: "Gemma",
+                embeddings,
+            }) if embeddings.len() == 2
+        ),
         "{error}"
     );
     assert!(error.to_string().contains("ambiguously"), "{error}");
