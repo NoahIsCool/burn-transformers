@@ -226,8 +226,8 @@ pub fn mrope_frequency_axis(index: usize, height_sections: usize, width_sections
 
 /// Returns the number of distinct displacements `query_length + key_length - 1`.
 ///
-/// `None` signals an empty axis or an unrepresentable length;
-/// [`plan_relative_table`] reports it as a contextual fault.
+/// `None` signals an empty axis or an unrepresentable length; the crate's T5
+/// table plan (`plan_relative_table`) reports it as a contextual fault.
 ///
 /// Verified: `Some` exactly when both axes are non-empty and the length is
 /// representable, and then the length is exact.
