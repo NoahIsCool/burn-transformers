@@ -620,3 +620,195 @@ fn batched_timing() {
         );
     }
 }
+
+/// Allocation rejects capacities the positions or portable index range cannot address.
+///
+/// Both checks run before any cache tensor is allocated, so a capacity of
+/// `i32::MAX + 1` is rejected without reserving memory.
+#[test]
+fn decode_state_rejects_unaddressable_capacities() {
+    let device = Default::default();
+    let model = windowed_model(&device);
+    let error = model
+        .new_decode_state(CacheConfig::new(1, 65).unwrap(), 1, &device)
+        .expect_err("capacity beyond the position table");
+    assert!(
+        error
+            .to_string()
+            .contains("65 exceeds max_position_embeddings 64"),
+        "{error}"
+    );
+    let at_limit = model
+        .new_decode_state(CacheConfig::new(1, 64).unwrap(), 1, &device)
+        .expect("capacity equal to the position table");
+    assert_eq!(at_limit.capacity(), 64);
+    assert_eq!(at_limit.batch_size(), 1);
+    assert_eq!(at_limit.layer_count(), 3);
+    assert_eq!(at_limit.device(), &device);
+
+    let mut wide = model;
+    wide.model.config.max_position_embeddings = i32::MAX as usize + 1;
+    let error = wide
+        .new_decode_state(
+            CacheConfig::new(1, i32::MAX as usize + 1).unwrap(),
+            1,
+            &device,
+        )
+        .expect_err("capacity beyond the signed index range");
+    assert!(
+        error.to_string().contains("portable signed position-index"),
+        "{error}"
+    );
+}
+
+/// A state from another geometry, or a request for cached probabilities, is rejected atomically.
+#[test]
+fn stateful_calls_reject_foreign_states_and_open_transactions() {
+    let device = Default::default();
+    let model = windowed_model(&device);
+    let mut shallow_config = model.config().clone();
+    shallow_config.num_hidden_layers = 2;
+    shallow_config.mlp_only_layers = Vec::new();
+    let shallow = Qwen3MoeForCausalLm::<TestBackend>::init(shallow_config, &device).unwrap();
+    let mut foreign = shallow
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill(
+            masked_input(&[vec![true, true]], 1, &device),
+            &mut foreign,
+            &ForwardOptions::default(),
+        )
+        .expect_err("a two-layer state cannot serve a three-layer model");
+    assert!(error.to_string().contains("incompatible"), "{error}");
+
+    // The family allocates no speculative staging, so no transaction can
+    // ever be open when an ordinary call starts.
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    assert!(state.tensors.begin_transaction().is_err());
+    assert!(!state.tensors.has_active_transaction());
+
+    let error = model
+        .prefill(
+            masked_input(&[vec![true]], 1, &device),
+            &mut state,
+            &ForwardOptions {
+                attentions: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("cached attention probabilities are unavailable");
+    assert!(matches!(error, Error::BackendCapability(_)));
+}
+
+/// An all-finished decode returns rectangular zero traces and zero router logits.
+///
+/// No block runs, so the hidden-state trace (embedding, three blocks, final
+/// norm) and the two sparse layers' router logits are exact zeros with the
+/// shapes an active call would have, and the cache is unchanged.
+#[test]
+fn all_finished_decode_returns_zero_traces_and_routers() {
+    let device = Default::default();
+    let model = windowed_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            masked_input(&[vec![true, true], vec![true, false]], 1, &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let cache = readable_cache(&state);
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[0, 0], [0, 0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false, false], [false, false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                hidden_states: true,
+                router_logits: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2, 1]);
+    assert_eq!(readable_cache(&state), cache);
+    assert_eq!(output.hidden_states.len(), 5);
+    assert_eq!(output.routers.len(), 2);
+    let zero = |tensor: Tensor<TestBackend, 3>, shape: [usize; 3]| {
+        assert_eq!(tensor.dims(), shape);
+        assert!(
+            tensor
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+    };
+    for hidden in output.hidden_states {
+        zero(hidden, [2, 2, 8]);
+    }
+    for router in output.routers {
+        zero(router.logits.unwrap(), [2, 2, 4]);
+    }
+    zero(output.final_hidden_state.unwrap(), [2, 2, 8]);
+    zero(output.logits, [2, 2, 32]);
+}
+
+/// A state whose bank gained a second native-KV group no longer matches the model.
+#[test]
+fn stateful_calls_reject_a_bank_with_an_extra_group() {
+    let device = Default::default();
+    let model = windowed_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    state.tensors.main_mut().add_native_kv(state.spec).unwrap();
+    let error = model
+        .prefill(
+            masked_input(&[vec![true, true]], 1, &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect_err("two native groups cannot serve one homogeneous model");
+    assert!(error.to_string().contains("incompatible"), "{error}");
+    assert_eq!(state.lengths(), &[0]);
+}
+
+/// A mutated zero sliding window fails closed in cached execution instead of hiding every key.
+///
+/// Validation rejects a zero window, but the configuration is a public field;
+/// cached execution re-checks it before reading any cache slot.
+#[test]
+fn cached_execution_rejects_a_mutated_zero_window() {
+    let device = Default::default();
+    let mut model = windowed_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model.model.config.sliding_window = Some(0);
+    let error = model
+        .prefill(
+            masked_input(&[vec![true, true]], 1, &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect_err("a zero window is not a valid attention span");
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "qwen3_moe.sliding_window"),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[0]);
+}

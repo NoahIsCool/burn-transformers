@@ -61,3 +61,26 @@ proptest! {
         );
     }
 }
+
+/// Each overflow names the configuration product reported by the contract diagnostic.
+#[test]
+fn dimension_errors_name_their_configuration_products() {
+    assert_eq!(
+        DimensionError::Query.field(),
+        "num_attention_heads * head_dim"
+    );
+    assert_eq!(
+        DimensionError::KeyValue.field(),
+        "num_key_value_heads * head_dim"
+    );
+    let key_value_overflow = DimensionInputs {
+        attention_heads: 1,
+        key_value_heads: usize::MAX,
+        head_dim: 2,
+        ..inputs()
+    };
+    assert_eq!(
+        checkpoint_dimensions(key_value_overflow).err(),
+        Some(DimensionError::KeyValue)
+    );
+}

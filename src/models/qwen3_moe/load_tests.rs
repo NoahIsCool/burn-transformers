@@ -674,3 +674,239 @@ fn mixed_projections_scaled_cached_forward_and_router_parity() {
         assert_eq!(state.lengths(), &[4]);
     }
 }
+
+/// One `[1]`-shaped F32 payload; every rejection below fails before its shape matters.
+fn scalar() -> TensorData {
+    TensorData::from([0.0_f32])
+}
+
+/// Malformed names, out-of-range indices, and absent components each produce one typed error.
+///
+/// The model is untied, bias-free, and all-MoE, so dense-MLP and bias targets
+/// name components the configured topology does not own; Q/K norms are
+/// removed explicitly to exercise their topology guards.
+#[test]
+fn sink_reports_every_target_rejection_with_its_reason() {
+    let device = Default::default();
+    let mut model = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    model.model.layers[0].self_attn.query_norm = None;
+    model.model.layers[0].self_attn.key_norm = None;
+    let invalid_index = |target: &str, reason: &str| Qwen3MoeLoadError::InvalidIndex {
+        target: target.into(),
+        reason: reason.into(),
+    };
+    let missing = |target: &str, component: &'static str| Qwen3MoeLoadError::MissingComponent {
+        target: target.into(),
+        component,
+    };
+    let unknown = |target: &str| Qwen3MoeLoadError::UnknownTarget {
+        target: target.into(),
+    };
+    let cases = [
+        unknown("model.unknown.weight"),
+        unknown("model.layers.0.unknown.weight"),
+        unknown("model.layers.0.sparse_mlp.routed.0.bogus.weight"),
+        unknown("model.layers.0.sparse_mlp.routed.0."),
+        invalid_index(
+            "model.layers.0",
+            "expected `model.layers.<index>.<parameter>`",
+        ),
+        invalid_index("model.layers.0.", "parameter suffix must not be empty"),
+        invalid_index(
+            "model.layers.-1.input_layernorm.weight",
+            "`-1` is not a decimal usize: invalid digit found in string",
+        ),
+        invalid_index(
+            "model.layers.1.input_layernorm.weight",
+            "layer 1 is outside 0..1",
+        ),
+        invalid_index(
+            "model.layers.0.sparse_mlp.routed.2",
+            "expected `sparse_mlp.routed.<index>.<projection>`",
+        ),
+        invalid_index(
+            "model.layers.0.sparse_mlp.routed.x.up_proj.weight",
+            "invalid expert index `x`: invalid digit found in string",
+        ),
+        invalid_index(
+            "model.layers.0.sparse_mlp.routed.3.up_proj.weight",
+            "expert index is outside 0..3",
+        ),
+        missing("model.layers.0.self_attn.q_norm.weight", "query RMSNorm"),
+        missing("model.layers.0.self_attn.k_norm.weight", "key RMSNorm"),
+        missing(
+            "model.layers.0.self_attn.q_proj.bias",
+            "attention projection bias",
+        ),
+        missing(
+            "model.layers.0.self_attn.o_proj.bias",
+            "attention projection bias",
+        ),
+        missing("model.layers.0.dense_mlp.gate_proj.weight", "dense SwiGLU"),
+    ];
+    for expected in cases {
+        let target = match &expected {
+            Qwen3MoeLoadError::InvalidIndex { target, .. }
+            | Qwen3MoeLoadError::MissingComponent { target, .. }
+            | Qwen3MoeLoadError::UnknownTarget { target } => target.clone(),
+            other => panic!("unexpected case {other:?}"),
+        };
+        assert_eq!(
+            model.write_tensor(&target, scalar()),
+            Err(expected),
+            "{target}"
+        );
+    }
+
+    // A dense block owns no router or experts.
+    model.model.layers[0].sparse_mlp = None;
+    for target in [
+        "model.layers.0.sparse_mlp.router.weight",
+        "model.layers.0.sparse_mlp.routed.0.gate_proj.weight",
+    ] {
+        assert_eq!(
+            model.write_tensor(target, scalar()),
+            Err(missing(target, "routed MoE"))
+        );
+    }
+
+    // A tied model has no independent head to install.
+    let mut tied = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    assert_eq!(
+        tied.write_tensor("lm_head.weight", scalar()),
+        Err(missing(
+            "lm_head.weight",
+            "independent LM head for an untied checkpoint"
+        ))
+    );
+}
+
+/// Only the tied embedding-to-head alias is accepted, and only after its owner is installed.
+#[test]
+fn alias_requires_the_tied_installed_embedding_owner() {
+    let device = Default::default();
+    let alias_error = |target: &str, source: &str, reason: &str| Qwen3MoeLoadError::InvalidAlias {
+        target: target.into(),
+        source_target: source.into(),
+        reason: reason.into(),
+    };
+    let mut tied = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    for (target, source) in [
+        ("lm_head.weight", "model.norm.weight"),
+        ("model.norm.weight", "model.embed_tokens.weight"),
+    ] {
+        assert_eq!(
+            tied.alias_tensor(target, source),
+            Err(alias_error(
+                target,
+                source,
+                "only the tied embedding-to-LM-head alias is supported"
+            ))
+        );
+    }
+    assert_eq!(
+        tied.alias_tensor("lm_head.weight", "model.embed_tokens.weight"),
+        Err(alias_error(
+            "lm_head.weight",
+            "model.embed_tokens.weight",
+            "the embedding storage owner has not been installed"
+        ))
+    );
+    tied.write_tensor(
+        "model.embed_tokens.weight",
+        TensorData::zeros::<f32, _>([16, 4]),
+    )
+    .unwrap();
+    tied.alias_tensor("lm_head.weight", "model.embed_tokens.weight")
+        .expect("the installed tied owner aliases the head");
+
+    let mut untied = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    assert_eq!(
+        untied.alias_tensor("lm_head.weight", "model.embed_tokens.weight"),
+        Err(alias_error(
+            "lm_head.weight",
+            "model.embed_tokens.weight",
+            "the configured model declares an independent LM head"
+        ))
+    );
+}
+
+/// A sink rejection during streaming is an execution failure with partial diagnostics.
+///
+/// The checkpoint matches the configuration's contract, so planning succeeds;
+/// removing layer 0's expert bank afterwards makes the sink reject its first
+/// routed tensor, which the error reports together with the failed target.
+/// Planning and configuration failures carry no execution diagnostics.
+#[test]
+fn loader_distinguishes_configuration_planning_and_execution_failures() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+
+    let mut model = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    model.model.layers[0].sparse_mlp = None;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .expect_err("the sink cannot install the expert bank");
+    let failure = error
+        .execution_failure()
+        .expect("execution reached the sink");
+    let target = failure.failed_target.as_deref().expect("failed target");
+    assert!(target.starts_with("model.layers.0.sparse_mlp."), "{target}");
+    assert!(matches!(
+        &failure.cause,
+        crate::checkpoint::ExecutionFailureCause::Sink(Qwen3MoeLoadError::MissingComponent {
+            component: "routed MoE",
+            ..
+        })
+    ));
+    assert!(error.to_string().contains(target));
+
+    let mut model = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    model.model.config.num_experts_per_tok = model.model.config.num_experts + 1;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .expect_err("an invalid configuration has no contract");
+    assert!(matches!(
+        &error,
+        Qwen3MoeCheckpointLoadError::Config(config) if config.field == "num_experts_per_tok"
+    ));
+    assert!(error.execution_failure().is_none());
+
+    let empty = TempDir::new().unwrap();
+    let mut model = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let error = model
+        .load_checkpoint(empty.path(), &LoadOptions::default())
+        .expect_err("an empty directory has no checkpoint");
+    assert!(matches!(error, Qwen3MoeCheckpointLoadError::Checkpoint(_)));
+    assert!(error.execution_failure().is_none());
+}
+
+/// A tied configuration whose model nevertheless owns an independent head rejects the alias.
+///
+/// The alias records that the head *is* the embedding; a separately owned
+/// head would silently diverge from it, so the inconsistent module fails.
+#[test]
+fn tied_alias_rejects_a_model_that_owns_a_head() {
+    let device = Default::default();
+    let mut tied = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let untied = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    tied.lm_head = untied.lm_head;
+    tied.write_tensor(
+        "model.embed_tokens.weight",
+        TensorData::zeros::<f32, _>([16, 4]),
+    )
+    .unwrap();
+    assert_eq!(
+        tied.alias_tensor("lm_head.weight", "model.embed_tokens.weight"),
+        Err(Qwen3MoeLoadError::InvalidAlias {
+            target: "lm_head.weight".into(),
+            source_target: "model.embed_tokens.weight".into(),
+            reason: "the configured model declares an independent LM head".into(),
+        })
+    );
+}
