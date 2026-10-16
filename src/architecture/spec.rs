@@ -44,10 +44,11 @@
 //! checks validation against direct construction of each component in both
 //! directions.
 //!
-//! `validate` checks that a spec is well formed. A few well-formed variants
-//! ([`ResidualTopology::Gated`], [`MixerSpec::Mamba2`]) are describable but not
-//! yet executable by the modular models, whose `init` rejects them with a
-//! capability error before allocating parameters.
+//! `validate` checks that a spec is well formed. One well-formed variant,
+//! [`ResidualTopology::Gated`], is describable but not executable by the
+//! modular models, whose `init` rejects it with a capability error before
+//! allocating parameters. Every other variant, [`MixerSpec::Mamba2`]
+//! included, builds and runs.
 
 use super::constraints::{
     ExpertCheck, HeadCheck, MlaCheck, StackCheck, attention_heads, cross_projection_fits,
@@ -1054,8 +1055,14 @@ pub enum MixerSpec {
     },
     /// Mamba2 structured state-space mixing.
     ///
-    /// Describable and validated, but not yet executable: the modular models
-    /// reject it at `init` with a capability error.
+    /// Executable: the modular models run it on the shared [`crate::mamba2`]
+    /// kernel. Settings this spec does not carry (SSD chunk width 256, the
+    /// no-op time-step bound, no projection bias, a convolution bias) take the
+    /// Hugging Face `Mamba2Config` defaults, and the gated group norm reuses
+    /// the block's mixer-norm epsilon. Construction rejects a
+    /// `convolution_kernel` below two, which the kernel cannot run. The scan
+    /// is intrinsically causal: an encoder stack or a bidirectional or custom
+    /// attention policy is rejected with a capability error.
     Mamba2(
         /// Recurrent state, head grouping, and convolution dimensions.
         Mamba2Spec,
