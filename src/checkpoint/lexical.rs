@@ -17,7 +17,8 @@
 //!   `.` and one or more zeros ([`integral_lexeme_digits`]);
 //! - a provenance shard key is canonical: every component is nonempty and
 //!   neither `.` nor `..` ([`canonical_components`]), and a digest is exactly 64
-//!   lowercase hexadecimal characters ([`is_lowercase_sha256`]).
+//!   lowercase hexadecimal characters ([`is_lowercase_sha256`]); digests are
+//!   spelled that way by [`spell_lower_hex`].
 //!
 //! The module has no crate, Burn, or allocator dependencies so that Verus can
 //! check it in place through `verus/checkpoint.rs`. Callers keep the
@@ -97,6 +98,24 @@ pub open spec fn canonical_segments(path: Seq<u8>) -> bool {
 /// Specification: `byte` is a lowercase hexadecimal digit.
 pub open spec fn is_lower_hex(byte: u8) -> bool {
     (48 <= byte <= 57) || (97 <= byte <= 102)
+}
+
+/// Specification: the value of a lowercase hexadecimal digit, `0-9` then `a-f` as 10-15.
+pub open spec fn hex_value(byte: u8) -> int {
+    if byte <= 57 {
+        byte - 48
+    } else {
+        byte - 87
+    }
+}
+
+/// Specification: `spelled` is the lowercase hexadecimal spelling of `bytes`,
+/// two digits per byte, high nibble first.
+pub open spec fn spells_lower_hex(bytes: Seq<u8>, spelled: Seq<u8>) -> bool {
+    &&& spelled.len() == 2 * bytes.len()
+    &&& forall|i: int| 0 <= i < spelled.len() ==> is_lower_hex(#[trigger] spelled[i])
+    &&& forall|i: int| 0 <= i < bytes.len()
+        ==> 16 * hex_value(spelled[2 * i]) + hex_value(spelled[2 * i + 1]) == #[trigger] bytes[i]
 }
 
 /// Specification: `digits` is a canonical unsigned decimal: nonempty ASCII
@@ -383,6 +402,74 @@ pub(crate) fn is_lowercase_sha256(digest: &[u8]) -> bool {
 ))]
 const fn is_lowercase_hex_digit(byte: u8) -> bool {
     (byte >= b'0' && byte <= b'9') || (byte >= b'a' && byte <= b'f')
+}
+
+/// Returns the lowercase hexadecimal digit of a four-bit value.
+///
+/// Verified: a lowercase digit (`0-9`, `a-f`) whose value is exactly `nibble`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(digit =>
+    requires
+        nibble < 16,
+    ensures
+        is_lower_hex(digit),
+        hex_value(digit) == nibble,
+))]
+const fn lowercase_hex_digit(nibble: u8) -> u8 {
+    if nibble < 10 {
+        b'0' + nibble
+    } else {
+        b'a' + (nibble - 10)
+    }
+}
+
+/// Writes the lowercase hexadecimal spelling of `bytes` into `spelled`, high nibble first.
+///
+/// Verified: `spelled` then holds only lowercase hexadecimal digits, and
+/// digits `2 i` and `2 i + 1` decode to byte `i` (`16 · high + low`), so the
+/// spelling is injective and decodes back to the input. A 32-byte SHA-256
+/// digest therefore spells as exactly the 64 lowercase hexadecimal bytes that
+/// [`is_lowercase_sha256`] accepts.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    requires
+        old(spelled)@.len() == 2 * bytes@.len(),
+    ensures
+        spells_lower_hex(bytes@, final(spelled)@),
+))]
+pub(crate) fn spell_lower_hex(bytes: &[u8], spelled: &mut [u8]) {
+    // `at == 2 * index` walks the spelling; bounding it by `spelled.len()`
+    // keeps `at + 1` and `at + 2` overflow-free.
+    let mut index = 0;
+    let mut at = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            at == 2 * index,
+            index <= bytes@.len(),
+            spelled@.len() == 2 * bytes@.len(),
+            forall|i: int| 0 <= i < at ==> is_lower_hex(#[trigger] spelled@[i]),
+            forall|i: int| 0 <= i < index
+                ==> 16 * hex_value(spelled@[2 * i]) + hex_value(spelled@[2 * i + 1])
+                    == #[trigger] bytes@[i],
+        decreases bytes@.len() - index,
+    ))]
+    while at < spelled.len() {
+        let byte = bytes[index];
+        let high = byte >> 4;
+        let low = byte & 0x0f;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(high < 16 && low < 16 && 16 * high + low == byte) by (bit_vector)
+                requires
+                    high == byte >> 4u8,
+                    low == byte & 0x0fu8,
+            ;
+        }
+        spelled[at] = lowercase_hex_digit(high);
+        spelled[at + 1] = lowercase_hex_digit(low);
+        index += 1;
+        at += 2;
+    }
 }
 
 /// Returns whether `bytes[start..end]` contains only ASCII digits.

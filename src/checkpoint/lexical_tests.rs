@@ -214,7 +214,44 @@ fn lowercase_digests_match_the_original_rule() {
     assert!(!is_lowercase_sha256(format!("{valid}0").as_bytes()));
 }
 
+/// Spells `bytes` with the original nibble-table encoder.
+fn reference_spelling(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| [HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]])
+        .collect()
+}
+
+/// Every byte spells as its two lowercase digits, and a digest spells canonically.
+#[test]
+fn hex_spelling_matches_the_table_encoder() {
+    let every_byte = (0..=u8::MAX).collect::<Vec<_>>();
+    let mut spelled = vec![0; 2 * every_byte.len()];
+    spell_lower_hex(&every_byte, &mut spelled);
+    assert_eq!(spelled, reference_spelling(&every_byte));
+    for (byte, pair) in every_byte.iter().zip(spelled.chunks_exact(2)) {
+        assert_eq!(pair, format!("{byte:02x}").as_bytes());
+    }
+    let digest = [0xa5_u8; 32];
+    let mut spelled = [0; 64];
+    spell_lower_hex(&digest, &mut spelled);
+    assert!(is_lowercase_sha256(&spelled));
+    let mut empty: [u8; 0] = [];
+    spell_lower_hex(&[], &mut empty);
+}
+
 proptest! {
+    /// Arbitrary byte strings spell exactly as the original table encoder does.
+    #[test]
+    fn arbitrary_bytes_spell_like_the_table_encoder(
+        bytes in proptest::collection::vec(any::<u8>(), 0..80),
+    ) {
+        let mut spelled = vec![0; 2 * bytes.len()];
+        spell_lower_hex(&bytes, &mut spelled);
+        prop_assert_eq!(spelled, reference_spelling(&bytes));
+    }
+
     /// Arbitrary byte strings get the same path verdict as the original rules.
     #[test]
     fn arbitrary_paths_match_the_original_rules(path in "[a-zA-Z0-9:./\\\\\\x00]{0,12}") {

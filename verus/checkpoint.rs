@@ -58,7 +58,10 @@
 //! - `integral_lexeme_digits` accepts exactly the lexemes whose part before the
 //!   first `.` is nonempty digits and whose fraction, if any, is nonempty zeros,
 //!   returning the integer digits' length; `is_lowercase_sha256` accepts exactly
-//!   64 lowercase hexadecimal bytes.
+//!   64 lowercase hexadecimal bytes, and `spell_lower_hex` writes two lowercase
+//!   digits per byte, high nibble first, that decode back to the byte (so the
+//!   spelling is injective and every SHA-256 digest the loader records passes
+//!   `is_lowercase_sha256`).
 //!
 //! # Planning and execution
 //!

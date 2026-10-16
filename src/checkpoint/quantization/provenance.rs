@@ -48,7 +48,7 @@ use super::{
 use crate::checkpoint::{
     CheckpointManifest, LoadPlan, PlannedSource, PlannedTensor, PlannedTransform,
     artifact::deserialize_unique_map,
-    lexical::{canonical_components, is_lowercase_sha256, lexical_path_violation},
+    lexical::{canonical_components, is_lowercase_sha256, lexical_path_violation, spell_lower_hex},
 };
 
 /// Domain separator for the canonical v2 load-plan digest.
@@ -760,16 +760,15 @@ fn hash_usize(hasher: &mut Sha256, value: usize) {
 }
 
 /// Encodes a digest without adding a separate hexadecimal dependency.
+///
+/// The verified [`spell_lower_hex`] writes two lowercase digits per byte, high nibble first, so a SHA-256
+/// digest spells as the 64 lowercase hexadecimal bytes that
+/// [`validate_sha256`] accepts.
 fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    /// Lowercase hexadecimal digits indexed by a four-bit nibble.
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = digest.as_ref();
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
+    let mut spelled = vec![0_u8; bytes.len() * 2];
+    spell_lower_hex(bytes, &mut spelled);
+    spelled.into_iter().map(char::from).collect()
 }
 
 /// Computes the digest of a fully materialized packed tensor payload.
