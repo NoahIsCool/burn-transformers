@@ -13,11 +13,12 @@
 //! operation overflows; that the limits are at least their floors and exact
 //! below saturation; that a budget charge succeeds exactly when the new total
 //! stays within the budget and then adds exactly the charge; that repetition
-//! sizes are exact products or `None` on overflow; and that the replacement
-//! and indentation bounds are at least the input length and exact below
-//! saturation. Whether these bounds dominate the text MiniJinja's `replace`
-//! and `indent` produce is a property of string semantics, covered by the
-//! sandbox's Rust tests.
+//! sizes are exact products or `None` on overflow; that the replacement and
+//! indentation bounds are at least the input length; and that the
+//! indentation bound is also exact below saturation (the replacement bound
+//! is only proved to be at least the input length). Whether these bounds
+//! dominate the text MiniJinja's `replace` and `indent` produce is a
+//! property of string semantics, covered by the sandbox's Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
