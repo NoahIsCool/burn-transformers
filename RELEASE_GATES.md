@@ -820,7 +820,21 @@ Two maintenance notices remain explicitly tracked:
   tokenizers. This is a build-time macro dependency.
 
 The runner waives only these two unmaintained-package notices, not new warnings
-or vulnerabilities. Revisit them when upgrading Burn or tokenizers; do not fork
+or vulnerabilities.
+
+The check runs in two parts. `cargo audit` checks every lockfile entry for
+vulnerabilities, including Burn's optional backends that no feature here
+activates. `cargo deny check advisories` judges advisories and yanked versions
+over the graph this crate actually builds with all of its own features
+(`deny.toml` lists the same two notices). On 2026-10-16 the connected audit in
+CI reported seven advisories in `quinn-proto 0.11.17` and `rustls 0.23.43`,
+reached through `cubecl-cpu`'s LLVM bundler download (the `cpu` feature); the
+lockfile now pins `quinn-proto 0.11.19` and `rustls 0.23.46`, the newest
+versions compatible with Rust 1.92. Every `zip 0.6` and `zip 7.x` release is
+yanked, and those entries come only from Burn's optional Candle and LibTorch
+backends (`candle-core 0.10.2`, `tch 0.22.0`), which no feature of this crate
+enables, so they are never compiled; cargo-deny's built-graph check keeps
+rejecting any yanked crate that is. Revisit them when upgrading Burn or tokenizers; do not fork
 the inference stack merely to suppress an informational notice. A fresh
 connected audit is required before release. The [2026-09-10 connected audit](acceptance/measurements/connected-dependency-audit-20260910/manifest.json)
 passes with zero vulnerabilities/new warnings, completed yanked lookup, and

@@ -524,16 +524,17 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
             "--lib", "--tests", "--json", "--output-path", str(output / "coverage.json"),
         ]]
     if gate == "dependencies":
-        audit = ["cargo", "audit", "--file", str(CRATE / "Cargo.lock"), "--deny", "warnings"]
+        # cargo-audit checks every lockfile entry for vulnerabilities, including
+        # optional Burn backends that no feature activates; cargo-deny judges
+        # advisories and yanked versions over the graph this crate builds.
+        audit = ["cargo", "audit", "--file", str(CRATE / "Cargo.lock"), "--deny", "warnings", "--no-yanked"]
         if offline:
-            audit += ["--no-fetch", "--no-yanked"]
+            audit += ["--no-fetch"]
         for advisory in MAINTENANCE_NOTICES:
             audit += ["--ignore", advisory]
-        return [
-            audit,
-            ["cargo", "deny"] + manifest + locked
-            + ["--config", str(CRATE / "deny.toml"), "check", "licenses", "sources"],
-        ]
+        # `locked` carries `--offline`, which also stops cargo-deny fetching its database.
+        deny = ["cargo", "deny"] + manifest + locked + ["--config", str(CRATE / "deny.toml"), "check"]
+        return [audit, deny + ["advisories", "licenses", "sources"]]
     if gate == "accelerator-compile":
         return [
             cargo + ["check"] + manifest + locked

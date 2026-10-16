@@ -26,6 +26,16 @@ allow = ["MPL-2.0"]
 crate = "webpki-roots@=1.0.9"
 allow = ["CDLA-Permissive-2.0"]
 
+# Advisories for the graph this crate actually builds (all of its own features).
+# `cargo audit` separately checks every lockfile entry for vulnerabilities,
+# including optional dependencies of Burn that no feature here activates.
+[advisories]
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "unmaintained notice for bincode 2.0.1, inherited from pinned Burn Core" },
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained notice for paste 1.0.15, a build-time macro dependency of CubeCL, Flex/GEMM, and tokenizers" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

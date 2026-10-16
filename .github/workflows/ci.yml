@@ -125,13 +125,13 @@ jobs:
       # Library, integration, and documentation tests with default features.
       # Checkpoint and hardware tests are #[ignore]d and need local artifacts.
       - name: Default features
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
       # Adds the autodiff gradient tests (a superset of
       # `cargo test --features autodiff --lib`) and the tokenizer,
       # chat-template, and training tests that default features compile out.
       - name: Every CPU feature
         run: |
-          cargo test --locked --no-default-features --features "$CPU_FEATURES" --lib --tests
+          cargo test --locked --no-fail-fast --no-default-features --features "$CPU_FEATURES" --lib --tests
           cargo test --locked --no-default-features --features "$CPU_FEATURES" --doc
       # qwen35_chat needs Metal to build; its argument tests create no device.
       - name: Metal example argument tests
@@ -200,7 +200,7 @@ jobs:
       - name: Build every CPU example
         run: cargo build --release --locked --examples --no-default-features --features "$CPU_FEATURES"
       - name: Tests embedded in examples
-        run: cargo test --release --locked --examples --no-default-features --features "$CPU_FEATURES"
+        run: cargo test --release --locked --no-fail-fast --examples --no-default-features --features "$CPU_FEATURES"
       # Download-free examples with their own numerical assertions. Training
       # examples run their short modes; full studies are documented separately.
       - name: Run download-free examples
@@ -333,12 +333,15 @@ jobs:
       # The versions RELEASE_GATES.md reviewed; update both places together.
       - name: Install cargo-audit and cargo-deny
         run: cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2
-      # The ignored IDs are unmaintained-crate notices, not vulnerabilities;
-      # they match MAINTENANCE_NOTICES in scripts/check_release.py.
-      - name: Advisories
-        run: cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2024-0436
-      - name: Licenses and sources
-        run: cargo deny --locked --config deny.toml check licenses sources
+      # cargo-audit checks every lockfile entry, including optional Burn
+      # backends that no feature here activates; yanked crates are judged by
+      # cargo-deny over the graph this crate builds. The ignored IDs are
+      # unmaintained-crate notices, not vulnerabilities; they match
+      # MAINTENANCE_NOTICES in scripts/check_release.py and deny.toml.
+      - name: Vulnerabilities in the whole lockfile
+        run: cargo audit --file Cargo.lock --deny warnings --no-yanked --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2024-0436
+      - name: Advisories, yanked crates, licenses, and sources of the built graph
+        run: cargo deny --locked --config deny.toml check advisories licenses sources
 
   proof-changes:
     name: Detect proof-relevant changes

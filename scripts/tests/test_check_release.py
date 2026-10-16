@@ -649,6 +649,20 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(command.count("--ignore"), 2)
         self.assertIn("--deny", command)
 
+    def test_built_graph_advisories_include_yanked_checks(self):
+        """cargo-deny judges advisories over the built graph, offline without fetching."""
+
+        for offline in (False, True):
+            deny = GATES.command_plan("dependencies", Path("/tmp/output"), "stable", "1.92.0", offline)[1]
+            self.assertEqual(deny[-3:], ["advisories", "licenses", "sources"])
+            self.assertEqual("--offline" in deny, offline)
+            audit = GATES.command_plan("dependencies", Path("/tmp/output"), "stable", "1.92.0", offline)[0]
+            self.assertIn("--no-yanked", audit)
+        policy = (GATES.CRATE / "deny.toml").read_text()
+        self.assertIn('yanked = "deny"', policy)
+        for advisory in GATES.MAINTENANCE_NOTICES:
+            self.assertIn(advisory, policy)
+
     def test_source_experiments_run_without_checkpoint_or_network_preparation(self):
         """Compilation alone cannot validate the public experiments' assertions."""
 
