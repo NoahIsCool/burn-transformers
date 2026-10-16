@@ -1466,6 +1466,36 @@ fn state_allocation_rejects_empty_batches_and_integer_storage() {
     );
 }
 
+/// A manually zeroed chunk size fails stateless allocation and chunked prefill, not decode.
+///
+/// `Mamba2::config` reconstructs the topology without validating it, so the
+/// stateless forward rejects the zero chunk size while allocating its zero
+/// state. With supplied state only chunked prefill uses the chunk width: it
+/// reports the scan's `mamba2.chunk` error, while the recurrent path, which
+/// never chunks, still runs.
+#[test]
+fn manual_zero_chunk_size_fails_only_where_chunks_are_used() {
+    let device = Default::default();
+    let mut mixer = config().init::<TestBackend>(&device).unwrap();
+    mixer.chunk_size = 0;
+    let state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    let hidden = waves([1, 3, 8], 0.5, 0.4);
+    assert_configuration(
+        mixer.forward(hidden.clone(), None, Mamba2Mode::Recurrent),
+        "mamba2",
+        "must be non-zero",
+    );
+    assert_configuration(
+        mixer.forward_with_state(hidden.clone(), None, &state, Mamba2Mode::ChunkedPrefill),
+        "mamba2.chunk",
+        "non-zero chunk width",
+    );
+    let (output, _) = mixer
+        .forward_with_state(hidden, None, &state, Mamba2Mode::Recurrent)
+        .expect("the recurrent path never chunks");
+    assert_eq!(output.dims(), [1, 3, 8]);
+}
+
 /// Hidden states, token masks, and external state must match the mixer geometry.
 #[test]
 fn mismatched_inputs_and_state_are_shape_errors() {
