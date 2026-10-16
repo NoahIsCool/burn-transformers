@@ -722,6 +722,14 @@ fn scalar_validators_reject_out_of_range_values() {
         ("heads", "must be divisible by groups")
     );
     divisible("test", "heads", 8, "groups", 4).unwrap();
+    // Zero counts name the zero field, numerator first, with `nonzero`'s message.
+    for (numerator, denominator, field) in [(0, 4, "heads"), (0, 0, "heads"), (8, 0, "groups")] {
+        let error = divisible("test", "heads", numerator, "groups", denominator).unwrap_err();
+        assert_eq!(
+            (error.field, error.reason.as_str()),
+            (field, "must be nonzero")
+        );
+    }
     let error = model_type("test", "llama", &["qwen3"]).unwrap_err();
     assert_eq!(error.field, "model_type");
     assert!(error.reason.contains("\"llama\""), "{}", error.reason);
