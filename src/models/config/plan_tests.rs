@@ -178,3 +178,82 @@ fn lexer_step_tracks_strings_and_escapes() {
     assert_eq!(lexer_advance(true, true, b'"'), (true, false));
     assert_eq!(lexer_advance(true, true, b'\\'), (true, false));
 }
+
+/// Counts are accepted exactly in `1..=maximum`, a zero reported before an excess.
+#[test]
+fn count_faults_follow_check_order() {
+    assert_eq!(count_fault(1, 1), None);
+    assert_eq!(count_fault(7, usize::MAX), None);
+    assert_eq!(count_fault(0, 0), Some(CountFault::Zero));
+    assert_eq!(count_fault(0, 8), Some(CountFault::Zero));
+    assert_eq!(count_fault(9, 8), Some(CountFault::AboveMaximum));
+    assert_eq!(
+        count_fault(usize::MAX, 1 << 20),
+        Some(CountFault::AboveMaximum)
+    );
+}
+
+/// The inventory total is exact, and any overflow (but only a real one) is `None`.
+#[test]
+fn moe_inventories_are_exact_or_overflow() {
+    let qwen3_30b = MoeInventory {
+        fixed: 3,
+        layers: 48,
+        per_layer: 8,
+        sparse_layers: 48,
+        per_sparse_layer: 1,
+        experts: 128,
+        per_expert: 3,
+        per_dense_layer: 3,
+    };
+    assert_eq!(
+        moe_inventory(qwen3_30b),
+        Some(3 + 48 * 8 + 48 * (1 + 128 * 3))
+    );
+    let mixed = MoeInventory {
+        sparse_layers: 1,
+        ..qwen3_30b
+    };
+    assert_eq!(moe_inventory(mixed), Some(3 + 48 * 8 + (1 + 384) + 47 * 3));
+    // Without sparse layers the expert product is never formed.
+    let dense = MoeInventory {
+        sparse_layers: 0,
+        experts: usize::MAX,
+        per_expert: usize::MAX,
+        ..qwen3_30b
+    };
+    assert_eq!(moe_inventory(dense), Some(3 + 48 * 8 + 48 * 3));
+    for overflowing in [
+        MoeInventory {
+            experts: usize::MAX,
+            ..qwen3_30b
+        },
+        MoeInventory {
+            layers: usize::MAX,
+            sparse_layers: 0,
+            ..qwen3_30b
+        },
+        MoeInventory {
+            fixed: usize::MAX,
+            ..qwen3_30b
+        },
+        MoeInventory {
+            experts: usize::MAX / 3,
+            ..mixed
+        },
+    ] {
+        assert_eq!(moe_inventory(overflowing), None, "{overflowing:?}");
+    }
+    // The largest representable total is still exact.
+    let exact = MoeInventory {
+        fixed: usize::MAX - 1,
+        layers: 1,
+        per_layer: 1,
+        sparse_layers: 0,
+        per_sparse_layer: 0,
+        experts: 0,
+        per_expert: 0,
+        per_dense_layer: 0,
+    };
+    assert_eq!(moe_inventory(exact), Some(usize::MAX));
+}

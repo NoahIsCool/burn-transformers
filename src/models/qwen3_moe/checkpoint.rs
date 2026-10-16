@@ -14,6 +14,7 @@ use crate::checkpoint::{
 };
 
 use super::{ConfigError, Qwen3MoeConfig, Validate};
+use crate::models::config::{MoeInventory, moe_inventory};
 
 /// Family label attached to checkpoint geometry errors.
 const FAMILY: &str = "qwen3_moe";
@@ -81,19 +82,22 @@ impl Qwen3MoeConfig {
     /// before any contract or graph is built, using checked arithmetic
     /// because `L` and `E` come from untrusted metadata.
     pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
-        let layers = self.num_hidden_layers;
-        let sparse = self
+        let sparse_layers = self
             .moe_layer_flags()
             .into_iter()
             .filter(|&sparse| sparse)
             .count();
-        let per_layer = if self.attention_bias { 12 } else { 8 };
-        let per_sparse_layer = self.num_experts.checked_mul(3)?.checked_add(1)?;
-        layers
-            .checked_mul(per_layer)?
-            .checked_add(sparse.checked_mul(per_sparse_layer)?)?
-            .checked_add((layers - sparse).checked_mul(3)?)?
-            .checked_add(3)
+        // The Verus-verified total is exact or `None` on overflow.
+        moe_inventory(MoeInventory {
+            fixed: 3,
+            layers: self.num_hidden_layers,
+            per_layer: if self.attention_bias { 12 } else { 8 },
+            sparse_layers,
+            per_sparse_layer: 1,
+            experts: self.num_experts,
+            per_expert: 3,
+            per_dense_layer: 3,
+        })
     }
 
     /// Derives the full parameter contract from validated topology metadata.

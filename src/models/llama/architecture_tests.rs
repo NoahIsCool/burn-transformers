@@ -486,6 +486,7 @@ fn dynamic_ntk_is_inert_within_the_accepted_positions() {
         tensor::{Int, Tensor, TensorData},
     };
 
+    /// CPU backend with F32 values and I32 indices.
     type B = Flex<f32, i32>;
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/tiny_goldens/llama-bias-tied");

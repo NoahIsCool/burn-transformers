@@ -33,9 +33,11 @@ use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use plan::{
-    DivisibilityFault, INFINITY_TOKEN_LENGTH, MropeSectionFault, TokenIdFault, divisibility_fault,
-    infinity_token_starts, mrope_section_fault, original_context_fits, token_id_fault,
+    CountFault, DivisibilityFault, INFINITY_TOKEN_LENGTH, MropeSectionFault, TokenIdFault,
+    count_fault, divisibility_fault, infinity_token_starts, mrope_section_fault,
+    original_context_fits, token_id_fault,
 };
+pub(crate) use plan::{MoeInventory, moe_inventory};
 
 pub use rope::{
     DEFAULT_ROPE_THETA, DynamicNtkContext, MropeHandling, PartialRotary, RopeContext,
@@ -895,8 +897,7 @@ pub(crate) fn layer_count(
     field: &'static str,
     value: usize,
 ) -> Result<(), ConfigError> {
-    nonzero(architecture, field, value)?;
-    at_most(architecture, field, value, MAX_LAYERS, "layers")
+    bounded_count(architecture, field, value, MAX_LAYERS, "layers")
 }
 
 /// Validates a routed-expert count: nonzero and at most [`MAX_EXPERTS`].
@@ -907,8 +908,7 @@ pub(crate) fn expert_count(
     field: &'static str,
     value: usize,
 ) -> Result<(), ConfigError> {
-    nonzero(architecture, field, value)?;
-    at_most(architecture, field, value, MAX_EXPERTS, "experts")
+    bounded_count(architecture, field, value, MAX_EXPERTS, "experts")
 }
 
 /// Validates the size of a complete checkpoint contract.
@@ -942,22 +942,25 @@ pub(crate) fn checkpoint_tensor_count(
     }
 }
 
-/// Rejects `value` above `maximum`, naming the bounded quantity (`layers`, `experts`).
-fn at_most(
+/// Accepts `value` in `1..=maximum`, naming the bounded quantity (`layers`, `experts`).
+///
+/// The verdict is the Verus-verified `count_fault`: a zero is reported, with
+/// [`nonzero`]'s message, before an excess.
+fn bounded_count(
     architecture: &'static str,
     field: &'static str,
     value: usize,
     maximum: usize,
     unit: &str,
 ) -> Result<(), ConfigError> {
-    if value > maximum {
-        Err(ConfigError::new(
+    match count_fault(value, maximum) {
+        None => Ok(()),
+        Some(CountFault::Zero) => Err(ConfigError::new(architecture, field, "must be nonzero")),
+        Some(CountFault::AboveMaximum) => Err(ConfigError::new(
             architecture,
             field,
             format!("{value} exceeds the supported maximum of {maximum} {unit}"),
-        ))
-    } else {
-        Ok(())
+        )),
     }
 }
 

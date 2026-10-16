@@ -91,6 +91,7 @@ fn reinit_policy_resets_every_layer_norm() {
     use crate::initialization::ParameterRole;
     use burn::{backend::Flex, module::Param, tensor::Tensor};
 
+    /// CPU backend with F32 values and I32 indices.
     type B = Flex<f32, i32>;
     let config = Gpt2Config {
         n_layer: 2,

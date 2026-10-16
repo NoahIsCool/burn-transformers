@@ -15,6 +15,7 @@ use crate::checkpoint::{
 };
 
 use super::{ConfigError, DeepseekTopKMethod, DeepseekV2Config, Validate};
+use crate::models::config::{MoeInventory, moe_inventory};
 
 /// Family identifier retained in checked checkpoint-dimension errors.
 const FAMILY: &str = "deepseek_v2";
@@ -69,7 +70,7 @@ impl DeepseekV2Config {
     /// with checked arithmetic before any contract or graph is built.
     pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
         let layers = self.num_hidden_layers;
-        let sparse = (0..layers)
+        let sparse_layers = (0..layers)
             .filter(|&layer| self.is_moe_layer(layer))
             .count();
         let bias = usize::from(self.attention_bias);
@@ -78,17 +79,18 @@ impl DeepseekV2Config {
         } else {
             1
         };
-        let attention = 2 + query + 4 + 2 * bias;
         let router = 1 + usize::from(self.topk_method == DeepseekTopKMethod::NoAuxTc);
-        let per_sparse_layer = self
-            .n_routed_experts
-            .checked_mul(3)?
-            .checked_add(router + 3)?;
-        layers
-            .checked_mul(attention)?
-            .checked_add(sparse.checked_mul(per_sparse_layer)?)?
-            .checked_add((layers - sparse).checked_mul(3)?)?
-            .checked_add(3)
+        // The Verus-verified total is exact or `None` on overflow.
+        moe_inventory(MoeInventory {
+            fixed: 3,
+            layers,
+            per_layer: 2 + query + 4 + 2 * bias,
+            sparse_layers,
+            per_sparse_layer: router + 3,
+            experts: self.n_routed_experts,
+            per_expert: 3,
+            per_dense_layer: 3,
+        })
     }
 
     /// Derives the exact tensor contract from validated architecture metadata.
