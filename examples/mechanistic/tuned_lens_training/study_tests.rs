@@ -4,7 +4,7 @@ use super::*;
 /// Builds a four-channel, seven-class lens with an identity-initialized correction and frozen decoder.
 fn tiny_lens() -> Lens<B> {
     let device = Default::default();
-    let backbone = GptNeoXModel::init(
+    let backbone = GptNeoXForCausalLm::init(
         GptNeoXConfig {
             vocab_size: 7,
             hidden_size: 4,

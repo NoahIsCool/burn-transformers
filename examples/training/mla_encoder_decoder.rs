@@ -12,7 +12,7 @@
 #[path = "support.rs"]
 mod support;
 
-use super::experiment::EncoderDecoder;
+use super::EncoderDecoder;
 use burn::{
     backend::Autodiff,
     module::{AutodiffModule, Module},

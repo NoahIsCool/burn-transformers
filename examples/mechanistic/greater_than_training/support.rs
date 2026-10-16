@@ -87,6 +87,14 @@ impl Options {
                 "target/mechanistic/greater_than_training/full"
             })
         });
+        if !prepared.join("preparation.json").is_file() {
+            return Err(format!(
+                "{}: no prepared artifacts; run python3 examples/mechanistic/greater_than/prepare.py \
+                 --checkpoint /local/gpt2, or pass --prepared-dir DIRECTORY",
+                prepared.display()
+            )
+            .into());
+        }
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }

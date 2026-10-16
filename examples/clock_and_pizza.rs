@@ -10,21 +10,11 @@
 //! subspaces, ordered removal/restoration, and attention normalization provide
 //! controls; training new weights is a separate `clock_and_pizza_train` example.
 
-#[cfg(not(feature = "flex"))]
-/// Explain the CPU backend feature required to replay these reference fixtures.
-fn main() {
-    eprintln!("enable the `flex` feature to run this example");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "flex")]
 #[path = "mechanistic/clock_and_pizza/measure.rs"]
 mod measure;
-#[cfg(feature = "flex")]
 #[path = "mechanistic/clock_and_pizza/model.rs"]
 mod model;
 
-#[cfg(feature = "flex")]
 /// Replay both pinned models and compare PCA interventions with paper/reference metrics.
 /// Save current replay measurements beside the prepared fixtures; keep published
 /// results and the documented checkpoint/paper accuracy discrepancy distinct.
@@ -227,7 +217,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "flex")]
 /// Evaluate all 59² input pairs using the supplied hooks and return flat F32 logits.
 /// A single complete-grid call keeps capture and restoration row alignment explicit.
 fn run(
@@ -240,7 +229,6 @@ fn run(
         .to_vec::<f32>()?)
 }
 
-#[cfg(feature = "flex")]
 /// Print and serialize complete-grid accuracy and distance irrelevance for one condition.
 fn row(label: &str, logits: &[f32]) -> serde_json::Value {
     let accuracy = measure::accuracy(logits);

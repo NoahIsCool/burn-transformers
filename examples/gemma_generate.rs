@@ -11,7 +11,7 @@
 //! their window in a ring cache.
 //!
 //! ```text
-//! cargo run --release --example gemma_generate -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]
+//! cargo run --release --locked --features tokenizers --example gemma_generate -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]
 //! ```
 //!
 //! An F32 Gemma 3 4B needs about 16 GiB of memory.

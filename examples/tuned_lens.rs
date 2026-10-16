@@ -13,18 +13,9 @@
 //! `KL(final || lens)` and shifted next-token CE measure predictive quality;
 //! changing this decoder alone does not establish a causal effect on the model.
 
-#[cfg(not(all(feature = "flex", feature = "tokenizers")))]
-/// Explain the required Cargo features and exit before accessing local artifacts.
-fn main() {
-    eprintln!("enable the `flex` and `tokenizers` features to run this example");
-    std::process::exit(1);
-}
-
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 #[path = "mechanistic/tuned_lens/study.rs"]
 mod study;
 
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 /// Run the fixed local experiment, retaining measurements and numerical controls.
 fn main() -> study::Result<()> {
     use burn::{module::Initializer, nn::LinearConfig};
@@ -46,6 +37,14 @@ fn main() -> study::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/mechanistic/tuned_lens"));
     let started = Instant::now();
+    if !root.join("preparation.json").is_file() {
+        return Err(format!(
+            "{}: no prepared artifacts; run python3 examples/mechanistic/tuned_lens/prepare.py, \
+             or pass the prepared directory as the first argument",
+            root.display()
+        )
+        .into());
+    }
     let (study, fixture, preparation) = Experiment::load(&root)?;
     let (reference, oracle) = study::load_reference(&root, &preparation)?;
     if REPLACE_TRANSLATOR >= study.translators.len()
