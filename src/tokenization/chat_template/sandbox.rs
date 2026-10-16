@@ -338,6 +338,10 @@ impl Operator {
 /// Numbers (checked `i128` and `f64` arithmetic) and every error case go
 /// through the engine, so results and messages stay exactly MiniJinja's.
 /// The two-variable expression is not a constant, so it is never folded.
+/// Its errors are located in the helper expression (`<expression>:1`), and
+/// MiniJinja only adds the template's location to an error without one, so
+/// they are re-created without a location: the render then reports the
+/// line of the operator in the template, as it would for the plain operator.
 fn engine_operation(
     state: &State<'_, '_>,
     operator: Operator,
@@ -346,8 +350,19 @@ fn engine_operation(
 ) -> Result<Value, Error> {
     state
         .env()
-        .compile_expression(operator.expression())?
-        .eval(minijinja::context! { left => left, right => right })
+        .compile_expression(operator.expression())
+        .and_then(|expression| {
+            expression.eval(minijinja::context! { left => left, right => right })
+        })
+        .map_err(|error| without_location(&error))
+}
+
+/// A copy of `error` with its kind and detail but no template location.
+fn without_location(error: &Error) -> Error {
+    match error.detail() {
+        Some(detail) => Error::new(error.kind(), detail.to_owned()),
+        None => Error::from(error.kind()),
+    }
 }
 
 /// Whether MiniJinja's `+` treats `value` as a sequence (a list or a lazy iterable).

@@ -237,6 +237,68 @@ fn excessive_nesting_and_chains_are_refused() {
     assert!(guard_operators(&chain).is_ok());
 }
 
+/// Rewrites keep every line break, so error locations after a rewritten tag do not move.
+///
+/// The operator and its surrounding whitespace disappear in a rewrite; their
+/// line breaks move inside the filter call, and the whitespace around a tag
+/// body is kept as written.
+#[test]
+fn rewrites_keep_line_breaks() {
+    for source in [
+        "{{\n  a\n  +\n  b\n}}",
+        "{%-\n set x = a ~\n b\n-%}",
+        "{{ a *\n\n b + c\n }}",
+        "{{a+b}}",
+        "{%+ if a * b +%}",
+    ] {
+        let rewritten = guarded(source);
+        assert_ne!(rewritten, source);
+        assert_eq!(
+            rewritten.matches('\n').count(),
+            source.matches('\n').count(),
+            "{rewritten}"
+        );
+    }
+    assert_eq!(guarded("{{a+b}}"), "{{a|__bounded_add(b)}}");
+    assert_eq!(guarded("{{\n a\n + b }}"), "{{\n a|__bounded_add(\nb) }}");
+}
+
+/// Comma-separated lists of any length are flat and are not capped like chains.
+///
+/// MiniJinja parses, compiles, and drops list, map, and tuple items, call
+/// arguments, and macro parameters iteratively, so only operator, unary,
+/// postfix, filter, and conditional chains (which it handles recursively)
+/// are limited.
+#[test]
+fn long_flat_lists_are_rewritten() {
+    let count = MAX_CHAIN + 100;
+    let join = |item: &dyn Fn(usize) -> String| (0..count).map(item).collect::<Vec<_>>().join(", ");
+    for source in [
+        format!("{{{{ [{}] }}}}", join(&|index| format!("{index} + 1"))),
+        format!("{{{{ ({}) }}}}", join(&|index| format!("{index} + 1"))),
+        format!(
+            "{{{{ {{{}}} }}}}",
+            join(&|index| format!("'k{index}': {index} * 2"))
+        ),
+        format!(
+            "{{{{ f({}) }}}}",
+            join(&|index| format!("k{index}=a ~ {index}"))
+        ),
+        format!(
+            "{{% macro m({}) %}}{{% endmacro %}}",
+            join(&|index| format!("p{index}={index} * 2"))
+        ),
+    ] {
+        let rewritten = guarded(&source);
+        assert_eq!(
+            rewritten.matches("__bounded_").count(),
+            count,
+            "{}",
+            &source[..40]
+        );
+    }
+}
+
 /// The lexer reads numbers, strings, and names exactly as MiniJinja does.
 #[test]
 fn lexer_matches_minijinja_tokens() {

@@ -25,7 +25,10 @@
 //! the left-associative operators did and add no parser nesting. A filter
 //! call is never constant-folded, operands are evaluated in the original
 //! order, and templates cannot assign to filter names, so `{% set %}` cannot
-//! shadow the bounded operators.
+//! shadow the bounded operators. A rewrite keeps the whitespace around the
+//! tag body, and the line breaks around a removed operator move inside the
+//! filter call, so every tag keeps its line count and errors report the same
+//! line numbers as the original template.
 //!
 //! # Grammar
 //!
@@ -64,8 +67,11 @@
 //! over (`a - b - c - ...` is a left-deep tree). A template with a few hundred
 //! thousand such operators therefore overflows the native stack, which aborts
 //! the process. This rewrite refuses expressions nested deeper than
-//! [`MAX_NESTING`] levels and chains (unary, binary, postfix, or filter) longer
-//! than [`MAX_CHAIN`], far beyond any published template.
+//! [`MAX_NESTING`] levels and chains (unary, binary, comparison, conditional,
+//! postfix, or filter) longer than [`MAX_CHAIN`], far beyond any published
+//! template. Comma-separated lists (list, tuple, and map items, call
+//! arguments, macro parameters) are flat in MiniJinja's parser, code
+//! generator, and destructor, so their length is not limited.
 
 use std::borrow::Cow;
 
@@ -116,6 +122,11 @@ pub(crate) fn guard_operators(source: &str) -> Result<Cow<'_, str>, GuardError> 
     })
 }
 
+/// Counts the line feeds in `text`, the line breaks MiniJinja counts for error locations.
+fn newline_count(text: &str) -> usize {
+    text.bytes().filter(|&byte| byte == b'\n').count()
+}
+
 /// Shortens a tag to at most 80 bytes on a character boundary for an error message.
 fn shorten(tag: &str) -> String {
     const LIMIT: usize = 80;
@@ -151,11 +162,18 @@ fn guard_tag(kind: TagKind, tag: &str) -> Result<Option<String>, String> {
         TagKind::Statement => parser.statement_tag(),
     };
     match parsed {
-        Ok(Some(text)) if parser.rewrites > 0 => Ok(Some(format!(
-            "{}{open_marker} {text} {close_marker}{}",
-            &tag[..2],
-            &tag[tag.len() - 2..]
-        ))),
+        Ok(Some(text)) if parser.rewrites > 0 => {
+            // Keep the whitespace around the body, newlines included, so
+            // every later line keeps its number in error messages.
+            let inner = &tag[2 + open_marker.len()..tag.len() - 2 - close_marker.len()];
+            let leading = &inner[..inner.len() - inner.trim_start().len()];
+            let trailing = &inner[inner.trim_end().len()..];
+            Ok(Some(format!(
+                "{}{open_marker}{leading}{text}{trailing}{close_marker}{}",
+                &tag[..2],
+                &tag[tag.len() - 2..]
+            )))
+        }
         Ok(_) => Ok(None),
         Err(Refusal::Limit(reason)) => Err(reason),
         Err(Refusal::Syntax(reason)) if tokens.iter().any(Token::is_guarded) => Err(reason),
@@ -710,13 +728,16 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses macro or call-block parameters after `(`: names with optional defaults.
+    ///
+    /// Parameter lists, like every comma-separated list below, are flat: MiniJinja
+    /// parses, compiles, and drops them iteratively, so their length is not capped.
     fn macro_parameters(&mut self, splice: &mut Splice<'_>) -> Parse<()> {
-        let mut count = 0;
+        let mut first = true;
         loop {
             if self.eat_symbol(")") {
                 return Ok(());
             }
-            if count > 0 {
+            if !first {
                 self.expect_symbol(",")?;
                 if self.eat_symbol(")") {
                     return Ok(());
@@ -726,8 +747,7 @@ impl<'a> Parser<'a> {
             if self.eat_symbol("=") {
                 splice.child(&self.expression()?);
             }
-            count += 1;
-            Self::check_chain(count)?;
+            first = false;
         }
     }
 
@@ -843,7 +863,11 @@ impl<'a> Parser<'a> {
             match filter {
                 Some(filter) => {
                     let left = if unary { text } else { format!("({text})") };
-                    text = format!("{left}|{filter}({})", right.text);
+                    // The operator and the whitespace around it disappear;
+                    // their newlines move inside the filter call so later
+                    // lines keep their numbers.
+                    let newlines = "\n".repeat(newline_count(&self.source[end..right.start]));
+                    text = format!("{left}|{filter}({newlines}{})", right.text);
                     unary = true;
                     self.rewrites += 1;
                 }
@@ -1066,12 +1090,11 @@ impl<'a> Parser<'a> {
     fn call_arguments(&mut self) -> Parse<Vec<Fragment>> {
         self.expect_symbol("(")?;
         let mut arguments = Vec::new();
-        let mut count = 0;
         loop {
             if self.eat_symbol(")") {
                 return Ok(arguments);
             }
-            if count > 0 {
+            if !arguments.is_empty() {
                 self.expect_symbol(",")?;
                 if self.eat_symbol(")") {
                     return Ok(arguments);
@@ -1085,8 +1108,6 @@ impl<'a> Parser<'a> {
             } else {
                 arguments.push(argument);
             }
-            count += 1;
-            Self::check_chain(count)?;
         }
     }
 
@@ -1144,7 +1165,6 @@ impl<'a> Parser<'a> {
         let mut name = first.name;
         if self.at_symbol(",") {
             name = false;
-            let mut count = 1;
             loop {
                 if self.eat_symbol(")") {
                     break;
@@ -1154,8 +1174,6 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 splice.child(&self.expression()?);
-                count += 1;
-                Self::check_chain(count)?;
             }
         } else {
             self.expect_symbol(")")?;
@@ -1173,12 +1191,12 @@ impl<'a> Parser<'a> {
     /// Parses list items up to `]`, or map entries `key: value` up to `}`.
     fn items(&mut self, start: usize, close: &str, map: bool) -> Parse<Fragment> {
         let mut splice = Splice::new(self.source, start);
-        let mut count = 0;
+        let mut first = true;
         loop {
             if self.eat_symbol(close) {
                 break;
             }
-            if count > 0 {
+            if !first {
                 self.expect_symbol(",")?;
                 if self.eat_symbol(close) {
                     break;
@@ -1189,8 +1207,7 @@ impl<'a> Parser<'a> {
                 self.expect_symbol(":")?;
                 splice.child(&self.expression()?);
             }
-            count += 1;
-            Self::check_chain(count)?;
+            first = false;
         }
         let end = self.last_end();
         Ok(Fragment {

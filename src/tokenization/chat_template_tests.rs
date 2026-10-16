@@ -525,6 +525,71 @@ proptest! {
     }
 }
 
+/// Errors of operators the bounded filters delegate report the template's own line.
+///
+/// Review finding ENGINE-ERROR-LOCATION: the engine's operator ran in a helper
+/// expression, so its errors said `<expression>:1` instead of the template's
+/// line. They now carry no location of their own and the render attaches the
+/// operator's line, as for the plain operator; rewritten tags also keep their
+/// line breaks, so lines after a multi-line rewritten tag do not move.
+#[test]
+fn delegated_operator_errors_report_the_template_line() {
+    let context = json!({"messages": [{"content": ["a", "b"]}]});
+    for (source, line) in [
+        ("first line\n{{ none + 1 }}", 2),
+        (
+            "{%- set ns = namespace(\n  a=1 +\n  2) -%}\n{{\n  'x' ~ ns.a\n}}\n{{ 'a' + messages[0]['content'] }}",
+            7,
+        ),
+        ("{{ 1 * 2 }}\n\n{{ {'a': 1} * 2 }}", 3),
+        ("\n\n\n{{ 170141183460469231731687303715884105727 + 1 }}", 4),
+    ] {
+        let guarded = render_template(source, &context, None).unwrap_err();
+        let plain = render_unguarded(source, &context).unwrap_err();
+        assert_eq!(guarded.line(), Some(line), "{source}: {guarded:#}");
+        assert_eq!(guarded.line(), plain.line(), "{source}: {plain:#}");
+        assert_eq!(guarded.kind(), plain.kind(), "{source}");
+        assert_eq!(guarded.detail(), plain.detail(), "{source}");
+        assert!(
+            !format!("{guarded:#}").contains("<expression>"),
+            "{guarded:#}"
+        );
+    }
+}
+
+/// Long literals and argument lists render like MiniJinja instead of being refused.
+///
+/// Review finding GUARD-FLAT-LITERAL-REFUSAL: the guard capped flat
+/// comma-separated lists at 1 024 items with a message about operator chains.
+#[test]
+fn long_flat_lists_render_like_minijinja() {
+    let join = |item: &dyn Fn(usize) -> String| (0..1_100).map(item).collect::<Vec<_>>().join(", ");
+    let plain_items = join(&|index| index.to_string());
+    let guarded_items = join(&|index| format!("{index} + 1"));
+    for source in [
+        format!("{{% set xs = [{plain_items}] %}}{{{{ xs | length }}}}"),
+        format!("{{{{ [{guarded_items}] | sum }}}}"),
+        format!("{{{{ ({guarded_items}) | last }}}}"),
+        format!(
+            "{{{{ {{{}}} | length }}}}",
+            join(&|index| format!("'k{index}': {index} * 2"))
+        ),
+        format!(
+            "{{{{ dict({}) | length }}}}",
+            join(&|index| format!("k{index}='a' ~ {index}"))
+        ),
+        format!(
+            "{{% macro m({}) %}}{{{{ p1099 }}}}{{% endmacro %}}{{{{ m() }}}}",
+            join(&|index| format!("p{index}={index} * 2"))
+        ),
+    ] {
+        let guarded = render_template(&source, &json!({}), None)
+            .unwrap_or_else(|error| panic!("{}: {error:#}", &source[..60]));
+        let plain = render_unguarded(&source, &json!({})).unwrap();
+        assert_eq!(guarded, plain, "{}", &source[..60]);
+    }
+}
+
 /// Representative template idioms render identically with and without the guard.
 #[test]
 fn official_template_idioms_render_like_minijinja() {
