@@ -921,12 +921,17 @@ moved from cosine 1.0 to `0.8920338531579629` after Mamba layer 0, then to
 `0.4418906779817166` after the following MoE layer. The trace proves that the
 path difference begins in Mamba and is amplified across the next sparse block;
 it does not prove different expert IDs because the oracle did not capture router
-selections. Its candidate causes are the clamp asymmetry and the F16 precision
-policy, not reassociation alone. Counting the heads and tokens with
-$\operatorname{softplus}(dt+dt_{bias})<\Delta_{min}$ at Mamba layer 0 for
-decision 14, which the existing hooks can measure, would separate the two; that
-diagnostic has not been run. Corresponding-path Burn comparisons therefore keep
-the 0.999 gate, while the two official paths remain separate reference streams.
+selections. Its candidate causes were the clamp asymmetry and the F16 precision
+policy. A Burn diagnostic separated them (source `1b48b81`,
+[large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)):
+at Mamba layer 0, whose $\Delta$ depends only on the token, the clamp changes 6
+to 8 of the 64 heads at every token (smallest step `1.76e-5`), and enabling the
+clamp in Burn's one-token update, with its F16 precision policy unchanged,
+lifts the decision-14 hidden cosines from `0.8919` and `0.4418` to `0.99999986`
+and `0.9999994`. The clamp asymmetry causes the split. Corresponding-path Burn
+comparisons keep their separate reference streams; on the real model the
+gate's 0.999 per-row floor is tighter than F16 noise at a few sparse-routing
+rows (see [the first official comparison](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)).
 
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
 chunked mode in [`mamba2.rs`](src/mamba2.rs).
