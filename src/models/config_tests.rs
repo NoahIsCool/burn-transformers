@@ -1021,6 +1021,136 @@ fn dense_families_accept_exactly_the_layer_bound() {
     }
 }
 
+/// Returns the length of `case`'s dense checkpoint contract with every stack `depth` layers deep.
+///
+/// Per-layer lists (`layer_types`, `no_rope_layers`, `max_window_layers`)
+/// are removed so the families derive schedules of the new depth; Qwen3.5
+/// also declares `depth` multi-token-prediction layers and lists them, its
+/// densest contract. Returns `None` for the per-expert MoE families, whose
+/// validation bounds their exact contract length instead.
+fn dense_contract_len(case: &CountCase, depth: usize) -> Option<usize> {
+    use crate::models::{
+        gemma::{GemmaCheckpointOptions, GemmaConfig},
+        gpt_neox::GptNeoXConfig,
+        gpt_oss::{GptOssCheckpointOptions, GptOssConfig},
+        gpt2::{Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2Config},
+        llama::{LlamaCheckpointOptions, LlamaFamilyConfig},
+        muse_glimmer::{MuseGlimmerCheckpointOptions, MuseGlimmerTextConfig},
+        qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5TextConfig},
+        t5::T5Config,
+    };
+    let mut document: serde_json::Value =
+        serde_json::from_str(&normalize_positive_infinity(&case.json)).unwrap();
+    let text = text_object(&mut document);
+    for key in ["layer_types", "no_rope_layers", "max_window_layers"] {
+        text.remove(key);
+    }
+    for &field in case.layers {
+        text.insert(field.into(), depth.into());
+    }
+    if case.name == "qwen3_5" {
+        text.insert("mtp_num_hidden_layers".into(), depth.into());
+    }
+    let json = document.to_string();
+    let len = match case.name {
+        "qwen3_moe" | "deepseek_v2" | "nemotron_h" => return None,
+        "gemma2" | "gemma3-text" => GemmaConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(GemmaCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "gpt_oss" => GptOssConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(GptOssCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "qwen3_5" => Qwen3_5TextConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(Qwen3_5CheckpointOptions {
+                include_mtp: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "muse_glimmer" => MuseGlimmerTextConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(MuseGlimmerCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "t5" => T5Config::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract()
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "gpt2" => Gpt2CheckpointContract::new(
+            &Gpt2Config::from_json_str(&json).unwrap(),
+            Gpt2CheckpointLayout::LanguageModel,
+        )
+        .unwrap()
+        .expected_tensors()
+        .len(),
+        "gpt_neox" => GptNeoXConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract()
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        _ => LlamaFamilyConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(LlamaCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+    };
+    Some(len)
+}
+
+/// Every dense contract stays within the artifact limit at [`MAX_LAYERS`], the derivation of the bound.
+///
+/// Regression for the review of CFG-COUNT-1: at the former `2^20` bound the
+/// accepted gpt-oss (17 tensors per layer), T5 (23 per encoder and decoder
+/// layer), and most Llama-family, Gemma, GPT-2, GPT-NeoX, Muse, and Qwen3.5
+/// contracts listed more tensors than any default-limited checkpoint can
+/// hold. Each family's contract is measured at depths 1 to 12 (covering its
+/// layer-type periods); its largest per-layer growth must stay within
+/// `MAX_TENSORS_PER_LAYER`, and its extrapolated length at the bound within
+/// [`MAX_CHECKPOINT_TENSORS`].
+#[test]
+fn every_dense_contract_fits_the_artifact_limit_at_the_layer_bound() {
+    let mut measured = 0;
+    for case in count_cases() {
+        let Some(lengths) = (1..=12)
+            .map(|depth| dense_contract_len(&case, depth))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let per_layer = lengths
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .unwrap();
+        assert!(
+            per_layer <= MAX_TENSORS_PER_LAYER,
+            "{}: {per_layer} tensors per layer",
+            case.name
+        );
+        let at_bound = lengths[0] + (MAX_LAYERS - 1) * per_layer;
+        assert!(
+            at_bound <= MAX_CHECKPOINT_TENSORS,
+            "{}: {at_bound} tensors at MAX_LAYERS",
+            case.name
+        );
+        measured += 1;
+    }
+    assert_eq!(measured, 15, "every dense family and variant is measured");
+}
+
 // Transformers 5 tagged non-finite floats (review finding NUM-2).
 
 /// A topology with an optional-bounded limit pair, like Nemotron-H's `time_step_limit`.

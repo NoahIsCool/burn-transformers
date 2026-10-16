@@ -325,12 +325,14 @@ impl GemmaArchitecture {
     }
 }
 
-/// The largest accepted `num_hidden_layers`, the shared [`crate::models::config::MAX_LAYERS`] (`2^20`).
+/// The largest accepted `num_hidden_layers`, the shared [`crate::models::config::MAX_LAYERS`] (`2^18`).
 ///
 /// Validation materializes one schedule entry per layer, so an absurd count
 /// in an untrusted `config.json` would exhaust memory (or overflow a vector's
 /// capacity) before any error could be reported. Every family checks the
-/// same bound; this re-export keeps the Gemma path it was first published at.
+/// same bound, sized so that every dense checkpoint contract fits the
+/// artifact tensor limit; this re-export keeps the Gemma path it was first
+/// published at (with the value `2^20`, lowered when the bound became shared).
 pub use crate::models::config::MAX_LAYERS;
 
 /// Checks the positive extents, the layer bound, grouped-query divisibility, and scalars.

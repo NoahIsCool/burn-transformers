@@ -18,9 +18,11 @@
 //! `plan` module, which Verus verifies in place through `verus/config.rs`.
 //!
 //! Counts read from an untrusted `config.json` are bounded before anything
-//! proportional to them is allocated: [`MAX_LAYERS`] per stack,
-//! [`MAX_EXPERTS`] per MoE layer, and, for checkpoint layouts with one tensor
-//! set per routed expert, [`MAX_CHECKPOINT_TENSORS`] for the whole contract.
+//! proportional to them is allocated, so that no family describes a
+//! checkpoint contract longer than the [`MAX_CHECKPOINT_TENSORS`] artifact
+//! limit: [`MAX_LAYERS`] per stack (sized for the densest per-layer
+//! contract), [`MAX_EXPERTS`] per MoE layer, and, for checkpoint layouts with
+//! one tensor set per routed expert, the exact size of the whole contract.
 
 mod plan;
 pub mod rope;
@@ -853,7 +855,13 @@ pub(crate) fn nonzero(
 //
 // The bounds follow from the default artifact tensor limit
 // [`MAX_CHECKPOINT_TENSORS`]: a configuration is only useful if some checkpoint
-// can satisfy it, and its checkpoint contract lists every parameter tensor.
+// can satisfy it, and its checkpoint contract lists every parameter tensor, so
+// no accepted configuration may describe a longer contract than that limit.
+// A dense contract grows with the depth alone, by at most
+// `MAX_TENSORS_PER_LAYER` tensors per layer index summed over every stack,
+// which fixes [`MAX_LAYERS`]. A per-expert MoE contract grows with the product
+// of MoE layers and experts, so those families compute its exact length and
+// compare it with the limit itself.
 
 /// The default artifact tensor limit, ten million tensors.
 ///
@@ -861,33 +869,60 @@ pub(crate) fn nonzero(
 /// `max_tensors`, the largest inventory that default checkpoint discovery
 /// accepts. A configuration whose complete checkpoint contract would list
 /// more tensors than this describes a checkpoint that no default-limited load
-/// can accept. Families whose contracts grow with a product of two counts
-/// (one tensor set per routed expert of every MoE layer) reject such a
-/// configuration during validation, before a contract or graph exists.
+/// can accept, so no family accepts one: dense families through
+/// [`MAX_LAYERS`], and families whose contracts grow with a product of two
+/// counts (one tensor set per routed expert of every MoE layer) by checking
+/// the exact contract length during validation, before a contract or graph
+/// exists.
 pub const MAX_CHECKPOINT_TENSORS: usize = 10_000_000;
 
-/// The largest accepted layer count of one stack, `2^20`.
+/// The most tensors a dense checkpoint contract lists per layer index, summed over all stacks.
+///
+/// Measured for every family by the configuration tests
+/// (`every_dense_contract_fits_the_artifact_limit_at_the_layer_bound`):
+/// Llama-family layouts list 9 tensors per layer (16 with every projection
+/// bias), Gemma 11 to 13, GPT-NeoX and Muse 12, GPT-2 16, gpt-oss 17, T5 23
+/// (one encoder and one decoder layer), and Qwen3.5 up to 25 (one decoder
+/// and one multi-token-prediction layer). Thirty-two leaves headroom for new
+/// optional tensors; the test fails if a contract outgrows it.
+const MAX_TENSORS_PER_LAYER: usize = 32;
+
+/// The largest accepted layer count of one stack, `2^18` (262,144).
 ///
 /// Validation, checkpoint contracts, and graph construction keep one entry
-/// per layer, so an absurd count in an untrusted `config.json` would exhaust
-/// memory (or overflow a vector's capacity) before any error could be
-/// reported. A dense family's contract lists roughly ten to twenty tensors
-/// per layer, so `2^20` layers already describe a checkpoint at the
-/// [`MAX_CHECKPOINT_TENSORS`] artifact limit, about four thousand times the
-/// depth of any released checkpoint (all below `2^8` layers). At the bound,
-/// a per-layer schedule takes a few megabytes.
-pub const MAX_LAYERS: usize = 1 << 20;
+/// per layer, so an absurd count in an untrusted `config.json` would overflow
+/// a vector's capacity or exhaust memory before any error could be reported.
+/// The bound is the largest power of two whose densest contract,
+/// `MAX_TENSORS_PER_LAYER` (32) tensors per layer index, fits the
+/// [`MAX_CHECKPOINT_TENSORS`] artifact limit: `2^18 · 32` is about 8.4
+/// million tensors, leaving room for embeddings and heads, while `2^19 · 32`
+/// exceeds ten million. That is about a thousand times the depth of any
+/// released checkpoint (all below `2^8` layers).
+///
+/// The bound keeps contracts within the artifact limit, not small: at the
+/// bound a Llama contract lists about 2.4 million tensors, as many as a
+/// checkpoint of that depth would hold, and a per-layer schedule takes
+/// between a quarter of a megabyte (one flag per layer) and about twenty
+/// megabytes (gpt-oss's one string per layer).
+pub const MAX_LAYERS: usize = 1 << 18;
 
 /// The largest accepted routed-expert count of one MoE layer, `2^20`.
 ///
 /// Released routers choose among at most a few hundred experts (DeepSeek-V3
-/// 256, Kimi K2 384). Per-expert checkpoint layouts store at least two
-/// tensors per expert, so `2^20` experts in a single MoE layer already
-/// approach the [`MAX_CHECKPOINT_TENSORS`] artifact limit. The bound keeps
-/// every per-expert table (router rows, routing groups, dispatch counts)
-/// small; the product of MoE layers and experts is bounded separately by the
-/// families that store experts as separate tensors.
+/// 256, Kimi K2 384). The bound keeps every per-expert table (router rows,
+/// routing groups, dispatch counts) small. Per-expert checkpoint layouts
+/// store two or three tensors per expert, so `2^20` experts in a single MoE
+/// layer already list a fifth to a third of the [`MAX_CHECKPOINT_TENSORS`]
+/// artifact limit; those families bound the product of MoE layers and
+/// experts exactly, as the length of their whole contract.
 pub const MAX_EXPERTS: usize = 1 << 20;
+
+// `MAX_LAYERS` is the largest power of two whose densest contract fits the limit.
+const _: () = assert!(
+    MAX_LAYERS.is_power_of_two()
+        && MAX_LAYERS * MAX_TENSORS_PER_LAYER <= MAX_CHECKPOINT_TENSORS
+        && 2 * MAX_LAYERS * MAX_TENSORS_PER_LAYER > MAX_CHECKPOINT_TENSORS
+);
 
 /// Validates a stack depth: nonzero and at most [`MAX_LAYERS`].
 ///
