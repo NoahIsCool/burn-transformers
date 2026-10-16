@@ -277,7 +277,7 @@ mechanism's equations, reference, and implementation.
 | Positions | RoPE with linear, dynamic-NTK, YaRN, Llama 3, LongRoPE, and proportional scaling (one translator for every Hugging Face `rope_type`); partial and multi-axis RoPE; NoPE; T5 relative buckets. |
 | Mixers | Gated DeltaNet with block-parallel chunked prefill; Mamba-2 with a vectorized chunk scan; fixed-state recurrent decoding. |
 | Feed-forward | SwiGLU/GeGLU, ungated, ReLU², and clamped SwiGLU; sparse experts with one router covering softmax or sigmoid scoring, top-k before or after scoring, group-limited selection, correction bias, renormalization, and shared experts, dispatched in memory-bounded expert blocks. |
-| State | Preallocated KV, ring, latent, recurrent, and cross-attention caches outside the parameters; atomic multi-layer step writes; transactional speculative staging; reorder, truncate, and reset. |
+| State | Preallocated KV, ring, latent, recurrent, and cross-attention caches outside the parameters; atomic multi-layer step writes; transactional speculative staging ([used by](TRANSFORMER_INNOVATIONS.md#innovation-transactional-cache) DeepSeek-V2, Qwen3.5, and Nemotron-H); reorder, truncate, and reset. |
 | Generation | Greedy, temperature, top-k, top-p, min-p, repetition/presence/frequency penalties, logit bias, `min_new_tokens`, no-repeat n-grams, stop sequences, streaming callbacks, cache-aware beam search, and lossless speculative verification. |
 | Artifacts | Strict local SafeTensors discovery and streaming, exact dtype casts, exact MXFP4 decoding, native Q4/Q8 Burnpack sidecars, local tokenizers, and sandboxed chat templates with Hugging Face semantics. |
 

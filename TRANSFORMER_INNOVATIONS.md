@@ -161,7 +161,7 @@ mathematical and implementation description.
 | [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | ✓ | — | — | — | — | — |
 | [Immutable cross-attention KV cache](#innovation-cross-kv-cache) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
 | [External recurrent-state cache](#innovation-recurrent-cache) | Delta | Delta | — | — | — | — | — | — | Mamba2 | Mamba2 |
-| [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | — | — | — | — | — | target + MTP | — |
+| [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | target only | — | — | — | — | target + MTP | — |
 | [Lossless speculative decoding](#innovation-speculative-decoding) | MTP, batch 1 | MTP, batch 1 | — | — | — | — | — | — | MTP, batch 1 | — |
 | [Cache-aware beam search](#innovation-beam-search) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
 
@@ -1424,6 +1424,12 @@ commit, and a subsequent rollback remain usable.
 Speculation tentatively advances both the target and draft states. A transaction
 records a mark, stages appends, and then either `commit_prefix(a)` to publish
 only the accepted prefix or `rollback()` to restore the committed logical state.
+DeepSeek-V2's decode state implements this as the `cache::TransactionalCache`
+trait, with one uniform accepted prefix. Qwen3.5 and Nemotron-H expose inherent
+`mark`, `commit_prefixes(mark, target, mtp)`, and `rollback` instead, because
+their MTP bank commits a prefix of its own; generic code bounded on the trait
+reaches only DeepSeek-V2. The other families' decode states have no
+transactions and roll back with `truncate`.
 Rollback leaves committed cache tensors unchanged and discards staging metadata;
 rejected staging bytes may remain allocated but are no longer addressable. Qwen
 maintains an independent MTP KV cache alongside target GQA/DeltaNet state;

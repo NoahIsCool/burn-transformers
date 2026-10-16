@@ -314,9 +314,15 @@ support.
 - MXFP4 experts are decoded to the load dtype, so gpt-oss-20b needs about
   39 GiB in F16/BF16; there is no packed MXFP4 execution. On Flex, batched
   decoding of wide MoE layers is not faster than row-by-row decoding.
-- Llama-family, Gemma, and gpt-oss decode states have no speculative
-  transactions; they roll back with `truncate`, which a sliding ring supports
-  only within its window.
+- Three model decode states support speculative transactions, through two
+  interfaces. DeepSeek-V2 implements `cache::TransactionalCache` (`mark`, one
+  uniform `commit_prefix`, `rollback`). Qwen3.5 and Nemotron-H instead expose
+  inherent `mark`, `commit_prefixes(mark, target, mtp)`, and `rollback`,
+  because their MTP head commits its own prefix; generic code bounded on
+  `TransactionalCache` therefore reaches only DeepSeek-V2. The Llama-family,
+  Gemma, gpt-oss, Qwen3-MoE, Muse Glimmer, T5, and modular decode states have
+  no transactions; they roll back with `truncate`, which a sliding ring
+  supports only within its window.
 - Multimodal execution, tensor/expert parallelism, external GGUF/AWQ/GPTQ/FP8
   formats, server/distributed execution, and a separate training framework
   remain out of scope; training uses native Burn (see [TRAINING.md](TRAINING.md)).
