@@ -27,7 +27,7 @@
 //!   decoded column) and high nibble (`byte / 16`, the odd column), both
 //!   below 16, with `low + 16 · high == byte`.
 //! - `exact_value_bits` returns the binary64 encoding of the exact decoded
-//!   value `fp4(code) · 2^(scale - 127)` for every `scale` and every
+//!   value `fp4(code) · 2^(scale - 127)` for every `scale < 255` and every
 //!   `code < 16`: the code's sign bit; a signed zero for magnitude code
 //!   `m = 0`; the biased exponent `scale + 895` with no fraction for `m = 1`;
 //!   and the biased exponent `⌊m / 2⌋ + scale + 895` with fraction

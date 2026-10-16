@@ -54,6 +54,17 @@
 //!   and advances it by one, so the `k`-th draw of a new stream is
 //!   `splitmix64(seed, k)`.
 //!
+//! Not proved here: the Burn-driven causal, sequence-to-sequence, and
+//! speculative coordinators that call these cores
+//! (`src/generation/causal.rs`, `seq2seq.rs`, `speculative.rs`), the per-row
+//! token history (`history.rs`) and host metadata readbacks (`metadata.rs`),
+//! the floating-point conversion of a draw (`interior_unit_f32`, `unit_f64`,
+//! `SplitMix64::next_unit_f64`), and the floating-point logits processing,
+//! sampling, and speculative acceptance test (`src/generation.rs`,
+//! `speculative.rs`). The sibling `*_tests.rs` files,
+//! `src/generation_tests.rs`, and the algebraic properties in
+//! `tests/generation_properties.rs` cover those.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]

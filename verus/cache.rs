@@ -118,6 +118,17 @@
 //!   `first_unstaged_proposal`, `all_set`) and set-position lists
 //!   (`set_positions`) are exact.
 //!
+//! Not proved here: the unannotated code that calls these cores. That is the
+//! capacity and retention validation in `src/cache/config.rs`, allocation
+//! identities (`identity.rs`), the length and transaction facades
+//! (`state.rs`, `transaction.rs`), the allocation geometry checks
+//! (`tensor/allocation.rs`), and the Burn tensor storage of the native-KV,
+//! latent, and recurrent caches with its device gathers, scatters, slices,
+//! and masks (`tensor.rs`, `tensor/kv.rs`, `tensor/kv/batch.rs`,
+//! `tensor/recurrent.rs`, `tensor/state.rs`, `tensor/state/step.rs`). The
+//! sibling `*_tests.rs` files under `src/cache/` cover those, including the
+//! model-based lifecycle test `src/cache/tensor/state_model_tests.rs`.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
