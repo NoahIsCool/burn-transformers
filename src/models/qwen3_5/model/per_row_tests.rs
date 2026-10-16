@@ -492,6 +492,8 @@ fn batched_timing() {
             .collect::<Vec<_>>();
         let prompt_input = masked_input(&mask, 3, &device);
         let decode_input = |step: i64| masked_input(&vec![vec![true]; batch], step, &device);
+        /// Batched or per-row cached execution under comparison: applies one
+        /// stateful prefill or decode call and returns its `[batch, sequence, vocabulary]` logits.
         type Runner<'a> = dyn Fn(
                 CausalLmInput<TestBackend>,
                 &mut Qwen3_5DecodeState<TestBackend>,

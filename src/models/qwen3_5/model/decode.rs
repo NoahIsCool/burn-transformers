@@ -994,7 +994,10 @@ impl<B: Backend> Qwen3_5TextModel<B> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeltaStep {
     /// Run the given kernel and record every row's terminal state.
-    Terminal(DeltaNetMode),
+    Terminal(
+        /// Kernel that evolves the state: chunked prefill or token-by-token recurrence.
+        DeltaNetMode,
+    ),
     /// Run the recurrence and record every row's state after each token.
     Snapshots,
 }

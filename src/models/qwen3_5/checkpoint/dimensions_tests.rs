@@ -198,3 +198,49 @@ proptest! {
         prop_assert_eq!(verified, reference(inputs));
     }
 }
+
+/// Every overflow names its configuration expression in the contract diagnostic.
+#[test]
+fn every_dimension_error_names_its_expression() {
+    let cases = [
+        (DimensionError::Query, "num_attention_heads * head_dim"),
+        (DimensionError::KeyValue, "num_key_value_heads * head_dim"),
+        (
+            DimensionError::DeltaKey,
+            "linear_num_key_heads * linear_key_head_dim",
+        ),
+        (
+            DimensionError::DeltaValue,
+            "linear_num_value_heads * linear_value_head_dim",
+        ),
+        (
+            DimensionError::DeltaConv,
+            "2 * delta key width + delta value width",
+        ),
+        (DimensionError::GatedQuery, "2 * query width"),
+        (DimensionError::DoubleHidden, "2 * hidden_size"),
+    ];
+    for (error, field) in cases {
+        assert_eq!(error.field(), field, "{error:?}");
+    }
+}
+
+/// The convolution width overflows when the doubled key width fits but adding values does not.
+#[test]
+fn convolution_width_overflow_at_the_value_term() {
+    if usize::BITS != 64 {
+        return;
+    }
+    let inputs = DimensionInputs {
+        delta_key_heads: 1 << 62,
+        delta_key_head_dim: 1,
+        delta_value_heads: 1 << 63,
+        delta_value_head_dim: 1,
+        ..inputs()
+    };
+    assert_eq!(
+        checkpoint_dimensions(inputs).err(),
+        Some(DimensionError::DeltaConv)
+    );
+    assert_eq!(reference(inputs).err(), Some(DimensionError::DeltaConv));
+}

@@ -347,3 +347,453 @@ fn independent_vocabulary_head_uses_a_new_gradient_leaf() {
     assert!(head.weight.grad(&gradients).is_some());
     assert!(model.embed_tokens.weight.grad(&gradients).is_none());
 }
+
+/// Message carried by the deliberately failing hook callbacks below.
+const HOOK_FAILURE: &str = "deliberate hook failure";
+
+/// Registers one edit at `point` whose callback fails with [`HOOK_FAILURE`].
+fn failing_hooks(point: &PointInfo) -> Hooks<'static, B> {
+    /// Builds the callback error returned at every point.
+    fn failure() -> Error {
+        Error::configuration("test.hook", HOOK_FAILURE)
+    }
+    let mut hooks = Hooks::new();
+    match point.rank() {
+        3 => hooks.try_edit(
+            crate::intervention::Point::<3>::custom(
+                point.name.clone(),
+                point.axes.clone().try_into().unwrap(),
+            ),
+            |_| Err(failure()),
+        ),
+        4 => hooks.try_edit(
+            crate::intervention::Point::<4>::custom(
+                point.name.clone(),
+                point.axes.clone().try_into().unwrap(),
+            ),
+            |_| Err(failure()),
+        ),
+        rank => panic!("{}: unexpected rank {rank}", point.name),
+    }
+    hooks
+}
+
+/// Asserts that a hooked call failed with the deliberate callback error.
+fn assert_hook_failure<T: core::fmt::Debug>(result: Result<T>, point: &PointInfo) {
+    let error = result.expect_err(&point.name);
+    assert!(
+        error.to_string().contains(HOOK_FAILURE),
+        "{}: {error}",
+        point.name
+    );
+}
+
+/// A failing callback at any catalog point aborts the fused and staged passes with its error.
+///
+/// Every DeltaNet, attention (with eager scores and pattern), MLP, residual,
+/// embedding, and final-norm point is emitted on both paths, and the user's
+/// error is returned rather than swallowed or replaced.
+#[test]
+fn a_failing_edit_at_any_point_aborts_with_its_error() {
+    let device = Default::default();
+    let mut model = Qwen3_5ForCausalLm::<B>::init(config(), &device).unwrap();
+    model.model.layers[1]
+        .self_attn
+        .as_mut()
+        .unwrap()
+        .precision_mode = crate::attention::AttentionPrecisionMode::EagerFp32Softmax;
+    let points = model.activation_points();
+    assert!(
+        points
+            .iter()
+            .any(|point| point.name == "decoder.layers.1.attention.pattern")
+    );
+    for point in &points {
+        let mut hooks = failing_hooks(point);
+        assert_hook_failure(
+            model
+                .forward_with_hooks(input(3), &ForwardOptions::default(), &mut hooks)
+                .map(|_| ()),
+            point,
+        );
+    }
+    let backbone = &model.model;
+    for point in &points {
+        let mut hooks = failing_hooks(point);
+        let staged = if *point == Stack::Decoder.embedding().info() {
+            backbone.embed_with_hooks(&input(3), &mut hooks).map(|_| ())
+        } else if *point == Stack::Decoder.final_norm().info() {
+            let state = backbone.embed(&input(3)).unwrap();
+            let state = backbone.run_layers(state, 0..2).unwrap();
+            backbone.normalize_with_hooks(state, &mut hooks).map(|_| ())
+        } else {
+            let state = backbone.embed(&input(3)).unwrap();
+            backbone
+                .run_layers_with_hooks(state, 0..2, &mut hooks)
+                .map(|_| ())
+        };
+        assert_hook_failure(staged, point);
+    }
+}
+
+/// The hooked headless backbone equals the plain backbone and the generic staging trait.
+#[test]
+fn hooked_backbone_matches_the_plain_backbone() {
+    use crate::architecture::StagedModel;
+
+    let model = Qwen3_5TextModel::<B>::init(config(), &Default::default()).unwrap();
+    let (plain, plain_states) = model.forward(&input(3), true).unwrap();
+    let mut hooks = Hooks::new();
+    let residual = hooks.capture(Layer::decoder(0).residual_post());
+    let (hooked, hooked_states) = model
+        .forward_with_hooks(&input(3), true, &mut hooks)
+        .unwrap();
+    assert_eq!(hooked.to_data(), plain.to_data());
+    assert_eq!(hooked_states.len(), 4);
+    assert_eq!(plain_states.len(), 4);
+    assert_eq!(
+        hooks.get(&residual).unwrap().to_data(),
+        plain_states[1].to_data()
+    );
+    assert_eq!(StagedModel::stack(&model), Stack::Decoder);
+    assert_eq!(StagedModel::num_layers(&model), 2);
+}
+
+/// Staged execution rejects contexts and module trees the hybrid cannot evaluate.
+#[test]
+fn staged_execution_rejects_unusable_contexts_and_modules() {
+    let device = Default::default();
+    let message =
+        |result: Result<HiddenState<B>>| result.expect_err("the staged call must fail").to_string();
+    let model = Qwen3_5TextModel::<B>::init(config(), &device).unwrap();
+    let fresh = || model.embed(&input(3)).unwrap();
+
+    let mut cross = fresh();
+    cross.context.cross_attention = Some(AttentionPolicy::causal());
+    assert!(message(model.run_layers(cross, 0..2)).contains("cross-attention"));
+    let mut layer_cross = fresh();
+    layer_cross
+        .context
+        .layer_cross_attention
+        .push((Layer::decoder(1), AttentionPolicy::causal()));
+    assert!(message(model.run_layers(layer_cross, 0..2)).contains("cross-attention"));
+    let mut encoded = fresh();
+    encoded.context.encoder = Some(crate::experiment::EncoderContext {
+        hidden: Tensor::zeros([1, 2, 8], &device),
+        positions: Tensor::<B, 2, Int>::from_ints([[0, 1]], &device),
+        token_mask: None,
+    });
+    assert!(message(model.run_layers(encoded, 0..2)).contains("cross-attention"));
+
+    // DeltaNet keeps its causal recurrence: neither connectivity nor a bias applies.
+    for policy in [
+        AttentionPolicy::causal().with_bias(Tensor::<B, 4>::zeros([1, 1, 3, 3], &device)),
+        AttentionPolicy {
+            allowed: Some(Tensor::<B, 4, Bool>::from_bool(
+                [[[[true, true, true]]]].into(),
+                &device,
+            )),
+            ..AttentionPolicy::causal()
+        },
+    ] {
+        let mut delta = fresh();
+        delta.context = delta
+            .context
+            .with_layer_attention(Layer::decoder(0), policy);
+        assert!(message(model.run_layers(delta, 0..2)).contains("causal recurrence"));
+    }
+
+    let mut beyond = fresh();
+    beyond.next_layer = 3;
+    assert!(message(model.normalize(beyond)).contains("valid block boundary"));
+
+    let mut stray = fresh();
+    stray.context = stray
+        .context
+        .with_layer_attention(Layer::decoder(2), AttentionPolicy::causal());
+    assert!(message(model.run_layers(stray, 0..2)).contains("unavailable Qwen decoder layer"));
+
+    let mut misshaped = fresh();
+    misshaped.context = misshaped.context.with_layer_attention(
+        Layer::decoder(1),
+        AttentionPolicy::custom(Tensor::<B, 4, Bool>::from_bool(
+            [[[[true, true]]]].into(),
+            &device,
+        )),
+    );
+    assert!(message(model.run_layers(misshaped, 0..2)).contains("attention.allowed"));
+
+    // One rotary configuration is required per block, staged or fused.
+    let mut short_rope = Qwen3_5TextModel::<B>::init(config(), &device).unwrap();
+    short_rope.layer_rope.pop();
+    let state = short_rope.embed(&input(3)).unwrap();
+    assert!(message(short_rope.run_layers(state, 0..2)).contains("one rotary configuration"));
+    let error = short_rope.forward(&input(3), false).unwrap_err();
+    assert!(
+        error.to_string().contains("one rotary configuration"),
+        "{error}"
+    );
+
+    // A block whose mixer was removed fails on both paths.
+    let mut no_attention = Qwen3_5TextModel::<B>::init(config(), &device).unwrap();
+    no_attention.layers[1].self_attn = None;
+    let state = no_attention.embed(&input(3)).unwrap();
+    assert!(message(no_attention.run_layers(state, 0..2)).contains("lacks its mixer"));
+    let error = no_attention.forward(&input(3), false).unwrap_err();
+    assert!(error.to_string().contains("no attention module"), "{error}");
+    let mut no_delta = Qwen3_5TextModel::<B>::init(config(), &device).unwrap();
+    no_delta.layers[0].linear_attn = None;
+    let error = no_delta.forward(&input(3), false).unwrap_err();
+    assert!(error.to_string().contains("no DeltaNet module"), "{error}");
+}
+
+/// One block called directly validates its hidden dtype and token-mask extent.
+#[test]
+fn single_block_validates_dtype_and_mask_extent() {
+    let device = Default::default();
+    let model = Qwen3_5TextModel::<B>::init(config(), &device).unwrap();
+    let hidden = model
+        .embed_tokens
+        .forward(Tensor::<B, 2, Int>::from_ints([[1, 2, 3]], &device));
+    let positions = Tensor::<B, 2, Int>::from_ints([[0, 1, 2]], &device);
+    let run = |hidden: Tensor<B, 3>, mask: Option<&TokenMask<B>>| {
+        model.layers[1].forward(hidden, positions.clone(), mask, model.layer_rope[1], 3)
+    };
+    let error = run(hidden.clone().cast(DType::F16), None).unwrap_err();
+    assert!(
+        error.to_string().contains("qwen.block.hidden dtype"),
+        "{error}"
+    );
+    let wide_mask = TokenMask::new(Tensor::<B, 2, Bool>::from_bool(
+        [[true, true, true, true]].into(),
+        &device,
+    ));
+    let error = run(hidden.clone(), Some(&wide_mask)).unwrap_err();
+    assert!(error.to_string().contains("token_mask"), "{error}");
+    let full_mask = TokenMask::new(Tensor::<B, 2, Bool>::from_bool(
+        [[true, true, true]].into(),
+        &device,
+    ));
+    assert_eq!(
+        run(hidden.clone(), Some(&full_mask)).unwrap().to_data(),
+        run(hidden, None).unwrap().to_data()
+    );
+}
+
+/// The tied readout rejects empty or mis-sized hidden states.
+#[test]
+fn tied_vocabulary_projection_rejects_malformed_hidden_states() {
+    let device = Default::default();
+    let model = Qwen3_5TextModel::<B>::init(config(), &device).unwrap();
+    for shape in [[0, 1, 8], [1, 0, 8], [1, 1, 7]] {
+        let error = model
+            .tied_vocabulary_projection(Tensor::zeros(shape, &device))
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.tied_vocabulary_projection"),
+            "{error}"
+        );
+    }
+}
+
+/// Attention-probability capture is unavailable on both stateless forward paths.
+#[test]
+fn attention_probability_capture_is_rejected() {
+    let model = Qwen3_5ForCausalLm::<B>::init(config(), &Default::default()).unwrap();
+    let options = ForwardOptions {
+        attentions: true,
+        ..Default::default()
+    };
+    for error in [
+        model.forward(input(3), &options).unwrap_err(),
+        model
+            .forward_with_hooks(input(3), &options, &mut Hooks::new())
+            .unwrap_err(),
+    ] {
+        assert!(matches!(error, Error::BackendCapability(_)));
+        assert!(
+            error.to_string().contains("reference attention path"),
+            "{error}"
+        );
+    }
+}
+
+/// An ungated full-attention block projects only queries and still runs.
+#[test]
+fn ungated_attention_projects_queries_only() {
+    let device = Default::default();
+    let ungated = Qwen3_5TextConfig {
+        attn_output_gate: false,
+        ..config()
+    };
+    let model = Qwen3_5ForCausalLm::<B>::init(ungated, &device).unwrap();
+    let attention = model.model.layers[1].self_attn.as_ref().unwrap();
+    assert_eq!(attention.q_proj.weight.dims(), [8, 2 * 4]);
+    assert_eq!(
+        model
+            .forward(input(3), &ForwardOptions::default())
+            .unwrap()
+            .logits
+            .dims(),
+        [1, 1, 16]
+    );
+}
+
+/// Builds the two-block test topology with one auxiliary MTP layer.
+fn mtp_model() -> Qwen3_5ForCausalLm<B> {
+    let config = Qwen3_5TextConfig {
+        mtp_num_hidden_layers: 1,
+        ..config()
+    };
+    Qwen3_5ForCausalLm::init(config, &Default::default()).unwrap()
+}
+
+/// The stateless MTP path requires its graph, non-empty tokens, and matching positions.
+#[test]
+fn stateless_mtp_validates_graph_tokens_and_positions() {
+    let device = Default::default();
+    let hidden = || Tensor::<B, 3>::zeros([1, 1, 8], &device);
+    let positions = || Tensor::<B, 2, Int>::from_ints([[0]], &device);
+    let base = Qwen3_5ForCausalLm::<B>::init(config(), &device).unwrap();
+    let error = base
+        .forward_mtp(Tensor::from_ints([[1]], &device), hidden(), positions(), 0)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "qwen3_5.mtp_num_hidden_layers"),
+        "{error}"
+    );
+
+    let model = mtp_model();
+    for shape in [[1, 0], [0, 1]] {
+        let error = model
+            .forward_mtp(
+                Tensor::<B, 2, Int>::zeros(shape, &device),
+                Tensor::zeros([shape[0], shape[1], 8], &device),
+                Tensor::<B, 2, Int>::zeros(shape, &device),
+                0,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.next_token_ids"),
+            "{error}"
+        );
+    }
+    let error = model
+        .forward_mtp(
+            Tensor::from_ints([[1]], &device),
+            hidden(),
+            Tensor::<B, 2, Int>::from_ints([[0, 1]], &device),
+            0,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.position_ids"),
+        "{error}"
+    );
+    // Step `s` selects layer `s mod 1`, so every step uses the same layer.
+    let step = |step| {
+        model
+            .forward_mtp(
+                Tensor::from_ints([[1]], &device),
+                hidden(),
+                positions(),
+                step,
+            )
+            .unwrap()
+            .logits
+            .to_data()
+    };
+    assert_eq!(step(0), step(5));
+}
+
+/// MTP construction rejects absent layers, dedicated embeddings, and an unrepresentable width.
+#[test]
+fn mtp_initialization_rejects_unsupported_topologies() {
+    let device = Default::default();
+    let cases = [
+        (
+            Qwen3_5TextConfig {
+                mtp_num_hidden_layers: 0,
+                ..config()
+            },
+            "qwen3_5.mtp_num_hidden_layers",
+        ),
+        (
+            Qwen3_5TextConfig {
+                mtp_num_hidden_layers: 1,
+                mtp_use_dedicated_embeddings: true,
+                ..config()
+            },
+            "qwen3_5.mtp_use_dedicated_embeddings",
+        ),
+        (
+            Qwen3_5TextConfig {
+                mtp_num_hidden_layers: 1,
+                hidden_size: usize::MAX / 2 + 1,
+                ..config()
+            },
+            "qwen3_5.hidden_size",
+        ),
+    ];
+    for (config, expected) in cases {
+        let error = Qwen3_5Mtp::<B>::init(&config, &device).unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == expected),
+            "{error}"
+        );
+    }
+}
+
+/// The MTP graph rejects mismatched, empty, or mis-sized inputs and an empty layer list.
+#[test]
+fn mtp_graph_validates_its_inputs_and_layers() {
+    let device = Default::default();
+    let mut model = mtp_model();
+    let rope = model.model.rope;
+    let mtp = model.mtp.as_mut().unwrap();
+    let embedding = |shape: [usize; 3]| Tensor::<B, 3>::zeros(shape, &device);
+    let shape_error = |error: Error, expected: &str| {
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == expected),
+            "{error}"
+        );
+    };
+    shape_error(
+        mtp.fuse(embedding([1, 2, 8]), embedding([1, 1, 8]))
+            .unwrap_err(),
+        "qwen.mtp.target_hidden_state",
+    );
+    for shape in [[0, 1, 8], [1, 0, 8], [1, 1, 7]] {
+        shape_error(
+            mtp.fuse(embedding(shape), embedding(shape)).unwrap_err(),
+            "qwen.mtp.inputs",
+        );
+    }
+    shape_error(
+        mtp.forward(
+            embedding([1, 2, 8]),
+            embedding([1, 2, 8]),
+            Tensor::<B, 2, Int>::from_ints([[0]], &device),
+            0,
+            rope,
+            2,
+        )
+        .unwrap_err(),
+        "qwen.mtp.position_ids",
+    );
+    mtp.layers.clear();
+    let error = mtp
+        .forward(
+            embedding([1, 1, 8]),
+            embedding([1, 1, 8]),
+            Tensor::<B, 2, Int>::from_ints([[0]], &device),
+            0,
+            rope,
+            1,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "qwen3_5.mtp"),
+        "{error}"
+    );
+}
