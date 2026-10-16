@@ -2561,3 +2561,28 @@ fn failing_gate_callback_names_its_activation_point() {
         "{error}"
     );
 }
+
+/// A score bound below one query row's plane fails before any score is allocated.
+#[test]
+fn score_bound_below_one_query_row_fails_before_scoring() {
+    let (model, device) = tiny_model();
+    let model = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 1))
+        .unwrap();
+    let error = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason.starts_with("one attention query row requires ")
+            && reason.ends_with(" score elements, exceeding the configured bound of 1")),
+        "{error}"
+    );
+}

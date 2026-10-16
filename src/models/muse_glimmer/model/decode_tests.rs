@@ -1936,3 +1936,35 @@ fn cache_layout_refuses_zero_and_missing_ring_windows() {
     assert_eq!(layout.groups.len(), 2);
     assert_eq!(layout.window, Some(3));
 }
+
+/// A cached call whose score bound is below one query row fails without publishing.
+#[test]
+fn cached_score_bound_below_one_query_row_fails_without_publishing() {
+    let (model, device) = tiny_model();
+    let model = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 1))
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let snapshot = contract_cache_snapshot(&state);
+    let error = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason.starts_with("one attention query row requires ")
+            && reason.ends_with(" score elements, exceeding the configured bound of 1")),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(contract_cache_snapshot(&state), snapshot);
+}

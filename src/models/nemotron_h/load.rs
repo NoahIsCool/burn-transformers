@@ -138,7 +138,8 @@ impl<B: Backend> TensorSink for NemotronHForCausalLm<B> {
                 install_linear_weight(target, head, data)
             }
             target if target.starts_with("model.layers.") => {
-                let (layer_index, suffix) = parse_indexed_target(target, "model.layers.")?;
+                let (layer_index, suffix) =
+                    parse_block_target(target, &target["model.layers.".len()..])?;
                 let layer_count = self.model.layers.len();
                 let layer = self.model.layers.get_mut(layer_index).ok_or_else(|| {
                     NemotronHLoadError::InvalidIndex {
@@ -235,23 +236,21 @@ impl<B: Backend> NemotronHForCausalLm<B> {
     }
 }
 
-/// Parses `<prefix><decimal>.<suffix>` without accepting empty components.
-fn parse_indexed_target<'a>(
-    target: &'a str,
-    prefix: &str,
+/// Splits the `<decimal>.<suffix>` remainder of a `model.layers.` target.
+///
+/// `remainder` is the text after the prefix the caller already matched;
+/// `target` is the full name reported by diagnostics. A missing separator, an
+/// empty suffix, and a non-decimal index are invalid.
+fn parse_block_target<'a>(
+    target: &str,
+    remainder: &'a str,
 ) -> Result<(usize, &'a str), NemotronHLoadError> {
-    let remainder =
-        target
-            .strip_prefix(prefix)
-            .ok_or_else(|| NemotronHLoadError::UnknownTarget {
-                target: target.into(),
-            })?;
     let (index, suffix) =
         remainder
             .split_once('.')
             .ok_or_else(|| NemotronHLoadError::InvalidIndex {
                 target: target.into(),
-                reason: format!("expected `{prefix}<index>.<parameter>`"),
+                reason: "expected `model.layers.<index>.<parameter>`".into(),
             })?;
     if suffix.is_empty() {
         return Err(NemotronHLoadError::InvalidIndex {
@@ -411,7 +410,8 @@ fn install_moe_tensor<B: Backend>(
         "router.weight" => install_linear_weight(target, &mut moe.router, data),
         "correction_bias" => install(target, &mut moe.correction_bias, data),
         suffix if suffix.starts_with("routed.") => {
-            let (expert_index, projection) = parse_indexed_suffix(target, suffix, "routed.")?;
+            let (expert_index, projection) =
+                parse_expert_target(target, &suffix["routed.".len()..])?;
             let count = moe.routed.len();
             let expert = moe.routed.get_mut(expert_index).ok_or_else(|| {
                 NemotronHLoadError::InvalidIndex {
@@ -458,24 +458,22 @@ fn install_moe_tensor<B: Backend>(
     }
 }
 
-/// Parses an indexed fragment already isolated from its full target prefix.
-fn parse_indexed_suffix<'a>(
+/// Splits the `<decimal>.<projection>` remainder of a `routed.` expert target.
+///
+/// `remainder` is the text after the `routed.` prefix the caller already
+/// matched; `target` is the full name reported by diagnostics. An empty
+/// projection is left to the expert's own dispatch, which rejects it as
+/// unknown.
+fn parse_expert_target<'a>(
     target: &str,
-    suffix: &'a str,
-    prefix: &str,
+    remainder: &'a str,
 ) -> Result<(usize, &'a str), NemotronHLoadError> {
-    let remainder =
-        suffix
-            .strip_prefix(prefix)
-            .ok_or_else(|| NemotronHLoadError::UnknownTarget {
-                target: target.into(),
-            })?;
     let (index, projection) =
         remainder
             .split_once('.')
             .ok_or_else(|| NemotronHLoadError::InvalidIndex {
                 target: target.into(),
-                reason: format!("expected `{prefix}<index>.<parameter>`"),
+                reason: "expected `routed.<index>.<parameter>`".into(),
             })?;
     let index = index
         .parse::<usize>()

@@ -1303,3 +1303,41 @@ fn failing_hook_callbacks_name_their_activation_point() {
         );
     }
 }
+
+/// Component constructors report zero widths of an unvalidated config contextually.
+///
+/// The public constructors validate first, so these widths reach the block
+/// and MoE constructors only through direct (crate-internal) calls; the shared
+/// feed-forward initializer must still refuse them instead of allocating.
+#[test]
+fn component_constructors_refuse_zero_widths() {
+    let device = Default::default();
+    let moe = NemotronHMoe::<TestBackend>::init(
+        &NemotronHConfig {
+            moe_shared_expert_intermediate_size: 0,
+            ..tiny_config(false)
+        },
+        &device,
+    );
+    assert!(matches!(moe, Err(Error::Configuration { .. })));
+    let block = NemotronHBlock::<TestBackend>::init(
+        &NemotronHConfig {
+            intermediate_size: 0,
+            ..tiny_config(false)
+        },
+        NemotronHBlockType::Mlp,
+        &device,
+    );
+    assert!(matches!(block, Err(Error::Configuration { .. })));
+    let block = NemotronHBlock::<TestBackend>::init(
+        &NemotronHConfig {
+            mlp_hidden_act: "gelu".into(),
+            ..tiny_config(false)
+        },
+        NemotronHBlockType::Mlp,
+        &device,
+    );
+    assert!(
+        matches!(block, Err(Error::Configuration { field, .. }) if field == "nemotron_h.mlp_hidden_act")
+    );
+}

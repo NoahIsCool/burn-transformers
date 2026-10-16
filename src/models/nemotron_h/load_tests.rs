@@ -732,6 +732,7 @@ fn sink_dispatch_rejects_every_malformed_or_absent_target_with_its_cause() {
         "model.layers.3.moe.unknown",
         "model.layers.3.moe.shared.unknown",
         "model.layers.3.moe.routed.0.unknown",
+        "model.layers.3.moe.routed.0.",
         "next_token_head.unknown",
         "next_token_head.attention.unknown",
         "next_token_head.moe.unknown",
