@@ -9,11 +9,13 @@
 //! Discovery is deliberately separate from parameter application. Pass one reads
 //! only the index and shard headers and produces a [`CheckpointManifest`]. Pass two
 //! is described by a [`LoadPlan`] and executed through [`execute_load_plan`]. The
-//! executor owns at most one source payload and one transformation output at a
-//! time, then transfers the resulting [`burn::tensor::TensorData`] into an
-//! architecture-owned [`TensorSink`]. That separation makes malformed artifacts
-//! fail before expensive model allocations occur and avoids staging the complete
-//! checkpoint in host memory.
+//! executor stages one operation at a time: one source payload and its
+//! transformation output (both sources for an MXFP4 blocks/scales pair, or the
+//! two payloads of an equivalence comparison), bounded by
+//! [`LoadPlan::required_host_staging_bytes`]. It then transfers the resulting
+//! [`burn::tensor::TensorData`] into an architecture-owned [`TensorSink`]. That
+//! separation makes malformed artifacts fail before expensive model allocations
+//! occur and avoids staging the complete checkpoint in host memory.
 
 pub(crate) mod accounting;
 mod artifact;
