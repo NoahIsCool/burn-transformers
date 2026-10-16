@@ -407,6 +407,132 @@ fn offsets_follow_their_row_major_formulas() {
     );
 }
 
+/// Table indices and coordinates are inverse bijections over all 4096 entries.
+#[test]
+fn table_index_and_coordinates_are_inverse_bijections() {
+    let mut seen = vec![false; TABLE_ENTRIES];
+    for scale in 0..=u8::MAX {
+        for code in 0..=u8::MAX {
+            let index = table_index(scale, code);
+            assert_eq!(index, 16 * usize::from(scale) + usize::from(code & 15));
+            assert_eq!(table_coordinates(index), (scale, code & 15));
+            if code < 16 {
+                assert!(!seen[index], "entry {index} claimed twice");
+                seen[index] = true;
+            }
+        }
+    }
+    assert!(seen.iter().all(|&claimed| claimed));
+    for index in 0..TABLE_ENTRIES {
+        let (scale, code) = table_coordinates(index);
+        assert_eq!(table_index(scale, code), index);
+    }
+}
+
+/// The decode partition pins its thread count and covers every unit once.
+#[test]
+fn decode_partition_covers_every_unit_with_at_most_the_planned_threads() {
+    for (experts, rows, groups) in [(1, 1, 1), (2, 3, 4), (32, 2880, 90), (1, 1 << 15, 64)] {
+        let geometry = geometry(experts, rows, groups);
+        let units = geometry.experts * geometry.groups;
+        for available in [1, 2, 3, 7, 8, 64, 10_000] {
+            for width in [2, 4, 8] {
+                let partition = decode_partition(geometry, available, width);
+                let expected_threads = if geometry.values() < PARALLEL_MIN_VALUES {
+                    1
+                } else {
+                    available.min(units)
+                };
+                assert_eq!(partition.threads, expected_threads);
+                assert_eq!(partition.unit_bytes, 32 * geometry.rows * width);
+                assert_eq!(
+                    partition.units_per_thread,
+                    units.div_ceil(partition.threads)
+                );
+                assert_eq!(
+                    partition.chunk_bytes,
+                    partition.units_per_thread * partition.unit_bytes
+                );
+                assert_eq!(units * partition.unit_bytes, geometry.values() * width);
+                let chunks = units.div_ceil(partition.units_per_thread);
+                assert!(chunks <= partition.threads);
+                assert!((chunks - 1) * partition.units_per_thread < units);
+            }
+        }
+    }
+}
+
+/// Unit coordinates recover the unit and place its values contiguously.
+#[test]
+fn unit_coordinates_place_each_unit_in_its_output_slice() {
+    let geometry = geometry(3, 5, 4);
+    for unit in 0..geometry.experts * geometry.groups {
+        let (expert, group) = unit_coordinates(geometry, unit);
+        assert_eq!(expert * geometry.groups + group, unit);
+        for column in 0..BLOCK_VALUES {
+            for row in 0..geometry.rows {
+                assert_eq!(
+                    transposed_offset(geometry, expert, 32 * group + column, row),
+                    unit * 32 * geometry.rows + column * geometry.rows + row
+                );
+            }
+        }
+    }
+}
+
+/// Each block byte's two values land in distinct in-unit slots, covering the unit once.
+#[test]
+fn unit_value_bytes_cover_each_unit_slot_once() {
+    for rows in [1_usize, 2, 5] {
+        for width in [2_usize, 4, 8] {
+            let mut written = vec![0_u8; BLOCK_VALUES * rows * width];
+            for row in 0..rows {
+                for byte_index in 0..BLOCK_BYTES {
+                    let (even, odd) = unit_value_bytes(rows, row, byte_index, width);
+                    assert_eq!(even, (row + 2 * byte_index * rows) * width);
+                    assert_eq!(odd, even + rows * width);
+                    for slot in [even, odd] {
+                        for byte in &mut written[slot..slot + width] {
+                            *byte += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                written.iter().all(|&count| count == 1),
+                "{rows} rows, {width} bytes"
+            );
+        }
+    }
+}
+
+/// Every rejected shape names exactly the first rule it violates.
+#[test]
+fn geometry_errors_name_the_first_violated_rule() {
+    let cases: [(&[u64], &[u64], Mxfp4ShapeError); 5] = [
+        (&[1, 1, 1, 15], &[0, 0], Mxfp4ShapeError::Blocks),
+        (&[1, 1, 1, 16], &[1, 1, 2], Mxfp4ShapeError::Scales),
+        (&[0, 1, 1, 16], &[0, 1, 1], Mxfp4ShapeError::Empty),
+        (
+            &[u64::MAX, 1, 1, 16],
+            &[u64::MAX, 1, 1],
+            Mxfp4ShapeError::Overflow,
+        ),
+        (
+            &[1, 1, u64::MAX / 16, 16],
+            &[1, 1, u64::MAX / 16],
+            Mxfp4ShapeError::Overflow,
+        ),
+    ];
+    for (blocks, scales, expected) in cases {
+        assert_eq!(
+            mxfp4_geometry(blocks, scales),
+            Err(expected),
+            "{blocks:?} {scales:?}"
+        );
+    }
+}
+
 /// The kernel refuses payloads whose lengths disagree with the geometry.
 #[test]
 fn decode_rejects_payload_lengths_that_disagree_with_the_geometry() {

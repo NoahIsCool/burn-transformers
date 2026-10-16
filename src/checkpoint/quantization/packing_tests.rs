@@ -58,7 +58,105 @@ fn packed_lengths_and_reserved_codes_match_the_format() {
     assert_eq!(read_code(CodeWidth::Nibble, &[0x21], 2), None);
 }
 
+/// Code validation names the first defect in index order.
+#[test]
+fn code_violations_name_the_first_defect() {
+    assert_eq!(first_code_violation(CodeWidth::Byte, 2, &[1, 0xff]), None);
+    assert_eq!(
+        first_code_violation(CodeWidth::Byte, 3, &[1, 0x80, 2]),
+        Some(CodeViolation::Reserved {
+            index: 1,
+            value: -128
+        })
+    );
+    assert_eq!(
+        first_code_violation(CodeWidth::Byte, 3, &[1, 2]),
+        Some(CodeViolation::Short)
+    );
+    // A reserved code before the end of the buffer is reported before shortness.
+    assert_eq!(
+        first_code_violation(CodeWidth::Byte, 3, &[0x80]),
+        Some(CodeViolation::Reserved {
+            index: 0,
+            value: -128
+        })
+    );
+    assert_eq!(
+        first_code_violation(CodeWidth::Nibble, 3, &[0x21, 0x03]),
+        None
+    );
+    assert_eq!(
+        first_code_violation(CodeWidth::Nibble, 3, &[0x21, 0x13]),
+        Some(CodeViolation::Padding)
+    );
+    assert_eq!(
+        first_code_violation(CodeWidth::Nibble, 2, &[0x81]),
+        Some(CodeViolation::Reserved {
+            index: 1,
+            value: -8
+        })
+    );
+    assert_eq!(
+        first_code_violation(CodeWidth::Nibble, 3, &[0x21]),
+        Some(CodeViolation::Short)
+    );
+    // Even Q4 streams and Q8 streams have no padding nibble to check.
+    assert_eq!(
+        first_code_violation(CodeWidth::Nibble, 2, &[0x21, 0xf0]),
+        None
+    );
+    assert_eq!(first_code_violation(CodeWidth::Nibble, 0, &[]), None);
+}
+
 proptest! {
+    /// Pushing codes one at a time reads back as the pushed sequence.
+    #[test]
+    fn pushed_codes_read_back_in_order(codes in proptest::collection::vec(-7_i8..=7, 0..100)) {
+        for width in [CodeWidth::Byte, CodeWidth::Nibble] {
+            let mut packed = Vec::new();
+            for (index, &code) in codes.iter().enumerate() {
+                push_code(width, &mut packed, index, code);
+                prop_assert_eq!(packed.len(), packed_len(width, index + 1));
+            }
+            for (index, &code) in codes.iter().enumerate() {
+                prop_assert_eq!(read_code(width, &packed, index), Some(code));
+            }
+            prop_assert_eq!(first_code_violation(width, codes.len(), &packed), None);
+        }
+    }
+
+    /// Code validation agrees with a direct scan of the original rules.
+    #[test]
+    fn code_violations_match_a_direct_scan(
+        packed in proptest::collection::vec(any::<u8>(), 0..12),
+        elements in 0_usize..26,
+        nibble in any::<bool>(),
+    ) {
+        let width = if nibble { CodeWidth::Nibble } else { CodeWidth::Byte };
+        let mut expected = None;
+        for index in 0..elements {
+            match read_code(width, &packed, index) {
+                None => {
+                    expected = Some(CodeViolation::Short);
+                    break;
+                }
+                Some(value) if value == reserved_code(width) => {
+                    expected = Some(CodeViolation::Reserved { index, value });
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        if expected.is_none()
+            && width == CodeWidth::Nibble
+            && elements % 2 == 1
+            && packed.last().is_some_and(|&byte| split_nibbles(byte).1 != 0)
+        {
+            expected = Some(CodeViolation::Padding);
+        }
+        prop_assert_eq!(first_code_violation(width, elements, &packed), expected);
+    }
+
     /// Codes packed in order read back exactly, with a zero unused Q4 high nibble.
     #[test]
     fn packed_codes_read_back_in_order(codes in proptest::collection::vec(-7_i8..=7, 0..100)) {

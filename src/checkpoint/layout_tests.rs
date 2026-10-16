@@ -216,3 +216,332 @@ proptest! {
         prop_assert_eq!(expected_target, outer * length * inner);
     }
 }
+
+/// Range products match `element_count` on the corresponding subslice.
+#[test]
+fn range_products_match_subslice_element_counts() {
+    let shapes: [&[u64]; 5] = [
+        &[],
+        &[2, 3, 4],
+        &[u64::MAX, 2, 0],
+        &[0, u64::MAX, 3],
+        &[1 << 40, 1 << 30, 5],
+    ];
+    for shape in shapes {
+        for start in 0..=shape.len() {
+            for end in start..=shape.len() {
+                assert_eq!(
+                    checked_range_product(shape, start, end),
+                    element_count(&shape[start..end]),
+                    "{shape:?}[{start}..{end}]"
+                );
+            }
+        }
+    }
+}
+
+/// The axis-view check sequence written directly with `try_fold` and `try_from`.
+fn reference_axis_view(shape: &[u64], axis: usize) -> Result<AxisExtents, AxisViewError> {
+    if axis >= shape.len() {
+        return Err(AxisViewError::AxisOutOfBounds);
+    }
+    let fold = |dimensions: &[u64]| {
+        dimensions
+            .iter()
+            .try_fold(1_u64, |product, &dimension| product.checked_mul(dimension))
+    };
+    let outer = fold(&shape[..axis]).ok_or(AxisViewError::OuterOverflow)?;
+    let outer =
+        usize::try_from(outer).map_err(|_| AxisViewError::OuterTooLarge { value: outer })?;
+    let axis_len = usize::try_from(shape[axis])
+        .map_err(|_| AxisViewError::AxisTooLarge { value: shape[axis] })?;
+    let inner = fold(&shape[axis + 1..]).ok_or(AxisViewError::InnerOverflow)?;
+    let inner =
+        usize::try_from(inner).map_err(|_| AxisViewError::InnerTooLarge { value: inner })?;
+    outer
+        .checked_mul(axis_len)
+        .and_then(|rows| rows.checked_mul(inner))
+        .ok_or(AxisViewError::ElementsTooLarge)?;
+    Ok(AxisExtents {
+        outer,
+        axis: axis_len,
+        inner,
+    })
+}
+
+/// The original runtime slice-plan checks, written directly.
+fn reference_slice_plan(
+    source: &[u64],
+    target: &[u64],
+    axis: usize,
+    start: u64,
+    length: u64,
+) -> Result<(), SlicePlanError> {
+    let axis_len = *source.get(axis).ok_or(SlicePlanError::AxisOutOfBounds)?;
+    let end = start
+        .checked_add(length)
+        .ok_or(SlicePlanError::EndOverflow)?;
+    if end > axis_len {
+        return Err(SlicePlanError::PastAxis { end });
+    }
+    let mut expected = source.to_vec();
+    expected[axis] = length;
+    if target != expected {
+        return Err(SlicePlanError::ShapeMismatch);
+    }
+    Ok(())
+}
+
+/// Slice plans accept in-range slices with the replaced shape and name the first failure.
+#[test]
+fn slice_plans_check_range_then_shape() {
+    assert_eq!(check_slice_plan(&[4, 6], &[4, 2], 1, 3, 2), Ok(()));
+    assert_eq!(check_slice_plan(&[4, 6], &[4, 0], 1, 6, 0), Ok(()));
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[4, 2], 2, 0, 2),
+        Err(SlicePlanError::AxisOutOfBounds)
+    );
+    assert_eq!(
+        check_slice_plan(&[4, u64::MAX], &[4, 2], 1, u64::MAX, 2),
+        Err(SlicePlanError::EndOverflow)
+    );
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[4, 2], 1, 5, 2),
+        Err(SlicePlanError::PastAxis { end: 7 })
+    );
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[2, 2], 1, 0, 2),
+        Err(SlicePlanError::ShapeMismatch)
+    );
+    assert_eq!(
+        check_slice_plan(&[4, 6], &[4, 2, 1], 1, 0, 2),
+        Err(SlicePlanError::ShapeMismatch)
+    );
+}
+
+/// Axis views report exact extents and name the first failed check.
+#[test]
+fn axis_views_split_shapes_and_name_the_first_failure() {
+    assert_eq!(
+        axis_view(&[2, 5, 3], 1),
+        Ok(AxisExtents {
+            outer: 2,
+            axis: 5,
+            inner: 3
+        })
+    );
+    assert_eq!(
+        axis_view(&[7], 0),
+        Ok(AxisExtents {
+            outer: 1,
+            axis: 7,
+            inner: 1
+        })
+    );
+    assert_eq!(axis_view(&[2, 3], 2), Err(AxisViewError::AxisOutOfBounds));
+    assert_eq!(
+        axis_view(&[u64::MAX, 2, 1], 2),
+        Err(AxisViewError::OuterOverflow)
+    );
+    assert_eq!(
+        axis_view(&[1, 2, u64::MAX, 2], 1),
+        Err(AxisViewError::InnerOverflow)
+    );
+    // A later zero does not hide an overflowing running product on either side.
+    assert_eq!(
+        axis_view(&[1 << 40, 1 << 40, 0, 5], 3),
+        Err(AxisViewError::OuterOverflow)
+    );
+    assert_eq!(
+        axis_view(&[5, 1 << 40, 1 << 40, 0], 0),
+        Err(AxisViewError::InnerOverflow)
+    );
+    // A zero inner extent keeps the element count at zero.
+    assert_eq!(
+        axis_view(&[3, 4, 0, 9], 1),
+        Ok(AxisExtents {
+            outer: 3,
+            axis: 4,
+            inner: 0
+        })
+    );
+    if usize::BITS < u64::BITS {
+        let huge = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            axis_view(&[huge, 1], 1),
+            Err(AxisViewError::OuterTooLarge { value: huge })
+        );
+        assert_eq!(
+            axis_view(&[1, huge], 0),
+            Err(AxisViewError::InnerTooLarge { value: huge })
+        );
+        assert_eq!(
+            axis_view(&[huge], 0),
+            Err(AxisViewError::AxisTooLarge { value: huge })
+        );
+    } else {
+        // `outer * axis` overflows `usize` even though the inner extent is zero.
+        assert_eq!(
+            axis_view(&[1 << 40, 1 << 40, 0], 1),
+            Err(AxisViewError::ElementsTooLarge)
+        );
+        assert_eq!(
+            axis_view(&[1 << 30, 1 << 30, 1 << 10], 1),
+            Err(AxisViewError::ElementsTooLarge)
+        );
+    }
+}
+
+/// Axis element counts check the partial and full products separately.
+#[test]
+fn axis_elements_reject_either_overflowing_product() {
+    assert_eq!(axis_elements(2, 5, 3), Some(30));
+    assert_eq!(axis_elements(usize::MAX, 2, 0), None);
+    assert_eq!(axis_elements(usize::MAX, 1, 1), Some(usize::MAX));
+    assert_eq!(axis_elements(usize::MAX, 1, 2), None);
+    assert_eq!(axis_elements(0, usize::MAX, usize::MAX), Some(0));
+}
+
+/// Range containment is exact and never overflows.
+#[test]
+fn range_within_checks_the_mathematical_end() {
+    assert!(range_within(0, 0, 0));
+    assert!(range_within(2, 3, 5));
+    assert!(!range_within(3, 3, 5));
+    assert!(!range_within(usize::MAX, 1, usize::MAX));
+    assert!(range_within(usize::MAX, 0, usize::MAX));
+}
+
+/// Concatenation extends the axis only for compatible sources and leaves failures untouched.
+#[test]
+fn concatenation_extends_the_axis_or_leaves_the_shape_unchanged() {
+    let mut shape = vec![2, 0, 4];
+    assert_eq!(extend_concatenation(&mut shape, &[2, 3, 4], 1), Ok(()));
+    assert_eq!(extend_concatenation(&mut shape, &[2, 5, 4], 1), Ok(()));
+    assert_eq!(shape, [2, 8, 4]);
+    for incompatible in [&[2, 1][..], &[2, 1, 4, 1], &[3, 1, 4], &[2, 1, 5]] {
+        assert_eq!(
+            extend_concatenation(&mut shape, incompatible, 1),
+            Err(ConcatError::Incompatible)
+        );
+        assert_eq!(shape, [2, 8, 4]);
+    }
+    assert_eq!(
+        extend_concatenation(&mut shape, &[2, u64::MAX, 4], 1),
+        Err(ConcatError::Overflow)
+    );
+    assert_eq!(shape, [2, 8, 4]);
+    // An incompatible shape is reported even when the axis would also overflow.
+    assert_eq!(
+        extend_concatenation(&mut shape, &[3, u64::MAX, 4], 1),
+        Err(ConcatError::Incompatible)
+    );
+}
+
+/// Dense byte lengths reject overflowing running products and byte counts.
+#[test]
+fn dense_byte_lengths_are_exact_or_rejected() {
+    assert_eq!(dense_byte_len(&[], 4), Some(4));
+    assert_eq!(dense_byte_len(&[2, 3], 2), Some(12));
+    assert_eq!(dense_byte_len(&[usize::MAX, 2, 0], 4), None);
+    assert_eq!(dense_byte_len(&[0, usize::MAX], 8), Some(0));
+    assert_eq!(dense_byte_len(&[usize::MAX], 1), Some(usize::MAX));
+    assert_eq!(dense_byte_len(&[usize::MAX], 2), None);
+    assert_eq!(checked_host_product(&[usize::MAX, 2, 0]), None);
+    assert_eq!(checked_host_product(&[3, 0, usize::MAX]), Some(0));
+}
+
+/// The data section follows the prefix and header and reaches the end of the file.
+#[test]
+fn data_sections_start_after_the_header_and_reach_the_file_end() {
+    assert_eq!(
+        data_section(10, 30),
+        Ok(DataSection {
+            start: 18,
+            bytes: 12
+        })
+    );
+    assert_eq!(
+        data_section(10, 18),
+        Ok(DataSection {
+            start: 18,
+            bytes: 0
+        })
+    );
+    assert_eq!(
+        data_section(0, 30),
+        Err(DataSectionError::InvalidHeaderLength)
+    );
+    assert_eq!(
+        data_section(23, 30),
+        Err(DataSectionError::InvalidHeaderLength)
+    );
+    assert_eq!(
+        data_section(u64::MAX - 7, u64::MAX),
+        Err(DataSectionError::Overflow)
+    );
+    assert_eq!(
+        data_section(u64::MAX - 8, u64::MAX),
+        Ok(DataSection {
+            start: u64::MAX,
+            bytes: 0
+        })
+    );
+}
+
+proptest! {
+    /// Axis views agree with independently computed prefix and suffix products.
+    #[test]
+    fn axis_views_match_independent_products(
+        shape in proptest::collection::vec(0_u64..9, 1..6),
+        axis_seed in any::<prop::sample::Index>(),
+    ) {
+        let axis = axis_seed.index(shape.len());
+        let view = axis_view(&shape, axis).expect("small shapes fit");
+        let product = |dimensions: &[u64]| dimensions.iter().product::<u64>();
+        prop_assert_eq!(view.outer as u64, product(&shape[..axis]));
+        prop_assert_eq!(view.axis as u64, shape[axis]);
+        prop_assert_eq!(view.inner as u64, product(&shape[axis + 1..]));
+        prop_assert_eq!((view.outer * view.axis * view.inner) as u64, product(&shape));
+    }
+
+    /// Slice plans give the original verdict on small and overflowing plans.
+    #[test]
+    fn slice_plans_match_the_original_checks(
+        source in proptest::collection::vec(0_u64..5, 0..4),
+        target in proptest::collection::vec(0_u64..5, 0..4),
+        axis in 0_usize..4,
+        start in prop_oneof![0_u64..6, Just(u64::MAX)],
+        length in 0_u64..6,
+    ) {
+        prop_assert_eq!(
+            check_slice_plan(&source, &target, axis, start, length),
+            reference_slice_plan(&source, &target, axis, start, length)
+        );
+    }
+
+    /// Axis views classify overflowing and zero-bearing shapes like a direct reference.
+    #[test]
+    fn axis_views_classify_like_the_reference(
+        shape in proptest::collection::vec(
+            prop::sample::select(vec![0_u64, 1, 3, 1 << 20, 1 << 32, 1 << 40, u64::MAX]),
+            0..6,
+        ),
+        axis in 0_usize..7,
+    ) {
+        prop_assert_eq!(axis_view(&shape, axis), reference_axis_view(&shape, axis));
+    }
+
+    /// Dense byte lengths match the original running-product fold.
+    #[test]
+    fn dense_byte_lengths_match_the_fold(
+        shape in proptest::collection::vec(any::<usize>().prop_map(|value| value % 100_000), 0..6),
+        width in 1_usize..9,
+    ) {
+        let reference = shape
+            .iter()
+            .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
+            .and_then(|elements| elements.checked_mul(width));
+        prop_assert_eq!(dense_byte_len(&shape, width), reference);
+    }
+}

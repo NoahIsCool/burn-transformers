@@ -23,13 +23,16 @@
 mod burnpack;
 mod checkpoint;
 mod config;
+mod counts;
 mod error;
+mod hash_workers;
 mod load;
 mod manifest;
 mod packing;
 mod policy;
 mod provenance;
 mod reference;
+mod staging;
 
 pub use burnpack::{
     BURNPACK_MANIFEST_TENSOR, BurnpackAppendOutcome, BurnpackArtifactSummary,

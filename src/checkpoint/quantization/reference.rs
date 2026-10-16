@@ -25,12 +25,11 @@ use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizationGroupSize,
     QuantizedTensorMetadata, Result, SourceFloatDType, SymmetricQuantization,
     WeightQuantizationConfig, classify_weight_for_quantization,
-    packing::{
-        CodeWidth, encode_byte, encode_nibble, join_nibbles, read_code, reserved_code,
-        split_nibbles,
-    },
+    counts::{block_scale_count, group_index},
+    packing::{CodeViolation, first_code_violation, push_code, read_code},
     provenance::quantized_payload_sha256,
 };
+use crate::checkpoint::division::ceil_div_usize;
 
 /// Bytes of little-endian scales encoded per staging write or digest update.
 ///
@@ -187,7 +186,7 @@ impl QuantizedWeight {
                 context: "dequantized f32 tensor",
                 requested: elements,
             })?;
-        let width = code_width(self.metadata.scheme);
+        let width = self.metadata.scheme.code_width();
         for index in 0..elements {
             let code = read_code(width, &self.packed_values, index).ok_or(
                 QuantizationError::PackedLengthMismatch {
@@ -195,7 +194,8 @@ impl QuantizedWeight {
                     actual: self.packed_values.len(),
                 },
             )?;
-            let scale = self.scales[index / self.metadata.group_size.get()];
+            // Verified: the group index is below the validated scale count.
+            let scale = self.scales[group_index(index, elements, self.metadata.group_size.get())];
             values.push(f32::from(code) * scale);
         }
         let shape = self.metadata.host_shape()?;
@@ -230,8 +230,7 @@ impl QuantizedWeight {
             SymmetricQuantization::Q4 => (QuantValue::Q4S, 8),
         };
         debug_assert!(columns.is_multiple_of(values_per_u32));
-        let expected_scales = rows
-            .checked_mul(columns / group_size)
+        let expected_scales = block_scale_count(*rows, *columns, group_size)
             .ok_or(QuantizationError::ShapeElementOverflow)?;
         if scales.len() != expected_scales {
             return Err(QuantizationError::ScaleCountMismatch {
@@ -332,7 +331,7 @@ pub fn quantize_tensor_data(
 
     let packed_len = config.scheme.packed_bytes(elements)?;
     let group_size = config.group_size.get();
-    let groups = ceil_div(elements, group_size);
+    let groups = ceil_div_usize(elements, group_size);
     let metadata = QuantizedTensorMetadata::new(source.shape.as_slice(), source_dtype, config)?;
 
     let mut packed_values = Vec::new();
@@ -350,7 +349,7 @@ pub fn quantize_tensor_data(
             requested: groups,
         })?;
 
-    let width = code_width(config.scheme);
+    let width = config.scheme.code_width();
     let mut buffer = [0.0_f32; QuantizationGroupSize::MAX];
     for (group, encoded) in source
         .as_bytes()
@@ -447,11 +446,8 @@ pub(super) fn for_each_scale_chunk<E>(
 
 /// Computes the flattened element count without overflowing the host index type.
 fn checked_num_elements(shape: &[usize]) -> Result<usize> {
-    shape.iter().try_fold(1_usize, |elements, &dimension| {
-        elements
-            .checked_mul(dimension)
-            .ok_or(QuantizationError::ShapeElementOverflow)
-    })
+    crate::checkpoint::layout::checked_host_product(shape)
+        .ok_or(QuantizationError::ShapeElementOverflow)
 }
 
 /// Requires exact native-endian source byte length before indexed scalar decoding.
@@ -460,12 +456,10 @@ fn validate_source_bytes(
     dtype: SourceFloatDType,
     elements: usize,
 ) -> Result<()> {
-    let expected =
-        elements
-            .checked_mul(dtype.byte_width())
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "source tensor byte length",
-            })?;
+    let expected = crate::checkpoint::layout::dense_byte_len(&[elements], dtype.byte_width())
+        .ok_or(QuantizationError::ByteLengthOverflow {
+            context: "source tensor byte length",
+        })?;
     let actual = source.as_bytes().len();
     if actual != expected {
         return Err(QuantizationError::SourceByteLengthMismatch { expected, actual });
@@ -491,34 +485,6 @@ fn quantize_value(value: f32, scale: f32, scheme: SymmetricQuantization) -> i8 {
     (value / scale).round().clamp(-qmax, qmax) as i8
 }
 
-/// Maps a quantization precision to its packed code width.
-const fn code_width(scheme: SymmetricQuantization) -> CodeWidth {
-    match scheme {
-        SymmetricQuantization::Q8 => CodeWidth::Byte,
-        SymmetricQuantization::Q4 => CodeWidth::Nibble,
-    }
-}
-
-/// Appends a Q8 code or packs a Q4 code with even indices in the low nibble.
-///
-/// The caller visits contiguous increasing indices, so every odd index completes
-/// the byte created by its preceding even index. Codes come from
-/// [`quantize_value`] and therefore lie in `[-q_max, q_max]`.
-fn push_code(width: CodeWidth, output: &mut Vec<u8>, index: usize, code: i8) {
-    match width {
-        CodeWidth::Byte => output.push(encode_byte(code)),
-        CodeWidth::Nibble => {
-            let nibble = encode_nibble(code);
-            if index.is_multiple_of(2) {
-                output.push(join_nibbles(nibble, 0));
-            } else if let Some(byte) = output.last_mut() {
-                let (low, _) = split_nibbles(*byte);
-                *byte = join_nibbles(low, nibble);
-            }
-        }
-    }
-}
-
 /// Requires each persisted F32 scale to be finite and strictly positive.
 fn validate_scales(scales: &[f32]) -> Result<()> {
     for (group, &scale) in scales.iter().enumerate() {
@@ -530,35 +496,23 @@ fn validate_scales(scales: &[f32]) -> Result<()> {
 }
 
 /// Rejects asymmetric reserved codes and nonzero unused high-nibble padding.
+///
+/// The verified [`first_code_violation`] scans the codes in index order and
+/// reports the first defect, which maps to the matching contextual error.
 fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8]) -> Result<()> {
-    let width = code_width(scheme);
-    let reserved = reserved_code(width);
-    for index in 0..elements {
-        let value =
-            read_code(width, packed, index).ok_or(QuantizationError::PackedLengthMismatch {
-                expected: elements,
-                actual: packed.len(),
-            })?;
-        if value == reserved {
-            return Err(QuantizationError::InvalidQuantizedValue { index, value });
+    match first_code_violation(scheme.code_width(), elements, packed) {
+        None => Ok(()),
+        Some(CodeViolation::Short) => Err(QuantizationError::PackedLengthMismatch {
+            expected: elements,
+            actual: packed.len(),
+        }),
+        Some(CodeViolation::Reserved { index, value }) => {
+            Err(QuantizationError::InvalidQuantizedValue { index, value })
         }
-    }
-    if width == CodeWidth::Nibble
-        && elements % 2 == 1
-        && packed
-            .last()
-            .is_some_and(|&byte| split_nibbles(byte).1 != 0)
-    {
-        return Err(QuantizationError::InvalidMetadata {
+        Some(CodeViolation::Padding) => Err(QuantizationError::InvalidMetadata {
             reason: "unused final Q4 high nibble must be zero".into(),
-        });
+        }),
     }
-    Ok(())
-}
-
-/// Computes a rounded-up quotient without addition overflow for a nonzero divisor.
-const fn ceil_div(value: usize, divisor: usize) -> usize {
-    value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
 
 #[cfg(test)]

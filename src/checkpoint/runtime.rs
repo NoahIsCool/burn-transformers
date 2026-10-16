@@ -16,17 +16,15 @@
 
 mod convert;
 mod packed_install;
+mod permutation;
 mod rounding;
+mod schedule;
 mod source;
 mod storage_order;
 mod tiles;
 mod transform;
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
-};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use burn::tensor::{DType, TensorData};
 use burn::{
@@ -40,6 +38,7 @@ use burn::{
 pub use packed_install::{
     PackedInstall, PackedLayoutPolicy, install_packed_parameter, packed_layout_is_exact,
 };
+use schedule::execution_group_indices;
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
 #[cfg(test)]
 pub(super) use transform::dequantize_mxfp4;
@@ -343,12 +342,7 @@ fn validate_float_payload_length(
     dtype: DType,
     actual: usize,
 ) -> std::result::Result<(), ParameterInstallError> {
-    let elements = shape
-        .iter()
-        .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
-        .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
-    let expected = elements
-        .checked_mul(dtype.size())
+    let expected = super::layout::dense_byte_len(shape, dtype.size())
         .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
     if expected != actual {
         return Err(ParameterInstallError::PayloadLength { expected, actual });
@@ -1127,34 +1121,22 @@ fn shared_slice_key(tensor: &PlannedTensor) -> Option<SharedSourceKey<'_>> {
 /// bound. Fused slices are a single group because all outputs depend on one shared
 /// payload. Target name and original plan index are total-order tie breakers for
 /// hand-authored plans whose source descriptors happen to compare equally.
+///
+/// Each distinct shared-source descriptor is numbered by first appearance, and
+/// the verified [`execution_group_indices`] forms the groups: they partition
+/// the plan, so every primary target is installed exactly once.
 fn execution_groups(tensors: &[PlannedTensor]) -> Vec<Vec<usize>> {
-    let mut slices_by_source = BTreeMap::<SharedSourceKey<'_>, Vec<usize>>::new();
-    for (index, tensor) in tensors.iter().enumerate() {
-        if let Some(key) = shared_slice_key(tensor) {
-            slices_by_source.entry(key).or_default().push(index);
-        }
-    }
-
-    let mut emitted = BTreeSet::new();
-    let mut groups = Vec::with_capacity(tensors.len());
-    for (index, tensor) in tensors.iter().enumerate() {
-        let Some(key) = shared_slice_key(tensor) else {
-            groups.push(vec![index]);
-            continue;
-        };
-        let Some(indices) = slices_by_source.get(&key) else {
-            // `key` was inserted during the immutable collection pass above. Keep
-            // this internal logic invariant non-panicking if the grouping code is
-            // changed independently in the future.
-            groups.push(vec![index]);
-            continue;
-        };
-        if indices.len() == 1 {
-            groups.push(vec![index]);
-        } else if emitted.insert(key) {
-            groups.push(indices.clone());
-        }
-    }
+    let mut class_of_source = BTreeMap::<SharedSourceKey<'_>, usize>::new();
+    let classes = tensors
+        .iter()
+        .map(|tensor| {
+            shared_slice_key(tensor).map(|key| {
+                let next = class_of_source.len();
+                *class_of_source.entry(key).or_insert(next)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut groups = execution_group_indices(&classes, class_of_source.len());
     groups.sort_by(|left, right| execution_group_order(tensors, left, right));
     groups
 }

@@ -2,6 +2,7 @@
 
 use std::{io::Write, sync::atomic::AtomicUsize};
 
+use super::super::hash_workers::MAX_HASH_WORKERS;
 use super::*;
 use crate::checkpoint::{
     ExpectedTensor, LoadOptions, LoadReport, MappingPlan, MemoryEstimate, PlannedTensorEquivalence,

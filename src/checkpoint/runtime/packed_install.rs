@@ -51,7 +51,9 @@ use burn::{
 
 use super::{
     ParameterInstallError, install_float_parameter, install_validated_parameter,
-    load_parameter_tensor, storage_order, validate_parameter_install,
+    load_parameter_tensor,
+    permutation::{permutation_of, probe_dimension},
+    storage_order, validate_parameter_install,
 };
 use crate::checkpoint::quantization::{
     QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
@@ -314,11 +316,10 @@ fn load_mapper_effect<B: Backend, const D: usize>(parameter: &Param<Tensor<B, D>
 /// Returns pairwise-distinct probe dimensions for a rank-`D` mapper probe.
 ///
 /// The first eight axes use the primes `2..=19`; any further axis `k` uses
-/// `k + 23`, which exceeds every prime used and every earlier fallback.
+/// `k + 23`, which exceeds every prime used and every earlier fallback. The
+/// verified [`probe_dimension`] proves the lengths strictly increase.
 fn probe_dims<const D: usize>() -> [usize; D] {
-    /// Pairwise-distinct small dimensions for the common ranks.
-    const DISTINCT: [usize; 8] = [2, 3, 5, 7, 11, 13, 17, 19];
-    core::array::from_fn(|axis| DISTINCT.get(axis).copied().unwrap_or(axis + 23))
+    core::array::from_fn(probe_dimension)
 }
 
 /// Recovers the axis permutation that maps `input` dimensions to `output`.
@@ -326,21 +327,11 @@ fn probe_dims<const D: usize>() -> [usize; D] {
 /// Requires pairwise-distinct `input` dimensions. Returns `axes` with
 /// `output[k] == input[axes[k]]` for every `k`, the convention of Burn's
 /// `Tensor::permute`, or `None` when `output` is not a rearrangement of `input`
-/// (a different rank, an unknown dimension, or a repeated one).
+/// (a different rank, an unknown dimension, or a repeated one). The verified
+/// [`permutation_of`] proves the recovered axes are a bijection.
 fn axis_permutation<const D: usize>(input: &[usize; D], output: &[usize]) -> Option<[usize; D]> {
-    if output.len() != D {
-        return None;
-    }
     let mut axes = [0; D];
-    let mut used = [false; D];
-    for (slot, &dimension) in axes.iter_mut().zip(output) {
-        let source = input.iter().position(|&candidate| candidate == dimension)?;
-        if core::mem::replace(&mut used[source], true) {
-            return None;
-        }
-        *slot = source;
-    }
-    Some(axes)
+    permutation_of(input, output, &mut axes).then_some(axes)
 }
 
 #[cfg(test)]

@@ -233,3 +233,26 @@ mod hardware {
         }
     }
 }
+
+/// The shared rounding step is nearest with ties to even at every small shift.
+#[test]
+fn round_shifted_is_nearest_with_ties_to_even() {
+    for shift in 1..=6_u32 {
+        let unit = 1_u64 << shift;
+        for significand in 0..(8 * unit) {
+            let rounded = round_shifted(significand, shift);
+            let scaled = rounded * unit;
+            let distance = scaled.abs_diff(significand);
+            assert!(
+                2 * distance <= unit,
+                "{significand} >> {shift} -> {rounded}"
+            );
+            if 2 * distance == unit {
+                assert_eq!(rounded % 2, 0, "tie {significand} >> {shift}");
+            }
+        }
+    }
+    assert_eq!(round_shifted((1 << 53) - 1, 53), 1);
+    assert_eq!(round_shifted(1 << 52, 53), 0);
+    assert_eq!(round_shifted((1 << 52) + 1, 53), 1);
+}

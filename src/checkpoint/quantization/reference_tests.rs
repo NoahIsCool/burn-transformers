@@ -176,7 +176,7 @@ proptest::proptest! {
         let weight = quantize_tensor_data(&source, config(scheme, group)).unwrap();
         let (codes, scales) = reference_codes(&decoded, scheme, group);
         proptest::prop_assert_eq!(weight.scales(), scales.as_slice());
-        let width = code_width(scheme);
+        let width = scheme.code_width();
         for (index, &code) in codes.iter().enumerate() {
             proptest::prop_assert_eq!(read_code(width, weight.packed_values(), index), Some(code));
         }

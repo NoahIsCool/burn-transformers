@@ -17,9 +17,11 @@
 
 pub(crate) mod accounting;
 mod artifact;
+mod division;
 mod dtype;
 mod error;
 mod layout;
+mod lexical;
 mod mapping;
 mod mxfp4;
 mod options;

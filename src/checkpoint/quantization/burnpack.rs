@@ -43,8 +43,12 @@ use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizedTensorMetadata,
     QuantizedWeight, Result, SourceFloatDType, WeightQuantizationConfig,
     classify_weight_for_quantization,
+    counts::{PayloadSplitError, payload_split},
     provenance::{DigestingWriter, packed_payload_sha256},
     quantize_tensor_data,
+    staging::{
+        BoundBreach, LimitViolation, TensorBreach, admit_tensor, bounded_add, first_limit_violation,
+    },
 };
 
 /// Reserved Burnpack U8 tensor containing the quantization manifest JSON.
@@ -74,6 +78,35 @@ const MAX_STAGED_REASON: &str =
 const DEFAULT_MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum UTF-8 bytes in one model tensor name.
 const DEFAULT_MAX_TENSOR_NAME_BYTES: usize = 16 * 1024;
+/// Session limit names, in validation order.
+const SESSION_LIMIT_FIELDS: [&str; 5] = [
+    "max_tensors",
+    "max_staged_bytes",
+    "max_tensor_payload_bytes",
+    "max_manifest_bytes",
+    "max_tensor_name_bytes",
+];
+/// Largest admissible value of each session limit, in validation order.
+///
+/// `max_tensors` stays below Burn Store's tensor count so one slot remains for
+/// the manifest tensor.
+const SESSION_LIMIT_CAPS: [u64; 5] = [
+    UPSTREAM_MAX_TENSORS as u64 - 1,
+    DEFAULT_MAX_STAGED_BYTES,
+    UPSTREAM_MAX_TENSOR_BYTES,
+    DEFAULT_MAX_MANIFEST_BYTES as u64,
+    DEFAULT_MAX_TENSOR_NAME_BYTES as u64,
+];
+/// Why each session limit above its cap is refused, in validation order.
+const SESSION_LIMIT_REASONS: [&str; 5] = [
+    "must leave one of Burn Store's 100,000 tensor slots for the manifest",
+    MAX_STAGED_REASON,
+    "exceeds Burn Store's platform-specific per-tensor reader limit",
+    "must be at most 64 MiB",
+    "must be at most 16 KiB",
+];
+/// Position of `max_manifest_bytes` in the session limit tables.
+const MANIFEST_LIMIT: usize = 3;
 /// Maximum individually materialized payload bytes on a 32-bit host.
 #[cfg(target_pointer_width = "32")]
 const UPSTREAM_MAX_TENSOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -125,47 +158,21 @@ pub struct BurnpackSessionLimits {
 
 impl BurnpackSessionLimits {
     /// Validates limits against Burn Store 0.21's documented reader bounds.
+    ///
+    /// Each limit must be positive and at most its cap; the verified
+    /// [`first_limit_violation`] names the first field that is not, checking
+    /// fields in declaration order and each for zero before its cap.
     pub fn validate(self) -> Result<Self> {
-        validate_nonzero_limit("max_tensors", self.max_tensors as u64)?;
-        if self.max_tensors >= UPSTREAM_MAX_TENSORS {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_tensors",
-                value: self.max_tensors as u64,
-                reason: "must leave one of Burn Store's 100,000 tensor slots for the manifest",
-            });
-        }
-        validate_nonzero_limit("max_staged_bytes", self.max_staged_bytes)?;
-        if self.max_staged_bytes > DEFAULT_MAX_STAGED_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_staged_bytes",
-                value: self.max_staged_bytes,
-                reason: MAX_STAGED_REASON,
-            });
-        }
-        validate_nonzero_limit("max_tensor_payload_bytes", self.max_tensor_payload_bytes)?;
-        if self.max_tensor_payload_bytes > UPSTREAM_MAX_TENSOR_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_tensor_payload_bytes",
-                value: self.max_tensor_payload_bytes,
-                reason: "exceeds Burn Store's platform-specific per-tensor reader limit",
-            });
-        }
-        validate_nonzero_limit("max_manifest_bytes", self.max_manifest_bytes as u64)?;
-        if self.max_manifest_bytes > DEFAULT_MAX_MANIFEST_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_manifest_bytes",
-                value: self.max_manifest_bytes as u64,
-                reason: "must be at most 64 MiB",
-            });
-        }
-        validate_nonzero_limit("max_tensor_name_bytes", self.max_tensor_name_bytes as u64)?;
-        if self.max_tensor_name_bytes > DEFAULT_MAX_TENSOR_NAME_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_tensor_name_bytes",
-                value: self.max_tensor_name_bytes as u64,
-                reason: "must be at most 16 KiB",
-            });
-        }
+        validate_session_limits(
+            0,
+            &[
+                self.max_tensors as u64,
+                self.max_staged_bytes,
+                self.max_tensor_payload_bytes,
+                self.max_manifest_bytes as u64,
+                self.max_tensor_name_bytes as u64,
+            ],
+        )?;
         Ok(self)
     }
 }
@@ -404,20 +411,19 @@ impl QuantizedBurnpackSession {
         if self.manifest.provenance.is_some() {
             return Err(QuantizationError::ProvenanceAlreadyBound);
         }
-        let bound_estimate = self
-            .stats
-            .estimated_manifest_bytes
-            .checked_add(estimated_provenance_bytes(&provenance)?)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "bound manifest size estimate",
-            })?;
-        if bound_estimate > self.limits.max_manifest_bytes as u64 {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "estimated manifest",
-                attempted: bound_estimate,
-                limit: self.limits.max_manifest_bytes as u64,
-            });
-        }
+        let bound_estimate = bounded_add(
+            self.stats.estimated_manifest_bytes,
+            estimated_provenance_bytes(&provenance)?,
+            self.limits.max_manifest_bytes as u64,
+        )
+        .map_err(|breach| {
+            limit_breach(
+                breach,
+                "bound manifest size estimate",
+                "estimated manifest",
+                self.limits.max_manifest_bytes as u64,
+            )
+        })?;
 
         // Assemble and validate a complete candidate before changing live state.
         // This keeps a manifest-size or digest error retryable as a v1 session.
@@ -444,20 +450,19 @@ impl QuantizedBurnpackSession {
                 context: "bound manifest byte length conversion",
             }
         })?;
-        let staged_with_manifest = self
-            .stats
-            .staged_payload_bytes
-            .checked_add(actual_manifest_bytes_u64)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "bound staging length with manifest",
-            })?;
-        if staged_with_manifest > self.limits.max_staged_bytes {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "staged payload",
-                attempted: staged_with_manifest,
-                limit: self.limits.max_staged_bytes,
-            });
-        }
+        bounded_add(
+            self.stats.staged_payload_bytes,
+            actual_manifest_bytes_u64,
+            self.limits.max_staged_bytes,
+        )
+        .map_err(|breach| {
+            limit_breach(
+                breach,
+                "bound staging length with manifest",
+                "staged payload",
+                self.limits.max_staged_bytes,
+            )
+        })?;
 
         self.manifest = candidate;
         self.stats.estimated_manifest_bytes = self
@@ -528,19 +533,19 @@ impl QuantizedBurnpackSession {
             projected.staged_payload_bytes = staged;
             projected.estimated_manifest_bytes = estimate;
         }
-        let bound = projected
-            .estimated_manifest_bytes
-            .checked_add(estimated_provenance_bytes(provenance)?)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "bound manifest size estimate",
-            })?;
-        if bound > self.limits.max_manifest_bytes as u64 {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "estimated manifest",
-                attempted: bound,
-                limit: self.limits.max_manifest_bytes as u64,
-            });
-        }
+        bounded_add(
+            projected.estimated_manifest_bytes,
+            estimated_provenance_bytes(provenance)?,
+            self.limits.max_manifest_bytes as u64,
+        )
+        .map_err(|breach| {
+            limit_breach(
+                breach,
+                "bound manifest size estimate",
+                "estimated manifest",
+                self.limits.max_manifest_bytes as u64,
+            )
+        })?;
         Ok(())
     }
 
@@ -588,20 +593,19 @@ impl QuantizedBurnpackSession {
                 context: "manifest byte length conversion",
             }
         })?;
-        let staged_with_manifest = self
-            .stats
-            .staged_payload_bytes
-            .checked_add(manifest_len)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "staging length with manifest",
-            })?;
-        if staged_with_manifest > self.limits.max_staged_bytes {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "staged payload",
-                attempted: staged_with_manifest,
-                limit: self.limits.max_staged_bytes,
-            });
-        }
+        bounded_add(
+            self.stats.staged_payload_bytes,
+            manifest_len,
+            self.limits.max_staged_bytes,
+        )
+        .map_err(|breach| {
+            limit_breach(
+                breach,
+                "staging length with manifest",
+                "staged payload",
+                self.limits.max_staged_bytes,
+            )
+        })?;
 
         let manifest_offset = self.checked_staging_end()?;
         if let Err(error) = self.write_raw_staging(&manifest_bytes) {
@@ -1064,14 +1068,7 @@ impl QuantizedBurnpackArtifact {
         path: impl AsRef<Path>,
         max_manifest_bytes: usize,
     ) -> Result<Self> {
-        validate_nonzero_limit("max_manifest_bytes", max_manifest_bytes as u64)?;
-        if max_manifest_bytes > DEFAULT_MAX_MANIFEST_BYTES {
-            return Err(QuantizationError::InvalidSessionLimit {
-                field: "max_manifest_bytes",
-                value: max_manifest_bytes as u64,
-                reason: "must be at most 64 MiB",
-            });
-        }
+        validate_session_limits(MANIFEST_LIMIT, &[max_manifest_bytes as u64])?;
         let path = validate_bpk_path(path.as_ref())?;
         let mut store = BurnpackStore::from_file(&path)
             .auto_extension(false)
@@ -1277,56 +1274,71 @@ impl LimitProjection<'_> {
         metadata: &QuantizedTensorMetadata,
         payload_bytes: u64,
     ) -> Result<(u64, u64)> {
-        let next_count = self.stats.tensor_count.checked_add(1).ok_or(
-            QuantizationError::ByteLengthOverflow {
+        // Verified: admitted counters stay within every limit (see `staging`).
+        let admitted = admit_tensor(
+            self.stats.tensor_count,
+            self.stats.staged_payload_bytes,
+            payload_bytes,
+            self.limits.max_tensors,
+            self.limits.max_tensor_payload_bytes,
+            self.limits.max_staged_bytes,
+        )
+        .map_err(|breach| match breach {
+            TensorBreach::CountOverflow => QuantizationError::ByteLengthOverflow {
                 context: "staged tensor count",
             },
-        )?;
-        if next_count > self.limits.max_tensors {
-            return Err(QuantizationError::SessionLimitExceeded {
+            TensorBreach::TooManyTensors { attempted } => QuantizationError::SessionLimitExceeded {
                 kind: "tensor count",
-                attempted: next_count as u64,
+                attempted: attempted as u64,
                 limit: self.limits.max_tensors as u64,
-            });
-        }
-        if payload_bytes > self.limits.max_tensor_payload_bytes {
-            return Err(QuantizationError::SessionLimitExceeded {
+            },
+            TensorBreach::PayloadTooLarge => QuantizationError::SessionLimitExceeded {
                 kind: "tensor payload",
                 attempted: payload_bytes,
                 limit: self.limits.max_tensor_payload_bytes,
-            });
-        }
-        let next_staged = self
-            .stats
-            .staged_payload_bytes
-            .checked_add(payload_bytes)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "total staged payload length",
-            })?;
-        if next_staged > self.limits.max_staged_bytes {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "staged payload",
-                attempted: next_staged,
-                limit: self.limits.max_staged_bytes,
-            });
-        }
+            },
+            TensorBreach::Staged(breach) => limit_breach(
+                breach,
+                "total staged payload length",
+                "staged payload",
+                self.limits.max_staged_bytes,
+            ),
+        })?;
 
         let entry_cost = manifest_entry_estimate(name, metadata)?;
-        let next_estimate = self
-            .stats
-            .estimated_manifest_bytes
-            .checked_add(entry_cost)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "manifest size estimate",
-            })?;
-        if next_estimate > self.limits.max_manifest_bytes as u64 {
-            return Err(QuantizationError::SessionLimitExceeded {
-                kind: "estimated manifest",
-                attempted: next_estimate,
-                limit: self.limits.max_manifest_bytes as u64,
-            });
-        }
-        Ok((next_staged, next_estimate))
+        let next_estimate = bounded_add(
+            self.stats.estimated_manifest_bytes,
+            entry_cost,
+            self.limits.max_manifest_bytes as u64,
+        )
+        .map_err(|breach| {
+            limit_breach(
+                breach,
+                "manifest size estimate",
+                "estimated manifest",
+                self.limits.max_manifest_bytes as u64,
+            )
+        })?;
+        Ok((admitted.staged, next_estimate))
+    }
+}
+
+/// Maps a refused bounded total to its overflow or session-limit error.
+fn limit_breach(
+    breach: BoundBreach,
+    overflow_context: &'static str,
+    kind: &'static str,
+    limit: u64,
+) -> QuantizationError {
+    match breach {
+        BoundBreach::Overflow => QuantizationError::ByteLengthOverflow {
+            context: overflow_context,
+        },
+        BoundBreach::Exceeded { attempted } => QuantizationError::SessionLimitExceeded {
+            kind,
+            attempted,
+            limit,
+        },
     }
 }
 
@@ -1391,29 +1403,34 @@ fn decode_payload(
     metadata: QuantizedTensorMetadata,
     bytes: &[u8],
 ) -> std::result::Result<(QuantizedWeight, BurnpackPayloadReadStats), BurnpackPayloadReadFailure> {
-    let packed_len = usize::try_from(metadata.packed_value_bytes).map_err(|_| {
-        empty_read_failure(QuantizationError::ByteLengthOverflow {
-            context: "packed payload host length",
-        })
-    })?;
-    let scale_len = usize::try_from(metadata.scale_bytes).map_err(|_| {
-        empty_read_failure(QuantizationError::ByteLengthOverflow {
-            context: "scale payload host length",
-        })
-    })?;
-    let expected = packed_len.checked_add(scale_len).ok_or_else(|| {
-        empty_read_failure(QuantizationError::ByteLengthOverflow {
-            context: "combined payload host length",
-        })
-    })?;
-    if bytes.len() != expected {
-        return Err(empty_read_failure(
-            QuantizationError::InvalidArtifactTensor {
-                name: name.to_owned(),
-                reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
+    // Verified: the packed prefix and scale suffix tile the payload exactly.
+    let split = payload_split(
+        metadata.packed_value_bytes,
+        metadata.scale_bytes,
+        bytes.len(),
+    )
+    .map_err(|error| {
+        empty_read_failure(match error {
+            PayloadSplitError::PackedTooLarge => QuantizationError::ByteLengthOverflow {
+                context: "packed payload host length",
             },
-        ));
-    }
+            PayloadSplitError::ScalesTooLarge => QuantizationError::ByteLengthOverflow {
+                context: "scale payload host length",
+            },
+            PayloadSplitError::CombinedOverflow => QuantizationError::ByteLengthOverflow {
+                context: "combined payload host length",
+            },
+            PayloadSplitError::LengthMismatch { expected } => {
+                QuantizationError::InvalidArtifactTensor {
+                    name: name.to_owned(),
+                    reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
+                }
+            }
+        })
+    })?;
+    let (packed_len, scale_len) = (split.packed, split.scales);
+    // Equals `packed_len + scale_len` by the split's verified postcondition.
+    let expected = bytes.len();
 
     let mut owned_payload = Vec::new();
     owned_payload.try_reserve_exact(expected).map_err(|_| {
@@ -1916,16 +1933,22 @@ fn sync_parent_directory(output: &Path) -> Result<()> {
     })
 }
 
-/// Rejects a zero resource bound before a session or artifact reader is created.
-fn validate_nonzero_limit(field: &'static str, value: u64) -> Result<()> {
-    if value == 0 {
-        Err(QuantizationError::InvalidSessionLimit {
-            field,
-            value,
-            reason: "must be greater than zero",
-        })
-    } else {
-        Ok(())
+/// Validates `values` against the session limit tables starting at entry `first`.
+///
+/// The verified [`first_limit_violation`] finds the first limit outside
+/// `[1, cap]`; this maps it to the contextual error of its field.
+fn validate_session_limits(first: usize, values: &[u64]) -> Result<()> {
+    let caps = &SESSION_LIMIT_CAPS[first..first + values.len()];
+    match first_limit_violation(values, caps) {
+        None => Ok(()),
+        Some((index, violation)) => Err(QuantizationError::InvalidSessionLimit {
+            field: SESSION_LIMIT_FIELDS[first + index],
+            value: values[index],
+            reason: match violation {
+                LimitViolation::Zero => "must be greater than zero",
+                LimitViolation::AboveCap => SESSION_LIMIT_REASONS[first + index],
+            },
+        }),
     }
 }
 
