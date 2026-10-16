@@ -90,8 +90,13 @@ mod chat_template; // Hugging Face-compatible template environment and `strftime
 mod layout; // Truncation-budget and padding arithmetic (Verus-verified).
 #[cfg(feature = "chat-templates")]
 mod pycompat; // Python `str`/`dict` semantics, printing, and filters for templates.
+mod vocabulary; // Special-token ID and embedding-row checks (Verus-verified).
 
-use layout::{content_token_budget, pad_token_row, padding_split, validity_mask};
+use layout::{
+    LimitViolation, PaddedBatch, content_token_budget, encoding_limit_violation, first_ragged_row,
+    flatten_mask_rows, flatten_token_rows, longest_row, pad_batch, unpadded_masks,
+};
+use vocabulary::{declared_special_id, id_fits_vocabulary, reconcile_special_id};
 
 /// Maximum accepted tokenizer JSON size in bytes before parsing.
 const MAX_TOKENIZER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -206,25 +211,28 @@ impl Default for EncodeOptions {
 
 impl EncodeOptions {
     /// Rejects empty limits and inconsistent fixed-padding controls.
+    ///
+    /// The rules are checked by the verified [`encoding_limit_violation`].
     fn validate(&self) -> Result<()> {
-        if self.max_length == Some(0) {
-            return Err(Error::Tokenizer(
+        let fixed_width = match self.padding {
+            Padding::Fixed(width) => Some(width),
+            Padding::None | Padding::Longest => None,
+        };
+        match encoding_limit_violation(self.max_length, fixed_width) {
+            None => Ok(()),
+            Some(LimitViolation::ZeroMaxLength) => Err(Error::Tokenizer(
                 "max_length must be greater than zero when present".into(),
-            ));
-        }
-        if let Padding::Fixed(0) = self.padding {
-            return Err(Error::Tokenizer(
+            )),
+            Some(LimitViolation::ZeroPaddingWidth) => Err(Error::Tokenizer(
                 "fixed padding length must be greater than zero".into(),
-            ));
-        }
-        if let (Some(maximum), Padding::Fixed(width)) = (self.max_length, self.padding)
-            && maximum > width
-        {
-            return Err(Error::Tokenizer(format!(
+            )),
+            Some(LimitViolation::MaxLengthExceedsWidth {
+                max_length: maximum,
+                width,
+            }) => Err(Error::Tokenizer(format!(
                 "max_length {maximum} exceeds fixed padding width {width}"
-            )));
+            ))),
         }
-        Ok(())
     }
 }
 
@@ -472,27 +480,26 @@ impl BatchEncoding {
                 "cannot create model input from an empty token batch".into(),
             ));
         }
-        for (row, (tokens, valid)) in self.token_ids.iter().zip(&self.valid_tokens).enumerate() {
-            if tokens.len() != sequence || valid.len() != sequence {
-                return Err(Error::Tokenizer(format!(
-                    "batch row {row} is not rectangular: expected {sequence} tokens, found {} tokens and {} mask entries",
-                    tokens.len(),
-                    valid.len()
-                )));
-            }
+        if self.valid_tokens.len() != batch {
+            return Err(Error::Tokenizer(format!(
+                "batch has {batch} token rows but {} mask rows",
+                self.valid_tokens.len()
+            )));
         }
-        let ids = self
-            .token_ids
-            .iter()
-            .flatten()
-            .map(|token| i64::from(*token))
-            .collect::<Vec<_>>();
-        let valid = self
-            .valid_tokens
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
+        if let Some(row) = first_ragged_row(&self.token_ids, &self.valid_tokens, sequence) {
+            return Err(Error::Tokenizer(format!(
+                "batch row {row} is not rectangular: expected {sequence} tokens, found {} tokens and {} mask entries",
+                self.token_ids[row].len(),
+                self.valid_tokens[row].len()
+            )));
+        }
+        // Equal row counts plus `first_ragged_row`'s verified `None` (every one
+        // of the `batch` pairs has width `sequence`) establish the flatteners'
+        // preconditions; `batch * sequence` fits `usize` because those rows
+        // already hold that many entries. Verified row-major layouts: entry
+        // `r * sequence + c` is row `r`, column `c`.
+        let ids = flatten_token_rows(&self.token_ids, sequence);
+        let valid = flatten_mask_rows(&self.valid_tokens, sequence);
         Ok(CausalLmInput {
             token_ids: Tensor::<B, 2, Int>::from_data(
                 TensorData::new(ids, [batch, sequence]),
@@ -648,7 +655,8 @@ impl LocalTokenizer {
             .into_values()
             .max()
             .ok_or_else(|| Error::Tokenizer("tokenizer vocabulary must not be empty".into()))?;
-        if maximum_id as usize >= model_vocabulary_size {
+        // Verified: the largest ID fitting means every emitted ID fits.
+        if !id_fits_vocabulary(maximum_id, model_vocabulary_size) {
             return Err(Error::Tokenizer(format!(
                 "tokenizer emits ID {maximum_id}, outside model vocabulary size {model_vocabulary_size}"
             )));
@@ -770,11 +778,11 @@ impl LocalTokenizer {
     fn pad_rows(&self, rows: Vec<Vec<u32>>, options: &EncodeOptions) -> Result<BatchEncoding> {
         let target = match options.padding {
             Padding::None => None,
-            Padding::Longest => rows.iter().map(Vec::len).max(),
+            Padding::Longest => longest_row(&rows),
             Padding::Fixed(width) => Some(width),
         };
         let Some(target) = target else {
-            let valid_tokens = rows.iter().map(|row| vec![true; row.len()]).collect();
+            let valid_tokens = unpadded_masks(&rows);
             return Ok(BatchEncoding {
                 token_ids: rows,
                 valid_tokens,
@@ -791,19 +799,16 @@ impl LocalTokenizer {
             .id;
         let pad_left =
             options.padding_side.unwrap_or(self.metadata.padding_side) == PaddingSide::Left;
-        let mut token_ids = Vec::with_capacity(rows.len());
-        let mut valid_tokens = Vec::with_capacity(rows.len());
-        for (index, row) in rows.iter().enumerate() {
-            if row.len() > target {
-                return Err(Error::Tokenizer(format!(
-                    "encoded row {index} has length {}, exceeding padding width {target}; set max_length to request truncation",
-                    row.len()
-                )));
-            }
-            let split = padding_split(row.len(), target, pad_left);
-            token_ids.push(pad_token_row(row, pad_id, split));
-            valid_tokens.push(validity_mask(row.len(), split));
-        }
+        // Verified: every row is padded exactly, or the first overlong row is named.
+        let PaddedBatch {
+            token_ids,
+            valid_tokens,
+        } = pad_batch(&rows, target, pad_id, pad_left).map_err(|index| {
+            Error::Tokenizer(format!(
+                "encoded row {index} has length {}, exceeding padding width {target}; set max_length to request truncation",
+                rows[index].len()
+            ))
+        })?;
         Ok(BatchEncoding {
             token_ids,
             valid_tokens,
@@ -1127,14 +1132,11 @@ fn resolve_special(
         .and_then(|value| value.get(format!("{field}_id")))
         .filter(|value| !value.is_null())
         .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| {
-                    Error::Tokenizer(format!(
-                        "{field}_id must be an unsigned 32-bit integer or null, found {value}"
-                    ))
-                })
+            value.as_u64().and_then(declared_special_id).ok_or_else(|| {
+                Error::Tokenizer(format!(
+                    "{field}_id must be an unsigned 32-bit integer or null, found {value}"
+                ))
+            })
         })
         .transpose()?;
     let content = match declared {
@@ -1156,13 +1158,12 @@ fn resolve_special(
             "declared {field} token `{content}` is absent from the vocabulary"
         ))
     })?;
-    if let Some(declared) = declared_id
-        && declared != id
-    {
-        return Err(Error::Tokenizer(format!(
+    // Verified: an accepted ID is always the vocabulary's own.
+    let id = reconcile_special_id(declared_id, id).map_err(|declared| {
+        Error::Tokenizer(format!(
             "{field}_id {declared} conflicts with tokenizer vocabulary ID {id}"
-        )));
-    }
+        ))
+    })?;
     Ok(Some(SpecialToken { content, id }))
 }
 

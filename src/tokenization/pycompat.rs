@@ -64,6 +64,11 @@ use minijinja::{
 
 use super::chat_template::sandbox::{self, LimitedText, RenderBudget};
 
+// Documents itself with `//!`; an outer `///` here would change its link scope.
+mod decimal; // Integer rounding and decimal increments for `round` (Verus-verified).
+
+use decimal::{round_digits_to_tens, round_integer_half_even};
+
 /// Deepest container nesting printed or serialized before failing.
 pub(crate) const MAX_NESTING: usize = 256;
 
@@ -833,28 +838,6 @@ impl RoundOperand {
     }
 }
 
-/// Rounds an integer to a multiple of `10^places`, ties to the even multiple.
-///
-/// Returns `None` only when the rounded value overflows `i128`. A unit larger
-/// than any `i128` rounds every value to zero.
-fn round_integer_half_even(value: i128, places: u32) -> Option<i128> {
-    let Some(unit) = 10_i128.checked_pow(places) else {
-        return Some(0);
-    };
-    let remainder = value.rem_euclid(unit);
-    let below = value - remainder;
-    let round_up = match remainder.cmp(&(unit - remainder)) {
-        core::cmp::Ordering::Less => false,
-        core::cmp::Ordering::Greater => true,
-        core::cmp::Ordering::Equal => (below / unit) % 2 != 0,
-    };
-    if round_up {
-        below.checked_add(unit)
-    } else {
-        Some(below)
-    }
-}
-
 /// CPython's `round(float, ndigits)`: correctly rounded, ties to even.
 ///
 /// CPython rounds the exact binary value through `dtoa`. For `ndigits >= 0`,
@@ -899,51 +882,15 @@ fn round_float_to_tens(value: f64, places: usize) -> f64 {
     }
     let magnitude = value.abs();
     let whole = magnitude.trunc();
-    // `{:.0}` prints an integral double's exact decimal expansion.
+    // `{:.0}` prints an integral double's exact decimal expansion; the
+    // verified digit rounding keeps the quotient by `10^places`, rounded half
+    // to even with the fraction breaking ties upward.
     let digits = format!("{whole:.0}");
-    let split = digits.len().saturating_sub(places);
-    let (kept, dropped) = digits.split_at(split);
-    let dropped = format!("{dropped:0>places$}");
-    let half = format!("5{}", "0".repeat(places - 1));
-    // Equal-length digit strings compare like the numbers they spell.
-    let round_up = match dropped.as_str().cmp(half.as_str()) {
-        core::cmp::Ordering::Less => false,
-        core::cmp::Ordering::Greater => true,
-        core::cmp::Ordering::Equal => {
-            magnitude != whole || kept.bytes().last().is_some_and(|digit| digit % 2 == 1)
-        }
-    };
-    let mut kept = if kept.is_empty() {
-        "0".to_owned()
-    } else {
-        kept.to_owned()
-    };
-    if round_up {
-        increment_decimal(&mut kept);
-    }
+    let kept = round_digits_to_tens(digits.as_bytes(), places, magnitude != whole);
+    let kept = String::from_utf8(kept).expect("ASCII digits stay valid UTF-8");
     // Parsing an exact decimal is correctly rounded; overflow yields infinity.
     let rounded: f64 = format!("{kept}e{places}").parse().unwrap_or(f64::INFINITY);
     rounded.copysign(value)
-}
-
-/// Adds one to a non-empty string of ASCII decimal digits.
-fn increment_decimal(digits: &mut String) {
-    let mut bytes = core::mem::take(digits).into_bytes();
-    let mut index = bytes.len();
-    loop {
-        if index == 0 {
-            bytes.insert(0, b'1');
-            break;
-        }
-        index -= 1;
-        if bytes[index] == b'9' {
-            bytes[index] = b'0';
-        } else {
-            bytes[index] += 1;
-            break;
-        }
-    }
-    *digits = String::from_utf8(bytes).expect("ASCII digits stay valid UTF-8");
 }
 
 // Jinja2 type tests whose answers depend on Python's object model.

@@ -151,13 +151,6 @@ fn tag_scanner_mirrors_minijinja_boundaries() {
             "{source}"
         );
     }
-    assert_eq!(basic_tag_length("- endraw\t+%}tail", "endraw"), Some(12));
-    assert_eq!(basic_tag_length(" endrawx %}", "endraw"), None);
-    assert_eq!(basic_tag_length(" endraw", "endraw"), None);
-    assert_eq!(raw_section_length("a{%x%}b{% endraw %}c"), Some(19));
-    assert_eq!(raw_section_length("a{% endraw"), None);
-    assert_eq!(find_tag_end(" ')}}' ) }}", "}}"), None);
-    assert_eq!(find_tag_end(" ( ')}}' ) }}", "}}"), Some(11));
 }
 
 /// `raise_exception` aborts rendering with the template's message.

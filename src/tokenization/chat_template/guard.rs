@@ -88,7 +88,12 @@
 
 use std::borrow::Cow;
 
-use super::{TagKind, sandbox, statement_parts, try_rewrite_tags};
+use super::{TagKind, sandbox, scan::char_boundary_at_most, statement_parts, try_rewrite_tags};
+
+// Documents itself with `//!`; an outer `///` here would change its link scope.
+mod lexer; // Byte-level tag-body lexer mirroring MiniJinja (Verus-verified).
+
+use lexer::{Kind, LexError, Span, lex_spans};
 
 /// Deepest parenthesized or bracketed nesting accepted; MiniJinja's own parser stops at 150.
 pub(crate) const MAX_NESTING: usize = 200;
@@ -146,10 +151,8 @@ fn shorten(tag: &str) -> String {
     if tag.len() <= LIMIT {
         return tag.to_owned();
     }
-    let mut end = LIMIT;
-    while !tag.is_char_boundary(end) {
-        end -= 1;
-    }
+    // Verified: the largest character boundary at or below the limit.
+    let end = char_boundary_at_most(tag, LIMIT);
     format!("{}...", &tag[..end])
 }
 
@@ -196,21 +199,6 @@ fn guard_tag(kind: TagKind, tag: &str) -> Result<Option<String>, String> {
 
 // Lexing.
 
-/// The kinds of token the expression grammar distinguishes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// An identifier or keyword such as `name`, `if`, or `not`.
-    Name,
-    /// A string literal, quotes included.
-    String,
-    /// An integer literal (decimal or with a `0b`/`0o`/`0x` prefix).
-    Integer,
-    /// A floating-point literal (with a fraction or exponent).
-    Float,
-    /// An operator or punctuation, such as `+`, `**`, `(`, or `==`.
-    Symbol,
-}
-
 /// One token of a tag body with its byte range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Token<'a> {
@@ -241,127 +229,33 @@ impl Token<'_> {
     }
 }
 
-/// Two-character symbols, matched before single characters as MiniJinja does.
-const DOUBLE_SYMBOLS: [&str; 6] = ["//", "**", "==", "!=", ">=", "<="];
-/// Single-character symbols MiniJinja's expression lexer recognizes.
-const SINGLE_SYMBOLS: &[u8] = b"+-*/%.,:~|=><()[]{}";
-
 /// Splits a tag body into tokens exactly as MiniJinja 2.19's block lexer does.
 ///
 /// ASCII whitespace separates tokens; strings honour backslash escapes;
 /// numbers follow MiniJinja's state machine (digits, `_`, one `.` fraction,
 /// an exponent with an optional sign, radix prefixes); identifiers are ASCII
-/// (MiniJinja is built without its `unicode` feature).
+/// (MiniJinja is built without its `unicode` feature). The spans come from
+/// the verified [`lex_spans`], which partitions the body into tokens of their
+/// kinds' lexical classes; every span boundary is an ASCII byte or the end,
+/// so each token's text is a valid `str` slice.
 fn lex(body: &str) -> Result<Vec<Token<'_>>, String> {
-    let bytes = body.as_bytes();
-    let mut tokens = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte.is_ascii_whitespace() {
-            index += 1;
-            continue;
+    let spans = lex_spans(body.as_bytes()).map_err(|error| match error {
+        LexError::UnterminatedString { start } => {
+            format!("unterminated string literal at byte {start}")
         }
-        let start = index;
-        let kind = if let Some(symbol) = DOUBLE_SYMBOLS
-            .iter()
-            .find(|symbol| bytes[index..].starts_with(symbol.as_bytes()))
-        {
-            index += symbol.len();
-            Kind::Symbol
-        } else if byte == b'\'' || byte == b'"' {
-            index = string_end(bytes, index)
-                .ok_or_else(|| format!("unterminated string literal at byte {start}"))?;
-            Kind::String
-        } else if byte.is_ascii_digit() {
-            let (end, float) = number_end(bytes, index);
-            index = end;
-            if float { Kind::Float } else { Kind::Integer }
-        } else if SINGLE_SYMBOLS.contains(&byte) {
-            index += 1;
-            Kind::Symbol
-        } else if byte == b'_' || byte.is_ascii_alphabetic() {
-            while index < bytes.len()
-                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
-            {
-                index += 1;
-            }
-            Kind::Name
-        } else {
-            return Err(format!("unexpected character at byte {start}"));
-        };
-        tokens.push(Token {
+        LexError::UnexpectedCharacter { start } => {
+            format!("unexpected character at byte {start}")
+        }
+    })?;
+    Ok(spans
+        .into_iter()
+        .map(|Span { kind, start, end }| Token {
             kind,
-            text: &body[start..index],
+            text: &body[start..end],
             start,
-            end: index,
-        });
-    }
-    Ok(tokens)
-}
-
-/// Returns the index just past the string literal opened at `start`, or `None` if unterminated.
-fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let quote = bytes[start];
-    let mut index = start + 1;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            byte if byte == quote => return Some(index + 1),
-            _ => index += 1,
-        }
-    }
-    None
-}
-
-/// Returns the end of the number starting at `start` and whether it is a float.
-///
-/// Mirrors MiniJinja's `eat_number`: a radix prefix allows only digits (and
-/// hexadecimal letters for `0x`); a decimal number allows one fraction, then
-/// an exponent whose first character may be a sign; `_` is allowed anywhere.
-fn number_end(bytes: &[u8], start: usize) -> (usize, bool) {
-    /// Lexer states of MiniJinja's number scanner.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum State {
-        /// After a `0b`, `0o`, or `0x` prefix.
-        Radix,
-        /// Integer digits.
-        Integer,
-        /// After the decimal point.
-        Fraction,
-        /// Just after `e` or `E`.
-        Exponent,
-        /// After the exponent's sign or first digit.
-        ExponentSign,
-    }
-    let radix = match bytes.get(start..start + 2) {
-        Some(b"0b" | b"0B") => 2,
-        Some(b"0o" | b"0O") => 8,
-        Some(b"0x" | b"0X") => 16,
-        _ => 10,
-    };
-    let (mut index, mut state) = if radix == 10 {
-        (start, State::Integer)
-    } else {
-        (start + 2, State::Radix)
-    };
-    while index < bytes.len() && bytes[index].is_ascii_digit() {
-        index += 1;
-    }
-    while index < bytes.len() {
-        state = match (bytes[index], state) {
-            (b'.', State::Integer) => State::Fraction,
-            (b'E' | b'e', State::Integer | State::Fraction) => State::Exponent,
-            (b'+' | b'-', State::Exponent) => State::ExponentSign,
-            (b'0'..=b'9', State::Exponent) => State::ExponentSign,
-            (b'0'..=b'9', state) => state,
-            (b'a'..=b'f' | b'A'..=b'F', State::Radix) if radix == 16 => state,
-            (b'_', state) => state,
-            _ => break,
-        };
-        index += 1;
-    }
-    (index, !matches!(state, State::Integer | State::Radix))
+            end,
+        })
+        .collect())
 }
 
 // Parsing.

@@ -234,6 +234,22 @@ fn round_matches_python() {
     assert_eq!(round_integer_half_even(i128::MAX, 1), None);
 }
 
+/// Review finding (Verus): rounding `i128::MIN` to tens or hundreds overflowed.
+///
+/// The lower multiple was computed before the direction was chosen, so a
+/// template could reach a debug panic or, in release builds, a wrapped
+/// positive result; the nearest multiple is now reached in one checked step.
+#[test]
+fn rounding_the_smallest_integer_is_exact_or_an_overflow_error() {
+    let minimum = "(-170141183460469231731687303715884105727 - 1)";
+    assert_eq!(
+        rendered(&format!("{{{{ {minimum} | round(-2) }}}}"), json!({})),
+        "-170141183460469231731687303715884105700"
+    );
+    let error = render(&format!("{{{{ {minimum} | round(-1) }}}}"), json!({})).unwrap_err();
+    assert!(error.to_string().contains("out of range"), "{error}");
+}
+
 /// Invalid filter arguments fail inside the template with Python-style context.
 #[test]
 fn filters_reject_invalid_arguments() {
