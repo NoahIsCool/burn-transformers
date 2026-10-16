@@ -6,7 +6,7 @@ implementation computes for a local checkpoint, so the Rust crate can be
 compared against it without Python at test time. It
 
 * loads ``AutoModelForCausalLM`` from a local directory only (no Hub access),
-  in F32 (or, with ``--dtype bfloat16``, BF16) on the CPU with eager
+  in F32 (or, with ``--dtype float64`` or ``bfloat16``, F64 or BF16) on the CPU with eager
   attention and deterministic kernels;
 * tokenizes a few fixed prompts with the checkpoint's own tokenizer and
   records their token IDs, so consumers need no tokenizer;
@@ -36,6 +36,17 @@ head), a real-weight smoke reference that fits in memory at F32. gpt-oss is the
 motivating case: without CUDA kernels Transformers decodes its MXFP4
 experts to BF16, and the F32 model (about 78 GiB for gpt-oss-20b) does not
 fit a 96 GiB host, while the BF16 one needs about 55 GiB while loading.
+
+``--dtype float64`` removes the reference's own rounding error, which matters
+for checkpoints with massive activations. Qwen2-7B's first-position hidden
+states reach magnitudes near 7,000; on its third prompt, F32 Transformers
+itself deviates from an F64 evaluation by 1.6e-3 in a first-position logit,
+while this crate's F32 Flex result deviates by only 2.0e-4. Comparing F32
+implementations against an F64 bundle measures each implementation's error
+instead of the sum of two. Memory is twice the F32 requirement (about 61 GB
+of weights for a 7B checkpoint), Transformers still computes its rotary
+tables in F32, and kernels without an F64 implementation (such as gpt-oss's
+grouped expert products) refuse F64 inputs.
 """
 
 from __future__ import annotations
@@ -75,7 +86,7 @@ DEFAULT_GREEDY_TOKENS = 32
 #: Name of the bundle's manifest.
 MANIFEST = "reference.json"
 #: Evaluation dtypes accepted by ``--dtype``; logits are always written as F32.
-DTYPES = ("float32", "bfloat16")
+DTYPES = ("float32", "float64", "bfloat16")
 
 
 def sha256_file(path: Path) -> str:

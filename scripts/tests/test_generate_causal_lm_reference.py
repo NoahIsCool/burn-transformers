@@ -25,6 +25,8 @@ SPEC.loader.exec_module(REFERENCE)
 HAS_TORCH = all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers"))
 #: Tiny seeded gpt-oss checkpoint (F32 weights, YaRN RoPE) committed for the Rust goldens.
 GPT_OSS_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_goldens" / "gpt-oss"
+#: Tiny Qwen2 checkpoint (QKV biases, untied head) for dense F64 evaluation.
+QWEN2_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_goldens" / "qwen2"
 
 
 class FakeTensor:
@@ -106,13 +108,14 @@ class ReferenceGeneratorTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             REFERENCE.parse_arguments(["--model-dir", "m", "--output", "o", "--greedy-tokens", "0"])
 
-    def test_dtype_defaults_to_float32_and_accepts_bfloat16(self) -> None:
-        """The evaluation dtype is F32 unless BF16 is requested; others are refused."""
+    def test_dtype_defaults_to_float32_and_accepts_float64_and_bfloat16(self) -> None:
+        """The evaluation dtype is F32 unless F64 or BF16 is requested; others are refused."""
 
         base = ["--model-dir", "m", "--output", "o"]
         self.assertEqual(REFERENCE.parse_arguments(base).dtype, "float32")
+        self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", "float64"]).dtype, "float64")
         self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", "bfloat16"]).dtype, "bfloat16")
-        self.assertEqual(REFERENCE.DTYPES, ("float32", "bfloat16"))
+        self.assertEqual(REFERENCE.DTYPES, ("float32", "float64", "bfloat16"))
         with self.assertRaises(SystemExit):
             REFERENCE.parse_arguments(base + ["--dtype", "float16"])
         with self.assertRaises(ValueError):
@@ -253,6 +256,23 @@ class ModelLoadingTests(unittest.TestCase):
         self.assertEqual(truncated.config.layer_types, ["sliding_attention", "full_attention"])
         with self.assertRaises(ValueError):
             REFERENCE.load_causal_lm(GPT_OSS_FIXTURE, "float16")
+
+    def test_float64_references_hold_f64_parameters_and_agree_with_f32(self) -> None:
+        """An F64 reference casts every parameter to F64 and stays within F32 rounding of F32 logits."""
+
+        import torch
+
+        model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float64")
+        self.assertEqual({parameter.dtype for parameter in model.parameters()}, {torch.float64})
+        single = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        tokens = [1, 5, 9, 14, 3, 27, 40, 8]
+        double_logits = REFERENCE.prompt_logits(model, tokens)
+        single_logits = REFERENCE.prompt_logits(single, tokens)
+        # Both are written as F32; the tiny fixture's logits are O(1), so F32
+        # accumulation error is far below this bound while a wrong dtype path
+        # (for example BF16 weights) would exceed it.
+        self.assertEqual(double_logits.dtype, torch.float32)
+        self.assertLess(float((double_logits - single_logits).abs().max()), 1e-4)
 
 
 if __name__ == "__main__":
