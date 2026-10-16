@@ -96,7 +96,14 @@ pub enum WidthError {
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
-        projection_widths_contract(hidden_size, query_heads, key_value_heads, head_dim, gated, result),
+        projection_widths_contract(
+            hidden_size,
+            query_heads,
+            key_value_heads,
+            head_dim,
+            gated,
+            result,
+        ),
 ))]
 pub fn projection_widths(
     hidden_size: usize,

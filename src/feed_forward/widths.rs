@@ -6,8 +6,12 @@
 //! that order; Verus proves (through `verus/attention.rs`) that it accepts
 //! exactly non-empty widths and names the first empty one.
 //!
-//! Matrix element counts `D * I` are not checked here: Burn allocates
-//! parameters lazily, so an unrepresentable product surfaces at allocation.
+//! Known gap: unlike attention and MLA validation, feed-forward validation
+//! does not yet check that the matrix element count `D * I` fits `usize`.
+//! Burn allocates parameters lazily, so such a configuration passes
+//! validation and fails only when a parameter is materialized. Adding the
+//! check would reject configurations that validation accepts today, so it is
+//! left to a dedicated follow-up.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;

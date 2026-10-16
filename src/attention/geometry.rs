@@ -149,8 +149,8 @@ pub(crate) enum OperandFault {
             let nonempty = query[0] >= 1 && query[1] >= 1 && query[2] >= 1 && query[3] >= 1
                 && key[1] >= 1 && key[2] >= 1 && value[3] >= 1;
             let grouped = nonempty && query[1] % key[1] == 0;
-            let paired = grouped && key[0] == query[0] && key[3] == query[3] && value[0]
-                == query[0] && value[1] == key[1] && value[2] == key[2];
+            let paired = grouped && key[0] == query[0] && key[3] == query[3]
+                && value[0] == query[0] && value[1] == key[1] && value[2] == key[2];
             let score = [query[0], query[1], query[2], key[2]];
             let masked = paired && (mask is None || same4(mask->Some_0, score));
             let biased = masked && (bias is None || bias_fits(bias->Some_0, score));
@@ -472,12 +472,8 @@ pub(crate) fn native_route(
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(shape =>
     ensures
-        forall|axis: int| 0 <= axis < 4 ==> #[trigger] shape[axis] == if first[axis]
-            >= second[axis] {
-            first[axis]
-        } else {
-            second[axis]
-        },
+        forall|axis: int| 0 <= axis < 4 ==> #[trigger] shape[axis]
+            == if first[axis] >= second[axis] { first[axis] } else { second[axis] },
 ))]
 pub(crate) fn broadcast_shape(first: [usize; 4], second: [usize; 4]) -> [usize; 4] {
     [
