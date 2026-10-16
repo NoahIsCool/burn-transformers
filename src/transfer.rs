@@ -600,6 +600,10 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
     /// Multiple fallback matches are rejected, so rule order cannot silently choose
     /// between overlapping module prefixes. The precedence itself is the
     /// Verus-verified [`select_rule`]; this method classifies each rule by path.
+    /// A prefix rule is classified as a fallback exactly when it covers
+    /// `target`, so a selected rule always supplies a source; if the
+    /// classification and [`Self::rule_source`] ever disagreed, the target is
+    /// rejected rather than silently left initialized.
     fn select(&self, target: &str, sources: &BTreeSet<String>) -> Result<Option<(usize, String)>> {
         let kept = self
             .keep
@@ -627,16 +631,23 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
                 target,
                 "overlapping transfer prefix rules; use one prefix or an exact override",
             )),
-            RuleSelection::Rule(index) => Ok(self
-                .rule_source(index, target)
-                .map(|source| (index, source))),
+            RuleSelection::Rule(index) => {
+                let source = self.rule_source(index, target).ok_or_else(|| {
+                    Error::configuration(
+                        target,
+                        "selected transfer rule does not supply this target",
+                    )
+                })?;
+                Ok(Some((index, source)))
+            }
         }
     }
 
     /// The source path that rule `index` supplies for `target`.
     ///
-    /// `None` only for a prefix rule that does not cover `target`, which
-    /// [`select_rule`] never selects.
+    /// `None` only for a prefix rule that does not cover `target`. [`Self::select`]
+    /// classifies such a rule as unrelated, and the verified [`select_rule`]
+    /// selects only exact or fallback rules, so `select` never sees `None`.
     fn rule_source(&self, index: usize, target: &str) -> Option<String> {
         match &self.rules[index] {
             Rule::Copy { source, .. } | Rule::Transform { source, .. } => Some(source.clone()),

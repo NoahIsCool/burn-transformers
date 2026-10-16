@@ -219,11 +219,12 @@ pub fn cross_entropy<B: Backend>(
         ));
     }
     // One fallible readback of both extrema: a single device synchronization.
-    let range = read_int_scalars(
+    let [minimum, maximum] = read_int_scalars(
         vec![targets.clone().min(), targets.clone().max()],
         "training target labels",
-    )?;
-    let (minimum, maximum) = (range[0], range[1]);
+    )?
+    .try_into()
+    .map_err(|_| Error::BackendCapability("label range readback is incomplete".into()))?;
     if !range_within(minimum, maximum, classes) {
         return Err(Error::configuration(
             "training.targets",
@@ -294,10 +295,21 @@ fn validate_logits<B: Backend, const D: usize>(logits: &Tensor<B, D>, field: &st
 ///
 /// Moves `dim` last, flattens the other axes into independent rows, and sums
 /// each row with [`pairwise_row_sums`]. The caller supplies a nonempty valid
-/// axis of a tensor without zero extents; the verified [`reduction_rows`]
-/// then proves `rows * width` is exactly the element count.
+/// axis of a tensor without zero extents (every loss runs [`validate_logits`]
+/// first); the verified [`reduction_rows`] then proves `rows * width` is
+/// exactly the element count. Debug builds assert that precondition, which
+/// Verus cannot check at this unverified call site.
 fn sum_dim<B: Backend, const D: usize>(input: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
     let mut shape = input.dims();
+    debug_assert!(
+        dim < D
+            && shape.iter().all(|&extent| extent > 0)
+            && shape
+                .iter()
+                .try_fold(1usize, |count, &extent| count.checked_mul(extent))
+                .is_some(),
+        "sum_dim requires a valid axis of a nonempty shape, found axis {dim} of {shape:?}"
+    );
     let rows = reduction_rows(&shape, dim);
     shape.swap(dim, D - 1);
     let width = shape[D - 1];
