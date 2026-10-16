@@ -27,7 +27,11 @@
 //!   padded with no-op `(0, 0)` entries to the common width; repeated rows are
 //!   exact copies; history increments are one exactly for active or present
 //!   tokens (and generated ones for the generated view);
+//! - a decode step adds one to the generated length of exactly the active
+//!   rows;
 //! - a packed `[batch, 2]` readback splits into its even and odd entries;
+//! - special-token validation reports the first configured token outside the
+//!   vocabulary, so accepted tokens are valid scatter indices;
 //! - a history value becomes a token ID exactly when it is a non-negative
 //!   `u32` below the vocabulary size.
 //!
@@ -603,6 +607,42 @@ pub(crate) fn record_scatter(tokens: &[u32], active: &[bool]) -> (Vec<i64>, Vec<
     (ids, increments)
 }
 
+/// Adds one to the generated length of every active row.
+///
+/// The proof shows each active row's length grows by exactly one and every
+/// inactive row's length is unchanged. The precondition holds for every
+/// reachable history: a length counts recorded steps, far below `usize::MAX`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    requires
+        old(lengths).len() == active.len(),
+        forall|i: int| 0 <= i < active.len() && #[trigger] active@[i] ==> old(lengths)@[i] < usize::MAX,
+    ensures
+        final(lengths).len() == active.len(),
+        forall|i: int| 0 <= i < active.len() ==> #[trigger] final(lengths)@[i] == old(lengths)@[i]
+            + if active@[i] { 1int } else { 0int },
+))]
+pub(crate) fn advance_generated_lengths(lengths: &mut [usize], active: &[bool]) {
+    let mut row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= active.len(),
+            lengths.len() == active.len(),
+            old(lengths).len() == active.len(),
+            forall|i: int| 0 <= i < active.len() && #[trigger] active@[i] ==> old(lengths)@[i] < usize::MAX,
+            forall|i: int| 0 <= i < row ==> #[trigger] lengths@[i] == old(lengths)@[i]
+                + if active@[i] { 1int } else { 0int },
+            forall|i: int| row <= i < active.len() ==> #[trigger] lengths@[i] == old(lengths)@[i],
+        decreases active.len() - row,
+    ))]
+    while row < active.len() {
+        if active[row] {
+            lengths[row] += 1;
+        }
+        row += 1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Readback and token IDs
 // ---------------------------------------------------------------------------
@@ -642,6 +682,41 @@ pub(crate) fn deinterleave<T: Copy>(values: &[T]) -> (Vec<T>, Vec<T>) {
         index += 1;
     }
     (evens, odds)
+}
+
+/// Returns the first token of `tokens` outside a vocabulary of `vocabulary_size` IDs.
+///
+/// The proof shows `Some(token)` is `tokens[i]` for the smallest `i` with
+/// `tokens[i] >= vocabulary_size`, and `None` means every token is a valid
+/// scatter index into the vocabulary.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(outside =>
+    ensures
+        match outside {
+            Some(token) => exists|i: int| {
+                &&& 0 <= i < tokens.len()
+                &&& #[trigger] tokens@[i] == token
+                &&& token >= vocabulary_size
+                &&& forall|j: int| 0 <= j < i ==> #[trigger] tokens@[j] < vocabulary_size
+            },
+            None => forall|i: int| 0 <= i < tokens.len() ==> #[trigger] tokens@[i] < vocabulary_size,
+        },
+))]
+pub(crate) fn first_outside_vocabulary(tokens: &[u32], vocabulary_size: usize) -> Option<u32> {
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= tokens.len(),
+            forall|j: int| 0 <= j < index ==> #[trigger] tokens@[j] < vocabulary_size,
+        decreases tokens.len() - index,
+    ))]
+    while index < tokens.len() {
+        if tokens[index] as usize >= vocabulary_size {
+            return Some(tokens[index]);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Converts one history value to a token ID inside the vocabulary.

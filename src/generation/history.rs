@@ -39,7 +39,9 @@ use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, backend::Bac
 use crate::{Error, Result, TokenMask};
 
 use super::bookkeeping::row_span;
-use super::layout::{count_valid, history_token_id, push_history_row, record_scatter};
+use super::layout::{
+    advance_generated_lengths, count_valid, history_token_id, push_history_row, record_scatter,
+};
 use super::ngram::{completed_ngram_prefix, insert_follower, ngram_lookup_start};
 use super::{GenerationConfig, metadata};
 
@@ -469,10 +471,10 @@ impl<B: Backend> TokenHistory<B> {
             );
             self.counts.add(ids, increments);
         }
-        for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
-            if is_active {
-                self.generated_lengths[row] += 1;
-                if self.ngram_size > 0 {
+        advance_generated_lengths(&mut self.generated_lengths, active);
+        if self.ngram_size > 0 {
+            for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
+                if is_active {
                     self.ngrams[row].push(token, self.ngram_size);
                 }
             }

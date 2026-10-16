@@ -15,8 +15,10 @@
 //! empty row reported); prefill-chunk row activity and the skip, prefill, or
 //! decode choice; the logit-bias, hard-constraint, history-count, and
 //! decode-step scatter layouts (each row in its own segment, padded with
-//! no-op entries); the split of a packed selection readback into IDs and
-//! scores; and the conversion of a history value into a vocabulary token ID.
+//! no-op entries); the per-step generated-length advance of active rows; the
+//! split of a packed selection readback into IDs and scores; the first
+//! special token outside the vocabulary; and the conversion of a history
+//! value into a vocabulary token ID.
 //!
 //! Finally it verifies `src/generation/ngram.rs`: the prefix range under
 //! which a completed n-gram is recorded, the lookup key before the next token

@@ -7,9 +7,9 @@
 use proptest::prelude::*;
 
 use super::{
-    ChunkCall, any_valid, chunk_activity, chunk_call, count_valid, deinterleave, fill_row_lengths,
-    history_token_id, last_valid, push_constraint_row, push_history_row, record_scatter,
-    repeat_row,
+    ChunkCall, advance_generated_lengths, any_valid, chunk_activity, chunk_call, count_valid,
+    deinterleave, fill_row_lengths, first_outside_vocabulary, history_token_id, last_valid,
+    push_constraint_row, push_history_row, record_scatter, repeat_row,
 };
 
 /// Mask scans handle empty spans, single slots, and spans without valid entries.
@@ -87,6 +87,18 @@ fn scatter_rows_are_ordered_and_padded() {
     assert_eq!(repeat_row(&[1_i64, 2], 3), [1, 2, 1, 2, 1, 2]);
     assert_eq!(repeat_row(&[0.5_f64], 2), [0.5, 0.5]);
     assert!(repeat_row(&[1_u8], 0).is_empty());
+}
+
+/// Only active rows gain a generated token; the first out-of-vocabulary token is reported.
+#[test]
+fn lengths_advance_and_vocabulary_checks() {
+    let mut lengths = [0, 4, usize::MAX];
+    advance_generated_lengths(&mut lengths, &[true, true, false]);
+    assert_eq!(lengths, [1, 5, usize::MAX]);
+    assert_eq!(first_outside_vocabulary(&[1, 9, 3, 12], 8), Some(9));
+    assert_eq!(first_outside_vocabulary(&[1, 7], 8), None);
+    assert_eq!(first_outside_vocabulary(&[], 0), None);
+    assert_eq!(first_outside_vocabulary(&[0], 0), Some(0));
 }
 
 /// Packed readbacks split into IDs and scores; history values must be vocabulary IDs.
@@ -222,6 +234,29 @@ proptest! {
             let expected = tokens.iter().copied().cycle().take(batch * tokens.len()).collect::<Vec<_>>();
             prop_assert_eq!(repeat_row(&tokens, batch), expected);
         }
+    }
+
+    /// Length advances and vocabulary checks agree with the original loops.
+    #[test]
+    fn lengths_and_vocabulary_match_iterators(
+        lengths in proptest::collection::vec(0_usize..100, 0..8),
+        active_seed in proptest::collection::vec(any::<bool>(), 8),
+        tokens in proptest::collection::vec(0_u32..20, 0..8),
+        vocabulary in 0_usize..24,
+    ) {
+        let active = &active_seed[..lengths.len()];
+        let mut advanced = lengths.clone();
+        advance_generated_lengths(&mut advanced, active);
+        let expected = lengths
+            .iter()
+            .zip(active)
+            .map(|(&length, &is_active)| length + usize::from(is_active))
+            .collect::<Vec<_>>();
+        prop_assert_eq!(advanced, expected);
+        prop_assert_eq!(
+            first_outside_vocabulary(&tokens, vocabulary),
+            tokens.iter().copied().find(|&token| token as usize >= vocabulary)
+        );
     }
 
     /// Readback splitting and token conversion agree with the original iterators.

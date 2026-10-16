@@ -150,7 +150,7 @@ use crate::{Error, Result, TokenMask};
 
 use bookkeeping::{StopDecision, stop_decision};
 use history::CountView;
-use layout::{push_constraint_row, repeat_row};
+use layout::{first_outside_vocabulary, push_constraint_row, repeat_row};
 
 /// Selects deterministic greedy decoding or stochastic categorical sampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -365,15 +365,17 @@ impl GenerationConfig {
     }
 
     /// Checks that every configured token ID and bias lies inside the vocabulary.
+    ///
+    /// Special tokens are checked in configuration order (EOS IDs, PAD, then
+    /// each stop sequence) with the Verus-verified [`first_outside_vocabulary`],
+    /// so the first offending token is reported.
     fn validate_token_ids(&self, vocabulary_size: usize) -> Result<()> {
-        for token in self
-            .eos_token_ids
-            .iter()
-            .copied()
-            .chain(self.pad_token_id)
-            .chain(self.stop_sequences.iter().flatten().copied())
-        {
-            if token as usize >= vocabulary_size {
+        let pad = self.pad_token_id.as_slice();
+        let special = [self.eos_token_ids.as_slice(), pad]
+            .into_iter()
+            .chain(self.stop_sequences.iter().map(Vec::as_slice));
+        for tokens in special {
+            if let Some(token) = first_outside_vocabulary(tokens, vocabulary_size) {
                 return Err(Error::Generation(format!(
                     "special token {token} is outside vocabulary size {vocabulary_size}"
                 )));
