@@ -16,6 +16,8 @@
 
 mod convert;
 mod packed_install;
+#[cfg(test)]
+pub(crate) mod packed_sink_support;
 mod permutation;
 mod rounding;
 mod schedule;

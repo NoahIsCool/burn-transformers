@@ -60,8 +60,11 @@
 //!
 //! Packed (quantized Burnpack) weights are loaded through
 //! [`crate::models::AutoCausalLm`] for the families whose packed path is
-//! certified; their sinks install each packed weight exactly or as its exact
-//! dequantized values (see [`install_packed_parameter`]).
+//! certified. Every family's sink, certified or not, installs each packed
+//! weight exactly or as its exact dequantized values (see
+//! [`install_packed_parameter`]), so driving a sink directly through
+//! [`quantization::execute_local_quantized_load_plan`] never stores a
+//! requantized approximation.
 
 pub(crate) mod accounting;
 mod artifact;
@@ -101,6 +104,8 @@ pub use report::{
     AliasRecord, CheckpointEquivalenceRecord, DTypeConversion, LoadReport, MemoryEstimate,
     QuantizationRecord, TransformRecord,
 };
+#[cfg(test)]
+pub(crate) use runtime::packed_sink_support;
 pub use runtime::{
     ExecutionFailure, ExecutionFailureCause, ExecutionOutcome, ExecutionResult, ExecutionStats,
     LocalShardSource, PackedInstall, PackedLayoutPolicy, ParameterInstallError, SourceStats,

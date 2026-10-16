@@ -729,3 +729,22 @@ fn load_checkpoint_returns_execution_failures_with_partial_reports() {
     ));
     assert!(matches!(error, T5CheckpointLoadError::Execution(_)));
 }
+
+/// Packed sidecar payloads install exactly the artifact, never a requantized approximation.
+///
+/// The sink's one installer must keep a packed column-layout weight exact on
+/// every backend (as exact dequantized values on Burn Flex, whose quantized
+/// transpose requantizes) and leave float payloads unchanged, as the
+/// certified Qwen3-MoE and Muse sinks do.
+#[test]
+fn packed_payloads_install_the_artifact_exactly() {
+    crate::checkpoint::packed_sink_support::assert_install_keeps_packed_weights_exact(
+        |parameter, data| {
+            install(
+                "encoder.block.0.layer.0.SelfAttention.q.weight",
+                parameter,
+                data,
+            )
+        },
+    );
+}

@@ -529,3 +529,16 @@ fn execution_failure_exposes_an_expanded_partial_report() {
     assert!(configuration.execution_failure().is_none());
     assert!(checkpoint.execution_failure().is_none());
 }
+
+/// Packed sidecar payloads install exactly the artifact, never a requantized approximation.
+///
+/// The sink's one installer must keep a packed column-layout weight exact on
+/// every backend (as exact dequantized values on Burn Flex, whose quantized
+/// transpose requantizes) and leave float payloads unchanged, as the
+/// certified Qwen3-MoE and Muse sinks do.
+#[test]
+fn packed_payloads_install_the_artifact_exactly() {
+    crate::checkpoint::packed_sink_support::assert_install_keeps_packed_weights_exact(
+        |parameter, data| install("gpt_neox.layers.0.attention.dense.weight", parameter, data),
+    );
+}
