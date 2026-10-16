@@ -15,11 +15,27 @@
 //! [`T5RelativePositionBias`] looks them up through a linear-size displacement
 //! table.
 //!
-//! Pure integer index plans ([`mrope_frequency_axis`], [`relative_table_length`],
-//! the T5 bucket assembly, and [`derive_batched_position_ids`]) are verified in
-//! place with Verus through `verus/position.rs`. [`relative_table_index`] is
-//! verified the same way as the specification of the device-side T5 table
-//! index, which a unit test checks entry by entry against it.
+//! The integer cores are verified in place with Verus through
+//! `verus/position.rs`, and each runs on the runtime path:
+//!
+//! * multimodal-RoPE axis selection ([`mrope_frequency_axis`]), with exact
+//!   per-axis frequency counts, and the section-sum and rotary-shape checks
+//!   behind [`mrope_angles`], [`apply_rotary_to`], and the pair-layout
+//!   converters;
+//! * T5 bucket geometry, signed and unsigned distance splitting, and bucket
+//!   assembly in [`T5RelativePositionBuckets`]; the learned-table shape check
+//!   of [`T5RelativePositionBiasConfig::validate`]; and the displacement-table
+//!   plan of [`T5RelativePositionBias::bucket_table`], whose length is
+//!   [`relative_table_length`] and whose device index takes each row start
+//!   from [`relative_table_index`];
+//! * [`derive_batched_position_ids`] and [`derive_position_ids`], including
+//!   their error precedence;
+//! * the integer checks of [`RopeConfig::new`] (rotary width, per-policy width
+//!   rules, and trained context) and LongRoPE's table length and
+//!   [`ProportionalRopeScaling::rotated_pairs`] clamp.
+//!
+//! Floating-point frequency arithmetic and Burn tensor code are covered by
+//! unit and property tests instead.
 
 mod frequencies;
 mod ids;

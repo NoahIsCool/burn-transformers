@@ -26,11 +26,15 @@
 //! interleaving, the multimodal axes receive exactly
 //! `min(height, (half + 1) / 3)` height and `min(width, half / 3)` width
 //! frequencies, so sections that fit receive exactly their configured counts.
-//! [`mrope_frequency_axis`] and the validators run as written at runtime.
-//! [`relative_table_index`] is the scalar specification of the T5 index that
-//! the bias evaluates for all pairs at once as a device tensor expression; the
-//! proof applies to this function, and a unit test checks that every device
-//! entry equals it.
+//!
+//! Every function here runs as written at runtime. [`plan_relative_table`]
+//! obtains the table length from [`relative_table_length`]. The T5 bias
+//! computes each query row's first entry `relative_table_index(i, 0,
+//! query_length) = query_length - 1 - i` with [`relative_table_index`] on the
+//! host and adds the key range on the device; since the index is
+//! `spec_relative_table_index(i, 0, q) + j` by definition, every device entry
+//! is the verified index of its pair, which a unit test also checks entry by
+//! entry.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -155,6 +159,14 @@ pub proof fn lemma_mrope_sections_receive_their_counts(
     lemma_mrope_axis_counts(half, height_sections, width_sections);
 }
 
+/// Entry of the T5 displacement table read by local query `query` and key `key` (see [`relative_table_index`]).
+///
+/// Row `query` starts at `spec_relative_table_index(query, 0, query_length) =
+/// query_length - 1 - query`, and key `key` reads `key` entries further on.
+pub open spec fn spec_relative_table_index(query: int, key: int, query_length: int) -> int {
+    key + (query_length - 1 - query)
+}
+
 /// Every table entry `t < query_length + key_length - 1` is read by some in-range pair.
 ///
 /// The anchor query `query_length - 1` reads entry `t = key` for every key,
@@ -167,16 +179,16 @@ pub proof fn lemma_relative_table_entries_are_read(entry: int, query_length: int
         0 <= entry < query_length + key_length - 1,
     ensures
         exists|query: int, key: int|
-            0 <= query < query_length && 0 <= key < key_length && #[trigger] (key + (query_length
-                - 1 - query)) == entry,
+            0 <= query < query_length && 0 <= key < key_length
+                && #[trigger] spec_relative_table_index(query, key, query_length) == entry,
 {
     if entry < key_length {
         let query = query_length - 1;
-        assert(entry + (query_length - 1 - query) == entry);
+        assert(spec_relative_table_index(query, entry, query_length) == entry);
     } else {
         let key = key_length - 1;
         let query = query_length + key_length - 2 - entry;
-        assert(key + (query_length - 1 - query) == entry);
+        assert(spec_relative_table_index(query, key, query_length) == entry);
     }
 }
 
@@ -214,8 +226,11 @@ pub fn mrope_frequency_axis(index: usize, height_sections: usize, width_sections
 
 /// Returns the number of distinct displacements `query_length + key_length - 1`.
 ///
-/// `None` signals an empty axis or an unrepresentable length; callers report
-/// it as a contextual shape error.
+/// `None` signals an empty axis or an unrepresentable length;
+/// [`plan_relative_table`] reports it as a contextual fault.
+///
+/// Verified: `Some` exactly when both axes are non-empty and the length is
+/// representable, and then the length is exact.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(length =>
     ensures
@@ -237,13 +252,18 @@ pub fn relative_table_length(query_length: usize, key_length: usize) -> Option<u
 /// key-minus-query displacement relative to the anchor query
 /// `query_length - 1`, and it is at most `key + query_length - 1`, so every key
 /// `key < key_length` reads inside the table of length
-/// `query_length + key_length - 1`.
+/// `query_length + key_length - 1`. The T5 bias calls it with `key = 0` for
+/// each query row's first entry.
+///
+/// Verified: the entry equals `spec_relative_table_index(query, key,
+/// query_length)` without overflow.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(entry =>
     requires
         query < query_length,
         key + query_length - 1 <= usize::MAX,
     ensures
+        entry == spec_relative_table_index(query as int, key as int, query_length as int),
         entry + query == key + query_length - 1,
         entry + 1 <= key + query_length,
 ))]
@@ -350,10 +370,10 @@ pub(crate) enum RelativeTableFault {
 /// Plans the host displacement table of a `[query, key]` bias whose first query sits at `query_offset`.
 ///
 /// Entry `t` holds the bucket of key position `t` relative to the anchor
-/// query `query_offset + query_length - 1`. The table length
-/// `query_length + key_length - 1` cannot overflow once `query_length *
-/// key_length` fits, because `q + k - 1 <= q * k` for positive lengths, so no
-/// separate length check is needed.
+/// query `query_offset + query_length - 1`. The length comes from
+/// [`relative_table_length`]. It fails only for an empty axis or when
+/// `q + k - 1` overflows, and for positive lengths `q + k - 1 <= q * k`, so
+/// that overflow is reported as the output overflow it implies.
 ///
 /// Verified: the result is `Ok` exactly when every check passes and the
 /// faults follow the listed order. A plan's anchor and length are exact, and
@@ -374,8 +394,10 @@ pub(crate) enum RelativeTableFault {
                 &&& plan.anchor == query_offset + query_length - 1
                 &&& forall|query: int, key: int|
                     0 <= query < query_length && 0 <= key < key_length ==> {
-                        &&& #[trigger] (key + (query_length - 1 - query)) < plan.length
-                        &&& key + (query_length - 1 - query) - plan.anchor == key - (query_offset + query)
+                        &&& #[trigger] spec_relative_table_index(query, key, query_length as int)
+                            < plan.length
+                        &&& spec_relative_table_index(query, key, query_length as int) - plan.anchor
+                            == key - (query_offset + query)
                     }
             },
             Err(RelativeTableFault::EmptyAxis) => query_length == 0 || key_length == 0,
@@ -401,22 +423,25 @@ pub(crate) fn plan_relative_table(
     key_length: usize,
     query_offset: usize,
 ) -> Result<RelativeTablePlan, RelativeTableFault> {
-    if query_length == 0 || key_length == 0 {
-        return Err(RelativeTableFault::EmptyAxis);
-    }
+    let Some(length) = relative_table_length(query_length, key_length) else {
+        if query_length == 0 || key_length == 0 {
+            return Err(RelativeTableFault::EmptyAxis);
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            // `q + k - 1 <= q * k` because `(q - 1) * (k - 1) >= 0`, so an
+            // unrepresentable length means the output overflows as well.
+            assert(query_length + key_length - 1 <= query_length * key_length) by (nonlinear_arith)
+                requires
+                    query_length >= 1,
+                    key_length >= 1,
+            ;
+        }
+        return Err(RelativeTableFault::OutputOverflow);
+    };
     if query_length.checked_mul(key_length).is_none() {
         return Err(RelativeTableFault::OutputOverflow);
     }
-    #[cfg(verus_keep_ghost)]
-    proof! {
-        // `q + k - 1 <= q * k` because `(q - 1) * (k - 1) >= 0`.
-        assert(query_length + key_length - 1 <= query_length * key_length) by (nonlinear_arith)
-            requires
-                query_length >= 1,
-                key_length >= 1,
-        ;
-    }
-    let length = query_length + (key_length - 1);
     let Some(end) = query_offset.checked_add(query_length) else {
         return Err(RelativeTableFault::OffsetOverflow);
     };

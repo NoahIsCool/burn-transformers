@@ -10,14 +10,16 @@
 //!   (`lemma_mrope_sections_receive_their_counts`); `mrope_section_total` is the
 //!   exact section sum or `None` on overflow; `rotary_operand_fits` and
 //!   `split_half_width_fits` are exactly the rotary shape relations; the T5
-//!   displacement-table length and lookup index are in bounds, overflow-free,
-//!   and displacement-preserving, and `lemma_relative_table_entries_are_read`
-//!   shows every entry is read by some pair; `plan_relative_table` accepts
-//!   exactly the representable `[query, key]` geometries with a query offset
-//!   (faults in check order), returns the exact length and anchor, and proves
-//!   that pair `(i, j)` reads the entry whose anchor displacement is
-//!   `j - (offset + i)`; `relative_bias_shape_fault` reports the first failed
-//!   learned-table shape check;
+//!   displacement-table length is exact, and the lookup index equals
+//!   `spec_relative_table_index` without overflow (the bias computes each
+//!   row start with it); `lemma_relative_table_entries_are_read` shows every
+//!   entry is read by some pair; `plan_relative_table` takes its length from
+//!   `relative_table_length`, accepts exactly the representable
+//!   `[query, key]` geometries with a query offset (faults in check order),
+//!   returns the exact length and anchor, and proves that pair `(i, j)` reads
+//!   the entry whose anchor displacement is `j - (offset + i)`;
+//!   `relative_bias_shape_fault` reports the first failed learned-table shape
+//!   check;
 //! * `src/position/t5.rs`: `checked_bucket_geometry` (behind
 //!   `T5RelativePositionBuckets::new`) accepts exactly the valid geometries and
 //!   otherwise returns the first failed check with its values;
@@ -49,13 +51,14 @@
 //! Not proved here: the floating-point logarithm that proposes a T5 offset,
 //! RoPE frequency arithmetic and validation of floating-point parameters
 //! (theta, factors, amplitudes, YaRN correction ranges), and Burn tensor
-//! construction, which the unit tests cover. Loop invariants are attributes on `while` statements, which
-//! needs `proc_macro_hygiene` under the Verus compiler only.
+//! construction, which the unit tests cover.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![allow(unused)]
-#![feature(proc_macro_hygiene)]
+// Loop invariants are attributes on `while` statements, which Verus parses as
+// expression attributes; ordinary builds never see these attributes.
+#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
 #[path = "../src/position/index_plan.rs"]
 pub mod index_plan;
