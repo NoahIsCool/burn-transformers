@@ -233,12 +233,14 @@ fn contradictory_metadata_names_the_field() {
             "must be finite and in [0, 1]".to_owned()
         )
     );
-    T5Config {
-        n_positions: Some(512),
-        decoder_start_token_id: Some(0),
-        classifier_dropout: Some(0.1),
-        ..T5Config::default()
+    for classifier_dropout in [Some(0.1), None] {
+        T5Config {
+            n_positions: Some(512),
+            decoder_start_token_id: Some(0),
+            classifier_dropout,
+            ..T5Config::default()
+        }
+        .validate()
+        .unwrap();
     }
-    .validate()
-    .unwrap();
 }
