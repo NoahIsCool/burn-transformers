@@ -48,12 +48,15 @@
 //! # Verification
 //!
 //! The integer core of this module (shape validation with overflow-free
-//! extents, block and scale offsets, the transposed output offset, the nibble
-//! split, and the exact binary64 encoding of a decoded value) has no crate or
-//! Burn dependencies and is verified in place by Verus through
-//! `verus/gpt_oss.rs`. The table-lookup kernel and its thread partition are
-//! ordinary Rust, tested bit for bit against Transformers over every
-//! `(scale, code)` pair and on a seeded multi-expert tensor.
+//! extents and an exact classification of every rejected shape, the block,
+//! scale, and value counts, block and scale offsets, the transposed output
+//! offset, the decode table's index bijection, the thread partition of the
+//! decode into whole units, each unit's coordinates and output slice, the
+//! nibble split, and the exact binary64 encoding of a decoded value) has
+//! no crate or Burn dependencies and is verified in place by Verus through
+//! `verus/gpt_oss.rs`. The byte copies of the table-lookup kernel and the
+//! dtype encoders are ordinary Rust, tested bit for bit against Transformers
+//! over every `(scale, code)` pair and on a seeded multi-expert tensor.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -67,12 +70,15 @@ pub(crate) const BLOCK_BYTES: usize = 16;
 pub(crate) const BLOCK_VALUES: usize = 32;
 
 /// Number of E8M0 scale codes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub(crate) const SCALE_CODES: usize = 256;
 
 /// Number of FP4 E2M1 codes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub(crate) const FP4_CODES: usize = 16;
 
 /// Entries of a decode table, one per `(scale, code)` pair, indexed `16 · scale + code`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub(crate) const TABLE_ENTRIES: usize = SCALE_CODES * FP4_CODES;
 
 /// Binary64 encoding of the positive quiet NaN Transformers produces for scale code 255.
@@ -102,7 +108,8 @@ pub(crate) const EXPONENT_OFFSET: u64 = 895;
 /// Fewest decoded values worth a second worker thread.
 ///
 /// Below this a decode takes microseconds and thread start-up would dominate.
-const PARALLEL_MIN_VALUES: usize = 1 << 20;
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub(crate) const PARALLEL_MIN_VALUES: usize = 1 << 20;
 
 /// Extents of one validated `[experts, rows, groups, 16]` MXFP4 tensor pair.
 ///
@@ -166,17 +173,37 @@ pub(crate) fn decoded_shape(blocks: &[u64], scales: &[u64]) -> Result<Vec<u64>, 
 #[cfg(verus_keep_ghost)]
 verus! {
 
+/// Specification: blocks are rank four with a trailing axis of 16 bytes.
+pub(crate) open spec fn blocks_shaped(blocks: Seq<u64>) -> bool {
+    blocks.len() == 4 && blocks[3] == 16
+}
+
+/// Specification: scales are rank three and equal the blocks' leading axes.
+pub(crate) open spec fn scales_match(blocks: Seq<u64>, scales: Seq<u64>) -> bool {
+    &&& scales.len() == 3
+    &&& scales[0] == blocks[0] && scales[1] == blocks[1] && scales[2] == blocks[2]
+}
+
+/// Specification: the expert, row, and group axes are all nonzero.
+pub(crate) open spec fn axes_nonzero(blocks: Seq<u64>) -> bool {
+    blocks[0] > 0 && blocks[1] > 0 && blocks[2] > 0
+}
+
+/// Specification: the decoded value count `E · R · 32 G` fits `usize` and `u64`.
+pub(crate) open spec fn count_fits(blocks: Seq<u64>) -> bool {
+    &&& blocks[0] * blocks[1] * (32 * blocks[2]) <= usize::MAX
+    &&& blocks[0] * blocks[1] * (32 * blocks[2]) <= u64::MAX
+}
+
 /// Specification: the shape pairs [`mxfp4_geometry`] accepts, and no others.
 ///
 /// Blocks `[E, R, G, 16]`, scales `[E, R, G]`, nonzero `E`, `R`, `G`, and a
 /// decoded value count `E · R · 32 G` that fits both `usize` and `u64`.
 pub(crate) open spec fn accepts(blocks: Seq<u64>, scales: Seq<u64>) -> bool {
-    &&& blocks.len() == 4 && blocks[3] == 16
-    &&& scales.len() == 3
-    &&& scales[0] == blocks[0] && scales[1] == blocks[1] && scales[2] == blocks[2]
-    &&& blocks[0] > 0 && blocks[1] > 0 && blocks[2] > 0
-    &&& blocks[0] * blocks[1] * (32 * blocks[2]) <= usize::MAX
-    &&& blocks[0] * blocks[1] * (32 * blocks[2]) <= u64::MAX
+    &&& blocks_shaped(blocks)
+    &&& scales_match(blocks, scales)
+    &&& axes_nonzero(blocks)
+    &&& count_fits(blocks)
 }
 
 /// Specification: geometry `g` describes `[e, r, q, 16]` blocks and fits every count in `usize`.
@@ -221,6 +248,10 @@ pub proof fn lemma_mul3_bounds(a: int, b: int, c: int, i: int, j: int, k: int)
 /// pair whose value count (and therefore its byte counts, at most eight bytes
 /// per value) does not fit both `usize` and `u64`.
 ///
+/// Verified: the result is `Ok` exactly for accepted pairs, and each error is
+/// exactly the first violated rule in the order blocks, scales, empty axis,
+/// overflow, so a diagnostic never misnames the defect.
+///
 /// # Errors
 ///
 /// Returns the first [`Mxfp4ShapeError`] the pair violates.
@@ -228,6 +259,14 @@ pub proof fn lemma_mul3_bounds(a: int, b: int, c: int, i: int, j: int, k: int)
 #[cfg_attr(verus_keep_ghost, verus_spec(geometry =>
     ensures
         geometry matches Ok(_) <==> accepts(blocks@, scales@),
+        geometry matches Err(Mxfp4ShapeError::Blocks) <==> !blocks_shaped(blocks@),
+        geometry matches Err(Mxfp4ShapeError::Scales) <==>
+            blocks_shaped(blocks@) && !scales_match(blocks@, scales@),
+        geometry matches Err(Mxfp4ShapeError::Empty) <==>
+            blocks_shaped(blocks@) && scales_match(blocks@, scales@) && !axes_nonzero(blocks@),
+        geometry matches Err(Mxfp4ShapeError::Overflow) <==>
+            blocks_shaped(blocks@) && scales_match(blocks@, scales@) && axes_nonzero(blocks@)
+                && !count_fits(blocks@),
         geometry matches Ok(g) ==> {
             &&& describes(g)
             &&& blocks@.len() == 4 && scales@.len() == 3
@@ -300,23 +339,76 @@ pub(crate) fn mxfp4_geometry(
 
 impl Mxfp4Geometry {
     /// Returns the decoded value count `E · R · 32 G`.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(values =>
+        requires
+            describes(self),
+        ensures
+            values == self.experts * self.rows * self.columns,
+    ))]
     #[must_use]
     pub(crate) fn values(self) -> usize {
         values_of(self)
     }
 
     /// Returns the packed block bytes `E · R · G · 16` (half the value count).
+    ///
+    /// Verified: exactly sixteen bytes for each of the `E · R · G` blocks.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(bytes =>
+        requires
+            describes(self),
+        ensures
+            bytes == self.experts * self.rows * self.groups * 16,
+    ))]
     #[must_use]
     pub(crate) fn block_bytes(self) -> usize {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_count_factors(self);
+        }
         values_of(self) / 2
     }
 
     /// Returns the scale count `E · R · G` (a 32nd of the value count).
+    ///
+    /// Verified: exactly one scale for each of the `E · R · G` blocks.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(count =>
+        requires
+            describes(self),
+        ensures
+            count == self.experts * self.rows * self.groups,
+    ))]
     #[must_use]
     pub(crate) fn scale_count(self) -> usize {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_count_factors(self);
+        }
         values_of(self) / BLOCK_VALUES
     }
 }
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// The value count is 32 values, or 16 block bytes, per scale.
+proof fn lemma_count_factors(g: Mxfp4Geometry)
+    requires
+        describes(g),
+    ensures
+        g.experts * g.rows * g.columns == 32 * (g.experts * g.rows * g.groups),
+        (g.experts * g.rows * g.columns) / 2 == g.experts * g.rows * g.groups * 16,
+        (g.experts * g.rows * g.columns) / 32 == g.experts * g.rows * g.groups,
+{
+    let blocks = g.experts * g.rows * g.groups;
+    assert(g.experts * g.rows * g.columns == 32 * blocks) by (nonlinear_arith)
+        requires g.columns == 32 * g.groups, blocks == g.experts * g.rows * g.groups;
+    assert(blocks * 16 == g.experts * g.rows * g.groups * 16);
+}
+
+} // verus!
 
 /// Returns the decoded value count `E · R · 32 G` of a validated geometry.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -499,6 +591,37 @@ pub(crate) fn transposed_offset(
     (expert * geometry.columns + column) * geometry.rows + row
 }
 
+/// Returns the decode-table entry of `code` under `scale`: `16 · scale + (code mod 16)`.
+///
+/// Verified: the index is in bounds of the [`TABLE_ENTRIES`]-entry table and is
+/// a bijection with [`table_coordinates`], so every `(scale, code)` pair owns
+/// exactly one entry.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(index =>
+    ensures
+        index == 16 * scale + code % 16,
+        index < TABLE_ENTRIES,
+))]
+const fn table_index(scale: u8, code: u8) -> usize {
+    scale as usize * FP4_CODES + (code % 16) as usize
+}
+
+/// Returns the `(scale, code)` pair stored at decode-table entry `index`.
+///
+/// Verified: the inverse of [`table_index`], so filling entries in index order
+/// visits every pair once, with scales outer and codes inner.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(pair =>
+    requires
+        index < TABLE_ENTRIES,
+    ensures
+        pair.1 < 16,
+        16 * pair.0 + pair.1 == index,
+))]
+const fn table_coordinates(index: usize) -> (u8, u8) {
+    ((index / FP4_CODES) as u8, (index % FP4_CODES) as u8)
+}
+
 /// A decode table: the target encoding of every `(scale, code)` pair.
 ///
 /// Entry `16 · scale + code` holds the native-endian bytes of the decoded
@@ -517,10 +640,10 @@ impl<const W: usize> Mxfp4Table<W> {
     /// overflow), and one round-to-nearest-even step for BF16 and F16.
     pub(crate) fn new(mut encode: impl FnMut(u64) -> [u8; W]) -> Self {
         let mut entries = Vec::with_capacity(TABLE_ENTRIES);
-        for scale in 0..=u8::MAX {
-            for code in 0..FP4_CODES as u8 {
-                entries.push(encode(exact_value_bits(scale, code)));
-            }
+        // Entry `i` holds pair `table_coordinates(i)`: scales outer, codes inner.
+        for index in 0..TABLE_ENTRIES {
+            let (scale, code) = table_coordinates(index);
+            entries.push(encode(exact_value_bits(scale, code)));
         }
         Self { entries }
     }
@@ -528,9 +651,283 @@ impl<const W: usize> Mxfp4Table<W> {
     /// Returns the encoding of `code` under `scale`.
     #[must_use]
     pub(crate) fn get(&self, scale: u8, code: u8) -> [u8; W] {
-        self.entries[usize::from(scale) * FP4_CODES + usize::from(code & 15)]
+        self.entries[table_index(scale, code)]
     }
 }
+
+/// How [`decode_transposed`] splits its `E · G` independent units over threads.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodePartition {
+    /// Output bytes of one unit: its `32 · R` values of `W` bytes each.
+    pub(crate) unit_bytes: usize,
+    /// Units per thread chunk, `⌈(E · G) / threads⌉`.
+    pub(crate) units_per_thread: usize,
+    /// Output bytes of one full thread chunk, `units_per_thread · unit_bytes`.
+    pub(crate) chunk_bytes: usize,
+    /// Threads to run the chunks on; one means the caller's thread alone.
+    pub(crate) threads: usize,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: the exact rounded-up quotient `⌈dividend / divisor⌉` for `divisor > 0`.
+pub open spec fn ceiling(dividend: int, divisor: int) -> int {
+    if dividend % divisor == 0 {
+        dividend / divisor
+    } else {
+        dividend / divisor + 1
+    }
+}
+
+} // verus!
+
+/// Splits a decode of `geometry` into per-thread chunks of whole units.
+///
+/// `available` is the parallelism the caller may use and `scalar_bytes` the
+/// target dtype width `W`. Unit `u = e · G + g` owns the `32 · R` output values
+/// of expert `e`, column group `g` (see [`unit_coordinates`]); the output is
+/// cut into chunks of `units_per_thread` whole units.
+///
+/// Verified: the thread count is one below `PARALLEL_MIN_VALUES` values and
+/// `min(available, E · G)` otherwise; `units_per_thread` is the exact ceiling
+/// of `E · G` over the threads, so the chunks number at most `threads` and
+/// cover every unit exactly once (`(n - 1) · k < E · G <= n · k` for `n`
+/// chunks of `k` units); the `E · G` units of `unit_bytes` partition the
+/// `values · W` output bytes exactly; and every product is overflow-free.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(partition =>
+    requires
+        describes(geometry),
+        available >= 1,
+        scalar_bytes >= 1,
+        geometry.experts * geometry.rows * geometry.columns * scalar_bytes <= usize::MAX,
+    ensures
+        partition.threads == (if geometry.experts * geometry.rows * geometry.columns
+            < PARALLEL_MIN_VALUES {
+            1
+        } else if available < geometry.experts * geometry.groups {
+            available as int
+        } else {
+            geometry.experts * geometry.groups
+        }),
+        1 <= partition.threads <= geometry.experts * geometry.groups,
+        partition.threads <= available,
+        partition.unit_bytes == 32 * geometry.rows * scalar_bytes,
+        partition.unit_bytes >= 1,
+        geometry.experts * geometry.groups * partition.unit_bytes
+            == geometry.experts * geometry.rows * geometry.columns * scalar_bytes,
+        partition.units_per_thread
+            == ceiling(geometry.experts * geometry.groups, partition.threads as int),
+        1 <= partition.units_per_thread <= geometry.experts * geometry.groups,
+        partition.chunk_bytes == partition.units_per_thread * partition.unit_bytes,
+        partition.chunk_bytes <= geometry.experts * geometry.rows * geometry.columns
+            * scalar_bytes,
+        ceiling(geometry.experts * geometry.groups, partition.units_per_thread as int)
+            <= partition.threads,
+        (ceiling(geometry.experts * geometry.groups, partition.units_per_thread as int) - 1)
+            * partition.units_per_thread < geometry.experts * geometry.groups,
+        geometry.experts * geometry.groups <= ceiling(
+            geometry.experts * geometry.groups,
+            partition.units_per_thread as int,
+        ) * partition.units_per_thread,
+))]
+pub(crate) fn decode_partition(
+    geometry: Mxfp4Geometry,
+    available: usize,
+    scalar_bytes: usize,
+) -> DecodePartition {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_unit_sizes(geometry, scalar_bytes);
+    }
+    let values = values_of(geometry);
+    let units = geometry.experts * geometry.groups;
+    let unit_bytes = BLOCK_VALUES * geometry.rows * scalar_bytes;
+    let threads = if values < PARALLEL_MIN_VALUES {
+        1
+    } else if available < units {
+        available
+    } else {
+        units
+    };
+    let quotient = units / threads;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        // A nonzero remainder needs at least two threads, so `quotient < units`.
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(units as int, threads as int);
+        assert(quotient * threads <= units) by (nonlinear_arith)
+            requires
+                units == threads * quotient + units % threads,
+                units % threads >= 0,
+        ;
+        if units % threads != 0 {
+            assert(quotient < units) by (nonlinear_arith)
+                requires quotient * threads <= units, threads >= 2, units >= 1;
+        }
+    }
+    // A named remainder keeps this Verus-checkable (`div_ceil` and
+    // `is_multiple_of` have no specification).
+    let remainder = units % threads;
+    let units_per_thread = if remainder == 0 {
+        quotient
+    } else {
+        quotient + 1
+    };
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_chunk_cover(units as int, threads as int, units_per_thread as int);
+        assert(units_per_thread * unit_bytes <= units * unit_bytes) by (nonlinear_arith)
+            requires units_per_thread <= units, unit_bytes >= 0;
+    }
+    DecodePartition {
+        unit_bytes,
+        units_per_thread,
+        chunk_bytes: units_per_thread * unit_bytes,
+        threads,
+    }
+}
+
+/// Returns the expert and column group of decode unit `unit = e · G + g`.
+///
+/// Verified: `(e, g)` is in range and recovers `unit`, and unit `u`'s values
+/// are exactly the transposed-output elements `[u · 32 R, (u + 1) · 32 R)`:
+/// decoded column `32 g + j` of row `r` lies at element `u · 32 R + j · R + r`
+/// of the `[E, 32 G, R]` output, so consecutive `unit_bytes` output chunks
+/// belong to consecutive units.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(coordinates =>
+    requires
+        describes(geometry),
+        unit < geometry.experts * geometry.groups,
+    ensures
+        coordinates.0 < geometry.experts,
+        coordinates.1 < geometry.groups,
+        unit == coordinates.0 * geometry.groups + coordinates.1,
+        forall|j: int, r: int| 0 <= j < 32 && 0 <= r < geometry.rows ==>
+            (coordinates.0 * geometry.columns + 32 * coordinates.1 + j) * geometry.rows + r
+                == #[trigger] unit_element(geometry.rows as int, unit as int, j, r),
+))]
+pub(crate) fn unit_coordinates(geometry: Mxfp4Geometry, unit: usize) -> (usize, usize) {
+    let expert = unit / geometry.groups;
+    let group = unit % geometry.groups;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(unit as int, geometry.groups as int);
+        assert(unit == expert * geometry.groups + group) by (nonlinear_arith)
+            requires unit == geometry.groups * expert + group;
+        assert(expert < geometry.experts) by (nonlinear_arith)
+            requires
+                unit == expert * geometry.groups + group,
+                unit < geometry.experts * geometry.groups,
+                0 <= group,
+                geometry.groups > 0,
+        ;
+        assert forall|j: int, r: int| 0 <= j < 32 && 0 <= r < geometry.rows implies
+            (expert * geometry.columns + 32 * group + j) * geometry.rows + r
+                == #[trigger] unit_element(geometry.rows as int, unit as int, j, r)
+        by {
+            assert((expert * geometry.columns + 32 * group + j) * geometry.rows + r
+                == unit * (32 * geometry.rows) + j * geometry.rows + r) by (nonlinear_arith)
+                requires
+                    geometry.columns == 32 * geometry.groups,
+                    unit == expert * geometry.groups + group,
+            ;
+        }
+    }
+    (expert, group)
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Specification: element `u · 32 R + j · R + r` of the transposed output.
+pub open spec fn unit_element(rows: int, unit: int, j: int, r: int) -> int {
+    unit * (32 * rows) + j * rows + r
+}
+
+/// The per-unit byte count is positive and the units tile the output bytes.
+proof fn lemma_unit_sizes(g: Mxfp4Geometry, scalar_bytes: usize)
+    requires
+        describes(g),
+        scalar_bytes >= 1,
+        g.experts * g.rows * g.columns * scalar_bytes <= usize::MAX,
+    ensures
+        g.experts * g.groups <= g.experts * g.rows * g.columns,
+        32 * g.rows * scalar_bytes <= g.experts * g.rows * g.columns * scalar_bytes,
+        32 * g.rows * scalar_bytes >= 1,
+        32 * g.rows <= usize::MAX,
+        g.experts * g.groups * (32 * g.rows * scalar_bytes)
+            == g.experts * g.rows * g.columns * scalar_bytes,
+{
+    assert(g.experts * g.rows * g.columns == (g.experts * g.groups) * (32 * g.rows))
+        by (nonlinear_arith)
+        requires g.columns == 32 * g.groups;
+    assert(g.experts * g.groups <= (g.experts * g.groups) * (32 * g.rows)) by (nonlinear_arith)
+        requires g.rows >= 1, g.experts * g.groups >= 0;
+    assert(32 * g.rows <= (g.experts * g.groups) * (32 * g.rows)) by (nonlinear_arith)
+        requires g.experts >= 1, g.groups >= 1, g.rows >= 0;
+    assert(32 * g.rows * scalar_bytes <= (g.experts * g.groups) * (32 * g.rows) * scalar_bytes)
+        by (nonlinear_arith)
+        requires g.experts >= 1, g.groups >= 1, g.rows >= 0, scalar_bytes >= 1;
+    assert(32 * g.rows <= 32 * g.rows * scalar_bytes) by (nonlinear_arith)
+        requires scalar_bytes >= 1, g.rows >= 0;
+    assert(32 * g.rows * scalar_bytes >= 1) by (nonlinear_arith)
+        requires scalar_bytes >= 1, g.rows >= 1;
+    assert(g.experts * g.groups * (32 * g.rows * scalar_bytes)
+        == (g.experts * g.groups) * (32 * g.rows) * scalar_bytes) by (nonlinear_arith);
+}
+
+/// Chunks of `k = ⌈units / threads⌉` units number at most `threads` and cover every unit once.
+proof fn lemma_chunk_cover(units: int, threads: int, k: int)
+    requires
+        units >= 1,
+        1 <= threads <= units,
+        k == ceiling(units, threads),
+    ensures
+        1 <= k <= units,
+        ceiling(units, k) <= threads,
+        (ceiling(units, k) - 1) * k < units,
+        units <= ceiling(units, k) * k,
+{
+    let q = units / threads;
+    let r = units % threads;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(units, threads);
+    assert(units == q * threads + r);
+    assert(0 <= r < threads);
+    // k * threads >= units, so ceil(units / k) <= threads.
+    assert(k * threads >= units) by (nonlinear_arith)
+        requires units == q * threads + r, 0 <= r < threads, k == (if r == 0 { q } else { q + 1 });
+    assert(q >= 1) by (nonlinear_arith)
+        requires units == q * threads + r, 0 <= r < threads, threads <= units, threads >= 1;
+    assert(k <= units) by (nonlinear_arith)
+        requires
+            units == q * threads + r,
+            0 <= r < threads,
+            k == (if r == 0 { q } else { q + 1 }),
+            threads >= 1,
+            q >= 1,
+    ;
+    let n = ceiling(units, k);
+    let qq = units / k;
+    let rr = units % k;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(units, k);
+    assert(units == qq * k + rr);
+    assert(n * k >= units) by (nonlinear_arith)
+        requires units == qq * k + rr, 0 <= rr < k, n == (if rr == 0 { qq } else { qq + 1 });
+    assert((n - 1) * k < units) by (nonlinear_arith)
+        requires
+            units == qq * k + rr,
+            0 <= rr < k,
+            n == (if rr == 0 { qq } else { qq + 1 }),
+            units >= 1,
+    ;
+    assert(n <= threads) by (nonlinear_arith)
+        requires (n - 1) * k < units, units <= k * threads, k >= 1;
+}
+
+} // verus!
 
 /// Decodes a validated blocks/scales pair into Transformers' `[E, 32 G, R]` layout.
 ///
@@ -561,25 +958,24 @@ pub(crate) fn decode_transposed<const W: usize>(
     {
         return Err(Mxfp4ShapeError::Overflow);
     }
-    let unit_bytes = BLOCK_VALUES * geometry.rows * W;
-    let units = geometry.experts * geometry.groups;
-    let threads = if values < PARALLEL_MIN_VALUES {
+    // The partition stays on one thread below the threshold, so skip the system query there.
+    let available = if values < PARALLEL_MIN_VALUES {
         1
     } else {
-        std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(units)
+        std::thread::available_parallelism().map_or(1, usize::from)
     };
-    let units_per_thread = units.div_ceil(threads);
+    let partition = decode_partition(geometry, available, W);
+    let unit_bytes = partition.unit_bytes;
+    let units_per_thread = partition.units_per_thread;
     std::thread::scope(|scope| {
-        for (chunk, slice) in output.chunks_mut(units_per_thread * unit_bytes).enumerate() {
+        for (chunk, slice) in output.chunks_mut(partition.chunk_bytes).enumerate() {
             let first_unit = chunk * units_per_thread;
             let mut work = move || {
                 for (offset, unit) in slice.chunks_exact_mut(unit_bytes).enumerate() {
                     decode_unit(blocks, scales, geometry, table, first_unit + offset, unit);
                 }
             };
-            if threads == 1 {
+            if partition.threads == 1 {
                 work();
             } else {
                 scope.spawn(work);
@@ -593,7 +989,9 @@ pub(crate) fn decode_transposed<const W: usize>(
 ///
 /// `output` is the unit's `[32, R]` slice of the transposed tensor: decoded
 /// column `32 g + j` of row `r` lands at element `j · R + r`, i.e. at
-/// [`transposed_offset`] minus the unit's first element.
+/// [`transposed_offset`] minus the unit's first element. [`unit_coordinates`]
+/// proves that first element is `u · 32 R`, the start of the unit's output
+/// chunk, and that `base` below is exactly `r`.
 fn decode_unit<const W: usize>(
     blocks: &[u8],
     scales: &[u8],
@@ -602,7 +1000,7 @@ fn decode_unit<const W: usize>(
     unit: usize,
     output: &mut [u8],
 ) {
-    let (expert, group) = (unit / geometry.groups, unit % geometry.groups);
+    let (expert, group) = unit_coordinates(geometry, unit);
     let rows = geometry.rows;
     let first_column = BLOCK_VALUES * group;
     let unit_start = transposed_offset(geometry, expert, first_column, 0);
