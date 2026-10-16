@@ -12,10 +12,61 @@
 //! [`projection_widths`] is checked in place by Verus through
 //! `verus/attention.rs`: for every input it never overflows, a successful
 //! result reports the exact widths with every projection matrix's element
-//! count inside `usize`, and each error states exactly which condition failed.
+//! count inside `usize`, and each error holds exactly when every earlier check
+//! passed and its own failed. [`paired_projection_widths`] adds differential
+//! attention's even query-head requirement after those checks.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Query projection output width: `q * d`, doubled when a gate is fused into it.
+pub open spec fn query_output(query_heads: usize, head_dim: usize, gated: bool) -> int {
+    if gated {
+        query_heads * head_dim * 2
+    } else {
+        query_heads * head_dim
+    }
+}
+
+/// The complete contract of [`projection_widths`]: exact widths, or the first failed check.
+pub open spec fn projection_widths_contract(
+    hidden_size: usize,
+    query_heads: usize,
+    key_value_heads: usize,
+    head_dim: usize,
+    gated: bool,
+    result: Result<ProjectionWidths, WidthError>,
+) -> bool {
+    let nonempty = hidden_size >= 1 && query_heads >= 1 && key_value_heads >= 1 && head_dim >= 1;
+    match result {
+        Ok(widths) => {
+            &&& nonempty
+            &&& query_heads % key_value_heads == 0
+            &&& widths.query_width == query_heads * head_dim
+            &&& widths.key_value_width == key_value_heads * head_dim
+            &&& widths.query_output_width == query_output(query_heads, head_dim, gated)
+            &&& widths.query_width <= widths.query_output_width
+            &&& hidden_size * widths.query_output_width <= usize::MAX
+            &&& hidden_size * widths.key_value_width <= usize::MAX
+            &&& widths.query_width * hidden_size <= usize::MAX
+        },
+        Err(WidthError::EmptyAxis) => !nonempty,
+        Err(WidthError::UngroupedHeads) => nonempty && query_heads % key_value_heads != 0,
+        Err(WidthError::Overflow) => {
+            &&& nonempty
+            &&& query_heads % key_value_heads == 0
+            &&& !(query_output(query_heads, head_dim, gated) <= usize::MAX
+                && key_value_heads * head_dim <= usize::MAX
+                && hidden_size * query_output(query_heads, head_dim, gated) <= usize::MAX
+                && hidden_size * (key_value_heads * head_dim) <= usize::MAX)
+        },
+    }
+}
+
+} // verus!
 
 /// Validated widths of one grouped-query attention layer's projections.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -45,35 +96,14 @@ pub enum WidthError {
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
-        match result {
-            Ok(widths) => {
-                let query_output = if gated { query_heads * head_dim * 2 } else { query_heads * head_dim };
-                &&& hidden_size >= 1 && query_heads >= 1 && key_value_heads >= 1 && head_dim >= 1
-                &&& query_heads % key_value_heads == 0
-                &&& widths.query_width == query_heads * head_dim
-                &&& widths.key_value_width == key_value_heads * head_dim
-                &&& widths.query_output_width == query_output
-                &&& widths.query_width <= widths.query_output_width
-                &&& hidden_size * widths.query_output_width <= usize::MAX
-                &&& hidden_size * widths.key_value_width <= usize::MAX
-                &&& widths.query_width * hidden_size <= usize::MAX
-            },
-            Err(WidthError::EmptyAxis) =>
-                hidden_size == 0 || query_heads == 0 || key_value_heads == 0 || head_dim == 0,
-            Err(WidthError::UngroupedHeads) => {
-                &&& hidden_size >= 1 && query_heads >= 1 && key_value_heads >= 1 && head_dim >= 1
-                &&& query_heads % key_value_heads != 0
-            },
-            Err(WidthError::Overflow) => {
-                let query_output = if gated { query_heads * head_dim * 2 } else { query_heads * head_dim };
-                &&& hidden_size >= 1 && query_heads >= 1 && key_value_heads >= 1 && head_dim >= 1
-                &&& query_heads % key_value_heads == 0
-                &&& !(query_output <= usize::MAX
-                    && key_value_heads * head_dim <= usize::MAX
-                    && hidden_size * query_output <= usize::MAX
-                    && hidden_size * (key_value_heads * head_dim) <= usize::MAX)
-            },
-        }
+        projection_widths_contract(
+            hidden_size,
+            query_heads,
+            key_value_heads,
+            head_dim,
+            gated,
+            result,
+        ),
 ))]
 pub fn projection_widths(
     hidden_size: usize,
@@ -123,6 +153,83 @@ pub fn projection_widths(
         key_value_width,
         query_output_width,
     })
+}
+
+/// Why differential-attention projection widths are unusable.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairedWidthError {
+    /// The grouped-query widths themselves are invalid.
+    Widths(
+        /// The first failed grouped-query width check.
+        WidthError,
+    ),
+    /// Query heads are used in pairs, so their count must be even.
+    OddQueryHeads,
+}
+
+/// Computes ungated projection widths of a layer whose query heads form pairs.
+///
+/// Differential attention pairs query head `i` with `i + H / 2`. Success
+/// implies everything [`projection_widths`] guarantees plus an even query-head
+/// count; errors keep its order and report odd counts last.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(widths) => {
+                &&& projection_widths_contract(
+                    hidden_size,
+                    query_heads,
+                    key_value_heads,
+                    head_dim,
+                    false,
+                    Ok(widths),
+                )
+                &&& query_heads % 2 == 0
+                &&& query_heads >= 2
+            },
+            Err(PairedWidthError::Widths(error)) => projection_widths_contract(
+                hidden_size,
+                query_heads,
+                key_value_heads,
+                head_dim,
+                false,
+                Err(error),
+            ),
+            Err(PairedWidthError::OddQueryHeads) => {
+                &&& projection_widths_contract(
+                    hidden_size,
+                    query_heads,
+                    key_value_heads,
+                    head_dim,
+                    false,
+                    Ok(ProjectionWidths {
+                        query_width: (query_heads * head_dim) as usize,
+                        key_value_width: (key_value_heads * head_dim) as usize,
+                        query_output_width: (query_heads * head_dim) as usize,
+                    }),
+                )
+                &&& query_heads % 2 == 1
+            },
+        }
+))]
+pub fn paired_projection_widths(
+    hidden_size: usize,
+    query_heads: usize,
+    key_value_heads: usize,
+    head_dim: usize,
+) -> Result<ProjectionWidths, PairedWidthError> {
+    let widths = match projection_widths(hidden_size, query_heads, key_value_heads, head_dim, false)
+    {
+        Ok(widths) => widths,
+        Err(error) => return Err(PairedWidthError::Widths(error)),
+    };
+    let parity = query_heads % 2;
+    if parity != 0 {
+        return Err(PairedWidthError::OddQueryHeads);
+    }
+    Ok(widths)
 }
 
 #[cfg(test)]

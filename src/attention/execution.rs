@@ -123,19 +123,16 @@ impl AttentionExecutionPolicy {
     }
 
     /// Returns the configured maximum query rows before score-bound reduction.
+    ///
+    /// This is `min(max_query_tokens, query_sequence)` (verified with Verus);
+    /// every planned chunk holds at most this many rows.
     #[must_use]
     pub const fn maximum_query_tokens(self, query_sequence: usize) -> usize {
         match self {
             Self::Unbounded => query_sequence,
             Self::QueryChunked {
                 max_query_tokens, ..
-            } => {
-                if max_query_tokens < query_sequence {
-                    max_query_tokens
-                } else {
-                    query_sequence
-                }
-            }
+            } => plan::capped_query_rows(max_query_tokens, query_sequence),
         }
     }
 
@@ -240,7 +237,8 @@ impl AttentionExecutionPlan {
 /// `query_rows`, `[max(0, start + K - Q + 1 - window), end + K - Q)`, whose
 /// width is at most `query_rows.len() + window - 1`. Returns `None` for an
 /// empty or out-of-bounds row range, `query_sequence > key_sequence`, or a
-/// zero window. Containment of every visible key is verified with Verus.
+/// zero window. Exactness (the range is the union of the rows' visible keys)
+/// is verified with Verus.
 #[must_use]
 pub fn sliding_window_key_range(
     query_sequence: usize,

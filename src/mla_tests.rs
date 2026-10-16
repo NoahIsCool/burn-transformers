@@ -483,6 +483,39 @@ fn configuration_rejects_each_zero_extent_and_nonfinite_numerical_constant() {
     }
 }
 
+/// Initialization allocates every projection with exactly the validated widths.
+#[test]
+fn init_allocates_every_projection_from_the_validated_widths() {
+    let device = Default::default();
+    for q_lora_rank in [None, Some(6)] {
+        let config = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, q_lora_rank);
+        let widths = config.validated_widths().unwrap();
+        assert_eq!(widths.qk_head_dim, config.qk_head_dim().unwrap());
+        assert_eq!(widths.query_width, 2 * (3 + 2));
+        assert_eq!(widths.value_width, 2 * 4);
+        assert_eq!(
+            widths.compressed_width,
+            config.compressed_projection_width().unwrap()
+        );
+        assert_eq!(widths.expanded_width, config.expanded_kv_width().unwrap());
+        let mla = config.init::<TestBackend>(&device).unwrap();
+        let dims = |linear: &Linear<TestBackend>| linear.weight.val().dims();
+        match q_lora_rank {
+            None => assert_eq!(dims(mla.q_proj.as_ref().unwrap()), [8, widths.query_width]),
+            Some(rank) => {
+                assert_eq!(dims(mla.q_a_proj.as_ref().unwrap()), [8, rank]);
+                assert_eq!(
+                    dims(mla.q_b_proj.as_ref().unwrap()),
+                    [rank, widths.query_width]
+                );
+            }
+        }
+        assert_eq!(dims(&mla.kv_a_proj_with_mqa), [8, widths.compressed_width]);
+        assert_eq!(dims(&mla.kv_b_proj), [5, widths.expanded_width]);
+        assert_eq!(dims(&mla.o_proj), [widths.value_width, 8]);
+    }
+}
+
 /// Overflowing head sums and projection widths fail configuration before allocating parameter tensors.
 #[test]
 fn projection_extent_overflow_is_rejected_before_parameter_allocation() {

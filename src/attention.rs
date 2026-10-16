@@ -44,11 +44,14 @@ mod connectivity;
 mod differential;
 mod dispatch;
 mod execution;
+mod geometry;
+mod grouping;
 mod mask;
 
 /// Largest position an integer tensor of a given dtype can hold (shared with cache masks).
 pub(crate) use mask::position_limit;
 mod plan;
+mod rules;
 mod widths;
 
 use burn::{
@@ -72,6 +75,8 @@ use mask::padding_plane;
 pub(crate) use mask::{bottom_right_causal_mask, union_exclusions};
 
 pub use execution::{AttentionExecutionPlan, AttentionExecutionPolicy, sliding_window_key_range};
+pub(crate) use geometry::causal_mask_needed;
+use geometry::{HeadLayout, ProjectionFault, projection_fault};
 use widths::{ProjectionWidths, WidthError, projection_widths};
 
 use crate::intervention::{AttentionPoints, Hooks};
@@ -619,11 +624,17 @@ impl<B: Backend> GroupedQueryAttention<B> {
             }
             _ => None,
         };
+        // `ExclusionPlan::new` validated the window as non-zero and the keys as
+        // at least as long as the queries. Every planned chunk therefore has a
+        // window key range within the verified bound, and `validate_chunk`
+        // below accepts it (`plan::lemma_window_chunk_admitted`, which builds
+        // on `plan::lemma_planned_chunk_fits_one_call`).
         let key_bound = window.map_or(key_sequence, |window| {
-            policy
-                .maximum_query_tokens(query_sequence)
-                .saturating_add(window - 1)
-                .min(key_sequence)
+            plan::windowed_key_bound(
+                policy.maximum_query_tokens(query_sequence),
+                window,
+                key_sequence,
+            )
         });
         let plan = policy.plan(batch, self.query_heads, query_sequence, key_bound)?;
         let chunked = plan.chunk_count() > 1;
@@ -970,118 +981,29 @@ fn validate_projection<B: Backend>(
     mask: Option<&Tensor<B, 4, Bool>>,
     bias: Option<&Tensor<B, 4>>,
 ) -> Result<()> {
-    let [batch, query_heads, query_sequence, query_dim] = projection.query.dims();
-    let [key_batch, key_value_heads, key_sequence, key_dim] = projection.key.dims();
-    let [value_batch, value_heads, value_sequence, value_dim] = projection.value.dims();
     // External callers can assemble projections without going through project().
     // Preserve its non-empty contract here; in particular, an empty key axis
     // cannot define the probability distribution required by softmax attention.
-    if batch == 0 || query_sequence == 0 || key_sequence == 0 {
-        return Err(Error::shape(
-            "attention.projection",
-            "non-empty batch, query sequence, and key sequence",
-            format!(
-                "query={:?}, key={:?}",
-                projection.query.dims(),
-                projection.key.dims()
-            ),
+    // The shape checks are the verified `geometry::projection_fault`.
+    let layout = HeadLayout {
+        query_heads: attention.query_heads,
+        key_value_heads: attention.key_value_heads,
+        head_dim: attention.head_dim,
+        gated: attention.output_gate != AttentionOutputGate::None,
+    };
+    let fault = projection_fault(
+        layout,
+        projection.query.dims(),
+        projection.key.dims(),
+        projection.value.dims(),
+        projection.gate.as_ref().map(Tensor::dims),
+        mask.map(Tensor::dims),
+        bias.map(Tensor::dims),
+    );
+    if let Some(fault) = fault {
+        return Err(projection_shape_error(
+            attention, projection, mask, bias, fault,
         ));
-    }
-    let expected_query = [
-        batch,
-        attention.query_heads,
-        query_sequence,
-        attention.head_dim,
-    ];
-    if [batch, query_heads, query_sequence, query_dim] != expected_query {
-        return Err(Error::shape(
-            "attention.query",
-            format!("{:?}", expected_query),
-            format!("{:?}", projection.query.dims()),
-        ));
-    }
-    let expected_key = [
-        batch,
-        attention.key_value_heads,
-        key_sequence,
-        attention.head_dim,
-    ];
-    if [key_batch, key_value_heads, key_sequence, key_dim] != expected_key {
-        return Err(Error::shape(
-            "attention.key",
-            format!("{:?}", expected_key),
-            format!("{:?}", projection.key.dims()),
-        ));
-    }
-    let expected_value = [
-        batch,
-        attention.key_value_heads,
-        key_sequence,
-        attention.head_dim,
-    ];
-    if [value_batch, value_heads, value_sequence, value_dim] != expected_value {
-        return Err(Error::shape(
-            "attention.value",
-            format!("{:?}", expected_value),
-            format!("{:?}", projection.value.dims()),
-        ));
-    }
-    let expected_gate = [
-        batch,
-        query_sequence,
-        attention.query_heads * attention.head_dim,
-    ];
-    match (attention.output_gate, projection.gate.as_ref()) {
-        (AttentionOutputGate::None, None) => {}
-        (AttentionOutputGate::None, Some(_)) => {
-            return Err(Error::shape(
-                "attention.gate",
-                "no gate for ungated attention",
-                "a gate tensor",
-            ));
-        }
-        (_, Some(gate)) if gate.dims() == expected_gate => {}
-        (_, Some(gate)) => {
-            return Err(Error::shape(
-                "attention.gate",
-                format!("{:?}", expected_gate),
-                format!("{:?}", gate.dims()),
-            ));
-        }
-        (_, None) => {
-            return Err(Error::shape(
-                "attention.gate",
-                format!("{:?}", expected_gate),
-                "no gate tensor",
-            ));
-        }
-    }
-    let expected_additive = [batch, attention.query_heads, query_sequence, key_sequence];
-    if let Some(mask) = mask
-        && mask.dims() != expected_additive
-    {
-        return Err(Error::shape(
-            "attention.mask",
-            format!("{:?}", expected_additive),
-            format!("{:?}", mask.dims()),
-        ));
-    }
-    if let Some(bias) = bias {
-        let [bias_batch, bias_heads, bias_query, bias_key] = bias.dims();
-        if ![1, batch].contains(&bias_batch)
-            || bias_heads != attention.query_heads
-            || bias_query != query_sequence
-            || bias_key != key_sequence
-        {
-            return Err(Error::shape(
-                "attention.bias",
-                format!(
-                    "[batch in {{1, {batch}}}, {}, {query_sequence}, {key_sequence}]",
-                    attention.query_heads
-                ),
-                format!("{:?}", bias.dims()),
-            ));
-        }
     }
 
     let dtype = projection.query.dtype();
@@ -1155,6 +1077,97 @@ fn validate_projection<B: Backend>(
         )?;
     }
     Ok(())
+}
+
+/// Describes one projection shape fault with the expected and actual extents.
+fn projection_shape_error<B: Backend>(
+    attention: &GroupedQueryAttention<B>,
+    projection: &AttentionProjection<B>,
+    mask: Option<&Tensor<B, 4, Bool>>,
+    bias: Option<&Tensor<B, 4>>,
+    fault: ProjectionFault,
+) -> Error {
+    let [batch, _, query_sequence, _] = projection.query.dims();
+    let key_sequence = projection.key.dims()[2];
+    let expected_query = [
+        batch,
+        attention.query_heads,
+        query_sequence,
+        attention.head_dim,
+    ];
+    let expected_key_value = [
+        batch,
+        attention.key_value_heads,
+        key_sequence,
+        attention.head_dim,
+    ];
+    let expected_gate = [
+        batch,
+        query_sequence,
+        attention.query_heads * attention.head_dim,
+    ];
+    let expected_additive = [batch, attention.query_heads, query_sequence, key_sequence];
+    match fault {
+        ProjectionFault::EmptyAxis => Error::shape(
+            "attention.projection",
+            "non-empty batch, query sequence, and key sequence",
+            format!(
+                "query={:?}, key={:?}",
+                projection.query.dims(),
+                projection.key.dims()
+            ),
+        ),
+        ProjectionFault::QueryShape => Error::shape(
+            "attention.query",
+            format!("{:?}", expected_query),
+            format!("{:?}", projection.query.dims()),
+        ),
+        ProjectionFault::KeyShape => Error::shape(
+            "attention.key",
+            format!("{:?}", expected_key_value),
+            format!("{:?}", projection.key.dims()),
+        ),
+        ProjectionFault::ValueShape => Error::shape(
+            "attention.value",
+            format!("{:?}", expected_key_value),
+            format!("{:?}", projection.value.dims()),
+        ),
+        ProjectionFault::UnexpectedGate => Error::shape(
+            "attention.gate",
+            "no gate for ungated attention",
+            "a gate tensor",
+        ),
+        ProjectionFault::GateShape => Error::shape(
+            "attention.gate",
+            format!("{:?}", expected_gate),
+            format!(
+                "{:?}",
+                projection
+                    .gate
+                    .as_ref()
+                    .map(Tensor::dims)
+                    .unwrap_or_default()
+            ),
+        ),
+        ProjectionFault::MissingGate => Error::shape(
+            "attention.gate",
+            format!("{:?}", expected_gate),
+            "no gate tensor",
+        ),
+        ProjectionFault::MaskShape => Error::shape(
+            "attention.mask",
+            format!("{:?}", expected_additive),
+            format!("{:?}", mask.map(Tensor::dims).unwrap_or_default()),
+        ),
+        ProjectionFault::BiasShape => Error::shape(
+            "attention.bias",
+            format!(
+                "[batch in {{1, {batch}}}, {}, {query_sequence}, {key_sequence}]",
+                attention.query_heads
+            ),
+            format!("{:?}", bias.map(Tensor::dims).unwrap_or_default()),
+        ),
+    }
 }
 
 /// Converts semantic valid-token masks into Burn's `true == excluded` mask.

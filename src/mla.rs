@@ -42,6 +42,8 @@
 //! key prefix (an exact storage bound, not an approximation), and keys past the
 //! chunk's last visible position are never scored.
 
+mod geometry;
+
 use core::ops::Range;
 
 use burn::{
@@ -53,8 +55,8 @@ use burn::{
 use crate::{
     Error, Result,
     attention::{
-        AttentionExecutionPolicy, bottom_right_causal_mask, eager_probabilities, union_exclusions,
-        zero_excluded,
+        AttentionExecutionPolicy, bottom_right_causal_mask, causal_mask_needed,
+        eager_probabilities, union_exclusions, zero_excluded,
     },
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
@@ -63,6 +65,11 @@ use crate::{
         RopeConfig, RotaryAngles, apply_rotary, apply_rotary_to, interleaved_to_split_half,
         rotary_angles,
     },
+};
+use geometry::{
+    MlaAxis, MlaAxisFault, MlaHeads, MlaMatrix, MlaWidthFault, MlaWidths, VisibilityFault,
+    broadcasts_over, chunk_key_end, compressed_width, expanded_width, mla_axis_fault, mla_widths,
+    projection_matches, qk_head_width, saturating_window, suffix_key_limits, visibility_fault,
 };
 
 /// Shape-bearing configuration for one multi-head latent-attention layer.
@@ -119,76 +126,72 @@ impl MultiLatentAttentionConfig {
     }
 
     /// Returns the full per-head query/key width.
+    ///
+    /// Computed by the Verus-verified `qk_head_width`, shared with validation.
     pub fn qk_head_dim(&self) -> Result<usize> {
-        self.qk_nope_head_dim
-            .checked_add(self.qk_rope_head_dim)
-            .ok_or_else(|| Error::configuration("mla.qk_head_dim", "dimension sum overflows usize"))
-    }
-
-    /// Checks the flattened query-head width before constructing a projection shape.
-    fn query_projection_width(&self) -> Result<usize> {
-        self.num_heads
-            .checked_mul(self.qk_head_dim()?)
-            .ok_or_else(|| Error::configuration("mla.query_width", "head product overflows usize"))
+        qk_head_width(self.qk_nope_head_dim, self.qk_rope_head_dim).map_err(mla_width_error)
     }
 
     /// Returns the width emitted by the joint KV-A projection.
+    ///
+    /// Computed by the Verus-verified `compressed_width`, shared with validation.
     pub fn compressed_projection_width(&self) -> Result<usize> {
-        self.kv_lora_rank
-            .checked_add(self.qk_rope_head_dim)
-            .ok_or_else(|| {
-                Error::configuration(
-                    "mla.compressed_projection_width",
-                    "dimension sum overflows usize",
-                )
-            })
+        compressed_width(self.kv_lora_rank, self.qk_rope_head_dim).map_err(mla_width_error)
     }
 
     /// Returns the width emitted by the KV-B expansion projection.
+    ///
+    /// Computed by the Verus-verified `expanded_width`, shared with validation.
     pub fn expanded_kv_width(&self) -> Result<usize> {
-        let per_head = self
-            .qk_nope_head_dim
-            .checked_add(self.value_head_dim)
-            .ok_or_else(|| {
-                Error::configuration("mla.expanded_kv_width", "per-head sum overflows usize")
-            })?;
-        self.num_heads.checked_mul(per_head).ok_or_else(|| {
-            Error::configuration("mla.expanded_kv_width", "head product overflows usize")
-        })
+        expanded_width(self.num_heads, self.qk_nope_head_dim, self.value_head_dim)
+            .map_err(mla_width_error)
     }
 
     /// Validates projection extents, matrix element counts, and numerical invariants.
     ///
     /// Checks matrix products before Burn's lazy parameters can defer an overflow
     /// to their first materialization. Valid geometry does not guarantee sufficient
-    /// backend memory for the requested tensors.
+    /// backend memory for the requested tensors. The integer checks are the
+    /// Verus-verified `mla_axis_fault` and `mla_widths` (`verus/mla.rs`): success
+    /// implies exact widths and representable element counts for every projection.
     pub fn validate(&self) -> Result<()> {
-        for (field, value) in [
-            ("hidden_size", self.hidden_size),
-            ("num_heads", self.num_heads),
-            ("qk_nope_head_dim", self.qk_nope_head_dim),
-            ("qk_rope_head_dim", self.qk_rope_head_dim),
-            ("value_head_dim", self.value_head_dim),
-            ("kv_lora_rank", self.kv_lora_rank),
-        ] {
-            if value == 0 {
-                return Err(Error::configuration(
-                    format!("mla.{field}"),
-                    "must be non-zero",
-                ));
-            }
-        }
-        if !self.qk_rope_head_dim.is_multiple_of(2) {
-            return Err(Error::configuration(
-                "mla.qk_rope_head_dim",
-                "must be even because RoPE rotates channel pairs",
-            ));
-        }
-        if self.q_lora_rank == Some(0) {
-            return Err(Error::configuration(
-                "mla.q_lora_rank",
-                "must be non-zero when present",
-            ));
+        self.validated_widths().map(|_| ())
+    }
+
+    /// Validates the configuration and returns the verified projection widths.
+    ///
+    /// The checks and their order are those documented on [`Self::validate`];
+    /// [`Self::init`] allocates every projection from the returned widths.
+    fn validated_widths(&self) -> Result<MlaWidths> {
+        if let Some(fault) = mla_axis_fault(
+            self.hidden_size,
+            self.num_heads,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.value_head_dim,
+            self.kv_lora_rank,
+            self.q_lora_rank,
+        ) {
+            return Err(match fault {
+                MlaAxisFault::Zero(axis) => {
+                    let field = match axis {
+                        MlaAxis::HiddenSize => "hidden_size",
+                        MlaAxis::NumHeads => "num_heads",
+                        MlaAxis::QkNopeHeadDim => "qk_nope_head_dim",
+                        MlaAxis::QkRopeHeadDim => "qk_rope_head_dim",
+                        MlaAxis::ValueHeadDim => "value_head_dim",
+                        MlaAxis::KvLoraRank => "kv_lora_rank",
+                    };
+                    Error::configuration(format!("mla.{field}"), "must be non-zero")
+                }
+                MlaAxisFault::OddRotary => Error::configuration(
+                    "mla.qk_rope_head_dim",
+                    "must be even because RoPE rotates channel pairs",
+                ),
+                MlaAxisFault::ZeroQueryRank => {
+                    Error::configuration("mla.q_lora_rank", "must be non-zero when present")
+                }
+            });
         }
         if !self.rms_norm_epsilon.is_finite() || self.rms_norm_epsilon <= 0.0 {
             return Err(Error::configuration(
@@ -202,47 +205,26 @@ impl MultiLatentAttentionConfig {
                 "must be finite and positive",
             ));
         }
-        self.qk_head_dim()?;
-        let compressed_width = self.compressed_projection_width()?;
-        let expanded_width = self.expanded_kv_width()?;
-        let query_width = self.query_projection_width()?;
-        // Burn parameters initialize lazily. Reject impossible matrix element
-        // counts here, rather than overflowing when their tensors are first read.
-        // The checked expanded width also bounds num_heads * value_head_dim.
-        for (projection, input, output) in [
-            self.q_lora_rank
-                .is_none()
-                .then_some(("q_proj", self.hidden_size, query_width)),
-            self.q_lora_rank
-                .map(|rank| ("q_a_proj", self.hidden_size, rank)),
-            self.q_lora_rank.map(|rank| ("q_b_proj", rank, query_width)),
-            Some(("kv_a_proj_with_mqa", self.hidden_size, compressed_width)),
-            Some(("kv_b_proj", self.kv_lora_rank, expanded_width)),
-            Some((
-                "o_proj",
-                self.num_heads * self.value_head_dim,
-                self.hidden_size,
-            )),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if input.checked_mul(output).is_none() {
-                return Err(Error::configuration(
-                    "mla.projection_shape",
-                    format!(
-                        "{projection} matrix element count overflows usize: {input} * {output}"
-                    ),
-                ));
-            }
-        }
-        Ok(())
+        // Burn parameters initialize lazily. Reject impossible widths and matrix
+        // element counts here, rather than overflowing when tensors are first read.
+        mla_widths(
+            self.hidden_size,
+            self.num_heads,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.value_head_dim,
+            self.kv_lora_rank,
+            self.q_lora_rank,
+        )
+        .map_err(mla_width_error)
     }
 
     /// Allocates all MLA projections in checkpoint-native column layout.
+    ///
+    /// Every projection width comes from the verified widths of validation.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<MultiLatentAttention<B>> {
-        self.validate()?;
-        let query_width = self.query_projection_width()?;
+        let widths = self.validated_widths()?;
+        let query_width = widths.query_width;
         let projection = |input, output, bias| {
             operations::init_linear(
                 &LinearConfig::new(input, output)
@@ -275,21 +257,13 @@ impl MultiLatentAttentionConfig {
             q_a_proj,
             q_a_layernorm,
             q_b_proj,
-            kv_a_proj_with_mqa: projection(
-                self.hidden_size,
-                self.compressed_projection_width()?,
-                self.bias,
-            ),
+            kv_a_proj_with_mqa: projection(self.hidden_size, widths.compressed_width, self.bias),
             kv_a_layernorm: RmsNormConfig::new(self.kv_lora_rank)
                 .with_epsilon(self.rms_norm_epsilon)
                 .with_round_before_scale(true)
                 .init(device)?,
-            kv_b_proj: projection(self.kv_lora_rank, self.expanded_kv_width()?, false),
-            o_proj: projection(
-                self.num_heads * self.value_head_dim,
-                self.hidden_size,
-                self.bias,
-            ),
+            kv_b_proj: projection(self.kv_lora_rank, widths.expanded_width, false),
+            o_proj: projection(widths.value_width, self.hidden_size, self.bias),
             config: self.clone(),
         })
     }
@@ -579,7 +553,8 @@ impl<B: Backend> MultiLatentAttention<B> {
         let scores = hooks.apply(points.scores(), scores)?;
         // One query row aligned with the final key sees every key, so causality
         // is a no-op there and needs no mask.
-        let causal_mask = if causal && query_sequence > 1 {
+        // Verified (`causal_mask_needed`): `query_sequence >= 1` here, so this is `Q > 1`.
+        let causal_mask = if causal_mask_needed(causal, query_sequence) {
             Some(bottom_right_causal_mask(
                 batch,
                 heads,
@@ -615,19 +590,22 @@ impl<B: Backend> MultiLatentAttention<B> {
         mask: Option<&Tensor<B, 4, Bool>>,
         bias: Option<&Tensor<B, 4>>,
     ) -> Result<()> {
-        let [batch, heads, queries, content] = projection.query_content.dims();
-        let [key_batch, keys, rank] = projection.normalized_latent.dims();
-        if batch == 0
-            || queries == 0
-            || keys == 0
-            || heads != self.config.num_heads
-            || content != self.config.qk_nope_head_dim
-            || key_batch != batch
-            || rank != self.config.kv_lora_rank
-            || projection.query_rotary.dims()
-                != [batch, heads, queries, self.config.qk_rope_head_dim]
-            || projection.rotated_key.dims() != [batch, 1, keys, self.config.qk_rope_head_dim]
-        {
+        let [batch, heads, queries, _] = projection.query_content.dims();
+        let keys = projection.normalized_latent.dims()[1];
+        let layout = MlaHeads {
+            heads: self.config.num_heads,
+            content: self.config.qk_nope_head_dim,
+            rotary: self.config.qk_rope_head_dim,
+            rank: self.config.kv_lora_rank,
+        };
+        // Verified: exactly the configured, non-empty component extents.
+        if !projection_matches(
+            layout,
+            projection.query_content.dims(),
+            projection.query_rotary.dims(),
+            projection.normalized_latent.dims(),
+            projection.rotated_key.dims(),
+        ) {
             return Err(Error::shape(
                 "mla.projection",
                 "non-empty projections matching the configured head and latent geometry",
@@ -671,12 +649,7 @@ impl<B: Backend> MultiLatentAttention<B> {
             }
         }
         if let Some(bias) = bias {
-            if bias
-                .dims()
-                .iter()
-                .zip(shape)
-                .any(|(&actual, expected)| actual != 1 && actual != expected)
-            {
+            if !broadcasts_over(bias.dims(), shape) {
                 return Err(Error::shape(
                     "mla.attention_bias",
                     format!("broadcast-compatible with {shape:?}"),
@@ -1113,7 +1086,7 @@ impl<B: Backend> PositionalVisibility<B> {
             key_positions: positions,
             query_valid: mask.clone(),
             key_valid: mask,
-            key_limits: (1..=sequence).collect(),
+            key_limits: suffix_key_limits(sequence, sequence),
             window: None,
         })
     }
@@ -1171,7 +1144,7 @@ impl<B: Backend> PositionalVisibility<B> {
             key_positions: Tensor::<B, 1, Int>::arange(0..end, device).reshape([1, keys]),
             query_valid: None,
             key_valid: None,
-            key_limits: (offset + 1..=keys).collect(),
+            key_limits: suffix_key_limits(queries, keys),
             window: None,
         })
     }
@@ -1215,34 +1188,26 @@ impl<B: Backend> PositionalVisibility<B> {
     ///
     /// Returns [`Error::Shape`] naming `mla.visibility` on any mismatch.
     pub(crate) fn validate(&self, batch: usize, queries: usize, keys: usize) -> Result<()> {
-        let rows_match = |rows: usize| rows == batch || rows == 1;
-        let [query_rows, query_columns] = self.query_positions.dims();
-        let [key_rows, key_columns] = self.key_positions.dims();
-        let valid_ok = |valid: &Option<Tensor<B, 2, Bool>>, columns: usize| {
-            valid
-                .as_ref()
-                .is_none_or(|valid| valid.dims() == [batch, columns])
-        };
-        let limits_ok = self.key_limits.len() == queries
-            && self.key_limits.windows(2).all(|pair| pair[0] <= pair[1])
-            && self
-                .key_limits
-                .iter()
-                .all(|&limit| limit > 0 && limit <= keys);
-        if self.window == Some(0) {
+        // Verified: accepts exactly a non-zero window, matching extents, and
+        // one nondecreasing bound in `1..=keys` per query.
+        let fault = visibility_fault(
+            self.window,
+            self.query_positions.dims(),
+            self.key_positions.dims(),
+            self.query_valid.as_ref().map(Tensor::dims),
+            self.key_valid.as_ref().map(Tensor::dims),
+            &self.key_limits,
+            batch,
+            queries,
+            keys,
+        );
+        if fault == Some(VisibilityFault::ZeroWindow) {
             return Err(Error::configuration(
                 "attention.visibility.window",
                 "must be greater than zero",
             ));
         }
-        if !rows_match(query_rows)
-            || !rows_match(key_rows)
-            || query_columns != queries
-            || key_columns != keys
-            || !valid_ok(&self.query_valid, queries)
-            || !valid_ok(&self.key_valid, keys)
-            || !limits_ok
-        {
+        if fault == Some(VisibilityFault::Shape) {
             return Err(Error::shape(
                 "mla.visibility",
                 format!(
@@ -1261,8 +1226,10 @@ impl<B: Backend> PositionalVisibility<B> {
     }
 
     /// Returns the key prefix length that query rows `rows` (non-empty) may need.
+    ///
+    /// For validated bounds this covers every row of the chunk (verified).
     pub(crate) fn key_end(&self, rows: &Range<usize>) -> usize {
-        self.key_limits[rows.end - 1]
+        chunk_key_end(&self.key_limits, rows.end)
     }
 
     /// Returns the host prefix bounds: query rows `0..=i` see only keys `0..limits[i]`.
@@ -1294,7 +1261,7 @@ impl<B: Backend> PositionalVisibility<B> {
         let mut excluded = key.clone().greater(query.clone());
         if let Some(window) = self.window {
             // `key + W <= query`: only the `W` newest positions remain visible.
-            let width = i64::try_from(window).unwrap_or(i64::MAX);
+            let width = saturating_window(window);
             excluded = excluded.bool_or(key.add_scalar(width).lower_equal(query));
         }
         if let Some(valid) = &self.key_valid {
@@ -1318,6 +1285,46 @@ impl<B: Backend> PositionalVisibility<B> {
             );
         }
         excluded.expand([batch, heads, rows.len(), keys.len()])
+    }
+}
+
+/// Maps a verified width fault to the configuration error naming the failed width.
+fn mla_width_error(fault: MlaWidthFault) -> Error {
+    match fault {
+        MlaWidthFault::QkHeadDim => {
+            Error::configuration("mla.qk_head_dim", "dimension sum overflows usize")
+        }
+        MlaWidthFault::CompressedWidth => Error::configuration(
+            "mla.compressed_projection_width",
+            "dimension sum overflows usize",
+        ),
+        MlaWidthFault::ExpandedPerHead => {
+            Error::configuration("mla.expanded_kv_width", "per-head sum overflows usize")
+        }
+        MlaWidthFault::ExpandedHeads => {
+            Error::configuration("mla.expanded_kv_width", "head product overflows usize")
+        }
+        MlaWidthFault::QueryWidth => {
+            Error::configuration("mla.query_width", "head product overflows usize")
+        }
+        MlaWidthFault::Matrix {
+            matrix,
+            input,
+            output,
+        } => {
+            let projection = match matrix {
+                MlaMatrix::Query => "q_proj",
+                MlaMatrix::QueryDown => "q_a_proj",
+                MlaMatrix::QueryUp => "q_b_proj",
+                MlaMatrix::JointKeyValue => "kv_a_proj_with_mqa",
+                MlaMatrix::KeyValueExpansion => "kv_b_proj",
+                MlaMatrix::Output => "o_proj",
+            };
+            Error::configuration(
+                "mla.projection_shape",
+                format!("{projection} matrix element count overflows usize: {input} * {output}"),
+            )
+        }
     }
 }
 

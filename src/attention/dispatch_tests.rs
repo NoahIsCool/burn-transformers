@@ -824,7 +824,7 @@ fn fp32_softmax_zeroes_unsupported_rows_and_preserves_dtype() {
 /// The group selector marks folded row `j * q + t` with channel `j`.
 #[test]
 fn group_selector_is_one_hot_by_group_member() {
-    let selector = group_selector::<TestBackend>(3, 2, DType::F32, &Default::default())
+    let selector = group_selector::<TestBackend>(3, 2, 6, DType::F32, &Default::default())
         .into_data()
         .to_vec::<f32>()
         .unwrap();

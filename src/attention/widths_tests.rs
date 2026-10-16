@@ -46,6 +46,32 @@ fn width_errors_are_precise() {
     }
 }
 
+/// Paired widths add the even query-head check after every grouped-query check.
+#[test]
+fn paired_widths_require_even_query_heads_last() {
+    assert_eq!(
+        paired_projection_widths(16, 8, 2, 4),
+        projection_widths(16, 8, 2, 4, false).map_err(PairedWidthError::Widths)
+    );
+    assert_eq!(
+        paired_projection_widths(16, 3, 1, 4),
+        Err(PairedWidthError::OddQueryHeads)
+    );
+    // Earlier failures win over an odd head count.
+    assert_eq!(
+        paired_projection_widths(0, 3, 1, 4),
+        Err(PairedWidthError::Widths(WidthError::EmptyAxis))
+    );
+    assert_eq!(
+        paired_projection_widths(4, 3, 2, 2),
+        Err(PairedWidthError::Widths(WidthError::UngroupedHeads))
+    );
+    assert_eq!(
+        paired_projection_widths(usize::MAX, 3, 1, 1),
+        Err(PairedWidthError::Widths(WidthError::Overflow))
+    );
+}
+
 proptest::proptest! {
     /// Success implies grouping and representable matrices; failure implies the stated cause.
     #[test]
