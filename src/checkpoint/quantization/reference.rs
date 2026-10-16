@@ -25,7 +25,7 @@ use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizationGroupSize,
     QuantizedTensorMetadata, Result, SourceFloatDType, SymmetricQuantization,
     WeightQuantizationConfig, classify_weight_for_quantization,
-    counts::{block_scale_count, ceil_div_usize},
+    counts::{block_scale_count, ceil_div_usize, group_index},
     packing::{CodeViolation, CodeWidth, first_code_violation, push_code, read_code},
     provenance::quantized_payload_sha256,
 };
@@ -193,7 +193,8 @@ impl QuantizedWeight {
                     actual: self.packed_values.len(),
                 },
             )?;
-            let scale = self.scales[index / self.metadata.group_size.get()];
+            // Verified: the group index is below the validated scale count.
+            let scale = self.scales[group_index(index, elements, self.metadata.group_size.get())];
             values.push(f32::from(code) * scale);
         }
         let shape = self.metadata.host_shape()?;

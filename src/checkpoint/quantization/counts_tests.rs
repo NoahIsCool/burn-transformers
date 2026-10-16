@@ -64,6 +64,20 @@ fn block_counts_match_flat_groups_for_aligned_matrices() {
     assert_eq!(block_scale_count(usize::MAX, 31, 32), Some(0));
 }
 
+/// Group indices stay below the group count and contain their element.
+#[test]
+fn group_indices_stay_below_the_group_count() {
+    for elements in 1..200_usize {
+        for group_size in [1_usize, 32, 64, 128] {
+            for element in 0..elements {
+                let group = group_index(element, elements, group_size);
+                assert_eq!(group, element / group_size);
+                assert!(group < elements.div_ceil(group_size));
+            }
+        }
+    }
+}
+
 proptest! {
     /// Wire counts agree with `div_ceil` for arbitrary element counts.
     #[test]

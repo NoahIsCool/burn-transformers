@@ -97,7 +97,9 @@
 //!   `usize`; persisted group (`⌈n / G⌉`), packed-byte, and scale-byte counts,
 //!   with the scale length proved never to overflow for `G >= 32`; and the Burn
 //!   block count `rows · (columns / G)`, proved equal to the flat group count
-//!   `⌈rows · columns / G⌉` whenever `G` divides the width;
+//!   `⌈rows · columns / G⌉` whenever `G` divides the width; `group_index` places
+//!   each element in its group and below the group count, so dequantization
+//!   never indexes past a validated scale vector;
 //! - `src/checkpoint/quantization/staging.rs`: `bounded_add` admits exactly the
 //!   sums within a limit (so a running total kept below its limit stays below
 //!   it, with no wraparound), and `admit_tensor` admits a tensor exactly when

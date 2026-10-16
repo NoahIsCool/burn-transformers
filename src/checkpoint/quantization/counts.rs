@@ -235,6 +235,53 @@ pub(crate) fn block_scale_count(rows: usize, columns: usize, group_size: usize) 
     count
 }
 
+/// Returns the group, and so the scale index, of flattened element `element`: `element / G`.
+///
+/// Verified: the group's values `[g · G, (g + 1) · G)` contain the element,
+/// and for an element of an `elements`-value tensor the index is below the
+/// group count `⌈elements / G⌉`, so a validated scale vector is never indexed
+/// out of bounds.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(group =>
+    requires
+        group_size > 0,
+        element < elements,
+    ensures
+        group == element / group_size,
+        group * group_size <= element < (group + 1) * group_size,
+        group < ceiling(elements as int, group_size as int),
+))]
+// `elements` appears only in the verified specification.
+#[cfg_attr(not(verus_keep_ghost), allow(unused_variables))]
+pub(crate) fn group_index(element: usize, elements: usize, group_size: usize) -> usize {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let group = element / group_size;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(element as int, group_size as int);
+        assert(element == group_size * group + element % group_size);
+        assert(group * group_size <= element) by (nonlinear_arith)
+            requires
+                element == group_size * group + element % group_size,
+                element % group_size >= 0,
+        ;
+        assert(element < (group + 1) * group_size) by (nonlinear_arith)
+            requires
+                element == group_size * group + element % group_size,
+                element % group_size < group_size,
+        ;
+        lemma_ceiling_bounds(elements as int, group_size as int);
+        // `element < elements <= ceiling · G`, so `group · G <= element` forces `group < ceiling`.
+        assert(group < ceiling(elements as int, group_size as int)) by (nonlinear_arith)
+            requires
+                group * group_size <= element,
+                element < elements,
+                elements <= ceiling(elements as int, group_size as int) * group_size,
+                group_size >= 1,
+        ;
+    }
+    element / group_size
+}
+
 #[cfg(test)]
 #[path = "counts_tests.rs"]
 mod tests;
