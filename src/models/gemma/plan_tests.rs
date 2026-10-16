@@ -126,3 +126,16 @@ proptest! {
         prop_assert_eq!(unique_flag(&found), expected);
     }
 }
+
+/// Projection widths are exact checkpoint extents, or report usize overflow.
+#[test]
+fn projection_extents_are_exact_or_report_overflow() {
+    assert_eq!(projection_extent(8, 128), Ok(1024));
+    assert_eq!(projection_extent(0, usize::MAX), Ok(0));
+    assert_eq!(projection_extent(usize::MAX, 2), Err(ExtentError::Overflow));
+    assert_eq!(
+        checkpoint_extent(usize::MAX),
+        u64::try_from(usize::MAX).ok()
+    );
+    assert_eq!(checkpoint_extent(7), Some(7));
+}

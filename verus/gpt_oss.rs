@@ -34,6 +34,9 @@
 //!   nonzero length", the condition that clears clean tails;
 //! - `fused_expert_elements` returns `2f · d · E` exactly when every partial
 //!   product fits `usize` (the configuration's overflow check);
+//!   `checkpoint_extent` and `projection_extent` form the contract's `u64`
+//!   extents exactly or name the `usize` or `u64` overflow; and
+//!   `derived_head_dim` is `hidden / heads`, or zero without heads;
 //! - `interleaved_offset` locates gate output `j` at column `2j` and up output
 //!   `j` at column `2j + 1` of a row of the stacked `gate_up_proj`, provably
 //!   inside the `[experts, rows, 2 · width]` tensor;

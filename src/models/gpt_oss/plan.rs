@@ -11,7 +11,9 @@
 //!   of each allocated group), and `truncation_leaves_bytes` (whether a
 //!   truncation keeps the state's clean tails);
 //! * `fused_expert_elements`: the overflow check of the stacked expert
-//!   projections;
+//!   projections; `checkpoint_extent`/`projection_extent`: the checked
+//!   `u64` extents of the checkpoint contract; `derived_head_dim`: the head
+//!   width of a config that omits it;
 //! * `interleaved_offset`: where the loader finds expert `e`'s gate and up
 //!   weights inside the stacked, column-interleaved `gate_up_proj`, and the
 //!   byte-level splitters built on it: `stacked_layout` (one expert's and
@@ -883,6 +885,72 @@ pub proof fn lemma_pair_in_bounds(
 }
 
 } // verus!
+
+// Checkpoint extents.
+
+/// Why a projection width cannot be a checkpoint extent.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtentError {
+    /// `heads · head_dim` overflows `usize`.
+    Overflow,
+    /// The width exceeds the checkpoint format's `u64` extents.
+    Format,
+}
+
+/// Returns `value` as a checkpoint-format `u64` extent, or `None` beyond `u64`.
+///
+/// Proved: `Some(value)` exactly when `value <= u64::MAX`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(extent =>
+    ensures
+        match extent {
+            Some(extent) => extent == value,
+            None => value > u64::MAX,
+        },
+))]
+pub(crate) fn checkpoint_extent(value: usize) -> Option<u64> {
+    match u64::try_from(value) {
+        Ok(extent) => Some(extent),
+        Err(_) => None,
+    }
+}
+
+/// Returns the projection width `heads · head_dim` as a checkpoint-format extent.
+///
+/// Proved: exactly `heads · head_dim`, or `Overflow` when the product
+/// exceeds `usize` and `Format` when it fits `usize` but not `u64`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        match width {
+            Ok(width) => width == heads * head_dim,
+            Err(ExtentError::Overflow) => heads * head_dim > usize::MAX,
+            Err(ExtentError::Format) => heads * head_dim <= usize::MAX && heads * head_dim > u64::MAX,
+        },
+))]
+pub(crate) fn projection_extent(heads: usize, head_dim: usize) -> Result<u64, ExtentError> {
+    let Some(width) = heads.checked_mul(head_dim) else {
+        return Err(ExtentError::Overflow);
+    };
+    match checkpoint_extent(width) {
+        Some(extent) => Ok(extent),
+        None => Err(ExtentError::Format),
+    }
+}
+
+/// Returns the head width derived when `head_dim` is absent or `null`.
+///
+/// Proved: `hidden / heads`, rounded down, or zero when there are no heads
+/// (validation then rejects the configuration with a field error).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        width == if heads == 0 { 0 } else { hidden / heads },
+))]
+pub(crate) fn derived_head_dim(hidden: usize, heads: usize) -> usize {
+    hidden.checked_div(heads).unwrap_or(0)
+}
 
 #[cfg(test)]
 #[path = "plan_tests.rs"]

@@ -7,8 +7,10 @@
 //!   whole-model schedules built from them (`interval_rotary_flags`,
 //!   `listed_rotary_flags`, `suffix_sliding_flags`, `nope_sliding_flags`,
 //!   and `first_set` for the first sliding layer without a window);
-//! * `derived_head_dim`, the head width of a config that omits it, and
-//!   `used_rotary_sets`, the rotary parameter sets some layer rotates with;
+//! * `derived_head_dim`, the head width of a config that omits it,
+//!   `used_rotary_sets`, the rotary parameter sets some layer rotates with,
+//!   and `checkpoint_extent`/`projection_extent`, the checked `u64` extents
+//!   of the checkpoint contract;
 //! * the cache layout: `plan_ring`, which assigns sliding layers below the
 //!   capacity to one ring group of one window, `cache_slots`, which numbers
 //!   layers inside their KV cache group (full storage or sliding ring),
@@ -1625,6 +1627,59 @@ pub(crate) fn plan_step(
             columns: columns_out,
             rows: rows_out,
         })
+    }
+}
+
+// Checkpoint extents.
+
+/// Why a projection width cannot be a checkpoint extent.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtentError {
+    /// `heads · head_dim` overflows `usize`.
+    Overflow,
+    /// The width exceeds the checkpoint format's `u64` extents.
+    Format,
+}
+
+/// Returns `value` as a checkpoint-format `u64` extent, or `None` beyond `u64`.
+///
+/// Proved: `Some(value)` exactly when `value <= u64::MAX`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(extent =>
+    ensures
+        match extent {
+            Some(extent) => extent == value,
+            None => value > u64::MAX,
+        },
+))]
+pub(crate) fn checkpoint_extent(value: usize) -> Option<u64> {
+    match u64::try_from(value) {
+        Ok(extent) => Some(extent),
+        Err(_) => None,
+    }
+}
+
+/// Returns the projection width `heads · head_dim` as a checkpoint-format extent.
+///
+/// Proved: exactly `heads · head_dim`, or `Overflow` when the product
+/// exceeds `usize` and `Format` when it fits `usize` but not `u64`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        match width {
+            Ok(width) => width == heads * head_dim,
+            Err(ExtentError::Overflow) => heads * head_dim > usize::MAX,
+            Err(ExtentError::Format) => heads * head_dim <= usize::MAX && heads * head_dim > u64::MAX,
+        },
+))]
+pub(crate) fn projection_extent(heads: usize, head_dim: usize) -> Result<u64, ExtentError> {
+    let Some(width) = heads.checked_mul(head_dim) else {
+        return Err(ExtentError::Overflow);
+    };
+    match checkpoint_extent(width) {
+        Some(extent) => Ok(extent),
+        None => Err(ExtentError::Format),
     }
 }
 

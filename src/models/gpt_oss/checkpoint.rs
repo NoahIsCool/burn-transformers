@@ -42,6 +42,7 @@ use crate::models::config::ConfigError;
 
 use super::architecture::{GptOssArchitecture, GptOssWeightFormat};
 use super::config::{FAMILY, GptOssConfig};
+use super::plan::{ExtentError, checkpoint_extent, projection_extent};
 
 /// Reserved family-specific checkpoint policy.
 ///
@@ -134,16 +135,19 @@ struct Dimensions {
 impl Dimensions {
     /// Converts and multiplies the architecture's extents without overflow.
     fn of(architecture: &GptOssArchitecture) -> Result<Self, ConfigError> {
+        let format = |field: &'static str| {
+            ConfigError::new(FAMILY, field, "dimension exceeds the checkpoint format")
+        };
         let extent = |field: &'static str, value: usize| {
-            u64::try_from(value).map_err(|_| {
-                ConfigError::new(FAMILY, field, "dimension exceeds the checkpoint format")
-            })
+            checkpoint_extent(value).ok_or_else(|| format(field))
         };
         let product = |field: &'static str, heads: usize| {
-            heads
-                .checked_mul(architecture.head_dim)
-                .ok_or_else(|| ConfigError::new(FAMILY, field, "projection width overflows usize"))
-                .and_then(|width| extent(field, width))
+            projection_extent(heads, architecture.head_dim).map_err(|error| match error {
+                ExtentError::Overflow => {
+                    ConfigError::new(FAMILY, field, "projection width overflows usize")
+                }
+                ExtentError::Format => format(field),
+            })
         };
         Ok(Self {
             vocab: extent("vocab_size", architecture.vocab_size)?,

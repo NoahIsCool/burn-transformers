@@ -18,7 +18,9 @@
 //!   two layers read the same set exactly when they have the same type, so
 //!   no layer rotates with the other type's parameters;
 //! - `unique_flag`: a checkpoint's namespace is selected exactly when one
-//!   namespace's embedding is present, `Absent` and `Ambiguous` otherwise.
+//!   namespace's embedding is present, `Absent` and `Ambiguous` otherwise;
+//! - `checkpoint_extent` and `projection_extent`: the contract's `u64`
+//!   extents are exact, or name the `usize` or `u64` overflow.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!

@@ -191,3 +191,23 @@ proptest! {
         }
     }
 }
+
+/// Projection widths are exact checkpoint extents, or report usize overflow.
+#[test]
+fn projection_extents_are_exact_or_report_overflow() {
+    assert_eq!(projection_extent(8, 128), Ok(1024));
+    assert_eq!(projection_extent(0, usize::MAX), Ok(0));
+    assert_eq!(projection_extent(usize::MAX, 2), Err(ExtentError::Overflow));
+    assert_eq!(
+        checkpoint_extent(usize::MAX),
+        u64::try_from(usize::MAX).ok()
+    );
+    assert_eq!(checkpoint_extent(7), Some(7));
+}
+
+/// The derived head width divides, and is zero without heads.
+#[test]
+fn derived_head_dim_divides_or_is_zero() {
+    assert_eq!(derived_head_dim(2880, 64), 45);
+    assert_eq!(derived_head_dim(64, 0), 0);
+}

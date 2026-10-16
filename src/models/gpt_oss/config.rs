@@ -306,7 +306,7 @@ impl SerializedGptOssConfig {
             head_dim: self
                 .head_dim
                 .unwrap_or(Some(64))
-                .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0)),
+                .unwrap_or_else(|| super::plan::derived_head_dim(hidden_size, num_attention_heads)),
             num_local_experts: self.num_local_experts.unwrap_or(128),
             num_experts_per_tok: self.num_experts_per_tok.unwrap_or(4),
             sliding_window: self.sliding_window.unwrap_or(Some(128)),

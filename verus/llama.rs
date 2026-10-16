@@ -10,7 +10,10 @@
 //!   0 or 1; Qwen's default sliding layers are the suffix
 //!   `l >= max_window_layers`; SmolLM3's are its NoPE layers when enabled;
 //!   the reported sliding layer without a window is the first one), and the
-//!   derived `head_dim = hidden / heads`;
+//!   derived `head_dim = hidden / heads`; the checkpoint contract's
+//!   extents (`checkpoint_extent` is `Some(v)` exactly when `v` fits `u64`,
+//!   and `projection_extent` is exactly `heads · head_dim` or names the
+//!   `usize` or `u64` overflow);
 //! - cache layout: `plan_ring` puts exactly the layers sliding over
 //!   `0 < W < capacity` keys in the ring, succeeds exactly when no layer is
 //!   chunked and all ring windows agree (reporting the first offending
