@@ -40,6 +40,7 @@ use crate::{Error, Result, TokenMask};
 
 use super::bookkeeping::row_span;
 use super::layout::{count_valid, history_token_id, push_history_row, record_scatter};
+use super::ngram::{completed_ngram_prefix, insert_follower, ngram_lookup_start};
 use super::{GenerationConfig, metadata};
 
 /// Which occurrence counts a penalty reads.
@@ -122,15 +123,15 @@ struct NgramIndex {
 
 impl NgramIndex {
     /// Appends `token` and records the n-gram of size `size` it completes.
+    ///
+    /// `size` is positive. The prefix range and the sorted, deduplicated
+    /// follower insertion are the Verus-verified [`completed_ngram_prefix`]
+    /// and [`insert_follower`].
     fn push(&mut self, token: u32, size: usize) {
         self.tokens.push(token);
-        let length = self.tokens.len();
-        if length >= size {
-            let prefix = self.tokens[length - size..length - 1].to_vec();
-            let followers = self.continuations.entry(prefix).or_default();
-            if let Err(position) = followers.binary_search(&token) {
-                followers.insert(position, token);
-            }
+        if let Some((start, end)) = completed_ngram_prefix(self.tokens.len(), size) {
+            let prefix = self.tokens[start..end].to_vec();
+            insert_follower(self.continuations.entry(prefix).or_default(), token);
         }
     }
 
@@ -138,14 +139,16 @@ impl NgramIndex {
     ///
     /// Matches Hugging Face `NoRepeatNGramLogitsProcessor`: nothing is banned
     /// until the next token could complete a full n-gram, and the lookup key
-    /// is the last `n - 1` tokens.
+    /// is the last `n - 1` tokens. `size` is positive; the verified
+    /// [`ngram_lookup_start`] proves this key is the prefix [`Self::push`]
+    /// records the next token under.
     fn banned(&self, size: usize) -> &[u32] {
-        let length = self.tokens.len();
-        if length + 1 < size {
+        let Some(start) = ngram_lookup_start(self.tokens.len(), size) else {
             return &[];
-        }
-        let prefix = &self.tokens[length + 1 - size..];
-        self.continuations.get(prefix).map_or(&[], Vec::as_slice)
+        };
+        self.continuations
+            .get(&self.tokens[start..])
+            .map_or(&[], Vec::as_slice)
     }
 }
 

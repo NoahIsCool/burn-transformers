@@ -18,6 +18,12 @@
 //! no-op entries); the split of a packed selection readback into IDs and
 //! scores; and the conversion of a history value into a vocabulary token ID.
 //!
+//! Finally it verifies `src/generation/ngram.rs`: the prefix range under
+//! which a completed n-gram is recorded, the lookup key before the next token
+//! (the same prefix, so the no-repeat ban is exact), and sorted, deduplicated
+//! follower insertion (the list stays strictly increasing and gains exactly
+//! the new token).
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
@@ -28,3 +34,6 @@ pub mod bookkeeping;
 
 #[path = "../src/generation/layout.rs"]
 pub mod layout;
+
+#[path = "../src/generation/ngram.rs"]
+pub mod ngram;

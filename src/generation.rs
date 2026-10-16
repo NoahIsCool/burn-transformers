@@ -118,6 +118,7 @@ mod causal;
 mod history;
 mod layout;
 mod metadata;
+mod ngram;
 mod random;
 mod seq2seq;
 pub mod speculative;
