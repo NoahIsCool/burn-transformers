@@ -25,31 +25,30 @@ use core::ops::Range;
 use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::identity::IdentityToken;
-use crate::cache::retention::{WorkingWindow, first_unsafe_ring_rewind, ring_working_window};
-use crate::cache::{
-    CacheConfig, DecodeStateError, plan_mirrored_ring_write, plan_ring_read, plan_ring_write,
-    plan_staged_ring_transaction,
-};
+use crate::cache::retention::first_unsafe_ring_rewind;
+use crate::cache::{CacheConfig, DecodeStateError};
 
+use super::plan::{
+    check_staged_commit, checked_product, first_index_out_of_range, next_version, portable_indices,
+    rows_cleared_by_truncate, write_end,
+};
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
 
 mod batch;
+mod plan;
 
-pub(crate) use batch::PreparedNativeKvBatchWrite;
 pub use batch::{KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment};
+pub(crate) use batch::{PreparedNativeKvBatchWrite, left_padded_columns, token_segment_table};
+pub use plan::KvCacheStorage;
 
-/// Physical time-axis strategy used by a native key/value cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KvCacheStorage {
-    /// Stores every logical position at its absolute time index.
-    Full,
-    /// Stores `position mod window`, producing at most two chronological views.
-    SlidingRing,
-    /// Duplicates each ring slot at `slot + window` for one contiguous view.
-    MirroredSlidingRing,
-}
+use plan::{
+    DirectSegment, SegmentViolation, TimeExtent, TimeSlotViolation, commit_write_segments,
+    committed_read_segments, direct_write_segments, staged_read_ranges, visible_count,
+    working_window,
+};
+pub(crate) use plan::{WriteAheadViolation, write_ahead_allowed};
 
 impl KvCacheStorage {
     /// Returns a stable human-readable storage name for diagnostics.
@@ -265,12 +264,14 @@ impl NativeKvCacheSpec {
     /// window; full storage has no ring width.
     #[must_use]
     pub fn effective_window(self, config: CacheConfig) -> Option<NonZeroUsize> {
-        match self.storage {
-            KvCacheStorage::Full => None,
-            KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => {
-                self.sliding_window.or(config.sliding_window())
-            }
-        }
+        // The Verus-verified selector; both inputs are nonzero, so
+        // `NonZeroUsize::new` restores the selected width exactly.
+        plan::effective_window_of(
+            self.storage,
+            self.sliding_window.map(NonZeroUsize::get),
+            config.sliding_window().map(NonZeroUsize::get),
+        )
+        .and_then(NonZeroUsize::new)
     }
 
     /// Returns the exact time-axis extent allocated for committed tensors.
@@ -286,48 +287,51 @@ impl NativeKvCacheSpec {
     /// than the logical capacity, a window on full storage, in-place staging
     /// on ring storage, or `2W` overflow.
     pub fn committed_time_slots(self, config: CacheConfig) -> TensorCacheResult<usize> {
-        if self.in_place_staging && self.storage != KvCacheStorage::Full {
-            return Err(TensorCacheError::InPlaceStagingRequiresFullStorage {
-                storage: self.storage.as_str(),
-            });
-        }
-        if let Some(window) = self.sliding_window {
-            if self.storage == KvCacheStorage::Full {
-                return Err(TensorCacheError::InvalidSlidingWindow {
-                    storage: self.storage.as_str(),
-                    window: window.get(),
-                    capacity: config.capacity(),
+        self.time_extent(config).map(|extent| extent.slots)
+    }
+
+    /// Returns the validated time extent together with the width that sized it.
+    ///
+    /// [`NativeKvCache::new`] stores this width, so every ring read and write
+    /// uses exactly the `W` whose `W` or `2W` extent was allocated.
+    fn time_extent(self, config: CacheConfig) -> TensorCacheResult<TimeExtent> {
+        let storage = self.storage.as_str();
+        let capacity = config.capacity();
+        // The extent, its width, and every rejection are the Verus-verified planner's.
+        plan::committed_time_slots(
+            self.storage,
+            self.in_place_staging,
+            self.sliding_window.map(NonZeroUsize::get),
+            config.sliding_window().map(NonZeroUsize::get),
+            capacity,
+        )
+        .map_err(|violation| match violation {
+            TimeSlotViolation::InPlaceStagingRequiresFullStorage => {
+                TensorCacheError::InPlaceStagingRequiresFullStorage { storage }
+            }
+            TimeSlotViolation::WindowOnFullStorage { window } => {
+                TensorCacheError::InvalidSlidingWindow {
+                    storage,
+                    window,
+                    capacity,
                     reason: "full storage retains every position; use a ring storage mode",
-                });
+                }
             }
-            if window.get() > config.capacity() {
-                return Err(TensorCacheError::InvalidSlidingWindow {
-                    storage: self.storage.as_str(),
-                    window: window.get(),
-                    capacity: config.capacity(),
+            TimeSlotViolation::WindowExceedsCapacity { window } => {
+                TensorCacheError::InvalidSlidingWindow {
+                    storage,
+                    window,
+                    capacity,
                     reason: "the window exceeds the logical capacity",
-                });
+                }
             }
-        }
-        let window = || {
-            self.effective_window(config)
-                .ok_or(TensorCacheError::SlidingWindowRequired {
-                    storage: self.storage.as_str(),
-                })
-        };
-        match self.storage {
-            KvCacheStorage::Full => Ok(config.capacity()),
-            KvCacheStorage::SlidingRing => Ok(window()?.get()),
-            KvCacheStorage::MirroredSlidingRing => {
-                let window = window()?;
-                window
-                    .get()
-                    .checked_mul(2)
-                    .ok_or(TensorCacheError::MirroredCapacityOverflow {
-                        window: window.get(),
-                    })
+            TimeSlotViolation::WindowRequired => {
+                TensorCacheError::SlidingWindowRequired { storage }
             }
-        }
+            TimeSlotViolation::MirroredOverflow { window } => {
+                TensorCacheError::MirroredCapacityOverflow { window }
+            }
+        })
     }
 }
 
@@ -487,6 +491,18 @@ struct PreparedDirectSegment {
     destinations: Vec<Range<usize>>,
 }
 
+impl From<DirectSegment> for PreparedDirectSegment {
+    /// Lists the verified primary destination, then its mirror copy if any.
+    fn from(segment: DirectSegment) -> Self {
+        Self {
+            input: segment.input,
+            destinations: core::iter::once(segment.primary)
+                .chain(segment.mirror)
+                .collect(),
+        }
+    }
+}
+
 /// Fully validated physical writes for one sequence's accepted prefix.
 #[derive(Debug)]
 struct KvSequenceCommitPlan {
@@ -501,6 +517,18 @@ struct KvCommitSegment {
     input: Range<usize>,
     /// One committed interval, or both copies for mirrored storage.
     destinations: Vec<Range<usize>>,
+}
+
+impl From<DirectSegment> for KvCommitSegment {
+    /// Lists the verified primary destination, then its mirror copy if any.
+    fn from(segment: DirectSegment) -> Self {
+        Self {
+            input: segment.input,
+            destinations: core::iter::once(segment.primary)
+                .chain(segment.mirror)
+                .collect(),
+        }
+    }
 }
 
 /// Opaque, prevalidated commit capability consumed by the cache coordinator.
@@ -587,7 +615,8 @@ impl<B: Backend> NativeKvCache<B> {
                 dtype: spec.dtype(),
             });
         }
-        let committed_time_slots = spec.committed_time_slots(config)?;
+        let extent = spec.time_extent(config)?;
+        let committed_time_slots = extent.slots;
         let committed_shape = [
             batch_size,
             spec.key_value_heads(),
@@ -596,7 +625,9 @@ impl<B: Backend> NativeKvCache<B> {
         ];
         let committed_elements =
             validate_tensor_shape("committed KV tensor", &committed_shape, spec.dtype())?;
-        let plane_layers = spec.layers().checked_mul(spec.plane_count()).ok_or(
+        // Every layer allocates `plane_count` tensors of each shape; the
+        // verified product rejects exactly an unrepresentable tensor count.
+        let plane_layers = checked_product(spec.layers(), spec.plane_count()).ok_or(
             TensorCacheError::TensorShapeOverflow {
                 tensor: "committed KV planes",
             },
@@ -661,7 +692,9 @@ impl<B: Backend> NativeKvCache<B> {
             staged_lengths: vec![vec![0; batch_size]; spec.layers()],
             staging_active: false,
             committed_time_slots,
-            window: spec.effective_window(config),
+            // The width that sized the extent; it came from nonzero windows,
+            // so `NonZeroUsize::new` restores it exactly.
+            window: extent.window.and_then(NonZeroUsize::new),
             staging_baseline: None,
             identity: IdentityToken::new(),
             staging_epoch: 0,
@@ -856,10 +889,7 @@ impl<B: Backend> NativeKvCache<B> {
                 capacity: self.config.capacity(),
             });
         }
-        let retained = match self.window {
-            Some(window) => sequence_length.min(window.get()),
-            None => sequence_length,
-        };
+        let retained = visible_count(sequence_length, self.window.map(NonZeroUsize::get));
         Ok(KvCacheRead {
             retained_positions: sequence_length - retained..sequence_length,
             segments: self.committed_segments(cache_layer, sequence, sequence_length, retained)?,
@@ -900,21 +930,16 @@ impl<B: Backend> NativeKvCache<B> {
             // Proposals already sit in committed slots `[C, C + P)`.
             return self.read_sequence(layer, sequence, working_length);
         }
-        let plan = match self.window {
-            Some(window) => ring_working_window(committed_length, staged, window.get()),
-            None => WorkingWindow {
-                retained_start: 0,
-                committed_keep: committed_length,
-                staged_skip: 0,
-            },
-        };
+        // `validate_write_end` proved `committed_length + staged` fits.
+        let plan = working_window(committed_length, staged, self.window.map(NonZeroUsize::get));
         let mut segments =
             self.committed_segments(cache_layer, sequence, committed_length, plan.committed_keep)?;
+        let (absolute, staged_offsets) = staged_read_ranges(committed_length, staged, plan);
         segments.push(read_staged_segment(
             cache_layer,
             sequence,
-            committed_length + plan.staged_skip..working_length,
-            plan.staged_skip..staged,
+            absolute,
+            staged_offsets,
             self.spec,
         )?);
         Ok(KvCacheRead {
@@ -937,44 +962,32 @@ impl<B: Backend> NativeKvCache<B> {
         length: usize,
         keep: usize,
     ) -> TensorCacheResult<Vec<KvCacheReadSegment<B>>> {
-        let start = length - keep;
-        let Some(keep) = NonZeroUsize::new(keep) else {
-            return Ok(Vec::new());
-        };
-        Ok(match self.spec.storage() {
-            KvCacheStorage::Full => vec![read_segment(
-                layer,
-                sequence,
-                start..length,
-                start..length,
-                self.spec,
-            )],
-            KvCacheStorage::SlidingRing => plan_ring_read(length, keep, self.window()?)?
-                .segments()
-                .iter()
-                .map(|segment| {
-                    read_segment(
-                        layer,
-                        sequence,
-                        segment.absolute(),
-                        segment.physical(),
-                        self.spec,
+        let storage = self.spec.storage();
+        // The Verus-verified planner partitions `[length - keep, length)` into
+        // chronological slices, each read from the slots that hold it.
+        let segments =
+            committed_read_segments(storage, length, keep, self.window.map(NonZeroUsize::get))
+                .map_err(|violation| {
+                    segment_error(
+                        storage,
+                        length - keep,
+                        keep,
+                        self.config.capacity(),
+                        violation,
                     )
-                })
-                .collect(),
-            KvCacheStorage::MirroredSlidingRing => {
-                // Slot `s` is duplicated at `s + W`, so any run of at most `W`
-                // positions starting at slot `start mod W` is contiguous.
-                let physical_start = start % self.window()?.get();
-                vec![read_segment(
+                })?;
+        Ok(segments
+            .into_iter()
+            .map(|segment| {
+                read_segment(
                     layer,
                     sequence,
-                    start..length,
-                    physical_start..physical_start + keep.get(),
+                    segment.absolute,
+                    segment.physical,
                     self.spec,
-                )]
-            }
-        })
+                )
+            })
+            .collect())
     }
 
     /// Appends one sequence's proposal values to preallocated staging storage.
@@ -1069,9 +1082,15 @@ impl<B: Backend> NativeKvCache<B> {
     }
 
     /// Clears rows reset to zero after truncate validation succeeds.
+    ///
+    /// The verified `rows_cleared_by_truncate` selects exactly the rows that
+    /// held tokens and are truncated to zero.
     pub(crate) fn apply_truncate(&mut self, current: &[usize], requested: &[usize]) {
-        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
-            if from != 0 && to == 0 {
+        for (sequence, cleared) in rows_cleared_by_truncate(current, requested)
+            .into_iter()
+            .enumerate()
+        {
+            if cleared {
                 self.zero_sequence(sequence);
             }
         }
@@ -1113,7 +1132,8 @@ impl<B: Backend> NativeKvCache<B> {
             lengths.fill(0);
         }
         self.staging_baseline = baseline;
-        self.staging_epoch = self.staging_epoch.wrapping_add(1);
+        // The verified successor always differs, so older working plans go stale.
+        self.staging_epoch = next_version(self.staging_epoch);
         self.staging_active = true;
         Ok(())
     }
@@ -1144,27 +1164,10 @@ impl<B: Backend> NativeKvCache<B> {
             return Err(TensorCacheError::TransactionNotActive);
         }
         validate_commit_vector_lengths(self.config.sequence_count(), baseline, proposed, accepted)?;
-        for layer in 0..self.spec.layers() {
-            for sequence in 0..self.config.sequence_count() {
-                let actual = self.staged_lengths[layer][sequence];
-                if actual != proposed[sequence] {
-                    return Err(TensorCacheError::IncompleteStaging {
-                        kind: "native KV",
-                        layer,
-                        sequence,
-                        expected: proposed[sequence],
-                        actual,
-                    });
-                }
-                if accepted[sequence] > proposed[sequence] {
-                    return Err(TensorCacheError::AcceptedPrefixExceedsProposal {
-                        sequence,
-                        accepted: accepted[sequence],
-                        proposed: proposed[sequence],
-                    });
-                }
-            }
-        }
+        // Every layer holds one staged length per row, so the verified scan's
+        // precondition follows from the vector-length check above.
+        check_staged_commit(&self.staged_lengths, proposed, accepted)
+            .map_err(|violation| TensorCacheError::staged_commit("native KV", violation))?;
 
         if self.spec.in_place_staging() {
             // Accepted proposals already occupy their committed slots.
@@ -1173,42 +1176,21 @@ impl<B: Backend> NativeKvCache<B> {
                 sequences: Vec::new(),
             });
         }
+        let storage = self.spec.storage();
+        let window = self.window.map(NonZeroUsize::get);
+        let capacity = self.config.capacity();
         let mut sequences = Vec::with_capacity(self.config.sequence_count());
         for sequence in 0..self.config.sequence_count() {
-            let count = accepted[sequence];
-            let staging = plan_staged_ring_transaction(baseline[sequence], proposed[sequence])?;
-            let segments = match self.spec.storage() {
-                KvCacheStorage::Full => {
-                    let end =
-                        validate_write_end(baseline[sequence], count, self.config.capacity())?;
-                    (count > 0)
-                        .then(|| KvCommitSegment {
-                            input: 0..count,
-                            destinations: core::iter::once(baseline[sequence]..end).collect(),
-                        })
-                        .into_iter()
-                        .collect()
-                }
-                KvCacheStorage::SlidingRing => staging
-                    .commit_prefix(count, self.window()?)?
-                    .segments()
-                    .iter()
-                    .map(|segment| KvCommitSegment {
-                        input: segment.input(),
-                        destinations: core::iter::once(segment.physical()).collect(),
-                    })
-                    .collect(),
-                KvCacheStorage::MirroredSlidingRing => {
-                    staging.commit_prefix(count, self.window()?)?;
-                    plan_mirrored_ring_write(baseline[sequence], count, self.window()?)?
-                        .iter()
-                        .map(|segment| KvCommitSegment {
-                            input: segment.input(),
-                            destinations: vec![segment.primary(), segment.mirror()],
-                        })
-                        .collect()
-                }
-            };
+            let (start, count) = (baseline[sequence], accepted[sequence]);
+            // The Verus-verified planner checks the proposal end, then the
+            // capacity (full storage) or the width, accepted prefix, and
+            // mirrored extent (rings), and plans exactly the accepted prefix.
+            let segments =
+                commit_write_segments(storage, start, proposed[sequence], count, window, capacity)
+                    .map_err(|violation| segment_error(storage, start, count, capacity, violation))?
+                    .into_iter()
+                    .map(KvCommitSegment::from)
+                    .collect();
             sequences.push(KvSequenceCommitPlan { segments });
         }
         let layers = self
@@ -1304,13 +1286,6 @@ impl<B: Backend> NativeKvCache<B> {
             })
     }
 
-    /// Returns the resolved ring width required by either ring representation.
-    fn window(&self) -> TensorCacheResult<NonZeroUsize> {
-        self.window.ok_or(TensorCacheError::SlidingWindowRequired {
-            storage: self.spec.storage().as_str(),
-        })
-    }
-
     /// Converts a key/value input pair into planes, rejecting latent groups.
     pub(crate) fn pair_planes(
         &self,
@@ -1377,36 +1352,28 @@ impl<B: Backend> NativeKvCache<B> {
         start: usize,
         token_count: usize,
     ) -> TensorCacheResult<Vec<PreparedDirectSegment>> {
-        if token_count == 0 {
-            return Ok(Vec::new());
-        }
-        match self.spec.storage() {
-            KvCacheStorage::Full => Ok(vec![PreparedDirectSegment {
-                input: 0..token_count,
-                destinations: core::iter::once(start..start + token_count).collect(),
-            }]),
-            KvCacheStorage::SlidingRing => {
-                let window = self.window()?;
-                Ok(plan_ring_write(start, token_count, window)?
-                    .segments()
-                    .iter()
-                    .map(|segment| PreparedDirectSegment {
-                        input: segment.input(),
-                        destinations: core::iter::once(segment.physical()).collect(),
-                    })
-                    .collect())
-            }
-            KvCacheStorage::MirroredSlidingRing => {
-                let window = self.window()?;
-                Ok(plan_mirrored_ring_write(start, token_count, window)?
-                    .into_iter()
-                    .map(|segment| PreparedDirectSegment {
-                        input: segment.input(),
-                        destinations: vec![segment.primary(), segment.mirror()],
-                    })
-                    .collect())
-            }
-        }
+        let storage = self.spec.storage();
+        // The Verus-verified planner; a single-row input starts at column zero.
+        let segments = direct_write_segments(
+            storage,
+            start,
+            token_count,
+            0,
+            self.window.map(NonZeroUsize::get),
+        )
+        .map_err(|violation| {
+            segment_error(
+                storage,
+                start,
+                token_count,
+                self.config.capacity(),
+                violation,
+            )
+        })?;
+        Ok(segments
+            .into_iter()
+            .map(PreparedDirectSegment::from)
+            .collect())
     }
 
     /// Clears one batch row in all committed and staging tensors.
@@ -1443,6 +1410,28 @@ impl<B: Backend> NativeKvCache<B> {
         }
         self.staging_baseline = None;
         self.staging_active = false;
+    }
+}
+
+/// Names a verified segment-planning violation of `tokens` at `start` in a `storage` group.
+///
+/// Only staged-prefix commits report `WriteEnd`; reads and direct appends
+/// never do, so their `start`, `tokens`, and `capacity` only label the error.
+fn segment_error(
+    storage: KvCacheStorage,
+    start: usize,
+    tokens: usize,
+    capacity: usize,
+    violation: SegmentViolation,
+) -> TensorCacheError {
+    match violation {
+        SegmentViolation::WindowRequired => TensorCacheError::SlidingWindowRequired {
+            storage: storage.as_str(),
+        },
+        SegmentViolation::WriteEnd(violation) => {
+            TensorCacheError::write_end(start, tokens, capacity, violation)
+        }
+        SegmentViolation::Ring(error) => TensorCacheError::Ring(error),
     }
 }
 
@@ -1484,20 +1473,10 @@ fn validate_sequence(sequence: usize, batch_size: usize) -> TensorCacheResult<()
     }
 }
 
-/// Checks absolute write arithmetic and logical capacity.
+/// Checks absolute write arithmetic and logical capacity (the verified `write_end`).
 fn validate_write_end(start: usize, tokens: usize, capacity: usize) -> TensorCacheResult<usize> {
-    let end = start
-        .checked_add(tokens)
-        .ok_or(TensorCacheError::WritePositionOverflow { start, tokens })?;
-    if end > capacity {
-        Err(TensorCacheError::WriteExceedsCapacity {
-            start,
-            end,
-            capacity,
-        })
-    } else {
-        Ok(end)
-    }
+    write_end(start, tokens, capacity)
+        .map_err(|violation| TensorCacheError::write_end(start, tokens, capacity, violation))
 }
 
 /// Checks shape, dtype, and device before invoking a backend assignment.
@@ -1651,10 +1630,13 @@ pub(crate) fn validate_reorder_indices(
             requested: indices.len(),
         });
     }
-    for &sequence in indices {
-        validate_sequence(sequence, batch_size)?;
+    match first_index_out_of_range(indices, batch_size) {
+        Some(position) => Err(TensorCacheError::SequenceOutOfBounds {
+            sequence: indices[position],
+            batch_size,
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Builds the device-local integer tensor used by Burn batch selection.
@@ -1662,12 +1644,10 @@ pub(crate) fn selection_tensor<B: Backend>(
     indices: &[usize],
     device: &B::Device,
 ) -> TensorCacheResult<Tensor<B, 1, Int>> {
-    let values: Vec<i32> = indices
-        .iter()
-        .map(|&index| {
-            i32::try_from(index).map_err(|_| TensorCacheError::BatchIndexOverflow { index })
-        })
-        .collect::<TensorCacheResult<_>>()?;
+    let values =
+        portable_indices(indices).map_err(|position| TensorCacheError::BatchIndexOverflow {
+            index: indices[position],
+        })?;
     Ok(Tensor::from_ints(
         TensorData::new(values, [indices.len()]),
         device,

@@ -62,27 +62,29 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use crate::cache::SequenceLengths;
 use crate::cache::identity::IdentityToken;
 use crate::cache::tensor::kv::{
-    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead,
+    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, WriteAheadViolation,
+    left_padded_columns, token_segment_table, write_ahead_allowed,
 };
 use crate::cache::tensor::kv::{PreparedNativeKvBatchWrite, PreparedNativeKvWrite};
+use crate::cache::tensor::plan::{checked_ends, first_index_above, portable_indices};
 use crate::cache::tensor::recurrent::{
     PreparedRecurrentBatchWrite, PreparedRecurrentStage, PreparedRecurrentStateWrite,
     RecurrentStateRead,
 };
+use crate::cache::tensor::recurrent::{first_nonuniform_offset, last_snapshot};
 
 use super::{
     KvCacheStorage, TensorCacheBank, TensorCacheError, TensorCacheResult, TensorDecodeState,
     validate_count,
 };
 
-/// Bank whose groups a step writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StepBank {
-    /// The decoder's ordinary cache groups and committed cursor.
-    Main,
-    /// The auxiliary multi-token-prediction groups and their own cursor.
-    Mtp,
-}
+mod coverage;
+
+pub use coverage::StepBank;
+use coverage::{
+    BankVersions, CoverageViolation, all_set, first_active_row, first_uncovered_row,
+    first_unstaged_proposal, initial_versions, mark_covered, set_positions,
+};
 
 impl StepBank {
     /// Returns the bank's name for diagnostics.
@@ -107,18 +109,17 @@ struct StepOrigin {
 ///
 /// A version is a counter that the owning [`TensorDecodeState`] advances on
 /// every change to a bank's cursors, transaction, or tensors made outside
-/// the step being validated (see the module documentation). Counters wrap
-/// with `wrapping_add`; reaching a collision would take 2^64 lifecycle
-/// operations while one stale step is kept alive, which is not a practical
-/// concern.
+/// the step being validated (see the module documentation). The counters
+/// are the Verus-verified `BankVersions`: a bump changes exactly its bank's
+/// version, to a value different from the old one. Counters wrap; reaching
+/// a collision would take 2^64 lifecycle operations while one stale step is
+/// kept alive, which is not a practical concern.
 #[derive(Debug)]
 pub(super) struct StepVersions {
     /// Identity of the owning decode state, shared by every step it creates.
     state: IdentityToken,
-    /// Lifecycle version of the main bank.
-    main: u64,
-    /// Lifecycle version of the MTP bank.
-    mtp: u64,
+    /// Lifecycle versions of the main and MTP banks.
+    banks: BankVersions,
 }
 
 impl StepVersions {
@@ -126,17 +127,13 @@ impl StepVersions {
     pub(super) fn new() -> Self {
         Self {
             state: IdentityToken::new(),
-            main: 0,
-            mtp: 0,
+            banks: initial_versions(),
         }
     }
 
     /// Invalidates every outstanding step of one bank.
     pub(super) const fn bump(&mut self, bank: StepBank) {
-        match bank {
-            StepBank::Main => self.main = self.main.wrapping_add(1),
-            StepBank::Mtp => self.mtp = self.mtp.wrapping_add(1),
-        }
+        self.banks.bump(bank);
     }
 
     /// Invalidates every outstanding step of both banks.
@@ -147,10 +144,7 @@ impl StepVersions {
 
     /// Returns a bank's current version.
     const fn current(&self, bank: StepBank) -> u64 {
-        match bank {
-            StepBank::Main => self.main,
-            StepBank::Mtp => self.mtp,
-        }
+        self.banks.current(bank)
     }
 
     /// Stamps a new step for `bank` with the current state identity and version.
@@ -459,28 +453,23 @@ impl<B: Backend> TensorStepWrites<B> {
 
     /// Returns the first row with new tokens (row 0 when every row is inactive).
     fn first_active_row(&self) -> usize {
-        self.counts.iter().position(|&count| count > 0).unwrap_or(0)
+        first_active_row(&self.counts)
     }
 
     /// Resolves each row's first input column for a batched input of width `block`.
     fn columns(&self, block: usize) -> TensorCacheResult<Vec<usize>> {
         match &self.alignment {
             TokenAlignment::RightPadded => Ok(vec![0; self.counts.len()]),
-            TokenAlignment::LeftPadded => self
-                .counts
-                .iter()
-                .enumerate()
-                .map(|(sequence, &count)| {
-                    block
-                        .checked_sub(count)
-                        .ok_or(TensorCacheError::AppendOutsideBlock {
-                            sequence,
-                            column: 0,
-                            count,
-                            block,
-                        })
+            TokenAlignment::LeftPadded => {
+                left_padded_columns(&self.counts, block).map_err(|sequence| {
+                    TensorCacheError::AppendOutsideBlock {
+                        sequence,
+                        column: 0,
+                        count: self.counts[sequence],
+                        block,
+                    }
                 })
-                .collect(),
+            }
             TokenAlignment::Columns(columns) => Ok(columns.clone()),
         }
     }
@@ -532,46 +521,26 @@ impl Coverage {
                 layer,
                 layers: layer_count,
             })?;
-        let marked: Vec<usize> = match row {
-            Some(row) => {
-                if row >= counts.len() {
-                    return Err(TensorCacheError::SequenceOutOfBounds {
-                        sequence: row,
-                        batch_size: counts.len(),
-                    });
-                }
-                if counts[row] == 0 {
-                    return Err(coverage_error(
-                        self.kind,
-                        group,
-                        layer,
-                        row,
-                        "inactive row written",
-                    ));
-                }
-                vec![row]
+        // The verified marker accepts exactly unmarked active rows.
+        mark_covered(rows, row, counts).map_err(|violation| match violation {
+            CoverageViolation::RowOutOfBounds { row } => TensorCacheError::SequenceOutOfBounds {
+                sequence: row,
+                batch_size: counts.len(),
+            },
+            CoverageViolation::InactiveRow { row } => {
+                coverage_error(self.kind, group, layer, row, "inactive row written")
             }
-            None => (0..counts.len()).filter(|&row| counts[row] > 0).collect(),
-        };
-        for row in marked {
-            if core::mem::replace(&mut rows[row], true) {
-                return Err(coverage_error(
-                    self.kind,
-                    group,
-                    layer,
-                    row,
-                    "duplicate write",
-                ));
+            CoverageViolation::Duplicate { row } => {
+                coverage_error(self.kind, group, layer, row, "duplicate write")
             }
-        }
-        Ok(())
+        })
     }
 
     /// Requires every active row of every layer of every group to be covered.
     fn finish(&self, counts: &[usize]) -> TensorCacheResult<()> {
         for (group, layers) in self.covered.iter().enumerate() {
             for (layer, rows) in layers.iter().enumerate() {
-                if let Some(row) = (0..counts.len()).find(|&row| counts[row] > 0 && !rows[row]) {
+                if let Some(row) = first_uncovered_row(rows, counts) {
                     return Err(coverage_error(
                         self.kind,
                         group,
@@ -777,19 +746,13 @@ impl<B: Backend> TensorDecodeState<B> {
             cache.spec().in_place_staging(),
             lengths.has_active_transaction(),
         )?;
-        let ends = lengths
-            .working_lengths()
-            .iter()
-            .zip(&step.counts)
-            .map(|(&length, &count)| {
-                length
-                    .checked_add(count)
-                    .ok_or(TensorCacheError::WritePositionOverflow {
-                        start: length,
-                        tokens: count,
-                    })
-            })
-            .collect::<TensorCacheResult<Vec<_>>>()?;
+        let working = lengths.working_lengths();
+        let ends = checked_ends(working, &step.counts).map_err(|row| {
+            TensorCacheError::WritePositionOverflow {
+                start: working[row],
+                tokens: step.counts[row],
+            }
+        })?;
         cache.plan_batch_read(&ends)
     }
 
@@ -939,27 +902,16 @@ impl<B: Backend> TensorDecodeState<B> {
         let [rows, _, block, _] = keys.dims();
         validate_count(step.counts.len(), rows)?;
         let append = step.append(lengths.working_lengths(), block)?;
-        let mut positions = Vec::with_capacity(rows * block);
-        let mut valid = Vec::with_capacity(rows * block);
-        for row in 0..rows {
-            let column = append.columns()[row];
-            let tokens = column..column + append.counts()[row];
-            for slot in 0..block {
-                let inside = tokens.contains(&slot);
-                let position = if inside {
-                    append.starts()[row] + (slot - column)
-                } else {
-                    0
-                };
-                positions.push(i32::try_from(position).map_err(|_| {
-                    TensorCacheError::TensorIndexOverflow {
-                        axis: "key position",
-                        index: position,
-                    }
-                })?);
-                valid.push(inside);
+        // `append` passed the verified layout validation, so the verified
+        // table builder's precondition holds; `rows == append.rows()` above.
+        let (positions, valid) =
+            token_segment_table(append.starts(), append.columns(), append.counts(), block);
+        let positions = portable_indices(&positions).map_err(|index| {
+            TensorCacheError::TensorIndexOverflow {
+                axis: "key position",
+                index: positions[index],
             }
-        }
+        })?;
         let device = keys.device();
         let all_valid = valid.iter().all(|&inside| inside);
         Ok(KvBatchSegment::from_parts(
@@ -1034,8 +986,7 @@ impl<B: Backend> TensorDecodeState<B> {
 
 /// Returns a row's committed length and proposal length.
 fn row_cursors(lengths: &SequenceLengths, row: usize) -> TensorCacheResult<(usize, usize)> {
-    let committed = lengths.length(row)?;
-    Ok((committed, lengths.working_lengths()[row] - committed))
+    Ok((lengths.length(row)?, lengths.proposal_length(row)?))
 }
 
 /// Requires a layer's staged count to equal the row's logical proposal length.
@@ -1058,19 +1009,20 @@ fn validate_write_ahead(
     in_place: bool,
     staging: bool,
 ) -> TensorCacheResult<()> {
-    if storage != KvCacheStorage::Full {
-        return Err(TensorCacheError::WriteAheadUnsupported {
+    // The verified rule admits exactly full storage, in place inside a transaction.
+    write_ahead_allowed(storage, in_place, staging).map_err(|violation| {
+        TensorCacheError::WriteAheadUnsupported {
             storage: storage.as_str(),
-            reason: "a ring write would overwrite a slot that is still visible",
-        });
-    }
-    if staging && !in_place {
-        return Err(TensorCacheError::WriteAheadUnsupported {
-            storage: storage.as_str(),
-            reason: "inside a transaction only groups with in-place staging can write ahead",
-        });
-    }
-    Ok(())
+            reason: match violation {
+                WriteAheadViolation::RingStorage => {
+                    "a ring write would overwrite a slot that is still visible"
+                }
+                WriteAheadViolation::SeparateStaging => {
+                    "inside a transaction only groups with in-place staging can write ahead"
+                }
+            },
+        }
+    })
 }
 
 /// Checks that the step writes every active row of every layer of the bank exactly once.
@@ -1198,11 +1150,9 @@ fn recurrent_rows<B: Backend>(
         | RecurrentEntry::RowSnapshots {
             group, layer, row, ..
         } => Some((*group, *layer, vec![*row])),
-        RecurrentEntry::BatchTerminal { group, layer, .. } => Some((
-            *group,
-            *layer,
-            (0..active.len()).filter(|&row| active[row]).collect(),
-        )),
+        RecurrentEntry::BatchTerminal { group, layer, .. } => {
+            Some((*group, *layer, set_positions(active)))
+        }
     }
 }
 
@@ -1219,13 +1169,17 @@ fn check_recurrent_proposals<B: Backend>(
     proposals: &[usize],
 ) -> TensorCacheResult<()> {
     let staged = bank.recurrent(group)?.staged_lengths_of(layer)?;
-    match rows.iter().find(|&&row| staged[row] != proposals[row]) {
-        Some(&sequence) => Err(TensorCacheError::TransactionCursorMismatch {
-            sequence,
-            cursor: "recurrent proposal start",
-            expected: proposals[sequence],
-            actual: staged[sequence],
-        }),
+    // Coverage validated every row, so each indexes both vectors.
+    match first_unstaged_proposal(rows, staged, proposals) {
+        Some(position) => {
+            let sequence = rows[position];
+            Err(TensorCacheError::TransactionCursorMismatch {
+                sequence,
+                cursor: "recurrent proposal start",
+                expected: proposals[sequence],
+                actual: staged[sequence],
+            })
+        }
         None => Ok(()),
     }
 }
@@ -1351,7 +1305,17 @@ fn prepare_recurrent<B: Backend>(
                 // Only the state after the row's last token is committed.
                 let [_, tokens, heads, rows, columns] = matrices.dims();
                 let [_, _, channels, width] = convolutions.dims();
-                let last = tokens - 1;
+                // Coverage proved the row active with exactly `tokens` new
+                // tokens; the verified selector still rejects an empty row.
+                let Some(last) = last_snapshot(tokens) else {
+                    return Err(coverage_error(
+                        "recurrent",
+                        group,
+                        layer,
+                        row,
+                        "row has no tokens",
+                    ));
+                };
                 let write = cache.prepare_sequence_state(
                     layer,
                     row,
@@ -1380,7 +1344,7 @@ fn prepare_recurrent<B: Backend>(
                 prepared.push(PreparedRecurrent::Batch(group, write));
                 return Ok(());
             }
-            if let Some(row) = (0..counts.len()).find(|&row| counts[row] > 1) {
+            if let Some(row) = first_index_above(counts, 1) {
                 return Err(coverage_error(
                     "recurrent",
                     group,
@@ -1413,11 +1377,8 @@ fn prepare_batch_snapshot_stages<B: Backend>(
     active: &[bool],
     prepared: &mut Vec<PreparedRecurrent<B>>,
 ) -> TensorCacheResult<()> {
-    let uniform = active.iter().all(|&row| row)
-        && cache
-            .staged_lengths_of(layer)?
-            .windows(2)
-            .all(|pair| pair[0] == pair[1]);
+    let uniform =
+        all_set(active) && first_nonuniform_offset(cache.staged_lengths_of(layer)?).is_none();
     if uniform {
         let stage = cache.prepare_batch_snapshots(
             layer,
@@ -1429,7 +1390,7 @@ fn prepare_batch_snapshot_stages<B: Backend>(
     }
     let [_, heads, rows, columns] = matrix.dims();
     let [_, channels, width] = convolution.dims();
-    for row in (0..active.len()).filter(|&row| active[row]) {
+    for row in set_positions(active) {
         let row_range: Range<usize> = row..row + 1;
         let stage = cache.prepare_row_snapshots(
             layer,

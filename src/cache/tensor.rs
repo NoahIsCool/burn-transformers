@@ -42,6 +42,7 @@
 mod allocation;
 mod error;
 mod kv;
+mod plan;
 mod recurrent;
 mod state;
 

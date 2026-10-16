@@ -11,6 +11,10 @@ use burn::tensor::DType;
 
 use crate::cache::{DecodeStateError, RingPlanError};
 
+use super::plan::{
+    AllocationViolation, PORTABLE_TENSOR_ELEMENT_LIMIT, StagedCommitViolation, WriteEndViolation,
+};
+
 /// Result returned by tensor-cache construction and mutation operations.
 pub type TensorCacheResult<T> = core::result::Result<T, TensorCacheError>;
 
@@ -451,4 +455,76 @@ pub enum TensorCacheError {
         #[from]
         RingPlanError,
     ),
+}
+
+impl TensorCacheError {
+    /// Names a verified allocation-size violation for the tensor `tensor`.
+    pub(crate) const fn allocation(
+        tensor: &'static str,
+        violation: AllocationViolation,
+        element_size: usize,
+    ) -> Self {
+        match violation {
+            AllocationViolation::ShapeOverflow => Self::TensorShapeOverflow { tensor },
+            AllocationViolation::ElementLimitExceeded { elements } => {
+                Self::TensorElementLimitExceeded {
+                    tensor,
+                    elements,
+                    limit: PORTABLE_TENSOR_ELEMENT_LIMIT,
+                }
+            }
+            AllocationViolation::ByteOverflow { elements } => Self::AllocationSizeOverflow {
+                tensor,
+                elements,
+                element_size,
+            },
+        }
+    }
+
+    /// Names a verified write-end violation of appending `tokens` at `start`.
+    pub(crate) const fn write_end(
+        start: usize,
+        tokens: usize,
+        capacity: usize,
+        violation: WriteEndViolation,
+    ) -> Self {
+        match violation {
+            WriteEndViolation::Overflow => Self::WritePositionOverflow { start, tokens },
+            WriteEndViolation::ExceedsCapacity { end } => Self::WriteExceedsCapacity {
+                start,
+                end,
+                capacity,
+            },
+        }
+    }
+
+    /// Names a verified staged-commit violation of a `kind` cache group.
+    pub(crate) const fn staged_commit(
+        kind: &'static str,
+        violation: StagedCommitViolation,
+    ) -> Self {
+        match violation {
+            StagedCommitViolation::Incomplete {
+                layer,
+                sequence,
+                expected,
+                actual,
+            } => Self::IncompleteStaging {
+                kind,
+                layer,
+                sequence,
+                expected,
+                actual,
+            },
+            StagedCommitViolation::PrefixExceedsProposal {
+                sequence,
+                accepted,
+                proposed,
+            } => Self::AcceptedPrefixExceedsProposal {
+                sequence,
+                accepted,
+                proposed,
+            },
+        }
+    }
 }

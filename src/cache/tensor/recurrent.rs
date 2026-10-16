@@ -16,9 +16,15 @@ use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
 
 use super::kv::validate_batch;
+use super::plan::{check_staged_commit, checked_product, rows_cleared_by_truncate, staging_end};
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
+
+mod plan;
+
+pub(crate) use self::plan::{first_nonuniform_offset, last_snapshot};
+use self::plan::{flat_snapshot_indices, uniform_snapshot};
 
 /// Validated geometry for DeltaNet/Mamba2-style recurrent layer state.
 ///
@@ -699,10 +705,12 @@ impl<B: Backend> RecurrentStateCache<B> {
         let state = self.layer(layer)?;
         validate_sequence(sequence, self.config.sequence_count())?;
         let staged = self.staged_lengths[layer][sequence];
-        if !self.staging_active || staged == 0 {
-            return self.read_sequence(layer, sequence);
-        }
-        let snapshot = staged - 1;
+        // The verified `last_snapshot` selects snapshot `staged - 1`, the
+        // state after the last proposal token.
+        let snapshot = match last_snapshot(staged) {
+            Some(snapshot) if self.staging_active => snapshot,
+            _ => return self.read_sequence(layer, sequence),
+        };
         let matrix = state
             .staged_matrix
             .as_ref()
@@ -805,10 +813,24 @@ impl<B: Backend> RecurrentStateCache<B> {
             });
         }
 
-        let flat_rows = flat_snapshot_rows(staged_lengths, spec.staging_capacity())?;
+        let flat_rows =
+            flat_snapshot_indices(staged_lengths, spec.staging_capacity()).map_err(|index| {
+                TensorCacheError::TensorIndexOverflow {
+                    axis: "batch * proposal",
+                    index,
+                }
+            })?;
         let selector =
             Tensor::<B, 1, Int>::from_ints(TensorData::new(flat_rows, [batch_size]), &self.device);
-        let flat = batch_size * spec.staging_capacity();
+        // The staged snapshots are reshaped to `[batch * proposal, ...]`.
+        // Allocation already validated that product as a factor of the staged
+        // shape; the verified product reports an unrepresentable reshape
+        // extent as a shape overflow instead of wrapping.
+        let flat = checked_product(batch_size, spec.staging_capacity()).ok_or(
+            TensorCacheError::TensorShapeOverflow {
+                tensor: "staged recurrent snapshots",
+            },
+        )?;
         let mut matrix = staged_matrix
             .clone()
             .reshape([
@@ -1002,16 +1024,12 @@ impl<B: Backend> RecurrentStateCache<B> {
         let tokens = self.validate_batch_snapshot_pair(layer, &matrices, &convolutions)?;
         let offsets = &self.staged_lengths[layer];
         let start = offsets[0];
-        if let Some((sequence, &actual)) = offsets
-            .iter()
-            .enumerate()
-            .find(|(_, offset)| **offset != start)
-        {
+        if let Some(sequence) = first_nonuniform_offset(offsets) {
             return Err(TensorCacheError::NonUniformStagingOffset {
                 layer,
                 sequence,
                 expected: start,
-                actual,
+                actual: offsets[sequence],
             });
         }
         let rows = 0..self.config.sequence_count();
@@ -1028,12 +1046,12 @@ impl<B: Backend> RecurrentStateCache<B> {
         matrices: Tensor<B, 5>,
         convolutions: Tensor<B, 4>,
     ) -> TensorCacheResult<PreparedRecurrentStage<B>> {
-        let end = start
-            .checked_add(tokens)
-            .filter(|&end| end <= self.spec.staging_capacity())
-            .ok_or(TensorCacheError::StagingCapacityExceeded {
-                requested: start.saturating_add(tokens),
-                capacity: self.spec.staging_capacity(),
+        let end =
+            staging_end(start, tokens, self.spec.staging_capacity()).map_err(|requested| {
+                TensorCacheError::StagingCapacityExceeded {
+                    requested,
+                    capacity: self.spec.staging_capacity(),
+                }
             })?;
         let state = self.layer(layer)?;
         if tokens > 0 && (state.staged_matrix.is_none() || state.staged_convolution.is_none()) {
@@ -1135,9 +1153,15 @@ impl<B: Backend> RecurrentStateCache<B> {
     }
 
     /// Restores the exact initial state for rows truncated to zero.
+    ///
+    /// The verified `rows_cleared_by_truncate` selects exactly the rows that
+    /// held tokens and are truncated to zero.
     pub(crate) fn apply_truncate(&mut self, current: &[usize], requested: &[usize]) {
-        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
-            if from != 0 && to == 0 {
+        for (sequence, cleared) in rows_cleared_by_truncate(current, requested)
+            .into_iter()
+            .enumerate()
+        {
+            if cleared {
                 self.zero_sequence(sequence);
             }
         }
@@ -1168,27 +1192,10 @@ impl<B: Backend> RecurrentStateCache<B> {
             return Err(TensorCacheError::TransactionNotActive);
         }
         validate_commit_vector_lengths(self.config.sequence_count(), proposed, accepted)?;
-        for layer in 0..self.spec.layers() {
-            for sequence in 0..self.config.sequence_count() {
-                let actual = self.staged_lengths[layer][sequence];
-                if actual != proposed[sequence] {
-                    return Err(TensorCacheError::IncompleteStaging {
-                        kind: "recurrent",
-                        layer,
-                        sequence,
-                        expected: proposed[sequence],
-                        actual,
-                    });
-                }
-                if accepted[sequence] > proposed[sequence] {
-                    return Err(TensorCacheError::AcceptedPrefixExceedsProposal {
-                        sequence,
-                        accepted: accepted[sequence],
-                        proposed: proposed[sequence],
-                    });
-                }
-            }
-        }
+        // Every layer holds one staged count per row, so the verified scan's
+        // precondition follows from the vector-length check above.
+        check_staged_commit(&self.staged_lengths, proposed, accepted)
+            .map_err(|violation| TensorCacheError::staged_commit("recurrent", violation))?;
         let layers = self
             .layers
             .iter()
@@ -1218,10 +1225,10 @@ impl<B: Backend> RecurrentStateCache<B> {
         let spec = self.spec;
         for (state, staging) in self.layers.iter_mut().zip(plan.layers) {
             for (sequence, &count) in plan.accepted.iter().enumerate() {
-                if count == 0 {
+                // Accepting `count > 0` tokens commits snapshot `count - 1`.
+                let Some(snapshot) = last_snapshot(count) else {
                     continue;
-                }
-                let snapshot = count - 1;
+                };
                 let matrix = staging
                     .matrix
                     .clone()
@@ -1477,31 +1484,6 @@ fn validate_sequence(sequence: usize, batch_size: usize) -> TensorCacheResult<()
             batch_size,
         })
     }
-}
-
-/// Returns the shared snapshot index `s - 1` when every row staged the same `s > 0`.
-fn uniform_snapshot(staged_lengths: &[usize]) -> Option<usize> {
-    let (&first, rest) = staged_lengths.split_first()?;
-    (first > 0 && rest.iter().all(|&length| length == first)).then(|| first - 1)
-}
-
-/// Computes each row's flat index `row * capacity + max(staged, 1) - 1` into
-/// the `[batch * capacity, ...]` view of a staging tensor.
-///
-/// Rows without a proposal point at their first (unused) snapshot slot; the
-/// caller replaces them with committed state.
-fn flat_snapshot_rows(staged_lengths: &[usize], capacity: usize) -> TensorCacheResult<Vec<i32>> {
-    staged_lengths
-        .iter()
-        .enumerate()
-        .map(|(row, &staged)| {
-            let flat = row * capacity + staged.max(1) - 1;
-            i32::try_from(flat).map_err(|_| TensorCacheError::TensorIndexOverflow {
-                axis: "batch * proposal",
-                index: flat,
-            })
-        })
-        .collect()
 }
 
 /// Validates proposal and acceptance vector sizes before direct indexing.

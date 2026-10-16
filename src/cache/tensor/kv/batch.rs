@@ -65,12 +65,27 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use crate::attention::position_limit;
 use crate::cache::DecodeStateError;
 use crate::cache::identity::IdentityToken;
-use crate::cache::retention::{WorkingWindow, ring_slot_position, ring_working_window};
+use crate::cache::retention::WorkingWindow;
 use crate::cache::rows::{RowRun, row_runs};
+use crate::cache::tensor::plan::{first_index_above, portable_indices};
 
+use super::plan::{committed_read_rows, plan_direct_run, working_read_rows};
 use super::{
     NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError, TensorCacheResult,
-    validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
+    segment_error, validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
+};
+
+mod layout;
+mod slots;
+
+use layout::{
+    AppendViolation, StageViolation, append_ends, linear_stage_runs, one_hot_counts,
+    plan_stage_updates, proposal_cursor_of, proposal_starts, validate_append_layout,
+};
+pub(crate) use layout::{left_padded_columns, token_segment_table};
+use slots::{
+    first_unequal_vector, full_slot_mask, full_slots_all_valid, max_value, ring_slot_table,
+    staged_slot_mask, staged_slot_positions, staged_slots_all_valid,
 };
 
 // Write layouts.
@@ -122,20 +137,14 @@ impl KvBatchAppend {
         counts: &[usize],
         block: usize,
     ) -> TensorCacheResult<Self> {
-        let columns = counts
-            .iter()
-            .enumerate()
-            .map(|(sequence, &count)| {
-                block
-                    .checked_sub(count)
-                    .ok_or(TensorCacheError::AppendOutsideBlock {
-                        sequence,
-                        column: 0,
-                        count,
-                        block,
-                    })
-            })
-            .collect::<TensorCacheResult<Vec<_>>>()?;
+        let columns = left_padded_columns(counts, block).map_err(|sequence| {
+            TensorCacheError::AppendOutsideBlock {
+                sequence,
+                column: 0,
+                count: counts[sequence],
+                block,
+            }
+        })?;
         Self::with_columns(starts, &columns, counts, block)
     }
 
@@ -151,33 +160,28 @@ impl KvBatchAppend {
         counts: &[usize],
         block: usize,
     ) -> TensorCacheResult<Self> {
-        for actual in [starts.len(), columns.len()] {
-            if actual != counts.len() {
-                return Err(DecodeStateError::SequenceCountMismatch {
-                    expected: counts.len(),
-                    actual,
+        // The verified validator accepts exactly the layouts whose rows fit
+        // the block and the position space; every other method relies on it.
+        validate_append_layout(starts, columns, counts, block).map_err(
+            |violation| match violation {
+                AppendViolation::CountMismatch { expected, actual } => {
+                    DecodeStateError::SequenceCountMismatch { expected, actual }.into()
                 }
-                .into());
-            }
-        }
-        for (sequence, ((&start, &column), &count)) in
-            starts.iter().zip(columns).zip(counts).enumerate()
-        {
-            if column.checked_add(count).is_none_or(|end| end > block) {
-                return Err(TensorCacheError::AppendOutsideBlock {
+                AppendViolation::OutsideBlock {
+                    sequence,
+                    column,
+                    count,
+                } => TensorCacheError::AppendOutsideBlock {
                     sequence,
                     column,
                     count,
                     block,
-                });
-            }
-            start
-                .checked_add(count)
-                .ok_or(TensorCacheError::WritePositionOverflow {
-                    start,
-                    tokens: count,
-                })?;
-        }
+                },
+                AppendViolation::PositionOverflow { start, tokens } => {
+                    TensorCacheError::WritePositionOverflow { start, tokens }
+                }
+            },
+        )?;
         Ok(Self {
             starts: starts.to_vec(),
             columns: columns.to_vec(),
@@ -219,12 +223,8 @@ impl KvBatchAppend {
     /// Returns each row's exclusive absolute end `start + count`.
     #[must_use]
     pub fn ends(&self) -> Vec<usize> {
-        // Construction proved that every sum fits in `usize`.
-        self.starts
-            .iter()
-            .zip(&self.counts)
-            .map(|(&start, &count)| start + count)
-            .collect()
+        // Construction validated that every sum fits in `usize`.
+        append_ends(&self.starts, &self.counts)
     }
 }
 
@@ -445,15 +445,14 @@ impl<B: Backend> NativeKvCache<B> {
         }
         let count = self.validate_planes(layer, sequence, &planes)?;
         let rows = self.config.sequence_count();
-        let mut counts = vec![0; rows];
-        counts[sequence] = count;
-        let staged = &self.staged_lengths[layer];
-        let starts: Vec<usize> = (0..rows)
-            .map(|row| {
-                let baseline = self.staging_baseline.as_ref().map_or(0, |base| base[row]);
-                baseline.saturating_add(staged[row])
-            })
-            .collect();
+        // Only row `sequence` is active, so every staging run starts at the
+        // source offset `sequence` (verified one-hot counts).
+        let counts = one_hot_counts(rows, sequence, count);
+        let starts = proposal_starts(
+            &self.staged_lengths[layer],
+            self.staging_baseline.as_deref(),
+            rows,
+        );
         let plan = self.plan_stage(layer, &starts, &vec![0; rows], &counts, sequence)?;
         Ok(plan.into_write(layer, planes))
     }
@@ -471,32 +470,41 @@ impl<B: Backend> NativeKvCache<B> {
         source_offset: usize,
     ) -> TensorCacheResult<StagePlan> {
         let staged = &self.staged_lengths[layer];
-        let mut staged_updates = Vec::new();
-        for (sequence, (&start, &count)) in starts.iter().zip(counts).enumerate() {
-            if count == 0 {
-                continue;
-            }
-            if let Some(baseline) = &self.staging_baseline {
-                let expected = baseline[sequence] + staged[sequence];
-                if start != expected {
-                    return Err(TensorCacheError::TransactionCursorMismatch {
-                        sequence,
-                        cursor: "proposal start",
-                        expected,
-                        actual: start,
-                    });
+        let staging_capacity = self.spec.staging_capacity();
+        let capacity = self.config.capacity();
+        // The verified planner checks each active row's cursor, staging
+        // capacity, and logical capacity and lists exactly the active rows.
+        let staged_updates = plan_stage_updates(
+            starts,
+            counts,
+            staged,
+            self.staging_baseline.as_deref(),
+            staging_capacity,
+            capacity,
+        )
+        .map_err(|violation| match violation {
+            StageViolation::CursorMismatch {
+                sequence,
+                expected,
+                actual,
+            } => TensorCacheError::TransactionCursorMismatch {
+                sequence,
+                cursor: "proposal start",
+                expected,
+                actual,
+            },
+            StageViolation::StagingCapacityExceeded { requested } => {
+                TensorCacheError::StagingCapacityExceeded {
+                    requested,
+                    capacity: staging_capacity,
                 }
             }
-            let end = staged[sequence]
-                .checked_add(count)
-                .filter(|&end| end <= self.spec.staging_capacity())
-                .ok_or(TensorCacheError::StagingCapacityExceeded {
-                    requested: staged[sequence].saturating_add(count),
-                    capacity: self.spec.staging_capacity(),
-                })?;
-            validate_write_end(start, count, self.config.capacity())?;
-            staged_updates.push((sequence, end));
-        }
+            StageViolation::WriteEnd {
+                start,
+                tokens,
+                violation,
+            } => TensorCacheError::write_end(start, tokens, capacity, violation),
+        })?;
         if self.spec.in_place_staging() {
             // In-place proposals land at their absolute positions, which the
             // cursor check above tied to `baseline + staged`.
@@ -514,15 +522,17 @@ impl<B: Backend> NativeKvCache<B> {
             });
         }
         self.staged_planes(self.layer(layer)?)?;
-        // Separate staging is linear: proposal offset `staged_b + j`.
-        let runs = row_runs(staged, columns, counts)
+        // Separate staging is linear: proposal offset `staged_b + j`. The
+        // checks above bound every active row's offsets by the staging
+        // capacity, so the verified run planner's preconditions hold.
+        let runs = linear_stage_runs(staged, columns, counts, source_offset)
             .into_iter()
             .map(|run| PreparedRun {
-                rows: run.first_row..run.end_row,
-                source_rows: run.first_row - source_offset..run.end_row - source_offset,
+                rows: run.rows,
+                source_rows: run.source_rows,
                 segments: vec![PreparedDirectSegment {
-                    input: run.column..run.column + run.count,
-                    destinations: core::iter::once(run.start..run.start + run.count).collect(),
+                    input: run.input,
+                    destinations: core::iter::once(run.destination).collect(),
                 }],
             })
             .collect();
@@ -593,18 +603,19 @@ impl<B: Backend> NativeKvCache<B> {
     ) -> TensorCacheResult<()> {
         self.layer(layer)?;
         validate_sequence(sequence, self.config.sequence_count())?;
-        match &self.staging_baseline {
-            Some(baseline)
-                if baseline[sequence] + self.staged_lengths[layer][sequence] != start =>
-            {
-                Err(TensorCacheError::TransactionCursorMismatch {
-                    sequence,
-                    cursor: "proposal start",
-                    expected: baseline[sequence] + self.staged_lengths[layer][sequence],
-                    actual: start,
-                })
-            }
-            _ => Ok(()),
+        let Some(baseline) = &self.staging_baseline else {
+            return Ok(());
+        };
+        let expected = proposal_cursor_of(baseline[sequence], self.staged_lengths[layer][sequence]);
+        if expected == start {
+            Ok(())
+        } else {
+            Err(TensorCacheError::TransactionCursorMismatch {
+                sequence,
+                cursor: "proposal start",
+                expected,
+                actual: start,
+            })
         }
     }
 
@@ -632,20 +643,38 @@ impl<B: Backend> NativeKvCache<B> {
 
     /// Plans the physical segments of one run, shifting inputs to the run's column.
     ///
-    /// Input row `b - source_offset` feeds destination row `b`.
+    /// Input row `b - source_offset` feeds destination row `b`. Every run
+    /// comes from `row_runs`, so it holds only active rows; a batched input
+    /// uses offset zero and a single-row input's one-hot counts make its row
+    /// the only active one, so every run starts at or after `source_offset`.
+    /// Validated layouts keep each run's columns inside the input block.
     fn prepare_run(&self, run: RowRun, source_offset: usize) -> TensorCacheResult<PreparedRun> {
-        let segments = self
-            .prepare_direct_segments(run.start, run.count)?
-            .into_iter()
-            .map(|segment| PreparedDirectSegment {
-                input: segment.input.start + run.column..segment.input.end + run.column,
-                destinations: segment.destinations,
-            })
-            .collect();
+        let storage = self.spec.storage();
+        // The Verus-verified planner shifts the inputs and rows and writes
+        // each token to its storage slot.
+        let plan = plan_direct_run(
+            run,
+            source_offset,
+            storage,
+            self.window.map(NonZeroUsize::get),
+        )
+        .map_err(|violation| {
+            segment_error(
+                storage,
+                run.start,
+                run.count,
+                self.config.capacity(),
+                violation,
+            )
+        })?;
         Ok(PreparedRun {
-            rows: run.first_row..run.end_row,
-            source_rows: run.first_row - source_offset..run.end_row - source_offset,
-            segments,
+            rows: plan.rows,
+            source_rows: plan.source_rows,
+            segments: plan
+                .segments
+                .into_iter()
+                .map(PreparedDirectSegment::from)
+                .collect(),
         })
     }
 
@@ -1060,23 +1089,13 @@ impl<B: Backend> NativeKvCache<B> {
     /// capacity, or a position outside Burn's portable `i32` index range.
     pub fn plan_batch_read(&self, lengths: &[usize]) -> TensorCacheResult<KvBatchReadPlan<B>> {
         self.validate_read_lengths(lengths)?;
-        let keep: Vec<usize> = match self.window {
-            Some(window) => lengths
-                .iter()
-                .map(|&length| length.min(window.get()))
-                .collect(),
-            None => lengths.to_vec(),
-        };
-        let retained = lengths
-            .iter()
-            .zip(&keep)
-            .map(|(&length, &keep)| length - keep..length)
-            .collect();
+        // The verified planner keeps `min(L_b, W)` (or `L_b`) positions per row.
+        let rows = committed_read_rows(lengths, self.window.map(NonZeroUsize::get));
         let segments = self
-            .committed_plan_segment(lengths, &keep)?
+            .committed_plan_segment(lengths, &rows.keep)?
             .into_iter()
             .collect();
-        Ok(self.plan(retained, segments, None))
+        Ok(self.plan(rows.retained, segments, None))
     }
 
     /// Plans a batched read of each row's working window during speculation.
@@ -1104,56 +1123,39 @@ impl<B: Backend> NativeKvCache<B> {
             self.validate_baseline(sequence, length)?;
         }
         let staged = self.staged_lengths[0].clone();
-        if let Some(layer) = self
-            .staged_lengths
-            .iter()
-            .position(|lengths| *lengths != staged)
-        {
+        if let Some(layer) = first_unequal_vector(&self.staged_lengths, &staged) {
             return Err(TensorCacheError::BatchPlanMismatch {
                 layer,
                 reason: "staged lengths differ between layers of the group",
             });
         }
-        let working = committed
-            .iter()
-            .zip(&staged)
-            .map(|(&length, &proposed)| {
-                validate_write_end(length, proposed, self.config.capacity())
-            })
-            .collect::<TensorCacheResult<Vec<_>>>()?;
+        let capacity = self.config.capacity();
+        // The verified planner checks every working end and splits each
+        // row's window into committed and staged parts.
+        let rows = working_read_rows(
+            committed,
+            &staged,
+            self.window.map(NonZeroUsize::get),
+            capacity,
+        )
+        .map_err(|(row, violation)| {
+            TensorCacheError::write_end(committed[row], staged[row], capacity, violation)
+        })?;
         let staging = PlannedStaging {
             epoch: self.staging_epoch,
             lengths: staged.clone(),
         };
         if self.spec.in_place_staging() {
-            let mut plan = self.plan_batch_read(&working)?;
+            let mut plan = self.plan_batch_read(&rows.ends)?;
             plan.staging = Some(staging);
             return Ok(plan);
         }
-        let windows: Vec<WorkingWindow> = committed
-            .iter()
-            .zip(&staged)
-            .map(|(&length, &proposed)| match self.window {
-                Some(window) => ring_working_window(length, proposed, window.get()),
-                None => WorkingWindow {
-                    retained_start: 0,
-                    committed_keep: length,
-                    staged_skip: 0,
-                },
-            })
-            .collect();
-        let retained = windows
-            .iter()
-            .zip(&working)
-            .map(|(window, &end)| window.retained_start..end)
-            .collect();
-        let keep: Vec<usize> = windows.iter().map(|window| window.committed_keep).collect();
         let mut segments: Vec<PlannedSegment<B>> = self
-            .committed_plan_segment(committed, &keep)?
+            .committed_plan_segment(committed, &rows.keep)?
             .into_iter()
             .collect();
-        segments.extend(self.staged_plan_segment(committed, &staged, &windows)?);
-        Ok(self.plan(retained, segments, Some(staging)))
+        segments.extend(self.staged_plan_segment(committed, &staged, &rows.windows)?);
+        Ok(self.plan(rows.retained, segments, Some(staging)))
     }
 
     /// Reads one layer through a batched read plan.
@@ -1254,12 +1256,9 @@ impl<B: Backend> NativeKvCache<B> {
             }
             .into());
         }
-        match lengths
-            .iter()
-            .find(|&&length| length > self.config.capacity())
-        {
-            Some(&length) => Err(TensorCacheError::ReadExceedsCapacity {
-                length,
+        match first_index_above(lengths, self.config.capacity()) {
+            Some(row) => Err(TensorCacheError::ReadExceedsCapacity {
+                length: lengths[row],
                 capacity: self.config.capacity(),
             }),
             None => Ok(()),
@@ -1275,22 +1274,20 @@ impl<B: Backend> NativeKvCache<B> {
         let rows = lengths.len();
         match self.window {
             None => {
-                // Slot j holds position j; row b sees positions [L_b - keep_b, L_b).
-                let slots = lengths.iter().copied().max().unwrap_or(0);
+                // Slot j holds position j; row b sees positions [L_b - keep_b, L_b)
+                // (the verified full-storage validity table).
+                let slots = max_value(lengths);
                 if slots == 0 {
                     return Ok(None);
                 }
                 let positions = Tensor::<B, 1, Int>::arange(0..to_i64(slots)?, &self.device)
                     .reshape([1, slots])
                     .expand([rows, slots]);
-                let all_valid = lengths
-                    .iter()
-                    .zip(keep)
-                    .all(|(&length, &keep)| length == slots && keep == length);
-                let valid = (!all_valid).then(|| {
-                    host_mask(rows, slots, &self.device, |row, slot| {
-                        slot < lengths[row] && slot >= lengths[row] - keep[row]
-                    })
+                let valid = (!full_slots_all_valid(lengths, keep, slots)).then(|| {
+                    Tensor::from_bool(
+                        TensorData::new(full_slot_mask(lengths, keep, slots), [rows, slots]),
+                        &self.device,
+                    )
                 });
                 Ok(Some(PlannedSegment {
                     source: SegmentSource::Committed,
@@ -1301,20 +1298,14 @@ impl<B: Backend> NativeKvCache<B> {
             }
             Some(window) => {
                 let width = window.get();
-                let slots = lengths.iter().copied().max().unwrap_or(0).min(width);
+                let slots = max_value(lengths).min(width);
                 if slots == 0 {
                     return Ok(None);
                 }
-                let mut positions = Vec::with_capacity(rows * slots);
-                let mut valid = Vec::with_capacity(rows * slots);
-                for (&length, &keep) in lengths.iter().zip(keep) {
-                    for slot in 0..slots {
-                        let position = ring_slot_position(length, slot, width);
-                        let visible = position.is_some_and(|position| position + keep >= length);
-                        positions.push(to_i32(position.unwrap_or(0))?);
-                        valid.push(visible);
-                    }
-                }
+                // The verified table gives every slot's newest position and
+                // whether it lies in the row's visible window.
+                let (positions, valid) = ring_slot_table(lengths, keep, width, slots);
+                let positions = key_positions(&positions)?;
                 let all_valid = valid.iter().all(|&visible| visible);
                 Ok(Some(PlannedSegment {
                     source: SegmentSource::Committed,
@@ -1339,24 +1330,18 @@ impl<B: Backend> NativeKvCache<B> {
         windows: &[WorkingWindow],
     ) -> TensorCacheResult<Option<PlannedSegment<B>>> {
         let rows = committed.len();
-        let slots = staged.iter().copied().max().unwrap_or(0);
+        let slots = max_value(staged);
         if slots == 0 {
             return Ok(None);
         }
-        let mut positions = Vec::with_capacity(rows * slots);
-        for &length in committed {
-            for slot in 0..slots {
-                positions.push(to_i32(length + slot)?);
-            }
-        }
-        let all_valid = staged
-            .iter()
-            .zip(windows)
-            .all(|(&proposed, window)| proposed == slots && window.staged_skip == 0);
-        let valid = (!all_valid).then(|| {
-            host_mask(rows, slots, &self.device, |row, slot| {
-                slot >= windows[row].staged_skip && slot < staged[row]
-            })
+        // Proposal `j` of row `b` is position `C_b + j`, valid from the row's
+        // skipped proposals up to its staged length (verified tables).
+        let positions = key_positions(&staged_slot_positions(committed, slots))?;
+        let valid = (!staged_slots_all_valid(staged, windows, slots)).then(|| {
+            Tensor::from_bool(
+                TensorData::new(staged_slot_mask(staged, windows, slots), [rows, slots]),
+                &self.device,
+            )
         });
         Ok(Some(PlannedSegment {
             source: SegmentSource::Staged,
@@ -1367,25 +1352,11 @@ impl<B: Backend> NativeKvCache<B> {
     }
 }
 
-/// Uploads a `[rows, slots]` Bool mask computed on the host.
-fn host_mask<B: Backend>(
-    rows: usize,
-    slots: usize,
-    device: &B::Device,
-    valid: impl Fn(usize, usize) -> bool,
-) -> Tensor<B, 2, Bool> {
-    let mask = (0..rows)
-        .flat_map(|row| (0..slots).map(move |slot| (row, slot)))
-        .map(|(row, slot)| valid(row, slot))
-        .collect::<Vec<_>>();
-    Tensor::from_bool(TensorData::new(mask, [rows, slots]), device)
-}
-
-/// Converts a position to Burn's portable `i32` index type.
-fn to_i32(value: usize) -> TensorCacheResult<i32> {
-    i32::try_from(value).map_err(|_| TensorCacheError::TensorIndexOverflow {
+/// Converts key positions to Burn's portable `i32` index type (the verified `portable_indices`).
+fn key_positions(positions: &[usize]) -> TensorCacheResult<Vec<i32>> {
+    portable_indices(positions).map_err(|index| TensorCacheError::TensorIndexOverflow {
         axis: "key position",
-        index: value,
+        index: positions[index],
     })
 }
 

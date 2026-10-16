@@ -53,6 +53,36 @@ pub open spec fn ring_rewind_safe(from: int, to: int, window: int) -> bool {
 
 } // verus!
 
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// `plan` splits the visible window of `committed + staged` working tokens.
+///
+/// With `visible = min(committed + staged, window)`, the plan keeps the newest
+/// `committed_keep` committed tokens and the staged suffix from `staged_skip`,
+/// together exactly `visible` positions starting at `retained_start`, and
+/// keeps committed tokens only when no proposal was dropped.
+pub(crate) open spec fn working_window_correct(
+    plan: WorkingWindow,
+    committed: int,
+    staged: int,
+    window: int,
+) -> bool {
+    let working = committed + staged;
+    let visible = if working <= window { working } else { window };
+    let staged_keep = staged - plan.staged_skip;
+    &&& plan.staged_skip <= staged
+    &&& plan.committed_keep <= committed
+    &&& plan.committed_keep <= window
+    &&& plan.committed_keep + staged_keep == visible
+    &&& plan.retained_start == working - visible
+    &&& plan.committed_keep > 0 ==> plan.staged_skip == 0
+        && plan.retained_start == committed - plan.committed_keep
+    &&& plan.committed_keep == 0 ==> plan.retained_start == committed + plan.staged_skip
+}
+
+} // verus!
+
 /// Returns whether rewinding a sliding ring from `from` to `to` keeps every
 /// newly visible position available.
 ///
@@ -97,7 +127,9 @@ pub(crate) fn recurrent_rewind_is_exact(from: usize, to: usize) -> bool {
 
 /// Returns the first row whose ring rewind would expose overwritten history.
 ///
-/// Rows are checked in order so diagnostics name the lowest offending row.
+/// Rows are checked in order so diagnostics name the lowest offending row:
+/// the proof shows the result is `None` exactly when every row is safe, and
+/// otherwise names an unsafe row before which every row is safe.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(first =>
     requires
@@ -111,6 +143,9 @@ pub(crate) fn recurrent_rewind_is_exact(from: usize, to: usize) -> bool {
             &&& row < current.len()
             &&& !ring_rewind_safe(current[row as int] as int, requested[row as int] as int,
                 window as int)
+            &&& forall|i: int| 0 <= i < row ==>
+                ring_rewind_safe(#[trigger] current[i] as int, requested[i] as int,
+                    window as int)
         },
 ))]
 pub(crate) fn first_unsafe_ring_rewind(
@@ -140,6 +175,9 @@ pub(crate) fn first_unsafe_ring_rewind(
 }
 
 /// Returns the first row whose recurrent state cannot represent its requested length.
+///
+/// Proved: `None` exactly when every row stays put or restarts from zero;
+/// otherwise the lowest row that does neither.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(first =>
     requires
@@ -151,6 +189,8 @@ pub(crate) fn first_unsafe_ring_rewind(
             &&& row < current.len()
             &&& requested[row as int] != current[row as int]
             &&& requested[row as int] != 0
+            &&& forall|i: int| 0 <= i < row ==>
+                (#[trigger] requested[i] == current[i] || requested[i] == 0)
         },
 ))]
 pub(crate) fn first_inexact_recurrent_rewind(
@@ -204,19 +244,7 @@ pub(crate) struct WorkingWindow {
         window > 0,
         committed + staged <= usize::MAX,
     ensures
-        ({
-            let working = committed + staged;
-            let visible = if working <= window { working } else { window as int };
-            let staged_keep = staged - plan.staged_skip;
-            &&& plan.staged_skip <= staged
-            &&& plan.committed_keep <= committed
-            &&& plan.committed_keep <= window
-            &&& plan.committed_keep + staged_keep == visible
-            &&& plan.retained_start == working - visible
-            &&& plan.committed_keep > 0 ==> plan.staged_skip == 0
-                && plan.retained_start == committed - plan.committed_keep
-            &&& plan.committed_keep == 0 ==> plan.retained_start == committed + plan.staged_skip
-        }),
+        working_window_correct(plan, committed as int, staged as int, window as int),
 ))]
 pub(crate) fn ring_working_window(committed: usize, staged: usize, window: usize) -> WorkingWindow {
     let staged_keep = staged.min(window);
