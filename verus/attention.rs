@@ -4,7 +4,8 @@
 //!
 //! - `src/attention/geometry.rs`: grouped operand and projected-layer shape
 //!   validators accept exactly the documented shapes and report the first
-//!   failed check; a skipped causal mask (one query row) excludes no link;
+//!   failed check; the head-group quotient of a validated geometry is exact;
+//!   a skipped causal mask (one query row) excludes no link;
 //!   native routing passes the backend's causal flag only for square
 //!   planes, where top-left and bottom-right alignment coincide; and mask
 //!   unions broadcast to the larger extent on every axis;
