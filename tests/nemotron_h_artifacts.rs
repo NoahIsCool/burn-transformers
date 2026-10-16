@@ -2182,6 +2182,434 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
     );
 }
 
+/// Decision whose official hidden trace localizes the recurrent/chunked split.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const DIAGNOSED_DECISION: usize = 14;
+
+/// Number of semantic hidden boundaries: embedding, 52 blocks, final norm.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const HIDDEN_BOUNDARIES: usize = 54;
+
+/// Lightning residual width.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const HIDDEN_WIDTH: usize = 2_688;
+
+/// One Burn cached run: every decision's logits and one decision's hidden trace.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+struct CachedDiagnosticRun {
+    /// Full-vocabulary rows for every reference decision.
+    logits: Vec<Vec<f32>>,
+    /// All [`HIDDEN_BOUNDARIES`] rows at [`DIAGNOSED_DECISION`], boundary-major.
+    hidden: Vec<f32>,
+}
+
+/// One cached run measured against the Burn teacher-forced chunk.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+struct CrossedPathSummary {
+    /// Minimum full-vocabulary logit cosine over all decisions.
+    minimum: f64,
+    /// Decision attaining [`Self::minimum`] (first on ties).
+    minimum_decision: usize,
+    /// Logit cosine at [`DIAGNOSED_DECISION`].
+    diagnosed: f64,
+    /// Decisions whose top-1 tokens agree.
+    top1_agreements: usize,
+    /// Hidden cosine at every boundary of [`DIAGNOSED_DECISION`].
+    hidden: Vec<f64>,
+}
+
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+impl CrossedPathSummary {
+    /// Returns the boundary with the lowest hidden cosine and that cosine.
+    fn worst_boundary(&self) -> (usize, f64) {
+        first_minimum(self.hidden.iter().copied())
+    }
+}
+
+/// Returns the first index attaining the minimum value, and that value.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn first_minimum(values: impl IntoIterator<Item = f64>) -> (usize, f64) {
+    values
+        .into_iter()
+        .enumerate()
+        .fold((0, f64::INFINITY), |best, (index, value)| {
+            if value < best.1 { (index, value) } else { best }
+        })
+}
+
+/// Runs chunked prefill and 31 one-token updates, keeping every decision row.
+///
+/// The token stream is the official greedy continuation, so cached decision
+/// `d` consumes generated token `d - 1` exactly as the oracle's cached path
+/// did. Only [`DIAGNOSED_DECISION`] retains its hidden trace.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn run_cached_diagnostic(
+    model: &AutoCausalLm<Metal>,
+    prompt_ids: &[i64],
+    generation_ids: &[u32],
+    device: &<Metal as burn::tensor::backend::BackendTypes>::Device,
+) -> CachedDiagnosticRun {
+    use nemotron_h_base_reference::{REFERENCE_DECISIONS, REFERENCE_VOCABULARY_SIZE};
+
+    let prompt_length = prompt_ids.len();
+    let mut state = model
+        .new_decode_state(
+            CacheConfig::new(1, prompt_length + REFERENCE_DECISIONS - 1)
+                .expect("valid diagnostic cache"),
+            1,
+            device,
+        )
+        .expect("allocate the Nemotron diagnostic cache");
+    let prefill = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(prompt_ids.to_vec(), [1, prompt_length]),
+                    device,
+                ),
+                token_mask: Some(all_valid_metal_mask(prompt_length, device)),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect("run diagnostic cached prefill");
+    assert_eq!(prefill.logits.dims(), [1, 1, REFERENCE_VOCABULARY_SIZE]);
+    let mut logits = vec![finite_metal_values(
+        "Nemotron diagnostic prefill logits",
+        &prefill.logits,
+    )];
+    let mut hidden = None;
+    for decision in 1..REFERENCE_DECISIONS {
+        let capture_hidden = decision == DIAGNOSED_DECISION;
+        let decoded = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<Metal, 2, Int>::from_data(
+                        TensorData::new(vec![i64::from(generation_ids[decision - 1])], [1, 1]),
+                        device,
+                    ),
+                    token_mask: Some(all_valid_metal_mask(1, device)),
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions {
+                    hidden_states: capture_hidden,
+                    ..ForwardOptions::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("run diagnostic decision {decision}: {error}"));
+        assert_eq!(decoded.logits.dims(), [1, 1, REFERENCE_VOCABULARY_SIZE]);
+        logits.push(finite_metal_values(
+            "Nemotron diagnostic recurrent logits",
+            &decoded.logits,
+        ));
+        if capture_hidden {
+            hidden = Some(hidden_trace(
+                "Nemotron diagnostic recurrent hidden trace",
+                &decoded.hidden_states,
+                1,
+            ));
+        }
+    }
+    CachedDiagnosticRun {
+        logits,
+        hidden: hidden.expect("the diagnosed decision must retain its hidden trace"),
+    }
+}
+
+/// Returns the top-1 index of one full-vocabulary row (first maximum on ties).
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn top1(row: &[f32]) -> usize {
+    row.iter()
+        .enumerate()
+        .fold((0, f32::NEG_INFINITY), |best, (index, &value)| {
+            if value > best.1 { (index, value) } else { best }
+        })
+        .0
+}
+
+/// Measures one cached run against the Burn teacher-forced rows and hidden trace.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn crossed_path_summary(
+    cached: &CachedDiagnosticRun,
+    teacher_rows: &[Vec<f32>],
+    teacher_hidden: &[f32],
+) -> CrossedPathSummary {
+    let cosines = cached
+        .logits
+        .iter()
+        .zip(teacher_rows)
+        .map(|(cached, teacher)| cosine_similarity(cached, teacher))
+        .collect::<Vec<_>>();
+    let (minimum_decision, minimum) = first_minimum(cosines.iter().copied());
+    CrossedPathSummary {
+        minimum,
+        minimum_decision,
+        diagnosed: cosines[DIAGNOSED_DECISION],
+        top1_agreements: cached
+            .logits
+            .iter()
+            .zip(teacher_rows)
+            .filter(|(cached, teacher)| top1(cached) == top1(teacher))
+            .count(),
+        hidden: cached
+            .hidden
+            .chunks_exact(HIDDEN_WIDTH)
+            .zip(teacher_hidden.chunks_exact(HIDDEN_WIDTH))
+            .map(|(cached, teacher)| cosine_similarity(cached, teacher))
+            .collect(),
+    }
+}
+
+/// Separates the two candidate causes of the official decision-14 divergence.
+///
+/// In the authenticated oracle the recurrent cached path and the chunked
+/// teacher path keep identical top-1 tokens, but their hidden states at
+/// decision 14 first diverge after Mamba layer 0 (cosine `0.892`) although the
+/// embedding is identical. The pinned reference treats the two paths
+/// differently in two ways: its chunk scan clamps the discretization step
+/// `Δ = softplus(dt + dt_bias)` to `[time_step_min, ∞)` while its one-token
+/// update does not, and its F16 one-token update rounds `(ΔB)x`, the `C`
+/// contraction, and the `D` skip in the activation dtype. This diagnostic
+/// measures both and asserts neither outcome:
+///
+/// 1. **Δ census.** Mamba layer 0 reads `RMSNorm(embedding)`, a per-token
+///    function shared exactly by both paths, so its `Δ` does not depend on the
+///    path. The stateless hook captures that input; the layer's own fused
+///    projection, `dt_bias`, the reference softplus (`x > 20 ? x :
+///    log1p(exp(x))` in F32, rounded once to F16), and the clamp then give
+///    every token's 64 head steps. An entry counts when the clamp changes it,
+///    which is exactly where the two official paths compute different `Δ`.
+/// 2. **Clamp counterfactual.** The crate reproduces each reference path,
+///    including the F16 one-token rounding, and [`TimeStepClamp`] states the
+///    clamp as data. Re-running the cached path with the one-token update
+///    clamped too changes only the clamp, so the cached-versus-teacher distance
+///    that disappears is the clamp's and the distance that remains is the
+///    precision policy's.
+///
+/// Both cached runs share the same chunked prefill, so their decision-0 rows
+/// must be bitwise identical; only one-token updates may differ.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+#[test]
+#[ignore = "requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory"]
+fn diagnoses_pinned_nemotron_decision_14_time_step_clamp() {
+    use nemotron_h_base_reference::{REFERENCE_DECISIONS, REFERENCE_VOCABULARY_SIZE};
+    use transformers::{
+        intervention::{Hooks, Layer},
+        mamba2::{TimeStepClamp, TimeStepLimits},
+        operations,
+    };
+
+    let started = Instant::now();
+    let reference = nemotron_h_base_reference::load_and_validate_reference_bundle();
+    assert_eq!(reference.prompt_token_ids(), SMOKE_TOKEN_IDS);
+    let generation_ids = reference.generation_token_ids().to_vec();
+    assert_eq!(generation_ids.len(), REFERENCE_DECISIONS);
+
+    let supplied = pinned_root();
+    let root = supplied
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied.display()));
+    let device = Default::default();
+    assert_metal_backend_available(&device);
+    assert_control_files(&root);
+    assert_weight_files(&root);
+    let mut loaded = load_pinned_nemotron_f16(&root, &device);
+
+    let prompt_ids = SMOKE_TOKEN_IDS
+        .iter()
+        .copied()
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    let prompt_length = prompt_ids.len();
+    let mut teacher_ids = prompt_ids.clone();
+    teacher_ids.extend(
+        generation_ids
+            .iter()
+            .take(REFERENCE_DECISIONS - 1)
+            .copied()
+            .map(i64::from),
+    );
+    let teacher_length = teacher_ids.len();
+    // Teacher position `prompt_length - 1 + d` predicts generated token `d`.
+    let diagnosed_position = prompt_length - 1 + DIAGNOSED_DECISION;
+
+    // ---- Δ census and the Burn teacher path from one hooked stateless pass.
+    let AutoCausalLm::NemotronH(model) = loaded.model() else {
+        panic!("automatic dispatch must select Nemotron-H");
+    };
+    let time_step_min = model.model.config.time_step_min;
+    let mamba = model.model.layers[0]
+        .mamba
+        .as_ref()
+        .expect("Lightning block 0 is a Mamba-2 mixer");
+    let pinned_clamp = TimeStepClamp::chunked_only(TimeStepLimits::at_least(time_step_min));
+    assert_eq!(mamba.time_step_clamp, pinned_clamp);
+    let heads = mamba.num_heads;
+
+    let mut hooks = Hooks::new();
+    let mixer_input = hooks.capture(Layer::decoder(0).mixer_input());
+    let teacher = model
+        .forward_with_hooks(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(teacher_ids, [1, teacher_length]),
+                    &device,
+                ),
+                token_mask: Some(all_valid_metal_mask(teacher_length, &device)),
+                position_ids: None,
+            },
+            &ForwardOptions {
+                hidden_states: true,
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+            &mut hooks,
+        )
+        .expect("run the hooked Burn teacher-forced chunk");
+    let input = hooks
+        .get(&mixer_input)
+        .expect("Mamba layer 0 input must be captured");
+    assert_eq!(input.dims(), [1, teacher_length, HIDDEN_WIDTH]);
+    assert_eq!(input.dtype(), DType::F16);
+
+    // The mixer's own tiling `[z | xBC | dt]`: `dt` is the last `heads` channels.
+    let projected = operations::linear(input, &mamba.in_proj).expect("project Mamba layer 0 input");
+    let dt_start = heads * mamba.head_dim + mamba.convolution_channels;
+    assert_eq!(projected.dims()[2], dt_start + heads);
+    let dt = projected.narrow(2, dt_start, heads);
+    let dtype = dt.dtype();
+    let biased = (dt + mamba.dt_bias.val().cast(dtype).reshape([1, 1, heads])).cast(DType::F32);
+    let steps = biased
+        .clone()
+        .exp()
+        .log1p()
+        .mask_where(biased.clone().greater_elem(20.0), biased)
+        .cast(dtype);
+    let clamped = steps.clone().clamp_min(time_step_min);
+    let steps = finite_metal_values("Nemotron layer-0 discretization steps", &steps);
+    let clamped = finite_metal_values("Nemotron clamped layer-0 steps", &clamped);
+    assert_eq!(steps.len(), teacher_length * heads);
+    let changed_per_token = steps
+        .chunks_exact(heads)
+        .zip(clamped.chunks_exact(heads))
+        .map(|(steps, clamped)| {
+            steps
+                .iter()
+                .zip(clamped)
+                .filter(|(step, clamped)| step != clamped)
+                .count()
+        })
+        .collect::<Vec<_>>();
+    // Prompt tokens run the chunked scan on both official paths; generated
+    // tokens through the diagnosed decision run one-token updates when cached.
+    let recurrent_positions = prompt_length..=diagnosed_position;
+    let recurrent_changed = changed_per_token[recurrent_positions.clone()]
+        .iter()
+        .sum::<usize>();
+    let recurrent_entries = recurrent_positions.clone().count() * heads;
+    let all_changed = changed_per_token.iter().sum::<usize>();
+    let minimum_step = steps.iter().copied().fold(f32::INFINITY, f32::min);
+    let recurrent_minimum_step = steps[prompt_length * heads..(diagnosed_position + 1) * heads]
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min);
+    let changed_per_recurrent_token = recurrent_positions
+        .clone()
+        .map(|position| {
+            (
+                generation_ids[position - prompt_length],
+                changed_per_token[position],
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        teacher.logits.dims(),
+        [1, teacher_length, REFERENCE_VOCABULARY_SIZE]
+    );
+    let teacher_values = finite_metal_values("Nemotron diagnostic teacher logits", &teacher.logits);
+    let teacher_rows = (0..REFERENCE_DECISIONS)
+        .map(|decision| {
+            let start = (prompt_length - 1 + decision) * REFERENCE_VOCABULARY_SIZE;
+            teacher_values[start..start + REFERENCE_VOCABULARY_SIZE].to_vec()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(teacher.hidden_states.len(), HIDDEN_BOUNDARIES);
+    let mut teacher_hidden = Vec::with_capacity(HIDDEN_BOUNDARIES * HIDDEN_WIDTH);
+    for (index, state) in teacher.hidden_states.iter().enumerate() {
+        assert_eq!(state.dims(), [1, teacher_length, HIDDEN_WIDTH]);
+        teacher_hidden.extend(finite_metal_values(
+            &format!("Nemotron diagnostic teacher hidden {index}"),
+            &state
+                .clone()
+                .narrow(1, diagnosed_position, 1)
+                .reshape([HIDDEN_WIDTH]),
+        ));
+    }
+    drop(teacher);
+    drop(teacher_values);
+
+    // ---- The cached path as pinned: unclamped one-token updates.
+    let pinned = run_cached_diagnostic(loaded.model(), &prompt_ids, &generation_ids, &device);
+
+    // ---- Counterfactual: clamp the one-token updates too; nothing else changes.
+    let AutoCausalLm::NemotronH(model) = loaded.model_mut() else {
+        panic!("automatic dispatch must select Nemotron-H");
+    };
+    let mut mamba_layers = 0;
+    for block in &mut model.model.layers {
+        if let Some(mamba) = block.mamba.as_mut() {
+            assert_eq!(mamba.time_step_clamp, pinned_clamp);
+            mamba.time_step_clamp = TimeStepClamp::both(TimeStepLimits::at_least(time_step_min));
+            mamba_layers += 1;
+        }
+    }
+    assert_eq!(mamba_layers, 23);
+    let clamped_run = run_cached_diagnostic(loaded.model(), &prompt_ids, &generation_ids, &device);
+    assert_eq!(
+        pinned.logits[0], clamped_run.logits[0],
+        "chunked prefill must not depend on the one-token clamp"
+    );
+
+    let pinned = crossed_path_summary(&pinned, &teacher_rows, &teacher_hidden);
+    let clamped_run = crossed_path_summary(&clamped_run, &teacher_rows, &teacher_hidden);
+    eprintln!(
+        "Nemotron decision-{DIAGNOSED_DECISION} Δ census at Mamba layer 0: \
+         time_step_min={time_step_min}, heads={heads}, tokens={teacher_length}, \
+         clamp_changed_all={all_changed}/{}, \
+         clamp_changed_recurrent={recurrent_changed}/{recurrent_entries} (positions {prompt_length}..={diagnosed_position}), \
+         changed_per_token={changed_per_token:?}, \
+         changed_per_recurrent_token={changed_per_recurrent_token:?}, \
+         minimum_step={minimum_step:e}, recurrent_minimum_step={recurrent_minimum_step:e}",
+        teacher_length * heads,
+    );
+    for (label, summary) in [
+        ("pinned unclamped one-token updates", &pinned),
+        ("one-token updates clamped too", &clamped_run),
+    ] {
+        let (worst_boundary, worst_hidden) = summary.worst_boundary();
+        eprintln!(
+            "Nemotron Burn cached-versus-teacher ({label}): \
+             minimum_logit_cosine={:.12}@{}, decision_{DIAGNOSED_DECISION}_logit_cosine={:.12}, \
+             top1_agreements={}/{REFERENCE_DECISIONS}, \
+             decision_{DIAGNOSED_DECISION}_hidden_cosine[embedding,block0,block1,block2]={:.12?}, \
+             worst_hidden_cosine={worst_hidden:.12}@{worst_boundary}",
+            summary.minimum,
+            summary.minimum_decision,
+            summary.diagnosed,
+            summary.top1_agreements,
+            &summary.hidden[..4],
+        );
+    }
+    eprintln!(
+        "Nemotron official crossed-path minimum={:.12}, total_seconds={:.3}",
+        reference.minimum_official_path_cosine,
+        started.elapsed().as_secs_f64(),
+    );
+}
+
 /// Authenticates the independently reviewed Transformers base-model oracle.
 #[test]
 #[ignore = "requires the independently reviewed external Nemotron base-reference bundle"]
