@@ -285,7 +285,8 @@ impl GemmaArchitecture {
     /// by it reproduces their product bit for bit. F64 and integer dtypes
     /// keep the F32 value, as Gemma 3's F32 `embed_scale` buffer does
     /// (embeddings are always floating point). The rounding is the shared
-    /// [`round_to_dtype`] of the modular stacks' `DecoderSpec::embedding_scale`.
+    /// `models::shared::scaling::round_to_dtype` that the modular stacks'
+    /// `DecoderSpec::embedding_scale` also uses.
     #[must_use]
     pub fn embedding_scale(&self, dtype: DType) -> f64 {
         round_to_dtype(f64::from((self.hidden_size as f64).sqrt() as f32), dtype)

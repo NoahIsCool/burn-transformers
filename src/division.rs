@@ -8,7 +8,7 @@
 //! `n + d - 1`, so it is total on the whole integer range.
 //!
 //! The module has no crate, Burn, or allocator dependencies so that Verus can
-//! check it in place. Every harness whose sources use the [`ceiling`]
+//! check it in place. Every harness whose sources use its `ceiling`
 //! specification includes it at its crate path `crate::division`:
 //! `verus/checkpoint.rs`, `verus/perf.rs`, `verus/gpt_oss.rs` (MXFP4), and
 //! `verus/mixers.rs` (DeltaNet and Mamba-2).

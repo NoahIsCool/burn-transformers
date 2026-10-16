@@ -738,24 +738,16 @@ impl<B: Backend> SparseMoe<B> {
         }
     }
 
-    /// Validates dispatch shapes, then evaluates only the experts named by top-k assignments.
+    /// Test shorthand for [`Self::dispatch_with_unit`] with ordinary (unclamped) experts.
     ///
-    /// Discrete IDs (and the optional per-token non-finite flags) are read to
-    /// the host once and grouped by expert; input rows and mixture weights stay
-    /// device tensors gathered with the uploaded permutation, so gradients
-    /// still flow through expert parameters, selected router probabilities,
-    /// and the residual input. `precision` fixes the multiplication and
-    /// accumulation dtypes independently of expert execution, so DeepSeek can
-    /// sum reduced-precision experts in FP32 while Qwen keeps its
-    /// residual-stream convention. Tests call it directly; production code
-    /// reaches it through [`Self::forward`] and [`Self::forward_with_unit`].
+    /// `precision` fixes the multiplication and accumulation dtypes
+    /// independently of expert execution, so DeepSeek can sum
+    /// reduced-precision experts in FP32 while Qwen keeps its residual-stream
+    /// convention; tests drive both conventions through it directly.
     ///
     /// # Errors
     ///
-    /// Returns a shape error for an empty or wrongly sized input or route
-    /// tensors, a configuration error for an invalid expert cardinality or
-    /// precision, a backend-capability error for operands on different
-    /// devices, and the expert-ID errors of [`dispatch_routed_experts`].
+    /// As [`Self::dispatch_with_unit`].
     #[cfg(test)]
     fn dispatch_selected_experts_with_precision(
         &self,
@@ -775,13 +767,27 @@ impl<B: Backend> SparseMoe<B> {
         )
     }
 
-    /// [`Self::dispatch_selected_experts_with_precision`] with every routed
-    /// expert evaluating `unit` through [`GatedFeedForward::forward_clamped`]
-    /// instead of its ordinary gated activation when it is given.
+    /// Validates dispatch shapes, then evaluates only the experts named by
+    /// top-k assignments, each through [`GatedFeedForward::forward_clamped`]
+    /// with `unit` when it is given, and through its ordinary gated
+    /// activation otherwise.
+    ///
+    /// Discrete IDs (and the optional per-token non-finite flags) are read to
+    /// the host once and grouped by expert; input rows and mixture weights
+    /// stay device tensors gathered with the uploaded permutation, so
+    /// gradients still flow through expert parameters, selected router
+    /// probabilities, and the residual input. `precision` fixes the
+    /// multiplication and accumulation dtypes independently of expert
+    /// execution. [`Self::forward_with_unit`] is the production caller; the
+    /// test-only `dispatch_selected_experts_with_precision` calls it without
+    /// a unit.
     ///
     /// # Errors
     ///
-    /// As [`Self::dispatch_selected_experts_with_precision`].
+    /// Returns a shape error for an empty or wrongly sized input or route
+    /// tensors, a configuration error for an invalid expert cardinality or
+    /// precision, a backend-capability error for operands on different
+    /// devices, and the expert-ID errors of [`dispatch_routed_experts`].
     fn dispatch_with_unit(
         &self,
         flat_input: Tensor<B, 2>,
