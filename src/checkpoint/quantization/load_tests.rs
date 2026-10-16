@@ -2285,3 +2285,190 @@ fn checkpoint_standards_quantization_error_conversion_retains_source() {
     ));
     assert_eq!(wrapped.to_string(), source.to_string());
 }
+
+/// Moves `checkpoint` aside and leaves a directory symlink at its old path.
+///
+/// Every shard path still opens the same regular file, and a no-follow
+/// inspection of the final component still sees that file, but the shard no
+/// longer canonicalizes to the path discovery recorded.
+#[cfg(unix)]
+fn redirect_through_directory_symlink(checkpoint: &Path) {
+    let moved = checkpoint.with_extension("moved");
+    fs::rename(checkpoint, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, checkpoint).unwrap();
+}
+
+/// Writes the executable fixture below `directory/checkpoint` with its sidecar beside it.
+#[cfg(unix)]
+fn nested_executable_sidecar(
+    directory: &TempDir,
+) -> (CheckpointManifest, LoadPlan, PathBuf, PathBuf) {
+    let checkpoint = directory.path().join("checkpoint");
+    fs::create_dir(&checkpoint).unwrap();
+    write_checkpoint(
+        &checkpoint,
+        &[
+            ("model.embed_tokens.weight", vec![2, 32]),
+            ("model.layers.0.input_layernorm.weight", vec![32]),
+            ("model.layers.0.self_attn.q_proj.weight", vec![32, 32]),
+        ],
+    );
+    let (manifest, plan) = fixture_plan(&checkpoint, None);
+    let output = directory.path().join("weights-q8.bpk");
+    quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions {
+            weights: WeightQuantizationConfig {
+                group_size: QuantizationGroupSize::new(32).unwrap(),
+                ..WeightQuantizationConfig::default()
+            },
+            ..QuantizedCheckpointOptions::default()
+        },
+    )
+    .unwrap();
+    (manifest, plan, output, checkpoint)
+}
+
+/// Asserts the provenance rejection of a shard reached through a moved parent.
+#[cfg(unix)]
+fn assert_redirected_shard(cause: &ExecutionFailureCause<QuantizedSinkError<SinkError>>) {
+    assert!(
+        matches!(cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::InvalidProvenance { reason }
+            )) if reason == "checkpoint shard `model.safetensors` resolves outside its discovered canonical path"),
+        "{cause:?}"
+    );
+}
+
+/// A shard redirected before loading fails the first hash pass with no model writes.
+///
+/// The redirect survives the no-follow shard preflight (the final path
+/// component is still a regular file of the recorded length), so the
+/// canonical-path check inside the hash pass is the gate that refuses it.
+#[cfg(unix)]
+#[test]
+fn local_overlay_prehash_rejects_a_redirected_shard_before_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manifest, plan, output, checkpoint) = nested_executable_sidecar(&directory);
+    let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+    redirect_through_directory_symlink(&checkpoint);
+    let mut sink = RecordingSink::default();
+
+    let audited =
+        execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+    assert_eq!(audited.format_version, 2);
+    assert_eq!(audited.preflight.passes_completed, 1);
+    let failure = &audited.execution;
+    assert_redirected_shard(&failure.cause);
+    assert_eq!(failure.failed_target, None);
+    assert_eq!(failure.execution, ExecutionStats::default());
+    assert!(failure.report.applied.is_empty());
+    let pre = failure.provenance.pre_execution.unwrap();
+    assert_eq!(pre.passes_completed, 0);
+    assert_eq!(pre.bytes_hashed, 0);
+    assert_eq!(failure.provenance.post_execution, None);
+    assert!(sink.operations.is_empty());
+}
+
+/// Redirects the checkpoint directory once the final tensor has been installed.
+#[cfg(unix)]
+struct RedirectingSink {
+    /// Recorder counting successfully installed tensors.
+    inner: RecordingSink,
+    /// Checkpoint directory moved behind a symlink at the final write.
+    checkpoint: PathBuf,
+    /// Number of successful writes that triggers the redirect.
+    final_write_count: usize,
+}
+
+#[cfg(unix)]
+impl TensorSink for RedirectingSink {
+    /// Architecture failures of the wrapped recorder.
+    type Error = SinkError;
+
+    /// Installs a tensor, redirecting the checkpoint after the last one.
+    fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
+        self.inner.write_tensor(target, data)?;
+        if self.inner.tensors.len() == self.final_write_count {
+            redirect_through_directory_symlink(&self.checkpoint);
+        }
+        Ok(())
+    }
+
+    /// Forwards aliases without another filesystem change.
+    fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
+        self.inner.alias_tensor(target, source_target)
+    }
+}
+
+/// A shard redirected during loading fails the second hash pass after a full load.
+///
+/// The model is completely written (the sink is not transactional), so the
+/// failure must carry the full execution audit and a started-but-incomplete
+/// post-execution pass for the caller to discard the model.
+#[cfg(unix)]
+#[test]
+fn local_overlay_posthash_rejects_a_shard_redirected_during_execution() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manifest, plan, output, checkpoint) = nested_executable_sidecar(&directory);
+    let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+    let mut sink = RedirectingSink {
+        inner: RecordingSink::default(),
+        checkpoint,
+        final_write_count: plan.tensors.len(),
+    };
+
+    let audited =
+        execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+    let failure = &audited.execution;
+    assert_redirected_shard(&failure.cause);
+    assert_eq!(failure.failed_target, None);
+    assert_eq!(failure.execution.tensors_applied, 3);
+    assert_eq!(failure.packed.tensors_applied, 1);
+    assert_eq!(failure.report.applied.len(), 3);
+    assert_eq!(sink.inner.operations.len(), 3);
+    assert_complete_hash_pass(failure.provenance.pre_execution, &manifest);
+    let post = failure.provenance.post_execution.unwrap();
+    assert_eq!(post.passes_completed, 0);
+    assert_eq!(post.bytes_hashed, 0);
+}
+
+/// A sidecar claiming packed execution with no tensors fails the contract check.
+///
+/// Writers never emit this manifest (an empty inventory is `unavailable`), so
+/// it is assembled through Burn Store directly; the contract must still refuse
+/// to treat an empty overlay as a packed model.
+#[test]
+fn sidecar_contract_rejects_an_empty_inventory_claiming_packed_execution() {
+    let directory = tempfile::tempdir().unwrap();
+    use crate::checkpoint::quantization::BurnpackQuantizationManifest;
+
+    let (_, plan, _) = executable_sidecar(&directory);
+    let manifest = BurnpackQuantizationManifest {
+        packed_execution: PackedExecutionSupport::BurnQFloatMatmul,
+        ..BurnpackQuantizationManifest::new_legacy_v1()
+    };
+    let json = manifest.to_json_pretty().unwrap().into_bytes();
+    let length = json.len();
+    let snapshot = burn_store::TensorSnapshot::from_data(
+        TensorData::new(json, [length]),
+        vec![crate::checkpoint::quantization::BURNPACK_MANIFEST_TENSOR.to_owned()],
+        vec!["Fixture".into()],
+        burn::module::ParamId::from(0),
+    );
+    let path = directory.path().join("empty-packed.bpk");
+    burn_store::BurnpackWriter::new(vec![snapshot])
+        .write_to_file(&path)
+        .unwrap();
+    let artifact = QuantizedBurnpackArtifact::open(&path).unwrap();
+    assert!(matches!(
+        validate_sidecar_contract(&plan, &artifact),
+        Err(QuantizationError::SidecarContract { name, reason })
+            if name == "<manifest>" && reason == "packed execution requires at least one model tensor"
+    ));
+}

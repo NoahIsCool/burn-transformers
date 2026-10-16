@@ -37,14 +37,21 @@ pub struct MemoryEstimate {
     pub largest_equivalence_pair_bytes: u64,
     /// Conservative pass-two host bound for transforms and equivalence preflight.
     ///
-    /// The bound is the greater of largest-shard-plus-largest-output and the
-    /// largest simultaneously held physical alias/owner pair. It deliberately
-    /// over-approximates the executor, which holds at most one source payload
-    /// plus one output (or only the source for in-place equal-width casts); the
-    /// slack leaves room for architecture-specific staging such as packed
-    /// overrides. [`crate::checkpoint::LoadPlan::required_host_staging_bytes`]
-    /// computes the tight per-operation figure. Backend transfer queues and
-    /// activations are excluded, so process-wide usage can be higher.
+    /// [`crate::checkpoint::build_load_plan`] sets it to the maximum of three
+    /// terms: the largest shard plus the largest materialized output, the
+    /// largest alias/owner payload pair compared for exact equivalence, and the
+    /// largest MXFP4 decode (`blocks + scales + output`). It over-approximates
+    /// what the executor stages for any single operation: one source and its
+    /// output, only the source for an in-place equal-width cast, both MXFP4
+    /// sources and the output, or one equivalence pair.
+    /// [`crate::checkpoint::LoadPlan::required_host_staging_bytes`] computes
+    /// that per-operation figure exactly. The runtime checks every planned
+    /// operation against this field before reading any payload and fails with
+    /// [`crate::checkpoint::CheckpointError::MemoryEstimateExceeded`] when an
+    /// operation needs more. Architecture loaders may raise it to budget for
+    /// staging inside their sinks, such as splitting a packed projection into
+    /// components. Backend transfer queues and activations are excluded, so
+    /// process-wide usage can be higher.
     pub peak_host_staging_bytes: u64,
 }
 

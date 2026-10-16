@@ -992,18 +992,15 @@ fn exactly_one_source(tensor: &PlannedTensor) -> Result<&PlannedSource> {
     }
 }
 
-/// Computes tensor bytes with checked shape multiplication.
+/// Computes `product(shape) * bits / 8` with checked shape multiplication.
+///
+/// A shape product that overflows `u64` is reported against `tensor`;
+/// [`TensorDType::storage_bytes`] then fails only with
+/// [`CheckpointError::ArithmeticOverflow`] (too many bits) or
+/// [`CheckpointError::MisalignedTensorStorage`] (a partial final byte), which
+/// are returned unchanged.
 fn byte_len(shape: &[u64], dtype: TensorDType, tensor: &str) -> Result<u64> {
-    dtype
-        .storage_bytes(checked_elements(shape, tensor)?)
-        .map_err(|error| match error {
-            CheckpointError::ArithmeticOverflow { .. }
-            | CheckpointError::MisalignedTensorStorage { .. } => error,
-            _ => CheckpointError::InvalidTensorPayload {
-                tensor: tensor.to_owned(),
-                reason: error.to_string(),
-            },
-        })
+    dtype.storage_bytes(checked_elements(shape, tensor)?)
 }
 
 /// Computes a shape product, treating rank zero as one scalar.

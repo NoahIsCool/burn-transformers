@@ -206,11 +206,7 @@ impl QuantizedTensorMetadata {
         }
 
         let num_elements = checked_num_elements_u64(&shape_wire)?;
-        let group_size = u64::try_from(config.group_size.get()).map_err(|_| {
-            QuantizationError::ByteLengthOverflow {
-                context: "group size conversion",
-            }
-        })?;
+        let group_size = config.group_size.get_u64();
         // Verified exact counts: `⌈n / G⌉` groups, `n` or `⌈n / 2⌉` code bytes, four scale bytes per group.
         let counts = wire_counts(num_elements, group_size, config.scheme.code_width());
         let group_count = counts.group_count;
@@ -263,11 +259,7 @@ impl QuantizedTensorMetadata {
             ));
         }
 
-        let group_size = u64::try_from(self.group_size.get()).map_err(|_| {
-            QuantizationError::ByteLengthOverflow {
-                context: "group size conversion",
-            }
-        })?;
+        let group_size = self.group_size.get_u64();
         let counts = wire_counts(expected_elements, group_size, self.scheme.code_width());
         let expected_groups = counts.group_count;
         if self.group_count != expected_groups {
@@ -298,17 +290,15 @@ impl QuantizedTensorMetadata {
             ));
         }
 
-        if self.group_layout != QuantizedGroupLayout::FlatRowMajorContiguous {
-            return invalid_metadata("unsupported group layout");
-        }
+        // The group, scale, and payload vocabularies each have exactly one
+        // variant, so deserialization has already fixed those discriminants.
+        // These irrefutable patterns turn a future variant into a compile error
+        // here, forcing its validation rule to be written before it can ship.
+        let QuantizedGroupLayout::FlatRowMajorContiguous = self.group_layout;
+        let ScaleLayout::F32LittleEndianPerGroup = self.scale_layout;
+        let QuantizedPayloadLayout::PackedValuesThenScales = self.payload_layout;
         if self.packed_value_layout != packed_layout(self.scheme) {
             return invalid_metadata("packed-value layout does not match scheme");
-        }
-        if self.scale_layout != ScaleLayout::F32LittleEndianPerGroup {
-            return invalid_metadata("unsupported scale layout");
-        }
-        if self.payload_layout != QuantizedPayloadLayout::PackedValuesThenScales {
-            return invalid_metadata("unsupported payload layout");
         }
         if let Some(digest) = &self.payload_sha256 {
             validate_sha256(digest, "packed tensor payload")?;

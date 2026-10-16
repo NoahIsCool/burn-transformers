@@ -3367,3 +3367,262 @@ fn checkpoint_standards_override_alias_failure_keeps_successful_owner_and_alias(
     assert_eq!(sink.aliases["a_alias"], "weight");
     assert!(!sink.aliases.contains_key("z_alias"));
 }
+
+// Defense-in-depth helpers: the public executor validates the plan before these
+// run, so their own guards are pinned here by calling them directly.
+
+/// Packed-load diagnostics explain the unsupported operation and its remedy.
+#[test]
+fn packed_parameter_install_errors_name_their_remedy() {
+    let autodiff = ParameterInstallError::QuantizedAutodiff.to_string();
+    assert!(autodiff.starts_with("Burn 0.21 autodiff cannot load or differentiate packed Q4/Q8"));
+    assert!(autodiff.ends_with("dequantize on the inner backend before loading floating data"));
+    let inexact = ParameterInstallError::InexactPackedLayout.to_string();
+    assert!(inexact.starts_with(
+        "the parameter's load mapper would not preserve the packed weight's exact blocks"
+    ));
+    assert!(inexact.contains("install dequantized values"));
+    assert_eq!(
+        ParameterInstallError::PayloadLength {
+            expected: 8,
+            actual: 4
+        }
+        .to_string(),
+        "expected 8 checkpoint float bytes, received 4"
+    );
+}
+
+/// Alias installation refuses a non-alias entry even when plan validation is bypassed.
+///
+/// `validate_plan` rejects the same edit first with the same message, so a
+/// public plan mutation is caught twice and never reaches `alias_tensor`.
+#[test]
+fn alias_installation_rejects_non_alias_entries_without_sink_calls() {
+    let (mut plan, mut source) = aliased_memory_fixture();
+    plan.aliases[0].transform = PlannedTransform::Identity;
+    let mut sink = CollectingSink::default();
+    let mut report = plan.report.without_progress();
+    let mut stats = ExecutionStats::default();
+    let (target, cause) = install_aliases(&plan, &mut sink, &mut report, &mut stats).unwrap_err();
+    assert_eq!(target.as_deref(), Some("alias"));
+    assert!(
+        matches!(&cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "entry `alias` in alias list is not an alias")
+    );
+    assert!(sink.events.is_empty());
+    assert_eq!(stats.aliases_applied, 0);
+    assert!(report.applied.is_empty());
+
+    let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+    assert!(
+        matches!(&failure.cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "entry `alias` in alias list is not an alias")
+    );
+    assert_eq!(failure.failed_target, None);
+    assert!(sink.events.is_empty());
+}
+
+/// The equivalence pass rechecks the observed pair against the staging bound.
+///
+/// Plan validation rejects an undersized bound before any read; this direct
+/// call shows the second guard measuring the payloads actually returned, after
+/// both reads and before any comparison or report record.
+#[test]
+fn equivalence_pass_bounds_observed_payload_pairs() {
+    let tensors = [
+        FixtureTensor::new("owner", TensorDType::F32, [2], f32_bytes(&[1.0, -2.0])),
+        FixtureTensor::new("copy", TensorDType::F32, [2], f32_bytes(&[1.0, -2.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("owner", [2])];
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("copy", "owner")],
+        ..LoadOptions::default()
+    };
+    let mut plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    plan.memory.peak_host_staging_bytes = 15;
+    let mut source = MemorySource {
+        tensors: tensors
+            .iter()
+            .map(|tensor| {
+                let payload = SourceTensor::new(
+                    &tensor.name,
+                    tensor.shape.clone(),
+                    tensor.dtype,
+                    tensor.bytes.clone(),
+                )
+                .unwrap();
+                (tensor.name.clone(), payload)
+            })
+            .collect(),
+        ..MemorySource::default()
+    };
+    let mut report = plan.report.without_progress();
+    let mut stats = ExecutionStats::default();
+    let (alias, error) =
+        verify_checkpoint_equivalences(&plan, &mut source, &mut report, &mut stats).unwrap_err();
+    assert_eq!(alias, "copy");
+    assert!(
+        matches!(&error, CheckpointError::MemoryEstimateExceeded { tensor, required: 16, planned: 15 }
+        if tensor == "copy")
+    );
+    assert_eq!(stats.equivalence_source_reads, 2);
+    assert_eq!(stats.equivalence_source_payload_bytes, 16);
+    assert_eq!(stats.largest_equivalence_pair_bytes, 16);
+    assert_eq!(stats.equivalences_verified, 0);
+    assert!(report.equivalence_verified.is_empty());
+}
+
+/// Builds a one-source planned descriptor for scheduling tests.
+fn scheduled_source(name: &str, shard: &str, start: u64) -> PlannedSource {
+    PlannedSource {
+        name: name.into(),
+        shard: shard.into(),
+        shape: vec![1],
+        dtype: TensorDType::F32,
+        data_offsets: [start, start + 4],
+    }
+}
+
+/// Builds a planned F32 target over `sources` with the given transform.
+fn scheduled_tensor(
+    target: &str,
+    sources: Vec<PlannedSource>,
+    transform: PlannedTransform,
+) -> PlannedTensor {
+    PlannedTensor {
+        target: target.into(),
+        sources,
+        transform,
+        shape: vec![1],
+        dtype: TensorDType::F32,
+    }
+}
+
+/// Only a well-formed unary slice joins a fused-source group.
+#[test]
+fn shared_slice_keys_require_exactly_one_slice_source() {
+    let slice = PlannedTransform::Slice {
+        axis: 0,
+        start: 0,
+        length: 1,
+    };
+    let source = scheduled_source("fused", "a.safetensors", 0);
+    let unary = scheduled_tensor("q", vec![source.clone()], slice.clone());
+    assert_eq!(
+        shared_slice_key(&unary),
+        Some(SharedSourceKey::from(&source))
+    );
+    let binary = scheduled_tensor("k", vec![source.clone(), source.clone()], slice.clone());
+    assert_eq!(shared_slice_key(&binary), None);
+    let sourceless = scheduled_tensor("v", Vec::new(), slice);
+    assert_eq!(shared_slice_key(&sourceless), None);
+    let identity = scheduled_tensor("o", vec![source], PlannedTransform::Identity);
+    assert_eq!(shared_slice_key(&identity), None);
+}
+
+/// Group ordering is total: real sources first, then empty or sourceless groups.
+#[test]
+fn execution_group_order_places_missing_descriptors_last() {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+
+    let tensors = [
+        scheduled_tensor(
+            "late",
+            vec![scheduled_source("x", "b.safetensors", 0)],
+            PlannedTransform::Identity,
+        ),
+        scheduled_tensor(
+            "early",
+            vec![scheduled_source("y", "a.safetensors", 8)],
+            PlannedTransform::Identity,
+        ),
+        scheduled_tensor("orphan", Vec::new(), PlannedTransform::Identity),
+    ];
+    assert_eq!(execution_group_order(&tensors, &[1], &[0]), Less);
+    assert_eq!(execution_group_order(&tensors, &[0], &[2]), Less);
+    assert_eq!(execution_group_order(&tensors, &[2], &[0]), Greater);
+    // Groups whose index lies outside the plan sort after every real group.
+    assert_eq!(execution_group_order(&tensors, &[0], &[9]), Less);
+    assert_eq!(execution_group_order(&tensors, &[9], &[0]), Greater);
+    assert_eq!(execution_group_order(&tensors, &[], &[]), Equal);
+    assert_eq!(execution_group_order(&tensors, &[9], &[7]), Greater);
+
+    let first = scheduled_source("y", "a.safetensors", 8);
+    assert_eq!(physical_source_order(Some(&first), None), Less);
+    assert_eq!(physical_source_order(None, Some(&first)), Greater);
+    assert_eq!(physical_source_order(None, None), Equal);
+    let mut wider = first.clone();
+    wider.data_offsets[1] += 4;
+    assert_eq!(physical_source_order(Some(&first), Some(&wider)), Less);
+}
+
+/// Grouped installation refuses work items that bypass their own invariants.
+///
+/// Execution groups contain several targets only when every member is a unary
+/// slice, and only overridden targets may skip their source. Called directly
+/// with groups violating those invariants, installation fails before any sink
+/// call instead of indexing a missing descriptor or delivering nothing.
+#[test]
+fn grouped_installation_rejects_inconsistent_dispositions() {
+    let (plan, mut source) = aliased_memory_fixture();
+    let mut sourceless = plan.clone();
+    sourceless.tensors[0].sources.clear();
+    sourceless.tensors.push(PlannedTensor {
+        target: "weight_copy".into(),
+        ..sourceless.tensors[0].clone()
+    });
+    let mut sink = CollectingSink::default();
+    let mut report = plan.report.without_progress();
+    let mut stats = ExecutionStats::default();
+    let mut no_override = |_: &mut CollectingSink,
+                           _: &PlannedTensor|
+     -> Result<Option<TensorData>, SinkError> { Ok(None) };
+    let (target, cause) = install_group(
+        &sourceless,
+        &[0, 1],
+        &mut source,
+        &mut sink,
+        &mut no_override,
+        &TargetDisposition {
+            overridden: &[false, false],
+            can_skip_source: &[false, false],
+        },
+        &mut report,
+        &mut stats,
+    )
+    .unwrap_err();
+    assert_eq!(target.as_deref(), Some("weight"));
+    assert!(
+        matches!(&cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "fused-split target `weight` has no source descriptor")
+    );
+
+    let (target, cause) = install_group(
+        &plan,
+        &[0],
+        &mut source,
+        &mut sink,
+        &mut no_override,
+        &TargetDisposition {
+            overridden: &[false],
+            can_skip_source: &[true],
+        },
+        &mut report,
+        &mut stats,
+    )
+    .unwrap_err();
+    assert_eq!(target.as_deref(), Some("weight"));
+    assert!(
+        matches!(&cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "non-overridden target `weight` unexpectedly bypassed its source")
+    );
+    assert!(sink.events.is_empty());
+    assert_eq!(stats.source_reads, 0);
+}

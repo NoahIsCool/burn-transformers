@@ -647,6 +647,130 @@ fn pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict() {
     assert!(plan.report.is_strictly_valid());
 }
 
+/// A pinned policy that fails authentication cannot excuse a defective index total.
+///
+/// Discovery consults the policy only after the declared and observed totals
+/// differ; every policy rejection is then returned verbatim, so a stale
+/// configuration digest or a sub-byte accounted tensor never yields a manifest.
+#[test]
+fn pinned_policy_rejections_fail_discovery_and_planning_revalidation() {
+    use sha2::{Digest, Sha256};
+
+    use super::accounting::{
+        DecimalLayerTensorSelector, PinnedAccountingTensor, PinnedControlFile,
+        PinnedIndexTotalSizePolicy,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let router = "backbone.layers.0.mixer.gate.weight";
+    let excluded = "mtp.layers.1.mixer.gate.weight";
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[
+            FixtureTensor::new(router, TensorDType::BF16, [1]),
+            FixtureTensor::new(excluded, TensorDType::BF16, [1]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[(router, "part.safetensors"), (excluded, "part.safetensors")],
+        Some(6),
+    );
+    let config = b"{}";
+    fs::write(temp.path().join("config.json"), config).unwrap();
+    let index = fs::read(temp.path().join("model.safetensors.index.json")).unwrap();
+    let policy = PinnedIndexTotalSizePolicy {
+        supplied_repository: "test/pinned".into(),
+        supplied_revision: "0123456789abcdef".into(),
+        expected_repository: "test/pinned".into(),
+        expected_revision: "0123456789abcdef".into(),
+        config: PinnedControlFile::new(
+            "config.json",
+            config.len() as u64,
+            format!("{:x}", Sha256::digest(config)),
+        ),
+        index: PinnedControlFile::new(
+            "model.safetensors.index.json",
+            index.len() as u64,
+            format!("{:x}", Sha256::digest(&index)),
+        ),
+        expected_physical_tensor_bytes: 4,
+        expected_declared_total_size: 6,
+        duplicated_tensor_selector: DecimalLayerTensorSelector::new(
+            "backbone.layers.",
+            ".mixer.gate.weight",
+        ),
+        duplicated_tensors: vec![PinnedAccountingTensor::new(
+            router,
+            TensorDType::BF16,
+            vec![1],
+        )],
+        excluded_tensors: vec![PinnedAccountingTensor::new(
+            excluded,
+            TensorDType::BF16,
+            vec![1],
+        )],
+    };
+
+    // A configuration file that no longer matches its pinned digest.
+    let mut stale = policy.clone();
+    stale.config.sha256 = "0".repeat(64);
+    let error = super::artifact::discover_checkpoint_with_index_total_size_policy(
+        temp.path(),
+        &LoadOptions::default(),
+        &stale,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, CheckpointError::IndexTotalSizePolicyMismatch { reason }
+            if reason.starts_with("configuration identity")),
+        "{error}"
+    );
+
+    // A public manifest edited to describe an accounted four-bit scalar cannot
+    // pass: the policy's own byte equation rejects the partial byte.
+    let manifest = super::artifact::discover_checkpoint_with_index_total_size_policy(
+        temp.path(),
+        &LoadOptions::default(),
+        &policy,
+    )
+    .unwrap();
+    let mut sub_byte_policy = policy.clone();
+    sub_byte_policy.excluded_tensors = vec![PinnedAccountingTensor::new(
+        excluded,
+        TensorDType::F4,
+        vec![1],
+    )];
+    let mut sub_byte_manifest = manifest.clone();
+    sub_byte_manifest.tensors.get_mut(excluded).unwrap().dtype = TensorDType::F4;
+    assert!(matches!(
+        super::artifact::validate_manifest_index_total_size_policy(
+            &sub_byte_manifest,
+            &sub_byte_policy
+        ),
+        Err(CheckpointError::MisalignedTensorStorage { .. })
+    ));
+
+    // A tampered shape whose element count overflows is an arithmetic error,
+    // never a wrapped count that could match a small recorded byte length.
+    let huge = vec![u64::MAX, 2];
+    let mut huge_policy = policy.clone();
+    huge_policy.excluded_tensors = vec![PinnedAccountingTensor::new(
+        excluded,
+        TensorDType::BF16,
+        huge.clone(),
+    )];
+    let mut huge_manifest = manifest.clone();
+    huge_manifest.tensors.get_mut(excluded).unwrap().shape = huge;
+    assert!(matches!(
+        super::artifact::validate_manifest_index_total_size_policy(&huge_manifest, &huge_policy),
+        Err(CheckpointError::ArithmeticOverflow {
+            context: "computing pinned accounting tensor elements"
+        })
+    ));
+}
+
 #[test]
 /// Explicit and unique nonstandard indexes can omit optional total-size metadata.
 fn explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size() {
@@ -1944,7 +2068,23 @@ fn malformed_split_and_concatenate_operations_are_rejected() {
     bad_split.split("a", 0, [("x".into(), 1), ("y".into(), 2)]);
     assert!(matches!(
         build_load_plan(&manifest, &expected, &bad_split, &LoadOptions::default()),
-        Err(CheckpointError::InvalidMapping { .. })
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "split sections for `a` sum to 3, axis 0 has length 2"
+    ));
+    // Section lengths whose running sum wraps `u64` are an arithmetic error,
+    // never a wrapped total that could accidentally equal the axis length.
+    let mut wrapping_split = MappingPlan::new();
+    wrapping_split.split("a", 0, [("x".into(), u64::MAX), ("y".into(), 3)]);
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &wrapping_split,
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::ArithmeticOverflow {
+            context: "summing split section lengths"
+        })
     ));
 
     let expected = [ExpectedTensor::new("joined", [4, 3])];

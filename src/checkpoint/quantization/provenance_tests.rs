@@ -241,6 +241,10 @@ fn canonical_digest_binds_every_executable_field_but_not_memory_estimates() {
         },
         PlannedTransform::Concatenate { axis: 0 },
         PlannedTransform::Concatenate { axis: 1 },
+        PlannedTransform::DequantizeMxfp4,
+        PlannedTransform::Alias {
+            source_target: String::new(),
+        },
     ] {
         let mut changed = plan.clone();
         changed.tensors[0].transform = transform;
@@ -901,4 +905,136 @@ fn concurrent_hash_throughput_against_sequential_hashing() {
         gib / concurrent,
         gib / sequential
     );
+}
+
+/// The staging digest covers exactly the bytes the destination accepted.
+///
+/// A short write hashes only its accepted prefix, so retrying the remainder
+/// yields the digest of the complete payload; flushing forwards to the
+/// destination without changing the digest.
+#[test]
+fn digesting_writer_hashes_accepted_prefixes_and_forwards_flushes() {
+    use std::io::Write as _;
+
+    /// Destination accepting at most three bytes per call and counting flushes.
+    struct Trickle {
+        /// Every accepted byte, in order.
+        accepted: Vec<u8>,
+        /// Number of flush requests received.
+        flushes: usize,
+    }
+
+    impl std::io::Write for Trickle {
+        /// Accepts a prefix of at most three bytes.
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            let accepted = buffer.len().min(3);
+            self.accepted.extend_from_slice(&buffer[..accepted]);
+            Ok(accepted)
+        }
+
+        /// Records the flush request.
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    let mut trickle = Trickle {
+        accepted: Vec::new(),
+        flushes: 0,
+    };
+    let payload = b"packed codes then scales";
+    let digest = {
+        let mut writer = DigestingWriter::new(&mut trickle);
+        assert_eq!(writer.write(payload).unwrap(), 3);
+        writer.write_all(&payload[3..]).unwrap();
+        writer.flush().unwrap();
+        writer.finish()
+    };
+    assert_eq!(trickle.accepted, payload);
+    assert_eq!(trickle.flushes, 1);
+    assert_eq!(digest, packed_payload_sha256(payload));
+}
+
+/// Pass totals reject each counter's overflow with its own context.
+#[test]
+fn hash_stat_accumulation_names_the_overflowing_counter() {
+    let one = ProvenanceHashStats {
+        bytes_hashed: 1,
+        shards_hashed: 1,
+        peak_buffer_bytes: 1,
+        ..ProvenanceHashStats::default()
+    };
+    for (total, context) in [
+        (
+            ProvenanceHashStats {
+                bytes_hashed: u64::MAX,
+                ..ProvenanceHashStats::default()
+            },
+            "provenance checkpoint byte count",
+        ),
+        (
+            ProvenanceHashStats {
+                shards_hashed: usize::MAX,
+                ..ProvenanceHashStats::default()
+            },
+            "provenance shard count",
+        ),
+        (
+            ProvenanceHashStats {
+                peak_buffer_bytes: usize::MAX,
+                ..ProvenanceHashStats::default()
+            },
+            "provenance hash buffer bytes",
+        ),
+    ] {
+        let mut accumulated = total;
+        assert!(matches!(
+            accumulate_hash_stats(&mut accumulated, one),
+            Err(QuantizationError::ByteLengthOverflow { context: actual }) if actual == context
+        ));
+    }
+    let mut total = one;
+    accumulate_hash_stats(&mut total, one).unwrap();
+    assert_eq!(
+        (
+            total.bytes_hashed,
+            total.shards_hashed,
+            total.peak_buffer_bytes
+        ),
+        (2, 2, 2)
+    );
+}
+
+/// An unreadable shard fails the hash pass at open, before any buffer is charged.
+///
+/// Canonicalization and the no-follow inspection both succeed on a mode-000
+/// file, so the open is the first failing step. A privileged process can
+/// still open it; the shard must then hash completely.
+#[cfg(unix)]
+#[test]
+fn unreadable_shard_fails_provenance_hashing_at_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_root, manifest, _plan) = local_fixture(4);
+    let shard = &manifest.shards[0];
+    std::fs::set_permissions(&shard.path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let privileged = File::open(&shard.path).is_ok();
+    let mut stats = ProvenanceHashStats::default();
+    let result = hash_one_shard(&manifest, shard, &mut stats);
+    std::fs::set_permissions(&shard.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    if privileged {
+        assert!(result.unwrap().is_some());
+        assert_eq!(stats.bytes_hashed, shard.file_bytes);
+        return;
+    }
+    assert!(matches!(
+        result,
+        Err(QuantizationError::ArtifactIo {
+            operation: "open checkpoint shard for provenance",
+            ref path,
+            ref source,
+        }) if *path == shard.path && source.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert_eq!(stats, ProvenanceHashStats::default());
 }

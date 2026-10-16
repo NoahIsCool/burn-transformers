@@ -313,7 +313,25 @@ pub fn quantize_local_checkpoint_to_burnpack(
     output_path: impl AsRef<Path>,
     options: QuantizedCheckpointOptions,
 ) -> CheckpointQuantizationResult<CheckpointQuantizationOutcome> {
-    let output_path = output_path.as_ref().to_path_buf();
+    quantize_with_post_execution_hook(manifest, plan, output_path.as_ref(), options, || {})
+}
+
+/// Runs the conversion, calling `after_execution` once between its two hash passes.
+///
+/// The hook runs after every target has been staged and the source closed, and
+/// before the post-execution provenance pass that guards publication; it is not
+/// called when an earlier phase fails. The public entry point passes a no-op,
+/// so the hook exists only to let tests change the checkpoint or claim the
+/// output inside exactly the window the second hash pass and create-only
+/// publication must defend.
+fn quantize_with_post_execution_hook(
+    manifest: &CheckpointManifest,
+    plan: &LoadPlan,
+    output_path: &Path,
+    options: QuantizedCheckpointOptions,
+    after_execution: impl FnOnce(),
+) -> CheckpointQuantizationResult<CheckpointQuantizationOutcome> {
+    let output_path = output_path.to_path_buf();
     let mut report = plan.report.without_progress();
     let mut provenance_stats = ProvenanceExecutionStats::default();
     if options.unaligned == UnalignedMatrixPolicy::Reject
@@ -436,6 +454,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
     report = execution.report;
     report.extend_quantized(quantized);
     normalize_exclusions(&mut excluded);
+    after_execution();
     provenance_stats.post_execution = Some(Default::default());
     let (final_provenance, final_hash_stats) =
         match hash_local_checkpoint_provenance_audited(manifest, plan) {

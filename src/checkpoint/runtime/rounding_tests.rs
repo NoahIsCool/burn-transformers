@@ -219,9 +219,17 @@ proptest! {
     }
 }
 
-/// On hosts with native binary16 conversion, the hardware is a second oracle.
 #[cfg(all(target_arch = "aarch64", target_feature = "fp16"))]
 mod hardware {
+    //! On hosts with native binary16 conversion, the hardware is a second oracle.
+    //!
+    //! AArch64 with the `fp16` feature converts binary64 to binary16 with one
+    //! correctly rounded `fcvt` (round to nearest, ties to even, with overflow to
+    //! infinity and gradual underflow). The property compares the software
+    //! rounding with it on uniformly sampled binary64 bit patterns (the
+    //! proptest default of 256 cases per run), independently of the reference
+    //! decoder; it is a sampled check, not an exhaustive one.
+
     use super::*;
 
     proptest! {
