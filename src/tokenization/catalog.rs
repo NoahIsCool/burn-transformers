@@ -143,8 +143,8 @@ fn read_template_files(
         insert_template_file(&mut templates, DEFAULT_TEMPLATE, path, source)?;
     }
     for name in additional_template_names(root, limits.additional_templates)? {
-        let relative = Path::new(ADDITIONAL_TEMPLATE_DIRECTORY)
-            .join(format!("{name}{TEMPLATE_FILE_EXTENSION}"));
+        // `/` separates components on every supported platform, Windows included.
+        let relative = format!("{ADDITIONAL_TEMPLATE_DIRECTORY}/{name}{TEMPLATE_FILE_EXTENSION}");
         // `contained_file` reports an absent optional file as `None`; a name
         // just listed is absent only when it is a dangling symlink (or was
         // removed meanwhile), which Python's `open` would also fail on.

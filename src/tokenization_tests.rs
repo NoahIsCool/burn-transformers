@@ -457,6 +457,29 @@ fn optional_artifacts_that_cannot_be_resolved_are_errors() {
     );
 }
 
+/// Only a missing path is absent: an optional artifact below a regular file is an I/O error.
+#[cfg(unix)]
+#[test]
+fn optional_artifacts_below_regular_files_are_errors() {
+    let directory = fixture(base_config());
+    let root = directory.path().canonicalize().unwrap();
+    let nested = root.join("tokenizer.json/nested.json");
+    assert!(!is_absent(&nested));
+    assert!(is_absent(&root.join("missing.json")));
+    let error = contained_file(
+        &root,
+        "tokenizer.json/nested.json",
+        false,
+        MAX_METADATA_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Io { path, source }
+            if path.ends_with("nested.json") && source.kind() != std::io::ErrorKind::NotFound),
+        "{error}"
+    );
+}
+
 /// Metadata objects, sides and standalone template files are validated independently.
 #[test]
 fn validates_metadata_objects_and_standalone_chat_templates() {

@@ -1059,7 +1059,7 @@ fn is_absent(path: &Path) -> bool {
 /// must be a regular file of at most `maximum_bytes`.
 fn contained_file(
     root: &Path,
-    name: impl AsRef<Path>,
+    name: &str,
     required: bool,
     maximum_bytes: u64,
 ) -> Result<Option<PathBuf>> {

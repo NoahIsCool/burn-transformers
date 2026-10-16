@@ -125,6 +125,54 @@ fn non_utf8_template_file_names_are_reported() {
     );
 }
 
+/// A dangling `additional_chat_templates` link holds no templates; a looping one is an error.
+///
+/// Python's `Path.is_dir()` is false for a dangling link, so Hugging Face
+/// reads nothing from it either.
+#[cfg(unix)]
+#[test]
+fn additional_directory_links_resolve_or_fail_with_their_path() {
+    use std::os::unix::fs::symlink;
+
+    let (_directory, root) = template_root(&[]);
+    let link = root.join(ADDITIONAL_TEMPLATE_DIRECTORY);
+    symlink(root.join("missing"), &link).unwrap();
+    assert!(
+        read_template_files(&root, TemplateFileLimits::CHECKPOINT)
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_file(&link).unwrap();
+    symlink(&link, &link).unwrap();
+    match read_template_files(&root, TemplateFileLimits::CHECKPOINT) {
+        Err(Error::Io { path, source }) => {
+            assert!(path.ends_with(ADDITIONAL_TEMPLATE_DIRECTORY));
+            assert_ne!(source.kind(), ErrorKind::NotFound);
+        }
+        other => panic!("expected an I/O error, found {other:?}"),
+    }
+}
+
+/// A `.jinja` file whose name is not UTF-8 fails with its path, where the filesystem allows one.
+///
+/// APFS (macOS) refuses such names outright, so there only the refusal is
+/// observed; Linux filesystems accept them and the loader must reject them.
+#[cfg(unix)]
+#[test]
+fn non_utf8_template_file_names_fail_with_their_path() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let (_directory, root) = template_root(&[("additional_chat_templates/ok.jinja", b"T")]);
+    let name = OsStr::from_bytes(b"\xff.jinja");
+    if fs::write(root.join(ADDITIONAL_TEMPLATE_DIRECTORY).join(name), b"T").is_err() {
+        return;
+    }
+    let (file, reason) =
+        artifact_failure(read_template_files(&root, TemplateFileLimits::CHECKPOINT));
+    assert_eq!(file, "\u{fffd}.jinja");
+    assert!(reason.contains("must be UTF-8"), "{reason}");
+}
+
 /// `\r\n` and a lone `\r` become `\n`, as in Python's text mode and Jinja2's lexer.
 ///
 /// Text without a carriage return is borrowed, not copied.
