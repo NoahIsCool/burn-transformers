@@ -279,6 +279,16 @@ fn excessive_nesting_and_chains_are_refused() {
     assert!(guard_operators(&chain).is_ok());
 }
 
+/// The guard's filter names are the sandbox's, so every rewrite reaches a bounded filter.
+#[test]
+fn rewrites_name_the_sandbox_filters() {
+    assert_eq!(SPLAT_SUFFIX, format!("|{}", sandbox::SPLAT_FILTER));
+    assert!(guarded("{{ s[1:] }}").contains(sandbox::SLICE_FILTER));
+    assert!(guarded("{{ a + b }}").contains(sandbox::ADD_FILTER));
+    assert!(guarded("{{ a ~ b }}").contains(sandbox::CONCAT_FILTER));
+    assert!(guarded("{{ a * b }}").contains(sandbox::MULTIPLY_FILTER));
+}
+
 /// Rewrites keep every line break, so error locations after a rewritten tag do not move.
 ///
 /// The operator and its surrounding whitespace disappear in a rewrite; their

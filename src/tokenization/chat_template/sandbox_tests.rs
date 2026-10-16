@@ -418,6 +418,9 @@ fn slices_and_splats_are_charged() {
         ("range(*[1, 3]) | list", "[1, 2]"),
         ("dict(**m) | length", "2"),
         ("[s[1:]] | first", "bcdefgh"),
+        // Undefined values slice to an empty list, as in MiniJinja.
+        ("missing[1:] | list", "[]"),
+        ("(s ~ s)[7:9]", "ha"),
     ];
     for (copy, expected) in cases {
         let source = format!("{prelude}{{{{ {copy} }}}}");

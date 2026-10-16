@@ -1,13 +1,14 @@
-//! Source rewrite that routes size-amplifying operators of untrusted templates through bounded filters.
+//! Source rewrite that routes size-amplifying syntax of untrusted templates through bounded filters.
 //!
 //! MiniJinja meters templates with fuel, one unit per instruction, but a
 //! single `+`, `~`, or `*` can allocate without bound (`'ab' * n`, `s ~ s`,
-//! `l + l`), and the engine has no hook for its operators. It even folds
-//! constant operands while *compiling*: `{{ 'ab' * 4611686018427387904 }}`
-//! panics with "capacity overflow" before a single unit of fuel is spent.
-//! [`guard_operators`] therefore rewrites the source before compilation so
-//! that every binary `+`, `~`, and `*` calls a bounded filter from the
-//! `sandbox` module with the operator's exact semantics plus size checks:
+//! `l + l`), a slice copies its string (`s[1:]`), a `*sequence` or
+//! `**mapping` call argument copies its operand, and the engine has no hook
+//! for any of them. It even folds constant operands while *compiling*:
+//! `{{ 'ab' * 4611686018427387904 }}` panics with "capacity overflow" before
+//! a single unit of fuel is spent. [`guard_operators`] therefore rewrites the
+//! source before compilation so that each of them calls a bounded filter
+//! from the `sandbox` module with the original semantics plus size checks:
 //!
 //! | Source                | Rewritten                                       |
 //! |-----------------------|-------------------------------------------------|
@@ -16,6 +17,9 @@
 //! | `a + b + c`           | `a|__bounded_add(b)|__bounded_add(c)`           |
 //! | `a - b + c`           | `(a - b)|__bounded_add(c)`                      |
 //! | `x ** y * z`          | `(x ** y)|__bounded_mul(z)`                     |
+//! | `s[1:]`, `l[::-1]`    | `s|__bounded_slice(1, none, none)`, `l|__bounded_slice(none, none, -1)` |
+//! | `s[1:].upper()`       | `(s|__bounded_slice(1, none, none)).upper()`    |
+//! | `f(*xs, **kw)`        | `f(*xs|__bounded_splat, **kw|__bounded_splat)`  |
 //!
 //! A filter binds tighter than every binary operator and as tightly as
 //! postfix syntax, so the left operand is parenthesized unless it already is
@@ -29,6 +33,15 @@
 //! tag body, and the line breaks around a removed operator move inside the
 //! filter call, so every tag keeps its line count and errors report the same
 //! line numbers as the original template.
+//!
+//! A slice applies to everything before it in its postfix chain, unary minus
+//! included (`-x[1:]` is `(-x)[1:]` in MiniJinja), which is exactly what a
+//! filter on that text applies to. A filter cannot take further postfix
+//! syntax, so the text is parenthesized before a following `.`, `[`, or `(`,
+//! and a sliced parenthesis-free test argument is parenthesized so the
+//! filter binds to the argument rather than to the test (`x is sameas (y|
+//! __bounded_slice(...))` passes one argument, as `x is sameas y[1:]` did).
+//! An omitted bound becomes `none`, the constant MiniJinja compiles for it.
 //!
 //! # Grammar
 //!
@@ -51,8 +64,8 @@
 //! # Failure policy and nesting limits
 //!
 //! A tag the parser cannot read is kept verbatim when it contains no `+`,
-//! `~`, or `*` token: MiniJinja then rejects the syntax itself or runs no
-//! guarded operator. The same applies to a variable named `not` used as an
+//! `~`, `*`, `**`, or `:` token: MiniJinja then rejects the syntax itself or
+//! runs no guarded operation. The same applies to a variable named `not` used as an
 //! operand (`x * not(y)`): MiniJinja reads it as a name there, but a
 //! rewritten operand is re-read inside filter arguments, where `not` would
 //! become the operator, so such a tag is refused rather than changed. A tag that does contain one is refused with a
