@@ -69,7 +69,44 @@ fn counter_wraps_like_the_sequential_state() {
     );
 }
 
+/// Inverts SplitMix64's finalizer with the inverse the Verus proof uses.
+///
+/// Each `x ^ (x >> s)` is undone by `y ^ (y >> s) ^ (y >> 2s)` (as `3s >= 64`),
+/// and each odd multiplier by its inverse modulo `2^64`.
+fn unmix(value: u64) -> u64 {
+    let second = value ^ (value >> 31) ^ (value >> 62);
+    let first_shifted = second.wrapping_mul(0x3196_42b2_d24d_8ec3);
+    let first = first_shifted ^ (first_shifted >> 27) ^ (first_shifted >> 54);
+    let state_shifted = first.wrapping_mul(0x96de_1b17_3f11_9089);
+    state_shifted ^ (state_shifted >> 30) ^ (state_shifted >> 60)
+}
+
+/// The modular inverses used by the bijection proof are exact.
+#[test]
+fn bijection_proof_constants_are_modular_inverses() {
+    assert_eq!(
+        0xbf58_476d_1ce4_e5b9_u64.wrapping_mul(0x96de_1b17_3f11_9089),
+        1
+    );
+    assert_eq!(
+        0x94d0_49bb_1331_11eb_u64.wrapping_mul(0x3196_42b2_d24d_8ec3),
+        1
+    );
+    assert_eq!(
+        super::SPLITMIX64_INCREMENT.wrapping_mul(0xf1de_83e1_9937_733d),
+        1
+    );
+}
+
 proptest! {
+    /// Each draw inverts to its Weyl state, so distinct counters give distinct draws.
+    #[test]
+    fn draws_invert_to_their_weyl_state(seed in any::<u64>(), index in any::<u64>()) {
+        let state = seed.wrapping_add(super::SPLITMIX64_INCREMENT.wrapping_mul(index.wrapping_add(1)));
+        prop_assert_eq!(unmix(splitmix64(seed, index)), state);
+        prop_assert_ne!(splitmix64(seed, index), splitmix64(seed, index.wrapping_add(1)));
+    }
+
     /// Counter-based draws are bit-identical to the sequential implementation they replace.
     #[test]
     fn counter_stream_equals_sequential_stream(seed in any::<u64>(), draws in 1_usize..64) {

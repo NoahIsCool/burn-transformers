@@ -64,7 +64,10 @@ use crate::{
     models::shared::rows::index_tensor,
 };
 
-use super::bookkeeping::{beam_row, fill_beam_expansion, frontier_capacity};
+use super::bookkeeping::{
+    RowSpanError, beam_row, fill_beam_expansion, frontier_capacity, matrix_row_span,
+    partition_frontier, required_cache_capacity,
+};
 use super::metadata::{self, extract_last_logits};
 use super::probability_accumulation_dtype;
 
@@ -474,10 +477,9 @@ impl PreparedRequest {
         }
         let maximum_prompt = decoder_prompt_lengths.iter().copied().max().unwrap_or(0);
         let required_capacity =
-            metadata::required_cache_capacity(maximum_prompt, request.search.max_new_tokens)
-                .ok_or_else(|| {
-                    Error::Generation("beam-search cache capacity overflows usize".into())
-                })?;
+            required_cache_capacity(maximum_prompt, request.search.max_new_tokens).ok_or_else(
+                || Error::Generation("beam-search cache capacity overflows usize".into()),
+            )?;
         if request.cache.capacity() < required_capacity {
             return Err(Error::Generation(format!(
                 "beam-search cache capacity {} is smaller than required decoder prompt {maximum_prompt} + {} - 1 fed-back tokens = {required_capacity}",
@@ -678,30 +680,35 @@ impl<'a> BeamSearch<'a> {
         }
 
         let at_length_limit = step + 1 == self.config.max_new_tokens;
-        let mut selected = Vec::with_capacity(beams);
-        for (rank, candidate) in candidates.into_iter().enumerate() {
-            let is_eos = self.config.eos_token_ids.contains(&candidate.token_id);
-            if is_eos || at_length_limit {
-                // Transformers 5.2 masks finished candidates below the
-                // current beam width. Those extra frontier rows are only
-                // backups for selecting enough non-finished successors.
-                if rank >= beams {
-                    continue;
+        let finished = candidates
+            .iter()
+            .map(|candidate| {
+                at_length_limit || self.config.eos_token_ids.contains(&candidate.token_id)
+            })
+            .collect::<Vec<_>>();
+        // Transformers 5.2 masks finished candidates below the current beam
+        // width. Those extra frontier rows are only backups for selecting
+        // enough non-finished successors; `partition_frontier` (verified)
+        // keeps finished ranks below `beams` and the `beams` best live ranks.
+        let frontier = partition_frontier(&finished, beams);
+        for &rank in &frontier.finalized {
+            let candidate = candidates[rank];
+            let reason = if self.config.eos_token_ids.contains(&candidate.token_id) {
+                FinishReason::EndOfSequence {
+                    token_id: candidate.token_id,
                 }
-                let reason = if is_eos {
-                    FinishReason::EndOfSequence {
-                        token_id: candidate.token_id,
-                    }
-                } else {
-                    FinishReason::Length
-                };
-                let ordinal = self.next_ordinal()?;
-                let hypothesis = extend_candidate(&self.active, &candidate, Some(reason), ordinal)?;
-                self.completed[source].push(hypothesis);
-            } else if selected.len() < beams {
-                selected.push(candidate);
-            }
+            } else {
+                FinishReason::Length
+            };
+            let ordinal = self.next_ordinal()?;
+            let hypothesis = extend_candidate(&self.active, &candidate, Some(reason), ordinal)?;
+            self.completed[source].push(hypothesis);
         }
+        let selected = frontier
+            .selected
+            .iter()
+            .map(|&rank| candidates[rank])
+            .collect::<Vec<_>>();
         rank_and_prune(
             &mut self.completed[source],
             beams,
@@ -922,16 +929,21 @@ fn candidates_for_source(
 }
 
 /// Borrows the log-probability row of one expanded beam.
+///
+/// The span is the Verus-verified [`matrix_row_span`].
 fn probability_row(probabilities: &[f64], row: usize, vocabulary: usize) -> Result<&[f64]> {
-    let start = row
-        .checked_mul(vocabulary)
-        .ok_or_else(|| Error::Generation("beam probability offset overflow".into()))?;
-    let end = start
-        .checked_add(vocabulary)
-        .ok_or_else(|| Error::Generation("beam probability row end overflow".into()))?;
-    probabilities
-        .get(start..end)
-        .ok_or_else(|| Error::Generation("beam probability matrix became ragged".into()))
+    match matrix_row_span(row, vocabulary, probabilities.len()) {
+        Ok((start, end)) => Ok(&probabilities[start..end]),
+        Err(RowSpanError::OffsetOverflow) => {
+            Err(Error::Generation("beam probability offset overflow".into()))
+        }
+        Err(RowSpanError::EndOverflow) => Err(Error::Generation(
+            "beam probability row end overflow".into(),
+        )),
+        Err(RowSpanError::OutOfBounds) => Err(Error::Generation(
+            "beam probability matrix became ragged".into(),
+        )),
+    }
 }
 
 /// Defines deterministic candidate order independently of backend sort rules.

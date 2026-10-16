@@ -38,6 +38,12 @@ use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, backend::Bac
 
 use crate::{Error, Result, TokenMask};
 
+use super::bookkeeping::row_span;
+use super::layout::{
+    advance_generated_lengths, any_valid, count_valid, first_active_outside_vocabulary,
+    history_token_id, push_history_row, record_scatter,
+};
+use super::ngram::{completed_ngram_prefix, insert_follower, ngram_lookup_start};
 use super::{GenerationConfig, metadata};
 
 /// Which occurrence counts a penalty reads.
@@ -120,15 +126,15 @@ struct NgramIndex {
 
 impl NgramIndex {
     /// Appends `token` and records the n-gram of size `size` it completes.
+    ///
+    /// `size` is positive. The prefix range and the sorted, deduplicated
+    /// follower insertion are the Verus-verified [`completed_ngram_prefix`]
+    /// and [`insert_follower`].
     fn push(&mut self, token: u32, size: usize) {
         self.tokens.push(token);
-        let length = self.tokens.len();
-        if length >= size {
-            let prefix = self.tokens[length - size..length - 1].to_vec();
-            let followers = self.continuations.entry(prefix).or_default();
-            if let Err(position) = followers.binary_search(&token) {
-                followers.insert(position, token);
-            }
+        if let Some((start, end)) = completed_ngram_prefix(self.tokens.len(), size) {
+            let prefix = self.tokens[start..end].to_vec();
+            insert_follower(self.continuations.entry(prefix).or_default(), token);
         }
     }
 
@@ -136,14 +142,16 @@ impl NgramIndex {
     ///
     /// Matches Hugging Face `NoRepeatNGramLogitsProcessor`: nothing is banned
     /// until the next token could complete a full n-gram, and the lookup key
-    /// is the last `n - 1` tokens.
+    /// is the last `n - 1` tokens. `size` is positive; the verified
+    /// [`ngram_lookup_start`] proves this key is the prefix [`Self::push`]
+    /// records the next token under.
     fn banned(&self, size: usize) -> &[u32] {
-        let length = self.tokens.len();
-        if length + 1 < size {
+        let Some(start) = ngram_lookup_start(self.tokens.len(), size) else {
             return &[];
-        }
-        let prefix = &self.tokens[length + 1 - size..];
-        self.continuations.get(prefix).map_or(&[], Vec::as_slice)
+        };
+        self.continuations
+            .get(&self.tokens[start..])
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -403,15 +411,16 @@ impl<B: Backend> TokenHistory<B> {
         }
         let values = grid.values.unwrap_or_default();
         for row in 0..batch {
+            let (start, end) = row_span(row, batch, width, 0, width);
+            if as_generated {
+                history.generated_lengths[row] = count_valid(&valid, start, end);
+            }
+            if !needs_values {
+                continue;
+            }
             for column in 0..width {
-                let offset = row * width + column;
+                let offset = start + column;
                 if !valid[offset] {
-                    continue;
-                }
-                if as_generated {
-                    history.generated_lengths[row] += 1;
-                }
-                if !needs_values {
                     continue;
                 }
                 let token = checked_history_token(values[offset], vocabulary_size, row, column)?;
@@ -430,6 +439,10 @@ impl<B: Backend> TokenHistory<B> {
     /// or padded) are ignored. Each tracked count tensor receives one
     /// scatter-add of the `[batch, 1]` new IDs; no data is read back from the
     /// device. See the module documentation for the per-backend cost.
+    ///
+    /// The Verus-verified `first_active_outside_vocabulary` rejects the
+    /// first active row whose token is not a valid scatter index, and
+    /// `any_valid` decides whether any row is active at all.
     pub fn record(&mut self, tokens: &[u32], active: &[bool]) -> Result<()> {
         let batch = self.batch_size();
         if tokens.len() != batch || active.len() != batch {
@@ -439,30 +452,20 @@ impl<B: Backend> TokenHistory<B> {
                 active.len()
             )));
         }
-        for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
-            if is_active && token as usize >= self.vocabulary_size {
-                return Err(Error::Generation(format!(
-                    "history update for row {row} has token {token} outside vocabulary size {}",
-                    self.vocabulary_size
-                )));
-            }
+        if let Some(row) = first_active_outside_vocabulary(tokens, active, self.vocabulary_size) {
+            return Err(Error::Generation(format!(
+                "history update for row {row} has token {} outside vocabulary size {}",
+                tokens[row], self.vocabulary_size
+            )));
         }
-        if !active.iter().any(|&is_active| is_active) {
+        if !any_valid(active, 0, batch) {
             return Ok(());
         }
         // Each active row gains one token, so no count grows by more than one.
         self.count_bound = self.count_bound.saturating_add(1);
         if self.counts.is_tracking() {
             // Inactive rows scatter a zero increment at token zero.
-            let ids = tokens
-                .iter()
-                .zip(active)
-                .map(|(&token, &is_active)| if is_active { i64::from(token) } else { 0 })
-                .collect::<Vec<_>>();
-            let increments = active
-                .iter()
-                .map(|&is_active| i64::from(is_active))
-                .collect::<Vec<_>>();
+            let (ids, increments) = record_scatter(tokens, active);
             let ids =
                 Tensor::<B, 2, Int>::from_data(TensorData::new(ids, [batch, 1]), &self.device);
             let increments = Tensor::<B, 2, Int>::from_data(
@@ -471,10 +474,10 @@ impl<B: Backend> TokenHistory<B> {
             );
             self.counts.add(ids, increments);
         }
-        for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
-            if is_active {
-                self.generated_lengths[row] += 1;
-                if self.ngram_size > 0 {
+        advance_generated_lengths(&mut self.generated_lengths, active);
+        if self.ngram_size > 0 {
+            for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
+                if is_active {
                     self.ngrams[row].push(token, self.ngram_size);
                 }
             }
@@ -633,12 +636,14 @@ fn row_counts<B: Backend>(
     let mut observed = metadata::vec_with_capacity::<i64>(elements, "history row increments")?;
     let mut generated = metadata::vec_with_capacity::<i64>(elements, "generated increments")?;
     for (&tokens, &prompt_length) in rows.iter().zip(prompt_lengths) {
-        for column in 0..width {
-            let token = tokens.get(column).copied();
-            ids.push(token.map_or(0, i64::from));
-            observed.push(i64::from(token.is_some()));
-            generated.push(i64::from(token.is_some() && column >= prompt_length));
-        }
+        push_history_row(
+            &mut ids,
+            &mut observed,
+            &mut generated,
+            tokens,
+            prompt_length,
+            width,
+        );
     }
     let upload = |values: Vec<i64>| {
         Tensor::<B, 2, Int>::from_data(TensorData::new(values, [batch, width]), device)
@@ -662,16 +667,13 @@ fn checked_history_token(
     row: usize,
     column: usize,
 ) -> Result<u32> {
-    u32::try_from(value)
-        .ok()
-        .filter(|&token| (token as usize) < vocabulary_size)
-        .ok_or_else(|| {
-            Error::shape(
-                "generation.history",
-                format!("token values in 0..{vocabulary_size}"),
-                format!("token {value} at row {row}, column {column}"),
-            )
-        })
+    history_token_id(value, vocabulary_size).ok_or_else(|| {
+        Error::shape(
+            "generation.history",
+            format!("token values in 0..{vocabulary_size}"),
+            format!("token {value} at row {row}, column {column}"),
+        )
+    })
 }
 
 #[cfg(test)]

@@ -61,6 +61,9 @@ fn record_updates_active_rows_only() {
     assert_eq!(history.generated_lengths(), [2, 1]);
     assert!(history.record(&[3, 0], &[true, false]).is_err());
     assert!(history.record(&[0], &[true]).is_err());
+    // The first active row with an invalid token is reported.
+    let error = history.record(&[7, 5], &[false, true]).unwrap_err();
+    assert!(error.to_string().contains("row 1 has token 5"), "{error}");
     // An inactive row may carry any value; it is never indexed.
     history.record(&[u32::MAX, 1], &[false, true]).unwrap();
 }
