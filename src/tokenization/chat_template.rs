@@ -24,6 +24,7 @@
 //! | dict insertion order                      | **not matched**: keys arrive sorted           |
 //! | `'x' ~ value` with a bool or `None`       | **not matched**: prints `true`/`none`         |
 //! | `'%s' % value` string formatting          | **not supported**: rendering fails            |
+//! | no `trim_blocks` after `{% raw %}`        | **not matched**: the next newline is dropped  |
 //!
 //! The unmatched rows, and smaller Unicode-class approximations, are
 //! described in the `pycompat` module documentation. Official templates

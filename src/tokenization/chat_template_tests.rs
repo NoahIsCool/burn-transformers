@@ -69,6 +69,30 @@ fn source_line_endings_are_normalized_like_jinja2() {
     }
 }
 
+/// Known difference: the newline right after `{% raw %}` is dropped, where Jinja2 keeps it.
+///
+/// Jinja2 applies `trim_blocks` after `{% endraw %}` but not after
+/// `{% raw %}`; MiniJinja trims after both. transformers 5.2.0 renders
+/// `{% raw %}\n{{ x }}\n{% endraw %}` as `"\n{{ x }}\n"`. This test pins the
+/// documented difference and fails once it is fixed, so the module and
+/// `tokenization` documentation can drop it.
+#[test]
+fn raw_block_opening_newline_is_dropped_unlike_jinja2() {
+    assert_eq!(
+        rendered("{% raw %}\n{{ x }}\n{% endraw %}", json!({})),
+        "{{ x }}\n"
+    );
+    // Elsewhere raw blocks match Jinja2, including the trim after `endraw`.
+    assert_eq!(
+        rendered("A{% raw %}{{ x }}{% endraw %}\nB", json!({})),
+        "A{{ x }}B"
+    );
+    assert_eq!(
+        rendered("{% raw -%}\n {{ x }}{% endraw %}", json!({})),
+        "{{ x }}"
+    );
+}
+
 /// Undefined variables are falsy, print nothing, and iterate as empty, as in Jinja2.
 #[test]
 fn undefined_variables_are_lenient() {
