@@ -43,12 +43,13 @@
 //! preserves every position's absolute chunk index.
 //!
 //! Bounded execution composes these results. It plans with the key bound
-//! [`windowed_key_bound`]`(min(max_query_tokens, Q), W, K)`, which no chunk's
-//! window range exceeds, and re-plans every concrete chunk;
-//! `lemma_planned_chunk_fits_one_call` proves that such a re-plan always
-//! succeeds as one call of exactly the chunk's rows, so the bounded loop's
-//! per-chunk check never rejects a planned chunk. Tensor slicing driven by
-//! these plans remains covered by the Rust test suite.
+//! [`windowed_key_bound`]`(min(max_query_tokens, Q), W, K)` and re-plans every
+//! concrete chunk; `lemma_planned_chunk_fits_one_call` proves that such a
+//! re-plan succeeds as one call of exactly the chunk's rows whenever the
+//! chunk's keys fit the bound, and `lemma_window_chunk_admitted` proves that
+//! every planned chunk's window key range exists and fits it. So the bounded
+//! loop's per-chunk checks never reject a planned chunk. Tensor slicing driven
+//! by these plans remains covered by the Rust test suite.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -64,7 +65,8 @@ pub open spec fn chunks_cover(size: int, count: int, rows: int) -> bool {
     &&& rows <= count * size
 }
 
-/// The largest admissible chunk: no more than the rows, the token limit, or the rows the score limit admits.
+/// The largest admissible chunk: no more than the rows, the token limit, or
+/// the rows the score limit admits.
 pub open spec fn largest_chunk(rows: int, max_tokens: int, admitted_rows: int) -> int {
     let by_tokens = if rows <= max_tokens { rows } else { max_tokens };
     if by_tokens <= admitted_rows { by_tokens } else { admitted_rows }
@@ -79,7 +81,12 @@ pub open spec fn limits_admissible(limits: Option<ChunkLimits>) -> bool {
 }
 
 /// Every axis of a `[batch, heads, query, key]` score plane is non-empty.
-pub open spec fn axes_nonempty(batch: int, heads: int, query_sequence: int, key_bound: int) -> bool {
+pub open spec fn axes_nonempty(
+    batch: int,
+    heads: int,
+    query_sequence: int,
+    key_bound: int,
+) -> bool {
     batch >= 1 && heads >= 1 && query_sequence >= 1 && key_bound >= 1
 }
 
@@ -322,6 +329,168 @@ proof fn lemma_binary_quotient(value: int, divisor: int)
     }
 }
 
+/// The contract of [`query_chunk_range`]: chunk `index` covers rows
+/// `[index * c, min((index + 1) * c, Q))`.
+pub open spec fn query_chunk_range_contract(
+    query_chunk_size: usize,
+    chunk_count: usize,
+    query_sequence: usize,
+    index: usize,
+    result: Option<(usize, usize)>,
+) -> bool {
+    match result {
+        Some(range) => {
+            &&& index < chunk_count
+            &&& range.0 == index * query_chunk_size
+            &&& range.0 < range.1
+            &&& range.1 <= query_sequence
+            &&& range.1 - range.0 <= query_chunk_size
+            &&& index + 1 < chunk_count ==> range.1 == (index + 1) * query_chunk_size
+            &&& index + 1 == chunk_count ==> range.1 == query_sequence
+        },
+        None => index >= chunk_count,
+    }
+}
+
+/// The contract of [`sliding_window_key_range`]: exactly the union of the rows' visible keys.
+///
+/// A range exists exactly for a non-empty, in-bounds row range, aligned
+/// queries (`Q <= K`), and a non-zero window. It then starts at
+/// `max(0, start + K - Q + 1 - W)`, ends at `end + K - Q`, contains every key
+/// some row sees, and every key in it is seen by some row.
+pub open spec fn window_key_range_contract(
+    query_sequence: usize,
+    key_sequence: usize,
+    query_start: usize,
+    query_end: usize,
+    window: usize,
+    result: Option<(usize, usize)>,
+) -> bool {
+    match result {
+        Some(range) => {
+            let offset = key_sequence - query_sequence;
+            &&& query_start < query_end <= query_sequence <= key_sequence
+            &&& window >= 1
+            &&& range.0 < range.1 <= key_sequence
+            &&& range.1 == query_end + offset
+            &&& range.1 - range.0 <= (query_end - query_start) + window - 1
+            &&& range.0 == if query_start + offset + 1 >= window {
+                query_start + offset + 1 - window
+            } else {
+                0
+            }
+            &&& forall|row: int, key: int|
+                query_start <= row < query_end
+                    && #[trigger] window_visible(row, key, offset as int, window as int)
+                    ==> range.0 <= key < range.1
+            &&& forall|key: int| range.0 <= key < range.1 ==> #[trigger] visible_to_rows(
+                query_start as int,
+                query_end as int,
+                key,
+                offset as int,
+                window as int,
+            )
+        },
+        None => !(query_start < query_end && query_end <= query_sequence
+            && query_sequence <= key_sequence && window >= 1),
+    }
+}
+
+/// Query rows one chunk may hold under `limits`: `min(max_query_tokens, Q)`, or `Q` unbounded.
+pub open spec fn query_cap(limits: Option<ChunkLimits>, query_sequence: usize) -> int {
+    match limits {
+        Some(limits) => if limits.max_query_tokens < query_sequence {
+            limits.max_query_tokens as int
+        } else {
+            query_sequence as int
+        },
+        None => query_sequence as int,
+    }
+}
+
+/// Key bound of windowed chunks of at most `cap` rows: `min(cap + window - 1, keys)`.
+pub open spec fn window_key_bound(cap: int, window: int, keys: int) -> int {
+    if cap + window - 1 <= keys {
+        cap + window - 1
+    } else {
+        keys
+    }
+}
+
+/// Every chunk of a causal sliding-window plan has a key range that fits the plan's key bound.
+///
+/// Bounded execution plans with `Kb = min(cap + W - 1, K)`, where `cap` is the
+/// policy's row cap, then for each planned chunk of rows `[s, e)` slices the
+/// window key range and re-plans that concrete chunk. With aligned queries
+/// (`Q <= K`, which the alignment check establishes for every non-global
+/// rule), the key range always exists, so the bounded loop's "no key range"
+/// error is unreachable; its width is at most `Kb` (it is at most
+/// `(e - s) + W - 1 <= cap + W - 1` wide and lies inside `[0, K)`); and the
+/// re-plan is one call of exactly `e - s` rows.
+pub proof fn lemma_window_chunk_admitted(
+    batch: usize,
+    heads: usize,
+    query_sequence: usize,
+    key_sequence: usize,
+    window: usize,
+    limits: Option<ChunkLimits>,
+    key_bound: usize,
+    plan: ChunkGeometry,
+    index: usize,
+    rows: (usize, usize),
+    keys: Option<(usize, usize)>,
+    replan: Result<ChunkGeometry, ChunkPlanError>,
+)
+    requires
+        window >= 1,
+        query_sequence <= key_sequence,
+        key_bound == window_key_bound(
+            query_cap(limits, query_sequence),
+            window as int,
+            key_sequence as int,
+        ),
+        chunk_plan_contract(batch, heads, query_sequence, key_bound, limits, Ok(plan)),
+        query_chunk_range_contract(
+            plan.query_chunk_size,
+            plan.chunk_count,
+            query_sequence,
+            index,
+            Some(rows),
+        ),
+        window_key_range_contract(query_sequence, key_sequence, rows.0, rows.1, window, keys),
+        keys is Some ==> chunk_plan_contract(
+            batch,
+            heads,
+            (rows.1 - rows.0) as usize,
+            (keys->Some_0.1 - keys->Some_0.0) as usize,
+            limits,
+            replan,
+        ),
+    ensures
+        keys is Some,
+        1 <= keys->Some_0.1 - keys->Some_0.0 <= key_bound,
+        replan is Ok,
+        replan->Ok_0.query_chunk_size == rows.1 - rows.0,
+        replan->Ok_0.chunk_count == 1,
+{
+    let range = keys->Some_0;
+    let width = range.1 - range.0;
+    // The plan's chunk respects the row cap, so the window range respects the key bound.
+    assert(plan.query_chunk_size <= query_cap(limits, query_sequence));
+    assert(width <= key_bound);
+    lemma_planned_chunk_fits_one_call(
+        batch,
+        heads,
+        query_sequence,
+        key_bound,
+        limits,
+        plan,
+        (rows.1 - rows.0) as usize,
+        width as usize,
+        replan,
+    );
+}
+
 /// A chunk of a successful plan always re-plans as one call: `validate_chunk` never rejects it.
 ///
 /// Bounded execution plans with a key bound `Kb`, then re-plans every concrete
@@ -546,18 +715,7 @@ pub fn plan_query_chunks(
     requires
         chunks_cover(query_chunk_size as int, chunk_count as int, query_sequence as int),
     ensures
-        match result {
-            Some(range) => {
-                &&& index < chunk_count
-                &&& range.0 == index * query_chunk_size
-                &&& range.0 < range.1
-                &&& range.1 <= query_sequence
-                &&& range.1 - range.0 <= query_chunk_size
-                &&& index + 1 < chunk_count ==> range.1 == (index + 1) * query_chunk_size
-                &&& index + 1 == chunk_count ==> range.1 == query_sequence
-            },
-            None => index >= chunk_count,
-        }
+        query_chunk_range_contract(query_chunk_size, chunk_count, query_sequence, index, result),
 ))]
 pub fn query_chunk_range(
     query_chunk_size: usize,
@@ -590,34 +748,14 @@ pub fn query_chunk_range(
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     ensures
-        match result {
-            Some(range) => {
-                let offset = key_sequence - query_sequence;
-                &&& query_start < query_end <= query_sequence <= key_sequence
-                &&& window >= 1
-                &&& range.0 < range.1 <= key_sequence
-                &&& range.1 == query_end + offset
-                &&& range.1 - range.0 <= (query_end - query_start) + window - 1
-                &&& range.0 == if query_start + offset + 1 >= window {
-                    query_start + offset + 1 - window
-                } else {
-                    0
-                }
-                &&& forall|row: int, key: int|
-                    query_start <= row < query_end
-                        && #[trigger] window_visible(row, key, offset as int, window as int)
-                        ==> range.0 <= key < range.1
-                &&& forall|key: int| range.0 <= key < range.1 ==> #[trigger] visible_to_rows(
-                    query_start as int,
-                    query_end as int,
-                    key,
-                    offset as int,
-                    window as int,
-                )
-            },
-            None => !(query_start < query_end && query_end <= query_sequence
-                && query_sequence <= key_sequence && window >= 1),
-        }
+        window_key_range_contract(
+            query_sequence,
+            key_sequence,
+            query_start,
+            query_end,
+            window,
+            result,
+        ),
 ))]
 pub fn sliding_window_key_range(
     query_sequence: usize,
@@ -674,17 +812,14 @@ pub const fn capped_query_rows(max_query_tokens: usize, query_sequence: usize) -
 /// Returns `min(query_cap + window - 1, key_sequence)`, computed without
 /// overflow. Every [`sliding_window_key_range`] of at most `query_cap` rows is
 /// no wider (its width is at most `rows + window - 1` and it lies inside
-/// `[0, key_sequence)`), so planning with this bound covers every chunk's keys.
+/// `[0, key_sequence)`), so planning with this bound covers every chunk's keys
+/// (`lemma_window_chunk_admitted`).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(bound =>
     requires
         window >= 1,
     ensures
-        bound == if query_cap + window - 1 <= key_sequence {
-            query_cap + window - 1
-        } else {
-            key_sequence as int
-        },
+        bound == window_key_bound(query_cap as int, window as int, key_sequence as int),
 ))]
 pub fn windowed_key_bound(query_cap: usize, window: usize, key_sequence: usize) -> usize {
     query_cap.saturating_add(window - 1).min(key_sequence)
@@ -704,10 +839,14 @@ pub fn windowed_key_bound(query_cap: usize, window: usize, key_sequence: usize) 
         chunk >= 1,
         span >= 1,
     ensures
+        // `None` exactly when the first and last positions share a chunk.
+        result is None <==> chunk_of(key_start + (span - 1), chunk as int) == key_start / chunk,
         match result {
             Some(frame) => {
                 &&& 1 <= frame.0 <= span
                 &&& frame.1 < frame.0
+                // The last local position lies past the first frame boundary.
+                &&& frame.0 <= span - 1 + frame.1
                 &&& forall|local: int| 0 <= local < span ==> #[trigger] chunk_of(
                     key_start + local,
                     chunk as int,
@@ -730,6 +869,15 @@ pub fn chunk_frame(chunk: usize, key_start: usize, span: usize) -> Option<(usize
             ) == key_start / chunk + (local + phase) / (chunk as int) by {
                 lemma_phase_shift(key_start as int, chunk as int, local);
             }
+            // The last position is at least one chunk past the start's phase.
+            assert(chunk_of(key_start + (span - 1), chunk as int)
+                == key_start / chunk + (span - 1 + phase) / (chunk as int));
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                chunk as int,
+                span - 1 + phase,
+                chunk as int,
+            );
+            vstd::arithmetic::div_mod::lemma_div_by_self(chunk as int);
         }
         return Some((chunk, phase));
     }
@@ -759,6 +907,9 @@ pub fn chunk_frame(chunk: usize, key_start: usize, span: usize) -> Option<(usize
             lemma_binary_quotient(local + phase, chunk as int);
             lemma_binary_quotient(local + shifted_phase, span as int);
         }
+        assert(chunk_of(key_start + (span - 1), chunk as int)
+            == key_start / chunk + (span - 1 + shifted_phase) / (span as int));
+        lemma_binary_quotient(span - 1 + shifted_phase, span as int);
     }
     Some((span, shifted_phase))
 }

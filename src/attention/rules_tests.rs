@@ -51,11 +51,15 @@ fn chunk_oracle_matches_floor_division() {
 #[test]
 fn window_reductions_preserve_exclusions() {
     for span in 1..=9usize {
-        for window in 0..=12usize {
+        for window in 1..=12usize {
             let rule = reduce_window(window, span);
             assert_eq!(rule == LocalRule::Unrestricted, window >= span);
             if window < span {
                 assert_eq!(rule, LocalRule::Window(window));
+            }
+            // Only a rule that excludes nothing collapses.
+            if rule != LocalRule::Unrestricted {
+                assert!(local_excludes(rule, span - 1, 0));
             }
             for query in 0..span {
                 for key in 0..span {
@@ -82,6 +86,15 @@ fn chunk_reductions_preserve_absolute_boundaries() {
                     assert!(1 <= width && width <= span && phase < width);
                 }
                 assert!(!matches!(rule, LocalRule::Window(_)));
+                // Collapse happens exactly when the span crosses no chunk boundary.
+                assert_eq!(
+                    rule == LocalRule::Unrestricted,
+                    key_start / chunk == (key_start + span - 1) / chunk,
+                    "C={chunk} start={key_start} span={span}"
+                );
+                if rule != LocalRule::Unrestricted {
+                    assert!(local_excludes(rule, span - 1, 0));
+                }
                 for query in 0..span {
                     for key in 0..span {
                         assert_eq!(
@@ -220,6 +233,10 @@ proptest::proptest! {
         span in 1usize..=24,
     ) {
         let rule = reduce_chunk(chunk, key_start, span);
+        proptest::prop_assert_eq!(
+            rule == LocalRule::Unrestricted,
+            key_start / chunk == (key_start + span - 1) / chunk
+        );
         for query in 0..span {
             for key in 0..span {
                 proptest::prop_assert_eq!(

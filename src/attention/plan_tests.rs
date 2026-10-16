@@ -185,6 +185,15 @@ fn windowed_key_bounds_cover_chunk_windows_without_overflow() {
 /// Checks a chunk frame against absolute chunk indices for every local position.
 fn assert_frame_preserves_chunks(chunk: usize, key_start: usize, span: usize) {
     let frame = chunk_frame(chunk, key_start, span);
+    // No frame exactly when the first and last positions share a chunk.
+    assert_eq!(
+        frame.is_none(),
+        key_start / chunk == (key_start + span - 1) / chunk,
+        "C={chunk} start={key_start} span={span}"
+    );
+    if let Some((width, phase)) = frame {
+        assert!(width < span + phase, "frame {frame:?} crosses no boundary");
+    }
     for local in 0..span {
         let absolute = (key_start + local) / chunk;
         match frame {

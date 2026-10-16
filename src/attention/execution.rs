@@ -237,7 +237,8 @@ impl AttentionExecutionPlan {
 /// `query_rows`, `[max(0, start + K - Q + 1 - window), end + K - Q)`, whose
 /// width is at most `query_rows.len() + window - 1`. Returns `None` for an
 /// empty or out-of-bounds row range, `query_sequence > key_sequence`, or a
-/// zero window. Containment of every visible key is verified with Verus.
+/// zero window. Exactness (the range is the union of the rows' visible keys)
+/// is verified with Verus.
 #[must_use]
 pub fn sliding_window_key_range(
     query_sequence: usize,

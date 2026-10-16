@@ -29,8 +29,9 @@
 //!   ([`reduce_window`]); a narrower window keeps `W < K`.
 //! - Chunks become a frame `(width, phase)` with `phase < width <= K`
 //!   ([`super::plan::chunk_frame`]): absolute chunks of `key_start + q` agree
-//!   exactly when `floor((q + phase) / width)` agree. A span inside one chunk
-//!   collapses to [`LocalRule::Unrestricted`] ([`reduce_chunk`]).
+//!   exactly when `floor((q + phase) / width)` agree. A span inside one chunk,
+//!   and only such a span, collapses to [`LocalRule::Unrestricted`]
+//!   ([`reduce_chunk`]).
 //!
 //! Every surviving parameter is below `K` (or a width of at most `K`), so the
 //! largest value the tensor arithmetic forms, `(K - 1) + parameter`, stays
@@ -43,16 +44,17 @@
 //! [`rejects_short_keys`] and [`position_source`] decide which position
 //! vectors a mask needs. Queries are the bottom-right suffix of the keys, so
 //! valid-token ordinals of the queries start `K - Q` columns into the keys;
-//! the planner proves that this offset never underflows once the alignment
-//! check has passed.
+//! [`lemma_alignment_admits_ordinals`] proves that this offset never
+//! underflows once the alignment check has passed.
 //!
 //! # Verified properties
 //!
 //! Verus checks every function here through `verus/attention.rs`: the oracles
 //! equal their mathematical definitions, both reductions preserve the
 //! exclusion relation on every local position pair with parameters below the
-//! span, geometry faults are reported exactly and in order, and the ordinal
-//! offset is exact and in range.
+//! span and collapse to [`LocalRule::Unrestricted`] exactly when the rule
+//! excludes nothing in the span, geometry faults are reported exactly and in
+//! order, and the ordinal offset is exact and in range.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -108,13 +110,18 @@ pub proof fn lemma_alignment_admits_ordinals(
 {
 }
 
+/// What the window excludes for local positions `query` and `key` of a span starting at `start`.
+pub open spec fn absolute_window_excluded(start: int, query: int, key: int, window: int) -> bool {
+    window_excluded(start + query, start + key, window)
+}
+
 /// What a reduced local rule excludes for local query position `query` and key `key`.
 pub open spec fn local_excluded(rule: LocalRule, query: int, key: int) -> bool {
     match rule {
         LocalRule::Unrestricted => false,
         LocalRule::Window(window) => window_excluded(query, key, window as int),
-        LocalRule::Chunk { width, phase } => (query + phase) / (width as int) != (key
-            + phase) / (width as int),
+        LocalRule::Chunk { width, phase } =>
+            (query + phase) / (width as int) != (key + phase) / (width as int),
     }
 }
 
@@ -176,24 +183,36 @@ pub enum LocalRule {
     },
 }
 
-/// Reduces a sliding window to local positions of a `span`-key timeline.
+/// Reduces a validated (non-zero) sliding window to local positions of a `span`-key timeline.
 ///
-/// The result excludes exactly the local pairs the window excludes; these are
-/// also the absolute pairs `(key_start + q, key_start + k)` for any
-/// `key_start`, because `j + W <= p` depends only on the gap `p - j`. Windows of at least
-/// `span` positions exclude nothing and become [`LocalRule::Unrestricted`];
-/// narrower windows keep their width.
+/// Verified: the result excludes exactly the local pairs the window excludes,
+/// and these are also the absolute pairs `(key_start + q, key_start + k)` for
+/// every `key_start`, because `j + W <= p` depends only on the gap `p - j`.
+/// Windows of at least `span` positions exclude nothing and become
+/// [`LocalRule::Unrestricted`]; narrower windows keep their width. The window
+/// must be non-zero (as [`super::AttentionConnectivity::validate`] ensures),
+/// so the relation proved is exactly that of [`window_excludes`].
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(rule =>
     requires
+        window >= 1,
         span >= 1,
     ensures
         rule == LocalRule::Unrestricted <==> window >= span,
         window < span ==> rule == LocalRule::Window(window),
+        // A surviving rule excludes something: the oldest key from the newest query.
+        rule != LocalRule::Unrestricted ==> local_excluded(rule, span - 1, 0),
         local_rule_fits(rule, span as int),
         forall|query: int, key: int|
             0 <= query < span && 0 <= key < span ==> #[trigger] local_excluded(rule, query, key)
                 == window_excluded(query, key, window as int),
+        forall|start: int, query: int, key: int|
+            0 <= start && 0 <= query < span && 0 <= key < span ==> #[trigger]
+                absolute_window_excluded(start, query, key, window as int) == local_excluded(
+                rule,
+                query,
+                key,
+            ),
 ))]
 pub fn reduce_window(window: usize, span: usize) -> LocalRule {
     // No local gap reaches `span`, so a window that wide excludes nothing.
@@ -206,11 +225,12 @@ pub fn reduce_window(window: usize, span: usize) -> LocalRule {
 
 /// Reduces chunked-local attention over absolute positions `key_start + [0, span)`.
 ///
-/// The result excludes local pair `(q, k)` exactly when the absolute
-/// positions `key_start + q` and `key_start + k` lie in different chunks of
-/// `chunk` positions. A span inside one chunk becomes
-/// [`LocalRule::Unrestricted`]; otherwise the frame of
-/// [`super::plan::chunk_frame`] keeps `phase < width <= span`.
+/// Verified: the result excludes local pair `(q, k)` exactly when the
+/// absolute positions `key_start + q` and `key_start + k` lie in different
+/// chunks of `chunk` positions. It is [`LocalRule::Unrestricted`] exactly when
+/// the first and last positions share a chunk (the span crosses no boundary);
+/// otherwise the frame of [`super::plan::chunk_frame`] keeps
+/// `phase < width <= span`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(rule =>
     requires
@@ -218,6 +238,10 @@ pub fn reduce_window(window: usize, span: usize) -> LocalRule {
         span >= 1,
     ensures
         !(rule is Window),
+        rule == LocalRule::Unrestricted <==> chunk_of(key_start + (span - 1), chunk as int)
+            == chunk_of(key_start as int, chunk as int),
+        // A surviving rule excludes something: the oldest key from the newest query.
+        rule != LocalRule::Unrestricted ==> local_excluded(rule, span - 1, 0),
         local_rule_fits(rule, span as int),
         forall|query: int, key: int|
             0 <= query < span && 0 <= key < span ==> #[trigger] local_excluded(rule, query, key)
@@ -232,11 +256,19 @@ pub fn reduce_chunk(chunk: usize, key_start: usize, span: usize) -> LocalRule {
                 assert forall|query: int, key: int| 0 <= query < span && 0 <= key < span implies
                     #[trigger] local_excluded(LocalRule::Chunk { width, phase }, query, key)
                         == chunk_excluded(key_start + query, key_start + key, chunk as int) by {
-                    assert(chunk_of(key_start + query, chunk as int) == key_start / chunk + (query
-                        + phase) / (width as int));
-                    assert(chunk_of(key_start + key, chunk as int) == key_start / chunk + (key
-                        + phase) / (width as int));
+                    assert(chunk_of(key_start + query, chunk as int)
+                        == key_start / chunk + (query + phase) / (width as int));
+                    assert(chunk_of(key_start + key, chunk as int)
+                        == key_start / chunk + (key + phase) / (width as int));
                 }
+                // The first frame boundary lies inside the span.
+                vstd::arithmetic::div_mod::lemma_basic_div(phase as int, width as int);
+                vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                    width as int,
+                    span - 1 + phase,
+                    width as int,
+                );
+                vstd::arithmetic::div_mod::lemma_div_by_self(width as int);
             }
             LocalRule::Chunk { width, phase }
         }
