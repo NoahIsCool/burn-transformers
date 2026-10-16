@@ -6,17 +6,21 @@
 //! - `valid_columns`: a mask row compacts to exactly the recursive list of
 //!   its valid columns (`spec_valid_columns`), which is strictly increasing,
 //!   in range, and contains every valid column;
-//! - `plan_scatter` and helpers: scatter plans restore the rectangular layout
-//!   (identity, one contiguous run, or a gather map with an appended zero
-//!   row), and the identity or a single run is chosen whenever it applies;
-//! - `row_valid_columns` and `row_last_columns`: every row of an optional
-//!   `[batch, sequence]` mask lists exactly its valid columns, and reports its
-//!   last valid column or `sequence - 1` when empty (dense when no mask);
-//! - `row_contexts` and `plan_host_rows`: the host side of every stateful
-//!   prefill and decode call returns exactly the specified outcome, with
-//!   errors in precedence order (rejected empty row, first impossible append,
-//!   first row with an out-of-range valid token, out-of-range valid position,
-//!   or unrepresentable extent, where an explicit-position row succeeds only
+//! - `plan_scatter` and its helpers `is_sorted_unique_below` (its exact
+//!   precondition check), `is_single_run`, and `gather_sources`: scatter
+//!   plans restore the rectangular layout (identity, one contiguous run, or a
+//!   gather map with an appended zero row), and the identity or a single run
+//!   is chosen whenever it applies;
+//! - `row_valid_columns`, `plan_row_grid`, and `row_last_columns`: every row
+//!   of an optional `[batch, sequence]` mask lists exactly its valid columns
+//!   (with its count), and reports its last valid column or `sequence - 1`
+//!   when empty (dense when no mask);
+//! - `row_contexts` and `plan_host_rows` (with `list_lengths` and
+//!   `contains_zero`): the host side of every stateful prefill and decode
+//!   call returns exactly the specified outcome, with errors in precedence
+//!   order (rejected empty row, first impossible append, first row with an
+//!   out-of-range valid token, out-of-range valid position, or
+//!   unrepresentable extent, where an explicit-position row succeeds only
 //!   when `1 + max p` is a positive `usize`, with or without a position
 //!   limit) and otherwise the per-row columns, counts, last columns, and
 //!   rotary extents `1 + max p` or `L + n`;
@@ -47,6 +51,8 @@
 //! the unverified callers (`[batch, sequence]` host buffers and one cursor per
 //! row, checked there at runtime) remain covered by the Rust tests in
 //! `src/models/shared/*_tests.rs` and every family's parity suite.
+//! `verus/nemotron.rs` includes the same planning file at its crate path and
+//! re-verifies it alongside the Nemotron-H plans.
 
 #![allow(unused)]
 // Loop invariants are attributes on `while` statements, which Verus parses as

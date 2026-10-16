@@ -9,7 +9,10 @@
 //!   `portable_displacement_table` keeps that table exactly when
 //!   `2R + 1 <= i32::MAX`, so its radius converts to `i64` losslessly;
 //! - `displacement_slot`: the device index `clamp(d, -R, R) + R` lies in the
-//!   table and equals `d + R` for every in-range displacement;
+//!   table, equals `d + R` for every in-range displacement, and is `0` or
+//!   `2R` beyond either end; it is the scalar specification of the device
+//!   expression, compiled only for tests and proofs
+//!   (`#[cfg(any(test, verus_keep_ghost))]`);
 //! - `slot_displacement`: slot `k` stores displacement `k - R`, the inverse of
 //!   `displacement_slot` on the table;
 //! - `plan_row_append`: one row's append counts its valid columns, keeps the
@@ -21,7 +24,8 @@
 //!   requested length when representable, never-started row), and otherwise
 //!   per-row counts `n_r`, lengths `L_r + n_r <= capacity`, and the rank slots
 //!   of every row; its helpers `count_valid_cells`, `grid_row_counts`,
-//!   `first_zero`, and `first_nonzero` are verified with exact results;
+//!   `first_zero`, and `first_nonzero` return exact counts and the first
+//!   matching index;
 //! - `plan_history_writes`: the write window `[start, end)` is the tightest
 //!   one over advancing rows (`[0, 0)` when none advances), cell `(r, j)` is
 //!   written exactly when `L_r <= start + j < L_r + n_r`, and a written cell
