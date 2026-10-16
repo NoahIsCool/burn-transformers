@@ -1438,6 +1438,117 @@ fn seq2seq_auto_state_forwards_group_preserving_reorder() {
     assert_registry_logits(actual, in_place);
 }
 
+/// Release timings of one beam step's reorder through the automatic T5 state (SI-1).
+///
+/// FLAN-T5-small decoder geometry (8 layers, 6 heads, `d_kv` 64) with one
+/// source expanded to four beams over 512 source tokens. Before the
+/// automatic state forwarded `reorder_within_groups`, the trait default ran
+/// the full `reorder`, which also re-gathers the bound encoder output and
+/// every layer's projected cross-attention keys and values; that former path
+/// is timed directly. Reproduce with
+/// `cargo test --release --lib -- --ignored --nocapture t5_beam_reorder_timings`.
+#[test]
+#[ignore = "release-mode timing; run explicitly"]
+fn t5_beam_reorder_timings() {
+    /// Beams per source, as in the README's FLAN-T5 example.
+    const BEAMS: usize = 4;
+    /// Source tokens, enough for cross-attention gathers to dominate a full reorder.
+    const SOURCE: usize = 512;
+    let device = Default::default();
+    let concrete = T5ForConditionalGeneration::<TestBackend>::init(
+        T5Config {
+            vocab_size: 32_128,
+            d_model: 512,
+            d_kv: 64,
+            d_ff: 1_024,
+            num_layers: 8,
+            num_decoder_layers: Some(8),
+            num_heads: 6,
+            relative_attention_num_buckets: 32,
+            relative_attention_max_distance: 128,
+            dropout_rate: 0.0,
+            feed_forward_proj: T5FeedForwardProjection::GatedGelu,
+            ..T5Config::default()
+        },
+        &device,
+    )
+    .unwrap();
+    materialize_registry_parameters(&concrete);
+    let automatic = AutoSeq2SeqLm::from(concrete.clone());
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let source = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(
+                (0..SOURCE as i32)
+                    .map(|id| 3 + id % 1_000)
+                    .collect::<Vec<_>>(),
+                [1, SOURCE],
+            ),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut encoder = concrete.encode(source, &options).unwrap();
+    encoder.hidden_state = encoder
+        .hidden_state
+        .select(0, Tensor::<TestBackend, 1, Int>::zeros([BEAMS], &device));
+    let cache = CacheConfig::new(BEAMS, 16).unwrap();
+    let start = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::zeros([BEAMS, 1], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut state = automatic.new_decode_state(cache, BEAMS, &device).unwrap();
+    automatic
+        .prefill_decoder(&encoder, start(), &mut state, &options)
+        .unwrap();
+    let mut direct =
+        Seq2SeqLanguageModel::new_decode_state(&concrete, cache, BEAMS, &device).unwrap();
+    Seq2SeqLanguageModel::prefill_decoder(&concrete, &encoder, start(), &mut direct, &options)
+        .unwrap();
+    let median_ms = |run: &mut dyn FnMut()| {
+        run();
+        let mut samples = (0..21)
+            .map(|_| {
+                let begin = std::time::Instant::now();
+                run();
+                TestBackend::sync(&device).unwrap();
+                begin.elapsed().as_secs_f64() * 1e3
+            })
+            .collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let parents = [1, 0, 3, 2];
+    let former = median_ms(&mut || DecodeState::reorder(&mut state, &parents).unwrap());
+    let automatic_grouped =
+        median_ms(&mut || state.reorder_within_groups(&parents, BEAMS).unwrap());
+    let concrete_grouped = median_ms(&mut || {
+        DecodeState::reorder_within_groups(&mut direct, &parents, BEAMS).unwrap();
+    });
+    let step = median_ms(&mut || {
+        let next = DecodeInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::ones([BEAMS, 1], &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        Seq2SeqLanguageModel::decode(&concrete, &encoder, next, &mut direct, &options)
+            .unwrap()
+            .decoder
+            .logits
+            .into_data();
+        DecodeState::truncate(&mut direct, &[1; BEAMS]).unwrap();
+    });
+    println!(
+        "SI-1 T5 beam reorder ({BEAMS} beams, {SOURCE} source tokens): former automatic {former:.3} ms, \
+         automatic {automatic_grouped:.3} ms, concrete {concrete_grouped:.3} ms; one decode step {step:.3} ms"
+    );
+}
+
 /// Names of the `fn` items declared directly inside the block opened by `header`.
 ///
 /// A brace-depth scan over the source text: `fn` lines count only at depth one,
