@@ -41,6 +41,15 @@
 //! - `checked_host_product` and `dense_byte_len` compute host element and byte
 //!   counts or report the overflowing running product.
 //!
+//! # Scalar dtypes (`src/checkpoint/dtype/scalar.rs`)
+//!
+//! - `TensorDType::bits` returns exactly the SafeTensors width of each dtype
+//!   (only F4 and the F6 formats are narrower than a byte; every other width
+//!   is a whole number of bytes); `is_float` and `is_castable_float` hold for
+//!   exactly the floating-point and the F16/BF16/F32/F64 formats; and
+//!   `converts_in_place_to` holds exactly for identity and the BF16 <-> F16
+//!   casts, so an in-place conversion never changes the scalar width.
+//!
 //! # Untrusted names (`src/checkpoint/lexical.rs`)
 //!
 //! - `lexical_path_violation` names exactly the first broken rule (empty, NUL,
@@ -139,6 +148,9 @@
 
 #[path = "../src/checkpoint/division.rs"]
 pub mod division;
+
+#[path = "../src/checkpoint/dtype/scalar.rs"]
+pub mod dtype_scalar;
 
 #[path = "../src/checkpoint/layout.rs"]
 pub mod layout;
