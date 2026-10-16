@@ -31,12 +31,14 @@ use crate::{
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
-use crate::models::shared::{check_nonempty_mask, ensure_grid, ensure_same_device};
+use crate::models::shared::{
+    check_nonempty_mask, ensure_grid, ensure_same_device, scaling::soft_cap,
+};
 
 use super::{
     common::{
         BackboneOutput, causal_output, embed_tokens, embedded_state, has_moe, router_diagnostics,
-        select_hidden, soft_cap_logits, tied_projection, validate_and_resolve_input,
+        select_hidden, tied_projection, validate_and_resolve_input,
         validate_and_resolve_input_with, validate_forward_options, validate_stack_execution,
         validate_staged_positions,
     },
@@ -697,16 +699,14 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
     /// Applies an independent or target-embedding-tied vocabulary projection, then the decoder's soft cap.
     ///
     /// A tied projection reads the unscaled target table; the decoder spec's
-    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`.
+    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`
+    /// through the shared [`soft_cap`].
     pub(super) fn project_decoder(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         let logits = match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
             None => tied_projection(hidden, self.decoder_embed_tokens.weight.val()),
         }?;
-        Ok(soft_cap_logits(
-            logits,
-            self.spec.decoder.final_logit_softcap,
-        ))
+        Ok(soft_cap(logits, self.spec.decoder.final_logit_softcap))
     }
 
     /// Evaluates a complete stateless encoder-decoder graph.

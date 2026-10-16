@@ -25,11 +25,13 @@ use crate::{
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
+use crate::models::shared::scaling::soft_cap;
+
 use super::{
     common::{
         BackboneOutput, causal_output, embed_tokens, embedded_state, router_diagnostics,
-        select_hidden, soft_cap_logits, tied_projection, validate_and_resolve_input,
-        validate_forward_options, validate_stack_execution, validate_staged_positions,
+        select_hidden, tied_projection, validate_and_resolve_input, validate_forward_options,
+        validate_stack_execution, validate_staged_positions,
     },
     init::scaled_init_policy,
     layer::ModularLayer,
@@ -409,13 +411,14 @@ impl<B: Backend> ModularCausalLm<B> {
     /// Applies an independent or exactly tied vocabulary projection, then the optional soft cap.
     ///
     /// A tied projection reads the unscaled embedding table; the spec's
-    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`.
+    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`
+    /// through the shared [`soft_cap`].
     pub(super) fn project(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         let logits = match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
             None => tied_projection(hidden, self.embed_tokens.weight.val()),
         }?;
-        Ok(soft_cap_logits(logits, self.spec.final_logit_softcap))
+        Ok(soft_cap(logits, self.spec.final_logit_softcap))
     }
 
     /// Evaluates the stateless, differentiable decoder graph.

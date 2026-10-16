@@ -26,6 +26,9 @@
 //!   family whose cached attention bounds key prefixes (DeepSeek-V2, Muse
 //!   Glimmer); its per-row maps also back Qwen3.5's compact batches, which
 //!   gpt-oss and Qwen3-MoE reuse;
+//! * [`scaling`] rounds scalar multipliers (Gemma's `sqrt(d)` embedding
+//!   scale) to an activation dtype exactly as the references' scalar tensors
+//!   are rounded, and applies `c · tanh(z / c)` logit soft caps;
 //! * [`load_audit`] holds the verified counter arithmetic that
 //!   [`LoadedModel`](crate::LoadedModel) audits use for every loaded family.
 //!
@@ -51,6 +54,7 @@ pub(crate) mod load_audit;
 pub(crate) mod logits;
 pub(crate) mod plan;
 pub(crate) mod rows;
+pub(crate) mod scaling;
 #[cfg(test)]
 pub(crate) mod test_support;
 

@@ -451,22 +451,3 @@ fn final_logit_softcap_bounds_every_readout_path() {
         Tolerance::absolute(1e-6),
     );
 }
-
-/// Embedding multipliers are rounded to the activation dtype, as Gemma rounds `sqrt(d)`.
-#[test]
-fn embedding_multipliers_round_to_the_activation_dtype() {
-    use super::super::common::round_to_dtype;
-    use burn::tensor::DType;
-
-    let sqrt_3072 = 3072f64.sqrt();
-    assert_eq!(round_to_dtype(sqrt_3072, DType::BF16), 55.5);
-    assert_eq!(
-        round_to_dtype(sqrt_3072, DType::F16),
-        f64::from(burn::tensor::f16::from_f64(sqrt_3072).to_f32())
-    );
-    assert_eq!(
-        round_to_dtype(sqrt_3072, DType::F32),
-        f64::from(sqrt_3072 as f32)
-    );
-    assert_eq!(round_to_dtype(sqrt_3072, DType::F64), sqrt_3072);
-}

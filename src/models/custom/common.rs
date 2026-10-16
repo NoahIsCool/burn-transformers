@@ -8,7 +8,7 @@
 
 use burn::{
     nn::Embedding,
-    tensor::{Bool, DType, Int, Tensor, backend::Backend, bf16, f16},
+    tensor::{Bool, Int, Tensor, backend::Backend},
 };
 
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
 pub(super) use crate::models::shared::select_hidden;
 use crate::models::shared::{
     DeferredChecks, InputContract, InputNames, PaddedPositions, defer_input,
-    validate_position_values,
+    scaling::round_to_dtype, validate_position_values,
 };
 
 use super::layer::{ENCODER_SLIDING_WINDOW, ensure_executable};
@@ -256,8 +256,9 @@ pub(super) fn has_moe(spec: &DecoderSpec) -> bool {
 /// Looks up `[batch, token]` IDs in `table` and applies a stack's optional embedding multiplier.
 ///
 /// Computes `h_0 = s · E[token]` in the table's dtype, with `s`
-/// ([`DecoderSpec::embedding_scale`]) first rounded to that dtype by
-/// [`round_to_dtype`]; `None` returns the plain lookup.
+/// ([`DecoderSpec::embedding_scale`]) first rounded to that dtype as
+/// `torch.tensor(s, dtype=...)` rounds it (the shared
+/// [`round_to_dtype`]); `None` returns the plain lookup.
 pub(super) fn embed_tokens<B: Backend>(
     table: &Embedding<B>,
     token_ids: Tensor<B, 2, Int>,
@@ -270,33 +271,6 @@ pub(super) fn embed_tokens<B: Backend>(
             embeddings.mul_scalar(scale)
         }
         None => embeddings,
-    }
-}
-
-/// Rounds a scalar multiplier to the precision of `dtype`.
-///
-/// F64 keeps the value, F16 and BF16 round through F32 (as Gemma's references
-/// build their `sqrt(d)` normalizer: an F32 value converted to the activation
-/// dtype), and every other floating dtype uses the F32 value. Multiplying a
-/// tensor of `dtype` by the result therefore uses a scalar that dtype
-/// represents exactly, independent of how a backend converts scalars.
-pub(super) fn round_to_dtype(value: f64, dtype: DType) -> f64 {
-    let single = value as f32;
-    match dtype {
-        DType::F64 => value,
-        DType::F16 => f64::from(f16::from_f32(single).to_f32()),
-        DType::BF16 => f64::from(bf16::from_f32(single).to_f32()),
-        _ => f64::from(single),
-    }
-}
-
-/// Applies a stack's optional final logit soft cap `c · tanh(z / c)` in the logits' dtype.
-///
-/// `cap` is [`DecoderSpec::final_logit_softcap`]; `None` returns the logits unchanged.
-pub(super) fn soft_cap_logits<B: Backend>(logits: Tensor<B, 3>, cap: Option<f64>) -> Tensor<B, 3> {
-    match cap {
-        Some(cap) => logits.div_scalar(cap).tanh().mul_scalar(cap),
-        None => logits,
     }
 }
 
