@@ -450,6 +450,36 @@ fn slices_and_splats_are_charged() {
     );
 }
 
+/// `divisibleby` reports an integer zero divisor instead of panicking inside MiniJinja.
+///
+/// Found by the typed differential property: MiniJinja's test computes
+/// `a % b` on `i128` unchecked, so `3 is divisibleby 0` panicked (and
+/// `i128::MIN is divisibleby -1` overflowed). Jinja2 raises
+/// `ZeroDivisionError`; every other answer is MiniJinja's.
+#[test]
+fn divisibleby_never_panics() {
+    let error = render("{{ 3 is divisibleby 0 }}").unwrap_err();
+    assert_eq!(
+        error.detail(),
+        Some("divisibleby: integer division or modulo by zero")
+    );
+    let cases = [
+        ("{{ 6 is divisibleby 3 }}", "True"),
+        ("{{ 7 is divisibleby(3) }}", "False"),
+        ("{{ 6 is divisibleby -1 }}", "True"),
+        (
+            "{{ -170141183460469231731687303715884105728 is divisibleby -1 }}",
+            "True",
+        ),
+        ("{{ 3.0 is divisibleby 0 }}", "False"),
+        ("{{ 4.5 is divisibleby 1.5 }}", "True"),
+        ("{{ 'a' is divisibleby 2 }}", "False"),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(render(source).unwrap(), expected, "{source}");
+    }
+}
+
 /// `strftime_now` checks its largest possible result before formatting and charges its result.
 #[test]
 fn strftime_is_bounded() {

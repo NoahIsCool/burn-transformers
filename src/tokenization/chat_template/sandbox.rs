@@ -30,7 +30,8 @@
 //!   `endingwith` tests) with bounded versions, charges the builtins that
 //!   copy their input (`list`, `sort`, `unique`, `map`, `select`, `reject`,
 //!   `selectattr`, `rejectattr`, `dictsort`, `groupby`, `reverse`, `lines`,
-//!   and `dict()`), and removes `debug()`.
+//!   and `dict()`), removes `debug()`, and replaces the `divisibleby` test,
+//!   which panics on a zero divisor, with a checked one.
 //! - [`NamespaceRegistry`] records (and charges) every namespace a render
 //!   creates and, through [`CycleBreaker`], clears their reference-holding
 //!   attributes when the render ends, so reference cycles
@@ -639,6 +640,32 @@ pub(crate) fn install(environment: &mut Environment<'_>, budget: &Arc<RenderBudg
     install_text_filters(environment, budget);
     install_sized_filters(environment, budget);
     install_copying_builtins(environment, budget);
+    environment.add_test("divisibleby", is_divisible_by);
+}
+
+/// MiniJinja's `divisibleby` test without its integer panics.
+///
+/// The builtin computes `a % b` on `i128` unchecked, which panics for
+/// `b = 0` and overflows for `i128::MIN % -1`; the render's `catch_unwind`
+/// would turn that into an error, but only where panics unwind. Jinja2
+/// raises `ZeroDivisionError` for a zero divisor, so integer zero is an
+/// error here, every integer is divisible by `-1`, and all other operands
+/// (floats, whose remainder by zero is NaN and so `false`, and non-numbers)
+/// go to the builtin unchanged.
+fn is_divisible_by(value: &Value, other: &Value) -> Result<bool, Error> {
+    if value.is_integer() && other.is_integer() {
+        match i128::try_from(other.clone()) {
+            Ok(0) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidOperation,
+                    "divisibleby: integer division or modulo by zero",
+                ));
+            }
+            Ok(-1) => return Ok(true),
+            _ => {}
+        }
+    }
+    Ok(builtin_tests::is_divisibleby(value, other))
 }
 
 /// Replaces the builtins that print arbitrary values: case changes, `escape`, `pprint`, and two tests.

@@ -620,6 +620,391 @@ fn long_flat_lists_render_like_minijinja() {
     }
 }
 
+/// The value types the typed template generator draws expressions of.
+#[derive(Debug, Clone, Copy)]
+enum Type {
+    /// Integers and floats.
+    Number,
+    /// Strings.
+    Text,
+    /// Lists, tuples, and lazy sequences.
+    Sequence,
+    /// Maps.
+    Map,
+    /// Conditions.
+    Boolean,
+}
+
+/// Parenthesizes `text` unless it is already a single primary.
+///
+/// Postfix syntax, filters, and tests bind tighter than every binary
+/// operator, so a compound operand needs parentheses to keep the type the
+/// generator meant (binary operands are left bare on purpose, to exercise
+/// the guard's precedence). Quoted literals, bracketed literals, and
+/// parenthesized groups are primaries; so is anything without a space.
+fn atom(text: String) -> String {
+    let enclosed = |open: char, close: char| {
+        text.starts_with(open) && text.ends_with(close) && {
+            let mut depth = 0_i32;
+            let mut quote = None;
+            let mut closes_last = true;
+            for (index, character) in text.char_indices() {
+                match (quote, character) {
+                    (Some(q), c) if c == q => quote = None,
+                    (Some(_), _) => {}
+                    (None, '\'' | '"') => quote = Some(character),
+                    (None, '(' | '[' | '{') => depth += 1,
+                    (None, ')' | ']' | '}') => {
+                        depth -= 1;
+                        if depth == 0 && index + 1 < text.len() {
+                            closes_last = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            closes_last
+        }
+    };
+    let quoted = (text.starts_with('\'')
+        && text.ends_with('\'')
+        && text[1..text.len() - 1].find('\'').is_none())
+        || (text.starts_with('"')
+            && text.ends_with('"')
+            && text[1..text.len() - 1].find('"').is_none());
+    if !text.contains(' ')
+        || quoted
+        || enclosed('(', ')')
+        || enclosed('[', ']')
+        || enclosed('{', '}')
+    {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// Strategy for one of `options`, each built from sub-expressions one level shallower.
+fn pick(options: Vec<BoxedStrategy<String>>) -> BoxedStrategy<String> {
+    prop::strategy::Union::new(options).boxed()
+}
+
+/// Strategy for an expression of type `kind` with at most `depth` levels of nesting.
+///
+/// The grammar covers what the operator guard rewrites or must see through:
+/// the guarded operators and their precedence neighbours, unary minus and
+/// `not`, postfix attributes, subscripts, slices, and calls (methods with
+/// arguments), filters with positional and keyword arguments,
+/// parenthesis-free tests, list, tuple, and map literals, conditionals, and
+/// `*`/`**` call arguments. Operands are typed so most expressions evaluate,
+/// and `+`/`*` never combine sequences (whose list semantics are the
+/// guard's documented difference from MiniJinja).
+fn typed(kind: Type, depth: u32) -> BoxedStrategy<String> {
+    let leaves: Vec<&'static str> = match kind {
+        Type::Number => vec!["0", "1", "2", "5", "2.5", "-1", "x", "(l | length)"],
+        Type::Text => vec!["'ab'", "''", "s", "'x y'", "\"q\""],
+        Type::Sequence => vec!["l", "[1, 2]", "[]", "['a', s]", "(1, 'b')"],
+        Type::Map => vec!["m", "{'a': 1}", "dict(a=2)"],
+        Type::Boolean => vec!["true", "false", "x > 1", "s in 'qs'"],
+    };
+    let leaf = prop::sample::select(leaves).prop_map(str::to_owned).boxed();
+    if depth == 0 {
+        return leaf;
+    }
+    let number = || typed(Type::Number, depth - 1);
+    let text = || typed(Type::Text, depth - 1);
+    let sequence = || typed(Type::Sequence, depth - 1);
+    let map = || typed(Type::Map, depth - 1);
+    let boolean = || typed(Type::Boolean, depth - 1);
+    let same = || typed(kind, depth - 1);
+    let small = || prop::sample::select(vec!["0", "1", "2", "-1", "-2", "none", "x"]);
+    let any = || pick(vec![number(), text(), sequence(), map(), boolean()]);
+    let mut options = vec![
+        leaf,
+        same().prop_map(|inner| format!("({inner})")).boxed(),
+        (same(), boolean(), same())
+            .prop_map(|(yes, test, no)| format!("{yes} if {test} else {no}"))
+            .boxed(),
+    ];
+    match kind {
+        Type::Number => options.extend([
+            (
+                number(),
+                prop::sample::select(vec!["+", "-", "*", "/", "//", "%", "**"]),
+                number(),
+            )
+                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}"))
+                .boxed(),
+            number().prop_map(|operand| format!("-{operand}")).boxed(),
+            text()
+                .prop_map(|operand| format!("{} | length", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{} | length", atom(operand)))
+                .boxed(),
+            number()
+                .prop_map(|operand| format!("{} | abs", atom(operand)))
+                .boxed(),
+            number()
+                .prop_map(|operand| format!("{} | round(1)", atom(operand)))
+                .boxed(),
+            map()
+                .prop_map(|operand| format!("{}.a | default(0)", atom(operand)))
+                .boxed(),
+            (sequence(), small())
+                .prop_map(|(operand, index)| format!("{}[{index}] | default(7)", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("dict(**{{'k': {operand}}}).k | length"))
+                .boxed(),
+        ]),
+        Type::Text => options.extend([
+            (text(), prop::sample::select(vec!["+", "~"]), text())
+                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}"))
+                .boxed(),
+            (text(), any())
+                .prop_map(|(left, right)| format!("{left} ~ {right}"))
+                .boxed(),
+            (text(), small())
+                .prop_map(|(left, count)| format!("{left} * {count}"))
+                .boxed(),
+            (small(), text())
+                .prop_map(|(count, right)| format!("{count} * {right}"))
+                .boxed(),
+            (text(), small(), small(), small())
+                .prop_map(|(operand, start, stop, step)| {
+                    format!("{}[{start}:{stop}:{step}]", atom(operand))
+                })
+                .boxed(),
+            (text(), small())
+                .prop_map(|(operand, start)| format!("{}[{start}:]", atom(operand)))
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{}[::-1]", atom(operand)))
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{}[1:].upper()", atom(operand)))
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{} | upper", atom(operand)))
+                .boxed(),
+            (text(), text(), text())
+                .prop_map(|(operand, from, to)| {
+                    format!("{} | replace({from}, {to})", atom(operand))
+                })
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{}.strip('a')", atom(operand)))
+                .boxed(),
+            (sequence(), text())
+                .prop_map(|(operand, separator)| format!("{} | join({separator})", atom(operand)))
+                .boxed(),
+            (sequence(), text())
+                .prop_map(|(operand, separator)| format!("{} | join(d={separator})", atom(operand)))
+                .boxed(),
+            any()
+                .prop_map(|operand| format!("{} | string", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("'%s|%s' | format(*{operand})"))
+                .boxed(),
+            (text(), small())
+                .prop_map(|(operand, index)| format!("{}[{index}]", atom(operand)))
+                .boxed(),
+        ]),
+        Type::Sequence => options.extend([
+            (sequence(), small(), small())
+                .prop_map(|(operand, start, stop)| format!("{}[{start}:{stop}]", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{}[::-1]", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{} | list", atom(operand)))
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{} | list", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{} | reverse | list", atom(operand)))
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{}.split()", atom(operand)))
+                .boxed(),
+            text()
+                .prop_map(|operand| format!("{}.split('a')[1:]", atom(operand)))
+                .boxed(),
+            (any(), any())
+                .prop_map(|(first, second)| format!("[{first}, {second}]"))
+                .boxed(),
+            (any(), any())
+                .prop_map(|(first, second)| format!("({first}, {second},)"))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{} | batch(2) | list", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{} | map('string') | list", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("{} | select | list", atom(operand)))
+                .boxed(),
+            map()
+                .prop_map(|operand| format!("{}.keys()", atom(operand)))
+                .boxed(),
+            map()
+                .prop_map(|operand| format!("{} | dictsort", atom(operand)))
+                .boxed(),
+            sequence()
+                .prop_map(|operand| format!("range(*{}[:2]) | list", atom(operand)))
+                .boxed(),
+        ]),
+        Type::Map => options.extend([
+            (text(), any())
+                .prop_map(|(key, value)| format!("{{{key}: {value}, 'z': 0}}"))
+                .boxed(),
+            (map(), any())
+                .prop_map(|(base, value)| format!("dict({base}, k={value})"))
+                .boxed(),
+            map()
+                .prop_map(|operand| format!("dict(**{operand})"))
+                .boxed(),
+        ]),
+        Type::Boolean => options.extend([
+            (
+                number(),
+                prop::sample::select(vec!["==", "!=", "<", ">=", "in"]),
+                number(),
+            )
+                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}"))
+                .boxed(),
+            (text(), text())
+                .prop_map(|(left, right)| format!("{left} not in {right}"))
+                .boxed(),
+            boolean()
+                .prop_map(|operand| format!("not {operand}"))
+                .boxed(),
+            (
+                boolean(),
+                prop::sample::select(vec!["and", "or"]),
+                boolean(),
+            )
+                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}"))
+                .boxed(),
+            (number(), small())
+                .prop_map(|(operand, divisor)| {
+                    format!("{} is divisibleby {divisor}", atom(operand))
+                })
+                .boxed(),
+            (text(), text())
+                .prop_map(|(left, right)| format!("{} is sameas {}[1:]", atom(left), atom(right)))
+                .boxed(),
+            any()
+                .prop_map(|operand| format!("{} is not none", atom(operand)))
+                .boxed(),
+            any()
+                .prop_map(|operand| format!("{} is string", atom(operand)))
+                .boxed(),
+            (text(), text())
+                .prop_map(|(left, right)| format!("{}.startswith({right})", atom(left)))
+                .boxed(),
+        ]),
+    }
+    pick(options)
+}
+
+/// Strategy for a template of one to four lines, each a statement or expression tag.
+///
+/// Every line holds one construct, so a failing line has the same number with
+/// and without the guard.
+fn typed_template() -> impl Strategy<Value = String> {
+    let any = || {
+        pick(vec![
+            typed(Type::Number, 2),
+            typed(Type::Text, 2),
+            typed(Type::Sequence, 2),
+            typed(Type::Map, 2),
+            typed(Type::Boolean, 2),
+        ])
+    };
+    let line = pick(vec![
+        any().prop_map(|value| format!("{{{{ {value} }}}}")).boxed(),
+        any().prop_map(|value| format!("{{% set y = {value} %}}{{{{ y }}}}")).boxed(),
+        (typed(Type::Sequence, 2), typed(Type::Boolean, 1))
+            .prop_map(|(items, test)| {
+                format!("{{% for i in ({items}) if {test} %}}{{{{ i }}}},{{% endfor %}}")
+            })
+            .boxed(),
+        (typed(Type::Boolean, 2), any())
+            .prop_map(|(test, value)| {
+                format!("{{% if {test} %}}{{{{ {value} }}}}{{% elif not {test} %}}b{{% endif %}}")
+            })
+            .boxed(),
+        (any(), any())
+            .prop_map(|(first, second)| {
+                format!("{{% set a, b = {first}, {second} %}}{{{{ a }}}}|{{{{ b }}}}")
+            })
+            .boxed(),
+        (any(), any())
+            .prop_map(|(default, argument)| {
+                format!(
+                    "{{% macro mm(p={default}) %}}[{{{{ p }}}}]{{% endmacro %}}{{{{ mm() }}}}{{{{ mm({argument}) }}}}"
+                )
+            })
+            .boxed(),
+        any()
+            .prop_map(|value| format!("{{% filter upper %}}{{{{ {value} }}}}{{% endfilter %}}"))
+            .boxed(),
+        any()
+            .prop_map(|value| format!("{{% set t %}}{{{{ {value} }}}}{{% endset %}}{{{{ t }}}}"))
+            .boxed(),
+        any()
+            .prop_map(|value| format!("{{% with w = {value} %}}{{{{ w }}}}{{% endwith %}}"))
+            .boxed(),
+        (any(), any())
+            .prop_map(|(first, second)| {
+                format!(
+                    "{{% set ns = namespace(v={first}) %}}{{% set ns.v = {second} %}}{{{{ ns.v }}}}"
+                )
+            })
+            .boxed(),
+    ]);
+    prop::collection::vec(line, 1..=4).prop_map(|lines| lines.join("\n"))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// Typed templates render exactly as MiniJinja does, failures included.
+    ///
+    /// Review finding GUARD-DIFFERENTIAL-COVERAGE: the scalar property above
+    /// never generated postfix syntax, filters with arguments, tests without
+    /// parentheses, calls with keyword or `*`/`**` arguments, literals, or
+    /// statement tags. Here successes must print the same text, and failures
+    /// must agree on the error kind, detail, and line.
+    #[test]
+    fn typed_templates_match_minijinja(source in typed_template()) {
+        let context = json!({"x": 3, "s": "q", "l": [1, 2, 3], "m": {"a": 1, "b": [1, 2]}});
+        let guarded = render_template(&source, &context, Some(0));
+        // Plain MiniJinja panics on `n is divisibleby 0`; the sandbox reports an error.
+        let Ok(plain) = std::panic::catch_unwind(|| render_unguarded(&source, &context)) else {
+            prop_assert!(guarded.is_err(), "{}: plain MiniJinja panicked", source);
+            return Ok(());
+        };
+        match (&guarded, &plain) {
+            (Ok(guarded), Ok(plain)) => prop_assert_eq!(guarded, plain, "{}", source),
+            // The guard refuses only tags MiniJinja cannot parse either.
+            (Err(guarded), Err(_)) if guarded.to_string().contains("cannot be bounded") => {}
+            (Err(guarded), Err(plain)) => {
+                prop_assert_eq!(guarded.kind(), plain.kind(), "{}: {:#} vs {:#}", source, guarded, plain);
+                prop_assert_eq!(guarded.detail(), plain.detail(), "{}", source);
+                prop_assert_eq!(guarded.line(), plain.line(), "{}", source);
+            }
+            _ => prop_assert!(false, "{source}: guarded {guarded:?}, plain {plain:?}"),
+        }
+    }
+}
+
 /// Representative template idioms render identically with and without the guard.
 #[test]
 fn official_template_idioms_render_like_minijinja() {

@@ -85,9 +85,11 @@
 //!   result is charged. Sequence slices, `split`, `items`, and `zip` are
 //!   lazy views that copy nothing.
 //! - **Panics.** A panic inside MiniJinja is caught and reported as a
-//!   rendering error; it never unwinds into the caller. Some negative-step
-//!   slices of empty or short values panic inside MiniJinja (`''[::-1]`);
-//!   those become rendering errors, not crashes.
+//!   rendering error; it never unwinds into the caller. MiniJinja's own
+//!   `divisibleby` test panics on an integer divisor of zero, so it is
+//!   replaced by a checked version that reports the error Jinja2 raises.
+//!   Some negative-step slices of empty or short values still panic inside
+//!   MiniJinja (`''[::-1]`); those become rendering errors, not crashes.
 //! - **Cycles.** Namespaces are MiniJinja's only mutable values, so a
 //!   template can make one reference itself (`{% set ns.me = ns %}`), and the
 //!   cycle would outlive the render and leak everything it reaches. Every

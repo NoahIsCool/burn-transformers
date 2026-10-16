@@ -391,6 +391,100 @@ prop_compose! {
     }
 }
 
+/// Strategy for syntactically varied MiniJinja expressions (types are not considered).
+///
+/// It draws every construct of the expression grammar: binary operators of
+/// every precedence level, unary minus and `not` chains, conditionals with
+/// and without `else`, postfix attributes, integer attributes, subscripts,
+/// slices with any combination of bounds, calls with positional, keyword,
+/// `*`, and `**` arguments, filters with and without arguments,
+/// parenthesis-free and called tests (negated or not), string runs, and
+/// list, tuple, and map literals.
+fn syntax_expression() -> impl Strategy<Value = String> {
+    let leaf = prop::sample::select(vec![
+        "a",
+        "x1",
+        "1",
+        "2.5",
+        "0x1f",
+        "'s'",
+        "'a' \"b\"",
+        "true",
+        "none",
+        "loop",
+        "f()",
+    ])
+    .prop_map(str::to_owned);
+    leaf.prop_recursive(5, 48, 3, |inner| {
+        let binary = prop::sample::select(vec![
+            "+", "-", "*", "/", "//", "%", "**", "~", "==", "!=", "<", ">=", "in", "not in", "and",
+            "or",
+        ]);
+        let bound = || prop::option::of(inner.clone());
+        prop_oneof![
+            (inner.clone(), binary, inner.clone())
+                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}")),
+            inner.clone().prop_map(|operand| format!("-{operand}")),
+            inner.clone().prop_map(|operand| format!("not {operand}")),
+            inner.clone().prop_map(|operand| format!("({operand})")),
+            (
+                inner.clone(),
+                inner.clone(),
+                prop::option::of(inner.clone())
+            )
+                .prop_map(|(yes, test, no)| match no {
+                    Some(no) => format!("{yes} if {test} else {no}"),
+                    None => format!("{yes} if {test}"),
+                }),
+            inner
+                .clone()
+                .prop_map(|operand| format!("({operand}).name.0")),
+            (inner.clone(), inner.clone())
+                .prop_map(|(operand, index)| format!("a[{operand}][{index}]")),
+            (bound(), bound(), bound(), any::<bool>()).prop_map(|(start, stop, step, two)| {
+                let part = |bound: Option<String>| bound.unwrap_or_default();
+                if two {
+                    format!("a[{}:{}]", part(start), part(stop))
+                } else {
+                    format!("a.b[{}:{}:{}]", part(start), part(stop), part(step))
+                }
+            }),
+            (inner.clone(), inner.clone(), inner.clone()).prop_map(|(first, keyword, splat)| {
+                format!("f({first}, k={keyword}, *{splat}, **kw)")
+            }),
+            (inner.clone(), inner.clone()).prop_map(|(operand, argument)| {
+                format!("({operand}) | upper | replace({argument}, 'x') | default(d=1)")
+            }),
+            (inner.clone(), inner.clone(), any::<bool>()).prop_map(
+                |(operand, argument, negate)| {
+                    let not = if negate { "not " } else { "" };
+                    format!("({operand}) is {not}divisibleby {argument}")
+                }
+            ),
+            (inner.clone(), inner.clone())
+                .prop_map(|(operand, argument)| { format!("({operand}) is sameas({argument})") }),
+            (inner.clone(), inner.clone())
+                .prop_map(|(first, second)| format!("[{first}, {second}]")),
+            (inner.clone(), inner.clone())
+                .prop_map(|(first, second)| format!("({first}, {second},)")),
+            (inner.clone(), inner.clone()).prop_map(|(key, value)| format!("{{{key}: {value}}}")),
+        ]
+    })
+}
+
+/// Parses an expression tag body with the guard's grammar, returning the refusal if any.
+fn parse_expression(body: &str) -> Result<(), Refusal> {
+    let tokens = lex(body).map_err(Refusal::Syntax)?;
+    let mut parser = Parser {
+        source: body,
+        tokens: &tokens,
+        position: 0,
+        depth: 0,
+        rewrites: 0,
+    };
+    parser.expression_tag().map(drop)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -414,5 +508,36 @@ proptest! {
             }
             prop_assert_eq!(guard_operators(&rewritten).unwrap().into_owned(), rewritten.clone());
         }
+    }
+
+    /// The guard reads every expression MiniJinja compiles, and its rewrite compiles too.
+    ///
+    /// Review finding GUARD-DIFFERENTIAL-COVERAGE asked for a check that no
+    /// tag carrying a guarded operator, slice, or splat is kept verbatim
+    /// while MiniJinja accepts it. Because a tag is kept verbatim only when
+    /// it has nothing to rewrite or the guard cannot parse it, this checks
+    /// the stronger property that the guard's grammar covers MiniJinja's:
+    /// whenever MiniJinja compiles `{{ body }}`, the guard parses the body,
+    /// and the rewritten tag compiles as well. The one documented exception
+    /// is a variable named `not` used as an operand, which the guard refuses.
+    #[test]
+    fn guard_reads_every_expression_minijinja_compiles(
+        body in prop_oneof![syntax_expression(), token_soup()]
+    ) {
+        let source = format!("{{{{ {body} }}}}");
+        let environment = minijinja::Environment::new();
+        if environment.template_from_str(&source).is_err() {
+            // Invalid syntax: the guard may keep or refuse it; MiniJinja rejects it.
+            return Ok(());
+        }
+        match parse_expression(&body) {
+            Ok(()) => {}
+            Err(Refusal::Syntax(reason)) if reason.contains("variable named `not`") => {
+                return Ok(());
+            }
+            Err(refusal) => prop_assert!(false, "{source}: {refusal:?}"),
+        }
+        let rewritten = guard_operators(&source).unwrap();
+        prop_assert!(environment.template_from_str(&rewritten).is_ok(), "{}", rewritten);
     }
 }
