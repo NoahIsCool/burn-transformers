@@ -202,39 +202,32 @@ impl T5Config {
     }
 }
 
-/// Portable checkpoint dimensions converted once after topology validation.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Number of rows in the shared token embedding table.
-    vocab: u64,
-    /// Residual-stream width, equal to the embedding column count.
-    model: u64,
-    /// Combined attention projection width, `num_heads * d_kv`.
-    attention: u64,
-    /// Intermediate width of each feed-forward branch.
-    feed_forward: u64,
-    /// Number of learned relative-position buckets.
-    buckets: u64,
-    /// Number of attention heads, also the relative-bias table width.
-    heads: u64,
-}
+mod dimensions; // Verified attention width and sublayer numbering of the tensor contract.
+
+pub(super) use dimensions::feed_forward_sublayer;
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&T5Config> for Dimensions {
-    /// Configuration diagnostic for an unrepresentable dimension or product.
+    /// Configuration diagnostic for an unrepresentable attention width.
     type Error = ConfigError;
 
-    /// Converts `usize` runtime extents to SafeTensors' portable `u64` shape form.
+    /// Converts `usize` runtime extents to SafeTensors' portable `u64` shape
+    /// form with the verified [`checkpoint_dimensions`].
     fn try_from(config: &T5Config) -> Result<Self, Self::Error> {
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            model: dimension("d_model", config.d_model)?,
-            attention: product("num_heads * d_kv", &[config.num_heads, config.d_kv])?,
-            feed_forward: dimension("d_ff", config.d_ff)?,
-            buckets: dimension(
-                "relative_attention_num_buckets",
-                config.relative_attention_num_buckets,
-            )?,
-            heads: dimension("num_heads", config.num_heads)?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            model: config.d_model,
+            heads: config.num_heads,
+            head_dim: config.d_kv,
+            feed_forward: config.d_ff,
+            buckets: config.relative_attention_num_buckets,
+        })
+        .map_err(|_| {
+            ConfigError::new(
+                FAMILY,
+                "num_heads * d_kv",
+                "overflows checkpoint tensor dimensions",
+            )
         })
     }
 }
@@ -316,12 +309,10 @@ impl ContractBuilder {
                 vec![dimensions.model],
             );
 
-            let feed_forward_layer = if decoder {
+            if decoder {
                 self.cross_attention(stack, index, dimensions);
-                2
-            } else {
-                1
-            };
+            }
+            let feed_forward_layer = feed_forward_sublayer(decoder);
             self.feed_forward(stack, index, feed_forward_layer, config, dimensions);
         }
         self.tensor(
@@ -401,27 +392,6 @@ impl ContractBuilder {
             vec![dimensions.model],
         );
     }
-}
-
-/// Converts one runtime extent into the SafeTensors shape representation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "does not fit the portable checkpoint dimension representation",
-        )
-    })
-}
-
-/// Multiplies dimensions with a checked portable accumulator.
-fn product(field: &'static str, values: &[usize]) -> Result<u64, ConfigError> {
-    values.iter().try_fold(1_u64, |accumulator, value| {
-        let value = dimension(field, *value)?;
-        accumulator.checked_mul(value).ok_or_else(|| {
-            ConfigError::new(FAMILY, field, "overflows checkpoint tensor dimensions")
-        })
-    })
 }
 
 #[cfg(test)]

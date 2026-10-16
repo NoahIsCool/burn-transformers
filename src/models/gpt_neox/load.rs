@@ -33,6 +33,13 @@ use crate::checkpoint::{
 
 use super::{GptNeoXConfig, GptNeoXForCausalLm, GptNeoXLayer};
 
+mod packed; // Verified packed-QKV row, byte, and staging arithmetic.
+
+use packed::{
+    PackedPayload, PackedQkvError, PackedRows, packed_component, packed_payload, packed_rows,
+    packed_staging_peak,
+};
+
 // Metadata contracts and deterministic shape accounting.
 
 /// Expected source shapes, parameter mappings, and derived-buffer exceptions.
@@ -88,7 +95,7 @@ impl GptNeoXCheckpointContract {
             }
         }
         let mut plan = build_load_plan(manifest, &self.expected, &self.mappings, &options)?;
-        let mut largest_component = 0;
+        let mut packed_storage = Vec::new();
         for tensor in &plan.tensors {
             if !tensor.dtype.is_float() {
                 return Err(CheckpointError::InvalidMapping {
@@ -125,17 +132,16 @@ impl GptNeoXCheckpointContract {
                         context: "computing GPT-NeoX packed projection elements",
                     })
             })?;
-            largest_component = largest_component.max(tensor.dtype.storage_bytes(elements)? / 3);
+            packed_storage.push(tensor.dtype.storage_bytes(elements)?);
         }
         // The sink retains the packed TensorData while constructing one native
         // component buffer. Generic execution counters exclude sink allocations.
-        plan.memory.peak_host_staging_bytes = plan
-            .memory
-            .peak_host_staging_bytes
-            .checked_add(largest_component)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "accounting for GPT-NeoX component staging",
-            })?;
+        plan.memory.peak_host_staging_bytes =
+            packed_staging_peak(plan.memory.peak_host_staging_bytes, &packed_storage).ok_or(
+                CheckpointError::ArithmeticOverflow {
+                    context: "accounting for GPT-NeoX component staging",
+                },
+            )?;
         plan.report.memory = Some(plan.memory);
         expand_report_targets(&mut plan.report);
         Ok(plan)
@@ -472,6 +478,9 @@ fn install_layer<B: Backend>(
 ///
 /// Source weights are `[heads, 3, head_channel, input]`; bias omits the input axis.
 /// Selecting component `c` gathers rows `(head * 3 + c) * head_dim..+head_dim`.
+/// The verified [`packed`] cores decide the geometry, the row and payload byte
+/// sizes, and each component's byte gather; this wrapper keeps the original
+/// check order (geometry, row overflow, shape, dtype, byte overflow, length).
 /// Cloned targets prevent a failed component from partially replacing the live Q/K/V group.
 fn install_packed<B: Backend>(
     layer: &mut GptNeoXLayer<B>,
@@ -484,25 +493,26 @@ fn install_packed<B: Backend>(
     let heads = layer.attention.query_heads;
     let head_dim = layer.attention.head_dim;
     let hidden = layer.attention.hidden_size;
-    if heads == 0
-        || head_dim == 0
-        || hidden == 0
-        || heads != expected_heads
-        || hidden != expected_hidden
-        || heads.checked_mul(head_dim) != Some(expected_hidden)
-        || layer.attention.key_value_heads != heads
-    {
-        return Err(GptNeoXLoadError::InvalidProjection {
+    let overflow = || parameter_error(target, ParameterInstallError::PayloadSizeOverflow);
+    let PackedRows {
+        rows,
+        component_rows,
+    } = packed_rows(
+        heads,
+        head_dim,
+        hidden,
+        expected_heads,
+        expected_hidden,
+        layer.attention.key_value_heads,
+    )
+    .map_err(|error| match error {
+        PackedQkvError::Geometry => GptNeoXLoadError::InvalidProjection {
             target: target.into(),
             reason: "head counts and widths must match the checkpoint configuration before loading"
                 .into(),
-        });
-    }
-    let overflow = || parameter_error(target, ParameterInstallError::PayloadSizeOverflow);
-    let rows = heads
-        .checked_mul(head_dim)
-        .and_then(|width| width.checked_mul(3))
-        .ok_or_else(overflow)?;
+        },
+        PackedQkvError::Overflow => overflow(),
+    })?;
     let shape = if bias { vec![rows] } else { vec![rows, hidden] };
     if data.shape.as_slice() != shape {
         return Err(parameter_error(
@@ -521,10 +531,11 @@ fn install_packed<B: Backend>(
             },
         ));
     }
-    let row_bytes = (if bias { 1 } else { hidden })
-        .checked_mul(data.dtype.size())
+    let PackedPayload {
+        row_bytes,
+        bytes: expected_bytes,
+    } = packed_payload(rows, if bias { 1 } else { hidden }, data.dtype.size())
         .ok_or_else(overflow)?;
-    let expected_bytes = rows.checked_mul(row_bytes).ok_or_else(overflow)?;
     if data.bytes.len() != expected_bytes {
         return Err(parameter_error(
             target,
@@ -541,16 +552,13 @@ fn install_packed<B: Backend>(
     ];
     let targets = component_targets(target).ok_or_else(|| unknown(target))?;
     for (component, projection) in projections.iter_mut().enumerate() {
-        let mut bytes = Vec::with_capacity(expected_bytes / 3);
-        for head in 0..heads {
-            let start = (head * 3 + component) * head_dim * row_bytes;
-            let end = start + head_dim * row_bytes;
-            bytes.extend_from_slice(&data.bytes[start..end]);
-        }
+        // `packed_rows` established `heads, head_dim > 0` and `3 q d <= usize::MAX`;
+        // the length check above established `len = 3 q d * row_bytes`.
+        let bytes = packed_component(&data.bytes, heads, head_dim, row_bytes, component);
         let shape = if bias {
-            vec![rows / 3]
+            vec![component_rows]
         } else {
-            vec![rows / 3, hidden]
+            vec![component_rows, hidden]
         };
         let component_data = TensorData::from_bytes_vec(bytes, shape, data.dtype);
         if bias {

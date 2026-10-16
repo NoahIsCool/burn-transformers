@@ -310,7 +310,7 @@ fn install_layer_tensor<B: Backend>(
                         target: target.into(),
                         component: "dense SwiGLU",
                     })?;
-            install_mlp_tensor(dense, target, &suffix[10..], data)
+            install_mlp_tensor(dense, target, &suffix["dense_mlp.".len()..], data)
         }
         _ => Err(Qwen3MoeLoadError::UnknownTarget {
             target: target.into(),

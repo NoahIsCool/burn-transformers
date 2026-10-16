@@ -32,7 +32,10 @@ use crate::{
     normalization::RmsNorm,
 };
 
-use super::{ConfigError, T5Attention, T5Block, T5ForConditionalGeneration, T5LayerFeedForward};
+use super::{
+    ConfigError, T5Attention, T5Block, T5ForConditionalGeneration, T5LayerFeedForward,
+    checkpoint::feed_forward_sublayer,
+};
 
 /// Architecture-specific failure while applying one validated T5 tensor.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -297,10 +300,7 @@ fn install_block_tensor<B: Backend>(
         }
     }
 
-    let feed_forward_layer = match stack {
-        Stack::Encoder => 1,
-        Stack::Decoder => 2,
-    };
+    let feed_forward_layer = feed_forward_sublayer(stack == Stack::Decoder);
     let feed_forward_prefix = format!("layer.{feed_forward_layer}.DenseReluDense.");
     if let Some(parameter) = suffix.strip_prefix(&feed_forward_prefix) {
         return install_feed_forward_tensor(&mut block.feed_forward, target, parameter, data);
