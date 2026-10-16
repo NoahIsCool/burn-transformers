@@ -1,6 +1,6 @@
 //! GPT-NeoX parameter validation, residual wiring, precision modes, and initialization.
 
-use burn::{backend::Flex, tensor::Bool};
+use burn::{backend::Flex, module::Param, tensor::Bool};
 
 use super::*;
 use crate::LogitsSelection;
@@ -408,6 +408,322 @@ fn former_model_name_aliases_the_causal_language_model() {
     let model: GptNeoXModel<B> = model();
     let renamed: &GptNeoXForCausalLm<B> = &model;
     assert_eq!(renamed.layers.len(), 1);
+}
+
+/// Unwraps a shape error into `(tensor, expected, actual)`.
+fn shape_parts(error: Error) -> (String, String, String) {
+    match error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    }
+}
+
+/// Unwraps a configuration error into `(field, reason)`.
+fn configuration_parts(error: Error) -> (String, String) {
+    match error {
+        Error::Configuration { field, reason } => (field, reason),
+        other => panic!("expected Error::Configuration, found {other:?}"),
+    }
+}
+
+/// A failing edit at any emitted point aborts causal, bidirectional, and hidden-only passes.
+#[test]
+fn every_activation_point_propagates_edit_failures() {
+    use crate::models::shared::test_support::assert_edit_failures_propagate;
+    for parallel in [true, false] {
+        let model = two_layer(parallel);
+        let points = model.activation_points();
+        assert_edit_failures_propagate(&points, |hooks| {
+            model.forward_with_hooks(padded_input(), &ForwardOptions::default(), hooks)
+        });
+        assert_edit_failures_propagate(&points, |hooks| {
+            model.forward_bidirectional_with_hooks(
+                padded_input(),
+                &ForwardOptions::default(),
+                hooks,
+            )
+        });
+        assert_edit_failures_propagate(&points, |hooks| {
+            model.forward_hidden_with_hooks(padded_input(), hooks)
+        });
+    }
+}
+
+/// Bidirectional attention lets earlier tokens read later ones; both entry points agree.
+#[test]
+fn bidirectional_forward_reads_future_tokens() {
+    let model = two_layer(true);
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let plain = model
+        .forward_bidirectional(padded_input(), &options)
+        .unwrap();
+    let hooked = model
+        .forward_bidirectional_with_hooks(padded_input(), &options, &mut Hooks::new())
+        .unwrap();
+    assert_eq!(plain.logits.clone().into_data(), hooked.logits.into_data());
+    let causal = model.forward(padded_input(), &options).unwrap();
+    // The first token reads later keys only without the causal exclusion.
+    assert!(gap(plain.logits.narrow(1, 0, 1), causal.logits.narrow(1, 0, 1)) > 1e-4);
+    // In one block, a row's last token already sees every key in both modes.
+    let mut single = model;
+    single.layers.truncate(1);
+    let bidirectional = single
+        .forward_bidirectional(padded_input(), &options)
+        .unwrap();
+    let causal = single.forward(padded_input(), &options).unwrap();
+    let last = |logits: Tensor<B, 3>| logits.narrow(0, 0, 1).narrow(1, 2, 1);
+    assert!(gap(last(bidirectional.logits), last(causal.logits)) < 1e-5);
+}
+
+/// Attention probabilities, router logits, and auxiliary losses are rejected before any work.
+#[test]
+fn unsupported_forward_diagnostics_are_rejected() {
+    let model = two_layer(true);
+    for options in [
+        ForwardOptions {
+            attentions: true,
+            ..ForwardOptions::default()
+        },
+        ForwardOptions {
+            router_logits: true,
+            ..ForwardOptions::default()
+        },
+        ForwardOptions {
+            auxiliary_losses: true,
+            ..ForwardOptions::default()
+        },
+    ] {
+        let (field, reason) =
+            configuration_parts(model.forward(padded_input(), &options).unwrap_err());
+        assert_eq!(field, "gpt_neox.forward_options");
+        assert!(reason.contains("attention pattern hooks"), "{reason}");
+    }
+}
+
+/// Inputs longer than the position table or with no rows fail before embedding lookup.
+#[test]
+fn input_extent_errors_name_the_position_limit() {
+    let model = two_layer(true);
+    let device = Default::default();
+    for dims in [[1, 17], [0, 3]] {
+        let input = CausalLmInput {
+            token_ids: Tensor::<B, 2, Int>::zeros(dims, &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        assert_eq!(
+            shape_parts(
+                model
+                    .forward(input, &ForwardOptions::default())
+                    .unwrap_err()
+            ),
+            (
+                "gpt_neox.token_ids".into(),
+                "nonempty [batch, sequence<=16]".into(),
+                format!("[{}, {}]", dims[0], dims[1]),
+            )
+        );
+    }
+}
+
+/// Lens projections reject empty or mis-sized states, foreign dtypes, and an edited final norm.
+#[test]
+fn lens_projection_validates_states_and_the_final_norm() {
+    let mut model = two_layer(true);
+    let device = Default::default();
+    for dims in [[0, 1, 8], [1, 0, 8], [1, 2, 7]] {
+        assert_eq!(
+            shape_parts(
+                model
+                    .project_hidden(Tensor::<B, 3>::zeros(dims, &device))
+                    .unwrap_err()
+            ),
+            (
+                "gpt_neox.hidden".into(),
+                "nonempty [batch, token, 8]".into(),
+                format!("{dims:?}"),
+            )
+        );
+    }
+    let half = Tensor::<B, 3>::zeros([1, 2, 8], &device).cast(DType::F16);
+    assert_eq!(
+        configuration_parts(model.normalize_hidden(half).unwrap_err()),
+        (
+            "gpt_neox.hidden".into(),
+            "dtype and device must match the model parameters".into()
+        )
+    );
+    let projected = model
+        .project_hidden(Tensor::<B, 3>::ones([1, 2, 8], &device))
+        .unwrap();
+    assert_eq!(projected.dims(), [1, 2, 13]);
+    model.final_layer_norm.beta = Some(Param::from_tensor(Tensor::zeros([7], &device)));
+    assert_eq!(
+        shape_parts(
+            model
+                .normalize_hidden(Tensor::<B, 3>::ones([1, 2, 8], &device))
+                .unwrap_err()
+        ),
+        (
+            "gpt_neox.final_layer_norm".into(),
+            "[8]".into(),
+            "[7]".into()
+        )
+    );
+}
+
+/// Every edited norm and projection is checked against the residual width, by label.
+#[test]
+fn edited_parameter_shapes_are_reported_by_label() {
+    let device = Default::default();
+    let wrong_linear =
+        |input: usize, output: usize| LinearConfig::new(input, output).init::<B>(&device);
+    type Edit = fn(&mut GptNeoXForCausalLm<B>, Linear<B>);
+    let cases: [(&str, usize, usize, Edit, &str); 6] = [
+        (
+            "attention.q_proj",
+            8,
+            7,
+            |m, l| m.layers[1].attention.q_proj = l,
+            "[8, 8]",
+        ),
+        (
+            "attention.k_proj",
+            8,
+            7,
+            |m, l| m.layers[1].attention.k_proj = l,
+            "[8, 8]",
+        ),
+        (
+            "attention.v_proj",
+            8,
+            7,
+            |m, l| m.layers[1].attention.v_proj = l,
+            "[8, 8]",
+        ),
+        (
+            "attention.o_proj",
+            7,
+            8,
+            |m, l| m.layers[1].attention.o_proj = l,
+            "[8, 8]",
+        ),
+        (
+            "mlp.up_proj",
+            7,
+            12,
+            |m, l| m.layers[1].mlp.up_proj = l,
+            "[8, 12]",
+        ),
+        (
+            "mlp.down_proj",
+            12,
+            7,
+            |m, l| m.layers[1].mlp.down_proj = l,
+            "[12, 8]",
+        ),
+    ];
+    for (label, input, output, edit, expected) in cases {
+        let mut model = two_layer(true);
+        edit(&mut model, wrong_linear(input, output));
+        let (tensor, shape, _) = shape_parts(model.validate_parameters().unwrap_err());
+        assert_eq!(tensor, format!("gpt_neox.layers.1.{label}"));
+        assert_eq!(shape, expected);
+    }
+    for norm in ["input_layernorm", "post_attention_layernorm"] {
+        let mut model = two_layer(true);
+        let replacement = LayerNormConfig::new(7).init(&device);
+        if norm == "input_layernorm" {
+            model.layers[1].input_layernorm = replacement;
+        } else {
+            model.layers[1].post_attention_layernorm = replacement;
+        }
+        let (tensor, shape, actual) = shape_parts(model.validate_parameters().unwrap_err());
+        assert_eq!(
+            (tensor.as_str(), shape.as_str(), actual.as_str()),
+            (format!("gpt_neox.layers.1.{norm}").as_str(), "[8]", "[7]")
+        );
+    }
+}
+
+/// Norm betas may be absent; query/key norms, MLP width, and dtype agreement are enforced.
+#[test]
+fn edited_norm_widths_and_dtypes_are_enforced() {
+    use crate::normalization::RmsNormConfig;
+    let device = Default::default();
+    let mut model = two_layer(true);
+    model.layers[0].input_layernorm.beta = None;
+    model.final_layer_norm.beta = None;
+    model
+        .validate_parameters()
+        .expect("affine norms without a bias remain valid");
+    model
+        .forward(padded_input(), &ForwardOptions::default())
+        .expect("a bias-free norm still executes");
+
+    let mut model = two_layer(true);
+    model.layers[0].attention.key_norm = Some(RmsNormConfig::new(3).init(&device).unwrap());
+    assert_eq!(
+        shape_parts(model.validate_parameters().unwrap_err()),
+        (
+            "gpt_neox.layers.0.attention.query_key_norm".into(),
+            "[4]".into(),
+            "[3]".into()
+        )
+    );
+
+    let mut model = two_layer(true);
+    model.layers[0].mlp.up_proj = LinearConfig::new(8, 0).init(&device);
+    assert_eq!(
+        configuration_parts(model.validate_parameters().unwrap_err()),
+        (
+            "gpt_neox.layers.0.mlp".into(),
+            "intermediate width must be nonzero".into()
+        )
+    );
+
+    let mut model = two_layer(true);
+    model.layers[1].attention.o_proj.weight = model.layers[1]
+        .attention
+        .o_proj
+        .weight
+        .clone()
+        .map(|weight| weight.cast(DType::F16));
+    assert_eq!(
+        configuration_parts(model.validate_parameters().unwrap_err()),
+        (
+            "gpt_neox.layers.1.attention.o_proj".into(),
+            "parameters must share device and dtype".into()
+        )
+    );
+}
+
+/// A replacement head width whose rotary prefix is odd fails while building RoPE tables.
+#[test]
+fn replacement_head_width_with_an_odd_rotary_prefix_is_rejected() {
+    let mut model = two_layer(true);
+    // hidden 8 = 4 heads of width 2; the configured rotary fraction 0.5 rotates one channel.
+    let mut attention = crate::attention::GroupedQueryAttentionConfig::new(8, 4, 4, 2)
+        .init(&Default::default())
+        .unwrap();
+    attention.precision_mode = AttentionPrecisionMode::EagerFp32Softmax;
+    model.layers[1].attention = attention;
+    model
+        .validate_parameters()
+        .expect("the geometry itself is consistent");
+    let (field, _) = configuration_parts(
+        model
+            .forward(padded_input(), &ForwardOptions::default())
+            .unwrap_err(),
+    );
+    assert_eq!(field, "gpt_neox.layers.1.rotary");
 }
 
 /// Times eager and backend-default causal forwards (release builds only).

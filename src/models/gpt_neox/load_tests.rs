@@ -9,7 +9,7 @@ use burn::{
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 
-use crate::checkpoint::{DTypePolicy, TensorDType, TensorOperation};
+use crate::checkpoint::{DTypePolicy, ExecutionFailureCause, TensorDType, TensorOperation};
 
 use super::*;
 
@@ -346,15 +346,186 @@ fn explicit_dtype_conversion_attributes_all_qkv_components() {
 }
 
 /// A tied-head configuration cannot produce the independent-head checkpoint contract.
+///
+/// Validation rejects the tied topology before any contract entry is built,
+/// so the error is the configuration error naming the field.
 #[test]
 fn tied_checkpoint_topology_is_rejected_explicitly() {
     let mut config = tiny();
     config.tie_word_embeddings = true;
-    assert!(
-        config
-            .checkpoint_contract()
-            .unwrap_err()
-            .to_string()
-            .contains("tie_word_embeddings")
+    match config.checkpoint_contract().unwrap_err() {
+        GptNeoXCheckpointLoadError::Configuration(crate::Error::Configuration {
+            field,
+            reason,
+        }) => {
+            assert_eq!(field, "gpt_neox.tie_word_embeddings");
+            assert_eq!(reason, "tied GPT-NeoX embeddings are not implemented");
+        }
+        other => panic!("expected a configuration error, found {other:?}"),
+    }
+}
+
+/// The contract allowlists exactly the three derived buffers of every layer, in layer order.
+#[test]
+fn allowlisted_buffers_are_the_exact_per_layer_legacy_names() {
+    let config = GptNeoXConfig {
+        num_hidden_layers: 2,
+        ..tiny()
+    };
+    let contract = config.checkpoint_contract().unwrap();
+    let expected = (0..2)
+        .flat_map(|layer| {
+            ["bias", "masked_bias", "rotary_emb.inv_freq"].map(|buffer| {
+                KeyMatcher::exact(format!("gpt_neox.layers.{layer}.attention.{buffer}"))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contract.allow_unexpected(), expected.as_slice());
+    // Exact matchers never swallow a learned source such as `attention.query_key_value.bias`.
+    for operation in contract.mappings().operations() {
+        let TensorOperation::Map { source, .. } = operation else {
+            panic!("the contract maps sources directly");
+        };
+        assert!(
+            contract
+                .allow_unexpected()
+                .iter()
+                .all(|matcher| !matcher.matches(source)),
+            "{source} is allowlisted"
+        );
+    }
+}
+
+/// Malformed layer targets name the precise syntax failure rather than a generic error.
+#[test]
+fn layer_target_syntax_errors_are_specific() {
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    let data = || TensorData::new(vec![0.0_f32; 4], [4]);
+    let reason = |target: &str| match parse_layer_target(target).unwrap_err() {
+        GptNeoXLoadError::InvalidIndex {
+            target: reported,
+            reason,
+        } => {
+            assert_eq!(reported, target);
+            reason
+        }
+        other => panic!("expected an invalid index for {target}, found {other:?}"),
+    };
+    assert_eq!(
+        reason("layers.0"),
+        "expected `layers.<decimal index>.<parameter>`"
     );
+    assert!(
+        reason("layers.99999999999999999999999.input_layernorm.gamma")
+            .starts_with("invalid layer index: "),
+    );
+    assert_eq!(
+        reason("layers..input_layernorm.gamma"),
+        "expected a decimal index and nonempty parameter suffix"
+    );
+    assert_eq!(
+        model.write_tensor("layers.0.attention.rotary_emb.inv_freq", data()),
+        Err(GptNeoXLoadError::UnknownTarget {
+            target: "layers.0.attention.rotary_emb.inv_freq".into()
+        })
+    );
+    assert_eq!(
+        model.write_tensor("layers.3.input_layernorm.gamma", data()),
+        Err(GptNeoXLoadError::InvalidIndex {
+            target: "layers.3.input_layernorm.gamma".into(),
+            reason: "layer 3 is outside 0..1".into(),
+        })
+    );
+    assert_eq!(
+        model.alias_tensor("embed_out.weight", "embed_in.weight"),
+        Err(GptNeoXLoadError::UnsupportedAlias {
+            target: "embed_out.weight".into(),
+            source_target: "embed_in.weight".into(),
+        })
+    );
+}
+
+/// Missing affine norm and projection biases are reported per target.
+#[test]
+fn absent_biases_are_reported_by_target() {
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    model.layers[0].attention.o_proj.bias = None;
+    model.layers[0].input_layernorm.beta = None;
+    for target in [
+        "layers.0.attention.o_proj.bias",
+        "layers.0.input_layernorm.beta",
+    ] {
+        assert_eq!(
+            model.write_tensor(target, TensorData::new(vec![0.0_f32; 4], [4])),
+            Err(GptNeoXLoadError::MissingBias {
+                target: target.into()
+            })
+        );
+    }
+}
+
+/// Packed row counts that overflow `usize` fail before any shape or payload check.
+///
+/// The geometry is consistent (`q d` equals the configured width and there
+/// are as many key/value heads as query heads), so only `3 q d` overflows.
+#[test]
+fn packed_row_overflow_is_a_payload_size_error() {
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    let head_dim = usize::MAX / 4;
+    let hidden = 2 * head_dim;
+    model.config.hidden_size = hidden;
+    let attention = &mut model.layers[0].attention;
+    attention.head_dim = head_dim;
+    attention.hidden_size = hidden;
+    assert_eq!(
+        model.write_tensor(
+            "layers.0.attention.query_key_value.bias",
+            TensorData::new(vec![0.0_f32; 12], [12]),
+        ),
+        Err(GptNeoXLoadError::Parameter {
+            target: "layers.0.attention.query_key_value.bias".into(),
+            source: ParameterInstallError::PayloadSizeOverflow,
+        })
+    );
+}
+
+/// A sink failure after planning keeps the partial report with packed names expanded.
+#[test]
+fn execution_failure_exposes_an_expanded_partial_report() {
+    let directory = TempDir::new().unwrap();
+    write_checkpoint(directory.path(), |_| {});
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    model.layers[0].attention.v_proj.bias = None;
+    let error = model
+        .load_checkpoint(directory.path(), &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("planning succeeded, so the failure carries a partial report");
+    assert_eq!(
+        failure.failed_target.as_deref(),
+        Some("layers.0.attention.query_key_value.bias")
+    );
+    assert!(matches!(
+        &failure.cause,
+        ExecutionFailureCause::Sink(GptNeoXLoadError::MissingBias { target })
+            if target == "layers.0.attention.v_proj.bias"
+    ));
+    assert!(
+        failure
+            .report
+            .applied
+            .iter()
+            .all(|name| !name.contains("query_key_value")),
+        "{:?}",
+        failure.report.applied
+    );
+    assert!(!failure.report.applied.is_empty());
+
+    let configuration = GptNeoXCheckpointLoadError::from(crate::Error::configuration("x", "y"));
+    let checkpoint = GptNeoXCheckpointLoadError::from(CheckpointError::InvalidMapping {
+        message: "z".into(),
+    });
+    assert!(configuration.execution_failure().is_none());
+    assert!(checkpoint.execution_failure().is_none());
 }

@@ -40,7 +40,7 @@ pub(crate) mod logits;
 pub(crate) mod plan;
 pub(crate) mod rows;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub(crate) use checks::{
     DeferredChecks, ensure_grid, ensure_nonempty, ensure_same_device, range_error,

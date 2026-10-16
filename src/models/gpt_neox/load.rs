@@ -153,14 +153,9 @@ impl GptNeoXConfig {
     pub fn checkpoint_contract(
         &self,
     ) -> Result<GptNeoXCheckpointContract, GptNeoXCheckpointLoadError> {
+        // Validation also rejects `tie_word_embeddings`, so every contract
+        // describes an independent `embed_out.weight` owner.
         self.validate()?;
-        if self.tie_word_embeddings {
-            return Err(crate::Error::configuration(
-                "gpt_neox.tie_word_embeddings",
-                "checkpoint loading currently requires an independent output embedding",
-            )
-            .into());
-        }
         let dimension = |value: usize| {
             u64::try_from(value).map_err(|_| CheckpointError::ArithmeticOverflow {
                 context: "converting GPT-NeoX checkpoint dimensions",

@@ -1,6 +1,7 @@
 //! Deterministic GPT-NeoX graph and public activation-interface regressions.
 
 use super::{GptNeoXConfig, GptNeoXForCausalLm};
+use crate::models::config::Validate;
 use crate::{
     CausalLmInput, Error, ForwardOptions, LogitsSelection,
     architecture::TokenMask,
@@ -460,4 +461,42 @@ fn replacing_attention_derives_partial_rope_from_the_new_head_width() {
     let (expected, _) = apply_rotary(projection.query, projection.key, &angles).unwrap();
     let actual = hooks.get(&query).unwrap();
     assert!((actual - expected).abs().max().into_scalar() < 1e-7);
+}
+
+/// Every extent must be nonzero and fit a signed 32-bit tensor index; errors name the field.
+#[test]
+fn zero_or_oversized_extents_name_the_field() {
+    let oversized = i32::MAX as usize + 1;
+    type Edit = fn(&mut GptNeoXConfig, usize);
+    let cases: [(&str, Edit); 6] = [
+        ("vocab_size", |config, value| config.vocab_size = value),
+        ("hidden_size", |config, value| config.hidden_size = value),
+        ("num_hidden_layers", |config, value| {
+            config.num_hidden_layers = value;
+        }),
+        ("num_attention_heads", |config, value| {
+            config.num_attention_heads = value;
+        }),
+        ("intermediate_size", |config, value| {
+            config.intermediate_size = value;
+        }),
+        ("max_position_embeddings", |config, value| {
+            config.max_position_embeddings = value;
+        }),
+    ];
+    for (field, edit) in cases {
+        for value in [0, oversized] {
+            let mut config = config();
+            edit(&mut config, value);
+            let error = Validate::validate(&config).unwrap_err();
+            assert_eq!(
+                (error.field, error.reason.as_str()),
+                (
+                    field,
+                    "must be nonzero and fit a signed 32-bit tensor index"
+                ),
+                "{field}={value}"
+            );
+        }
+    }
 }
