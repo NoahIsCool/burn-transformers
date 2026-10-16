@@ -42,6 +42,57 @@ fn block_whitespace_matches_hugging_face() {
     );
 }
 
+/// Carriage returns in template source render as `\n`, as Jinja2's lexer makes them.
+///
+/// Jinja2 splits the source on `\r\n`, `\r`, and `\n` and rejoins it with
+/// `newline_sequence` (`\n`) before tokenizing, so raw line endings inside
+/// text, tags, comments, raw blocks, and string literals all become `\n`.
+/// Escape sequences in literals and values in the context are untouched.
+#[test]
+fn source_line_endings_are_normalized_like_jinja2() {
+    let context = json!({"messages": [{"role": "user", "content": "a\r\nb"}]});
+    for (source, expected) in [
+        ("C\r\nD", "C\nD"),
+        ("C\rD", "C\nD"),
+        ("C\r\n", "C"),
+        ("C\r", "C"),
+        ("C\r\n\r\n", "C\n"),
+        ("X{{ messages[0].content }}Y", "Xa\r\nbY"),
+        ("{% if true %}\r\nA{% endif %}\r\nB", "AB"),
+        ("{{ 'a\r\nb' }}", "a\nb"),
+        ("{{ 'a\\r\\nb' }}", "a\r\nb"),
+        ("L1\r\n  {%- if true %}x{% endif %}\rL2", "L1xL2"),
+        ("{# c\r\n #}\r\nA", "A"),
+        ("{% raw %}{{ x }}\r{% endraw %}\r\nA", "{{ x }}\nA"),
+    ] {
+        assert_eq!(rendered(source, context.clone()), expected, "{source:?}");
+    }
+}
+
+/// Known difference: the newline right after `{% raw %}` is dropped, where Jinja2 keeps it.
+///
+/// Jinja2 applies `trim_blocks` after `{% endraw %}` but not after
+/// `{% raw %}`; MiniJinja trims after both. transformers 5.2.0 renders
+/// `{% raw %}\n{{ x }}\n{% endraw %}` as `"\n{{ x }}\n"`. This test pins the
+/// documented difference and fails once it is fixed, so the module and
+/// `tokenization` documentation can drop it.
+#[test]
+fn raw_block_opening_newline_is_dropped_unlike_jinja2() {
+    assert_eq!(
+        rendered("{% raw %}\n{{ x }}\n{% endraw %}", json!({})),
+        "{{ x }}\n"
+    );
+    // Elsewhere raw blocks match Jinja2, including the trim after `endraw`.
+    assert_eq!(
+        rendered("A{% raw %}{{ x }}{% endraw %}\nB", json!({})),
+        "A{{ x }}B"
+    );
+    assert_eq!(
+        rendered("{% raw -%}\n {{ x }}{% endraw %}", json!({})),
+        "{{ x }}"
+    );
+}
+
 /// Undefined variables are falsy, print nothing, and iterate as empty, as in Jinja2.
 #[test]
 fn undefined_variables_are_lenient() {

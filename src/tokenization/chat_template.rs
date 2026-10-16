@@ -9,6 +9,7 @@
 //!
 //! | Hugging Face / Jinja2                     | Here                                          |
 //! |-------------------------------------------|-----------------------------------------------|
+//! | `\r\n` and `\r` in the source lexed as `\n` | normalized before compiling                   |
 //! | `trim_blocks`, `lstrip_blocks`            | the same MiniJinja whitespace switches        |
 //! | lenient `Undefined` (`{% if x %}` is falsy) | [`UndefinedBehavior::Lenient`]                |
 //! | `loopcontrols` (`break`, `continue`)      | MiniJinja's `loop_controls` feature           |
@@ -23,6 +24,7 @@
 //! | dict insertion order                      | **not matched**: keys arrive sorted           |
 //! | `'x' ~ value` with a bool or `None`       | **not matched**: prints `true`/`none`         |
 //! | `'%s' % value` string formatting          | **not supported**: rendering fails            |
+//! | no `trim_blocks` after `{% raw %}`        | **not matched**: the next newline is dropped  |
 //!
 //! The unmatched rows, and smaller Unicode-class approximations, are
 //! described in the `pycompat` module documentation. Official templates
@@ -132,7 +134,7 @@ use std::{
 
 use minijinja::{Environment, Error, ErrorKind, UndefinedBehavior, Value};
 
-use super::{calendar, pycompat};
+use super::{calendar, catalog::universal_newlines, pycompat};
 
 mod guard;
 mod limits;
@@ -205,8 +207,11 @@ fn render_bounded(
     limits: RenderLimits,
     extend: impl FnOnce(&mut Environment<'_>),
 ) -> Result<String, Error> {
-    let rewritten =
-        parenthesize_conditional_keyword_arguments(&rewrite_generation_blocks(source)).into_owned();
+    // Jinja2 rejoins the source's lines with `\n` before lexing; MiniJinja
+    // keeps raw `\r\n` and `\r` in text, tags, and literals.
+    let source = universal_newlines(source);
+    let rewritten = parenthesize_conditional_keyword_arguments(&rewrite_generation_blocks(&source))
+        .into_owned();
     let source = guard::guard_operators(&rewritten)
         .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))?
         .into_owned();

@@ -262,18 +262,6 @@ fn rejects_invalid_sides_limits_and_missing_padding_token() {
     assert!(error.to_string().contains("no pad token"));
 }
 
-/// Named template parsing rejects duplicate and malformed declarations.
-#[test]
-fn validates_chat_template_metadata_shapes() {
-    let duplicate = serde_json::json!([
-        {"name": "same", "template": "one"},
-        {"name": "same", "template": "two"}
-    ]);
-    assert!(parse_chat_templates(Some(&duplicate)).is_err());
-    assert!(parse_chat_templates(Some(&Value::Bool(true))).is_err());
-    assert!(parse_chat_templates(Some(&Value::String("  ".into()))).is_err());
-}
-
 /// Invalid limits fail before encoding, while explicit right-side controls preserve masks.
 #[test]
 fn validates_encoding_limits_and_right_padding_boundaries() {
@@ -451,6 +439,30 @@ fn local_artifacts_reject_escaping_symlinks() {
     );
 }
 
+/// A dangling optional metadata symlink is absent, as a missing file is.
+///
+/// The lstat fast path sees the link itself, so resolving it decides: its
+/// `NotFound` means "absent" for an optional artifact.
+#[cfg(unix)]
+#[test]
+fn dangling_optional_metadata_artifacts_are_absent() {
+    let directory = fixture(base_config());
+    let root = directory.path().canonicalize().unwrap();
+    let dangling = root.join("special_tokens_map.json");
+    std::os::unix::fs::symlink(root.join("missing.json"), &dangling).unwrap();
+    assert!(!is_absent(&dangling));
+    assert!(
+        contained_file(&root, "special_tokens_map.json", false, MAX_METADATA_BYTES)
+            .unwrap()
+            .is_none()
+    );
+    let tokenizer = LocalTokenizer::from_directory(&root).unwrap();
+    assert_eq!(
+        tokenizer.metadata().tokenizer_class.as_deref(),
+        Some("FixtureTokenizer")
+    );
+}
+
 /// An optional artifact that cannot be resolved is an I/O error, not a missing file.
 ///
 /// Only `NotFound` means "absent"; a symlink loop names the unreadable path.
@@ -465,6 +477,29 @@ fn optional_artifacts_that_cannot_be_resolved_are_errors() {
         matches!(&error, Error::Io { path, source }
             if path.ends_with("special_tokens_map.json")
                 && source.kind() != std::io::ErrorKind::NotFound),
+        "{error}"
+    );
+}
+
+/// Only a missing path is absent: an optional artifact below a regular file is an I/O error.
+#[cfg(unix)]
+#[test]
+fn optional_artifacts_below_regular_files_are_errors() {
+    let directory = fixture(base_config());
+    let root = directory.path().canonicalize().unwrap();
+    let nested = root.join("tokenizer.json/nested.json");
+    assert!(!is_absent(&nested));
+    assert!(is_absent(&root.join("missing.json")));
+    let error = contained_file(
+        &root,
+        "tokenizer.json/nested.json",
+        false,
+        MAX_METADATA_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Io { path, source }
+            if path.ends_with("nested.json") && source.kind() != std::io::ErrorKind::NotFound),
         "{error}"
     );
 }
@@ -681,36 +716,6 @@ fn local_special_token_text_errors_cannot_be_hidden_by_valid_ids() {
             id: 1
         })
     );
-}
-
-/// All supported template metadata shapes normalize identically and malformed entries fail.
-#[test]
-fn named_template_metadata_validates_each_entry() {
-    let expected = BTreeMap::from([("chat".into(), "hello".into())]);
-    for value in [
-        serde_json::json!({"chat": "hello"}),
-        serde_json::json!([{"name": "chat", "template": "hello"}]),
-    ] {
-        assert_eq!(parse_chat_templates(Some(&value)).unwrap(), expected);
-    }
-    for (value, expected) in [
-        (
-            serde_json::json!([{"template": "hello"}]),
-            ".name must be a string",
-        ),
-        (
-            serde_json::json!([{"name": "chat"}]),
-            ".template must be a string",
-        ),
-        (serde_json::json!({"chat": 17}), "must be a string"),
-        (
-            serde_json::json!({"": "hello"}),
-            "name and source must not be empty",
-        ),
-    ] {
-        let error = parse_chat_templates(Some(&value)).unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
-    }
 }
 
 /// Rendering chooses only an explicit, default, or unambiguous sole template.
@@ -1685,6 +1690,513 @@ fn chat_map_key_order_is_sorted_until_order_is_preserved() {
     assert_eq!(rendered, expected);
 }
 
+/// Writes the base fixture with an optional configured template plus extra files.
+///
+/// Each file is `(path relative to the root, contents)`; parent directories
+/// are created as needed.
+fn template_file_fixture(configured: Option<Value>, files: &[(&str, &[u8])]) -> TempDir {
+    let mut config = base_config();
+    if let Some(configured) = configured {
+        config["chat_template"] = configured;
+    }
+    let directory = fixture(config);
+    for (relative, contents) in files {
+        let path = directory.path().join(relative);
+        fs::create_dir_all(path.parent().expect("fixture files live below the root")).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    directory
+}
+
+/// Loads `directory` and returns its named chat templates.
+fn loaded_templates(directory: &TempDir) -> BTreeMap<String, String> {
+    LocalTokenizer::from_directory(directory.path())
+        .unwrap()
+        .metadata()
+        .chat_templates
+        .clone()
+}
+
+/// Builds the expected template map from `(name, source)` pairs.
+fn template_map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|(name, source)| ((*name).to_owned(), (*source).to_owned()))
+        .collect()
+}
+
+/// Template files replace `tokenizer_config.json` templates, as in Hugging Face 5.2.
+///
+/// `_from_pretrained` loads `chat_template.jinja` as `default` and each
+/// `additional_chat_templates/<name>.jinja` as `<name>`; when any exists they
+/// replace the config's `chat_template` (TPL-1). Files are read with Python's
+/// universal newlines; JSON strings keep their carriage returns.
+#[test]
+fn template_files_replace_configured_templates() {
+    let configured = Some(Value::String("CONFIG".into()));
+    let jinja_only =
+        template_file_fixture(configured.clone(), &[("chat_template.jinja", b"JINJA")]);
+    assert_eq!(
+        loaded_templates(&jinja_only),
+        template_map(&[("default", "JINJA")])
+    );
+    let with_additional = template_file_fixture(
+        configured.clone(),
+        &[
+            ("chat_template.jinja", b"JINJA\r\nA\rB"),
+            ("additional_chat_templates/tool_use.jinja", b"TOOLS\r\n"),
+            ("additional_chat_templates/rag.jinja", b"RAG"),
+            ("additional_chat_templates/README.md", b"not a template"),
+            (
+                "additional_chat_templates/upper.JINJA",
+                b"case-sensitive extension",
+            ),
+        ],
+    );
+    assert_eq!(
+        loaded_templates(&with_additional),
+        template_map(&[
+            ("default", "JINJA\nA\nB"),
+            ("rag", "RAG"),
+            ("tool_use", "TOOLS\n"),
+        ])
+    );
+    // Additional templates alone still replace the config, leaving no `default`.
+    let additional_only = template_file_fixture(
+        configured.clone(),
+        &[("additional_chat_templates/tool_use.jinja", b"TOOLS")],
+    );
+    assert_eq!(
+        loaded_templates(&additional_only),
+        template_map(&[("tool_use", "TOOLS")])
+    );
+    // A directory without `.jinja` files supplies no template, so the config's stays.
+    let no_template_files = template_file_fixture(
+        configured,
+        &[("additional_chat_templates/README.md", b"not a template")],
+    );
+    assert_eq!(
+        loaded_templates(&no_template_files),
+        template_map(&[("default", "CONFIG")])
+    );
+    // A replaced config template is never read, so it may even be malformed.
+    let malformed_config = template_file_fixture(
+        Some(serde_json::json!(17)),
+        &[("chat_template.jinja", b"JINJA")],
+    );
+    assert_eq!(
+        loaded_templates(&malformed_config),
+        template_map(&[("default", "JINJA")])
+    );
+    // `"chat_template": null` is Python's `None`: no template.
+    assert!(loaded_templates(&template_file_fixture(Some(Value::Null), &[])).is_empty());
+    let json_newlines = template_file_fixture(Some(Value::String("C\r\nD\r".into())), &[]);
+    assert_eq!(
+        loaded_templates(&json_newlines),
+        template_map(&[("default", "C\r\nD\r")])
+    );
+}
+
+/// Malformed, escaping, and ambiguous template files fail with their path.
+#[test]
+fn template_files_are_validated_with_their_path() {
+    let artifact_error = |files: &[(&str, &[u8])]| {
+        let directory = template_file_fixture(None, files);
+        match LocalTokenizer::from_directory(directory.path()).unwrap_err() {
+            Error::Artifact { path, reason } => (path, reason),
+            other => panic!("expected an artifact error, found {other}"),
+        }
+    };
+    for (files, file_name, expected) in [
+        (
+            &[("additional_chat_templates/.jinja", &b"T"[..])][..],
+            ".jinja",
+            "needs a name",
+        ),
+        (
+            &[("additional_chat_templates/ .jinja", &b"T"[..])][..],
+            " .jinja",
+            "needs a name",
+        ),
+        (
+            &[("additional_chat_templates/tool_use.jinja", &b" \r\n\t"[..])][..],
+            "tool_use.jinja",
+            "must not be empty",
+        ),
+        (
+            &[("additional_chat_templates/tool_use.jinja", &b"\xff"[..])][..],
+            "tool_use.jinja",
+            "UTF-8",
+        ),
+        (
+            &[("chat_template.jinja", &b"\xc3"[..])][..],
+            "chat_template.jinja",
+            "UTF-8",
+        ),
+        (
+            &[
+                ("chat_template.jinja", &b"D"[..]),
+                ("additional_chat_templates/default.jinja", &b"D2"[..]),
+            ][..],
+            "default.jinja",
+            "duplicate chat template `default`",
+        ),
+    ] {
+        let (path, reason) = artifact_error(files);
+        assert!(path.ends_with(file_name), "{}: {reason}", path.display());
+        assert!(reason.contains(expected), "{file_name}: {reason}");
+    }
+}
+
+/// Template paths that Hugging Face skips are skipped, so the same templates load.
+///
+/// Transformers 5.2 reads a template file only when `os.path.isfile` holds
+/// for it and scans `additional_chat_templates` only when `Path.is_dir()`
+/// holds; anything else at those names is ignored, and when no template file
+/// remains the config template stays. Each expectation is the
+/// `tokenizer.chat_template` that Transformers 5.2.0 loads from the same
+/// layout (TOK-R1).
+#[cfg(unix)]
+#[test]
+fn template_paths_that_are_not_files_are_skipped_like_hugging_face() {
+    use std::os::unix::fs::symlink;
+
+    /// Makes `relative` a symlink to a missing path.
+    fn dangle(root: &Path, relative: &str) {
+        symlink(root.join("missing"), root.join(relative)).unwrap();
+    }
+    /// Makes `relative` a symlink to itself, which no lookup can resolve.
+    fn loop_back(root: &Path, relative: &str) {
+        symlink(root.join(relative), root.join(relative)).unwrap();
+    }
+    /// One layout and the templates Transformers 5.2.0 loads from it.
+    struct Case {
+        /// What the layout shows.
+        layout: &'static str,
+        /// Regular files to write, as `(path relative to the root, contents)`.
+        files: &'static [(&'static str, &'static [u8])],
+        /// Finishes the layout with what plain files cannot express.
+        arrange: fn(&Path),
+        /// The loaded templates, as `(name, source)` pairs.
+        expected: &'static [(&'static str, &'static str)],
+    }
+    /// The directory of named templates.
+    const ADDITIONAL: &str = "additional_chat_templates";
+    /// A valid named template that every skipped neighbour leaves loaded.
+    const RAG: (&str, &[u8]) = ("additional_chat_templates/rag.jinja", b"RAG");
+    /// A valid `default` template file that replaces the config's `CONFIG`.
+    const JINJA: (&str, &[u8]) = ("chat_template.jinja", b"JINJA");
+    let cases = [
+        Case {
+            layout: "dangling additional entry",
+            files: &[RAG],
+            arrange: |root| dangle(root, "additional_chat_templates/tool_use.jinja"),
+            expected: &[("rag", "RAG")],
+        },
+        Case {
+            layout: "looping additional entry",
+            files: &[RAG],
+            arrange: |root| loop_back(root, "additional_chat_templates/tool_use.jinja"),
+            expected: &[("rag", "RAG")],
+        },
+        Case {
+            layout: "directory named like a template",
+            files: &[
+                RAG,
+                (
+                    "additional_chat_templates/nested.jinja/inner.jinja",
+                    b"INNER",
+                ),
+            ],
+            arrange: |_| {},
+            expected: &[("rag", "RAG")],
+        },
+        Case {
+            layout: "only a dangling additional entry",
+            files: &[],
+            arrange: |root| {
+                fs::create_dir(root.join(ADDITIONAL)).unwrap();
+                dangle(root, "additional_chat_templates/tool_use.jinja");
+            },
+            expected: &[("default", "CONFIG")],
+        },
+        Case {
+            layout: "regular file named like the directory",
+            files: &[JINJA, (ADDITIONAL, b"not a directory")],
+            arrange: |_| {},
+            expected: &[("default", "JINJA")],
+        },
+        Case {
+            layout: "looping directory link",
+            files: &[JINJA],
+            arrange: |root| loop_back(root, ADDITIONAL),
+            expected: &[("default", "JINJA")],
+        },
+        Case {
+            layout: "dangling directory link",
+            files: &[JINJA],
+            arrange: |root| dangle(root, ADDITIONAL),
+            expected: &[("default", "JINJA")],
+        },
+        Case {
+            layout: "directory named chat_template.jinja",
+            files: &[("chat_template.jinja/inner.jinja", b"INNER")],
+            arrange: |_| {},
+            expected: &[("default", "CONFIG")],
+        },
+        Case {
+            layout: "dangling chat_template.jinja",
+            files: &[],
+            arrange: |root| dangle(root, "chat_template.jinja"),
+            expected: &[("default", "CONFIG")],
+        },
+        Case {
+            layout: "looping chat_template.jinja",
+            files: &[],
+            arrange: |root| loop_back(root, "chat_template.jinja"),
+            expected: &[("default", "CONFIG")],
+        },
+    ];
+    for Case {
+        layout,
+        files,
+        arrange,
+        expected,
+    } in cases
+    {
+        let directory = template_file_fixture(Some(Value::String("CONFIG".into())), files);
+        arrange(directory.path());
+        let tokenizer = LocalTokenizer::from_directory(directory.path())
+            .unwrap_or_else(|error| panic!("{layout}: {error}"));
+        assert_eq!(
+            tokenizer.metadata().chat_templates,
+            template_map(expected),
+            "{layout}"
+        );
+    }
+}
+
+/// Template-file symlinks are followed but cannot escape the root.
+///
+/// Only a path that resolves to a regular file is read, so a link that
+/// leaves the root for a directory is skipped like any directory.
+#[cfg(unix)]
+#[test]
+fn template_file_symlinks_are_contained() {
+    use std::os::unix::fs::symlink;
+
+    let outside = template_file_fixture(None, &[("templates/tool_use.jinja", b"OUTSIDE")]);
+    let escaping_file =
+        template_file_fixture(None, &[("additional_chat_templates/rag.jinja", b"R")]);
+    symlink(
+        outside.path().join("templates/tool_use.jinja"),
+        escaping_file
+            .path()
+            .join("additional_chat_templates/tool_use.jinja"),
+    )
+    .unwrap();
+    let escaping_directory = fixture(base_config());
+    symlink(
+        outside.path().join("templates"),
+        escaping_directory.path().join("additional_chat_templates"),
+    )
+    .unwrap();
+    for directory in [&escaping_file, &escaping_directory] {
+        assert!(matches!(
+            LocalTokenizer::from_directory(directory.path()).unwrap_err(),
+            Error::Artifact { reason, .. } if reason.contains("symlink escapes")
+        ));
+    }
+    let outside_directory =
+        template_file_fixture(None, &[("additional_chat_templates/rag.jinja", b"R")]);
+    symlink(
+        outside.path().join("templates"),
+        outside_directory
+            .path()
+            .join("additional_chat_templates/elsewhere.jinja"),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded_templates(&outside_directory),
+        template_map(&[("rag", "R")])
+    );
+    // Symlinks that stay inside the root are followed, as in Hugging Face.
+    let inside = template_file_fixture(None, &[("templates/tool_use.jinja", b"INSIDE")]);
+    symlink(
+        inside.path().join("templates"),
+        inside.path().join("additional_chat_templates"),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded_templates(&inside),
+        template_map(&[("tool_use", "INSIDE")])
+    );
+}
+
+/// Renders one user message with an optional template name and tools.
+#[cfg(feature = "chat-templates")]
+fn render_selected(
+    tokenizer: &LocalTokenizer,
+    template_name: Option<&str>,
+    tools: Option<Value>,
+) -> Result<String> {
+    tokenizer.render_chat(
+        &[ChatMessage::text("user", "hello")],
+        &ChatTemplateOptions {
+            template_name: template_name.map(str::to_owned),
+            tools,
+            ..ChatTemplateOptions::default()
+        },
+    )
+}
+
+/// Without a name, tools select a `tool_use` template, as `get_chat_template` does (CHAT-4).
+///
+/// Hugging Face 5.2 returns `template_dict["tool_use"]` when no name is
+/// given, `tools is not None`, and the checkpoint has a `tool_use` template;
+/// otherwise `default`. JSON `null` tools are Python's `None`.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn unnamed_renders_select_tool_use_when_tools_are_given() {
+    for templates in [
+        serde_json::json!([
+            {"name": "default", "template": "D"},
+            {"name": "tool_use", "template": "T"}
+        ]),
+        serde_json::json!({"default": "D", "tool_use": "T"}),
+    ] {
+        let directory = template_file_fixture(Some(templates), &[]);
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        let tools = serde_json::json!([{"type": "function", "function": {"name": "f"}}]);
+        assert_eq!(render_selected(&tokenizer, None, None).unwrap(), "D");
+        assert_eq!(
+            render_selected(&tokenizer, None, Some(serde_json::json!([]))).unwrap(),
+            "T"
+        );
+        assert_eq!(
+            render_selected(&tokenizer, None, Some(tools.clone())).unwrap(),
+            "T"
+        );
+        assert_eq!(
+            render_selected(&tokenizer, None, Some(Value::Null)).unwrap(),
+            "D"
+        );
+        // An explicit name always wins.
+        assert_eq!(
+            render_selected(&tokenizer, Some("default"), Some(tools)).unwrap(),
+            "D"
+        );
+        assert_eq!(
+            render_selected(&tokenizer, Some("tool_use"), None).unwrap(),
+            "T"
+        );
+    }
+    let with_tools = Some(serde_json::json!([]));
+    // Tools change nothing without a `tool_use` template.
+    for (templates, expected) in [
+        (serde_json::json!({"default": "D", "rag": "R"}), "D"),
+        (Value::String("S".into()), "S"),
+    ] {
+        let directory = template_file_fixture(Some(templates), &[]);
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        assert_eq!(
+            render_selected(&tokenizer, None, with_tools.clone()).unwrap(),
+            expected
+        );
+    }
+    // Without `default`, only tools resolve the choice, as in Hugging Face.
+    let directory =
+        template_file_fixture(Some(serde_json::json!({"rag": "R", "tool_use": "T"})), &[]);
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    assert_eq!(render_selected(&tokenizer, None, with_tools).unwrap(), "T");
+    let error = render_selected(&tokenizer, None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("multiple chat templates") && error.contains("`rag`, `tool_use`"),
+        "{error}"
+    );
+    let error = render_selected(&tokenizer, Some("missing"), None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("`missing` was not found") && error.contains("`rag`, `tool_use`"),
+        "{error}"
+    );
+    // A sole template renders without a name (Hugging Face raises here).
+    let directory = template_file_fixture(Some(serde_json::json!({"tool_use": "T"})), &[]);
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    assert_eq!(render_selected(&tokenizer, None, None).unwrap(), "T");
+}
+
+/// Template files and tools select the prompt Hugging Face 5.2 renders.
+///
+/// Goldens from transformers 5.2.0 `AutoTokenizer.from_pretrained` plus
+/// `apply_chat_template(..., tokenize=False)` on the same three fixtures: a
+/// config template `CONFIG`, `chat_template.jinja` with CRLF and CR line
+/// endings, and `additional_chat_templates/*.jinja`.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn template_files_and_tools_render_like_hugging_face() {
+    let configured = Some(Value::String("CONFIG".into()));
+    let precedence = template_file_fixture(
+        configured.clone(),
+        &[
+            ("chat_template.jinja", b"JINJA\r\nA\rB"),
+            (
+                "additional_chat_templates/tool_use.jinja",
+                b"TOOLS{{ tools | length }}",
+            ),
+        ],
+    );
+    let tokenizer = LocalTokenizer::from_directory(precedence.path()).unwrap();
+    assert_eq!(
+        render_selected(&tokenizer, None, None).unwrap(),
+        "JINJA\nA\nB"
+    );
+    assert_eq!(
+        render_selected(&tokenizer, None, Some(serde_json::json!([]))).unwrap(),
+        "TOOLS0"
+    );
+    assert_eq!(
+        render_selected(&tokenizer, Some("default"), None).unwrap(),
+        "JINJA\nA\nB"
+    );
+    assert_eq!(
+        render_selected(&tokenizer, Some("default"), Some(serde_json::json!([]))).unwrap(),
+        "JINJA\nA\nB"
+    );
+    let jinja_only =
+        template_file_fixture(configured.clone(), &[("chat_template.jinja", b"JINJA")]);
+    let tokenizer = LocalTokenizer::from_directory(jinja_only.path()).unwrap();
+    for tools in [None, Some(serde_json::json!([]))] {
+        assert_eq!(render_selected(&tokenizer, None, tools).unwrap(), "JINJA");
+    }
+    let additional_only = template_file_fixture(
+        configured,
+        &[
+            ("additional_chat_templates/tool_use.jinja", b"TOOLS"),
+            ("additional_chat_templates/rag.jinja", b"RAG"),
+        ],
+    );
+    let tokenizer = LocalTokenizer::from_directory(additional_only.path()).unwrap();
+    // Hugging Face: "multiple chat templates with no default specified".
+    assert!(
+        render_selected(&tokenizer, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple chat templates")
+    );
+    assert_eq!(
+        render_selected(&tokenizer, None, Some(serde_json::json!([]))).unwrap(),
+        "TOOLS"
+    );
+    assert_eq!(
+        render_selected(&tokenizer, Some("tool_use"), None).unwrap(),
+        "TOOLS"
+    );
+}
+
 /// Writes a byte-level BPE tokenizer with one token per byte and no merges.
 ///
 /// Every multi-byte UTF-8 character therefore spans several tokens, the
@@ -1843,5 +2355,66 @@ fn decode_stream_timing() {
         "{} tokens: prefix re-decoding {prefix:?}, streaming {stream:?} ({:.1}x)",
         ids.len(),
         prefix.as_secs_f64() / stream.as_secs_f64()
+    );
+}
+
+/// Measures tokenizer loading with chat templates and an unnamed tool-use render.
+///
+/// Loading resolves `chat_template.jinja` and `additional_chat_templates/`
+/// before the config template, and rendering consults `tools` while choosing
+/// a template. Each figure is the fastest of 25 batch means of 100 calls,
+/// which resists interference from other processes. Run with `cargo test
+/// --release --no-default-features --features std,flex,tokenizers,chat-templates
+/// --lib chat_template_selection_timing -- --ignored --nocapture`.
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "timing measurement; run explicitly in release mode"]
+fn chat_template_selection_timing() {
+    /// Batches timed per figure; the fastest batch mean is reported.
+    const BATCHES: u32 = 25;
+    /// Calls per batch.
+    const CALLS: u32 = 100;
+    /// Returns the fastest per-call mean over the batches.
+    fn fastest(mut call: impl FnMut()) -> std::time::Duration {
+        (0..BATCHES)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                for _ in 0..CALLS {
+                    call();
+                }
+                started.elapsed() / CALLS
+            })
+            .min()
+            .expect("at least one batch")
+    }
+    let template =
+        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}";
+    let config_only = template_file_fixture(Some(Value::String(template.into())), &[]);
+    let config_and_file = template_file_fixture(
+        Some(Value::String(template.into())),
+        &[("chat_template.jinja", template.as_bytes())],
+    );
+    let named = template_file_fixture(
+        Some(serde_json::json!({"default": template, "tool_use": template})),
+        &[],
+    );
+    let load = |directory: &TempDir| {
+        fastest(|| {
+            std::hint::black_box(LocalTokenizer::from_directory(directory.path()).unwrap());
+        })
+    };
+    let tokenizer = LocalTokenizer::from_directory(named.path()).unwrap();
+    let messages = [ChatMessage::text("user", "hello world")];
+    let options = ChatTemplateOptions {
+        tools: Some(serde_json::json!([])),
+        ..ChatTemplateOptions::default()
+    };
+    let render = fastest(|| {
+        std::hint::black_box(tokenizer.render_chat(&messages, &options).unwrap());
+    });
+    println!(
+        "fastest per-call mean: load (config template) {:?}, load (config + chat_template.jinja) {:?}, unnamed tool-use render {render:?}",
+        load(&config_only),
+        load(&config_and_file),
     );
 }
