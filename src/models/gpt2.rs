@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     architecture::Activation,
-    initialization::{InitPolicy, ResidualScaling},
+    initialization::{InitPolicy, ParameterInit, ResidualScaling},
     models::config::{
         ConfigError, ModelConfig, Validate, layer_count, model_type, positive_finite,
     },
@@ -204,19 +204,43 @@ impl Gpt2Config {
     /// shift zero as Hugging Face does.
     ///
     /// The policy itself covers embeddings, projections, and projection biases
-    /// only: LayerNorm scales and shifts have the role
+    /// only, so it applies to any module rooted anywhere: a LayerNorm's scale
+    /// and shift both have the role
     /// [`ParameterRole::Other`](crate::initialization::ParameterRole::Other),
-    /// which the policy keeps, because [`ParameterInit`](crate::initialization::ParameterInit)
-    /// cannot express "ones". Applying it to a trained or edited model
-    /// therefore re-samples the embeddings and projections and zeroes the
-    /// biases but leaves the LayerNorm parameters as they are; reset those
-    /// separately (for example by rebuilding each norm with
-    /// `LayerNormConfig::new(n_embd).with_epsilon(layer_norm_epsilon)`) for a
-    /// complete Hugging Face-style re-initialization.
+    /// so no role rule can set the scale to one and the shift to zero, and the
+    /// policy keeps them. Applying it to a trained or edited model therefore
+    /// re-samples the embeddings and projections and zeroes the biases but
+    /// leaves the LayerNorm parameters as they are. [`Self::reinit_policy`]
+    /// adds the per-path [`ParameterInit::Ones`] and [`ParameterInit::Zeros`]
+    /// overrides that complete a Hugging Face-style re-initialization.
     #[must_use]
     pub fn init_policy(&self) -> InitPolicy {
         InitPolicy::normal(self.initializer_range)
             .with_depth_scaling(self.n_layer, ["o_proj", "down_proj"])
+    }
+
+    /// [`Self::init_policy`] plus LayerNorm resets: Hugging Face's complete `_init_weights`.
+    ///
+    /// Hugging Face also sets every LayerNorm scale to one and shift to zero.
+    /// This policy adds one path override per parameter for the attention and
+    /// MLP norms of all `n_layer` blocks and for the final norm:
+    /// [`ParameterInit::Ones`] for each scale (`gamma`) and
+    /// [`ParameterInit::Zeros`] for each shift (`beta`). The paths are rooted
+    /// at [`Gpt2ForCausalLm`] (`model.layers.{l}.attention_norm.gamma`, ...),
+    /// so apply it to that type; [`InitPolicy::apply`] rejects it, unchanged,
+    /// for a module where those paths do not exist.
+    #[must_use]
+    pub fn reinit_policy(&self) -> InitPolicy {
+        let norms = (0..self.n_layer)
+            .flat_map(|layer| {
+                ["attention_norm", "mlp_norm"].map(|norm| format!("model.layers.{layer}.{norm}"))
+            })
+            .chain(["model.final_norm".to_owned()]);
+        norms.fold(self.init_policy(), |policy, norm| {
+            policy
+                .with_override(format!("{norm}.gamma"), ParameterInit::Ones)
+                .with_override(format!("{norm}.beta"), ParameterInit::Zeros)
+        })
     }
 
     /// Standard deviation of residual-writing projections, `initializer_range / sqrt(2 * n_layer)`.
