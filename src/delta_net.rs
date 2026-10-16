@@ -36,10 +36,10 @@
 //! same valid outputs and state as its compacted, unpadded form.
 //!
 //! The integer planning behind both paths (chunk width and count, padding,
-//! balanced chunk blocks, the doubling-inverse schedule, projection widths,
-//! geometry checks, and the recurrence-versus-chunked choice) lives in the
-//! dependency-free `plan` submodule, whose functions Verus proves exact
-//! through `verus/mixers.rs`.
+//! balanced chunk blocks, the doubling-inverse levels, projection widths and
+//! the query/key/value channel layout, geometry checks, and the
+//! recurrence-versus-chunked choice) lives in the dependency-free `plan`
+//! submodule, whose functions Verus proves exact through `verus/mixers.rs`.
 
 use core::ops::Range;
 
@@ -61,8 +61,9 @@ use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig
 pub(crate) mod plan;
 
 use plan::{
-    ChunkPlan, DeltaGeometryViolation, block_chunk_ranges, check_delta_geometry, chunk_plan,
-    inverse_block_sizes, prefers_recurrence,
+    ChunkPlan, DeltaGeometryViolation, InverseLevel, MixerLayout, ProjectionWidths,
+    block_chunk_ranges, check_delta_geometry, chunk_plan, inverse_levels, mixer_layout,
+    prefers_recurrence, projection_widths,
 };
 
 /// Number of prefill chunks whose intra-chunk algebra is batched together.
@@ -199,7 +200,15 @@ impl GatedDeltaNetConfig {
 
     /// Returns the concatenated Q/K/V convolution channel count.
     pub fn convolution_channels(&self) -> Result<usize> {
-        plan::convolution_channels(
+        Ok(self.projection_widths()?.channels)
+    }
+
+    /// Returns the verified key, value, and fused channel widths of the Q/K/V projection.
+    ///
+    /// [`projection_widths`] is exact and fails exactly when the channel count
+    /// overflows `usize`, in which case every partial width fits too.
+    fn projection_widths(&self) -> Result<ProjectionWidths> {
+        projection_widths(
             self.key_heads,
             self.key_head_dim,
             self.value_heads,
@@ -254,12 +263,9 @@ impl GatedDeltaNetConfig {
             }
         }
         self.rule_config().validate()?;
-        let _ = self.convolution_channels()?;
-        self.value_heads
-            .checked_mul(self.value_head_dim)
-            .ok_or_else(|| {
-                Error::configuration("delta_net.value_width", "dimension overflows usize")
-            })?;
+        // The verified channel count fits only if the key and value widths fit,
+        // so this one check covers every projection width.
+        let _ = self.projection_widths()?;
         Ok(())
     }
 
@@ -275,9 +281,11 @@ impl GatedDeltaNetConfig {
     /// Initializes lazy Burn projections and checkpoint-compatible scalar parameters.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<GatedDeltaNet<B>> {
         self.validate()?;
-        let key_width = self.key_heads * self.key_head_dim;
-        let value_width = self.value_heads * self.value_head_dim;
-        let convolution_channels = self.convolution_channels()?;
+        let ProjectionWidths {
+            value_width,
+            channels: convolution_channels,
+            ..
+        } = self.projection_widths()?;
         let linear = |output| {
             operations::init_linear(
                 &LinearConfig::new(self.hidden_size, output)
@@ -302,7 +310,7 @@ impl GatedDeltaNetConfig {
         )
         .log();
         Ok(GatedDeltaNet {
-            in_proj_qkv: linear(key_width * 2 + value_width),
+            in_proj_qkv: linear(convolution_channels),
             in_proj_z: linear(value_width),
             in_proj_b: linear(self.value_heads),
             in_proj_a: linear(self.value_heads),
@@ -610,8 +618,19 @@ impl<B: Backend> GatedDeltaNet<B> {
             )
         });
         let mixed = activation::silu(convolution.output).swap_dims(1, 2);
-        let key_width = self.key_heads * self.key_head_dim;
-        let value_width = self.value_heads * self.value_head_dim;
+        // Verified tiling of the convolved channels: queries `0..K`, keys
+        // `K..2K`, values `2K..2K + V`; a validated configuration's channel
+        // count fits, which is the precondition.
+        let MixerLayout {
+            key_width,
+            value_start,
+            value_width,
+        } = mixer_layout(
+            self.key_heads,
+            self.key_head_dim,
+            self.value_heads,
+            self.value_head_dim,
+        );
         let query = mixed.clone().narrow(2, 0, key_width).reshape([
             batch,
             sequence,
@@ -624,7 +643,7 @@ impl<B: Backend> GatedDeltaNet<B> {
             self.key_heads,
             self.key_head_dim,
         ]);
-        let value = mixed.narrow(2, key_width * 2, value_width).reshape([
+        let value = mixed.narrow(2, value_start, value_width).reshape([
             batch,
             sequence,
             self.value_heads,
@@ -662,7 +681,9 @@ impl<B: Backend> GatedDeltaNet<B> {
             initial_state: Some(state.recurrent.clone()),
             token_mask: mask,
         };
-        let state_elements = self.value_heads * self.key_head_dim * self.value_head_dim;
+        // The recurrent state passed `validate_state`, so its element count fits.
+        let state_elements =
+            plan::state_elements(self.value_heads, self.key_head_dim, self.value_head_dim);
         let (values, final_state, snapshots) = match kernel {
             RuleKernel::Prefill if !prefers_recurrence(sequence, state_elements) => {
                 let output = chunked_gated_delta_rule(rule_input, self.rule_config)?;
@@ -1344,9 +1365,10 @@ fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
         return Tensor::ones([chunks, batch, heads, 1, 1], (&device, DType::F32));
     }
     let items = chunks * batch * heads;
-    // Verified schedule `[P, P / 2, …, 2]` with `P` the least power of two `>= width`.
-    let sizes = inverse_block_sizes(width);
-    let size = sizes[0];
+    // Verified levels: one `P x P` block, then `2^k` blocks of side `P / 2^k`
+    // down to side two, with `P` the least power of two `>= width`.
+    let levels = inverse_levels(width);
+    let size = levels[0].block;
     let mut lower = strict_lower.reshape([items, 1, width, width]);
     if size != width {
         let pad = size - width;
@@ -1357,11 +1379,11 @@ fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
     // Diagonal blocks of L by size: `diagonal[k]` holds the blocks of size
     // `size >> k` as `[items, 2^k, size >> k, size >> k]`, finest last.
     let mut diagonal = vec![lower];
-    for level in sizes.windows(2) {
-        // `block == 2 * half`, and `size / block` blocks of size `block` tile the tile.
-        let (block, half) = (level[0], level[1]);
+    for pair in levels.windows(2) {
+        // Each parent block splits into two children of side `half`, and the
+        // next level holds twice as many blocks.
+        let (InverseLevel { half, .. }, InverseLevel { count, .. }) = (pair[0], pair[1]);
         let parent = diagonal.last().expect("starts non-empty").clone();
-        let count = size / block;
         // Rows 0..half of the concatenation are the upper-left quadrant and
         // rows half..block the lower-right one: reshaping interleaves them as
         // children 2j and 2j + 1 of parent j.
@@ -1372,13 +1394,13 @@ fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
             ],
             2,
         );
-        diagonal.push(children.reshape([items, count * 2, half, half]));
+        diagonal.push(children.reshape([items, count, half, half]));
     }
     // `inverse` holds the inverted diagonal blocks of size `half`.
     let mut inverse: Option<Tensor<B, 4>> = None;
-    for parent in diagonal.into_iter().rev() {
-        let [_, count, block, _] = parent.dims();
-        let half = block / 2;
+    // `diagonal[k]` is `[items, count, block, block]` for `levels[k]`.
+    for (parent, level) in diagonal.into_iter().zip(&levels).rev() {
+        let InverseLevel { block, half, count } = *level;
         // Q: the lower-left quadrant of every parent block.
         let quadrant = parent.narrow(2, half, half).narrow(3, 0, half);
         let (upper, lower_right, corner) = match inverse {

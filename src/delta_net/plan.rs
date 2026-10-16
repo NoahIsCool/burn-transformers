@@ -6,9 +6,11 @@
 //! balanced blocks of at most `B` chunks: `m = ceil(n / B)` blocks whose sizes
 //! differ by at most one, the larger first. Each chunk's unit lower-triangular
 //! system `(I + L)^-1` is inverted by recursive doubling over a `P x P` tile,
-//! where `P` is the least power of two not below `C`; the levels combine
-//! diagonal blocks of sizes `2, 4, …, P`. The fused Q/K/V convolution carries
-//! `2 * key_heads * key_head_dim + value_heads * value_head_dim` channels.
+//! where `P` is the least power of two not below `C`; level `k` holds `2^k`
+//! diagonal blocks of side `P / 2^k`, down to side two. The fused Q/K/V
+//! convolution carries `2 * K + V` channels, with `K = key_heads *
+//! key_head_dim` query (and key) channels and `V = value_heads *
+//! value_head_dim` value channels, laid out as queries, keys, then values.
 //!
 //! # Verified planning
 //!
@@ -19,9 +21,11 @@
 //! are consecutive, start at zero, end at `n`, hold between one and `B`
 //! chunks, and follow the balanced size formula; the doubling schedule starts
 //! at the least power of two not below the width and halves exactly down to
-//! two; the channel count is exact or rejected exactly when it overflows; and
-//! the recurrence-versus-chunked choice equals its closed-form cost
-//! comparison and is monotone in the segment length and the state size.
+//! two, and its levels tile the `P x P` tile with twice as many blocks per
+//! level; the projection widths are exact or rejected exactly when the
+//! channel count overflows; the query, key, and value slices tile the fused
+//! channels; and the recurrence-versus-chunked choice equals its closed-form
+//! cost comparison and is monotone in the segment length and the state size.
 
 use core::ops::Range;
 
@@ -370,25 +374,173 @@ pub(super) fn inverse_block_sizes(width: usize) -> Vec<usize> {
     sizes
 }
 
-/// Returns the fused Q/K/V convolution width `2 * key_heads * key_head_dim + value_heads * value_head_dim`.
-///
-/// The proof shows the result is that exact width whenever it fits in
-/// `usize`, and `None` exactly when it does not; every partial product then
-/// fits as well.
+/// Doubling-inverse geometry of one level: `count` diagonal blocks of `block x block`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
-#[cfg_attr(verus_keep_ghost, verus_spec(channels =>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct InverseLevel {
+    /// Side of every diagonal block at this level.
+    pub(super) block: usize,
+    /// Side of each of the two child blocks, `block / 2`.
+    pub(super) half: usize,
+    /// Number of diagonal blocks, `P / block`.
+    pub(super) count: usize,
+}
+
+/// Returns the per-level block geometry of the doubling inverse of a `width x width` system.
+///
+/// Level `k` holds `count` diagonal blocks of side `block`, each split into
+/// two children of side `half`. The proof shows the levels start with one
+/// `P x P` block, where `P` is the least power of two not below `width`;
+/// that every level tiles the `P x P` tile exactly (`count * block == P`)
+/// with `block == 2 * half`; that each next level has the children's side
+/// and twice as many blocks; and that the last level has blocks of side two.
+/// The inverse narrows and reshapes with exactly these extents.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(levels =>
+    requires
+        2 <= width <= usize::MAX / 2,
     ensures
-        match channels {
-            Some(width) => width == 2 * (key_heads * key_head_dim) + value_heads * value_head_dim,
+        levels.len() >= 1,
+        levels[0].count == 1,
+        is_power_of_two(levels[0].block as int),
+        width <= levels[0].block < 2 * width,
+        levels[levels.len() - 1].block == 2,
+        forall|k: int| 0 <= k < levels.len() ==> {
+            &&& #[trigger] levels[k].block == 2 * levels[k].half
+            &&& levels[k].half >= 1
+            &&& levels[k].count * levels[k].block == levels[0].block
+        },
+        forall|k: int| 0 <= k && k + 1 < levels.len() ==> {
+            &&& #[trigger] levels[k + 1].block == levels[k].half
+            &&& levels[k + 1].count == 2 * levels[k].count
+        },
+))]
+pub(super) fn inverse_levels(width: usize) -> Vec<InverseLevel> {
+    let sizes = inverse_block_sizes(width);
+    let mut levels: Vec<InverseLevel> = Vec::with_capacity(sizes.len());
+    let mut count = 1usize;
+    let mut level = 0usize;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::arithmetic::power2::lemma2_to64();
+    }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            level <= sizes.len(),
+            sizes.len() >= 1,
+            levels.len() == level,
+            count == vstd::arithmetic::power2::pow2(level as nat),
+            level < sizes.len() ==> count * sizes[level as int] == sizes[0],
+            forall|k: int| 0 <= k && k + 1 < sizes.len() ==> #[trigger] sizes[k] == 2 * sizes[k + 1],
+            forall|k: int| 0 <= k < sizes.len() ==> {
+                &&& #[trigger] sizes[k] >= 2
+                &&& is_power_of_two(sizes[k] as int)
+                &&& sizes[k] * vstd::arithmetic::power2::pow2(k as nat) == sizes[0]
+            },
+            forall|k: int| 0 <= k < level ==> {
+                &&& #[trigger] levels[k].block == sizes[k]
+                &&& levels[k].block == 2 * levels[k].half
+                &&& levels[k].count == vstd::arithmetic::power2::pow2(k as nat)
+            },
+        decreases sizes.len() - level,
+    ))]
+    while level < sizes.len() {
+        let block = sizes[level];
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            vstd::arithmetic::power2::lemma_pow2_pos(level as nat);
+            lemma_halve_power_of_two(block as int);
+            // `count * block == P` with `block >= 2`, so doubling `count` stays within `P`.
+            assert(2 * count <= count * block) by (nonlinear_arith)
+                requires block >= 2, count >= 1;
+            vstd::arithmetic::power2::lemma_pow2_unfold((level + 1) as nat);
+            if level + 1 < sizes.len() {
+                assert(2 * count * sizes[level + 1] == sizes[0]) by (nonlinear_arith)
+                    requires
+                        count * block == sizes[0],
+                        block == 2 * sizes[level + 1];
+            }
+        }
+        levels.push(InverseLevel {
+            block,
+            half: block / 2,
+            count,
+        });
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(levels[level as int].block == sizes[level as int]);
+            assert(levels[level as int].block == 2 * levels[level as int].half);
+            assert(levels[level as int].count == vstd::arithmetic::power2::pow2(level as nat));
+        }
+        count *= 2;
+        level += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::arithmetic::power2::lemma_pow2_pos(0);
+        assert(levels[0].block == sizes[0]);
+        assert forall|k: int| 0 <= k < levels.len() implies {
+            &&& #[trigger] levels[k].block == 2 * levels[k].half
+            &&& levels[k].half >= 1
+            &&& levels[k].count * levels[k].block == levels[0].block
+        } by {
+            assert(levels[k].block == sizes[k]);
+            assert(sizes[k] * vstd::arithmetic::power2::pow2(k as nat) == sizes[0]);
+            assert(levels[k].count * levels[k].block == sizes[0]) by (nonlinear_arith)
+                requires
+                    levels[k].count == vstd::arithmetic::power2::pow2(k as nat),
+                    levels[k].block == sizes[k],
+                    sizes[k] * vstd::arithmetic::power2::pow2(k as nat) == sizes[0];
+        }
+        assert forall|k: int| 0 <= k && k + 1 < levels.len() implies
+            #[trigger] levels[k + 1].block == levels[k].half
+                && levels[k + 1].count == 2 * levels[k].count
+        by {
+            assert(levels[k].block == sizes[k]);
+            assert(levels[k + 1].block == sizes[k + 1]);
+            assert(sizes[k] == 2 * sizes[k + 1]);
+            vstd::arithmetic::power2::lemma_pow2_unfold((k + 1) as nat);
+        }
+    }
+    levels
+}
+
+/// Widths of a Gated DeltaNet's fused query/key/value projection.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ProjectionWidths {
+    /// Query width, equal to the key width: `key_heads * key_head_dim`.
+    pub(super) key_width: usize,
+    /// Value width `value_heads * value_head_dim`.
+    pub(super) value_width: usize,
+    /// Fused convolution channels `2 * key_width + value_width`.
+    pub(super) channels: usize,
+}
+
+/// Returns the fused Q/K/V widths, with `2 * key_heads * key_head_dim + value_heads * value_head_dim` channels.
+///
+/// The proof shows the key, value, and channel widths are exact whenever the
+/// channel count fits in `usize`, and that `None` is returned exactly when it
+/// does not; every partial product then fits as well, so no separate check of
+/// the key or value width can fail afterwards.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(widths =>
+    ensures
+        match widths {
+            Some(widths) => {
+                &&& widths.key_width == key_heads * key_head_dim
+                &&& widths.value_width == value_heads * value_head_dim
+                &&& widths.channels == 2 * widths.key_width + widths.value_width
+            },
             None => 2 * (key_heads * key_head_dim) + value_heads * value_head_dim > usize::MAX,
         },
 ))]
-pub(super) fn convolution_channels(
+pub(super) fn projection_widths(
     key_heads: usize,
     key_head_dim: usize,
     value_heads: usize,
     value_head_dim: usize,
-) -> Option<usize> {
+) -> Option<ProjectionWidths> {
     #[cfg(verus_keep_ghost)]
     proof! {
         assert(key_heads * key_head_dim >= 0) by (nonlinear_arith);
@@ -397,7 +549,93 @@ pub(super) fn convolution_channels(
     let key_width = key_heads.checked_mul(key_head_dim)?;
     let query_key_width = key_width.checked_mul(2)?;
     let value_width = value_heads.checked_mul(value_head_dim)?;
-    query_key_width.checked_add(value_width)
+    let channels = query_key_width.checked_add(value_width)?;
+    Some(ProjectionWidths {
+        key_width,
+        value_width,
+        channels,
+    })
+}
+
+/// Channel layout of a mixer's convolved Q/K/V activations.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MixerLayout {
+    /// Query channels are `0..key_width` and key channels `key_width..2 * key_width`.
+    pub(super) key_width: usize,
+    /// First value channel, `2 * key_width`.
+    pub(super) value_start: usize,
+    /// Value channels are `value_start..value_start + value_width`.
+    pub(super) value_width: usize,
+}
+
+/// Splits a mixer's convolved Q/K/V channels into query, key, and value slices.
+///
+/// The proof shows the slices `0..K`, `K..2K`, and `2K..2K + V` (with
+/// `K = key_heads * key_head_dim` and `V = value_heads * value_head_dim`) are
+/// consecutive and end exactly at the fused channel count, so they tile the
+/// convolution output with no gap or overlap. The precondition holds for a
+/// mixer built from a validated configuration, whose channel count
+/// [`projection_widths`] accepted; the arithmetic is the mixer's own, so
+/// behavior is unchanged.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(layout =>
+    requires
+        2 * (key_heads * key_head_dim) + value_heads * value_head_dim <= usize::MAX,
+    ensures
+        layout.key_width == key_heads * key_head_dim,
+        layout.value_start == layout.key_width + layout.key_width,
+        layout.value_width == value_heads * value_head_dim,
+        layout.value_start + layout.value_width
+            == 2 * (key_heads * key_head_dim) + value_heads * value_head_dim,
+))]
+pub(super) fn mixer_layout(
+    key_heads: usize,
+    key_head_dim: usize,
+    value_heads: usize,
+    value_head_dim: usize,
+) -> MixerLayout {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(key_heads * key_head_dim >= 0) by (nonlinear_arith);
+        assert(value_heads * value_head_dim >= 0) by (nonlinear_arith);
+    }
+    let key_width = key_heads * key_head_dim;
+    let value_width = value_heads * value_head_dim;
+    MixerLayout {
+        key_width,
+        value_start: key_width * 2,
+        value_width,
+    }
+}
+
+/// Returns the elements `value_heads * key_head_dim * value_head_dim` of one row's recurrent state.
+///
+/// The proof shows the product is exact and that its partial product cannot
+/// overflow first. The precondition holds whenever the state tensor
+/// `[batch, value_heads, key_head_dim, value_head_dim]` of a validated mixer
+/// exists, because its element count is then representable.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(elements =>
+    requires
+        key_head_dim > 0,
+        value_head_dim > 0,
+        value_heads * key_head_dim * value_head_dim <= usize::MAX,
+    ensures
+        elements == value_heads * key_head_dim * value_head_dim,
+))]
+pub(super) fn state_elements(
+    value_heads: usize,
+    key_head_dim: usize,
+    value_head_dim: usize,
+) -> usize {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(0 <= value_heads * key_head_dim <= value_heads * key_head_dim * value_head_dim)
+            by (nonlinear_arith)
+            requires key_head_dim > 0, value_head_dim > 0, value_heads >= 0;
+    }
+    value_heads * key_head_dim * value_head_dim
 }
 
 /// First violated integer constraint of a Gated DeltaNet configuration.

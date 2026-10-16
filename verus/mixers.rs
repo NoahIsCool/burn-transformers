@@ -8,10 +8,13 @@
 //!   end at the chunk count, hold between one and the limit of chunks, and
 //!   follow the exact balanced size formula; the doubling-inverse schedule
 //!   starts at the least power of two not below the chunk width and halves
-//!   exactly down to two; the fused convolution width is exact or rejected
-//!   exactly on overflow; integer configuration checks accept exactly the
-//!   admissible geometry; and the recurrence-versus-chunked choice equals its
-//!   closed-form cost comparison and is monotone.
+//!   exactly down to two, and its levels hold `2^k` blocks that tile the
+//!   padded tile; the key, value, and fused convolution widths are exact or
+//!   rejected exactly on overflow; the query, key, and value channel slices
+//!   tile the convolution output and the recurrent state size is exact;
+//!   integer configuration checks accept exactly the admissible geometry;
+//!   and the recurrence-versus-chunked choice equals its closed-form cost
+//!   comparison and is monotone.
 //! - `src/mamba2/plan.rs`: Mamba-2 bookkeeping. Projection and convolution
 //!   widths are exact or name the first overflowing step in validation
 //!   order; geometry and row-count checks accept exactly the admissible
