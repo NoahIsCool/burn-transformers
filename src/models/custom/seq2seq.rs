@@ -686,10 +686,7 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
     pub(super) fn project_decoder(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
-            None => Ok(tied_projection(
-                hidden,
-                self.decoder_embed_tokens.weight.val(),
-            )),
+            None => tied_projection(hidden, self.decoder_embed_tokens.weight.val()),
         }
     }
 

@@ -9,6 +9,13 @@
 //! The batched history-write timing lives with the decode state
 //! (`models::custom::state::tests`), which owns the history tensors.
 //!
+//! `tied_vocabulary_decode_throughput` is an end-to-end series rather than an
+//! old/new comparison: it times cached decode of randomly initialized
+//! tied-vocabulary decoders (tiny and small modular stacks and a small
+//! Qwen3.5 hybrid with the released vocabulary) and prints one JSON line per
+//! configuration. Build it from two source revisions and compare the lines;
+//! `TRANSFORMERS_BENCH_SOURCE_LABEL` names the revision in the output.
+//!
 //! Each comparison times the former algorithm (kept here verbatim as an
 //! oracle) and the new one on identical inputs, checks that both produce the
 //! same values wherever attention reads them, and prints the median of several
@@ -349,4 +356,185 @@ fn mixed_stack_forward_time() {
     println!(
         "mixed T5-bias/sliding stack, 4 layers, batch {batch}, tokens {sequence}, width 128: {elapsed:.2} ms per forward"
     );
+}
+
+/// Minimum, median and maximum of measured samples, in their own unit.
+fn spread(mut samples: Vec<f64>) -> (f64, f64, f64) {
+    samples.sort_by(f64::total_cmp);
+    (
+        samples[0],
+        samples[samples.len() / 2],
+        samples[samples.len() - 1],
+    )
+}
+
+/// Times batch-one cached decode of `model` and prints one JSON line.
+///
+/// Every repetition allocates a fresh state, prefills `prompt` tokens, then
+/// decodes `steps` single tokens. The decode interval ends after reading back
+/// the final logits, so no lazily queued work escapes it; prefill is reported
+/// separately. Two warm-up repetitions (which also materialize lazily
+/// initialized parameters) precede `repetitions` measured ones.
+fn time_cached_decode<M: CausalLanguageModel<TestBackend>>(
+    name: &str,
+    model: &M,
+    vocabulary: usize,
+    repetitions: usize,
+) {
+    let device: Device = Default::default();
+    let (prompt, steps) = (32, 32);
+    let token = |index: usize| ((index * 7919 + 13) % vocabulary) as i32;
+    let prompt_ids = (0..prompt).map(token).collect::<Vec<_>>();
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..ForwardOptions::default()
+    };
+    let run = || {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, prompt + steps).unwrap(), 1, &device)
+            .unwrap();
+        let started = Instant::now();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(
+                        TensorData::new(prompt_ids.clone(), [1, prompt]),
+                        &device,
+                    ),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let prefill = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let mut logits = None;
+        for step in 0..steps {
+            logits = Some(
+                model
+                    .decode(
+                        DecodeInput {
+                            token_ids: Tensor::from_data(
+                                TensorData::new(vec![token(prompt + step)], [1, 1]),
+                                &device,
+                            ),
+                            token_mask: None,
+                            position_ids: None,
+                        },
+                        &mut state,
+                        &options,
+                    )
+                    .unwrap()
+                    .logits,
+            );
+        }
+        let checksum = logits
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|&value| f64::from(value))
+            .sum::<f64>();
+        let decode = started.elapsed().as_secs_f64();
+        (prefill * 1e3, steps as f64 / decode, checksum)
+    };
+    run();
+    run();
+    let samples = (0..repetitions).map(|_| run()).collect::<Vec<_>>();
+    let (prefill_min, prefill_median, prefill_max) =
+        spread(samples.iter().map(|sample| sample.0).collect());
+    let (decode_min, decode_median, decode_max) =
+        spread(samples.iter().map(|sample| sample.1).collect());
+    let label = std::env::var("TRANSFORMERS_BENCH_SOURCE_LABEL").unwrap_or_default();
+    println!(
+        "TIED_DECODE_JSON={{\"source\":\"{label}\",\"config\":\"{name}\",\"vocabulary\":{vocabulary},\"prompt_tokens\":32,\"decode_steps\":32,\"repetitions\":{repetitions},\"prefill_ms\":[{prefill_min:.3},{prefill_median:.3},{prefill_max:.3}],\"decode_tokens_per_second\":[{decode_min:.2},{decode_median:.2},{decode_max:.2}],\"final_logit_sum\":{:.6}}}",
+        samples[0].2
+    );
+}
+
+/// Tied modular decoder: RoPE grouped-query attention and gated SiLU MLPs.
+fn tied_modular_decoder(
+    hidden: usize,
+    vocabulary: usize,
+    layers: usize,
+    heads: (usize, usize, usize),
+    intermediate: usize,
+) -> DecoderSpec {
+    let (query_heads, key_value_heads, head_dim) = heads;
+    let block = crate::architecture::DecoderLayerSpec {
+        mixer: MixerSpec::Attention(AttentionSpec {
+            query_heads,
+            key_value_heads,
+            head_dim,
+            query_key_norm: false,
+            output_gate: false,
+            position: PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: head_dim,
+                scaling: RopeScaling::None,
+            },
+        }),
+        feed_forward: FeedForwardSpec::Dense(crate::architecture::DenseFeedForwardSpec {
+            intermediate_size: intermediate,
+            activation: Activation::Silu,
+            bias: false,
+        }),
+        ..layer(attention(PositionEncodingSpec::None))
+    };
+    DecoderSpec {
+        vocabulary_size: vocabulary,
+        hidden_size: hidden,
+        layers: vec![block; layers],
+        final_norm: rms(),
+        tie_word_embeddings: true,
+        max_position_embeddings: 128,
+    }
+}
+
+/// Flex cached-decode throughput of tied-vocabulary decoders (see the module documentation).
+///
+/// `tiny` (width 64, vocabulary 1,024) is dominated by per-call overhead;
+/// `small` (width 576, vocabulary 49,152, SmolLM-135M's table) and
+/// `qwen3.5-small` (width 1,024, vocabulary 248,320, four hybrid layers) are
+/// dominated by the tied readout and the projections.
+#[test]
+#[ignore = "timing measurement; run in release with --ignored --nocapture"]
+fn tied_vocabulary_decode_throughput() {
+    let device: Device = Default::default();
+    let tiny = ModularCausalLm::<TestBackend>::init(
+        tied_modular_decoder(64, 1_024, 2, (4, 2, 16), 128),
+        &device,
+    )
+    .unwrap();
+    time_cached_decode("modular-tiny", &tiny, 1_024, 9);
+    let small = ModularCausalLm::<TestBackend>::init(
+        tied_modular_decoder(576, 49_152, 4, (9, 3, 64), 1_536),
+        &device,
+    )
+    .unwrap();
+    time_cached_decode("modular-small", &small, 49_152, 9);
+    let qwen = crate::models::qwen3_5::Qwen3_5ForCausalLm::<TestBackend>::init(
+        crate::models::qwen3_5::Qwen3_5TextConfig {
+            vocab_size: 248_320,
+            hidden_size: 1_024,
+            intermediate_size: 3_584,
+            num_hidden_layers: 4,
+            num_attention_heads: 8,
+            num_key_value_heads: 2,
+            head_dim: 256,
+            max_position_embeddings: 128,
+            tie_word_embeddings: true,
+            linear_num_key_heads: 16,
+            linear_num_value_heads: 16,
+            ..Default::default()
+        },
+        &device,
+    )
+    .unwrap();
+    time_cached_decode("qwen3.5-small", &qwen, 248_320, 5);
 }

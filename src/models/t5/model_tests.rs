@@ -835,3 +835,40 @@ fn padded_forward_benchmark() {
     }
     eprintln!("T5 padded forward batch={batch} sequence={sequence}: best={best:.4}s");
 }
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, burn::tensor::Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// The scaled tied readout equals Burn's reshaping `linear(h / sqrt(d), Eᵀ)` within F32 rounding.
+///
+/// It multiplies by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_readout_matches_reshaping_linear_oracle() {
+    let device = Default::default();
+    let config = tiny_config(T5FeedForwardProjection::Relu);
+    let width = config.d_model;
+    let model =
+        T5ForConditionalGeneration::<TestBackend>::init(config, &device).expect("valid model");
+    let hidden = readout_hidden(width, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone().mul_scalar(1.0 / (width as f64).sqrt()),
+        model.shared.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    model
+        .project_logits(hidden)
+        .expect("tied projection")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+}

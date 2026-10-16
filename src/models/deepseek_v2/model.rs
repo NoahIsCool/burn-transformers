@@ -684,16 +684,15 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         &self.model.config
     }
 
-    /// Applies the independent or tied vocabulary projection.
+    /// Applies the independent or tied vocabulary projection, returning F32 logits.
+    ///
+    /// A tied head multiplies by the transposed view of the embedding table
+    /// without copying it ([`operations::matmul_transposed`]).
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
             Some(head) => operations::linear(hidden, head).map(|logits| logits.cast(DType::F32)),
-            None => Ok(burn::tensor::module::linear(
-                hidden,
-                self.model.embed_tokens.weight.val().transpose(),
-                None,
-            )
-            .cast(DType::F32)),
+            None => operations::matmul_transposed(hidden, self.model.embed_tokens.weight.val())
+                .map(|logits| logits.cast(DType::F32)),
         }
     }
 }

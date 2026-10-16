@@ -602,6 +602,11 @@ impl<B: Backend> Qwen3_5TextModel<B> {
     /// Projects hidden states through the live embedding table without a second parameter.
     /// This reproduces a tied Qwen vocabulary head; for an originally untied checkpoint,
     /// choosing this method deliberately changes its readout.
+    ///
+    /// The readout `logits[b, t, v] = Σ_i hidden[b, t, i] · E[v, i]` multiplies by
+    /// the transposed *view* of the `[vocabulary, hidden]` table through
+    /// [`operations::matmul_transposed`], so the table is never copied (Burn's
+    /// `module::linear` copies it on Flex on every call).
     pub fn tied_vocabulary_projection(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         let [batch, sequence, width] = hidden.dims();
         if batch == 0 || sequence == 0 || width != self.config.hidden_size {
@@ -622,11 +627,7 @@ impl<B: Backend> Qwen3_5TextModel<B> {
             hidden.dtype(),
             self.embed_tokens.weight.val().dtype(),
         )?;
-        Ok(burn::tensor::module::linear(
-            hidden,
-            self.embed_tokens.weight.val().transpose(),
-            None,
-        ))
+        operations::matmul_transposed(hidden, self.embed_tokens.weight.val())
     }
 
     /// Makes an independent readout initialized from the embedding table.
@@ -959,6 +960,9 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
     }
 
     /// Projects normalized hidden states with the shared base-model LM head.
+    ///
+    /// A tied head multiplies by the transposed view of the embedding table
+    /// without copying it ([`operations::matmul_transposed`]).
     pub(crate) fn project_hidden(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         let hidden_device = hidden.device();
         match &self.lm_head {
@@ -978,11 +982,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                     &hidden_device,
                     PARAMETERS,
                 )?;
-                Ok(burn::tensor::module::linear(
-                    hidden,
-                    self.model.embed_tokens.weight.val().transpose(),
-                    None,
-                ))
+                operations::matmul_transposed(hidden, self.model.embed_tokens.weight.val())
             }
         }
     }

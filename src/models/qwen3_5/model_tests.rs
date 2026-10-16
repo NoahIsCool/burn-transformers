@@ -502,3 +502,62 @@ fn position_tables_build_the_padding_plane_only_for_full_attention() {
         PositionTables::new([rope], &positions, None, 3, burn::tensor::DType::F32).unwrap();
     assert!(unmasked.padding.is_none());
 }
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, burn::tensor::Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// Both tied readouts equal Burn's reshaping `linear(h, Eᵀ)` up to F32 reassociation.
+///
+/// They multiply by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_readouts_match_reshaping_linear_oracle() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.tie_word_embeddings = true;
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .expect("tied tiny model must initialize");
+    let hidden = readout_hidden(config.hidden_size, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        model.model.embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    let tolerance = burn::tensor::Tolerance::absolute(1e-6);
+    model
+        .project_hidden(hidden.clone())
+        .expect("tied head")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, tolerance);
+    model
+        .model
+        .tied_vocabulary_projection(hidden)
+        .expect("tied projection")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, tolerance);
+}
+
+/// A tied head reports a mismatched hidden width as a shape error instead of panicking.
+#[test]
+fn tied_head_rejects_mismatched_hidden_width() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.tie_word_embeddings = true;
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .expect("tied tiny model must initialize");
+    let result = model.project_hidden(readout_hidden(config.hidden_size + 1, &device));
+    assert!(
+        matches!(result, Err(Error::Shape { ref tensor, .. }) if tensor == "matmul_transposed.matrix"),
+        "{result:?}"
+    );
+}

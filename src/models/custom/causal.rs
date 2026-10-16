@@ -405,7 +405,7 @@ impl<B: Backend> ModularCausalLm<B> {
     pub(super) fn project(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
-            None => Ok(tied_projection(hidden, self.embed_tokens.weight.val())),
+            None => tied_projection(hidden, self.embed_tokens.weight.val()),
         }
     }
 

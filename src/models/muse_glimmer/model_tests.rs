@@ -2259,3 +2259,37 @@ fn global_rope_theta_has_one_resolver() {
             .all(|&theta| theta == 0.0 || theta == 500_000.0)
     );
 }
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, burn::tensor::Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// The tied projection equals Burn's reshaping `linear(h, Eᵀ)` up to F32 reassociation.
+///
+/// It multiplies by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_projection_matches_reshaping_linear_oracle() {
+    let device = Default::default();
+    let embedding = readout_hidden(8, &device).reshape([6, 8]).mul_scalar(0.5);
+    let hidden = readout_hidden(8, &device).flip([2]);
+    let oracle = burn::tensor::module::linear(hidden.clone(), embedding.clone().transpose(), None)
+        .into_data();
+    tied_projection(hidden.clone(), embedding)
+        .expect("tied projection")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
+    let narrow = Tensor::<TestBackend, 2>::zeros([6, 7], &device);
+    assert!(matches!(
+        tied_projection(hidden, narrow),
+        Err(Error::Shape { tensor, .. }) if tensor == "muse_glimmer.tied_lm_head"
+    ));
+}

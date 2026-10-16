@@ -250,12 +250,21 @@ pub(super) fn has_moe(spec: &DecoderSpec) -> bool {
         .any(|layer| matches!(&layer.feed_forward, FeedForwardSpec::MixtureOfExperts(_)))
 }
 
-/// Applies an ordinary tied vocabulary projection with embedding weights.
+/// Applies an ordinary tied vocabulary projection with a `[vocabulary, hidden]` embedding table.
+///
+/// `logits[b, t, v] = Σ_i hidden[b, t, i] · E[v, i]`, computed by
+/// [`crate::operations::matmul_transposed`] against the transposed view of `E`.
+/// The table is never copied; Burn's `module::linear` reshapes the transposed
+/// table and therefore copies it on Flex on every call.
+///
+/// # Errors
+///
+/// Propagates the shape, dtype, and device checks of `matmul_transposed`.
 pub(super) fn tied_projection<B: Backend>(
     hidden: Tensor<B, 3>,
     embedding_weight: Tensor<B, 2>,
-) -> Tensor<B, 3> {
-    burn::tensor::module::linear(hidden, embedding_weight.transpose(), None)
+) -> Result<Tensor<B, 3>> {
+    crate::operations::matmul_transposed(hidden, embedding_weight)
 }
 
 /// Recomputes auxiliary loss from gathered cached-step router tensors.
