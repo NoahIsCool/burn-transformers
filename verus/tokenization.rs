@@ -40,6 +40,13 @@
 //! every day of an era from its monotonicity plus a `by (compute_only)`
 //! evaluation of each of the 400 years' first and last days.
 //!
+//! and to `src/tokenization/vocabulary.rs`:
+//!
+//! - `declared_special_id` accepts exactly the declared JSON IDs that fit
+//!   `u32`; `reconcile_special_id` returns the vocabulary's own ID, and only
+//!   when no ID or the same ID was declared; `id_fits_vocabulary` holds
+//!   exactly for IDs below the model's vocabulary size.
+//!
 //! and to `src/tokenization/pycompat/decimal.rs`, the integer core of
 //! Python's `round`:
 //!
@@ -100,6 +107,8 @@ pub mod calendar;
 pub mod layout;
 #[path = "../src/tokenization/pycompat/decimal.rs"]
 pub mod decimal;
+#[path = "../src/tokenization/vocabulary.rs"]
+pub mod vocabulary;
 #[path = "../src/tokenization/chat_template/scan.rs"]
 pub mod scan;
 #[path = "../src/tokenization/chat_template/guard/lexer.rs"]

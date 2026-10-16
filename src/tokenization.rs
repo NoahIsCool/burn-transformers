@@ -90,11 +90,13 @@ mod chat_template; // Hugging Face-compatible template environment and `strftime
 mod layout; // Truncation-budget and padding arithmetic (Verus-verified).
 #[cfg(feature = "chat-templates")]
 mod pycompat; // Python `str`/`dict` semantics, printing, and filters for templates.
+mod vocabulary; // Special-token ID and embedding-row checks (Verus-verified).
 
 use layout::{
     LimitViolation, PaddedBatch, content_token_budget, encoding_limit_violation, first_ragged_row,
     flatten_mask_rows, flatten_token_rows, longest_row, pad_batch, unpadded_masks,
 };
+use vocabulary::{declared_special_id, id_fits_vocabulary, reconcile_special_id};
 
 /// Maximum accepted tokenizer JSON size in bytes before parsing.
 const MAX_TOKENIZER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -643,7 +645,8 @@ impl LocalTokenizer {
             .into_values()
             .max()
             .ok_or_else(|| Error::Tokenizer("tokenizer vocabulary must not be empty".into()))?;
-        if maximum_id as usize >= model_vocabulary_size {
+        // Verified: the largest ID fitting means every emitted ID fits.
+        if !id_fits_vocabulary(maximum_id, model_vocabulary_size) {
             return Err(Error::Tokenizer(format!(
                 "tokenizer emits ID {maximum_id}, outside model vocabulary size {model_vocabulary_size}"
             )));
@@ -1119,14 +1122,11 @@ fn resolve_special(
         .and_then(|value| value.get(format!("{field}_id")))
         .filter(|value| !value.is_null())
         .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| {
-                    Error::Tokenizer(format!(
-                        "{field}_id must be an unsigned 32-bit integer or null, found {value}"
-                    ))
-                })
+            value.as_u64().and_then(declared_special_id).ok_or_else(|| {
+                Error::Tokenizer(format!(
+                    "{field}_id must be an unsigned 32-bit integer or null, found {value}"
+                ))
+            })
         })
         .transpose()?;
     let content = match declared {
@@ -1148,13 +1148,12 @@ fn resolve_special(
             "declared {field} token `{content}` is absent from the vocabulary"
         ))
     })?;
-    if let Some(declared) = declared_id
-        && declared != id
-    {
-        return Err(Error::Tokenizer(format!(
+    // Verified: an accepted ID is always the vocabulary's own.
+    let id = reconcile_special_id(declared_id, id).map_err(|declared| {
+        Error::Tokenizer(format!(
             "{field}_id {declared} conflicts with tokenizer vocabulary ID {id}"
-        )));
-    }
+        ))
+    })?;
     Ok(Some(SpecialToken { content, id }))
 }
 
