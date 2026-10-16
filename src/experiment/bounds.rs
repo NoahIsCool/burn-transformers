@@ -17,10 +17,13 @@
 //!   cursor exactly once and never run a block at or past it.
 //! - [`reduction_rows`] multiplies every extent except the reduced axis, so
 //!   rows times the reduced width is exactly the element count.
-//! - [`fold_level`] partitions a row into the added left and right blocks and
-//!   the carried odd middle column, so every column is read exactly once; the
-//!   width strictly shrinks to `ceil(w/2)`, and `lemma_fold_depth` proves the
-//!   reduction takes exactly `ceil(log2(w))` levels.
+//! - [`fold_level`] returns the exact plan of one pairwise-reduction level:
+//!   output column `j < pairs` receives exactly input columns `j` and
+//!   `partner_start + j`, an odd width's middle column is carried into output
+//!   column `pairs`, and no output column receives anything else, so every
+//!   input column is read exactly once. The width shrinks to `ceil(w/2)`, one
+//!   level fewer remains, and `lemma_fold_depth` proves the reduction takes
+//!   exactly `ceil(log2(w))` levels.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -175,26 +178,40 @@ pub(crate) struct FoldLevel {
 
 /// Plans one folding level of a pairwise row reduction of `width >= 2` columns.
 ///
-/// The left block `0..pairs`, the right block `partner_start..width`, and (for
-/// an odd width) the middle column `pairs` partition `0..width`: every column
-/// is read exactly once, so the level preserves the row sum, and each block
-/// lies inside the row. The next width is `ceil(width / 2)`, at least one and
-/// strictly smaller than `width`, so repeated folding terminates; the number of
-/// levels is exactly `ceil(log2(width))` ([`fold_depth`]).
+/// Output column `j < pairs` is the sum of input columns `j` and
+/// `partner_start + j`; for an odd width, output column `pairs` carries the
+/// middle input column `pairs` unchanged. The proved postcondition says every
+/// input column lands in one output column below `next`, each output column
+/// receives exactly those inputs and no others, and the middle block
+/// `pairs..partner_start` holds `width % 2` columns, so the level reads every
+/// column exactly once and preserves the row sum. The next width is
+/// `ceil(width / 2)`, at least one and strictly smaller than `width`, and the
+/// remaining depth drops by exactly one, so repeated folding terminates after
+/// exactly `ceil(log2(width))` levels (`lemma_fold_depth`).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(level =>
     requires
         width >= 2,
     ensures
         level.pairs == width / 2,
-        level.partner_start + level.pairs == width,
+        level.partner_start == width - level.pairs,
         level.next == level.partner_start,
-        level.next == level.pairs + width % 2,
-        1 <= level.pairs <= level.partner_start <= level.pairs + 1,
+        level.partner_start - level.pairs == width % 2,
+        1 <= level.pairs,
         1 <= level.next < width,
-        forall|column: int| 0 <= column < width ==> fold_destination(width as int, column) < level.next,
-        forall|column: int| #![trigger fold_class(width as int, column)] 0 <= column < width
-            ==> fold_class(width as int, column) <= 2,
+        fold_depth(width as int) == fold_depth(level.next as int) + 1,
+        forall|column: int| 0 <= column < width
+            ==> 0 <= #[trigger] folded_column(level, column) < level.next,
+        forall|pair: int| 0 <= pair < level.pairs ==> {
+            &&& level.partner_start + pair < width
+            &&& #[trigger] folded_column(level, pair) == pair
+            &&& folded_column(level, level.partner_start + pair) == pair
+        },
+        level.pairs < level.next ==> folded_column(level, level.pairs as int) == level.pairs,
+        forall|first: int, second: int|
+            #![trigger folded_column(level, first), folded_column(level, second)]
+            0 <= first < second < width && folded_column(level, first) == folded_column(level, second)
+            ==> first < level.pairs && second == level.partner_start + first,
 ))]
 pub(crate) fn fold_level(width: usize) -> FoldLevel {
     let pairs = width / 2;
@@ -250,7 +267,6 @@ pub(crate) proof fn lemma_product_except_times_extent(shape: Seq<usize>, dim: in
         lemma_product_except_times_extent(prefix, dim);
         assert(prefix[dim] == shape[dim]);
         let others = product_except(prefix, dim);
-        let all = shape_product(prefix);
         assert(others * shape.last() * shape[dim] == others * shape[dim] * shape.last())
             by (nonlinear_arith);
     }
@@ -328,32 +344,17 @@ pub(crate) proof fn lemma_prefix_product_at_most(shape: Seq<usize>, length: int)
     }
 }
 
-/// Which block of a folding level reads `column`: 0 left, 1 right, 2 carried middle, 3 none.
+/// Output column of a folding level that receives input `column`.
 ///
-/// Every column of `0..width` falls in exactly one of the first three classes.
-pub(crate) open spec fn fold_class(width: int, column: int) -> int {
-    let pairs = width / 2;
-    let partner_start = width - pairs;
-    if 0 <= column < pairs {
-        0
-    } else if partner_start <= column < width {
-        1
-    } else if width % 2 == 1 && column == pairs {
-        2
-    } else {
-        3
-    }
-}
-
-/// Column of the folded row that receives `column`: `j` for `j` and `partner_start + j`, `pairs` for the middle.
-pub(crate) open spec fn fold_destination(width: int, column: int) -> int {
-    let pairs = width / 2;
-    if column < pairs {
+/// The left block and the carried middle column keep their index; the right
+/// block `partner_start..` shifts onto its partners `0..pairs`. This mirrors
+/// the runtime layout: the pair sums are concatenated first, then the middle
+/// column.
+pub(crate) open spec fn folded_column(level: FoldLevel, column: int) -> int {
+    if column < level.partner_start {
         column
-    } else if column >= width - pairs {
-        column - (width - pairs)
     } else {
-        pairs
+        column - level.partner_start
     }
 }
 
@@ -377,30 +378,6 @@ pub(crate) open spec fn power_of_two(exponent: nat) -> int
     } else {
         2 * power_of_two((exponent - 1) as nat)
     }
-}
-
-/// The folded row has exactly one destination per surviving column.
-///
-/// Destination `j < pairs` receives exactly columns `j` and `partner_start + j`;
-/// for an odd width, destination `pairs` receives exactly the middle column.
-/// Together with [`fold_level`]'s partition this shows a level preserves the
-/// row sum: every input column contributes to exactly one output column.
-pub(crate) proof fn lemma_fold_preimages(width: int, column: int, destination: int)
-    requires
-        width >= 2,
-        0 <= column < width,
-        0 <= destination < width - width / 2,
-    ensures
-        fold_class(width, column) <= 2,
-        0 <= fold_destination(width, column) < width - width / 2,
-        (fold_destination(width, column) == destination) <==> (
-            column == destination
-                && destination < width / 2
-            || column == width - width / 2 + destination
-                && destination < width / 2
-            || width % 2 == 1 && destination == width / 2 && column == destination
-        ),
-{
 }
 
 /// Folding `width` columns takes exactly `ceil(log2(width))` levels.

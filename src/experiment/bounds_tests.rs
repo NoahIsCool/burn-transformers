@@ -123,6 +123,22 @@ proptest::proptest! {
         proptest::prop_assert_eq!(rows * shape[dim], shape.iter().product::<usize>());
     }
 
+    /// Folding a row with the runtime layout preserves its sum and yields `next` columns.
+    #[test]
+    fn fold_levels_preserve_row_sums(
+        row in proptest::collection::vec(-1_000i64..1_000, 2..64),
+    ) {
+        let level = fold_level(row.len());
+        let mut folded = (0..level.pairs)
+            .map(|pair| row[pair] + row[level.partner_start + pair])
+            .collect::<Vec<_>>();
+        if level.next != level.pairs {
+            folded.push(row[level.pairs]);
+        }
+        proptest::prop_assert_eq!(folded.len(), level.next);
+        proptest::prop_assert_eq!(folded.iter().sum::<i64>(), row.iter().sum::<i64>());
+    }
+
     /// Every column of a folding level is read by exactly one block, and the depth is ceil(log2 w).
     #[test]
     fn fold_levels_partition_columns(width in 2usize..300) {

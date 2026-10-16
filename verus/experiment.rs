@@ -16,18 +16,21 @@
 //!   overflow), position/label range checks, broadcast compatibility of masks
 //!   and attention planes, and staged block cursors, whose consecutively
 //!   accepted ranges run every block below the cursor exactly once and in
-//!   order. A loss reduction's row count is the product of every other
-//!   extent, so `rows * width` is exactly the element count and no partial
-//!   product overflows. Each pairwise-reduction level partitions the row into added left
-//!   and right blocks plus the carried odd middle column (every column is read
-//!   exactly once), and the whole reduction takes exactly `ceil(log2 w)` levels.
+//!   order. A loss reduction's row count is the
+//!   product of every other extent, so `rows * width` is exactly the element
+//!   count and no partial product overflows. Each pairwise-reduction level
+//!   sends output column `j` exactly input columns `j` and
+//!   `partner_start + j`, carries an odd width's middle column, and sends
+//!   nothing else (every column is read exactly once); the whole reduction
+//!   takes exactly `ceil(log2 w)` levels.
 //! - `src/experiment/precedence.rs`: ordered overrides (per-layer attention
 //!   policies and initialization path overrides) resolve to exactly the last
 //!   matching entry.
 //! - `src/architecture/constraints.rs`: the integer rules of specification
 //!   validation. Head layouts are classified in precedence order (zero
-//!   dimension, then indivisible groups), and a valid layout maps every head
-//!   to an in-range group of exactly `heads / groups` members; Mamba2 group
+//!   dimension, then indivisible groups), and a valid layout has
+//!   `size * groups == heads`, maps every head to an in-range group, and keeps
+//!   every group's block of `size` heads inside the head range; Mamba2 group
 //!   sizes, routed-expert selection counts, MLA query-key width overflow (and
 //!   its saturating builder width), cross-attention projection sizes, and
 //!   stack dimensions are decided exactly. Group-preserving decode-state
