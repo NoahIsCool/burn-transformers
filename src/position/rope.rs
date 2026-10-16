@@ -55,8 +55,24 @@
 //! - Amplitudes (YaRN and LongRoPE `attention_factor`) must be normal positive
 //!   `f32` values too: an amplitude above `f32::MAX` turns `sin(0) = 0` at
 //!   position zero into `0 * inf = NaN`.
+//!
+//! # Verified width checks
+//!
+//! The integer validation is checked in place by Verus through
+//! `verus/position.rs`: [`validate_dimensions`] accepts exactly a positive,
+//! even rotary width no wider than a non-empty head (so it splits into
+//! `rotary / 2` complex pairs and leaves a `head - rotary` suffix) and
+//! otherwise reports the first failed check; [`check_scaling_width`] adds
+//! exactly the width each scaling policy requires (dynamic NTK above two,
+//! LongRoPE one factor per pair, proportional RoPE the whole head); and
+//! [`validate_original_context`] accepts exactly a non-zero trained context.
+//! Floating-point validation (theta, factors, amplitudes, betas) is covered by
+//! the unit tests.
 
 use core::fmt;
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
 
 use super::rope_scaling::{Llama3RopeScaling, LongRopeScaling, ProportionalRopeScaling};
 
@@ -381,6 +397,20 @@ impl RopeScaling {
         }
     }
 
+    /// Returns the integer width requirement this policy adds to the rotary dimension.
+    const fn width_rule(&self) -> ScalingWidthRule {
+        match self {
+            Self::DynamicNtk(_) => ScalingWidthRule::DynamicNtk,
+            Self::LongRope(long) => ScalingWidthRule::LongRope {
+                factor_count: long.frequency_count(),
+            },
+            Self::Proportional(_) => ScalingWidthRule::FullHead,
+            Self::None | Self::Linear(_) | Self::Yarn(_) | Self::Llama3(_) => {
+                ScalingWidthRule::Unconstrained
+            }
+        }
+    }
+
     /// Returns the cosine/sine amplitude multiplier this policy applies.
     #[must_use]
     pub const fn amplitude(&self) -> f64 {
@@ -480,28 +510,13 @@ impl RopeConfig {
         if !(theta.is_finite() && theta >= 1.0) {
             return Err(RopeConfigError::InvalidTheta { theta });
         }
-        match scaling {
-            RopeScaling::DynamicNtk(_) if rotary_dimension <= 2 => {
-                return Err(RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension });
-            }
-            // The YaRN correction-dimension formula divides by ln(theta).
-            RopeScaling::Yarn(_) if theta <= 1.0 => {
-                return Err(RopeConfigError::YarnThetaTooSmall { theta });
-            }
-            RopeScaling::LongRope(long) if long.frequency_count() != rotary_dimension / 2 => {
-                return Err(RopeConfigError::LongRopeFactorCount {
-                    expected: rotary_dimension / 2,
-                    actual: long.frequency_count(),
-                });
-            }
-            RopeScaling::Proportional(_) if rotary_dimension != head_dimension => {
-                return Err(RopeConfigError::ProportionalRequiresFullRotation {
-                    rotary_dimension,
-                    head_dimension,
-                });
-            }
-            _ => {}
+        // The YaRN correction-dimension formula divides by ln(theta). YaRN
+        // adds no width rule, so checking it before the width rule keeps the
+        // original single-policy error.
+        if matches!(scaling, RopeScaling::Yarn(_)) && theta <= 1.0 {
+            return Err(RopeConfigError::YarnThetaTooSmall { theta });
         }
+        check_scaling_width(head_dimension, rotary_dimension, scaling.width_rule())?;
 
         Ok(Self {
             head_dimension,
@@ -601,6 +616,41 @@ pub fn rotary_dimension_from_partial_factor(
 }
 
 /// Requires a positive, even rotary prefix that fits inside a nonempty attention head.
+///
+/// Verified: `Ok` exactly when `head > 0`, `0 < rotary <= head`, and `rotary`
+/// is even, so the prefix holds `rotary / 2` complex pairs and the suffix
+/// `head - rotary` channels; otherwise the first failed check in the order
+/// zero head, zero rotary, rotary wider than head, odd rotary.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(()) => {
+                &&& head_dimension > 0
+                &&& 0 < rotary_dimension <= head_dimension
+                &&& rotary_dimension % 2 == 0
+                &&& 2 * (rotary_dimension / 2) == rotary_dimension
+                &&& rotary_dimension / 2 >= 1
+            },
+            Err(RopeConfigError::ZeroHeadDimension) => head_dimension == 0,
+            Err(RopeConfigError::ZeroRotaryDimension) => head_dimension > 0 && rotary_dimension == 0,
+            Err(RopeConfigError::RotaryDimensionExceedsHead {
+                rotary_dimension: rotary,
+                head_dimension: head,
+            }) => {
+                &&& head_dimension > 0 && rotary_dimension > 0
+                &&& rotary_dimension > head_dimension
+                &&& rotary == rotary_dimension && head == head_dimension
+            },
+            Err(RopeConfigError::OddRotaryDimension { rotary_dimension: rotary }) => {
+                &&& head_dimension > 0
+                &&& 0 < rotary_dimension <= head_dimension
+                &&& rotary_dimension % 2 == 1
+                &&& rotary == rotary_dimension
+            },
+            Err(_) => false,
+        }
+))]
 fn validate_dimensions(
     head_dimension: usize,
     rotary_dimension: usize,
@@ -623,6 +673,84 @@ fn validate_dimensions(
     Ok(())
 }
 
+/// Integer width requirement a scaling policy places on the rotary dimension.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScalingWidthRule {
+    /// No requirement beyond [`validate_dimensions`] (none, linear, YaRN, Llama 3).
+    Unconstrained,
+    /// Dynamic NTK's exponent `d / (d - 2)` needs `d > 2`.
+    DynamicNtk,
+    /// LongRoPE needs one factor per complex pair, `rotary / 2` factors.
+    LongRope {
+        /// Number of factors in each LongRoPE table.
+        factor_count: usize,
+    },
+    /// Proportional RoPE pairs span the whole head, so `rotary == head`.
+    FullHead,
+}
+
+/// Checks the width requirement of a scaling policy after [`validate_dimensions`].
+///
+/// Verified: `Ok` exactly when the rule holds (no requirement, `rotary > 2`,
+/// `factor_count == rotary / 2`, or `rotary == head`), and otherwise the
+/// rule's own error carrying the offending values.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(()) => match rule {
+                ScalingWidthRule::Unconstrained => true,
+                ScalingWidthRule::DynamicNtk => rotary_dimension > 2,
+                ScalingWidthRule::LongRope { factor_count } => factor_count == rotary_dimension / 2,
+                ScalingWidthRule::FullHead => rotary_dimension == head_dimension,
+            },
+            Err(RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension: rotary }) => {
+                &&& rule == ScalingWidthRule::DynamicNtk
+                &&& rotary_dimension <= 2
+                &&& rotary == rotary_dimension
+            },
+            Err(RopeConfigError::LongRopeFactorCount { expected, actual }) => {
+                &&& rule == ScalingWidthRule::LongRope { factor_count: actual }
+                &&& expected == rotary_dimension / 2
+                &&& actual != expected
+            },
+            Err(RopeConfigError::ProportionalRequiresFullRotation {
+                rotary_dimension: rotary,
+                head_dimension: head,
+            }) => {
+                &&& rule == ScalingWidthRule::FullHead
+                &&& rotary_dimension != head_dimension
+                &&& rotary == rotary_dimension && head == head_dimension
+            },
+            Err(_) => false,
+        }
+))]
+fn check_scaling_width(
+    head_dimension: usize,
+    rotary_dimension: usize,
+    rule: ScalingWidthRule,
+) -> Result<(), RopeConfigError> {
+    match rule {
+        ScalingWidthRule::DynamicNtk if rotary_dimension <= 2 => {
+            Err(RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension })
+        }
+        ScalingWidthRule::LongRope { factor_count } if factor_count != rotary_dimension / 2 => {
+            Err(RopeConfigError::LongRopeFactorCount {
+                expected: rotary_dimension / 2,
+                actual: factor_count,
+            })
+        }
+        ScalingWidthRule::FullHead if rotary_dimension != head_dimension => {
+            Err(RopeConfigError::ProportionalRequiresFullRotation {
+                rotary_dimension,
+                head_dimension,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Requires a finite context-extension factor of at least one; one preserves the original scale.
 pub(super) fn validate_scaling_factor(
     kind: &'static str,
@@ -636,6 +764,20 @@ pub(super) fn validate_scaling_factor(
 }
 
 /// Requires a nonzero trained context length before evaluating an extension formula.
+///
+/// Verified: `Ok` exactly when the context is non-zero, and otherwise
+/// [`RopeConfigError::ZeroOriginalContext`] naming `kind`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(()) => original_max_position_embeddings > 0,
+            Err(RopeConfigError::ZeroOriginalContext { kind: name }) => {
+                original_max_position_embeddings == 0 && name == kind
+            },
+            Err(_) => false,
+        }
+))]
 pub(super) fn validate_original_context(
     kind: &'static str,
     original_max_position_embeddings: usize,
@@ -670,6 +812,7 @@ fn validate_yarn_beta(name: &'static str, value: f64) -> Result<(), RopeConfigEr
 }
 
 /// Invalid rotary dimensions or context-scaling parameters.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RopeConfigError {
     /// Attention head width must be non-zero.
