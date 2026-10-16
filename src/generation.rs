@@ -149,7 +149,7 @@ use burn::tensor::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, TokenMask};
+use crate::{Error, Result, TokenMask, architecture::bool_tensor_from_values};
 
 use bookkeeping::{StopDecision, stop_decision};
 use history::CountView;
@@ -1153,6 +1153,29 @@ fn sample_with_uniforms<B: Backend>(logits: Tensor<B, 2>, uniforms: Vec<f32>) ->
         .int()
         .sum_dim(1)
         .squeeze_dim::<1>(1)
+}
+
+/// Sets every score of each row whose `active` flag is false to zero.
+///
+/// `active` holds one flag per row of the `[batch, vocabulary]` scores. When
+/// every row is active, the common decode step, the scores are returned
+/// untouched: filling through an all-false mask would only copy them.
+/// Otherwise the flags are negated on the host and only a `[batch, 1]` column
+/// is uploaded and broadcast; negating the broadcast `[batch, vocabulary]`
+/// view on the device would instead materialize all of its elements, every
+/// step.
+fn zero_inactive_rows<B: Backend>(scores: Tensor<B, 2>, active: &[bool]) -> Tensor<B, 2> {
+    if active.iter().all(|&row| row) {
+        return scores;
+    }
+    let [batch, vocabulary] = scores.dims();
+    let inactive = bool_tensor_from_values(
+        active.iter().map(|&row| !row).collect(),
+        [batch, 1],
+        &scores.device(),
+    )
+    .expand([batch, vocabulary]);
+    scores.mask_fill(inactive, 0.0)
 }
 
 /// Keeps every score at least the `k`-th greatest of its row, ties included.

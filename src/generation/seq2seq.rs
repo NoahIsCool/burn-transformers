@@ -1238,11 +1238,8 @@ fn host_log_probabilities<B: Backend>(
             "beam-search active metadata does not match model logits".into(),
         ));
     }
-    let device = logits.device();
-    let active_mask =
-        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
     let dtype = probability_accumulation_dtype(logits.dtype());
-    let logits = logits.cast(dtype).mask_fill(active_mask.bool_not(), 0.0);
+    let logits = super::zero_inactive_rows(logits.cast(dtype), active);
     let fully_excluded = logits
         .clone()
         .equal_elem(f64::NEG_INFINITY)

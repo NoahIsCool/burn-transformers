@@ -504,22 +504,20 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
 ///
 /// Architecture implementations define inactive decode outputs as ignorable,
 /// not necessarily finite. Neutralizing those rows prevents a NaN produced by
-/// one finished sequence from contaminating fused batched reductions.
+/// one finished sequence from contaminating fused batched reductions. A step
+/// in which every row is active returns the logits untouched.
 fn neutralize_inactive_logits<B: Backend>(
     logits: Tensor<B, 2>,
     active: &[bool],
 ) -> Result<Tensor<B, 2>> {
-    let [batch, vocabulary] = logits.dims();
+    let [batch, _] = logits.dims();
     if active.len() != batch {
         return Err(Error::Generation(format!(
             "active-row count {} does not match logits batch {batch}",
             active.len()
         )));
     }
-    let device = logits.device();
-    let valid =
-        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
-    Ok(logits.mask_fill(valid.bool_not(), 0.0))
+    Ok(super::zero_inactive_rows(logits, active))
 }
 
 /// Creates one explicit decode-position column on the selected backend.
