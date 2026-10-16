@@ -32,8 +32,8 @@ use crate::cache::{
 };
 
 use super::plan::{
-    check_staged_commit, first_index_out_of_range, portable_indices, rows_cleared_by_truncate,
-    write_end,
+    check_staged_commit, first_index_out_of_range, next_version, portable_indices,
+    rows_cleared_by_truncate, write_end,
 };
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
@@ -1103,7 +1103,8 @@ impl<B: Backend> NativeKvCache<B> {
             lengths.fill(0);
         }
         self.staging_baseline = baseline;
-        self.staging_epoch = self.staging_epoch.wrapping_add(1);
+        // The verified successor always differs, so older working plans go stale.
+        self.staging_epoch = next_version(self.staging_epoch);
         self.staging_active = true;
         Ok(())
     }

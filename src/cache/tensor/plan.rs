@@ -84,6 +84,23 @@ pub open spec fn staged_commit_passes_before(
 
 } // verus!
 
+/// Returns the next lifecycle version, wrapping after `u64::MAX`.
+///
+/// Version counters stamp read plans and step write sets; a stamp is current
+/// only while its counter is unchanged. Proved: the successor is exactly
+/// `(version + 1) mod 2^64` and always differs from `version`, so every bump
+/// makes the previous stamp stale (until 2^64 further bumps, which is not a
+/// practical concern).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(next =>
+    ensures
+        next as int == (version as int + 1) % 0x1_0000_0000_0000_0000,
+        next != version,
+))]
+pub(crate) const fn next_version(version: u64) -> u64 {
+    version.wrapping_add(1)
+}
+
 /// Integer reason an allocation geometry is rejected.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

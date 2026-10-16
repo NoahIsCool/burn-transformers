@@ -31,7 +31,8 @@
 //!   failure; truncation clears exactly the rows reset from history; beam
 //!   sources, read lengths, and host index vectors are checked and converted
 //!   exactly;
-//!   staging lengths stay within the staging capacity.
+//!   staging lengths stay within the staging capacity; version successors
+//!   always differ from their predecessor.
 //! * `src/cache/tensor/recurrent/plan.rs`: recurrent snapshot indexing. The
 //!   working and committed snapshot of `n` tokens is `n - 1`, a uniform batch
 //!   shares one snapshot exactly when every row staged the same positive
@@ -58,6 +59,14 @@
 //!   report `C_b + s` and are valid exactly between the skipped and staged
 //!   proposals; all-valid shortcuts and the per-layer staging comparison are
 //!   exact.
+//! * `src/cache/tensor/state/step/coverage.rs`: step write-set coverage and
+//!   lifecycle versions. A row mark succeeds exactly for an in-batch, active,
+//!   unmarked row and sets only that flag; a batched mark succeeds exactly
+//!   when every active row is unmarked and sets exactly the active rows; the
+//!   finish check names the first active unmarked row. Hence an accepted,
+//!   finished step writes every active row exactly once. Bumping a bank's
+//!   version changes it to a different value and leaves the other bank's
+//!   untouched; row scans and set-position lists are exact.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -82,6 +91,8 @@ pub mod kv_plan;
 pub mod kv_batch_layout;
 #[path = "../src/cache/tensor/kv/batch/slots.rs"]
 pub mod kv_batch_slots;
+#[path = "../src/cache/tensor/state/step/coverage.rs"]
+pub mod step_coverage;
 
 /// Mirrors the crate paths `crate::cache::*` used by the tensor-cache planners.
 pub mod cache {

@@ -66,7 +66,8 @@ use crate::cache::tensor::kv::{
     token_segment_table,
 };
 use crate::cache::tensor::kv::{PreparedNativeKvBatchWrite, PreparedNativeKvWrite};
-use crate::cache::tensor::plan::{checked_ends, portable_indices};
+use crate::cache::tensor::plan::{checked_ends, first_index_above, portable_indices};
+use crate::cache::tensor::recurrent::first_nonuniform_offset;
 use crate::cache::tensor::recurrent::{
     PreparedRecurrentBatchWrite, PreparedRecurrentStage, PreparedRecurrentStateWrite,
     RecurrentStateRead,
@@ -77,14 +78,13 @@ use super::{
     validate_count,
 };
 
-/// Bank whose groups a step writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StepBank {
-    /// The decoder's ordinary cache groups and committed cursor.
-    Main,
-    /// The auxiliary multi-token-prediction groups and their own cursor.
-    Mtp,
-}
+mod coverage;
+
+pub use coverage::StepBank;
+use coverage::{
+    BankVersions, CoverageViolation, all_set, first_active_row, first_uncovered_row,
+    first_unstaged_proposal, initial_versions, mark_covered, set_positions,
+};
 
 impl StepBank {
     /// Returns the bank's name for diagnostics.
@@ -109,18 +109,17 @@ struct StepOrigin {
 ///
 /// A version is a counter that the owning [`TensorDecodeState`] advances on
 /// every change to a bank's cursors, transaction, or tensors made outside
-/// the step being validated (see the module documentation). Counters wrap
-/// with `wrapping_add`; reaching a collision would take 2^64 lifecycle
-/// operations while one stale step is kept alive, which is not a practical
-/// concern.
+/// the step being validated (see the module documentation). The counters
+/// are the Verus-verified `BankVersions`: a bump changes exactly its bank's
+/// version, to a value different from the old one. Counters wrap; reaching
+/// a collision would take 2^64 lifecycle operations while one stale step is
+/// kept alive, which is not a practical concern.
 #[derive(Debug)]
 pub(super) struct StepVersions {
     /// Identity of the owning decode state, shared by every step it creates.
     state: IdentityToken,
-    /// Lifecycle version of the main bank.
-    main: u64,
-    /// Lifecycle version of the MTP bank.
-    mtp: u64,
+    /// Lifecycle versions of the main and MTP banks.
+    banks: BankVersions,
 }
 
 impl StepVersions {
@@ -128,17 +127,13 @@ impl StepVersions {
     pub(super) fn new() -> Self {
         Self {
             state: IdentityToken::new(),
-            main: 0,
-            mtp: 0,
+            banks: initial_versions(),
         }
     }
 
     /// Invalidates every outstanding step of one bank.
     pub(super) const fn bump(&mut self, bank: StepBank) {
-        match bank {
-            StepBank::Main => self.main = self.main.wrapping_add(1),
-            StepBank::Mtp => self.mtp = self.mtp.wrapping_add(1),
-        }
+        self.banks.bump(bank);
     }
 
     /// Invalidates every outstanding step of both banks.
@@ -149,10 +144,7 @@ impl StepVersions {
 
     /// Returns a bank's current version.
     const fn current(&self, bank: StepBank) -> u64 {
-        match bank {
-            StepBank::Main => self.main,
-            StepBank::Mtp => self.mtp,
-        }
+        self.banks.current(bank)
     }
 
     /// Stamps a new step for `bank` with the current state identity and version.
@@ -461,7 +453,7 @@ impl<B: Backend> TensorStepWrites<B> {
 
     /// Returns the first row with new tokens (row 0 when every row is inactive).
     fn first_active_row(&self) -> usize {
-        self.counts.iter().position(|&count| count > 0).unwrap_or(0)
+        first_active_row(&self.counts)
     }
 
     /// Resolves each row's first input column for a batched input of width `block`.
@@ -529,46 +521,26 @@ impl Coverage {
                 layer,
                 layers: layer_count,
             })?;
-        let marked: Vec<usize> = match row {
-            Some(row) => {
-                if row >= counts.len() {
-                    return Err(TensorCacheError::SequenceOutOfBounds {
-                        sequence: row,
-                        batch_size: counts.len(),
-                    });
-                }
-                if counts[row] == 0 {
-                    return Err(coverage_error(
-                        self.kind,
-                        group,
-                        layer,
-                        row,
-                        "inactive row written",
-                    ));
-                }
-                vec![row]
+        // The verified marker accepts exactly unmarked active rows.
+        mark_covered(rows, row, counts).map_err(|violation| match violation {
+            CoverageViolation::RowOutOfBounds { row } => TensorCacheError::SequenceOutOfBounds {
+                sequence: row,
+                batch_size: counts.len(),
+            },
+            CoverageViolation::InactiveRow { row } => {
+                coverage_error(self.kind, group, layer, row, "inactive row written")
             }
-            None => (0..counts.len()).filter(|&row| counts[row] > 0).collect(),
-        };
-        for row in marked {
-            if core::mem::replace(&mut rows[row], true) {
-                return Err(coverage_error(
-                    self.kind,
-                    group,
-                    layer,
-                    row,
-                    "duplicate write",
-                ));
+            CoverageViolation::Duplicate { row } => {
+                coverage_error(self.kind, group, layer, row, "duplicate write")
             }
-        }
-        Ok(())
+        })
     }
 
     /// Requires every active row of every layer of every group to be covered.
     fn finish(&self, counts: &[usize]) -> TensorCacheResult<()> {
         for (group, layers) in self.covered.iter().enumerate() {
             for (layer, rows) in layers.iter().enumerate() {
-                if let Some(row) = (0..counts.len()).find(|&row| counts[row] > 0 && !rows[row]) {
+                if let Some(row) = first_uncovered_row(rows, counts) {
                     return Err(coverage_error(
                         self.kind,
                         group,
@@ -1178,11 +1150,9 @@ fn recurrent_rows<B: Backend>(
         | RecurrentEntry::RowSnapshots {
             group, layer, row, ..
         } => Some((*group, *layer, vec![*row])),
-        RecurrentEntry::BatchTerminal { group, layer, .. } => Some((
-            *group,
-            *layer,
-            (0..active.len()).filter(|&row| active[row]).collect(),
-        )),
+        RecurrentEntry::BatchTerminal { group, layer, .. } => {
+            Some((*group, *layer, set_positions(active)))
+        }
     }
 }
 
@@ -1199,13 +1169,17 @@ fn check_recurrent_proposals<B: Backend>(
     proposals: &[usize],
 ) -> TensorCacheResult<()> {
     let staged = bank.recurrent(group)?.staged_lengths_of(layer)?;
-    match rows.iter().find(|&&row| staged[row] != proposals[row]) {
-        Some(&sequence) => Err(TensorCacheError::TransactionCursorMismatch {
-            sequence,
-            cursor: "recurrent proposal start",
-            expected: proposals[sequence],
-            actual: staged[sequence],
-        }),
+    // Coverage validated every row, so each indexes both vectors.
+    match first_unstaged_proposal(rows, staged, proposals) {
+        Some(position) => {
+            let sequence = rows[position];
+            Err(TensorCacheError::TransactionCursorMismatch {
+                sequence,
+                cursor: "recurrent proposal start",
+                expected: proposals[sequence],
+                actual: staged[sequence],
+            })
+        }
         None => Ok(()),
     }
 }
@@ -1360,7 +1334,7 @@ fn prepare_recurrent<B: Backend>(
                 prepared.push(PreparedRecurrent::Batch(group, write));
                 return Ok(());
             }
-            if let Some(row) = (0..counts.len()).find(|&row| counts[row] > 1) {
+            if let Some(row) = first_index_above(counts, 1) {
                 return Err(coverage_error(
                     "recurrent",
                     group,
@@ -1393,11 +1367,8 @@ fn prepare_batch_snapshot_stages<B: Backend>(
     active: &[bool],
     prepared: &mut Vec<PreparedRecurrent<B>>,
 ) -> TensorCacheResult<()> {
-    let uniform = active.iter().all(|&row| row)
-        && cache
-            .staged_lengths_of(layer)?
-            .windows(2)
-            .all(|pair| pair[0] == pair[1]);
+    let uniform =
+        all_set(active) && first_nonuniform_offset(cache.staged_lengths_of(layer)?).is_none();
     if uniform {
         let stage = cache.prepare_batch_snapshots(
             layer,
@@ -1409,7 +1380,7 @@ fn prepare_batch_snapshot_stages<B: Backend>(
     }
     let [_, heads, rows, columns] = matrix.dims();
     let [_, channels, width] = convolution.dims();
-    for row in (0..active.len()).filter(|&row| active[row]) {
+    for row in set_positions(active) {
         let row_range: Range<usize> = row..row + 1;
         let stage = cache.prepare_row_snapshots(
             layer,

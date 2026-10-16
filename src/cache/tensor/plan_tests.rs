@@ -147,6 +147,14 @@ fn index_scans_report_first_out_of_range_position() {
     assert_eq!(first_index_out_of_range(&[0], 0), Some(0));
 }
 
+/// Version successors always differ and wrap after `u64::MAX`.
+#[test]
+fn next_version_always_changes() {
+    assert_eq!(next_version(0), 1);
+    assert_eq!(next_version(41), 42);
+    assert_eq!(next_version(u64::MAX), 0);
+}
+
 /// Bound scans report the lowest value above the bound.
 #[test]
 fn first_index_above_reports_lowest_position() {

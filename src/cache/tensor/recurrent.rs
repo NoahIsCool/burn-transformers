@@ -23,7 +23,8 @@ use super::{
 
 mod plan;
 
-use self::plan::{first_nonuniform_offset, flat_snapshot_indices, last_snapshot, uniform_snapshot};
+pub(crate) use self::plan::first_nonuniform_offset;
+use self::plan::{flat_snapshot_indices, last_snapshot, uniform_snapshot};
 
 /// Validated geometry for DeltaNet/Mamba2-style recurrent layer state.
 ///
