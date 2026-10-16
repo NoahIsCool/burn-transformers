@@ -138,21 +138,23 @@ fn invalid_dispatch_metadata_is_rejected() {
     let device = Default::default();
     let module = deterministic_module(SparseMoeConfig::new(4, 8, 3, 2), &device);
     let error = module
-        .dispatch_selected_experts(
+        .dispatch_selected_experts_with_precision(
             Tensor::zeros([2, 4], &device),
             Tensor::ones([2, 1], &device),
             Tensor::<Flex, 2, Int>::from_ints([[0, 1], [1, 2]], &device),
-            DType::F32,
+            None,
+            RoutedExpertPrecision::uniform(DType::F32),
         )
         .expect_err("route weights with the wrong top-k width must fail");
     assert!(error.to_string().contains("moe.dispatch.routes"));
 
     let error = module
-        .dispatch_selected_experts(
+        .dispatch_selected_experts_with_precision(
             Tensor::zeros([1, 4], &device),
             Tensor::ones([1, 2], &device),
             Tensor::<Flex, 2, Int>::from_ints([[0, 1]], &device),
-            DType::I32,
+            None,
+            RoutedExpertPrecision::uniform(DType::I32),
         )
         .expect_err("integer accumulation must fail before a tensor cast");
     assert!(error.to_string().contains("moe.dispatch.precision"));
@@ -497,11 +499,12 @@ fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
         ([2, 2], [2, 1], [2, 2], "moe.dispatch.routes"),
     ] {
         let error = module
-            .dispatch_selected_experts(
+            .dispatch_selected_experts_with_precision(
                 Tensor::zeros(input, &device),
                 Tensor::zeros(weights, &device),
                 Tensor::zeros(ids, &device),
-                DType::F32,
+                None,
+                RoutedExpertPrecision::uniform(DType::F32),
             )
             .unwrap_err();
         assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == field));
@@ -510,11 +513,12 @@ fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
         let mut changed = module.clone();
         changed.experts_per_token = top_k;
         let error = changed
-            .dispatch_selected_experts(
+            .dispatch_selected_experts_with_precision(
                 Tensor::zeros([1, 2], &device),
                 Tensor::zeros([1, top_k], &device),
                 Tensor::zeros([1, top_k], &device),
-                DType::F32,
+                None,
+                RoutedExpertPrecision::uniform(DType::F32),
             )
             .unwrap_err();
         assert!(
@@ -524,8 +528,9 @@ fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
     let mut empty = module.clone();
     empty.routed.clear();
     assert!(
-        matches!(empty.dispatch_selected_experts(Tensor::zeros([1, 2], &device),
-        Tensor::zeros([1, 1], &device), Tensor::zeros([1, 1], &device), DType::F32),
+        matches!(empty.dispatch_selected_experts_with_precision(Tensor::zeros([1, 2], &device),
+        Tensor::zeros([1, 1], &device), Tensor::zeros([1, 1], &device), None,
+        RoutedExpertPrecision::uniform(DType::F32)),
         Err(crate::Error::Configuration { field, .. }) if field == "moe.dispatch.experts_per_token")
     );
     for (multiplication_dtype, accumulation_dtype) in
