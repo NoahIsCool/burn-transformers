@@ -777,11 +777,25 @@ fn chained_materialization_preserves_lazy_initializer_values() {
 /// Burn draws a column-layout weight as `[out, in]` with Kaiming-uniform bound
 /// `1/sqrt(out)` (Burn 0.21 passes `d_output` as the fan-in of that layout) and
 /// exposes its transposed view. The installed weight must be contiguous,
-/// remain lazy until read, stay inside that bound, and round-trip its record
-/// through the unchanged save/load mappers. Row layouts are already contiguous.
+/// remain lazy until read, stay inside that bound, and round-trip a serialized
+/// record through the unchanged save/load mappers with exactly the same values.
+/// Row layouts are already contiguous.
+///
+/// The contiguous layout is a property of random initialization only. A Burn
+/// recorder serializes the `[out, in]` checkpoint orientation in row-major
+/// order, and Burn's column-layout load mapper exposes it as a strided
+/// `[in, out]` view; `load_record` never runs the initializer, so it never runs
+/// the contiguous copy either. The final layout assertion pins that documented
+/// limitation, so a Burn change that alters it is noticed. Products against
+/// the two layouts may differ by F32 reassociation inside Flex's GEMM only.
 #[test]
 fn inference_flex_random_column_projections_are_contiguous() {
-    use burn::{module::Module, nn::LinearLayout};
+    use burn::{
+        module::Module,
+        nn::LinearLayout,
+        record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
+        tensor::Tolerance,
+    };
 
     let device = Default::default();
     let (input, output) = (24, 40);
@@ -802,9 +816,20 @@ fn inference_flex_random_column_projections_are_contiguous() {
     let expected = linear(probe.clone(), &projection).unwrap().into_data();
     let record = projection.into_record();
     assert_eq!(record.weight.val().dims(), [output, input]);
-    let restored = super::init_linear::<Flex>(&config, &device).load_record(record);
-    assert!(flex_primitive(restored.weight.val()).is_contiguous());
-    assert_eq!(linear(probe, &restored).unwrap().into_data(), expected);
+    let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+    let bytes = recorder.record(record, ()).unwrap();
+    let restored = super::init_linear::<Flex>(&config, &device)
+        .load_record(recorder.load(bytes, &device).unwrap());
+    let restored_weight = restored.weight.val();
+    assert_eq!(restored_weight.to_data(), weight.into_data());
+    linear(probe, &restored)
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected, Tolerance::absolute(1e-6));
+    assert!(
+        !flex_primitive(restored_weight).is_contiguous(),
+        "Burn-record loads keep the load mapper's strided view"
+    );
 
     let row = super::init_linear::<Flex>(&config.clone().with_layout(LinearLayout::Row), &device);
     assert!(flex_primitive(row.weight.val()).is_contiguous());

@@ -44,6 +44,8 @@
 //! constructors apply it to randomly initialized column-layout projection
 //! weights, and cached decoders apply it to tensors that every later decode
 //! step reads (for example T5's projected cross-attention keys and values).
+//! Checkpoint loads choose their storage order separately in the installer;
+//! a record restored through a Burn recorder keeps Burn's strided view.
 
 use burn::{
     module::Param,
@@ -78,6 +80,13 @@ use crate::{Error, Result};
 /// runs it), consumes no random numbers, keeps every value bit for bit, and
 /// transiently holds two copies of that one matrix. Row-layout weights are
 /// already contiguous and are left untouched.
+///
+/// Only random initialization is re-laid out here. The load mapper stays
+/// Burn's plain transpose, because the checkpoint installer probes and applies
+/// it to choose its own storage order (`checkpoint::runtime::storage_order`
+/// already stores loaded weights contiguously on the same backends). A record
+/// loaded through a Burn recorder therefore keeps the strided `[in, out]` view
+/// of its row-major `[out, in]` payload, exactly as a plain Burn module would.
 pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device) -> Linear<B> {
     let mut projection = config.init::<B>(device);
     if !matches!(config.layout, LinearLayout::Col) {
