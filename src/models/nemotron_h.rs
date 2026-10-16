@@ -256,8 +256,14 @@ pub struct NemotronHConfig {
     pub mtp_layers_block_type: Vec<NemotronHBlockType>,
     /// Bias switch used by the pinned Mamba input/output projection graph.
     pub use_bias: bool,
-    /// Upstream initialization standard deviation; validated, while fresh
-    /// parameters use Burn's default initializers.
+    /// Upstream initialization standard deviation; validated as positive and
+    /// finite, but never read.
+    ///
+    /// Fresh parameters come from each component's own constructor: Burn's
+    /// default initializers for linear, depthwise-convolution, and embedding
+    /// weights, and fixed values elsewhere — Mamba-2 `A_log = log(1..=H)` with
+    /// unit `D`, `dt_bias`, and gated-norm scale, unit RMS-norm scales, and a
+    /// zero router correction bias.
     pub initializer_range: f64,
     /// Epsilon applied by residual-block normalization.
     pub layer_norm_epsilon: f64,

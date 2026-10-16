@@ -84,8 +84,12 @@ pub struct MuseGlimmerTextConfig {
     pub hidden_activation: String,
     /// Maximum indexed context length.
     pub max_position_embeddings: usize,
-    /// Upstream initialization standard deviation; validated, while fresh
-    /// parameters use Burn's default initializers.
+    /// Upstream initialization standard deviation; validated as positive and
+    /// finite, but never read.
+    ///
+    /// Fresh linear and embedding weights use Burn's default initializers,
+    /// and every RMS norm starts at unit effective scale: zero offsets for the
+    /// `1 + weight` sublayer norms and ones for the final norm.
     pub initializer_range: f64,
     /// Epsilon in pre-sublayer RMS normalization.
     pub rms_norm_eps: f64,
