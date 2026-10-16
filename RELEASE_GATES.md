@@ -190,6 +190,7 @@ python3 scripts/check_release.py --gate coverage --toolchain nightly --offline
 python3 scripts/check_release.py --gate dependencies
 python3 scripts/check_release.py --gate accelerator-compile --offline
 python3 scripts/check_release.py --gate package --offline
+VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
 ```
 
 Run from this crate or use its full script path from the repository root. Install
@@ -198,8 +199,15 @@ versions are `cargo-llvm-cov 0.6.21`, `cargo-audit 0.22.2`, `cargo-deny 0.20.2`,
 and `cargo-fuzz 0.13.2`. LLVM tools must match the selected Rust toolchain.
 Source/MSRV audit groups require the full repository checkout: Cargo excludes
 nested standalone packages from source archives, including the development-only
-Rust classifier. Ordinary library tests and package checks remain usable from
-the archive; archive verification does not claim to run repository-only tooling.
+Rust classifier. The archive does carry the Verus harnesses and their guide,
+because `tests/verus_harness.rs` reads them. After `cargo package` builds the
+extracted archive, the package gate runs its default `cargo test` there, so a
+test that reads a file the archive omits fails the gate; the archive still does
+not run repository-only tooling (fuzzing, CI, the coverage classifier).
+The archive is about 28 MiB compressed, mostly `acceptance/` records that the
+packaged Python record tests read. That exceeds crates.io's 10 MB upload limit,
+so publishing would first need a narrower `include` and repository-only record
+tests; this is an open release decision, not a gate.
 The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is
 permitted only while that local alias actually resolves to Rust **1.92.0**.
 Coverage export warnings (including mismatched profile data) fail validation

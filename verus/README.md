@@ -205,6 +205,19 @@ The whole loop takes 35 to 55 seconds on an Apple M3 Max, depending on
 concurrent load; a single harness can be run alone while working on its
 area.
 
+The release gate runs the same loop and records the evidence:
+
+```sh
+VERUS=/path/to/verus python3 scripts/check_release.py --gate verus
+```
+
+It checks that `$VERUS` is the pinned release, runs every harness with the
+flags above, requires each harness's `N verified, 0 errors` to match the
+table above, and writes the per-harness counts, the total, and the SHA-256
+of every harness and included source to `verus.json` in its evidence
+directory. CI runs this gate on every push and pull request that changes
+`src/`, `verus/`, or the gate itself.
+
 Without Verus installed, `cargo test --locked --test verus_harness` still
 checks the harness structure: every harness begins with module
 documentation and includes existing sources, no harness or included source

@@ -36,6 +36,49 @@ def minimal_crate(crate: Path) -> None:
     (crate / "Cargo.lock").write_text("version = 4\n")
 
 
+VERUS_VERSION_OUTPUT = (
+    "Verus\n  Version: 0.2026.10.04.426d8b0\n  Profile: release\n"
+    "  Platform: macos_aarch64\n  Toolchain: 1.98.1-aarch64-apple-darwin\n"
+)
+
+
+def verus_crate(crate: Path, counts: dict[str, int]) -> None:
+    """Write one harness per entry, each including its own source, and their README table."""
+
+    (crate / "src").mkdir()
+    (crate / "verus").mkdir()
+    rows = []
+    for name in sorted(counts):
+        stem = name.removesuffix(".rs")
+        (crate / f"src/{stem}.rs").write_text(f"pub fn {stem}() -> u8 {{ 1 }}\n")
+        (crate / "verus" / name).write_text(f'//! Harness.\n#[path = "../src/{stem}.rs"]\nmod {stem};\n')
+        rows.append(f"| `{name}` | `src/{stem}.rs` | {counts[name]:,} | Proofs. |")
+    total = sum(counts.values())
+    (crate / "verus/README.md").write_text(
+        "# Proofs\n\n## Harnesses\n\nThe counts: **" + f"{total:,}" + " verified, 0 errors**.\n\n"
+        "| Harness | Verified sources | Verified | What |\n| --- | --- | ---: | --- |\n"
+        + "\n".join(rows) + "\n\n## Rules for proof code\n\n| Rejected | Why |\n| --- | --- |\n"
+        "| `admit(` | Assumes. |\n"
+    )
+
+
+def fake_verus(counts: dict[str, int], mutate=None):
+    """Return a subprocess.run stand-in that prints Verus output for the requested harness."""
+
+    def run(command, **kwargs):
+        """Write the version banner or one harness's result line into the gate's log."""
+
+        if command[1:] == ["--version"]:
+            kwargs["stdout"].write(VERUS_VERSION_OUTPUT)
+        else:
+            if mutate is not None:
+                mutate(Path(command[-1]))
+            kwargs["stdout"].write(f"verification results:: {counts[Path(command[-1]).name]} verified, 0 errors\n")
+        return subprocess.CompletedProcess(command, 0)
+
+    return run
+
+
 class ReleaseGateTests(unittest.TestCase):
     """Pin denominator policy, exact threshold comparisons, and safe command plans."""
 
@@ -582,7 +625,8 @@ class ReleaseGateTests(unittest.TestCase):
 
         for gate in GATES.GATES:
             with self.subTest(gate=gate):
-                commands = GATES.command_plan(gate, Path("/tmp/output with spaces"), "stable", "1.92.0", True)
+                commands = GATES.command_plan(gate, Path("/tmp/output with spaces"), "stable", "1.92.0", True,
+                                              verus="/opt/verus/verus")
                 self.assertTrue(commands)
                 self.assertTrue(all(isinstance(command, list) for command in commands))
                 for command in commands:
@@ -692,6 +736,209 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertTrue((GATES.CRATE / "scripts/COVERAGE_EVIDENCE.md").is_file())
         self.assertIn("/scripts/WHOLE_FILE_COVERAGE.md", manifest["package"]["include"])
         self.assertTrue((GATES.CRATE / "scripts/WHOLE_FILE_COVERAGE.md").is_file())
+
+    def test_package_ships_the_files_its_verus_harness_test_reads(self):
+        """tests/verus_harness.rs is packaged, so the harnesses and their guide must be too."""
+
+        include = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())["package"]["include"]
+        self.assertIn("/tests/**", include)
+        self.assertIn("/verus/*.rs", include)
+        self.assertIn("/verus/README.md", include)
+        base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
+        self.assertEqual(GATES.validate_package_listing(base + "verus/cache.rs\nverus/README.md\n"), 6)
+        for entry in ("verus/nested/cache.rs", "verus/notes.txt", "verus/.verus-log/root.air"):
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, "verus/"):
+                GATES.validate_package_listing(base + entry + "\n")
+
+    def test_package_gate_runs_the_archive_test_suite(self):
+        """Cargo's verification only builds the archive; the gate also runs its tests."""
+
+        for target, expected in ((None, GATES.CRATE / "target"), ("/explicit/target", Path("/explicit/target")),
+                                 ("relative-target", GATES.CRATE / "relative-target")):
+            environment = {} if target is None else {"CARGO_TARGET_DIR": target}
+            with self.subTest(target=target), mock.patch.dict(GATES.os.environ, environment, clear=True):
+                listing, package, archive_tests = GATES.command_plan("package", Path("/tmp/output"), "stable", "1.92.0", True)
+            self.assertIn("--list", listing)
+            self.assertEqual(package[:3], ["cargo", "+stable", "package"])
+            self.assertEqual(archive_tests[:3], ["cargo", "+stable", "test"])
+            manifest = Path(archive_tests[archive_tests.index("--manifest-path") + 1])
+            self.assertEqual(manifest, expected / "package/transformers-0.1.0/Cargo.toml")
+            self.assertIn("--locked", archive_tests)
+            self.assertIn("--offline", archive_tests)
+            self.assertTrue(GATES.command_compiles(archive_tests))
+
+    def test_verus_gate_requires_the_executable(self):
+        """An unset VERUS fails before any evidence directory exists."""
+
+        with self.assertRaisesRegex(ValueError, "VERUS"):
+            GATES.command_plan("verus", Path("/tmp/output"), "stable", "1.92.0", True)
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "verus"]),
+                mock.patch.dict(GATES.os.environ, {}, clear=True),
+                mock.patch.object(GATES.subprocess, "run") as process,
+                self.assertRaisesRegex(ValueError, "VERUS"),
+            ):
+                GATES.main()
+            process.assert_not_called()
+            self.assertFalse((crate / "target").exists())
+
+    def test_verus_gate_checks_the_version_then_every_harness_without_cheating(self):
+        """One version probe, then each verus/*.rs in order with the pinned flags."""
+
+        commands = GATES.command_plan("verus", Path("/tmp/output"), "stable", "1.92.0", True, verus="/opt/verus")
+        self.assertEqual(commands[0], ["/opt/verus", "--version"])
+        harnesses = sorted((GATES.CRATE / "verus").glob("*.rs"))
+        self.assertEqual(len(commands), 1 + len(harnesses))
+        for command, harness in zip(commands[1:], harnesses):
+            self.assertEqual(command, ["/opt/verus", "--crate-type", "lib", "--no-cheating",
+                                       "--triggers-mode", "silent", str(harness)])
+            self.assertFalse(GATES.command_compiles(command))
+
+    def test_verus_result_lines_must_report_zero_errors(self):
+        """Only one clean result line is a pass; errors and missing results fail."""
+
+        self.assertEqual(GATES.parse_verus_result("note: x\nverification results:: 199 verified, 0 errors\n"), 199)
+        self.assertEqual(GATES.parse_verus_result("verification results:: 3 verified, 0 errors"), 3)
+        for log in ("", "verification results:: 198 verified, 1 errors\n", "verification results:: 2 verified, 0 errors\n" * 2,
+                    "error: aborting due to 1 previous error\n"):
+            with self.subTest(log=log), self.assertRaises(ValueError):
+                GATES.parse_verus_result(log)
+        GATES.require_pinned_verus(VERUS_VERSION_OUTPUT)
+        for output in ("", VERUS_VERSION_OUTPUT.replace("426d8b0", "1234567"), "Version: 0.2026.10.04.426d8b0-dirty\n"):
+            with self.subTest(output=output), self.assertRaisesRegex(ValueError, "pinned"):
+                GATES.require_pinned_verus(output)
+
+    def test_recorded_verus_counts_cover_every_repository_harness(self):
+        """The real verus/README.md table names each harness once and sums to its total."""
+
+        counts, total = GATES.recorded_verus_counts((GATES.CRATE / "verus/README.md").read_text())
+        self.assertEqual(sorted(counts), [path.name for path in sorted((GATES.CRATE / "verus").glob("*.rs"))])
+        self.assertEqual(sum(counts.values()), total)
+        for readme in ("# Proofs\n", "## Harnesses\n| `a.rs` | x | many | y |\n**1 verified, 0 errors**\n",
+                       "## Harnesses\n| `a.rs` | x | 1 | y |\n| `a.rs` | x | 1 | y |\n**2 verified, 0 errors**\n",
+                       "## Harnesses\n| `a.rs` | x |\n**1 verified, 0 errors**\n",
+                       "## Harnesses\n| `a.rs` | x | 1 | y |\n"):
+            with self.subTest(readme=readme), self.assertRaises(ValueError):
+                GATES.recorded_verus_counts(readme)
+
+    def run_verus_fixture(self, crate, run):
+        """Run the real runner over a fixture crate with a fake Verus executable."""
+
+        with (
+            mock.patch.object(GATES, "CRATE", crate),
+            mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "verus"]),
+            mock.patch.dict(GATES.os.environ, {"VERUS": "/opt/verus"}, clear=True),
+            mock.patch.object(GATES.subprocess, "run", side_effect=run) as process,
+            mock.patch("builtins.print"),
+        ):
+            status = GATES.main()
+        manifest, = (crate / "target/release-gates").glob("*/results.json")
+        return status, json.loads(manifest.read_text()), manifest.parent, process.call_count
+
+    def test_verus_gate_records_matching_counts_and_input_hashes(self):
+        """A run that reproduces the README table passes and records its evidence."""
+
+        counts = {"alpha.rs": 1200, "beta.rs": 677}
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+            status, result, output, calls = self.run_verus_fixture(crate, fake_verus(counts))
+            self.assertEqual((status, calls), (0, 3))
+            self.assertTrue(result["passed"])
+            version, alpha, beta = result["gates"]
+            self.assertEqual(version["verus_version"], GATES.VERUS_VERSION)
+            self.assertNotIn("storage_preflight", version)
+            self.assertEqual((alpha["harness"], alpha["verified"]), ("alpha.rs", 1200))
+            self.assertEqual(beta["verus_evidence"], "verus.json")
+            evidence = json.loads((output / "verus.json").read_text())
+            self.assertEqual(evidence["harnesses"], counts)
+            self.assertEqual((evidence["verified"], evidence["errors"]), (1877, 0))
+            self.assertIn("--no-cheating", evidence["flags"])
+            self.assertEqual(set(evidence["inputs"]["alpha.rs"]["sources"]), {"src/alpha.rs"})
+            self.assertEqual(len(evidence["inputs"]["beta.rs"]["harness"]["sha256"]), 64)
+
+    def test_verus_gate_rejects_counts_that_drift_from_the_readme(self):
+        """A proof change without a table update fails and names the harness to update."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, {"alpha.rs": 10, "beta.rs": 5})
+            status, result, output, calls = self.run_verus_fixture(crate, fake_verus({"alpha.rs": 11, "beta.rs": 5}))
+            self.assertEqual((status, calls), (1, 2))
+            self.assertFalse(result["passed"])
+            row = result["gates"][-1]
+            self.assertEqual(row["process_exit_code"], 0)
+            self.assertIn("alpha.rs: Verus verified 11 items, but verus/README.md records 10", row["validation_error"])
+            self.assertFalse((output / "verus.json").exists())
+
+    def test_verus_gate_rejects_a_wrong_prover_or_a_failed_proof(self):
+        """A different release or a harness with errors never reaches the evidence file."""
+
+        counts = {"alpha.rs": 10}
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+
+            def other_release(command, **kwargs):
+                """Report a different Verus release."""
+
+                kwargs["stdout"].write(VERUS_VERSION_OUTPUT.replace("426d8b0", "0000000"))
+                return subprocess.CompletedProcess(command, 0)
+
+            status, result, _, calls = self.run_verus_fixture(crate, other_release)
+            self.assertEqual((status, calls), (1, 1))
+            self.assertIn("pinned", result["gates"][0]["validation_error"])
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+
+            def failing(command, **kwargs):
+                """Fail the proof with Verus's nonzero exit status."""
+
+                if command[1:] == ["--version"]:
+                    kwargs["stdout"].write(VERUS_VERSION_OUTPUT)
+                    return subprocess.CompletedProcess(command, 0)
+                kwargs["stdout"].write("verification results:: 9 verified, 1 errors\n")
+                return subprocess.CompletedProcess(command, 1)
+
+            status, result, output, _ = self.run_verus_fixture(crate, failing)
+            self.assertEqual(status, 1)
+            self.assertEqual(result["gates"][-1]["exit_code"], 1)
+            self.assertFalse((output / "verus.json").exists())
+
+    def test_verus_gate_rejects_inputs_edited_during_the_run(self):
+        """Counts are bound to the exact harness and source bytes the prover read."""
+
+        counts = {"alpha.rs": 10, "beta.rs": 5}
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+
+            def edit(harness):
+                """Change an included source after its harness was verified."""
+
+                if harness.name == "beta.rs":
+                    (crate / "src/alpha.rs").write_text("pub fn alpha() -> u8 { 2 }\n")
+
+            status, result, output, _ = self.run_verus_fixture(crate, fake_verus(counts, edit))
+            self.assertEqual(status, 1)
+            self.assertIn("changed while the gate ran", result["gates"][-1]["validation_error"])
+            self.assertFalse((output / "verus.json").exists())
+
+    def test_verus_gate_rejects_a_table_that_omits_a_harness(self):
+        """A harness missing from the README table fails before the prover starts."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, {"alpha.rs": 10})
+            (crate / "src/gamma.rs").write_text("pub fn gamma() {}\n")
+            (crate / "verus/gamma.rs").write_text('//! Harness.\n#[path = "../src/gamma.rs"]\nmod gamma;\n')
+            status, result, _, calls = self.run_verus_fixture(crate, fake_verus({"alpha.rs": 10, "gamma.rs": 1}))
+            self.assertEqual((status, calls), (1, 0))
+            self.assertIn("gamma.rs", result["gates"][0]["validation_error"])
 
     def test_package_listing_checks_the_actual_cargo_inventory(self):
         """Allow model source but reject artifact trees, weights, and bytecode."""

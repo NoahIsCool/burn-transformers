@@ -302,6 +302,10 @@ code written against unreleased sources.
   registered experiment to survive serialization and reloading.
 - Reject packed quantized autodiff before unsupported Burn operations panic,
   including checkpoint installation; validate the explicit dequantized path.
+- Packaging: the source archive now includes `verus/*.rs` and
+  `verus/README.md`, which `tests/verus_harness.rs` reads, so `cargo test`
+  passes from the extracted archive (all three Verus structure tests failed
+  there before). The package gate now runs the archive's test suite.
 
 ### Performance
 

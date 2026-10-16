@@ -4,6 +4,10 @@ Commands execute without a shell and stop at the first failure. Logs and the
 command manifest are written to a new directory below Cargo's normal target
 directory; no source files, Git refs, checkpoints, or support flags are changed.
 Hardware acceptance and fuzz campaigns remain separate, serialized workflows.
+
+The ``verus`` gate runs every proof harness with the pinned Verus release named
+by the ``VERUS`` environment variable and requires each harness's verified
+count to equal the one recorded in ``verus/README.md``.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 
 from coverage_provenance import capture_sources, fingerprint_file, require_same_sources
 from coverage_binding import prepare_capture, validate_capture, read_json, require_identity
@@ -25,7 +30,7 @@ from coverage_binding import prepare_capture, validate_capture, read_json, requi
 
 CRATE = Path(__file__).resolve().parents[1]
 FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
-GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package")
+GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package", "verus")
 MINIMUM_BUILD_FREE_BYTES = 20 * 1024**3
 # Public experiments with fixed/random fixtures and numerical assertions. Paper
 # checkpoints have separate explicit preparation/replay protocols; never fetch
@@ -44,6 +49,12 @@ UNFILTERED_OPTION_NOTICE = "warning: --disable-default-ignore-filename-regex opt
 RUNNER_INPUTS = tuple(Path(__file__).resolve().with_name(name) for name in (
     "check_release.py", "coverage_provenance.py", "coverage_binding.py", "coverage_compiler.py", "coverage_dependencies.py",
 ))
+# The Verus release that verus/README.md and the CI workflow pin.
+VERUS_VERSION = "0.2026.10.04.426d8b0"
+# Every harness is a library crate root; --no-cheating rejects assume/admit,
+# external_body, and assume_specification in the prover itself.
+VERUS_FLAGS = ("--crate-type", "lib", "--no-cheating", "--triggers-mode", "silent")
+VERUS_RESULT = re.compile(r"^verification results:: (\d+) verified, (\d+) errors?\s*$", re.MULTILINE)
 
 
 def coverage_tool_versions(command: list[str], crate: Path, environment: dict) -> list[dict]:
@@ -204,8 +215,151 @@ def coverage_summary(report: dict, crate: Path) -> dict:
     return result
 
 
-def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bool) -> list[list[str]]:
-    """Build auditable argument arrays; platform checks never execute GPU code."""
+def cargo_target_directory() -> Path:
+    """Return Cargo's target directory for commands that run in this crate.
+
+    Cargo resolves a relative ``CARGO_TARGET_DIR`` against its working
+    directory, which is the crate root for every gate command.
+    """
+
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    return CRATE / configured if configured else CRATE / "target"
+
+
+def package_directory() -> Path:
+    """Return the directory where ``cargo package`` extracts and verifies the archive."""
+
+    package = tomllib.loads((CRATE / "Cargo.toml").read_text())["package"]
+    return cargo_target_directory() / "package" / f"{package['name']}-{package['version']}"
+
+
+def verus_harnesses(crate: Path) -> list[Path]:
+    """List every Verus crate root, each ``verus/*.rs`` file, in file-name order."""
+
+    return sorted(path for path in (crate / "verus").glob("*.rs") if path.is_file())
+
+
+def verus_included_sources(harness: Path) -> list[str]:
+    """Return the ``src/`` files a harness verifies through ``#[path = "…"]`` attributes.
+
+    Nested inline modules change how Rust resolves relative paths, so only the
+    suffix starting at ``src/`` names the file, as in ``tests/verus_harness.rs``.
+    """
+
+    sources = []
+    for target in re.findall(r'#\[path = "([^"]+)"\]', harness.read_text()):
+        offset = target.find("src/")
+        if offset < 0:
+            raise ValueError(f"{harness.name}: #[path] must name a file under src/: {target}")
+        sources.append(target[offset:])
+    return sources
+
+
+def recorded_verus_counts(readme: str) -> tuple[dict[str, int], int]:
+    """Read the harness table and bold total of the ``Harnesses`` section of verus/README.md.
+
+    Each row reads ``| `name.rs` | sources | verified | proofs |``; the total
+    reads ``**N verified, 0 errors**``. Both are what the last recorded run
+    reported, and the gate compares a new run against them.
+    """
+
+    start = readme.find("## Harnesses\n")
+    if start < 0:
+        raise ValueError("verus/README.md has no Harnesses section")
+    section = readme[start:].split("\n## ", 1)[0]
+    counts = {}
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 5:
+            raise ValueError(f"malformed verus/README.md harness row: {line}")
+        name, verified = cells[1].strip().strip("`"), cells[3].strip().replace(",", "")
+        if not verified.isdigit() or name in counts:
+            raise ValueError(f"malformed verus/README.md harness row: {line}")
+        counts[name] = int(verified)
+    total = re.search(r"\*\*([\d,]+) verified, 0 errors\*\*", section)
+    if not counts or total is None:
+        raise ValueError("verus/README.md records no harness counts or total")
+    return counts, int(total.group(1).replace(",", ""))
+
+
+def parse_verus_result(log: str) -> int:
+    """Return one harness run's verified count; anything but one error-free result fails."""
+
+    results = VERUS_RESULT.findall(log)
+    if len(results) != 1:
+        raise ValueError(f"expected one Verus result line, found {len(results)}")
+    verified, errors = (int(value) for value in results[0])
+    if errors:
+        raise ValueError(f"Verus reported {errors} errors")
+    return verified
+
+
+def require_pinned_verus(version_output: str) -> None:
+    """Reject a ``$VERUS`` that is not the release the proofs are recorded against."""
+
+    if not re.search(rf"^\s*Version:\s*{re.escape(VERUS_VERSION)}\s*$", version_output, re.MULTILINE):
+        raise ValueError(f"$VERUS is not the pinned Verus release {VERUS_VERSION}")
+
+
+def capture_verus_inputs(crate: Path) -> dict:
+    """Fingerprint every harness and each source it includes (SHA-256, bytes, lines)."""
+
+    return {harness.name: {
+        "harness": fingerprint_file(harness),
+        "sources": {source: fingerprint_file(crate / source) for source in verus_included_sources(harness)},
+    } for harness in verus_harnesses(crate)}
+
+
+def start_verus_evidence(crate: Path) -> dict:
+    """Read the recorded counts and fingerprint the proof inputs before any harness runs."""
+
+    recorded, total = recorded_verus_counts((crate / "verus/README.md").read_text())
+    names = [harness.name for harness in verus_harnesses(crate)]
+    if sorted(recorded) != names:
+        raise ValueError(f"verus/README.md lists {sorted(recorded)}, but verus/ holds {names}")
+    return {"recorded": recorded, "recorded_total": total, "measured": {},
+            "inputs_before": capture_verus_inputs(crate)}
+
+
+def record_verus_step(state: dict, command: list[str], log: str) -> dict:
+    """Validate one successful Verus command and return the fields its manifest row records."""
+
+    if command[1:] == ["--version"]:
+        require_pinned_verus(log)
+        return {"verus_version": VERUS_VERSION}
+    name = Path(command[-1]).name
+    verified = parse_verus_result(log)
+    recorded = state["recorded"].get(name)
+    if verified != recorded:
+        raise ValueError(f"{name}: Verus verified {verified} items, but verus/README.md records {recorded}; "
+                         "update its harness table and total")
+    state["measured"][name] = verified
+    return {"harness": name, "verified": verified}
+
+
+def finish_verus_evidence(state: dict, crate: Path) -> dict:
+    """Require unchanged inputs and the recorded total, then return the gate's evidence."""
+
+    after = capture_verus_inputs(crate)
+    if after != state["inputs_before"]:
+        raise ValueError("a Verus harness or included source changed while the gate ran")
+    if sorted(state["measured"]) != sorted(state["recorded"]):
+        raise ValueError("not every recorded harness was verified")
+    total = sum(state["measured"].values())
+    if total != state["recorded_total"]:
+        raise ValueError(f"Verus verified {total} items, but verus/README.md records {state['recorded_total']}")
+    return {"schema_version": 1, "verus_version": VERUS_VERSION, "flags": list(VERUS_FLAGS),
+            "harnesses": state["measured"], "verified": total, "errors": 0, "inputs": after}
+
+
+def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bool,
+                 verus: str | None = None) -> list[list[str]]:
+    """Build auditable argument arrays; platform checks never execute GPU code.
+
+    ``verus`` is the Verus executable that the ``verus`` gate requires.
+    """
 
     cargo = ["cargo", f"+{toolchain}"]
     manifest = ["--manifest-path", str(CRATE / "Cargo.toml")]
@@ -273,9 +427,19 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
     if gate == "package":
         # The parent repository may contain unrelated changes. Package listing
         # is diagnostic; the verified final archive still requires clean Git.
+        # Cargo's verification only builds the extracted archive, so its test
+        # suite runs there too: tests must not read files the archive omits.
         return [
             cargo + ["package"] + manifest + locked + ["--list"],
             cargo + ["package"] + manifest + locked,
+            cargo + ["test", "--manifest-path", str(package_directory() / "Cargo.toml")] + locked,
+        ]
+    if gate == "verus":
+        if not verus:
+            raise ValueError("the verus gate needs the VERUS environment variable to name the pinned "
+                             f"Verus {VERUS_VERSION} executable (see verus/README.md)")
+        return [[verus, "--version"]] + [
+            [verus, *VERUS_FLAGS, str(harness)] for harness in verus_harnesses(CRATE)
         ]
     raise ValueError(f"unknown gate: {gate}")
 
@@ -344,7 +508,7 @@ def validate_package_listing(listing: str) -> int:
 
     allowed_files = {"Cargo.toml", "Cargo.toml.orig", "Cargo.lock", "deny.toml",
                      "LICENSE-MIT", "LICENSE-APACHE", ".cargo_vcs_info.json"}
-    allowed_roots = {"src", "examples", "tests", "scripts", "acceptance"}
+    allowed_roots = {"src", "examples", "tests", "scripts", "acceptance", "verus"}
     files = set()
     for raw in listing.splitlines():
         if not raw.strip() or raw.startswith("warning:") or raw.lstrip().startswith(("|", "= note:")):
@@ -354,6 +518,8 @@ def validate_package_listing(listing: str) -> int:
             raise ValueError(f"unsafe package entry: {raw}")
         if path.parts[:2] == ("scripts", "coverage-layout"):
             raise ValueError(f"repository-only standalone audit tool in runtime package: {raw}")
+        if path.parts[0] == "verus" and (len(path.parts) != 2 or not (path.suffix == ".rs" or path.name == "README.md")):
+            raise ValueError(f"unexpected entry below verus/: {raw}")
         if path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}:
             raise ValueError(f"runtime artifact in source package: {raw}")
         root_doc = len(path.parts) == 1 and path.suffix == ".md"
@@ -386,8 +552,10 @@ def main() -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     output = CRATE / "target/release-gates" / stamp
     plan = [(gate, command) for gate in args.gate for command in command_plan(
-        gate, output, args.toolchain, args.msrv_toolchain, args.offline,
+        gate, output, args.toolchain, args.msrv_toolchain, args.offline, verus=os.environ.get("VERUS"),
     )]
+    last_verus = max((index for index, (gate, _) in enumerate(plan) if gate == "verus"), default=None)
+    verus_state = None
     if args.coverage_compiler_evidence:
         for gate, command in plan:
             if gate == "coverage":
@@ -421,6 +589,8 @@ def main() -> int:
                         f"{storage['minimum_free_bytes']} bytes (20 GiB) required"
                     )
                     raise ValueError(f"compile storage preflight failed at {storage['checked_path']}: {reason}")
+            if gate == "verus" and verus_state is None:
+                verus_state = start_verus_evidence(CRATE)
             if gate == "coverage":
                 if args.coverage_compiler_evidence:
                     command_environment, compiler_setup = prepare_capture(CRATE.resolve(), output.resolve(), args.toolchain, FEATURES, command_environment)
@@ -488,6 +658,16 @@ def main() -> int:
                     row["exit_code"] = 1
             if completed.returncode == 0 and gate == "package" and "--list" in command:
                 row["package_files"] = validate_package_listing(log.read_text())
+            if completed.returncode == 0 and gate == "verus":
+                row.update(record_verus_step(verus_state, command, log.read_text()))
+                if "harness" in row:
+                    print(f"[verus] {row['harness']}: {row['verified']} verified, 0 errors", flush=True)
+                if index == last_verus:
+                    evidence = finish_verus_evidence(verus_state, CRATE)
+                    write_evidence(output / "verus.json", evidence)
+                    row["verus_evidence"] = "verus.json"
+                    print(f"[verus] {len(evidence['harnesses'])} harnesses: {evidence['verified']} verified, 0 errors",
+                          flush=True)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             # Preserve the distinction between a successful native process and
             # invalid evidence, including a malformed/missing export or unsafe

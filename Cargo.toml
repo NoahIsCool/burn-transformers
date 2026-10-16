@@ -18,6 +18,9 @@ include = [
     "/scripts/tests/fixtures/coverage_lines/**",
     "/scripts/tests/fixtures/coverage_dependencies/**",
     "/acceptance/**",
+    # tests/verus_harness.rs reads the harnesses and their guide.
+    "/verus/*.rs",
+    "/verus/README.md",
     "/*.md",
     "/LICENSE-*",
     "/deny.toml",
