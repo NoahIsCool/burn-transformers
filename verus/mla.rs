@@ -8,7 +8,9 @@
 //! - projection widths are exact (`d_n + d_r`, `r + d_r`, `H * (d_n + d_v)`,
 //!   `H * (d_n + d_r)`, `H * d_v`), and validation succeeds exactly when every
 //!   width and every projection matrix's element count fits `usize`, naming
-//!   the first overflowing matrix otherwise;
+//!   the first overflowing matrix otherwise; the public width helpers and
+//!   validation share one verified derivation per width, and initialization
+//!   allocates from the validated widths;
 //! - bottom-right suffix key bounds are exactly each row's causal prefix
 //!   `K - Q + i + 1` and satisfy the prefix contract; the bound validator
 //!   accepts exactly contract-satisfying bounds; a chunk's key prefix covers
@@ -29,7 +31,7 @@
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![allow(unused)]
-#![feature(proc_macro_hygiene)]
+#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
 #[path = "../src/mla/geometry.rs"]
 pub mod geometry;

@@ -45,6 +45,42 @@ fn widths_are_exact() {
     assert_eq!(mla_widths(8, 2, 3, 2, 4, 5, Some(6)), Ok(expected));
 }
 
+/// The shared width helpers equal checked arithmetic and name their own faults.
+#[test]
+fn shared_width_helpers_are_exact() {
+    for (nope, rope) in [
+        (3, 2),
+        (0, 0),
+        (usize::MAX, 0),
+        (usize::MAX, 1),
+        (1, usize::MAX),
+    ] {
+        assert_eq!(
+            qk_head_width(nope, rope),
+            nope.checked_add(rope).ok_or(MlaWidthFault::QkHeadDim)
+        );
+        assert_eq!(
+            compressed_width(nope, rope),
+            nope.checked_add(rope).ok_or(MlaWidthFault::CompressedWidth)
+        );
+    }
+    assert_eq!(expanded_width(2, 3, 4), Ok(14));
+    assert_eq!(
+        expanded_width(1, usize::MAX, 1),
+        Err(MlaWidthFault::ExpandedPerHead)
+    );
+    // The per-head sum is checked before the head product.
+    assert_eq!(
+        expanded_width(2, usize::MAX, 1),
+        Err(MlaWidthFault::ExpandedPerHead)
+    );
+    assert_eq!(
+        expanded_width(usize::MAX, 1, 1),
+        Err(MlaWidthFault::ExpandedHeads)
+    );
+    assert_eq!(expanded_width(usize::MAX, 0, 1), Ok(usize::MAX));
+}
+
 /// Width faults name the first overflowing sum, product, or matrix.
 #[test]
 fn width_faults_name_the_first_overflow() {

@@ -67,9 +67,9 @@ use crate::{
     },
 };
 use geometry::{
-    MlaAxis, MlaAxisFault, MlaHeads, MlaMatrix, MlaWidthFault, VisibilityFault, broadcasts_over,
-    chunk_key_end, mla_axis_fault, mla_widths, projection_matches, saturating_window,
-    suffix_key_limits, visibility_fault,
+    MlaAxis, MlaAxisFault, MlaHeads, MlaMatrix, MlaWidthFault, MlaWidths, VisibilityFault,
+    broadcasts_over, chunk_key_end, compressed_width, expanded_width, mla_axis_fault, mla_widths,
+    projection_matches, qk_head_width, saturating_window, suffix_key_limits, visibility_fault,
 };
 
 /// Shape-bearing configuration for one multi-head latent-attention layer.
@@ -126,42 +126,25 @@ impl MultiLatentAttentionConfig {
     }
 
     /// Returns the full per-head query/key width.
+    ///
+    /// Computed by the Verus-verified `qk_head_width`, shared with validation.
     pub fn qk_head_dim(&self) -> Result<usize> {
-        self.qk_nope_head_dim
-            .checked_add(self.qk_rope_head_dim)
-            .ok_or_else(|| Error::configuration("mla.qk_head_dim", "dimension sum overflows usize"))
-    }
-
-    /// Checks the flattened query-head width before constructing a projection shape.
-    fn query_projection_width(&self) -> Result<usize> {
-        self.num_heads
-            .checked_mul(self.qk_head_dim()?)
-            .ok_or_else(|| Error::configuration("mla.query_width", "head product overflows usize"))
+        qk_head_width(self.qk_nope_head_dim, self.qk_rope_head_dim).map_err(mla_width_error)
     }
 
     /// Returns the width emitted by the joint KV-A projection.
+    ///
+    /// Computed by the Verus-verified `compressed_width`, shared with validation.
     pub fn compressed_projection_width(&self) -> Result<usize> {
-        self.kv_lora_rank
-            .checked_add(self.qk_rope_head_dim)
-            .ok_or_else(|| {
-                Error::configuration(
-                    "mla.compressed_projection_width",
-                    "dimension sum overflows usize",
-                )
-            })
+        compressed_width(self.kv_lora_rank, self.qk_rope_head_dim).map_err(mla_width_error)
     }
 
     /// Returns the width emitted by the KV-B expansion projection.
+    ///
+    /// Computed by the Verus-verified `expanded_width`, shared with validation.
     pub fn expanded_kv_width(&self) -> Result<usize> {
-        let per_head = self
-            .qk_nope_head_dim
-            .checked_add(self.value_head_dim)
-            .ok_or_else(|| {
-                Error::configuration("mla.expanded_kv_width", "per-head sum overflows usize")
-            })?;
-        self.num_heads.checked_mul(per_head).ok_or_else(|| {
-            Error::configuration("mla.expanded_kv_width", "head product overflows usize")
-        })
+        expanded_width(self.num_heads, self.qk_nope_head_dim, self.value_head_dim)
+            .map_err(mla_width_error)
     }
 
     /// Validates projection extents, matrix element counts, and numerical invariants.
@@ -172,6 +155,14 @@ impl MultiLatentAttentionConfig {
     /// Verus-verified `mla_axis_fault` and `mla_widths` (`verus/mla.rs`): success
     /// implies exact widths and representable element counts for every projection.
     pub fn validate(&self) -> Result<()> {
+        self.validated_widths().map(|_| ())
+    }
+
+    /// Validates the configuration and returns the verified projection widths.
+    ///
+    /// The checks and their order are those documented on [`Self::validate`];
+    /// [`Self::init`] allocates every projection from the returned widths.
+    fn validated_widths(&self) -> Result<MlaWidths> {
         if let Some(fault) = mla_axis_fault(
             self.hidden_size,
             self.num_heads,
@@ -225,14 +216,15 @@ impl MultiLatentAttentionConfig {
             self.kv_lora_rank,
             self.q_lora_rank,
         )
-        .map(|_| ())
         .map_err(mla_width_error)
     }
 
     /// Allocates all MLA projections in checkpoint-native column layout.
+    ///
+    /// Every projection width comes from the verified widths of validation.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<MultiLatentAttention<B>> {
-        self.validate()?;
-        let query_width = self.query_projection_width()?;
+        let widths = self.validated_widths()?;
+        let query_width = widths.query_width;
         let projection = |input, output, bias| {
             operations::init_linear(
                 &LinearConfig::new(input, output)
@@ -265,21 +257,13 @@ impl MultiLatentAttentionConfig {
             q_a_proj,
             q_a_layernorm,
             q_b_proj,
-            kv_a_proj_with_mqa: projection(
-                self.hidden_size,
-                self.compressed_projection_width()?,
-                self.bias,
-            ),
+            kv_a_proj_with_mqa: projection(self.hidden_size, widths.compressed_width, self.bias),
             kv_a_layernorm: RmsNormConfig::new(self.kv_lora_rank)
                 .with_epsilon(self.rms_norm_epsilon)
                 .with_round_before_scale(true)
                 .init(device)?,
-            kv_b_proj: projection(self.kv_lora_rank, self.expanded_kv_width()?, false),
-            o_proj: projection(
-                self.num_heads * self.value_head_dim,
-                self.hidden_size,
-                self.bias,
-            ),
+            kv_b_proj: projection(self.kv_lora_rank, widths.expanded_width, false),
+            o_proj: projection(widths.value_width, self.hidden_size, self.bias),
             config: self.clone(),
         })
     }

@@ -8,7 +8,8 @@
 //! `D -> r_q -> H * (d_n + d_r)`), the joint KV-A projection to `r + d_r`, the
 //! KV-B expansion to `H * (d_n + d_v)`, and the output from `H * d_v` back to
 //! `D`. Burn allocates parameters lazily, so every width and every matrix
-//! element count is checked here before allocation.
+//! element count is checked here before allocation, and allocation uses the
+//! widths validation returns.
 //!
 //! # Key prefixes
 //!
@@ -34,7 +35,8 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 verus! {
 
-/// Bottom-right causality: query row `row` of `Q` sits at key position `K - Q + row` and sees `key`.
+/// Bottom-right causality: query row `row` of `Q` sits at key position
+/// `K - Q + row` and sees `key`.
 pub open spec fn causally_visible(row: int, key: int, queries: int, keys: int) -> bool {
     key <= keys - queries + row
 }
@@ -42,7 +44,8 @@ pub open spec fn causally_visible(row: int, key: int, queries: int, keys: int) -
 /// Bounds never decrease: an earlier row's bound is at most a later row's.
 pub open spec fn nondecreasing(limits: Seq<usize>) -> bool {
     forall|first: int, second: int|
-        0 <= first <= second < limits.len() ==> #[trigger] limits[first] <= #[trigger] limits[second]
+        0 <= first <= second < limits.len()
+            ==> #[trigger] limits[first] <= #[trigger] limits[second]
 }
 
 /// Key-prefix bounds for `queries` rows over `keys` keys: one per row, in `1..=K`, nondecreasing.
@@ -97,23 +100,25 @@ pub(crate) enum MlaAxisFault {
 #[cfg_attr(verus_keep_ghost, verus_spec(fault =>
     ensures
         ({
-            let nonzero = hidden_size >= 1 && num_heads >= 1 && nope >= 1 && rope >= 1 && value >= 1
-                && kv_rank >= 1;
+            let nonzero = hidden_size >= 1 && num_heads >= 1 && nope >= 1 && rope >= 1
+                && value >= 1 && kv_rank >= 1;
             match fault {
                 None => nonzero && rope % 2 == 0 && query_rank != Some(0usize),
                 Some(MlaAxisFault::Zero(MlaAxis::HiddenSize)) => hidden_size == 0,
                 Some(MlaAxisFault::Zero(MlaAxis::NumHeads)) => hidden_size >= 1 && num_heads == 0,
-                Some(MlaAxisFault::Zero(MlaAxis::QkNopeHeadDim)) => hidden_size >= 1 && num_heads
-                    >= 1 && nope == 0,
-                Some(MlaAxisFault::Zero(MlaAxis::QkRopeHeadDim)) => hidden_size >= 1 && num_heads
-                    >= 1 && nope >= 1 && rope == 0,
-                Some(MlaAxisFault::Zero(MlaAxis::ValueHeadDim)) => hidden_size >= 1 && num_heads
-                    >= 1 && nope >= 1 && rope >= 1 && value == 0,
-                Some(MlaAxisFault::Zero(MlaAxis::KvLoraRank)) => hidden_size >= 1 && num_heads
-                    >= 1 && nope >= 1 && rope >= 1 && value >= 1 && kv_rank == 0,
+                Some(MlaAxisFault::Zero(MlaAxis::QkNopeHeadDim)) =>
+                    hidden_size >= 1 && num_heads >= 1 && nope == 0,
+                Some(MlaAxisFault::Zero(MlaAxis::QkRopeHeadDim)) =>
+                    hidden_size >= 1 && num_heads >= 1 && nope >= 1 && rope == 0,
+                Some(MlaAxisFault::Zero(MlaAxis::ValueHeadDim)) =>
+                    hidden_size >= 1 && num_heads >= 1 && nope >= 1 && rope >= 1 && value == 0,
+                Some(MlaAxisFault::Zero(MlaAxis::KvLoraRank)) => {
+                    &&& hidden_size >= 1 && num_heads >= 1 && nope >= 1
+                    &&& rope >= 1 && value >= 1 && kv_rank == 0
+                },
                 Some(MlaAxisFault::OddRotary) => nonzero && rope % 2 == 1,
-                Some(MlaAxisFault::ZeroQueryRank) => nonzero && rope % 2 == 0 && query_rank
-                    == Some(0usize),
+                Some(MlaAxisFault::ZeroQueryRank) =>
+                    nonzero && rope % 2 == 0 && query_rank == Some(0usize),
             }
         }),
 ))]
@@ -218,6 +223,75 @@ pub(crate) enum MlaWidthFault {
     },
 }
 
+/// Per-head query/key width `d_n + d_r`, or [`MlaWidthFault::QkHeadDim`] when it overflows.
+///
+/// Verified exact: the shared derivation behind
+/// `MultiLatentAttentionConfig::qk_head_dim` and [`mla_widths`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        match width {
+            Ok(width) => width == nope + rope,
+            Err(fault) => fault == MlaWidthFault::QkHeadDim && nope + rope > usize::MAX,
+        },
+))]
+pub(crate) fn qk_head_width(nope: usize, rope: usize) -> Result<usize, MlaWidthFault> {
+    match nope.checked_add(rope) {
+        Some(width) => Ok(width),
+        None => Err(MlaWidthFault::QkHeadDim),
+    }
+}
+
+/// Joint KV-A output width `r + d_r`, or [`MlaWidthFault::CompressedWidth`] when it overflows.
+///
+/// Verified exact: the shared derivation behind
+/// `MultiLatentAttentionConfig::compressed_projection_width` and [`mla_widths`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        match width {
+            Ok(width) => width == kv_rank + rope,
+            Err(fault) => fault == MlaWidthFault::CompressedWidth && kv_rank + rope > usize::MAX,
+        },
+))]
+pub(crate) fn compressed_width(kv_rank: usize, rope: usize) -> Result<usize, MlaWidthFault> {
+    match kv_rank.checked_add(rope) {
+        Some(width) => Ok(width),
+        None => Err(MlaWidthFault::CompressedWidth),
+    }
+}
+
+/// KV-B expansion width `H * (d_n + d_v)`, naming the per-head sum or the head product on overflow.
+///
+/// Verified exact, with the per-head sum checked first: the shared derivation
+/// behind `MultiLatentAttentionConfig::expanded_kv_width` and [`mla_widths`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        match width {
+            Ok(width) => nope + value <= usize::MAX && width == num_heads * (nope + value),
+            Err(MlaWidthFault::ExpandedPerHead) => nope + value > usize::MAX,
+            Err(MlaWidthFault::ExpandedHeads) => {
+                &&& nope + value <= usize::MAX
+                &&& num_heads * (nope + value) > usize::MAX
+            },
+            Err(_) => false,
+        },
+))]
+pub(crate) fn expanded_width(
+    num_heads: usize,
+    nope: usize,
+    value: usize,
+) -> Result<usize, MlaWidthFault> {
+    let Some(per_head) = nope.checked_add(value) else {
+        return Err(MlaWidthFault::ExpandedPerHead);
+    };
+    match num_heads.checked_mul(per_head) {
+        Some(width) => Ok(width),
+        None => Err(MlaWidthFault::ExpandedHeads),
+    }
+}
+
 /// Computes MLA widths and checks every projection matrix's element count.
 ///
 /// Widths are checked in the order `d_n + d_r`, `r + d_r`, `d_n + d_v`,
@@ -234,8 +308,8 @@ pub(crate) enum MlaWidthFault {
             let expanded = num_heads * per_head;
             let query = num_heads * qk;
             let value_width = num_heads * value;
-            let widths_fit = qk <= usize::MAX && compressed <= usize::MAX && per_head
-                <= usize::MAX && expanded <= usize::MAX && query <= usize::MAX;
+            let widths_fit = qk <= usize::MAX && compressed <= usize::MAX
+                && per_head <= usize::MAX && expanded <= usize::MAX && query <= usize::MAX;
             let query_fits = match query_rank {
                 None => fits(hidden_size as int, query),
                 Some(rank) => fits(hidden_size as int, rank as int) && fits(rank as int, query),
@@ -254,29 +328,40 @@ pub(crate) enum MlaWidthFault {
                 },
                 Err(MlaWidthFault::QkHeadDim) => qk > usize::MAX,
                 Err(MlaWidthFault::CompressedWidth) => qk <= usize::MAX && compressed > usize::MAX,
-                Err(MlaWidthFault::ExpandedPerHead) => qk <= usize::MAX && compressed <= usize::MAX
-                    && per_head > usize::MAX,
-                Err(MlaWidthFault::ExpandedHeads) => qk <= usize::MAX && compressed <= usize::MAX
-                    && per_head <= usize::MAX && expanded > usize::MAX,
-                Err(MlaWidthFault::QueryWidth) => qk <= usize::MAX && compressed <= usize::MAX
-                    && per_head <= usize::MAX && expanded <= usize::MAX && query > usize::MAX,
+                Err(MlaWidthFault::ExpandedPerHead) => {
+                    &&& qk <= usize::MAX && compressed <= usize::MAX
+                    &&& per_head > usize::MAX
+                },
+                Err(MlaWidthFault::ExpandedHeads) => {
+                    &&& qk <= usize::MAX && compressed <= usize::MAX
+                    &&& per_head <= usize::MAX && expanded > usize::MAX
+                },
+                Err(MlaWidthFault::QueryWidth) => {
+                    &&& qk <= usize::MAX && compressed <= usize::MAX
+                    &&& per_head <= usize::MAX && expanded <= usize::MAX
+                    &&& query > usize::MAX
+                },
                 Err(MlaWidthFault::Matrix { matrix, input, output }) => {
                     &&& widths_fit
                     &&& !fits(input as int, output as int)
                     &&& match matrix {
-                        MlaMatrix::Query => query_rank is None && input == hidden_size && output
-                            == query,
+                        MlaMatrix::Query =>
+                            query_rank is None && input == hidden_size && output == query,
                         MlaMatrix::QueryDown => query_rank == Some(output) && input == hidden_size,
-                        MlaMatrix::QueryUp => query_rank == Some(input) && output == query && fits(
-                            hidden_size as int,
-                            input as int,
-                        ),
-                        MlaMatrix::JointKeyValue => query_fits && input == hidden_size && output
-                            == compressed,
-                        MlaMatrix::KeyValueExpansion => query_fits && kv_a_fits && input == kv_rank && output
-                            == expanded,
-                        MlaMatrix::Output => query_fits && kv_a_fits && kv_b_fits && input
-                            == value_width && output == hidden_size,
+                        MlaMatrix::QueryUp => {
+                            &&& query_rank == Some(input) && output == query
+                            &&& fits(hidden_size as int, input as int)
+                        },
+                        MlaMatrix::JointKeyValue =>
+                            query_fits && input == hidden_size && output == compressed,
+                        MlaMatrix::KeyValueExpansion => {
+                            &&& query_fits && kv_a_fits
+                            &&& input == kv_rank && output == expanded
+                        },
+                        MlaMatrix::Output => {
+                            &&& query_fits && kv_a_fits && kv_b_fits
+                            &&& input == value_width && output == hidden_size
+                        },
                     }
                 },
             }
@@ -291,26 +376,15 @@ pub(crate) fn mla_widths(
     kv_rank: usize,
     query_rank: Option<usize>,
 ) -> Result<MlaWidths, MlaWidthFault> {
-    let Some(qk_head_dim) = nope.checked_add(rope) else {
-        return Err(MlaWidthFault::QkHeadDim);
-    };
-    let Some(compressed_width) = kv_rank.checked_add(rope) else {
-        return Err(MlaWidthFault::CompressedWidth);
-    };
-    let Some(per_head) = nope.checked_add(value) else {
-        return Err(MlaWidthFault::ExpandedPerHead);
-    };
-    let Some(expanded_width) = num_heads.checked_mul(per_head) else {
-        return Err(MlaWidthFault::ExpandedHeads);
-    };
+    let qk_head_dim = qk_head_width(nope, rope)?;
+    let compressed_width = compressed_width(kv_rank, rope)?;
+    let expanded_width = expanded_width(num_heads, nope, value)?;
     let Some(query_width) = num_heads.checked_mul(qk_head_dim) else {
         return Err(MlaWidthFault::QueryWidth);
     };
     #[cfg(verus_keep_ghost)]
     proof! {
-        assert(num_heads * value <= num_heads * per_head) by (nonlinear_arith)
-            requires
-                value <= per_head;
+        assert(num_heads * value <= num_heads * (nope + value)) by (nonlinear_arith);
     }
     // The checked expansion bounds `H * d_v <= H * (d_n + d_v)`.
     let value_width = num_heads * value;
@@ -382,8 +456,8 @@ pub(crate) fn mla_widths(
         queries <= keys,
     ensures
         limits.len() == queries,
-        forall|row: int| 0 <= row < queries ==> #[trigger] limits[row] == keys - queries + row
-            + 1,
+        forall|row: int|
+            0 <= row < queries ==> #[trigger] limits[row] == keys - queries + row + 1,
         forall|row: int, key: int|
             0 <= row < queries && 0 <= key ==> (#[trigger] causally_visible(
                 row,
@@ -506,12 +580,14 @@ pub(crate) enum VisibilityFault {
 #[cfg_attr(verus_keep_ghost, verus_spec(fault =>
     ensures
         ({
-            let rows_ok = (query_positions[0] == batch || query_positions[0] == 1) && (
-            key_positions[0] == batch || key_positions[0] == 1);
+            let rows_ok = (query_positions[0] == batch || query_positions[0] == 1)
+                && (key_positions[0] == batch || key_positions[0] == 1);
             let columns_ok = query_positions[1] == queries && key_positions[1] == keys;
-            let valid_ok = (query_valid is None || (query_valid->Some_0[0] == batch
-                && query_valid->Some_0[1] == queries)) && (key_valid is None || (
-            key_valid->Some_0[0] == batch && key_valid->Some_0[1] == keys));
+            let query_valid_ok = query_valid is None
+                || (query_valid->Some_0[0] == batch && query_valid->Some_0[1] == queries);
+            let key_valid_ok = key_valid is None
+                || (key_valid->Some_0[0] == batch && key_valid->Some_0[1] == keys);
+            let valid_ok = query_valid_ok && key_valid_ok;
             let shape_ok = rows_ok && columns_ok && valid_ok && key_limits_contract(
                 limits@,
                 queries as int,
@@ -639,8 +715,8 @@ pub(crate) fn broadcasts_over(extent: [usize; 4], shape: [usize; 4]) -> bool {
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             axis <= 4,
-            forall|done: int| 0 <= done < axis ==> (#[trigger] extent[done] == 1 || extent[done]
-                == shape[done]),
+            forall|done: int|
+                0 <= done < axis ==> (#[trigger] extent[done] == 1 || extent[done] == shape[done]),
         decreases 4 - axis,
     ))]
     while axis < 4 {
