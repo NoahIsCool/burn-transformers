@@ -55,6 +55,73 @@ fn infinity_normalization_preserves_utf8_and_escaped_string_boundaries() {
     }
 }
 
+/// The original character-level normalizer, kept as the reference for the verified byte lexer.
+fn character_reference_normalization(input: &str) -> String {
+    /// Legacy non-JSON numeric literal accepted outside quoted metadata.
+    const TOKEN: &[u8] = b"Infinity";
+    let mut normalized = String::with_capacity(input.len());
+    let mut remaining = input;
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = remaining.chars().next() {
+        if in_string {
+            normalized.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            remaining = &remaining[character.len_utf8()..];
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            normalized.push('"');
+            remaining = &remaining[character.len_utf8()..];
+        } else if remaining.as_bytes().starts_with(TOKEN) {
+            normalized.push_str("null");
+            remaining = &remaining[TOKEN.len()..];
+        } else {
+            normalized.push(character);
+            remaining = &remaining[character.len_utf8()..];
+        }
+    }
+    normalized
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(512))]
+
+    /// The byte-level verified lexer reproduces the character-level reference on any text.
+    #[test]
+    fn byte_lexer_matches_character_reference(
+        pieces in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "Infinity", "Infinit", "nfinity", "\"", "\\", "\\\"", "\\\\", "y", "I",
+                " ", ",", "[", "]", "無限", "🦀", "é", "\u{80}", "-",
+            ]),
+            0..24,
+        ),
+    ) {
+        let input = pieces.concat();
+        proptest::prop_assert_eq!(
+            normalize_positive_infinity(&input),
+            character_reference_normalization(&input)
+        );
+    }
+
+    /// Arbitrary Unicode strings normalize identically under both lexers.
+    #[test]
+    fn byte_lexer_matches_character_reference_on_arbitrary_text(input in ".{0,64}") {
+        proptest::prop_assert_eq!(
+            normalize_positive_infinity(&input),
+            character_reference_normalization(&input)
+        );
+    }
+}
+
 /// Normalization does not conceal malformed JSON or invalid topology fields.
 #[test]
 fn configuration_loading_preserves_parser_and_validation_failures() {
