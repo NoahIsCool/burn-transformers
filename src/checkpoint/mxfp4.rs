@@ -583,6 +583,13 @@ pub(crate) fn scale_offset(
 ///
 /// The output is `[E, 32 G, R]` row-major, so the value of row `row` at
 /// decoded column `column` lands at `(expert · 32 G + column) · R + row`.
+///
+/// This is the layout specification the decoder implements: production
+/// decoding places values through [`unit_coordinates`] and
+/// [`unit_value_bytes`], which are proved to reach exactly these offsets, and
+/// unit tests compare every decoded element against this formula, so it is
+/// compiled only for tests and proofs.
+#[cfg(any(test, verus_keep_ghost))]
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(offset =>
     requires
@@ -1098,9 +1105,11 @@ pub(crate) fn decode_transposed<const W: usize>(
 ///
 /// `output` is the unit's `[32, R]` slice of the transposed tensor: decoded
 /// column `32 g + j` of row `r` lands at element `j · R + r`, i.e. at
-/// [`transposed_offset`] minus the unit's first element. [`unit_coordinates`]
-/// proves that first element is `u · 32 R`, the start of the unit's output
-/// chunk, and that `base` below is exactly `r`.
+/// `transposed_offset` minus the unit's first element, which
+/// [`unit_coordinates`] proves is `u · 32 R`, the start of the unit's output
+/// chunk. [`unit_value_bytes`] places the two values of byte `b` of row `r`
+/// at elements `2 b · R + r` and `(2 b + 1) · R + r`, proved in bounds and
+/// disjoint for `r < R`, which the row loop guarantees.
 fn decode_unit<const W: usize>(
     blocks: &[u8],
     scales: &[u8],
@@ -1111,17 +1120,13 @@ fn decode_unit<const W: usize>(
 ) {
     let (expert, group) = unit_coordinates(geometry, unit);
     let rows = geometry.rows;
-    let first_column = BLOCK_VALUES * group;
-    let unit_start = transposed_offset(geometry, expert, first_column, 0);
     for row in 0..rows {
         let scale = scales[scale_offset(geometry, expert, row, group)];
         let start = block_offset(geometry, expert, row, group);
-        // Element of column `32 g` of this row, relative to the unit.
-        let base = transposed_offset(geometry, expert, first_column, row) - unit_start;
         for (byte_index, &byte) in blocks[start..start + BLOCK_BYTES].iter().enumerate() {
             let (low, high) = fp4_codes(byte);
             // Verified in-bounds, non-overlapping slots of columns `2 b` and `2 b + 1`.
-            let (even, odd) = unit_value_bytes(rows, base, byte_index, W);
+            let (even, odd) = unit_value_bytes(rows, row, byte_index, W);
             output[even..even + W].copy_from_slice(&table.get(scale, low));
             output[odd..odd + W].copy_from_slice(&table.get(scale, high));
         }
