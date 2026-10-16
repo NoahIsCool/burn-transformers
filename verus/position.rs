@@ -5,7 +5,9 @@
 //! * `src/position/index_plan.rs`: multimodal-RoPE axis selection equals
 //!   `spec_mrope_axis`, and `lemma_mrope_axis_counts` proves that the first
 //!   `half` frequencies give height `min(h, (half + 1) / 3)`, width
-//!   `min(w, half / 3)`, and temporal the rest; `mrope_section_total` is the
+//!   `min(w, half / 3)`, and temporal the rest, so sections that sum to
+//!   `half` within those limits receive exactly their counts
+//!   (`lemma_mrope_sections_receive_their_counts`); `mrope_section_total` is the
 //!   exact section sum or `None` on overflow; `rotary_operand_fits` and
 //!   `split_half_width_fits` are exactly the rotary shape relations; the T5
 //!   displacement-table length and lookup index are in bounds, overflow-free,

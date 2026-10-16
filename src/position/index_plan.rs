@@ -128,6 +128,33 @@ pub proof fn lemma_mrope_axis_counts(half: int, height_sections: int, width_sect
     }
 }
 
+/// Sections `[t, h, w]` summing to `half` that fit the interleaving receive exactly their counts.
+///
+/// Height can hold at most `(half + 1) / 3` frequencies and width at most
+/// `half / 3`; within those limits (Qwen3-VL's `[24, 20, 20]` over 64
+/// frequencies fits), temporal, height, and width receive exactly `t`, `h`,
+/// and `w` of the `half` frequencies.
+pub proof fn lemma_mrope_sections_receive_their_counts(
+    half: int,
+    temporal_sections: int,
+    height_sections: int,
+    width_sections: int,
+)
+    requires
+        temporal_sections >= 0,
+        height_sections >= 0,
+        width_sections >= 0,
+        temporal_sections + height_sections + width_sections == half,
+        height_sections <= (half + 1) / 3,
+        width_sections <= half / 3,
+    ensures
+        mrope_axis_count(half, height_sections, width_sections, 0) == temporal_sections,
+        mrope_axis_count(half, height_sections, width_sections, 1) == height_sections,
+        mrope_axis_count(half, height_sections, width_sections, 2) == width_sections,
+{
+    lemma_mrope_axis_counts(half, height_sections, width_sections);
+}
+
 /// Every table entry `t < query_length + key_length - 1` is read by some in-range pair.
 ///
 /// The anchor query `query_length - 1` reads entry `t = key` for every key,
