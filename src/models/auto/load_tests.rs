@@ -2491,3 +2491,38 @@ fn nemotron_without_provenance_uses_generic_discovery() {
         assert!(matches!(&error, Error::Checkpoint(_)), "{error}");
     }
 }
+
+/// A tokenizer whose IDs outrun the model vocabulary fails the bundle after a complete load.
+#[cfg(feature = "tokenizers")]
+#[test]
+fn tokenizers_beyond_the_model_vocabulary_fail_the_bundle() {
+    use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
+
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_goldens/llama3");
+    let root = tempfile::tempdir().expect("temporary model root");
+    for file in ["config.json", "model.safetensors"] {
+        std::fs::copy(fixture.join(file), root.path().join(file)).unwrap();
+    }
+    let vocabulary = [("unknown".to_owned(), 0_u32), ("far".to_owned(), 4096_u32)]
+        .into_iter()
+        .collect();
+    let model = WordLevel::builder()
+        .vocab(vocabulary)
+        .unk_token("unknown".into())
+        .build()
+        .expect("word-level tokenizer");
+    Tokenizer::new(model)
+        .save(root.path().join("tokenizer.json"), false)
+        .expect("save tokenizer fixture");
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions::default(),
+        &Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Tokenizer(reason) if reason.contains("tokenizer emits ID 4096")),
+        "{error}"
+    );
+}
