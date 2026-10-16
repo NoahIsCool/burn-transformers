@@ -1156,7 +1156,10 @@ fn next_token_logits_reject_missing_head_shapes_and_tokens() {
         )
         .unwrap_err();
     assert!(
-        matches!(&error, Error::Shape { tensor, .. } if tensor == "nemotron_h.input_ids"),
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 1..=32"),
         "{error}"
     );
 }
@@ -1308,31 +1311,45 @@ fn failing_hook_callbacks_name_their_activation_point() {
     }
 }
 
-/// Component constructors report zero widths of an unvalidated config contextually.
+/// The shared feed-forward validator refuses zero widths of an unvalidated config.
 ///
-/// The public constructors validate first, so these widths reach the block
-/// and MoE constructors only through direct (crate-internal) calls; the shared
-/// feed-forward initializer must still refuse them instead of allocating.
+/// The public constructors validate the Nemotron-H config first, so these
+/// widths reach the block and MoE constructors only through direct
+/// (crate-internal) calls. There the shared dense-MLP initializer still
+/// refuses them, with its own generic `feed_forward.intermediate_size` field
+/// rather than a Nemotron-H one, instead of allocating empty projections. An
+/// unknown activation name is refused by the family's own activation parser.
 #[test]
 fn component_constructors_refuse_zero_widths() {
     let device = Default::default();
-    let moe = NemotronHMoe::<TestBackend>::init(
-        &NemotronHConfig {
-            moe_shared_expert_intermediate_size: 0,
-            ..tiny_config(false)
-        },
-        &device,
+    let zero_width = |result: Result<()>| {
+        assert!(
+            matches!(&result, Err(Error::Configuration { field, reason })
+                if field == "feed_forward.intermediate_size" && reason == "must be non-zero"),
+            "{result:?}"
+        );
+    };
+    zero_width(
+        NemotronHMoe::<TestBackend>::init(
+            &NemotronHConfig {
+                moe_shared_expert_intermediate_size: 0,
+                ..tiny_config(false)
+            },
+            &device,
+        )
+        .map(drop),
     );
-    assert!(matches!(moe, Err(Error::Configuration { .. })));
-    let block = NemotronHBlock::<TestBackend>::init(
-        &NemotronHConfig {
-            intermediate_size: 0,
-            ..tiny_config(false)
-        },
-        NemotronHBlockType::Mlp,
-        &device,
+    zero_width(
+        NemotronHBlock::<TestBackend>::init(
+            &NemotronHConfig {
+                intermediate_size: 0,
+                ..tiny_config(false)
+            },
+            NemotronHBlockType::Mlp,
+            &device,
+        )
+        .map(drop),
     );
-    assert!(matches!(block, Err(Error::Configuration { .. })));
     let block = NemotronHBlock::<TestBackend>::init(
         &NemotronHConfig {
             mlp_hidden_act: "gelu".into(),
@@ -1342,6 +1359,9 @@ fn component_constructors_refuse_zero_widths() {
         &device,
     );
     assert!(
-        matches!(block, Err(Error::Configuration { field, .. }) if field == "nemotron_h.mlp_hidden_act")
+        matches!(&block, Err(Error::Configuration { field, reason })
+            if field == "nemotron_h.mlp_hidden_act" && reason == "unsupported activation \"gelu\""),
+        "{:?}",
+        block.map(drop)
     );
 }

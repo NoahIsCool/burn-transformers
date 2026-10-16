@@ -623,7 +623,10 @@ fn prefill_mtp_cache_rejects_invalid_requests_without_mutation() {
         )
         .unwrap_err();
     assert!(
-        matches!(&error, Error::Shape { tensor, .. } if tensor == "nemotron_h.input_ids"),
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 1..=32"),
         "{error}"
     );
     let error = model
@@ -751,7 +754,10 @@ fn forward_mtp_cached_rejects_invalid_requests_without_mutation() {
         )
         .unwrap_err();
     assert!(
-        matches!(&error, Error::Shape { tensor, .. } if tensor == "nemotron_h.input_ids"),
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 32..=32"),
         "{error}"
     );
     let error = model

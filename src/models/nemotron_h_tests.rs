@@ -209,8 +209,17 @@ fn schedule_wire_forms_reject_unknown_characters_and_accept_aliases() {
     )
     .unwrap();
     assert_eq!(config.hybrid_override_pattern(), "M*-EM*");
-    assert!(serde_json::from_str::<NemotronHConfig>(r#"{"layer_types":["conv"]}"#).is_err());
-    assert!(serde_json::from_str::<NemotronHConfig>(r#"{"layer_types":7}"#).is_err());
+    // Neither an unknown layer name nor a non-string, non-list value matches
+    // either wire form of the schedule.
+    for json in [r#"{"layer_types":["conv"]}"#, r#"{"layer_types":7}"#] {
+        let error = serde_json::from_str::<NemotronHConfig>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("data did not match any variant of untagged enum BlockScheduleWire"),
+            "{json}: {error}"
+        );
+    }
 }
 
 /// Global extents, declared depth, regularization, epsilons, and token IDs fail by field.

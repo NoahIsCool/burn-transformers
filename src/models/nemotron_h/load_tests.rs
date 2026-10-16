@@ -1003,7 +1003,12 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
     let error = model
         .load_checkpoint(temp.path().join("absent"), &LoadOptions::default())
         .unwrap_err();
-    assert!(matches!(error, NemotronHCheckpointLoadError::Checkpoint(_)));
+    assert!(
+        matches!(&error, NemotronHCheckpointLoadError::Checkpoint(CheckpointError::Io {
+            operation, path, ..
+        }) if *operation == "inspect checkpoint root" && path.ends_with("absent")),
+        "{error}"
+    );
     assert!(error.execution_failure().is_none());
 
     // A graph whose head was removed after planning fails in pass two with progress.

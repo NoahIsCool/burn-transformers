@@ -379,6 +379,10 @@ fn hooked_forward_refuses_attention_capture_and_trait_delegates() {
 }
 
 /// Staged states with a foreign dtype, cross-attention, or an oversized context are rejected.
+///
+/// Normalization also refuses a cursor past the stack and an already
+/// normalized state, and embedding refuses out-of-vocabulary token IDs, each
+/// with its exact diagnostic.
 #[test]
 fn staged_state_validation_rejects_dtype_cross_attention_and_context() {
     let device = Default::default();
@@ -416,14 +420,23 @@ fn staged_state_validation_rejects_dtype_cross_attention_and_context() {
         "{error}"
     );
 
-    let mut beyond = state;
+    // A cursor past the four-block stack and a second normalization are both
+    // refused before the final norm runs.
+    let mut beyond = state.clone();
     beyond.next_layer = 5;
-    let error = model.model.normalize(beyond).unwrap_err();
-    assert!(
-        matches!(&error, Error::Configuration { field, .. }
-            if field == "nemotron_h.execution.normalize"),
-        "{error}"
-    );
+    let normalized = model
+        .model
+        .normalize(model.model.run_layers(state, 0..4).unwrap())
+        .unwrap();
+    for staged in [beyond, normalized] {
+        let error = model.model.normalize(staged).unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "nemotron_h.execution.normalize"
+                && reason == "expected an unnormalized state at a valid block boundary"),
+            "{error}"
+        );
+    }
 
     let error = model
         .model
@@ -434,7 +447,10 @@ fn staged_state_validation_rejects_dtype_cross_attention_and_context() {
         })
         .unwrap_err();
     assert!(
-        matches!(&error, Error::Shape { tensor, .. } if tensor == "nemotron_h.input_ids"),
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 1..=32"),
         "{error}"
     );
 }
@@ -466,10 +482,13 @@ fn staged_attention_bias_requires_the_activation_dtype() {
         Layer::decoder(0),
         AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &device)),
     );
-    assert!(matches!(
-        model.model.run_layers(recurrent_bias, 0..4),
-        Err(Error::BackendCapability(_))
-    ));
+    let error = model.model.run_layers(recurrent_bias, 0..4).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H Mamba-2 block 0 is a causal recurrence and supports \
+                          no custom attention connectivity or score bias"),
+        "{error}"
+    );
 
     // A zero bias in the activation dtype leaves the causal result unchanged.
     let mut zero_bias = state.clone();
