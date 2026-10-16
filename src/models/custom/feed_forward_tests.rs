@@ -6,6 +6,7 @@ use burn::{
 };
 
 use super::*;
+use crate::moe::RoutedWeightingPrecision;
 use crate::{
     architecture::{Activation, DenseFeedForwardSpec, MixtureOfExpertsSpec},
     models::custom::test_support::{DeterministicParameters, TestBackend},
@@ -310,12 +311,6 @@ fn clamped_experts_without_shared_experts_return_the_routed_mixture() {
         panic!("expected clamped experts");
     };
     assert!(clamped.experts.shared.is_empty());
-    assert!(
-        clamped
-            .shared_output(input(&device).reshape([6, 8]))
-            .unwrap()
-            .is_none()
-    );
     let (output, routing) = branch
         .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
         .unwrap();
@@ -397,7 +392,11 @@ fn clamped_experts_honor_the_layer_weighting_precision() {
             .assert_eq(&selected, true);
         let selected = selected.to_vec::<i32>().unwrap();
 
-        let shared = clamped.shared_output(row.clone()).unwrap().unwrap();
+        let shared = clamped
+            .experts
+            .shared_output(row.clone(), Some(&clamped.glu))
+            .unwrap()
+            .unwrap();
         let mut expected_fp32 = Tensor::<TestBackend, 2>::zeros([1, 8], (&device, DType::F16));
         let mut expected_residual = expected_fp32.clone();
         for (slot, &expert) in selected.iter().enumerate() {
@@ -499,7 +498,8 @@ fn clamped_experts_sum_several_ungated_shared_experts() {
         .reduce(|left, right| left + right)
         .unwrap();
     clamped
-        .shared_output(flat)
+        .experts
+        .shared_output(flat, Some(&clamped.glu))
         .unwrap()
         .expect("two shared experts")
         .into_data()

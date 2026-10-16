@@ -36,7 +36,7 @@ use burn::{
 use crate::{
     Error, Result,
     architecture::{Activation, TokenMask},
-    feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
+    feed_forward::{ClampedSwiGlu, GatedFeedForward, GatedFeedForwardConfig},
     operations,
 };
 
@@ -747,7 +747,8 @@ impl<B: Backend> SparseMoe<B> {
     /// and the residual input. `precision` fixes the multiplication and
     /// accumulation dtypes independently of expert execution, so DeepSeek can
     /// sum reduced-precision experts in FP32 while Qwen keeps its
-    /// residual-stream convention. [`Self::forward`] is the production caller.
+    /// residual-stream convention. Tests call it directly; production code
+    /// reaches it through [`Self::forward`] and [`Self::forward_with_unit`].
     ///
     /// # Errors
     ///
@@ -755,6 +756,7 @@ impl<B: Backend> SparseMoe<B> {
     /// tensors, a configuration error for an invalid expert cardinality or
     /// precision, a backend-capability error for operands on different
     /// devices, and the expert-ID errors of [`dispatch_routed_experts`].
+    #[cfg(test)]
     fn dispatch_selected_experts_with_precision(
         &self,
         flat_input: Tensor<B, 2>,
@@ -762,6 +764,32 @@ impl<B: Backend> SparseMoe<B> {
         selected_experts: Tensor<B, 2, Int>,
         non_finite_tokens: Option<Tensor<B, 1, Bool>>,
         precision: RoutedExpertPrecision,
+    ) -> Result<RoutedExpertDispatch<B>> {
+        self.dispatch_with_unit(
+            flat_input,
+            flat_weights,
+            selected_experts,
+            non_finite_tokens,
+            precision,
+            None,
+        )
+    }
+
+    /// [`Self::dispatch_selected_experts_with_precision`] with every routed
+    /// expert evaluating `unit` through [`GatedFeedForward::forward_clamped`]
+    /// instead of its ordinary gated activation when it is given.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::dispatch_selected_experts_with_precision`].
+    fn dispatch_with_unit(
+        &self,
+        flat_input: Tensor<B, 2>,
+        flat_weights: Tensor<B, 2>,
+        selected_experts: Tensor<B, 2, Int>,
+        non_finite_tokens: Option<Tensor<B, 1, Bool>>,
+        precision: RoutedExpertPrecision,
+        unit: Option<&ClampedSwiGlu>,
     ) -> Result<RoutedExpertDispatch<B>> {
         let [tokens, hidden] = flat_input.dims();
         let [weight_tokens, weight_slots] = flat_weights.dims();
@@ -814,7 +842,10 @@ impl<B: Backend> SparseMoe<B> {
             non_finite_tokens,
             self.routed.len(),
             precision,
-            |expert, rows| self.routed[expert].forward(rows),
+            |expert, rows| match unit {
+                Some(glu) => self.routed[expert].forward_clamped(rows, glu),
+                None => self.routed[expert].forward(rows),
+            },
         )
     }
 
@@ -827,6 +858,23 @@ impl<B: Backend> SparseMoe<B> {
     /// invariants or the input is empty or has the wrong hidden width, and a
     /// shape error naming the token when router scores contain NaN.
     pub fn forward(&self, input: Tensor<B, 3>) -> Result<SparseMoeOutput<B>> {
+        self.forward_with_unit(input, None)
+    }
+
+    /// [`Self::forward`] with every routed and shared expert evaluating
+    /// `unit`, the clamped SwiGLU of gpt-oss-style experts, when it is given.
+    ///
+    /// Routing, weighting, dispatch, and the shared-expert gate are exactly
+    /// those of [`Self::forward`]; only each expert's activation changes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::forward`].
+    pub(crate) fn forward_with_unit(
+        &self,
+        input: Tensor<B, 3>,
+        unit: Option<&ClampedSwiGlu>,
+    ) -> Result<SparseMoeOutput<B>> {
         let [batch, sequence, hidden] = input.dims();
         if batch == 0 || sequence == 0 || hidden != self.hidden_size {
             return Err(Error::shape(
@@ -873,14 +921,15 @@ impl<B: Backend> SparseMoe<B> {
                 RoutedExpertPrecision::fp32_weights_round_each(residual_dtype),
             ),
         };
-        let dispatch = self.dispatch_selected_experts_with_precision(
+        let dispatch = self.dispatch_with_unit(
             flat_input.clone(),
             flat_weights.clone(),
             decision.experts.clone(),
             Some(decision.non_finite_tokens),
             precision,
+            unit,
         )?;
-        let hidden_state = match self.shared_output(flat_input)? {
+        let hidden_state = match self.shared_output(flat_input, unit)? {
             Some(shared) => dispatch.hidden_state + shared,
             None => dispatch.hidden_state,
         };
@@ -897,15 +946,25 @@ impl<B: Backend> SparseMoe<B> {
 
     /// Sums the always-active shared experts and applies the optional sigmoid gate.
     ///
-    /// Returns `None` without allocating when there are no shared experts.
-    fn shared_output(&self, flat_input: Tensor<B, 2>) -> Result<Option<Tensor<B, 2>>> {
+    /// Each shared expert evaluates `unit` when it is given, as the routed
+    /// experts do. Returns `None` without allocating when there are no shared
+    /// experts.
+    pub(crate) fn shared_output(
+        &self,
+        flat_input: Tensor<B, 2>,
+        unit: Option<&ClampedSwiGlu>,
+    ) -> Result<Option<Tensor<B, 2>>> {
+        let evaluate = |expert: &GatedFeedForward<B>| match unit {
+            Some(glu) => expert.forward_clamped(flat_input.clone(), glu),
+            None => expert.forward(flat_input.clone()),
+        };
         let mut experts = self.shared.iter();
         let Some(first) = experts.next() else {
             return Ok(None);
         };
-        let mut sum = first.forward(flat_input.clone())?;
+        let mut sum = evaluate(first)?;
         for expert in experts {
-            sum = sum + expert.forward(flat_input.clone())?;
+            sum = sum + evaluate(expert)?;
         }
         Ok(Some(match &self.shared_expert_gate {
             Some(gate) => sum * activation::sigmoid(operations::linear(flat_input, gate)?),
