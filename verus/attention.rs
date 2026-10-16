@@ -2,51 +2,68 @@
 //!
 //! Verifies, in place, the specifications attached to:
 //!
-//! - `src/attention/geometry.rs`: grouped operand and projected-layer shape
-//!   validators accept exactly the documented shapes and report the first
-//!   failed check; the head-group quotient of a validated geometry is exact;
-//!   a skipped causal mask (one query row) excludes no link;
-//!   native routing passes the backend's causal flag only for square
-//!   planes, where top-left and bottom-right alignment coincide; and mask
-//!   unions broadcast to the larger extent on every axis;
-//! - `src/attention/grouping.rs`: grouped-query head counts are exact, and
-//!   repeating K/V by expand-and-reshape makes repeated head `m` read source
-//!   head `m / g`; folding `[b, H, rows, x]` to `[b, G, g * rows, x]` keeps
-//!   every flat index and maps `(head, token)` bijectively onto
-//!   `(kv head, folded row)`, with unfolding as its inverse and the sink
-//!   selector's member index in range; differential attention's native value
-//!   pairing gives every query head its reference pair
-//!   `[V_kv(i) ; V_kv(i + H/2)]`, one shared head pairs with itself, and the
-//!   repeated pairing reads valid repeated heads `(h mod H/2, h mod H/2 +
-//!   H/2)`, whose source heads are the reference pair by definition;
-//! - `src/attention/plan.rs`: query-chunk planning against score-element
-//!   limits (exact peak size, both limits respected, the largest chunk they
-//!   admit, `ceil(Q / c)` chunks with no overflow, and each error exactly when
-//!   every earlier check passed), chunk ranges that partition the query rows,
-//!   sliding-window key ranges that are exactly the union of their rows'
-//!   visible keys, the row cap and window key bound of bounded execution
-//!   (with lemmas that every planned chunk has a window key range within the
-//!   bound and re-plans as one call), and chunk frames that preserve every
-//!   position's absolute chunk index with small, overflow-free parameters
-//!   and exist exactly when the span crosses a chunk boundary;
-//! - `src/attention/rules.rs`: the window and chunk exclusion oracles equal
-//!   their mathematical definitions; reducing a sliding window or a chunked
-//!   rule to local positions of a span excludes exactly the links the
-//!   absolute rule excludes on every local pair, with parameters below the
-//!   span, and collapses to `Unrestricted` exactly when the rule excludes
-//!   nothing in the span; the largest position value a
-//!   reduced rule forms is exact and below `2 * K - 1`; mask extents are
-//!   validated in a fixed order; and the ordinal query offset `K - Q` cannot
-//!   underflow once the alignment check passes;
-//! - `src/attention/widths.rs`: grouped-query projection widths, whose
-//!   success implies exact widths, head grouping, and representable element
-//!   counts for every projection matrix, with each error exactly when every
-//!   earlier check passed, and differential widths that add the even
-//!   query-head requirement last.
+//! - `src/attention/geometry.rs`: `operand_geometry` (grouped `[B, H, Q, d]`
+//!   query, `[B, G, K, d]` key, and `[B, G, K, d_v]` value operands with
+//!   optional mask, bias, and sinks) and `projection_fault` (a projected
+//!   layer's tensors against its configured layout) accept exactly the
+//!   documented shapes and otherwise return the first failed check in variant
+//!   order, each fault exactly when every earlier check passed; the helpers
+//!   `mismatched` and `misfit_bias` decide extent equality and `[1 or B, H,
+//!   Q, K]` bias broadcasting exactly. `HeadGeometry::groups` is the exact
+//!   quotient (`groups * G == H`, at least one for non-empty heads);
+//!   `causal_mask_needed` is exactly `causal && Q != 1`, and a skipped causal
+//!   mask (one query row) excludes no link; `native_route` passes the
+//!   backend's causal flag only for square planes, where top-left and
+//!   bottom-right alignment exclude exactly the same links; and
+//!   `broadcast_shape` takes the larger extent on every axis.
+//! - `src/attention/grouping.rs`: `head_groups` returns the exact group size
+//!   `g` (`g * G == H`) exactly when both counts are non-zero and `G` divides
+//!   `H`, and repeating K/V by expand-and-reshape makes repeated head `m` read
+//!   source head `m / g`; `folded_rows` folds `[b, H, rows, x]` to
+//!   `[b, G, g * rows, x]` keeping every flat index and maps `(head, token)`
+//!   bijectively onto `(kv head, folded row)` (`lemma_fold_index`,
+//!   `lemma_unfold_index`), with every member index below `g`, and
+//!   `unfolded_rows` is its inverse; `value_pairing` gives every query head of
+//!   differential attention its reference pair `[V_kv(i) ; V_kv(i + H/2)]`:
+//!   natively for an even key/value count (`lemma_native_pairing`), as head
+//!   zero twice for one shared head, and otherwise through valid repeated
+//!   heads `(h mod H/2, h mod H/2 + H/2)` whose source heads are the reference
+//!   pair.
+//! - `src/attention/plan.rs`: `plan_query_chunks` satisfies
+//!   `chunk_plan_contract`: an exact peak score size, both limits respected,
+//!   the largest chunk they admit, `ceil(Q / c)` chunks that cover the rows,
+//!   and each error exactly when every earlier check passed;
+//!   `query_chunk_range` returns ranges that partition the query rows in
+//!   order; `sliding_window_key_range` returns exactly the union of its rows'
+//!   visible keys, at most `rows + W - 1` wide; `capped_query_rows` is
+//!   `min(cap, Q)` and `windowed_key_bound` is `min(cap + W - 1, K)` without
+//!   overflow, and the lemmas `lemma_window_chunk_admitted` and
+//!   `lemma_planned_chunk_fits_one_call` prove that every planned chunk of
+//!   bounded execution has a window key range within that bound and re-plans
+//!   as one call; `chunk_frame` exists exactly when the span crosses a chunk
+//!   boundary and then preserves every position's absolute chunk index with
+//!   `phase < width <= span`.
+//! - `src/attention/rules.rs`: `window_excludes` and `chunk_excludes` equal
+//!   their mathematical definitions; `reduce_window` and `reduce_chunk`
+//!   reduce a sliding window or a chunked rule to local positions of a span,
+//!   excluding exactly the links the absolute rule excludes on every local
+//!   pair, with parameters below the span, and collapse to `Unrestricted`
+//!   exactly when the rule excludes nothing in the span; `position_peak` and
+//!   `aligned_position_peak` return the exact largest position value formed
+//!   (below `2 * span - 1` for a reduced rule); `mask_geometry_fault` validates
+//!   mask extents in a fixed order; `rejects_short_keys` is exactly the
+//!   `K < Q` rejection rule, and `position_source` chooses columns or
+//!   ordinals, whose offset `K - Q` cannot underflow once the alignment check
+//!   passes (`lemma_alignment_admits_ordinals`).
+//! - `src/attention/widths.rs`: `projection_widths` succeeds exactly for
+//!   non-empty, grouped layouts whose widths and projection-matrix element
+//!   counts are representable, returning the exact widths, with each error
+//!   exactly when every earlier check passed; `paired_projection_widths` adds
+//!   the even query-head requirement last.
 //!
 //! It also verifies `src/feed_forward/widths.rs`, which shares this area:
-//! feed-forward validation accepts exactly non-empty residual and
-//! intermediate widths and names the residual width first.
+//! `width_fault` accepts exactly non-empty residual and intermediate widths
+//! and names the residual width first.
 //!
 //! Not proved here: Burn tensor kernels, floating-point softmax and masking
 //! numerics, and the unannotated wrappers that call these cores; the attention

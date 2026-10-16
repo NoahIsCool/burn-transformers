@@ -1,4 +1,5 @@
-//! Verus harness for the checkpoint loader's pure layout, naming, scheduling, and packing logic.
+//! Verus harness for the checkpoint loader's pure layout, naming, scheduling,
+//! and packing logic.
 //!
 //! Verifies, in place, the specifications attached to these sources.
 //!
@@ -14,16 +15,16 @@
 //!   SafeTensors byte intervals tile the data section (soundness and
 //!   completeness): they chain from zero, each beginning where the previous
 //!   ended, and the last ends at the data-section size, so every interval lies
-//!   inside the section, nonempty intervals are disjoint, and their lengths sum
-//!   exactly to the data-section size. Each error names the first violation,
-//!   with every earlier interval proved valid;
-//! - `tensor_file_offset` computes `8 + header + begin` or reports overflow, and
-//!   `data_section` places the data section at `8 + header`, ending exactly at
-//!   the end of the file, rejecting an empty or oversized header;
+//!   inside the section, nonempty intervals are disjoint, and their lengths
+//!   sum exactly to the data-section size. Each error names the first
+//!   violation, with every earlier interval proved valid;
+//! - `tensor_file_offset` computes `8 + header + begin` or reports overflow,
+//!   and `data_section` places the data section at `8 + header`, ending
+//!   exactly at the end of the file, rejecting an empty or oversized header;
 //! - `axis_view` has a complete specification: it succeeds exactly when every
-//!   running product before and after the axis fits `u64` (a later zero cannot
-//!   hide an overflowing prefix) and the host checks pass, returning exact
-//!   `[outer, axis, inner]` products whose `outer * axis` and
+//!   running product before and after the axis fits `u64` (a later zero
+//!   cannot hide an overflowing prefix) and the host checks pass, returning
+//!   exact `[outer, axis, inner]` products whose `outer * axis` and
 //!   `outer * axis * inner` fit `usize` (exactly `slice_block`'s
 //!   preconditions) and whose product is the full shape product; each error
 //!   names the first failed check, with every earlier check proved to pass;
@@ -34,14 +35,14 @@
 //!   target shape is the source shape with the axis replaced by the length,
 //!   naming the first failed check otherwise;
 //! - `slice_block` keeps every slice and concatenation block inside its tensor
-//!   with overflow-free arithmetic, and consecutive target blocks partition the
-//!   output in order;
+//!   with overflow-free arithmetic (`slice_block_bounds`), and consecutive
+//!   target blocks partition the output in order;
 //! - `section_starts` returns prefix-sum section starts only when the split
-//!   lengths sum exactly to the axis, so every section lies inside the axis, and
-//!   reports overflow or the exact mismatching total otherwise;
+//!   lengths sum exactly to the axis, so every section lies inside the axis,
+//!   and reports overflow or the exact mismatching total otherwise;
 //! - `extend_concatenation` adds a source's axis length to the running target
-//!   shape exactly when the source agrees on every other axis and the sum fits,
-//!   and leaves the shape unchanged on either error;
+//!   shape exactly when the source agrees on every other axis and the sum
+//!   fits, and leaves the shape unchanged on either error;
 //! - `checked_host_product` and `dense_byte_len` compute host element and byte
 //!   counts or report the overflowing running product.
 //!
@@ -63,82 +64,99 @@
 //!   begin with a `.` component, and has no `..` component anywhere (the Unix
 //!   `Path::components` rule, cross-checked exhaustively by tests), so an
 //!   accepted path cannot climb out of the directory it is joined to;
-//!   `canonical_components` additionally rejects empty and `.` components, so a
-//!   provenance shard has one key;
+//!   `canonical_components` additionally rejects empty and `.` components, so
+//!   a provenance shard has one key;
 //! - `decimal_layer_between` holds exactly when a name is `prefix ++ layer ++
 //!   suffix` with a canonical decimal layer (digits, no leading zero except
 //!   `0`), with non-overlapping anchors;
-//! - `integral_lexeme_digits` accepts exactly the lexemes whose part before the
-//!   first `.` is nonempty digits and whose fraction, if any, is nonempty zeros,
-//!   returning the integer digits' length; `is_lowercase_sha256` accepts exactly
-//!   64 lowercase hexadecimal bytes, and `spell_lower_hex` writes two lowercase
-//!   digits per byte, high nibble first, that decode back to the byte (so the
-//!   spelling is injective and every SHA-256 digest the loader records passes
-//!   `is_lowercase_sha256`).
+//! - `integral_lexeme_digits` accepts exactly the lexemes whose part before
+//!   the first `.` is nonempty digits and whose fraction, if any, is nonempty
+//!   zeros, returning the integer digits' length; `is_lowercase_sha256`
+//!   accepts exactly 64 lowercase hexadecimal bytes, and `spell_lower_hex`
+//!   writes two lowercase digits per byte, high nibble first, that decode back
+//!   to the byte (so the spelling is injective and every SHA-256 digest the
+//!   loader records passes `is_lowercase_sha256`);
+//! - the byte helpers behind these rules are exact: `contains`,
+//!   `is_ascii_letter` (`A..=Z` and `a..=z`), `is_lowercase_hex_digit`,
+//!   `lowercase_hex_digit` (the digit whose value is the nibble),
+//!   `only_digits`, `only_zeros`, and `equal_at` (an in-bounds range equal to
+//!   the expected bytes).
 //!
 //! # Planning and execution
 //!
 //! - `src/checkpoint/mapping/aliases.rs`: `walk_alias_chain` always terminates
-//!   (each alias is visited at most once) and returns exactly the first event of
-//!   the deterministic chain from its start: the aliases before it are distinct
-//!   and each links onward, and the reported alias is the first one that is
-//!   revisited (a cycle), owned by a primary target, or dangling, so every
-//!   resolved alias reaches its storage owner along an acyclic chain; the
-//!   caller's visited buffer is all clear again on return (the walk marks
-//!   exactly its distinct prefix and clears exactly those marks), so one
-//!   buffer serves every walk of a resolution pass;
+//!   (each alias is visited at most once) and returns exactly the first event
+//!   of the deterministic chain from its start: the aliases before it are
+//!   distinct and each links onward, and the reported alias is the first one
+//!   that is revisited (a cycle), owned by a primary target, or dangling, so
+//!   every resolved alias reaches its storage owner along an acyclic chain;
+//!   the caller's visited buffer is all clear again on return
+//!   (`mark_alias_chain` marks exactly the walk's distinct prefix and
+//!   `clear_alias_chain` clears exactly those marks), so one buffer serves
+//!   every walk of a resolution pass;
 //! - `src/checkpoint/mapping/ledger.rs`: the target claim ledger starts with
-//!   every expected target open; `claim` succeeds exactly on an open target and
-//!   changes only that entry, so a primary operation and an alias (or two of
-//!   either) can never both own one target, whichever is declared first;
-//!   `resolve` turns exactly a declared alias into a resolved one; and
-//!   `is_produced` holds exactly for primaries and resolved aliases, the
-//!   complement being the targets reported missing;
+//!   every expected target open (`open_ledger`); `claim` succeeds exactly on
+//!   an open target and changes only that entry, so a primary operation and
+//!   an alias (or two of either) can never both own one target, whichever is
+//!   declared first; `resolve` turns exactly a declared alias into a resolved
+//!   one; and `is_produced` holds exactly for primaries and resolved aliases,
+//!   the complement being the targets reported missing;
 //! - `src/checkpoint/runtime/schedule.rs`: `execution_group_indices` returns
-//!   exactly the group of each leader (a classless target, or the first target
-//!   of its shared-source class) in index order, and those groups partition the
-//!   plan: every target lies in exactly one group, each group is nonempty and
-//!   strictly increasing, and a group's targets share one class, so the
-//!   executor installs every primary target exactly once;
-//! - `src/checkpoint/runtime/permutation.rs`: `probe_dimension` lengths strictly
-//!   increase with the axis (so probe axes are pairwise distinct), and for
-//!   distinct input lengths `permutation_of` succeeds exactly when the mapped
-//!   shape is a rearrangement of the probe, recovering a bijection `axes` with
-//!   `output[k] == input[axes[k]]`;
+//!   exactly the group of each leader (a classless target, or the first
+//!   target of its shared-source class) in index order, and those groups
+//!   partition the plan (`lemma_partition`): every target lies in exactly one
+//!   group, each group is nonempty and strictly increasing, and a group's
+//!   targets share one class, so the executor installs every primary target
+//!   exactly once;
+//! - `src/checkpoint/runtime/permutation.rs`: `probe_dimension` lengths
+//!   strictly increase with the axis (so probe axes are pairwise distinct),
+//!   and for distinct input lengths `permutation_of` succeeds exactly when the
+//!   mapped shape is a rearrangement of the probe, recovering a bijection
+//!   `axes` with `output[k] == input[axes[k]]`; its helper `position` returns
+//!   the first index of a value, `None` exactly when the value does not occur;
 //! - `src/checkpoint/runtime/rounding.rs`: `round_shifted` returns the integer
 //!   nearest `significand / 2^shift` with ties to even (within half a unit, an
-//!   exact tie gives an even result), bounded by `2^(53 - shift)`, for every
-//!   shift the binary64-to-16-bit narrowing uses.
+//!   exact tie gives an even result), bounded by `2^(53 - shift)`
+//!   (`lemma_round_shifted_bounds`), for every shift the binary64-to-16-bit
+//!   narrowing uses.
 //!
 //! # Quantized storage
 //!
-//! - `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed lengths (`n` and
-//!   `ceil(n / 2)`, never above `n`), the two's-complement nibble and byte
-//!   encodings and their inverses, nibble joining and splitting, and code reads
-//!   that return exactly the stored code (Q8 byte `i`; Q4 low nibble of byte
-//!   `i / 2` for even `i`, high nibble for odd `i`) and `None` exactly past the
-//!   end; `push_code` preserves the packing invariant (a buffer holding codes
-//!   `0..i` becomes one holding `0..=i`, every earlier code unchanged, the new
-//!   code readable as pushed, and an unused Q4 high nibble kept zero), so
-//!   packing then reading is the identity; `first_code_violation` returns
-//!   `None` exactly for canonical buffers and otherwise names the first short
-//!   read, reserved code, or dirty Q4 padding;
-//! - `src/checkpoint/division.rs` (shared with `verus/perf.rs`): exact
-//!   ceilings in `u64` and `usize`, each the least `q` with `n <= q · d`,
-//!   never above `n` and positive for positive `n`;
-//! - `src/checkpoint/quantization/counts.rs`: persisted group (`⌈n / G⌉`), packed-byte, and scale-byte counts,
-//!   with the scale length proved never to overflow for `G >= 32`; and the Burn
-//!   block count `rows · (columns / G)`, proved equal to the flat group count
-//!   `⌈rows · columns / G⌉` whenever `G` divides the width; `group_index` places
-//!   each element in its group and below the group count, so dequantization
-//!   never indexes past a validated scale vector; `payload_split` accepts a
-//!   stored payload exactly when its packed and scale counts fit the host and
-//!   sum to its length, so the packed prefix and the scale suffix tile it;
-//! - `src/checkpoint/quantization/staging.rs`: `bounded_add` admits exactly the
-//!   sums within a limit (so a running total kept below its limit stays below
-//!   it, with no wraparound), and `admit_tensor` admits a tensor exactly when
-//!   the new count, its payload, and the new staged total are within their
-//!   limits, naming the first breached limit otherwise; `first_limit_violation`
+//! - `src/checkpoint/quantization/packing.rs`: Q8/Q4 packed lengths
+//!   (`packed_len`: `n` and `ceil(n / 2)`, never above `n`), the
+//!   two's-complement nibble and byte encodings and their inverses
+//!   (`encode_nibble`, `decode_nibble`, `encode_byte`, `decode_byte`), nibble
+//!   joining and splitting (`join_nibbles`, `split_nibbles`), the reserved
+//!   most-negative code (`reserved_code`: `-128` or `-8`), and code reads
+//!   (`read_code`) that return exactly the stored code (Q8 byte `i`; Q4 low
+//!   nibble of byte `i / 2` for even `i`, high nibble for odd `i`) and `None`
+//!   exactly past the end; `push_code` preserves the packing invariant (a
+//!   buffer holding codes `0..i` becomes one holding `0..=i`, every earlier
+//!   code unchanged, the new code readable as pushed, and an unused Q4 high
+//!   nibble kept zero), so packing then reading is the identity;
+//!   `first_code_violation` returns `None` exactly for canonical buffers and
+//!   otherwise names the first short read, reserved code, or dirty Q4 padding;
+//! - `src/checkpoint/division.rs` (shared with `verus/perf.rs`):
+//!   `ceil_div_u64` and `ceil_div_usize` return the exact ceiling without
+//!   forming `n + d - 1`: the least `q` with `n <= q · d`, never above `n` and
+//!   positive for positive `n` (`lemma_ceiling_bounds`);
+//! - `src/checkpoint/quantization/counts.rs`: `wire_counts` derives the
+//!   persisted group (`⌈n / G⌉`), packed-byte, and scale-byte counts exactly,
+//!   with the scale length proved never to overflow for `G >= 32`
+//!   (`lemma_small_group_count`); `block_scale_count` is the Burn block count
+//!   `rows · (columns / G)` or `None` on overflow, proved equal to the flat
+//!   group count `⌈rows · columns / G⌉` whenever `G` divides the width;
+//!   `group_index` places each element in its group and below the group
+//!   count, so dequantization never indexes past a validated scale vector;
+//!   `payload_split` accepts a stored payload exactly when its packed and
+//!   scale counts fit the host and sum to its length, so the packed prefix and
+//!   the scale suffix tile it;
+//! - `src/checkpoint/quantization/staging.rs`: `bounded_add` admits exactly
+//!   the sums within a limit (so a running total kept below its limit stays
+//!   below it, with no wraparound), distinguishing `u64` overflow from an
+//!   exceeded limit; `admit_tensor` admits a tensor exactly when the new
+//!   count, its payload, and the new staged total are within their limits,
+//!   naming the first breached limit otherwise; `first_limit_violation`
 //!   accepts session limits exactly when each lies in `[1, cap]` and otherwise
 //!   names the first zero or over-cap limit, every earlier one admissible.
 //!

@@ -35,9 +35,12 @@
 //!   exactly when declared but not requested, and covers nothing otherwise.
 //! - `src/models/auto/load/report.rs`: automatic generation defaults report a
 //!   positive `min_new_tokens` exactly when the consumer ignores it or applies
-//!   a smaller value (for causal loads, exactly when it exceeds
-//!   `max_new_tokens`), report a positive `no_repeat_ngram_size` exactly when
-//!   it is not applied, and accept at most one padding token.
+//!   a smaller value (`reported_min_new_tokens`; for causal loads, exactly
+//!   when it exceeds `max_new_tokens`, by `lemma_clamped_minimum_reported`),
+//!   report a positive `no_repeat_ngram_size` exactly when it is not applied
+//!   (`reported_no_repeat_ngram`), and accept at most one padding token
+//!   (`single_token`: none for an empty list, the token for one, an error
+//!   for two or more).
 //!
 //! See `verus/README.md` for the method, toolchain, and command. String
 //! parsing of tensor names, `format!`-built inventories, Burn tensor

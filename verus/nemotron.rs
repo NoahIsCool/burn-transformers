@@ -9,9 +9,10 @@
 //!   its documented equation. The compact width is the largest row count,
 //!   the scatter inverts the gather on valid columns, and a plan is refused
 //!   exactly for malformed columns or unrepresentable extents.
-//! - `CompactPlan` accessors: `is_dense` and `is_identity` are exactly the
-//!   premises under which the plan's maps are proved to be identities, so
-//!   the tensor wrappers skip only identity gathers.
+//! - `CompactPlan` accessors: `batch` and `tokens` return `B` and `T`, and
+//!   `is_dense` (`T = B * N`) and `is_identity` (`N = S`, all valid) are
+//!   exactly the premises under which the plan's maps are proved to be
+//!   identities, so the tensor wrappers skip only identity gathers.
 //! - `slot_position` and `query_positions`: the exact absolute query
 //!   position of every compact slot. Padded slots repeat a row's last
 //!   readable position, so no query of a row with history loses every key,
@@ -46,8 +47,10 @@
 //!   request more experts than exist.
 //!
 //! The planning file reuses the shared strictly-increasing check, so the
-//! shared planning module is included at its crate path. See
-//! `verus/README.md` for the method, toolchain, and command.
+//! shared planning module `src/models/shared/plan.rs` is included at its
+//! crate path and re-verified here; its own functions are documented in
+//! `verus/models.rs`. See `verus/README.md` for the method, toolchain, and
+//! command.
 //!
 //! Burn tensor programs driven by these plans (index selects, cache steps,
 //! and attention masks) remain covered by the Rust tests in

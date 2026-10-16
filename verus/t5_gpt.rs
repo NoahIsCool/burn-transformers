@@ -17,7 +17,10 @@
 //!   above the block, too few columns, an unsorted or out-of-range row, or
 //!   an unrepresentable extent) holds in both directions.
 //! - `padded_slots` and `has_padded_slot`, and the `BatchedRows` methods over
-//!   them: exactly the slots `i >= n_b` are padding.
+//!   them (`BatchedRows::padded_slots`, `has_padded_slots`, `is_empty`):
+//!   exactly the slots `i >= n_b` are padding, and `is_empty` holds exactly
+//!   when the block width `Q` is zero (for a `plan_rows` plan, exactly when
+//!   no row has a new token).
 //! - `row_positions`: every block slot's causal visibility and relative-bias
 //!   query position equal their documented formulas (`L + i` for new tokens,
 //!   the row's last new position for padding, `L - 1` for inactive rows), so
@@ -34,32 +37,36 @@
 //!   beam search leave T5's encoder binding and cross-attention keys in place;
 //!   `first_out_of_range` returns the first reorder index outside the batch.
 //!
-//! It also verifies `src/models/t5/buckets.rs`: the configuration's
-//! relative-bucket geometry check accepts exactly layouts with an even count
-//! of at least four buckets whose exact-distance region (`B / 4` for the
-//! encoder, `B / 2` for a causal decoder) lies below `max_distance`, naming
-//! each rejection's cause, and the explicit-position bias table has radius
-//! `min(bound, max_distance)`. A lemma states the index arithmetic of the
-//! device's clamped lookup (every clamped index lies inside the table's
-//! `2r + 1` entries); the device code itself is covered by Rust tests.
-//! `bias_owners` gives every encoder layer the first layer with its head
-//! count as relative-bias owner, so two layers share a learned table exactly
-//! when their head counts agree, and `positions_within` accepts staged
-//! positions exactly when they lie in the evaluated context.
+//! It also verifies `src/models/t5/buckets.rs`: `bucket_geometry` accepts
+//! exactly layouts with an even count of at least four buckets whose
+//! exact-distance region (`B / 4` for the encoder, `B / 2` for a causal
+//! decoder) lies below `max_distance`, naming each rejection's cause, and
+//! `displacement_table` gives the explicit-position bias table radius
+//! `min(bound, max_distance)` (`None` exactly when `r + 1` overflows).
+//! `lemma_clamped_index_in_table` states the index arithmetic of the device's
+//! clamped lookup (every clamped index lies inside the table's `2r + 1`
+//! entries); the device code itself is covered by Rust tests. `bias_owners`
+//! gives every encoder layer the first layer with its head count as
+//! relative-bias owner, so two layers share a learned table exactly when
+//! their head counts agree, and `positions_within` accepts staged positions
+//! exactly when they lie in the evaluated context.
 //!
-//! For the GPT families it verifies `src/models/gpt2/extents.rs` (the first
-//! extent outside `1..=i32::MAX`, GPT-2's MLP width rule `n_inner` or `4 d`,
-//! and the checked parameter-size product chains of both configurations)
-//! and `src/models/gpt_neox/widths.rs` (an edited attention layer's
-//! projection widths are exact and every invalid geometry is named).
+//! For the GPT families it verifies `src/models/gpt2/extents.rs`
+//! (`first_invalid_extent`: the first extent outside `1..=i32::MAX`;
+//! `intermediate_width`: GPT-2's MLP width rule `n_inner` or `4 d`; and
+//! `product_fits`: the checked parameter-size product chains of both
+//! configurations, exact even when a later factor is zero) and
+//! `src/models/gpt_neox/widths.rs` (`layer_widths`: an edited attention
+//! layer's projection widths are exact and every invalid geometry is named).
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
-//! The planning files are dependency-free, so each is included as a single module.
-//! The Burn tensor programs driven by these plans (token packing, state
-//! unpacking, write-ahead cache appends, masks, and the relative bias) remain
-//! covered by the Rust tests in `src/models/t5/model/*_tests.rs`, including
-//! parity against the per-row reference algorithm and the stateless forward.
+//! The planning files are dependency-free, so each is included as a single
+//! module. The Burn tensor programs driven by these plans (token packing,
+//! state unpacking, write-ahead cache appends, masks, and the relative bias)
+//! remain covered by the Rust tests in `src/models/t5/model/*_tests.rs`,
+//! including parity against the per-row reference algorithm and the stateless
+//! forward.
 
 #![allow(unused)]
 // Loop invariants are attributes on `while` statements, which Verus parses as
