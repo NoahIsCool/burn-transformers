@@ -76,6 +76,17 @@ fn scanner_helpers_match_reference_offsets() {
     assert!(!is_ascii_space(0x0b));
 }
 
+/// Identifiers are ASCII letters, digits, and `_`, not starting with a digit.
+#[test]
+fn identifiers_are_ascii_names() {
+    for name in ["_", "a", "_a1", "Loop", "x_Y_9"] {
+        assert!(is_identifier(name.as_bytes()), "{name}");
+    }
+    for name in ["", "1a", "a b", "é", "a-b", "a.b"] {
+        assert!(!is_identifier(name.as_bytes()), "{name}");
+    }
+}
+
 /// Shortening never splits a character.
 #[test]
 fn boundaries_never_split_characters() {

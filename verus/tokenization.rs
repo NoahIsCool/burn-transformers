@@ -74,7 +74,9 @@
 //!   the source, so the rewrite loop makes progress and slices in bounds;
 //!   `marker_widths` never exceeds the tag body, and `char_boundary_at_most`
 //!   returns the largest character boundary at or below its limit (against
-//!   vstd's UTF-8 model of `str`).
+//!   vstd's UTF-8 model of `str`); `is_identifier`, which picks the namespace
+//!   attributes the sandbox clears to break reference cycles, accepts exactly
+//!   the ASCII identifiers.
 //!
 //! and to `src/tokenization/chat_template/guard/lexer.rs`, the operator
 //! guard's tag-body lexer:

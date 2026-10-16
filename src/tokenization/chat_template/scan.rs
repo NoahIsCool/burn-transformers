@@ -36,7 +36,8 @@
 //!   every slice it takes is in bounds;
 //! - [`marker_widths`] never measures more than the tag body holds;
 //! - [`char_boundary_at_most`] returns the largest character boundary at or
-//!   below its limit.
+//!   below its limit;
+//! - [`is_identifier`] accepts exactly the ASCII identifiers.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -132,6 +133,16 @@ pub(crate) open spec fn is_tag_space(byte: u8) -> bool {
 /// A whitespace-control marker, `-` or `+`.
 pub(crate) open spec fn is_marker(byte: u8) -> bool {
     byte == 45 || byte == 43
+}
+
+/// An ASCII letter.
+pub(crate) open spec fn is_letter(byte: u8) -> bool {
+    (65 <= byte <= 90) || (97 <= byte <= 122)
+}
+
+/// An ASCII letter, digit, or `_`.
+pub(crate) open spec fn is_identifier_byte(byte: u8) -> bool {
+    is_letter(byte) || (48 <= byte <= 57) || byte == 95
 }
 
 /// Bytes `from..to` are all tag whitespace.
@@ -616,6 +627,49 @@ pub(crate) fn marker_widths(inner: &[u8]) -> (usize, usize) {
         0
     };
     (open, close)
+}
+
+/// Whether `name` is an ASCII identifier MiniJinja's lexer reads as one name.
+///
+/// That is a letter or `_` followed by letters, digits, and `_`. Verified:
+/// exactly when the bytes are non-empty, the first is a letter or `_`, and
+/// every byte is a letter, digit, or `_`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(identifier =>
+    ensures
+        identifier == (name.len() > 0 && (is_letter(name@[0]) || name@[0] == 95) && forall|i: int|
+            0 <= i < name.len() ==> is_identifier_byte(#[trigger] name@[i])),
+))]
+// Verus has no specification for `u8::is_ascii_alphanumeric` or `RangeInclusive::contains`.
+#[allow(clippy::manual_is_ascii_check, clippy::manual_range_contains)]
+pub(crate) fn is_identifier(name: &[u8]) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first = name[0];
+    if !(first == b'_' || (b'a' <= first && first <= b'z') || (b'A' <= first && first <= b'Z')) {
+        return false;
+    }
+    let mut index = 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= index <= name.len(),
+            is_letter(name@[0]) || name@[0] == 95,
+            forall|i: int| 0 <= i < index ==> is_identifier_byte(#[trigger] name@[i]),
+        decreases name.len() - index,
+    ))]
+    while index < name.len() {
+        let byte = name[index];
+        if !(byte == b'_'
+            || (b'a' <= byte && byte <= b'z')
+            || (b'A' <= byte && byte <= b'Z')
+            || (b'0' <= byte && byte <= b'9'))
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// The largest character boundary of `text` at or below `limit`.

@@ -1185,12 +1185,10 @@ impl CleanupPlan {
 }
 
 /// Whether `name` is an ASCII identifier MiniJinja's lexer reads as one name.
+///
+/// The verified [`super::scan::is_identifier`] on its bytes.
 fn is_identifier(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes
-        .next()
-        .is_some_and(|first| first == b'_' || first.is_ascii_alphabetic())
-        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    super::scan::is_identifier(name.as_bytes())
 }
 
 /// Clears a render's namespaces when dropped, including while a panic unwinds.
