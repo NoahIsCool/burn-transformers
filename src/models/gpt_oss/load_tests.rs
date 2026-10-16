@@ -531,6 +531,35 @@ fn sink_rejects_targets_the_graph_does_not_own() {
         matches!(error, GptOssLoadError::ExpertShape { .. }),
         "{error}"
     );
+    // A stacked payload whose bytes disagree with its shape is rejected, never read.
+    let (count, hidden, width) = {
+        let experts = &model.model.layers[0].mlp.experts;
+        let [hidden, width] = experts[0].gate_proj.weight.lazy_shape().dims();
+        (experts.len(), hidden, width)
+    };
+    for (target, shape) in [
+        (
+            "model.layers.0.mlp.experts.gate_up_proj",
+            vec![count, hidden, 2 * width],
+        ),
+        (
+            "model.layers.0.mlp.experts.down_proj",
+            vec![count, width, hidden],
+        ),
+    ] {
+        let short = TensorData::from_bytes_vec(vec![0; 4], shape, burn::tensor::DType::F32);
+        let error = model.write_tensor(target, short).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GptOssLoadError::Parameter {
+                    source: ParameterInstallError::PayloadLength { actual: 4, .. },
+                    ..
+                }
+            ),
+            "{target}: {error}"
+        );
+    }
     // A wrongly ranked parameter reports the install failure.
     let error = model
         .write_tensor(

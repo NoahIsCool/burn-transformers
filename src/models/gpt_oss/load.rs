@@ -16,8 +16,9 @@
 //! ```
 //!
 //! in Burn's row layout (`[in, out]`, the reference's own orientation), so a
-//! dense expert installs by one contiguous copy and a gate/up split by one
-//! strided pass whose offsets are the Verus-verified `interleaved_offset`.
+//! dense expert installs by one contiguous copy (`expert_slab`) and a gate/up
+//! split by one strided pass (`deinterleave`), both Verus-verified to copy
+//! exactly the reference's bytes from a payload whose length is checked first.
 
 use std::path::Path;
 
@@ -39,7 +40,7 @@ use crate::{
 
 use super::{
     GptOssCheckpointOptions, GptOssDecoderLayer, GptOssForCausalLm,
-    plan::{GluHalf, interleaved_offset},
+    plan::{GluHalf, deinterleave, expert_slab, stacked_layout},
 };
 
 /// Failure while installing one validated tensor into the graph.
@@ -309,6 +310,35 @@ fn stacked_extents(
     })
 }
 
+/// Checks that a stacked `[E, rows, columns]` payload holds exactly its scalars' bytes.
+///
+/// Returns one expert's byte span. The verified splitters read expert slabs
+/// and interleaved columns inside a payload of exactly
+/// `E · rows · columns · element` bytes, which every validated tensor has;
+/// anything else is reported as a payload error rather than read.
+fn stacked_payload(
+    target: &str,
+    bytes: &[u8],
+    experts: usize,
+    rows: usize,
+    columns: usize,
+    element: usize,
+) -> Result<usize, GptOssLoadError> {
+    let parameter = |source| GptOssLoadError::Parameter {
+        target: target.into(),
+        source,
+    };
+    let (span, total) = stacked_layout(experts, rows, columns, element)
+        .ok_or_else(|| parameter(ParameterInstallError::PayloadSizeOverflow))?;
+    if bytes.len() != total {
+        return Err(parameter(ParameterInstallError::PayloadLength {
+            expected: total,
+            actual: bytes.len(),
+        }));
+    }
+    Ok(span)
+}
+
 /// Splits a stacked, column-interleaved `gate_up_proj` (or its bias) into every expert.
 ///
 /// The weight is `[E, d, 2f]` and the bias `[E, 2f]`; even columns go to
@@ -333,18 +363,10 @@ fn install_gate_up<B: Backend>(
     let width = columns / 2;
     let element = data.dtype.size();
     let bytes = data.as_bytes();
+    stacked_payload(target, bytes, count, rows, 2 * width, element)?;
     for (index, expert) in experts.iter_mut().enumerate() {
-        let [gate, up] = [GluHalf::Gate, GluHalf::Up].map(|half| {
-            let mut out = Vec::with_capacity(rows * width * element);
-            for row in 0..rows {
-                // Output 0 of this half; output j sits 2j elements further.
-                let start = interleaved_offset(count, rows, width, index, row, 0, half) * element;
-                for scalar in bytes[start..].chunks_exact(element).step_by(2).take(width) {
-                    out.extend_from_slice(scalar);
-                }
-            }
-            out
-        });
+        let [gate, up] = [GluHalf::Gate, GluHalf::Up]
+            .map(|half| deinterleave(bytes, count, rows, width, element, index, half));
         let shape: Vec<usize> = if bias { vec![width] } else { vec![rows, width] };
         let gate = TensorData::from_bytes_vec(gate, shape.clone(), data.dtype);
         let up = TensorData::from_bytes_vec(up, shape, data.dtype);
@@ -375,13 +397,14 @@ fn install_down<B: Backend>(
     } else {
         vec![width, hidden]
     };
-    let (rows, columns) = stacked_extents(target, &data, experts.len(), &expected)?;
+    let count = experts.len();
+    let (rows, columns) = stacked_extents(target, &data, count, &expected)?;
     let element = data.dtype.size();
-    let span = rows * columns * element;
     let bytes = data.as_bytes();
+    let span = stacked_payload(target, bytes, count, rows, columns, element)?;
     for (index, expert) in experts.iter_mut().enumerate() {
-        let slice = bytes[index * span..(index + 1) * span].to_vec();
-        let tensor = TensorData::from_bytes_vec(slice, expected.clone(), data.dtype);
+        let slab = expert_slab(bytes, count, span, index);
+        let tensor = TensorData::from_bytes_vec(slab, expected.clone(), data.dtype);
         if bias {
             install_bias(target, &mut expert.down_proj, tensor)?;
         } else {

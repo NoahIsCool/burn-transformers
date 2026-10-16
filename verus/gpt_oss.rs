@@ -22,20 +22,37 @@
 //! It also verifies `src/models/gpt_oss/plan.rs`:
 //!
 //! - `default_layer_slides` equals the reference's default schedule
-//!   `bool((l + 1) % 2)` without overflow;
-//! - `cache_slots` numbers every layer by the count of earlier layers of its
-//!   KV group (full storage or sliding ring), so slots are dense and in range
-//!   and the two group sizes partition the layers;
+//!   `bool((l + 1) % 2)` without overflow, and `default_schedule` applies it
+//!   to every layer: consecutive layers alternate from a sliding layer and
+//!   exactly `⌊L / 2⌋` layers are full-attention layers;
+//! - `ring_assignment` activates the ring exactly for a shared window
+//!   `0 < W < capacity` and then puts exactly the sliding layers in it;
+//!   `cache_slots` numbers each KV group's layers by an order-preserving
+//!   bijection onto `0..size`, and the two sizes partition the layers;
+//!   `group_indices` numbers the allocated groups densely, full storage
+//!   first; `truncation_leaves_bytes` is exactly "some row is shortened to a
+//!   nonzero length", the condition that clears clean tails;
+//! - `fused_expert_elements` returns `2f · d · E` exactly when every partial
+//!   product fits `usize` (the configuration's overflow check);
 //! - `interleaved_offset` locates gate output `j` at column `2j` and up output
 //!   `j` at column `2j + 1` of a row of the stacked `gate_up_proj`, provably
-//!   inside the `[experts, rows, 2 · width]` tensor.
+//!   inside the `[experts, rows, 2 · width]` tensor;
+//! - `stacked_layout` computes one expert's and the whole tensor's byte
+//!   counts exactly or reports overflow; `expert_slab` copies exactly bytes
+//!   `[e · span, (e + 1) · span)`; and `deinterleave` copies, for every
+//!   output byte, exactly the matching byte of column `2j` (gate) or
+//!   `2j + 1` (up) of the stacked row, with every read in bounds, so the
+//!   loader's split equals the reference's `gate_up[e, :, ::2]` and
+//!   `gate_up[e, :, 1::2]` byte for byte.
 //!
 //! The table-lookup kernel that applies these offsets, its thread partition,
 //! and the dtype encoders remain covered by `src/checkpoint/mxfp4_tests.rs`,
 //! which checks every `(scale, code)` pair and the pinned checkpoint's
-//! expert tensors bit for bit against Transformers; the loader's expert
-//! split and the cache plans are covered by the gpt-oss load and decode
-//! tests.
+//! expert tensors bit for bit against Transformers. The loader's payload
+//! check that establishes `deinterleave`'s and `expert_slab`'s length
+//! precondition, the mapping of `AttentionConnectivity` to sliding flags,
+//! and the cache specifications built from the plans are covered by the
+//! gpt-oss load and decode tests.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 

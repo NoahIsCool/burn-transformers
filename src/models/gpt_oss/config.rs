@@ -156,9 +156,10 @@ impl GptOssConfig {
     /// i.e. for even `l`, and `full_attention` otherwise.
     #[must_use]
     pub fn default_layer_types(layers: usize) -> Vec<String> {
-        (0..layers)
-            .map(|layer| {
-                if super::plan::default_layer_slides(layer) {
+        super::plan::default_schedule(layers)
+            .into_iter()
+            .map(|sliding| {
+                if sliding {
                     "sliding_attention".into()
                 } else {
                     "full_attention".into()

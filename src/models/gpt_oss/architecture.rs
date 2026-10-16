@@ -48,6 +48,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::config::{FAMILY, GptOssConfig, MODEL_TYPE, SWIGLU_LIMIT};
+use super::plan::fused_expert_elements;
 use crate::{
     attention::{AttentionConnectivity, GroupedQueryAttentionConfig, ProjectionBias},
     feed_forward::ClampedSwiGlu,
@@ -253,12 +254,12 @@ fn validate_geometry(config: &GptOssConfig) -> Result<(), ConfigError> {
         "num_key_value_heads",
         config.num_key_value_heads,
     )?;
-    if config
-        .intermediate_size
-        .checked_mul(2)
-        .and_then(|width| width.checked_mul(config.hidden_size))
-        .and_then(|matrix| matrix.checked_mul(config.num_local_experts))
-        .is_none()
+    if fused_expert_elements(
+        config.intermediate_size,
+        config.hidden_size,
+        config.num_local_experts,
+    )
+    .is_none()
     {
         return Err(ConfigError::new(
             FAMILY,
