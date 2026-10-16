@@ -13,8 +13,8 @@
 //!   rollback, truncate, reorder, reset) preserves `committed <= working <=
 //!   capacity`, computes its documented formula without overflow, and is
 //!   rejected exactly when its rule is violated, naming the first offending
-//!   row or the blocking transaction state. Proposal lengths and remaining
-//!   capacities are exact.
+//!   row or the blocking transaction state. Proposal lengths, remaining
+//!   capacities, per-row transitions, and appended ranges are exact.
 //! * `src/cache/retention.rs`: ring and recurrent rewind predicates, proved
 //!   sound and complete against the ring eviction model (row scans name the
 //!   lowest offending row), the working window

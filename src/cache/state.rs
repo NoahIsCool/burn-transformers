@@ -11,53 +11,10 @@
 
 use core::fmt;
 
-use super::lengths::{LengthLedger, LengthViolation};
+pub use super::lengths::LengthTransition;
+use super::lengths::{LengthLedger, LengthViolation, length_transitions};
 use super::transaction::TransactionToken;
 use super::{CacheConfig, TransactionError};
-
-/// A checked before/after description of one sequence-length mutation.
-///
-/// Tensor-backed caches can use this metadata to derive the exact physical
-/// write or invalidation range without duplicating overflow checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LengthTransition {
-    /// Batch-row index affected by this transition.
-    sequence: usize,
-    /// Absolute token count before the transition.
-    previous: usize,
-    /// Absolute token count after the transition.
-    current: usize,
-}
-
-impl LengthTransition {
-    /// Returns the affected sequence index.
-    #[must_use]
-    pub const fn sequence(self) -> usize {
-        self.sequence
-    }
-
-    /// Returns the logical length before the mutation.
-    #[must_use]
-    pub const fn previous(self) -> usize {
-        self.previous
-    }
-
-    /// Returns the logical length after the mutation.
-    #[must_use]
-    pub const fn current(self) -> usize {
-        self.current
-    }
-
-    /// Returns the appended absolute token range.
-    ///
-    /// This method is intended for transitions returned by [`SequenceLengths::advance`]
-    /// or [`SequenceLengths::advance_all`]. A truncating transition yields an empty
-    /// range at its new endpoint.
-    #[must_use]
-    pub fn appended_range(self) -> core::ops::Range<usize> {
-        self.previous.min(self.current)..self.current
-    }
-}
 
 /// Backend-independent lifecycle metadata for an autoregressive cache.
 ///
@@ -213,11 +170,7 @@ impl SequenceLengths {
             .map_err(|violation| length_error(violation, "advance"))?;
         let current = next.working()[sequence];
         self.ledger = next;
-        Ok(LengthTransition {
-            sequence,
-            previous,
-            current,
-        })
+        Ok(LengthTransition::new(sequence, previous, current))
     }
 
     /// Atomically advances every sequence by its corresponding token count.
@@ -265,11 +218,7 @@ impl SequenceLengths {
         let mut requested = self.ledger.committed().to_vec();
         requested[sequence] = new_length;
         self.ledger = self.plan_truncate(&requested)?;
-        Ok(LengthTransition {
-            sequence,
-            previous,
-            current: new_length,
-        })
+        Ok(LengthTransition::new(sequence, previous, new_length))
     }
 
     /// Atomically truncates all sequences to corresponding earlier lengths.
@@ -408,18 +357,9 @@ impl SequenceLengths {
     }
 }
 
-/// Describes the row-wise change from `previous` to `current` lengths.
+/// Describes the row-wise change from `previous` to `current` lengths (the verified `length_transitions`).
 fn transitions(previous: &[usize], current: &[usize]) -> Vec<LengthTransition> {
-    previous
-        .iter()
-        .zip(current)
-        .enumerate()
-        .map(|(sequence, (&previous, &current))| LengthTransition {
-            sequence,
-            previous,
-            current,
-        })
-        .collect()
+    length_transitions(previous, current)
 }
 
 /// Maps a verified-ledger violation to the public metadata error.

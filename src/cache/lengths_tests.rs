@@ -319,6 +319,25 @@ fn operation(rows: usize) -> impl Strategy<Value = Operation> {
     ]
 }
 
+/// Transitions describe each zipped row, and appended ranges are empty for truncation.
+#[test]
+fn transitions_describe_rows_and_appended_ranges() {
+    let transitions = length_transitions(&[2, 5, 7], &[4, 3]);
+    assert_eq!(transitions.len(), 2);
+    assert_eq!(
+        (
+            transitions[0].sequence(),
+            transitions[0].previous(),
+            transitions[0].current()
+        ),
+        (0, 2, 4)
+    );
+    assert_eq!(transitions[0].appended_range(), 2..4);
+    assert_eq!(transitions[1].sequence(), 1);
+    assert_eq!(transitions[1].appended_range(), 3..3);
+    assert!(length_transitions(&[], &[1]).is_empty());
+}
+
 proptest! {
     /// Random lifecycles agree with the naive model and keep `C <= W <= capacity`.
     #[test]

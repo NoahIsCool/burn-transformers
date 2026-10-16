@@ -42,6 +42,148 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
+/// A checked before/after description of one sequence-length mutation.
+///
+/// Tensor-backed caches can use this metadata to derive the exact physical
+/// write or invalidation range without duplicating overflow checks.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LengthTransition {
+    /// Batch-row index affected by this transition.
+    sequence: usize,
+    /// Absolute token count before the transition.
+    previous: usize,
+    /// Absolute token count after the transition.
+    current: usize,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+impl LengthTransition {
+    /// The affected row.
+    pub closed spec fn sequence_view(self) -> usize {
+        self.sequence
+    }
+
+    /// The row's length before the mutation.
+    pub closed spec fn previous_view(self) -> usize {
+        self.previous
+    }
+
+    /// The row's length after the mutation.
+    pub closed spec fn current_view(self) -> usize {
+        self.current
+    }
+}
+
+} // verus!
+
+impl LengthTransition {
+    /// Describes row `sequence` changing from `previous` to `current` tokens.
+    pub(crate) const fn new(sequence: usize, previous: usize, current: usize) -> Self {
+        Self {
+            sequence,
+            previous,
+            current,
+        }
+    }
+
+    /// Returns the affected sequence index.
+    #[must_use]
+    pub const fn sequence(self) -> usize {
+        self.sequence
+    }
+
+    /// Returns the logical length before the mutation.
+    #[must_use]
+    pub const fn previous(self) -> usize {
+        self.previous
+    }
+
+    /// Returns the logical length after the mutation.
+    #[must_use]
+    pub const fn current(self) -> usize {
+        self.current
+    }
+
+    /// Returns the appended absolute token range.
+    ///
+    /// This method is intended for transitions returned by [`SequenceLengths::advance`]
+    /// or [`SequenceLengths::advance_all`]. A truncating transition yields an empty
+    /// range at its new endpoint.
+    ///
+    /// Verified: the range is `[min(previous, current), current)`, so an advance
+    /// yields exactly its appended positions and a truncation is empty.
+    ///
+    /// [`SequenceLengths::advance`]: super::SequenceLengths::advance
+    /// [`SequenceLengths::advance_all`]: super::SequenceLengths::advance_all
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(range =>
+        ensures
+            range.end == self.current_view(),
+            range.start == if self.previous_view() <= self.current_view() {
+                self.previous_view()
+            } else {
+                self.current_view()
+            },
+    ))]
+    #[must_use]
+    pub fn appended_range(self) -> core::ops::Range<usize> {
+        self.previous.min(self.current)..self.current
+    }
+}
+
+/// Describes the row-wise change from `previous` to `current` lengths.
+///
+/// Rows beyond the shorter input are omitted, matching a zipped scan.
+/// Verified: entry `i` describes row `i` with exactly its two lengths.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(transitions =>
+    ensures
+        transitions.len() == if previous.len() <= current.len() {
+            previous.len()
+        } else {
+            current.len()
+        },
+        forall|i: int| 0 <= i < transitions.len() ==> {
+            &&& (#[trigger] transitions[i]).sequence_view() == i
+            &&& transitions[i].previous_view() == previous[i]
+            &&& transitions[i].current_view() == current[i]
+        },
+))]
+pub(crate) fn length_transitions(previous: &[usize], current: &[usize]) -> Vec<LengthTransition> {
+    let rows = if previous.len() <= current.len() {
+        previous.len()
+    } else {
+        current.len()
+    };
+    let mut transitions: Vec<LengthTransition> = Vec::with_capacity(rows);
+    let mut sequence = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            sequence <= rows,
+            rows <= previous.len(),
+            rows <= current.len(),
+            transitions.len() == sequence,
+            forall|i: int| 0 <= i < sequence ==> {
+                &&& (#[trigger] transitions[i]).sequence_view() == i
+                &&& transitions[i].previous_view() == previous[i]
+                &&& transitions[i].current_view() == current[i]
+            },
+        decreases rows - sequence,
+    ))]
+    while sequence < rows {
+        transitions.push(LengthTransition {
+            sequence,
+            previous: previous[sequence],
+            current: current[sequence],
+        });
+        sequence += 1;
+    }
+    transitions
+}
+
 /// Rule broken by a rejected per-row length transition.
 ///
 /// Callers map these integer-level violations to their own public error
