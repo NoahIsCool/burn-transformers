@@ -614,3 +614,29 @@ fn tied_alias_rejects_a_model_that_owns_a_head() {
         })
     );
 }
+
+/// `load_checkpoint_with` under the (empty) family options equals `load_checkpoint`.
+#[test]
+fn load_checkpoint_with_default_options_matches_load_checkpoint() {
+    let device = Default::default();
+    let config = tiny_config();
+    let contract = config
+        .checkpoint_contract(DeepseekV2CheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let detected = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .unwrap()
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap();
+    let explicit = DeepseekV2ForCausalLm::<TestBackend>::init(config, &device)
+        .unwrap()
+        .load_checkpoint_with(
+            temp.path(),
+            &LoadOptions::default(),
+            DeepseekV2CheckpointOptions::default(),
+        )
+        .unwrap();
+    assert!(explicit.report.is_strictly_valid());
+    assert_eq!(explicit.report, detected.report);
+}

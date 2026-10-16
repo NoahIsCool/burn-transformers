@@ -1076,3 +1076,29 @@ fn packed_projections_install_the_artifact_exactly() {
             .all(|value| value.is_finite())
     );
 }
+
+/// `load_checkpoint_with` under the (empty) family options equals `load_checkpoint`.
+#[test]
+fn load_checkpoint_with_default_options_matches_load_checkpoint() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let detected = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .unwrap()
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap();
+    let explicit = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device)
+        .unwrap()
+        .load_checkpoint_with(
+            temp.path(),
+            &LoadOptions::default(),
+            Qwen3MoeCheckpointOptions::default(),
+        )
+        .unwrap();
+    assert!(explicit.report.is_strictly_valid());
+    assert_eq!(explicit.report, detected.report);
+}

@@ -673,3 +673,24 @@ fn sink_failures_after_planning_keep_the_partial_report() {
         crate::checkpoint::ExecutionFailureCause::Sink(GptOssLoadError::MissingComponent { .. })
     ));
 }
+
+/// `load_checkpoint_with` under the (empty) family options equals `load_checkpoint`.
+#[test]
+fn load_checkpoint_with_default_options_matches_load_checkpoint() {
+    let config = tiny_config();
+    let tensors = dense_tensors(&config);
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), &config, &tensors);
+    let detected = graph(&config)
+        .load_checkpoint(directory.path(), &LoadOptions::default())
+        .unwrap();
+    let explicit = graph(&config)
+        .load_checkpoint_with(
+            directory.path(),
+            &LoadOptions::default(),
+            GptOssCheckpointOptions::default(),
+        )
+        .unwrap();
+    assert!(explicit.report.is_strictly_valid());
+    assert_eq!(explicit.report, detected.report);
+}

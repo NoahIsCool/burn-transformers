@@ -398,3 +398,41 @@ fn biases_install_and_sink_failures_keep_the_partial_report() {
         crate::checkpoint::ExecutionFailureCause::Sink(GemmaLoadError::MissingComponent { .. })
     ));
 }
+
+/// `load_checkpoint_with` installs the namespace it is given instead of detecting one.
+///
+/// The detected text-only source reproduces `load_checkpoint` exactly; forcing
+/// a multimodal namespace on the same checkpoint is a strict planning error.
+#[test]
+fn load_checkpoint_with_uses_the_given_namespace() {
+    let root = fixture("gemma3-text");
+    let detected = graph(&root)
+        .load_checkpoint(&root, &LoadOptions::default())
+        .unwrap();
+    let explicit = graph(&root)
+        .load_checkpoint_with(
+            &root,
+            &LoadOptions::default(),
+            GemmaCheckpointOptions {
+                source: GemmaCheckpointSource::TextOnly,
+            },
+        )
+        .unwrap();
+    assert_eq!(explicit.report, detected.report);
+    for source in [
+        GemmaCheckpointSource::Multimodal,
+        GemmaCheckpointSource::LegacyMultimodal,
+    ] {
+        let error = graph(&root)
+            .load_checkpoint_with(
+                &root,
+                &LoadOptions::default(),
+                GemmaCheckpointOptions { source },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, GemmaCheckpointLoadError::Checkpoint(_)),
+            "{source:?}: {error}"
+        );
+    }
+}

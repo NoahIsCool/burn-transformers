@@ -142,11 +142,7 @@ fn local_loader_streams_tied_and_untied_text_checkpoints() {
         write_checkpoint(temp.path(), &contract, |_| {});
         let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
         let outcome = model
-            .load_checkpoint_with_family_options(
-                temp.path(),
-                &LoadOptions::default(),
-                family_options,
-            )
+            .load_checkpoint_with(temp.path(), &LoadOptions::default(), family_options)
             .unwrap();
         assert_eq!(
             outcome.report.applied.len(),
@@ -174,11 +170,7 @@ fn malformed_inventory_fails_before_parameter_initialization() {
     });
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(
-            missing.path(),
-            &LoadOptions::default(),
-            family_options,
-        )
+        .load_checkpoint_with(missing.path(), &LoadOptions::default(), family_options)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -192,11 +184,7 @@ fn malformed_inventory_fails_before_parameter_initialization() {
     });
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(
-            unexpected.path(),
-            &LoadOptions::default(),
-            family_options,
-        )
+        .load_checkpoint_with(unexpected.path(), &LoadOptions::default(), family_options)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -217,7 +205,7 @@ fn malformed_inventory_fails_before_parameter_initialization() {
     });
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(wrong.path(), &LoadOptions::default(), family_options)
+        .load_checkpoint_with(wrong.path(), &LoadOptions::default(), family_options)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -522,7 +510,7 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     model.model.config.hidden_activation = "gelu".into();
     let error = model
-        .load_checkpoint_with_family_options(temp.path(), &LoadOptions::default(), options)
+        .load_checkpoint_with(temp.path(), &LoadOptions::default(), options)
         .unwrap_err();
     assert!(
         matches!(&error, MuseGlimmerCheckpointLoadError::Config(config)
@@ -532,11 +520,7 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
 
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(
-            temp.path().join("absent"),
-            &LoadOptions::default(),
-            options,
-        )
+        .load_checkpoint_with(temp.path().join("absent"), &LoadOptions::default(), options)
         .unwrap_err();
     assert!(
         matches!(&error, MuseGlimmerCheckpointLoadError::Checkpoint(CheckpointError::Io {
@@ -550,7 +534,7 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
     model.lm_head = None;
     let error = model
-        .load_checkpoint_with_family_options(temp.path(), &LoadOptions::default(), options)
+        .load_checkpoint_with(temp.path(), &LoadOptions::default(), options)
         .unwrap_err();
     let failure = error
         .execution_failure()
@@ -734,4 +718,124 @@ fn packed_projections_install_the_artifact_exactly() {
             .iter()
             .all(|value| value.is_finite())
     );
+}
+
+/// The default loader detects a text-only checkpoint, as automatic loading does.
+///
+/// Before namespace detection, `load_checkpoint` assumed the multimodal layout
+/// and rejected every standalone text checkpoint as missing and unexpected
+/// tensors.
+#[test]
+fn default_loader_detects_a_text_only_checkpoint() {
+    let device = Default::default();
+    for tied in [false, true] {
+        let config = tiny_config(tied);
+        let contract = config
+            .checkpoint_contract(MuseGlimmerCheckpointOptions {
+                source: MuseGlimmerCheckpointSource::TextOnly,
+            })
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        write_checkpoint(temp.path(), &contract, |tensors| {
+            assert!(
+                tensors
+                    .iter()
+                    .any(|(name, _)| name == "model.embed_tokens.weight")
+            );
+        });
+        let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
+        let outcome = model
+            .load_checkpoint(temp.path(), &LoadOptions::default())
+            .unwrap();
+        assert!(outcome.report.is_strictly_valid());
+        assert_eq!(
+            outcome.report.applied.len(),
+            contract.expected_tensors().len()
+        );
+        assert!(outcome.report.allowlisted_ignored.is_empty());
+    }
+}
+
+/// Neither or both language namespaces fail detection with a typed, family-named error.
+#[test]
+fn default_loader_rejects_missing_and_ambiguous_namespaces() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        })
+        .unwrap();
+
+    let ambiguous = TempDir::new().unwrap();
+    write_checkpoint(ambiguous.path(), &contract, |tensors| {
+        tensors.push(("model.language_model.norm.weight".into(), vec![4]));
+    });
+    let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let error = model
+        .load_checkpoint(ambiguous.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MuseGlimmerCheckpointLoadError::Checkpoint(
+                CheckpointError::AmbiguousLanguageNamespace { family: "Muse" }
+            )
+        ),
+        "{error}"
+    );
+    assert!(!model.model.embed_tokens.weight.is_initialized());
+
+    let neither = TempDir::new().unwrap();
+    write_checkpoint(neither.path(), &contract, |tensors| {
+        tensors.retain(|(name, _)| name == "lm_head.weight");
+    });
+    let error = model
+        .load_checkpoint(neither.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MuseGlimmerCheckpointLoadError::Checkpoint(
+                CheckpointError::LanguageNamespaceNotFound { family: "Muse" }
+            )
+        ),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none());
+}
+
+/// The 0.1.0 options method forwards unchanged to `load_checkpoint_with`.
+#[test]
+#[allow(deprecated)]
+fn deprecated_family_options_method_forwards_to_load_checkpoint_with() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let options = MuseGlimmerCheckpointOptions {
+        source: MuseGlimmerCheckpointSource::TextOnly,
+    };
+    let contract = config.checkpoint_contract(options).unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let mut current = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let mut former = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let expected = current
+        .load_checkpoint_with(temp.path(), &LoadOptions::default(), options)
+        .unwrap();
+    let actual = former
+        .load_checkpoint_with_family_options(temp.path(), &LoadOptions::default(), options)
+        .unwrap();
+    assert_eq!(actual.report, expected.report);
+    // Forcing the other namespace through either name is a strict planning error.
+    let error = former
+        .load_checkpoint_with_family_options(
+            temp.path(),
+            &LoadOptions::default(),
+            MuseGlimmerCheckpointOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        MuseGlimmerCheckpointLoadError::Checkpoint(_)
+    ));
 }

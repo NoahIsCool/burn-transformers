@@ -208,11 +208,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
-        self.load_checkpoint_with_architecture_options(
-            root,
-            options,
-            NemotronHCheckpointOptions::default(),
-        )
+        self.load_checkpoint_with(root, options, NemotronHCheckpointOptions::default())
     }
 
     /// Loads with explicit family provenance for pinned artifact policies.
@@ -223,16 +219,31 @@ impl<B: Backend> NemotronHForCausalLm<B> {
     /// physical payload by counting 23 base routers twice. Every source label,
     /// control hash, tensor name, dtype, shape, and byte total is revalidated
     /// before that one exception is applied.
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: NemotronHCheckpointOptions,
+    ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
+        let contract = self.config().checkpoint_contract(family_options)?;
+        let manifest = contract.discover_checkpoint(root, options)?;
+        let plan = contract.build_load_plan(&manifest, options)?;
+        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+    }
+
+    /// Former name of [`Self::load_checkpoint_with`], kept so 0.1.0 code compiles.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint_with`], to which it forwards unchanged.
+    #[deprecated(note = "use `load_checkpoint_with`, the name every family shares")]
     pub fn load_checkpoint_with_architecture_options(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
         architecture_options: NemotronHCheckpointOptions,
     ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
-        let contract = self.config().checkpoint_contract(architecture_options)?;
-        let manifest = contract.discover_checkpoint(root, options)?;
-        let plan = contract.build_load_plan(&manifest, options)?;
-        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+        self.load_checkpoint_with(root, options, architecture_options)
     }
 }
 

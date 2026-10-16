@@ -23,15 +23,16 @@ use thiserror::Error;
 
 use crate::{
     checkpoint::{
-        CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        PackedLayoutPolicy, ParameterInstallError, TensorSink, execute_local_load_plan,
-        install_packed_parameter,
+        CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LanguageNamespace,
+        LoadOptions, PackedLayoutPolicy, ParameterInstallError, TensorSink,
+        execute_local_load_plan, install_packed_parameter,
     },
     normalization::RmsNorm,
 };
 
 use super::{
-    ConfigError, MuseGlimmerCheckpointOptions, MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm,
+    ConfigError, MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource,
+    MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm,
 };
 
 /// Architecture-specific failure while applying one planned parameter.
@@ -181,33 +182,77 @@ impl<B: Backend> TensorSink for MuseGlimmerForCausalLm<B> {
 }
 
 impl<B: Backend> MuseGlimmerForCausalLm<B> {
-    /// Strictly loads an official multimodal Muse artifact's language tower.
+    /// Strictly discovers, validates, and streams a local Muse checkpoint.
     ///
-    /// No network access occurs. Visual tensors are audited as explicit ignored
-    /// keys, while any unknown namespace remains a strict error.
+    /// The language namespace is detected from the tensor names with the
+    /// shared classifier automatic loading uses: an official multimodal
+    /// artifact (`model.language_model.*`, whose visual tensors are audited as
+    /// explicitly ignored keys) or a standalone text checkpoint
+    /// (`model.embed_tokens.weight`). A checkpoint with neither or both fails
+    /// with [`CheckpointError::LanguageNamespaceNotFound`] or
+    /// [`CheckpointError::AmbiguousLanguageNamespace`]; any unknown namespace
+    /// remains a strict error. No network access occurs. After an execution
+    /// failure the partially initialized model must be discarded.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MuseGlimmerCheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
-        self.load_checkpoint_with_family_options(
-            root,
-            options,
-            MuseGlimmerCheckpointOptions::default(),
-        )
+        let manifest = CheckpointManifest::discover(root, options)?;
+        let source = match LanguageNamespace::of_manifest(&manifest, "Muse")? {
+            LanguageNamespace::Wrapped => MuseGlimmerCheckpointSource::Multimodal,
+            LanguageNamespace::TextOnly => MuseGlimmerCheckpointSource::TextOnly,
+        };
+        self.load_discovered(&manifest, options, MuseGlimmerCheckpointOptions { source })
     }
 
-    /// Loads a local artifact using an explicit multimodal or text-only namespace.
-    pub fn load_checkpoint_with_family_options(
+    /// Loads a local checkpoint with an explicit multimodal or text-only namespace.
+    ///
+    /// Use this to force the `source` layout; [`Self::load_checkpoint`]
+    /// detects it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`], without the namespace-detection errors.
+    pub fn load_checkpoint_with(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
         family_options: MuseGlimmerCheckpointOptions,
     ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
+        self.load_discovered(&manifest, options, family_options)
+    }
+
+    /// Former name of [`Self::load_checkpoint_with`], kept so 0.1.0 code compiles.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint_with`], to which it forwards unchanged.
+    #[deprecated(note = "use `load_checkpoint_with`, the name every family shares")]
+    pub fn load_checkpoint_with_family_options(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: MuseGlimmerCheckpointOptions,
+    ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
+        self.load_checkpoint_with(root, options, family_options)
+    }
+
+    /// Plans a discovered checkpoint under `family_options` and streams it into this model.
+    fn load_discovered(
+        &mut self,
+        manifest: &CheckpointManifest,
+        options: &LoadOptions,
+        family_options: MuseGlimmerCheckpointOptions,
+    ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
         let contract = self.config().checkpoint_contract(family_options)?;
-        let plan = contract.build_load_plan(&manifest, options)?;
-        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+        let plan = contract.build_load_plan(manifest, options)?;
+        Ok(execute_local_load_plan(manifest, &plan, self)?)
     }
 }
 
