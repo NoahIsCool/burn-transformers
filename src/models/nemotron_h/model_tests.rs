@@ -982,3 +982,386 @@ fn tied_readout_matches_reshaping_linear_oracle() {
         .into_data()
         .assert_approx_eq::<f32>(&oracle, Tolerance::absolute(1e-6));
 }
+
+/// Dropout and FP32 residual accumulation are refused instead of silently ignored.
+#[test]
+fn init_refuses_unimplemented_dropout_and_fp32_residuals() {
+    let device = Default::default();
+    let dropout = "Nemotron-H inference currently requires released zero-dropout configs";
+    for (config, reason) in [
+        (
+            NemotronHConfig {
+                attention_dropout: 0.1,
+                ..tiny_config(false)
+            },
+            dropout,
+        ),
+        (
+            NemotronHConfig {
+                hidden_dropout: 0.1,
+                ..tiny_config(false)
+            },
+            dropout,
+        ),
+        (
+            NemotronHConfig {
+                residual_in_fp32: true,
+                ..tiny_config(false)
+            },
+            "Nemotron-H FP32 residual accumulation is not implemented",
+        ),
+    ] {
+        let error = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap_err();
+        assert!(
+            matches!(&error, Error::BackendCapability(found) if found == reason),
+            "{error}"
+        );
+    }
+}
+
+/// The MTP body re-checks its own topology and fusion width when built from an unvalidated config.
+#[test]
+fn next_token_head_init_rejects_unsupported_stages_and_overflowing_width() {
+    let device = Default::default();
+    let unsupported = "Nemotron-H MTP currently supports Lightning's single [attention, moe] stage";
+    for config in [
+        NemotronHConfig {
+            num_nextn_predict_layers: 2,
+            ..tiny_config(true)
+        },
+        NemotronHConfig {
+            mtp_layers_block_type: vec![NemotronHBlockType::Moe, NemotronHBlockType::FullAttention],
+            ..tiny_config(true)
+        },
+    ] {
+        let error = NemotronHNextTokenHead::<TestBackend>::init(&config, &device).unwrap_err();
+        assert!(
+            matches!(&error, Error::BackendCapability(found) if found == unsupported),
+            "{error}"
+        );
+    }
+    let config = NemotronHConfig {
+        hidden_size: usize::MAX,
+        ..tiny_config(true)
+    };
+    let error = NemotronHNextTokenHead::<TestBackend>::init(&config, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.next_token_head.eh_proj"
+            && reason == "2 * hidden_size overflows usize"),
+        "{error}"
+    );
+}
+
+/// The MoE rejects empty or mis-sized rectangular and flattened inputs by shape.
+#[test]
+fn moe_rejects_empty_and_mis_sized_inputs() {
+    let config = tiny_config(false);
+    let moe = deterministic_moe(&config);
+    let device = Default::default();
+    let error = moe.forward(Tensor::zeros([1, 2, 7], &device)).unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.moe.input"
+            && expected == "[batch>0, sequence>0, 8]"
+            && actual == "[1, 2, 7]"),
+        "{error}"
+    );
+    for dims in [[0, 8], [3, 7]] {
+        let error = moe
+            .forward_tokens(Tensor::zeros(dims, &device))
+            .err()
+            .expect("the flattened input must be rejected");
+        assert!(
+            matches!(&error, Error::Shape { tensor, expected, actual }
+                if tensor == "nemotron_h.moe.input"
+                && expected == "[tokens>0, 8]"
+                && *actual == format!("[{}, {}]", dims[0], dims[1])),
+            "{error}"
+        );
+    }
+}
+
+/// Only the two released MLP activations are recognized.
+#[test]
+fn activation_names_map_to_the_shared_activations() {
+    assert!(matches!(
+        activation_from_name("relu2"),
+        Ok(Activation::ReluSquared)
+    ));
+    assert!(matches!(activation_from_name("silu"), Ok(Activation::Silu)));
+    let error = activation_from_name("gelu").unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.mlp_hidden_act" && reason == "unsupported activation \"gelu\""),
+        "{error}"
+    );
+}
+
+/// The MTP fusion requires equally shaped embedding and hidden inputs.
+#[test]
+fn next_token_head_fusion_rejects_mismatched_inputs() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let head = model.next_token_head.as_ref().unwrap();
+    let error = head
+        .fuse(
+            Tensor::zeros([1, 2, 8], &device),
+            Tensor::zeros([1, 3, 8], &device),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.next_token_head"
+            && expected == "matching shifted/base tensors, base=[1, 3, 8]"
+            && actual == "shifted=[1, 2, 8]"),
+        "{error}"
+    );
+}
+
+/// Stateless MTP prediction names a missing head, mis-sized hidden states, and bad tokens.
+#[test]
+fn next_token_logits_reject_missing_head_shapes_and_tokens() {
+    let device = Default::default();
+    let base = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let error = base
+        .predict_next_token_logits(
+            Tensor::from_ints([[1]], &device),
+            Tensor::zeros([1, 1, 8], &device),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "this Nemotron-H config has no next-token head"),
+        "{error}"
+    );
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let error = model
+        .predict_next_token_logits(
+            Tensor::from_ints([[1, 2]], &device),
+            Tensor::zeros([1, 2, 7], &device),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.next_token_head.base_hidden"
+            && expected == "[1, 2, 8]"
+            && actual == "[1, 2, 7]"),
+        "{error}"
+    );
+    let error = model
+        .predict_next_token_logits(
+            Tensor::from_ints([[1, 32]], &device),
+            Tensor::zeros([1, 2, 8], &device),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 1..=32"),
+        "{error}"
+    );
+}
+
+/// The window mask is exactly the padding mask united with `key + window <= query`.
+#[test]
+fn stateless_window_mask_unites_padding_with_the_causal_window() {
+    let device = Default::default();
+    let token_mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[false, true, true, true], [true, true, true, true]].into(),
+        &device,
+    ));
+    let padding = stateless_attention_mask(Some(&token_mask), 2, 3, 4, None, &device)
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .to_vec::<bool>()
+        .unwrap();
+    let window = 2;
+    let combined = stateless_attention_mask(Some(&token_mask), 2, 3, 4, Some(window), &device)
+        .unwrap()
+        .unwrap();
+    assert_eq!(combined.dims(), [2, 3, 4, 4]);
+    let combined = combined.into_data().to_vec::<bool>().unwrap();
+    for (index, (&combined, &padding)) in combined.iter().zip(&padding).enumerate() {
+        let (query, key) = ((index / 4) % 4, index % 4);
+        assert_eq!(
+            combined,
+            padding || key + window <= query,
+            "element {index}"
+        );
+    }
+    // Without padding the window alone is returned.
+    let alone = stateless_attention_mask::<TestBackend>(None, 1, 1, 3, Some(1), &device)
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .to_vec::<bool>()
+        .unwrap();
+    assert_eq!(
+        alone,
+        [false, false, false, true, false, false, true, true, false]
+    );
+    // Only a 64-bit `usize` can hold a window beyond the signed index range.
+    if usize::BITS == 64 {
+        let error =
+            stateless_attention_mask::<TestBackend>(None, 1, 1, 3, Some(usize::MAX), &device)
+                .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "nemotron_h.sliding_window"
+                && reason == "window exceeds portable signed index range"),
+            "{error}"
+        );
+    }
+}
+
+/// A padded windowed batch excludes old keys: shrinking the window changes only late rows.
+#[test]
+fn padded_sliding_window_forward_limits_old_keys() {
+    let device = Default::default();
+    let reference = NemotronHForCausalLm::<TestBackend>::init(
+        NemotronHConfig {
+            layers_block_type: vec![NemotronHBlockType::FullAttention],
+            num_hidden_layers: Some(1),
+            ..tiny_config(false)
+        },
+        &device,
+    )
+    .unwrap();
+    let input = || CausalLmInput {
+        token_ids: Tensor::from_ints([[0, 3, 4, 5]], &device),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[false, true, true, true]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let full = reference.forward(input(), &options).unwrap().logits;
+    // The same (now materialized) parameters with a one-token window; cloning
+    // before the first forward would re-draw lazily initialized parameters.
+    let mut windowed = reference.clone();
+    windowed.model.config.sliding_window = Some(1);
+    let local = windowed.forward(input(), &options).unwrap().logits;
+    // The first valid query sees only itself under both masks.
+    full.clone()
+        .narrow(1, 1, 1)
+        .into_data()
+        .assert_approx_eq::<f32>(
+            &local.clone().narrow(1, 1, 1).into_data(),
+            Tolerance::absolute(1e-6),
+        );
+    // Later queries lose their older keys under the one-token window.
+    assert_ne!(
+        full.narrow(1, 3, 1).into_data(),
+        local.narrow(1, 3, 1).into_data()
+    );
+}
+
+/// Failing hook callbacks at stack, attention, and MoE points abort with their point.
+#[test]
+fn failing_hook_callbacks_name_their_activation_point() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let input = || CausalLmInput {
+        token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let failing = |point: &str| Error::Generation(format!("refused at {point}"));
+    let mut cases: Vec<(String, Hooks<'_, TestBackend>)> = Vec::new();
+    let mut hooks = Hooks::new();
+    hooks.try_edit(
+        Stack::Decoder.embedding(),
+        move |_: Tensor<TestBackend, 3>| Err(failing("embedding")),
+    );
+    cases.push(("decoder.embedding".into(), hooks));
+    let mut hooks = Hooks::new();
+    hooks.try_edit(
+        Layer::decoder(1).self_attention().head_context(),
+        move |_: Tensor<TestBackend, 4>| Err(failing("head context")),
+    );
+    cases.push(("decoder.layers.1.attention.head_context".into(), hooks));
+    let mut hooks = Hooks::new();
+    hooks.try_edit(
+        Layer::decoder(3).mlp_output(),
+        move |_: Tensor<TestBackend, 3>| Err(failing("moe")),
+    );
+    cases.push(("decoder.layers.3.mlp.output".into(), hooks));
+    let mut hooks = Hooks::new();
+    hooks.try_edit(
+        Stack::Decoder.final_norm(),
+        move |_: Tensor<TestBackend, 3>| Err(failing("final norm")),
+    );
+    cases.push(("decoder.final_norm".into(), hooks));
+    for (expected, mut hooks) in cases {
+        let error = model
+            .forward_with_hooks(input(), &ForwardOptions::default(), &mut hooks)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Intervention { point, cause: Some(cause), .. }
+                if *point == expected && matches!(**cause, Error::Generation(_))),
+            "{expected}: {error}"
+        );
+    }
+}
+
+/// The shared feed-forward validator refuses zero widths of an unvalidated config.
+///
+/// The public constructors validate the Nemotron-H config first, so these
+/// widths reach the block and MoE constructors only through direct
+/// (crate-internal) calls. There the shared dense-MLP initializer still
+/// refuses them, with its own generic `feed_forward.intermediate_size` field
+/// rather than a Nemotron-H one, instead of allocating empty projections. An
+/// unknown activation name is refused by the family's own activation parser.
+#[test]
+fn component_constructors_refuse_zero_widths() {
+    let device = Default::default();
+    let zero_width = |result: Result<()>| {
+        assert!(
+            matches!(&result, Err(Error::Configuration { field, reason })
+                if field == "feed_forward.intermediate_size" && reason == "must be non-zero"),
+            "{result:?}"
+        );
+    };
+    zero_width(
+        NemotronHMoe::<TestBackend>::init(
+            &NemotronHConfig {
+                moe_shared_expert_intermediate_size: 0,
+                ..tiny_config(false)
+            },
+            &device,
+        )
+        .map(drop),
+    );
+    zero_width(
+        NemotronHBlock::<TestBackend>::init(
+            &NemotronHConfig {
+                intermediate_size: 0,
+                ..tiny_config(false)
+            },
+            NemotronHBlockType::Mlp,
+            &device,
+        )
+        .map(drop),
+    );
+    let block = NemotronHBlock::<TestBackend>::init(
+        &NemotronHConfig {
+            mlp_hidden_act: "gelu".into(),
+            ..tiny_config(false)
+        },
+        NemotronHBlockType::Mlp,
+        &device,
+    );
+    assert!(
+        matches!(&block, Err(Error::Configuration { field, reason })
+            if field == "nemotron_h.mlp_hidden_act" && reason == "unsupported activation \"gelu\""),
+        "{:?}",
+        block.map(drop)
+    );
+}

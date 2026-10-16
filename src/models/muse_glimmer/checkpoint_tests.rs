@@ -238,3 +238,62 @@ fn tied_head_uses_one_storage_owner() {
     assert_eq!(plan.aliases.len(), 1);
     assert_eq!(plan.aliases[0].target, "lm_head.weight");
 }
+
+/// Each source layout exposes exactly its visual exceptions, and configuring options is idempotent.
+#[test]
+fn source_layouts_expose_their_visual_exceptions() {
+    let multimodal = tiny_config()
+        .checkpoint_contract(MuseGlimmerCheckpointOptions::default())
+        .unwrap();
+    assert_eq!(
+        multimodal.allow_unexpected(),
+        [
+            KeyMatcher::prefix("model.vision_tower."),
+            KeyMatcher::prefix("model.vision_adapter."),
+            KeyMatcher::prefix("model.vision_projection."),
+        ]
+    );
+    let mut options = LoadOptions {
+        allow_unexpected: vec![KeyMatcher::exact("caller.extra")],
+        ..LoadOptions::default()
+    };
+    multimodal.configure_load_options(&mut options);
+    multimodal.configure_load_options(&mut options);
+    assert_eq!(options.allow_unexpected.len(), 4);
+    assert_eq!(
+        options.allow_unexpected[0],
+        KeyMatcher::exact("caller.extra")
+    );
+    let text_only = tiny_config()
+        .checkpoint_contract(MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        })
+        .unwrap();
+    assert!(text_only.allow_unexpected().is_empty());
+}
+
+/// An unrepresentable query width is a configuration error naming its expression.
+///
+/// Validation accepts any head count divisible by the key/value heads, so the
+/// contract's checked width product is the guard that reports `q d` overflow.
+#[test]
+fn overflowing_attention_width_is_a_configuration_error() {
+    let config = MuseGlimmerTextConfig {
+        num_attention_heads: usize::MAX / 2 + 1,
+        num_key_value_heads: 1,
+        head_dim: 2,
+        ..tiny_config()
+    };
+    config.validate().unwrap();
+    let error = config
+        .checkpoint_contract(MuseGlimmerCheckpointOptions::default())
+        .unwrap_err();
+    assert_eq!(
+        (error.architecture, error.field, error.reason.as_str()),
+        (
+            FAMILY,
+            "num_attention_heads * head_dim",
+            "dimension product overflows usize"
+        )
+    );
+}

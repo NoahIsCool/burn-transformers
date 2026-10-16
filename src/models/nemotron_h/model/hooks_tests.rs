@@ -269,3 +269,237 @@ fn hooked_edits_are_differentiable() {
     let gradients = output.logits.sum().backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
+
+/// Eager attention adds its score and pattern points; a broken block lists no mixer points.
+#[test]
+fn activation_points_follow_attention_precision_and_skip_broken_mixers() {
+    let device = Default::default();
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    model.model.layers[1]
+        .attention
+        .as_mut()
+        .unwrap()
+        .precision_mode = AttentionPrecisionMode::EagerFp32Softmax;
+    let names = |model: &NemotronHForCausalLm<TestBackend>| {
+        model
+            .activation_points()
+            .into_iter()
+            .filter(|point| point.name.starts_with("decoder.layers.1."))
+            .map(|point| point.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&model),
+        [
+            "decoder.layers.1.residual.pre",
+            "decoder.layers.1.attention.input",
+            "decoder.layers.1.attention.query",
+            "decoder.layers.1.attention.key",
+            "decoder.layers.1.attention.value",
+            "decoder.layers.1.attention.scores",
+            "decoder.layers.1.attention.pattern",
+            "decoder.layers.1.attention.head_context",
+            "decoder.layers.1.attention.output",
+            "decoder.layers.1.residual.post",
+        ]
+    );
+    // The eager pattern is observable: every valid query row is a probability
+    // distribution and the padded query of row zero attends to nothing.
+    let mut hooks = Hooks::new();
+    let pattern = hooks.capture(Layer::decoder(1).self_attention().pattern());
+    model
+        .forward_with_hooks(padded_input(), &hidden_options(), &mut hooks)
+        .unwrap();
+    let rows = hooks
+        .get(&pattern)
+        .unwrap()
+        .sum_dim(3)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    // `[batch, head, query]` row sums; batch zero's query zero is padding.
+    for (index, sum) in rows.iter().enumerate() {
+        let padded = index / 8 == 0 && index % 4 == 0;
+        let expected = if padded { 0.0 } else { 1.0 };
+        assert!((sum - expected).abs() < 1e-5, "row {index}: {rows:?}");
+    }
+
+    // A block whose optional mixers disagree with its type advertises only its residuals.
+    model.model.layers[1].block_type = crate::models::nemotron_h::NemotronHBlockType::Mlp;
+    assert_eq!(
+        names(&model),
+        [
+            "decoder.layers.1.residual.pre",
+            "decoder.layers.1.residual.post",
+        ]
+    );
+    let error = model
+        .forward_with_hooks(padded_input(), &hidden_options(), &mut Hooks::new())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Checkpoint(reason)
+            if reason == "Nemotron-H block contains an invalid mixer topology"),
+        "{error}"
+    );
+}
+
+/// Hooked execution refuses probability capture and delegates through the trait.
+#[test]
+fn hooked_forward_refuses_attention_capture_and_trait_delegates() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let error = model
+        .forward_with_hooks(
+            padded_input(),
+            &ForwardOptions {
+                attentions: true,
+                ..Default::default()
+            },
+            &mut Hooks::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H attention probability capture is not yet exposed"),
+        "{error}"
+    );
+    let direct = model
+        .forward_with_hooks(padded_input(), &hidden_options(), &mut Hooks::new())
+        .unwrap();
+    let generic = HookedModel::forward_with_hooks(
+        &model,
+        padded_input(),
+        &hidden_options(),
+        &mut Hooks::new(),
+    )
+    .unwrap();
+    assert_eq!(direct.logits.into_data(), generic.logits.into_data());
+    assert_eq!(StagedModel::<TestBackend>::stack(&model), Stack::Decoder);
+    assert_eq!(StagedModel::<TestBackend>::num_layers(&model), 4);
+}
+
+/// Staged states with a foreign dtype, cross-attention, or an oversized context are rejected.
+///
+/// Normalization also refuses a cursor past the stack and an already
+/// normalized state, and embedding refuses out-of-vocabulary token IDs, each
+/// with its exact diagnostic.
+#[test]
+fn staged_state_validation_rejects_dtype_cross_attention_and_context() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let state = model.model.embed(&padded_input()).unwrap();
+
+    let mut half = state.clone();
+    half.hidden = half.hidden.cast(burn::tensor::DType::F16);
+    let error = model.model.run_layers(half, 0..1).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H staged states must use the model dtype F32, found F16"),
+        "{error}"
+    );
+
+    let mut cross = state.clone();
+    cross.context = cross
+        .context
+        .with_cross_attention(AttentionPolicy::causal());
+    let error = model.model.normalize(cross).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.execution.encoder"
+            && reason == "Nemotron-H decoder blocks do not define cross-attention"),
+        "{error}"
+    );
+
+    let mut long = state.clone();
+    long.context.evaluated_context = 33;
+    let error = model.model.run_layers(long, 0..1).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.execution.positions"
+            && reason == "positions must lie below max_position_embeddings 32"),
+        "{error}"
+    );
+
+    // A cursor past the four-block stack and a second normalization are both
+    // refused before the final norm runs.
+    let mut beyond = state.clone();
+    beyond.next_layer = 5;
+    let normalized = model
+        .model
+        .normalize(model.model.run_layers(state, 0..4).unwrap())
+        .unwrap();
+    for staged in [beyond, normalized] {
+        let error = model.model.normalize(staged).unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "nemotron_h.execution.normalize"
+                && reason == "expected an unnormalized state at a valid block boundary"),
+            "{error}"
+        );
+    }
+
+    let error = model
+        .model
+        .embed(&CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 32]], &device),
+            token_mask: None,
+            position_ids: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 1..=32"),
+        "{error}"
+    );
+}
+
+/// Attention bias must use the activation dtype; Mamba-2 refuses a score bias.
+#[test]
+fn staged_attention_bias_requires_the_activation_dtype() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let state = model.model.embed(&padded_input()).unwrap();
+
+    let mut half_bias = state.clone();
+    half_bias.context = half_bias.context.with_layer_attention(
+        Layer::decoder(1),
+        AttentionPolicy::causal().with_bias(Tensor::zeros(
+            [1, 1, 4, 4],
+            (&device, burn::tensor::DType::F16),
+        )),
+    );
+    let error = model.model.run_layers(half_bias, 0..4).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H attention bias must use the activation dtype"),
+        "{error}"
+    );
+
+    let mut recurrent_bias = state.clone();
+    recurrent_bias.context = recurrent_bias.context.with_layer_attention(
+        Layer::decoder(0),
+        AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &device)),
+    );
+    let error = model.model.run_layers(recurrent_bias, 0..4).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H Mamba-2 block 0 is a causal recurrence and supports \
+                          no custom attention connectivity or score bias"),
+        "{error}"
+    );
+
+    // A zero bias in the activation dtype leaves the causal result unchanged.
+    let mut zero_bias = state.clone();
+    zero_bias.context = zero_bias.context.with_layer_attention(
+        Layer::decoder(1),
+        AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &device)),
+    );
+    let biased = model.model.run_layers(zero_bias, 0..4).unwrap();
+    let causal = model.model.run_layers(state, 0..4).unwrap();
+    biased
+        .hidden
+        .into_data()
+        .assert_approx_eq::<f32>(&causal.hidden.into_data(), Tolerance::absolute(1e-6));
+}

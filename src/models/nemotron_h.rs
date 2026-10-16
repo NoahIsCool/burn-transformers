@@ -131,9 +131,12 @@ pub struct NemotronHConfig {
     pub num_hidden_layers: Option<usize>,
     /// Whether token embedding and output projection share parameters.
     pub tie_word_embeddings: bool,
-    /// Whether inference maintains Mamba and attention caches.
+    /// Hugging Face generation hint; ignored here, where callers own [`NemotronHDecodeState`].
     pub use_cache: bool,
-    /// Number of final prompt positions projected to vocabulary logits.
+    /// Upstream count of final prompt positions given logits; must be nonzero.
+    ///
+    /// This runtime selects logit positions per call with
+    /// [`crate::ForwardOptions::logits`] instead.
     pub num_logits_to_keep: usize,
     /// Optional padding token ID.
     pub pad_token_id: Option<TokenIds>,
@@ -152,7 +155,7 @@ pub struct NemotronHConfig {
     pub max_position_embeddings: usize,
     /// Whether attention projections include bias.
     pub attention_bias: bool,
-    /// Attention-probability dropout.
+    /// Attention-probability dropout; inference rejects any nonzero value.
     pub attention_dropout: f64,
     /// Optional causal sliding window for attention blocks.
     pub sliding_window: Option<usize>,
@@ -162,7 +165,7 @@ pub struct NemotronHConfig {
     pub mlp_hidden_act: String,
     /// Whether dense MLP projections contain bias.
     pub mlp_bias: bool,
-    /// Runtime hint retained from official configs; it does not change topology.
+    /// Upstream fused-kernel hint; it changes neither topology nor this runtime's math.
     pub use_mamba_kernels: bool,
     /// State dimension `N` in each selective state-space head.
     pub ssm_state_size: usize,
@@ -199,10 +202,13 @@ pub struct NemotronHConfig {
     /// compositions. No shipped checkpoint sets a finite upper bound.
     #[serde(alias = "mamba_dt_limit")]
     pub time_step_limit: Vec<Option<f64>>,
-    /// Small positive floor used while initializing discretization steps.
+    /// Upstream initialization floor of discretization steps (validated metadata).
+    ///
+    /// Validation requires `time_step_floor <= time_step_min`; parameters are
+    /// loaded from checkpoints, so the runtime never reads it.
     #[serde(alias = "mamba_dt_init_floor")]
     pub time_step_floor: f64,
-    /// Optional legacy low-rank discretization projection width.
+    /// Optional legacy low-rank discretization width; validated, never instantiated.
     pub time_step_rank: Option<usize>,
     /// Whether the causal convolution has a bias.
     #[serde(alias = "mamba_conv_bias")]
@@ -228,7 +234,7 @@ pub struct NemotronHConfig {
     pub moe_shared_expert_intermediate_size: usize,
     /// Optional low-rank bottleneck shared by expert projections.
     pub moe_latent_size: Option<usize>,
-    /// Whether shared-expert execution may overlap routed experts.
+    /// Upstream scheduling hint for overlapping shared and routed experts; unused here.
     pub moe_shared_expert_overlap: bool,
     /// Routed experts selected per token.
     pub num_experts_per_tok: usize,
@@ -250,7 +256,14 @@ pub struct NemotronHConfig {
     pub mtp_layers_block_type: Vec<NemotronHBlockType>,
     /// Bias switch used by the pinned Mamba input/output projection graph.
     pub use_bias: bool,
-    /// New-weight initialization standard deviation.
+    /// Upstream initialization standard deviation; validated as positive and
+    /// finite, but never read.
+    ///
+    /// Fresh parameters come from each component's own constructor: Burn's
+    /// default initializers for linear, depthwise-convolution, and embedding
+    /// weights, and fixed values elsewhere — Mamba-2 `A_log = log(1..=H)` with
+    /// unit `D`, `dt_bias`, and gated-norm scale, unit RMS-norm scales, and a
+    /// zero router correction bias.
     pub initializer_range: f64,
     /// Epsilon applied by residual-block normalization.
     pub layer_norm_epsilon: f64,
@@ -258,11 +271,11 @@ pub struct NemotronHConfig {
     pub rms_norm_eps: Option<f64>,
     /// Redundant epsilon emitted by newer Nemotron Nano checkpoints.
     pub norm_eps: Option<f64>,
-    /// Whether residual accumulation uses FP32.
+    /// Whether residual accumulation uses FP32; inference rejects `true`.
     pub residual_in_fp32: bool,
-    /// Residual-stream dropout.
+    /// Residual-stream dropout; inference rejects any nonzero value.
     pub hidden_dropout: f64,
-    /// Whether initialization rescales pre-normalized residual branches by depth.
+    /// Upstream initialization flag for depth-scaled residual branches; unused here.
     pub rescale_prenorm_residual: bool,
     /// Compatibility RoPE theta retained by NVIDIA configs; current attention is NoPE.
     pub rope_theta: Option<f64>,

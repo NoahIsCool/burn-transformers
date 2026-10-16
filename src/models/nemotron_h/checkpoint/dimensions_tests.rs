@@ -191,3 +191,52 @@ proptest! {
         }
     }
 }
+
+/// Every overflow names its configuration expression and the representation it exceeded.
+#[test]
+fn every_dimension_error_names_its_expression_and_representation() {
+    let product_usize = "dimension product overflows usize";
+    for (error, field, reason) in [
+        (
+            DimensionError::MambaIntermediate,
+            "mamba_num_heads * mamba_head_dim",
+            product_usize,
+        ),
+        (
+            DimensionError::StateGroups,
+            "n_groups * ssm_state_size",
+            product_usize,
+        ),
+        (
+            DimensionError::ConvolutionStates,
+            "mamba convolution",
+            "dimension product overflows u64",
+        ),
+        (
+            DimensionError::Convolution,
+            "mamba convolution",
+            "dimension sum overflows u64",
+        ),
+        (
+            DimensionError::Projection,
+            "mamba projection",
+            "dimension sum overflows u64",
+        ),
+        (
+            DimensionError::AttentionQuery,
+            "num_attention_heads * head_dim",
+            product_usize,
+        ),
+        (
+            DimensionError::AttentionKeyValue,
+            "num_key_value_heads * head_dim",
+            product_usize,
+        ),
+    ] {
+        assert_eq!(
+            (error.field(), error.reason()),
+            (field, reason),
+            "{error:?}"
+        );
+    }
+}

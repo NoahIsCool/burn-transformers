@@ -84,11 +84,16 @@ pub struct MuseGlimmerTextConfig {
     pub hidden_activation: String,
     /// Maximum indexed context length.
     pub max_position_embeddings: usize,
-    /// New-weight initialization standard deviation.
+    /// Upstream initialization standard deviation; validated as positive and
+    /// finite, but never read.
+    ///
+    /// Fresh linear and embedding weights use Burn's default initializers,
+    /// and every RMS norm starts at unit effective scale: zero offsets for the
+    /// `1 + weight` sublayer norms and ones for the final norm.
     pub initializer_range: f64,
     /// Epsilon in pre-sublayer RMS normalization.
     pub rms_norm_eps: f64,
-    /// Whether generation maintains KV caches.
+    /// Hugging Face generation hint; ignored here, where callers own [`MuseGlimmerDecodeState`].
     pub use_cache: bool,
     /// Whether token embedding and LM head share parameters.
     pub tie_word_embeddings: bool,
@@ -97,7 +102,7 @@ pub struct MuseGlimmerTextConfig {
     pub rope_parameters: Option<RopeParameters>,
     /// Whether attention projections include bias.
     pub attention_bias: bool,
-    /// Attention probability dropout.
+    /// Attention probability dropout; inference rejects any nonzero value.
     pub attention_dropout: f64,
     /// Local receptive-field width of sliding layers.
     pub sliding_window: Option<usize>,

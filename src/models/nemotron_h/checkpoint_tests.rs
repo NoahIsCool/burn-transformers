@@ -522,3 +522,116 @@ fn mtp_section_rejects_unrepresentable_fusion_width() {
     assert!(expected.is_empty());
     assert!(mappings.operations().is_empty());
 }
+
+/// The MTP section re-checks its stage topology when called on an unvalidated config.
+///
+/// Validation shadows this guard on the public path; the section must still
+/// refuse a stage it cannot map before recording any tensor or mapping.
+#[test]
+fn mtp_section_rejects_unsupported_stage_topologies() {
+    let reason = "v1 checkpoint loading supports one [attention, moe] Lightning MTP stage";
+    for config in [
+        NemotronHConfig {
+            num_nextn_predict_layers: 2,
+            ..tiny_config()
+        },
+        NemotronHConfig {
+            mtp_layers_block_type: vec![NemotronHBlockType::FullAttention],
+            ..tiny_config()
+        },
+    ] {
+        let dimensions = Dimensions::try_from(&tiny_config()).unwrap();
+        let mut expected = Vec::new();
+        let mut mappings = MappingPlan::new();
+        let error = add_mtp(&mut expected, &mut mappings, dimensions, &config).unwrap_err();
+        assert_eq!(
+            (error.architecture, error.field, error.reason.as_str()),
+            (FAMILY, "mtp_layers_block_type", reason)
+        );
+        assert!(expected.is_empty());
+        assert!(mappings.operations().is_empty());
+    }
+}
+
+/// Latent expert projections without MLP bias map exactly two unbiased matrices per MoE.
+#[test]
+fn unbiased_latent_projections_map_only_weights() {
+    let config = NemotronHConfig {
+        moe_latent_size: Some(4),
+        n_group: 1,
+        topk_group: 1,
+        ..tiny_config()
+    };
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let latent = contract
+        .expected_tensors()
+        .iter()
+        .filter(|tensor| tensor.name.contains("latent_proj"))
+        .map(|tensor| (tensor.name.as_str(), tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        latent,
+        [
+            ("model.layers.3.moe.fc1_latent_proj.weight", vec![4, 8]),
+            ("model.layers.3.moe.fc2_latent_proj.weight", vec![8, 4]),
+            ("next_token_head.moe.fc1_latent_proj.weight", vec![4, 8]),
+            ("next_token_head.moe.fc2_latent_proj.weight", vec![8, 4]),
+        ]
+    );
+    // Routed experts operate in the latent width.
+    let expert = contract
+        .expected_tensors()
+        .iter()
+        .find(|tensor| tensor.name == "model.layers.3.moe.routed.0.up_proj.weight")
+        .unwrap();
+    assert_eq!(expert.shape, [6, 4]);
+    contract
+        .build_load_plan(&manifest(&contract), &LoadOptions::default())
+        .unwrap();
+}
+
+/// A Mamba-2 block maps exactly the biases its config enables.
+///
+/// The released checkpoints use a biased depthwise convolution and unbiased
+/// projections; the reverse switches must drop `conv1d.bias` and add
+/// `in_proj.bias` (one entry per projected channel) and `out_proj.bias`
+/// (one per residual channel), and the strict plan must still consume every
+/// source exactly once.
+#[test]
+fn mamba_block_maps_exactly_the_enabled_biases() {
+    let config = NemotronHConfig {
+        use_conv_bias: false,
+        use_bias: true,
+        ..tiny_config()
+    };
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let mamba = contract
+        .expected_tensors()
+        .iter()
+        .filter(|tensor| tensor.name.contains("layers.0."))
+        .map(|tensor| (tensor.name.as_str(), tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    // Projection width 2 * 8 + 2 * 2 * 3 + 4 = 32; convolution channels 8 + 2 * 2 * 3 = 20.
+    assert_eq!(
+        mamba,
+        [
+            ("model.layers.0.norm.weight", vec![8]),
+            ("model.layers.0.mamba.in_proj.weight", vec![32, 8]),
+            ("model.layers.0.mamba.conv1d.weight", vec![20, 1, 3]),
+            ("model.layers.0.mamba.dt_bias", vec![4]),
+            ("model.layers.0.mamba.a_log", vec![4]),
+            ("model.layers.0.mamba.d", vec![4]),
+            ("model.layers.0.mamba.norm.weight", vec![8]),
+            ("model.layers.0.mamba.out_proj.weight", vec![8, 8]),
+            ("model.layers.0.mamba.in_proj.bias", vec![32]),
+            ("model.layers.0.mamba.out_proj.bias", vec![8]),
+        ]
+    );
+    contract
+        .build_load_plan(&manifest(&contract), &LoadOptions::default())
+        .unwrap();
+}

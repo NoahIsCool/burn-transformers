@@ -528,3 +528,455 @@ fn speculative_state_truncate_is_atomic_and_reusable() {
     assert_eq!(state.tensor_state().lengths(), &[3]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
 }
+
+/// The speculative constructor names zero drafts, a missing MTP stage, and staging overflow.
+#[test]
+fn speculative_state_constructor_rejects_unusable_requests() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let base = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let cache = || CacheConfig::new(1, 8).unwrap();
+    for (error, expected) in [
+        (
+            model
+                .new_speculative_decode_state(cache(), 2, 2, &device)
+                .unwrap_err(),
+            "Nemotron-H MTP speculative decoding supports batch size one, found 2",
+        ),
+        (
+            model
+                .new_speculative_decode_state(cache(), 1, 0, &device)
+                .unwrap_err(),
+            "Nemotron-H MTP max_draft_tokens must be greater than zero",
+        ),
+        (
+            base.new_speculative_decode_state(cache(), 1, 2, &device)
+                .unwrap_err(),
+            "Nemotron-H model has no configured next-token prediction stage",
+        ),
+        (
+            model
+                .new_speculative_decode_state(cache(), 1, usize::MAX, &device)
+                .unwrap_err(),
+            "Nemotron-H MTP staging capacity overflows usize",
+        ),
+        (
+            model
+                .new_speculative_decode_state(cache(), 1, 8, &device)
+                .unwrap_err(),
+            "Nemotron-H MTP needs staging capacity 9, exceeding cache capacity 8",
+        ),
+    ] {
+        assert!(
+            matches!(&error, Error::Generation(reason) if reason == expected),
+            "{error}"
+        );
+    }
+    // The largest draft that fits leaves exactly `K + 1` staging slots.
+    let state = model
+        .new_speculative_decode_state(cache(), 1, 7, &device)
+        .unwrap();
+    assert_eq!(state.staging_capacity(), 8);
+}
+
+/// Prompt alignment rejects transactions, shapes, tokens, and misaligned or used banks.
+#[test]
+fn prefill_mtp_cache_rejects_invalid_requests_without_mutation() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let target = prefill_target(&model, &mut state, &device);
+    let prompt = || Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device);
+
+    let mark = state.mark().unwrap();
+    let error = model
+        .prefill_mtp_cache(prompt(), target.clone(), &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::TensorCache(TensorCacheError::TransactionActive {
+                operation: "prefill Nemotron-H MTP cache"
+            })
+        ),
+        "{error}"
+    );
+    state.rollback(mark).unwrap();
+
+    let error = model
+        .prefill_mtp_cache(prompt(), target.clone().narrow(1, 0, 2), &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.mtp.prefill"
+            && expected == "token IDs [1, L] and target hidden states [1, L, 8] for L > 0"
+            && actual == "tokens=[1, 3], hidden=[1, 2, 8]"),
+        "{error}"
+    );
+    let error = model
+        .prefill_mtp_cache(
+            Tensor::from_ints([[1, 2, 32]], &device),
+            target.clone(),
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 1..=32"),
+        "{error}"
+    );
+    let error = model
+        .prefill_mtp_cache(
+            Tensor::from_ints([[1, 2]], &device),
+            target.clone().narrow(1, 0, 2),
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Cache(reason)
+            if reason == "Nemotron-H target cache length must equal MTP prompt length 2, found [3]"),
+        "{error}"
+    );
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+
+    model
+        .prefill_mtp_cache(prompt(), target.clone(), &mut state)
+        .unwrap();
+    let error = model
+        .prefill_mtp_cache(prompt(), target, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Cache(reason)
+            if reason == "Nemotron-H MTP prefill requires a fresh auxiliary cache"),
+        "{error}"
+    );
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
+}
+
+/// A one-token prompt forms no shifted pair, so the auxiliary bank stays empty.
+#[test]
+fn one_token_prompt_aligns_without_mtp_pairs() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    model
+        .prefill_mtp_cache(Tensor::from_ints([[4]], &device), hidden, &mut state)
+        .unwrap();
+    assert_eq!(state.tensor_state().lengths(), &[1]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+}
+
+/// Cached MTP evaluation names a missing stage, bad shapes, tokens, and position tensors.
+#[test]
+fn forward_mtp_cached_rejects_invalid_requests_without_mutation() {
+    let device = Default::default();
+    let base = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let mut base_state = base
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let error = base
+        .forward_mtp_cached(
+            Tensor::from_ints([[1]], &device),
+            Tensor::zeros([1, 1, 8], &device),
+            None,
+            &mut base_state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "Nemotron-H model has no configured next-token prediction stage"),
+        "{error}"
+    );
+
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    prefill_target(&model, &mut state, &device);
+    let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[1], [2]], &device),
+            Tensor::zeros([2, 1, 8], &device),
+            None,
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.mtp.next_token_ids"
+            && expected == "[1, nonzero_sequence] matching a batch-one decode state"
+            && actual == "[2, 1]"),
+        "{error}"
+    );
+    let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[1]], &device),
+            Tensor::zeros([1, 1, 7], &device),
+            None,
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.mtp.hidden_state"
+            && expected == "[1, 1, 8]"
+            && actual == "[1, 1, 7]"),
+        "{error}"
+    );
+    let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[32]], &device),
+            Tensor::zeros([1, 1, 8], &device),
+            None,
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids"
+            && expected == "token values in 0..32"
+            && actual == "observed range 32..=32"),
+        "{error}"
+    );
+    let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[1]], &device),
+            Tensor::zeros([1, 1, 8], &device),
+            Some(Tensor::from_ints([[0, 1]], &device)),
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.mtp.position_ids" && expected == "[1, 1]" && actual == "[1, 2]"),
+        "{error}"
+    );
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+}
+
+/// The contiguous-position contract reports overflow, the context limit, and drift.
+#[test]
+fn mtp_position_contract_reports_overflow_limit_and_drift() {
+    let device = Default::default();
+    let error =
+        validate_mtp_positions::<TestBackend>(None, usize::MAX, 1, 32, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "nemotron_h.mtp.position_ids" && reason == "position range overflows usize"),
+        "{error}"
+    );
+    let error = validate_mtp_positions::<TestBackend>(None, 30, 3, 32, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.mtp.position_ids"
+            && expected == "positions below 32"
+            && actual == "range 30..33"),
+        "{error}"
+    );
+    validate_mtp_positions::<TestBackend>(None, 30, 2, 32, &device).unwrap();
+    validate_mtp_positions::<TestBackend>(
+        Some(Tensor::from_ints([[4, 5]], &device)),
+        4,
+        2,
+        32,
+        &device,
+    )
+    .unwrap();
+    let error = validate_mtp_positions::<TestBackend>(
+        Some(Tensor::from_ints([[4, 6]], &device)),
+        4,
+        2,
+        32,
+        &device,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.mtp.position_ids"
+            && expected == "contiguous cache positions 4..6"
+            && actual == "a different explicit position sequence"),
+        "{error}"
+    );
+}
+
+/// Device checks name the mismatched MTP input.
+#[test]
+fn mtp_device_check_names_the_mismatched_input() {
+    ensure_mtp_device("hidden state", &1, &1).unwrap();
+    let error = ensure_mtp_device("hidden state", &1, &2).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H MTP hidden state must use the decode-state device"),
+        "{error}"
+    );
+}
+
+/// Draft pairs accept only in-vocabulary tokens and never publish.
+#[test]
+fn draft_pairs_reject_out_of_vocabulary_tokens_and_publish_nothing() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let target = prefill_target(&model, &mut state, &device);
+    let mut drafts = DraftPairs::new();
+    let error = model
+        .draft_mtp(32, target.clone().narrow(1, 2, 1), &mut drafts, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "nemotron_h.input_ids" && expected == "a token in 0..32" && actual == "32"),
+        "{error}"
+    );
+    assert_eq!(drafts.len(), 0);
+    let first = model
+        .draft_mtp(4, target.narrow(1, 2, 1), &mut drafts, &mut state)
+        .unwrap();
+    assert_eq!(first.logits.dims(), [1, 1, 32]);
+    model
+        .draft_mtp(5, first.hidden_state, &mut drafts, &mut state)
+        .unwrap();
+    assert_eq!(drafts.len(), 2);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+}
+
+/// A step longer than the remaining MTP capacity fails before any publication.
+#[test]
+fn mtp_step_beyond_capacity_is_rejected() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 8).unwrap(), 1, 2, &device)
+        .unwrap();
+    prefill_target(&model, &mut state, &device);
+    let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[1, 2, 3, 4, 5, 6, 7, 8, 9]], &device),
+            Tensor::zeros([1, 9, 8], &device),
+            None,
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::TensorCache(TensorCacheError::Metadata(
+                DecodeStateError::CapacityExceeded {
+                    sequence: 0,
+                    requested: 9,
+                    capacity: 8
+                }
+            ))
+        ),
+        "{error}"
+    );
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+}
+
+/// With an active window, cached MTP attention equals the windowed stateless head.
+#[test]
+fn windowed_cached_mtp_matches_the_stateless_head() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(
+        crate::models::nemotron_h::NemotronHConfig {
+            sliding_window: Some(2),
+            ..tiny_config(true)
+        },
+        &device,
+    )
+    .unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let target = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    let shifted = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3, 4, 5]], &device);
+    let hidden = target.narrow(1, 0, 4);
+    let stateless = model
+        .predict_next_token_logits(shifted.clone(), hidden.clone())
+        .unwrap();
+    // Three pairs at once (window active at the step's end), then one more.
+    let chunk = model
+        .forward_mtp_cached(
+            shifted.clone().narrow(1, 0, 3),
+            hidden.clone().narrow(1, 0, 3),
+            None,
+            &mut state,
+        )
+        .unwrap();
+    let last = model
+        .forward_mtp_cached(
+            shifted.narrow(1, 3, 1),
+            hidden.narrow(1, 3, 1),
+            None,
+            &mut state,
+        )
+        .unwrap();
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([4].as_slice()));
+    Tensor::cat(vec![chunk.logits, last.logits], 1)
+        .into_data()
+        .assert_approx_eq::<f32>(&stateless.into_data(), Tolerance::absolute(3e-5));
+}
+
+/// The key/value-only projection refuses a head with key normalization.
+#[test]
+fn pair_projection_refuses_key_normalization() {
+    let device = Default::default();
+    let mut model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    model.next_token_head.as_mut().unwrap().attention.key_norm = Some(
+        crate::normalization::RmsNormConfig::new(4)
+            .init(&device)
+            .unwrap(),
+    );
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let target = prefill_target(&model, &mut state, &device);
+    let error = model
+        .prefill_mtp_cache(Tensor::from_ints([[1, 2, 3]], &device), target, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Nemotron-H MTP key/value projection does not support key normalization"),
+        "{error}"
+    );
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+}

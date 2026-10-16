@@ -1641,3 +1641,422 @@ fn muse_cached_ring_prefill_benchmark() {
         samples[0], samples[2]
     );
 }
+
+/// The trait accessors and slot lookups describe the allocated geometry.
+#[test]
+fn decode_state_accessors_report_allocation_geometry() {
+    let (model, device) = tiny_model();
+    let state = model
+        .new_decode_state(CacheConfig::new(3, 8).unwrap(), 3, &device)
+        .unwrap();
+    assert_eq!(DecodeState::batch_size(&state), 3);
+    assert_eq!(DecodeState::capacity(&state), 8);
+    assert_eq!(DecodeState::device(&state), &device);
+    assert_eq!(state.sliding_window(), Some(3));
+    assert_eq!(
+        state.layer_cache(2),
+        Some(MuseGlimmerLayerCache::Sliding { group: 0, layer: 2 })
+    );
+    assert_eq!(
+        state.layer_cache(3),
+        Some(MuseGlimmerLayerCache::Full { group: 1, layer: 0 })
+    );
+    assert_eq!(state.layer_cache(4), None);
+    // A ring never needs to be wider than the logical capacity.
+    let narrow = model
+        .new_decode_state(CacheConfig::new(1, 2).unwrap(), 1, &device)
+        .unwrap();
+    assert_eq!(narrow.sliding_window(), Some(2));
+}
+
+/// Returns the window-3 miniature's weights under another sliding window.
+///
+/// Every tensor is identical to [`tiny_model`]'s, so the twin's decode states
+/// differ from the miniature's only in their ring width.
+fn window_twin(
+    window: usize,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> MuseGlimmerForCausalLm<TestBackend> {
+    initialized_model(
+        MuseGlimmerTextConfig {
+            sliding_window: Some(window),
+            ..tiny_config()
+        },
+        device,
+    )
+}
+
+/// A state allocated for another schedule or ring window is rejected before any work.
+///
+/// Regressions: a full-attention-only state (no ring window) used with a
+/// hybrid model surfaced the internal planning error
+/// `muse_glimmer.decode_state.window: is required by the sliding cache group`
+/// instead of the incompatibility diagnostic; and a state from a twin that
+/// differs only in `sliding_window` was accepted, because the model's layout
+/// was re-planned with the state's own window, so cached decoding silently
+/// masked with the twin's window. Each foreign state first commits two of its
+/// owner's tokens, so both prefill and decode refusals are shown to leave the
+/// lengths and every cached key/value byte untouched.
+#[test]
+fn foreign_decode_state_is_rejected_before_work() {
+    let (hybrid, device) = tiny_model();
+    let full_only = initialized_model::<TestBackend>(full_only_config(), &device);
+    let narrower = window_twin(2, &device);
+    let wider = window_twin(5, &device);
+    let tokens = |ids: &[i32]| CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(ids.to_vec(), [1, ids.len()]), &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    for (model, owner) in [
+        (&hybrid, &full_only),
+        (&full_only, &hybrid),
+        (&hybrid, &narrower),
+        (&hybrid, &wider),
+        (&narrower, &hybrid),
+        (&wider, &hybrid),
+    ] {
+        let mut foreign = owner
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        owner
+            .prefill(tokens(&[1, 2]), &mut foreign, &ForwardOptions::default())
+            .unwrap();
+        let snapshot = contract_cache_snapshot(&foreign);
+        // The six-token suffix is longer than every ring width under test.
+        let prefill = model
+            .prefill(
+                tokens(&[3, 4, 5, 6, 7, 8]),
+                &mut foreign,
+                &ForwardOptions::default(),
+            )
+            .unwrap_err();
+        let decode = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut foreign,
+                &ForwardOptions::default(),
+            )
+            .unwrap_err();
+        for error in [prefill, decode] {
+            assert!(
+                matches!(&error, Error::Cache(reason)
+                    if reason == "Muse-Glimmer decode state is incompatible with the model"),
+                "{error}"
+            );
+        }
+        assert_eq!(foreign.lengths(), &[2]);
+        assert_eq!(contract_cache_snapshot(&foreign), snapshot);
+    }
+}
+
+/// Twins whose windows both clamp to the same capacity share an interchangeable state.
+///
+/// A ring is never wider than the logical capacity, so at capacity 2 the
+/// window-3 miniature and its window-2 and window-5 twins all allocate the
+/// same two-slot ring and attend over identical spans. Such a state is
+/// accepted and decodes bit-identically to one the model allocated itself.
+#[test]
+fn states_with_the_same_capacity_clamped_window_are_interchangeable() {
+    let (model, device) = tiny_model();
+    let prompt = || CausalLmInput {
+        token_ids: Tensor::from_ints([[4, 9]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut own = model
+        .new_decode_state(CacheConfig::new(1, 2).unwrap(), 1, &device)
+        .unwrap();
+    let expected = model
+        .prefill(prompt(), &mut own, &ForwardOptions::default())
+        .unwrap()
+        .logits
+        .into_data();
+    for window in [2, 5] {
+        let mut borrowed = window_twin(window, &device)
+            .new_decode_state(CacheConfig::new(1, 2).unwrap(), 1, &device)
+            .unwrap();
+        assert_eq!(borrowed.sliding_window(), Some(2));
+        let actual = model
+            .prefill(prompt(), &mut borrowed, &ForwardOptions::default())
+            .unwrap()
+            .logits
+            .into_data();
+        assert_eq!(actual, expected, "window {window}");
+        assert_eq!(borrowed.lengths(), &[2]);
+        assert_eq!(
+            contract_cache_snapshot(&borrowed),
+            contract_cache_snapshot(&own)
+        );
+    }
+}
+
+/// Capacities beyond Burn's portable signed position range are refused before allocation.
+#[test]
+fn capacity_beyond_the_signed_index_range_is_refused() {
+    let device = Default::default();
+    let limit = i32::MAX as usize;
+    let model = MuseGlimmerForCausalLm::<TestBackend>::init(
+        MuseGlimmerTextConfig {
+            max_position_embeddings: limit + 1,
+            ..tiny_config()
+        },
+        &device,
+    )
+    .unwrap();
+    let error = model
+        .new_decode_state(CacheConfig::new(1, limit + 1).unwrap(), 1, &device)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.decode_state.capacity"
+            && reason == "must fit Burn's portable signed position-index range"),
+        "{error}"
+    );
+    let (model, device) = tiny_model();
+    let error = model
+        .new_decode_state(CacheConfig::new(1, 33).unwrap(), 1, &device)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.decode_state.capacity"
+            && reason == "33 exceeds max_position_embeddings 32"),
+        "{error}"
+    );
+}
+
+/// A decode whose every row is finished returns exact zeros and changes no cache byte.
+#[test]
+fn fully_inactive_decode_returns_exact_zeros_and_preserves_the_cache() {
+    let (model, device) = tiny_model();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2], [3, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let snapshot = contract_cache_snapshot(&state);
+    let finished = || DecodeInput {
+        token_ids: Tensor::from_ints([[5, 6], [7, 8]], &device),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[false, false], [false, false]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let is_zero = |tensor: Tensor<TestBackend, 3>| {
+        tensor
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .all(|value| value == 0.0)
+    };
+    let plain = model
+        .decode(finished(), &mut state, &ForwardOptions::default())
+        .unwrap();
+    assert_eq!(plain.logits.dims(), [2, 1, 32]);
+    assert!(is_zero(plain.logits));
+    assert!(plain.final_hidden_state.is_none() && plain.hidden_states.is_empty());
+    let detailed = model
+        .decode(
+            finished(),
+            &mut state,
+            &ForwardOptions {
+                logits: crate::LogitsSelection::All,
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(detailed.logits.dims(), [2, 2, 32]);
+    assert!(is_zero(detailed.logits));
+    assert_eq!(detailed.hidden_states.len(), 6);
+    assert!(detailed.hidden_states.into_iter().all(is_zero));
+    assert!(is_zero(detailed.final_hidden_state.unwrap()));
+    assert_eq!(state.lengths(), &[2, 2]);
+    assert_eq!(contract_cache_snapshot(&state), snapshot);
+}
+
+/// Four-layer miniature whose RoPE layers use LongRoPE with a two-token trained context.
+///
+/// LongRoPE switches from its short to its long frequency table once a row's
+/// evaluated context exceeds two, so rows with different contexts need
+/// different rotary tables within one batch.
+fn long_rope_config() -> MuseGlimmerTextConfig {
+    MuseGlimmerTextConfig {
+        rope_parameters: Some(crate::models::config::RopeParameters {
+            rope_type: crate::models::config::RopeType::LongRope,
+            rope_theta: Some(10_000.0),
+            factor: Some(2.0),
+            original_max_position_embeddings: Some(2),
+            short_factor: Some(vec![1.0, 1.0]),
+            long_factor: Some(vec![1.5, 2.0]),
+            ..Default::default()
+        }),
+        ..tiny_config()
+    }
+}
+
+/// Ragged rows with context-dependent RoPE get per-row tables, matching independent rows.
+#[test]
+fn context_dependent_rope_builds_per_row_tables_matching_independent_rows() {
+    let device = Default::default();
+    let model = initialized_model::<TestBackend>(long_rope_config(), &device);
+    let options = ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        ..Default::default()
+    };
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    // Row 0 evaluates context 2 (short table), row 1 context 3 (long table).
+    let output = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[4, 5, 0], [4, 5, 6]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[true, true, false], [true, true, true]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut batched,
+            &options,
+        )
+        .unwrap();
+    assert_eq!(batched.lengths(), &[2, 3]);
+    for (row, tokens) in [vec![4, 5], vec![4, 5, 6]].into_iter().enumerate() {
+        let mut single = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let length = tokens.len();
+        let expected = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(
+                        TensorData::new(tokens.clone(), [1, length]),
+                        &device,
+                    ),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut single,
+                &options,
+            )
+            .unwrap()
+            .logits;
+        contract_close(
+            output
+                .logits
+                .clone()
+                .slice([row..row + 1, 0..length, 0..32]),
+            expected,
+        );
+    }
+}
+
+/// Extending cached keys past a context-dependent limit is refused before any mutation.
+#[test]
+fn context_dependent_rope_refuses_to_extend_cached_keys_past_its_limit() {
+    let device = Default::default();
+    let model = initialized_model::<TestBackend>(long_rope_config(), &device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[4, 5]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let snapshot = contract_cache_snapshot(&state);
+    let error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[6]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Muse cached decoding at context 3 exceeds the 2-token limit of its \
+                context-dependent rotary scaling, which would require re-rotating cached keys"),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[2]);
+    assert_eq!(contract_cache_snapshot(&state), snapshot);
+}
+
+/// Cache planning refuses a zero ring window and sliding layers without a window.
+#[test]
+fn cache_layout_refuses_zero_and_missing_ring_windows() {
+    let (model, _) = tiny_model();
+    for (window, reason) in [
+        (Some(0), "must be non-zero"),
+        (None, "is required by the sliding cache group"),
+    ] {
+        let error = cache_layout(&model, window).unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason: found }
+                if field == "muse_glimmer.decode_state.window" && found == reason),
+            "{error}"
+        );
+    }
+    let layout = cache_layout(&model, Some(3)).unwrap();
+    assert_eq!(layout.groups.len(), 2);
+    assert_eq!(layout.window, Some(3));
+}
+
+/// A cached call whose score bound is below one query row fails without publishing.
+#[test]
+fn cached_score_bound_below_one_query_row_fails_without_publishing() {
+    let (model, device) = tiny_model();
+    let model = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 1))
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let snapshot = contract_cache_snapshot(&state);
+    let error = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason.starts_with("one attention query row requires ")
+            && reason.ends_with(" score elements, exceeding the configured bound of 1")),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(contract_cache_snapshot(&state), snapshot);
+}

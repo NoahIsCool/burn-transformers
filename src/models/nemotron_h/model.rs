@@ -499,13 +499,27 @@ pub struct NemotronHBlock<B: Backend> {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BlockMixer<'a, B: Backend> {
     /// Mamba-2 selective state-space mixer.
-    Mamba2(&'a NemotronMamba2<B>),
+    Mamba2(
+        /// The block's `mamba` field, mixing `[batch, sequence, hidden]` through
+        /// its convolution and selective scan.
+        &'a NemotronMamba2<B>,
+    ),
     /// Causal grouped-query attention.
-    Attention(&'a GroupedQueryAttention<B>),
+    Attention(
+        /// The block's `attention` field; its native key/value heads are what
+        /// the attention cache stores.
+        &'a GroupedQueryAttention<B>,
+    ),
     /// Dense two-projection MLP.
-    Mlp(&'a NemotronHDense<B>),
+    Mlp(
+        /// The block's `mlp` field, the ungated `down(phi(up(x)))` map.
+        &'a NemotronHDense<B>,
+    ),
     /// Sparse routed-plus-shared MoE.
-    Moe(&'a NemotronHMoe<B>),
+    Moe(
+        /// The block's `moe` field: router, routed experts, and shared expert.
+        &'a NemotronHMoe<B>,
+    ),
 }
 
 impl<B: Backend> NemotronHBlock<B> {

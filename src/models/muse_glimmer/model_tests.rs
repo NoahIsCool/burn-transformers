@@ -2293,3 +2293,296 @@ fn tied_projection_matches_reshaping_linear_oracle() {
         Err(Error::Shape { tensor, .. }) if tensor == "muse_glimmer.tied_lm_head"
     ));
 }
+
+/// Inference refuses attention dropout instead of silently ignoring it.
+#[test]
+fn init_refuses_attention_dropout() {
+    let device = Default::default();
+    let error = MuseGlimmerForCausalLm::<TestBackend>::init(
+        MuseGlimmerTextConfig {
+            attention_dropout: 0.1,
+            ..tiny_config()
+        },
+        &device,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason == "Muse-Glimmer inference supports the released zero attention dropout only"),
+        "{error}"
+    );
+}
+
+/// An unrepresentable query width fails before any projection is allocated.
+///
+/// Validation accepts any head count divisible by the key/value heads, so the
+/// checked width product is what reports `q d` overflow.
+#[test]
+fn attention_init_rejects_an_overflowing_query_width() {
+    let device = Default::default();
+    let config = MuseGlimmerTextConfig {
+        num_attention_heads: usize::MAX / 2 + 1,
+        num_key_value_heads: 1,
+        head_dim: 2,
+        ..tiny_config()
+    };
+    let error = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.attention.query_width"
+            && reason == "dimension product overflows usize"),
+        "{error}"
+    );
+    assert_eq!(
+        checked_product("muse_glimmer.attention.key_value_width", 3, 4).unwrap(),
+        12
+    );
+}
+
+/// Projected tensors, masks, and key slices that disagree with the layer are shape errors.
+#[test]
+fn attention_rejects_inconsistent_projections_masks_and_slices() {
+    let (model, device) = tiny_model();
+    let attention = &model.model.layers[3].self_attn;
+    let projection = attention
+        .project_self(Tensor::ones([1, 3, 8], &device))
+        .unwrap();
+
+    // A token mask requires keys aligned one-to-one with the queries.
+    let mut longer = projection.clone();
+    longer.key = Tensor::cat(vec![longer.key.clone(), longer.key.narrow(2, 0, 1)], 2);
+    longer.value = Tensor::cat(vec![longer.value.clone(), longer.value.narrow(2, 0, 1)], 2);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true, true]].into(),
+        &device,
+    ));
+    let error = attention
+        .attend_aligned(&longer, Some(&mask), None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "muse_glimmer.stateless_attention"
+            && expected == "equal query and key sequence lengths with a token mask"
+            && actual == "query=3, key=4"),
+        "{error}"
+    );
+    // Without a mask, the same longer keys are a valid cached suffix.
+    assert_eq!(
+        attention
+            .attend_aligned(&longer, None, None)
+            .unwrap()
+            .dims(),
+        [1, 2, 3, 4]
+    );
+
+    let mut narrow_gate = projection.clone();
+    narrow_gate.gate = narrow_gate.gate.narrow(2, 0, 4);
+    let error = attention
+        .attend_aligned(&narrow_gate, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, actual, .. }
+            if tensor == "muse_glimmer.attention_projection"
+            && actual == "q=[1, 2, 3, 4], k=[1, 1, 3, 4], v=[1, 1, 3, 4], gate=[1, 3, 4]"),
+        "{error}"
+    );
+
+    let error = attention
+        .attend_unbounded(
+            &projection,
+            Some(Tensor::<TestBackend, 4, Bool>::empty([1, 2, 3, 2], &device)),
+            true,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "muse_glimmer.attention_mask"
+            && expected == "[1, 2, 3, 3]"
+            && actual == "[1, 2, 3, 2]"),
+        "{error}"
+    );
+
+    let error = MuseKeySlicing::Aligned { window: None }
+        .key_range(4, 3, 0..1)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, actual, .. }
+            if tensor == "muse_glimmer.attention_alignment" && actual == "query=4, key=3"),
+        "{error}"
+    );
+    for rows in [2..2, 3..5] {
+        let error = MuseKeySlicing::Aligned { window: None }
+            .key_range(4, 4, rows)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "muse_glimmer.attention_chunk"
+                && reason == "query range must be non-empty and in bounds"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        MuseKeySlicing::Aligned { window: None }
+            .key_range(2, 5, 0..1)
+            .unwrap(),
+        0..4
+    );
+}
+
+/// A layer's rotary lookup, window, and tables are required exactly where they apply.
+#[test]
+fn layers_require_their_window_and_rotary_tables() {
+    let (model, device) = tiny_model();
+    let local = &model.model.layers[0];
+    let global = &model.model.layers[3];
+    assert!(local.uses_rope() && !global.uses_rope());
+    assert_eq!(local.window(Some(3)).unwrap(), Some(3));
+    assert_eq!(global.window(None).unwrap(), None);
+    let error = local.window(None).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.sliding_window"
+            && reason == "is required by a sliding-attention layer"),
+        "{error}"
+    );
+
+    let hidden = || Tensor::<TestBackend, 3>::ones([1, 2, 8], &device);
+    let error = local
+        .attention_projection(hidden(), None, &mut None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.rope" && reason == "a RoPE layer needs its rotary tables"),
+        "{error}"
+    );
+    // A NoPE layer needs no tables.
+    global
+        .attention_projection(hidden(), None, &mut None)
+        .unwrap();
+
+    let rope = local.rope.unwrap();
+    let error = RotaryTables::<TestBackend> {
+        entries: Vec::new(),
+    }
+    .get(&rope)
+    .expect_err("an empty table set has no entry");
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.rope"
+            && reason == "no rotary table was built for a layer's configuration"),
+        "{error}"
+    );
+}
+
+/// A tied head projects through the embedding table, then applies the bounded soft-cap.
+#[test]
+fn tied_head_projects_through_the_embedding_and_soft_caps() {
+    let device = Default::default();
+    let config = MuseGlimmerTextConfig {
+        tie_word_embeddings: true,
+        ..tiny_config()
+    };
+    let contract = config
+        .checkpoint_contract(MuseGlimmerCheckpointOptions::default())
+        .unwrap();
+    let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    assert!(model.lm_head.is_none());
+    for (tensor_index, expected) in contract.expected_tensors().iter().enumerate() {
+        if expected.name == "lm_head.weight" {
+            continue;
+        }
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&dimension| dimension as usize)
+            .collect::<Vec<_>>();
+        let values = (0..shape.iter().product())
+            .map(|element: usize| (((element + tensor_index * 5) % 29) as f32 - 14.0) * 0.03)
+            .collect::<Vec<_>>();
+        TensorSink::write_tensor(&mut model, &expected.name, TensorData::new(values, shape))
+            .unwrap();
+    }
+    let output = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let hidden = output.final_hidden_state.unwrap();
+    let raw = hidden.matmul(
+        model
+            .model
+            .embed_tokens
+            .weight
+            .val()
+            .transpose()
+            .unsqueeze_dim::<3>(0),
+    );
+    let cap = config.final_logit_softcapping;
+    let expected = ((raw * config.output_multiplier) / cap).tanh() * cap;
+    output
+        .logits
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-5));
+}
+
+/// A failing gate callback aborts the layer and names the activation point.
+#[test]
+fn failing_gate_callback_names_its_activation_point() {
+    let (model, device) = tiny_model();
+    let mut hooks = Hooks::new();
+    hooks.try_edit(
+        gate_point(Layer::decoder(1)),
+        |_: Tensor<TestBackend, 3>| Err(Error::Generation("refused".into())),
+    );
+    let error = model
+        .forward_with_hooks(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+            &mut hooks,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Intervention { point, cause: Some(cause), .. }
+            if point == "decoder.layers.1.attention.gate"
+            && matches!(**cause, Error::Generation(_))),
+        "{error}"
+    );
+}
+
+/// A score bound below one query row's plane fails before any score is allocated.
+#[test]
+fn score_bound_below_one_query_row_fails_before_scoring() {
+    let (model, device) = tiny_model();
+    let model = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 1))
+        .unwrap();
+    let error = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason)
+            if reason.starts_with("one attention query row requires ")
+            && reason.ends_with(" score elements, exceeding the configured bound of 1")),
+        "{error}"
+    );
+}

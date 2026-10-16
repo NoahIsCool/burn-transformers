@@ -177,16 +177,12 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
                 "must fit Burn's portable signed position-index range",
             ));
         }
-        let physical_window = model
-            .config()
-            .resolved_sliding_window()
-            .map(|window| window.min(requested.capacity()));
         // Each ring group carries its own window, so the bank needs none.
         let internal_config = CacheConfig::new(requested.sequence_count(), requested.capacity())
             .map_err(|error| {
                 Error::configuration("muse_glimmer.decode_state", error.to_string())
             })?;
-        let layout = cache_layout(model, physical_window)?;
+        let layout = planned_layout(model, requested.capacity())?;
         let mut tensors = TensorDecodeState::new(internal_config, batch_size, device)?;
         for (expected_group, spec) in layout.groups.iter().copied().enumerate() {
             let group = tensors.main_mut().add_native_kv(spec)?;
@@ -218,8 +214,23 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
     }
 
     /// Verifies that state geometry belongs to the supplied model.
+    ///
+    /// The expected layout is exactly what [`Self::new`] would allocate for
+    /// this model at the state's logical capacity, including the model's own
+    /// physical ring window `min(sliding_window, capacity)`. Decode masks
+    /// sliding layers with the state's stored window, so comparing windows is
+    /// what stops a state from a twin model that differs only in
+    /// `sliding_window` from silently attending over the wrong span. A
+    /// full-attention-only state (no window) on a hybrid model, or the
+    /// reverse, differs in its schedule and window and is refused the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cache("Muse-Glimmer decode state is incompatible with the
+    /// model")` for any schedule, group, or window mismatch, and a cache error
+    /// naming the group when a bank's geometry differs from its spec.
     fn validate_for_model(&self, model: &MuseGlimmerForCausalLm<B>) -> Result<()> {
-        let expected = cache_layout(model, self.layout.window)?;
+        let expected = planned_layout(model, self.tensors.capacity())?;
         if expected != self.layout || self.tensors.main().native_kv_count() != expected.groups.len()
         {
             return Err(Error::Cache(
@@ -652,6 +663,28 @@ fn prepare_stateful_input<B: Backend>(
         )));
     }
     Ok(rows)
+}
+
+/// Plans the layout a decode state of logical `capacity` uses for `model`.
+///
+/// A ring never needs more slots than the logical capacity, so the physical
+/// window is `min(sliding_window, capacity)`; a full-attention-only model
+/// resolves no window. Allocation and reuse validation both call this, so a
+/// state is accepted exactly when it matches a fresh allocation.
+///
+/// # Errors
+///
+/// Returns the planning errors of [`cache_layout`]; a validated model and a
+/// non-zero capacity always plan successfully.
+fn planned_layout<B: Backend>(
+    model: &MuseGlimmerForCausalLm<B>,
+    capacity: usize,
+) -> Result<MuseGlimmerCacheLayout> {
+    let physical_window = model
+        .config()
+        .resolved_sliding_window()
+        .map(|window| window.min(capacity));
+    cache_layout(model, physical_window)
 }
 
 /// Resolves the two homogeneous groups and dense per-layer schedule.

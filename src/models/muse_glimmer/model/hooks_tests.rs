@@ -331,3 +331,114 @@ fn hooked_forward_is_differentiable() {
     let gradients = logits.sum().backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
+
+/// The hook trait delegates to the family method and the stack is the decoder.
+#[test]
+fn hooked_trait_delegates_to_the_family_forward() {
+    let model = model();
+    let direct = model
+        .forward_with_hooks(input(), &options(), &mut Hooks::new())
+        .unwrap();
+    let generic =
+        HookedModel::forward_with_hooks(&model, input(), &options(), &mut Hooks::new()).unwrap();
+    assert_eq!(direct.logits.into_data(), generic.logits.into_data());
+    assert_eq!(StagedModel::<TestBackend>::stack(&model), Stack::Decoder);
+}
+
+/// Failing embedding and final-norm callbacks abort their stage and name the point.
+#[test]
+fn failing_stage_callbacks_name_their_activation_points() {
+    let model = model();
+    let refuse = |_: Tensor<TestBackend, 3>| Err(Error::Generation("refused".into()));
+    let assert_point = |error: Error, expected: &str| {
+        assert!(
+            matches!(&error, Error::Intervention { point, cause: Some(cause), .. }
+                if point == expected && matches!(**cause, Error::Generation(_))),
+            "{error}"
+        );
+    };
+    let mut hooks = Hooks::new();
+    hooks.try_edit(Stack::Decoder.embedding(), refuse);
+    assert_point(
+        model.embed_with_hooks(input(), &mut hooks).unwrap_err(),
+        "decoder.embedding",
+    );
+    let state = model
+        .run_layers(model.embed(input()).unwrap(), 0..4)
+        .unwrap();
+    let mut hooks = Hooks::new();
+    hooks.try_edit(Stack::Decoder.final_norm(), refuse);
+    assert_point(
+        model.normalize_with_hooks(state, &mut hooks).unwrap_err(),
+        "decoder.final_norm",
+    );
+}
+
+/// Staged states in a foreign dtype or with cross-attention are rejected by field.
+#[test]
+fn staged_states_reject_foreign_dtypes_and_cross_attention() {
+    let model = model();
+    let state = model.embed(input()).unwrap();
+    let mut half = state.clone();
+    half.hidden = half.hidden.cast(burn::tensor::DType::F16);
+    for error in [
+        model.run_layers(half.clone(), 0..1).unwrap_err(),
+        model.normalize(half).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "muse_glimmer.execution.hidden"
+                && reason == "hidden states must use the model dtype F32, found F16"),
+            "{error}"
+        );
+    }
+    let mut cross = state;
+    cross.context = cross
+        .context
+        .with_cross_attention(AttentionPolicy::causal());
+    let error = model.run_layers(cross, 0..1).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "muse_glimmer.execution.encoder"
+            && reason == "Muse decoder blocks do not define cross-attention"),
+        "{error}"
+    );
+}
+
+/// Explicit connectivity and additive bias reach the overridden layer's scores.
+///
+/// A non-causal policy whose `allowed` plane is the lower triangle with a zero
+/// bias reproduces the causal override; a nonzero bias changes the result.
+#[test]
+fn staged_policy_connectivity_and_bias_reach_the_scores() {
+    let model = model();
+    let device = Default::default();
+    let run = |policy: AttentionPolicy<TestBackend>| {
+        let mut state = model.embed(input()).unwrap();
+        state.context.layer_attention = vec![(Layer::decoder(3), policy)];
+        model
+            .normalize(model.run_layers(state, 0..4).unwrap())
+            .unwrap()
+            .hidden
+    };
+    let causal = run(AttentionPolicy::causal());
+    let lower = Tensor::<TestBackend, 1, Int>::arange(0..5, &device);
+    let allowed = lower
+        .clone()
+        .reshape([5, 1])
+        .greater_equal(lower.reshape([1, 5]))
+        .reshape([1, 1, 5, 5]);
+    let explicit =
+        run(AttentionPolicy::custom(allowed.clone())
+            .with_bias(Tensor::zeros([1, 1, 5, 5], &device)));
+    explicit
+        .into_data()
+        .assert_approx_eq::<f32>(&causal.clone().into_data(), Tolerance::absolute(1e-6));
+    let biased = run(AttentionPolicy::custom(allowed).with_bias(
+        Tensor::<TestBackend, 1, Int>::arange(0..25, &device)
+            .float()
+            .reshape([1, 1, 5, 5])
+            * 0.1,
+    ));
+    assert!((biased - causal).abs().max().into_scalar() > 1e-5);
+}

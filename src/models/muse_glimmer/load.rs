@@ -21,7 +21,6 @@ use crate::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
         ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
     },
-    feed_forward::GatedFeedForward,
     normalization::RmsNorm,
 };
 
@@ -272,26 +271,9 @@ fn install_layer_tensor<B: Backend>(
         "self_attn.k_proj.bias" => install_linear_bias(target, &mut layer.self_attn.k_proj, data),
         "self_attn.v_proj.bias" => install_linear_bias(target, &mut layer.self_attn.v_proj, data),
         "self_attn.o_proj.bias" => install_linear_bias(target, &mut layer.self_attn.o_proj, data),
-        "mlp.gate_proj.weight" => install_mlp_weight(target, &mut layer.mlp, "gate", data),
-        "mlp.up_proj.weight" => install_mlp_weight(target, &mut layer.mlp, "up", data),
-        "mlp.down_proj.weight" => install_mlp_weight(target, &mut layer.mlp, "down", data),
-        _ => Err(MuseGlimmerLoadError::UnknownTarget {
-            target: target.into(),
-        }),
-    }
-}
-
-/// Installs one named SwiGLU projection.
-fn install_mlp_weight<B: Backend>(
-    target: &str,
-    mlp: &mut GatedFeedForward<B>,
-    projection: &str,
-    data: TensorData,
-) -> Result<(), MuseGlimmerLoadError> {
-    match projection {
-        "gate" => install_linear_weight(target, &mut mlp.gate_proj, data),
-        "up" => install_linear_weight(target, &mut mlp.up_proj, data),
-        "down" => install_linear_weight(target, &mut mlp.down_proj, data),
+        "mlp.gate_proj.weight" => install_linear_weight(target, &mut layer.mlp.gate_proj, data),
+        "mlp.up_proj.weight" => install_linear_weight(target, &mut layer.mlp.up_proj, data),
+        "mlp.down_proj.weight" => install_linear_weight(target, &mut layer.mlp.down_proj, data),
         _ => Err(MuseGlimmerLoadError::UnknownTarget {
             target: target.into(),
         }),
