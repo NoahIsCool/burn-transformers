@@ -199,6 +199,7 @@ pub(crate) fn walk_alias_chain(links: &[AliasLink], start: usize) -> AliasWalk {
                 #[cfg(verus_keep_ghost)]
                 proof! {
                     let previous = steps;
+                    let earlier = seen;
                     assert(walk(links@, start as int, (previous + 1) as nat) == next as int);
                     seen = seen.insert(cursor as int);
                     steps = steps + 1;
@@ -209,13 +210,13 @@ pub(crate) fn walk_alias_chain(links: &[AliasLink], start: usize) -> AliasWalk {
                             assert(walk(links@, start as int, previous) == x);
                         }
                     }
+                    // The new position `cursor` was unvisited, so it differs from every earlier one.
                     assert forall|a: nat, b: nat| a < b < steps
                         implies #[trigger] walk(links@, start as int, a)
                             != #[trigger] walk(links@, start as int, b)
                     by {
                         if b == previous {
-                            assert(!seen.remove(cursor as int).contains(walk(links@, start as int, a))
-                                || walk(links@, start as int, a) != cursor as int);
+                            assert(earlier.contains(walk(links@, start as int, a)));
                         }
                     }
                 }
