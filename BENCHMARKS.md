@@ -558,9 +558,11 @@ interleaved runs each, 21:25–21:59 local time:
 Cached decode is 1.2x, 1.8x and 3.8x faster and now nearly independent of the
 source length; it exceeds the September 10 controlled series at every length
 (by 11%, 61% and 3.4x), which closes the 8–18% regression recorded above. The
-cost is the one-time contiguous copy at prefill, `2 · layers · source ·
-d_model` elements (about 3 ms at 128 source tokens, within noise at 32 and
-512), and whole-process peak footprint rose from 472–479 MB to 509–514 MB.
+cost is the one-time contiguous copy at prefill, `2 · layers · source · heads
+· d_kv` elements (8 decoder layers and 6 · 64 = 384 projected channels for
+FLAN-T5-small, so 786,432 F32 elements at 128 source tokens; about 3 ms there,
+within noise at 32 and 512), and whole-process peak footprint rose from
+472–479 MB to 509–514 MB.
 Predicted tokens are identical in every run. The FLAN-T5-small
 official-reference gate (`flan_t5_small_flex_matches_official_reference`)
 reproduces the earlier Flex output hashes bit for bit, and a unit test shows
@@ -623,16 +625,22 @@ s. At width 256 neither path changed beyond noise.
 
 ### Qwen3.5-0.8B Metal/F16 process memory
 
-The footprint increase recorded above (4.37 GB at `e4011b9` versus 2.91 GB on
-September 9 and 3.02 GB on September 10) is **not** a regression of the
-polish pass. The supervised memory run (`scripts/profile_process_memory.py`
+The footprint increase recorded above (4.37 GB at `e4011b9` versus the
+2,907,412,480-byte, 2.91 GB, peak of the September 9 benchmark run) is **not**
+a regression of the polish pass. September's supervised memory runs peaked at
+3,014,105,216 bytes (3.01 GB) on September 9
+([record](acceptance/measurements/qwen3.5-0.8b-metal-memory-20260909-supervisor.json),
+the first column of the table below) and 2,977,486,656 bytes (2.98 GB) on
+September 10
+([record](acceptance/measurements/small-model-performance-20260910/qwen-memory-phase-summary.json)).
+The supervised memory run (`scripts/profile_process_memory.py`
 around `qwen::qwen35_metal_baseline_benchmark`, one Metal job at a time) was
 repeated on today's host for three source revisions: `103c6ff` (this
 repository's September 10 state), `5ab1fa6` (the pre-polish `main`, September
 12) and `ac07281`. Sampled
 per-phase maxima of physical footprint (resident set in parentheses), in GB:
 
-| Phase | September 9, macOS 15.7.9 | `103c6ff` | `5ab1fa6` | `ac07281` |
+| Phase | September 9 supervised run, macOS 15.7.9 | `103c6ff` | `5ab1fa6` | `ac07281` |
 | --- | ---: | ---: | ---: | ---: |
 | strict load | 2.781 (2.518) | 4.310 (2.546) | 4.309 (2.564) | 4.369 (2.642) |
 | cold prefill | 2.622 | 4.162 (1.844) | 4.162 (1.842) | 4.184 (1.845) |

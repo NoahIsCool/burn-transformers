@@ -36,13 +36,14 @@
 //! heads (`reshape` then `swap_dims(1, 2)`) yields a strided view. CubeCL
 //! kernels read that view directly, but Burn Flex's attention copies every
 //! non-contiguous key and value operand on every call: with the view cached,
-//! each decode step re-copied all `2 * layers * batch * source * d_model`
-//! cached elements (about two thirds of FLAN-T5-small's Flex decode time at
-//! 512 source tokens). The cache therefore stores both tensors contiguously
-//! once at prefill on backends that prefer it
-//! ([`operations::contiguous_where_preferred`]), a one-time copy of the same
-//! size as one decode step used to make. Values are unchanged; only the
-//! physical layout differs.
+//! each decode step re-copied all `2 * layers * batch * source * heads * d_kv`
+//! cached elements (the projected inner width `heads * d_kv`, which need not
+//! equal `d_model`, is 6 * 64 = 384 for FLAN-T5-small). That copy took about
+//! two thirds of FLAN-T5-small's Flex decode time at 512 source tokens. The
+//! cache therefore stores both tensors contiguously once at prefill on
+//! backends that prefer it ([`operations::contiguous_where_preferred`]), a
+//! one-time copy of the same size as one decode step used to make. Values are
+//! unchanged; only the physical layout differs.
 //!
 //! Values of invalid key slots are zeroed before attention (they may hold
 //! stale bytes), and scores of excluded keys are replaced, never offset.
