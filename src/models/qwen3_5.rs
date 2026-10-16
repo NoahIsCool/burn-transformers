@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::{
     ConfigError, ModelConfig, MropeHandling, RopeContext, RopeParameters, TokenIds, Validate,
-    divisible, model_type, nonzero, positive_finite, probability, token_ids,
+    divisible, layer_count, model_type, nonzero, positive_finite, probability, token_ids,
 };
 use crate::position::RopeConfig;
 
@@ -303,6 +303,9 @@ impl Validate for Qwen3_5TextConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before `resolved_layer_types` derives one entry per layer;
+        // `mtp_num_hidden_layers` is bounded by this depth below.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         divisible(
             FAMILY,
             "num_attention_heads",

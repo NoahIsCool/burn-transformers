@@ -501,3 +501,67 @@ fn zero_or_oversized_extents_name_the_field() {
         }
     }
 }
+
+/// The re-initialization policy resets every LayerNorm as Hugging Face's `_init_weights` does.
+///
+/// Regression for GPT2-NEOX-INIT-DOC: the policy documentation claimed
+/// `ParameterInit` could not express ones; per-path `Ones`/`Zeros`
+/// overrides express the reset exactly.
+#[test]
+fn reinit_policy_resets_every_layer_norm() {
+    use crate::initialization::{ParameterInit, ParameterRole};
+
+    let config = GptNeoXConfig {
+        vocab_size: 13,
+        hidden_size: 8,
+        num_hidden_layers: 2,
+        num_attention_heads: 2,
+        intermediate_size: 12,
+        rotary_pct: 0.5,
+        max_position_embeddings: 16,
+        ..GptNeoXConfig::default()
+    };
+    let device = Default::default();
+    let mut model = GptNeoXForCausalLm::<B>::init(config.clone(), &device).unwrap();
+    let perturb = |norm: &mut LayerNorm<B>| {
+        norm.gamma = Param::from_tensor(Tensor::full([8], 2.0, &device));
+        norm.beta = Some(Param::from_tensor(Tensor::full([8], 0.5, &device)));
+    };
+    perturb(&mut model.layers[0].input_layernorm);
+    perturb(&mut model.layers[1].post_attention_layernorm);
+    perturb(&mut model.final_layer_norm);
+    let policy = config.reinit_policy();
+    policy.validate_for(&model).unwrap();
+    let (model, report) = policy.apply(model).unwrap();
+
+    let values = |tensor: Tensor<B, 1>| tensor.into_data().to_vec::<f32>().unwrap();
+    for norm in [
+        &model.layers[0].input_layernorm,
+        &model.layers[0].post_attention_layernorm,
+        &model.layers[1].input_layernorm,
+        &model.layers[1].post_attention_layernorm,
+        &model.final_layer_norm,
+    ] {
+        assert!(values(norm.gamma.val()).iter().all(|&value| value == 1.0));
+        assert!(
+            values(norm.beta.as_ref().unwrap().val())
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+    }
+    let others = report
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.role == ParameterRole::Other)
+        .collect::<Vec<_>>();
+    assert_eq!(others.len(), 2 * (2 * config.num_hidden_layers + 1));
+    for parameter in others {
+        let expected = if parameter.path.ends_with(".gamma") {
+            ParameterInit::Ones
+        } else {
+            assert!(parameter.path.ends_with(".beta"), "{}", parameter.path);
+            ParameterInit::Zeros
+        };
+        assert_eq!(parameter.init, expected, "{}", parameter.path);
+    }
+}

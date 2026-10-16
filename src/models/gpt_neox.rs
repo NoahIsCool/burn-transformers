@@ -29,9 +29,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
-    initialization::InitPolicy,
+    initialization::{InitPolicy, ParameterInit},
     models::{
-        config::{ConfigError, ModelConfig, Validate, model_type, positive_finite},
+        config::{ConfigError, ModelConfig, Validate, layer_count, model_type, positive_finite},
         gpt2::extents::{first_invalid_extent, product_fits},
     },
     position::{RopeConfig, RopeScaling},
@@ -121,18 +121,43 @@ impl GptNeoXConfig {
     /// shift zero as Hugging Face does.
     ///
     /// The policy itself covers embeddings, projections, and projection biases
-    /// only: LayerNorm scales and shifts have the role
+    /// only, so it applies to any module rooted anywhere: a LayerNorm's scale
+    /// and shift both have the role
     /// [`ParameterRole::Other`](crate::initialization::ParameterRole::Other),
-    /// which the policy keeps, because [`ParameterInit`](crate::initialization::ParameterInit)
-    /// cannot express "ones". Applying it to a trained or edited model
-    /// therefore re-samples the embeddings and projections and zeroes the
-    /// biases but leaves the LayerNorm parameters as they are; reset those
-    /// separately (for example by rebuilding each norm with
-    /// `LayerNormConfig::new(hidden_size).with_epsilon(layer_norm_eps)`) for
-    /// a complete Hugging Face-style re-initialization.
+    /// so no role rule can set the scale to one and the shift to zero, and the
+    /// policy keeps them. Applying it to a trained or edited model therefore
+    /// re-samples the embeddings and projections and zeroes the biases but
+    /// leaves the LayerNorm parameters as they are. [`Self::reinit_policy`]
+    /// adds the per-path [`ParameterInit::Ones`] and [`ParameterInit::Zeros`]
+    /// overrides that complete a Hugging Face-style re-initialization.
     #[must_use]
     pub fn init_policy(&self) -> InitPolicy {
         InitPolicy::normal(self.initializer_range)
+    }
+
+    /// [`Self::init_policy`] plus LayerNorm resets: Hugging Face's complete `_init_weights`.
+    ///
+    /// Hugging Face also sets every LayerNorm scale to one and shift to zero.
+    /// This policy adds one path override per parameter for the input and
+    /// post-attention norms of all `num_hidden_layers` blocks and for the
+    /// final norm: [`ParameterInit::Ones`] for each scale (`gamma`) and
+    /// [`ParameterInit::Zeros`] for each shift (`beta`). The paths are rooted
+    /// at [`GptNeoXForCausalLm`] (`layers.{l}.input_layernorm.gamma`, ...),
+    /// so apply it to that type; [`InitPolicy::apply`] rejects it, unchanged,
+    /// for a module where those paths do not exist.
+    #[must_use]
+    pub fn reinit_policy(&self) -> InitPolicy {
+        let norms = (0..self.num_hidden_layers)
+            .flat_map(|layer| {
+                ["input_layernorm", "post_attention_layernorm"]
+                    .map(|norm| format!("layers.{layer}.{norm}"))
+            })
+            .chain(["final_layer_norm".to_owned()]);
+        norms.fold(self.init_policy(), |policy, norm| {
+            policy
+                .with_override(format!("{norm}.gamma"), ParameterInit::Ones)
+                .with_override(format!("{norm}.beta"), ParameterInit::Zeros)
+        })
     }
 
     /// Returns the width of one attention head after validation.
@@ -162,6 +187,7 @@ impl Validate for GptNeoXConfig {
                 "must be nonzero and fit a signed 32-bit tensor index",
             ));
         }
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(ConfigError::new(
                 FAMILY,

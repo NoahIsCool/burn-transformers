@@ -53,7 +53,8 @@ use crate::{
     attention::{AttentionConnectivity, GroupedQueryAttentionConfig, ProjectionBias},
     feed_forward::ClampedSwiGlu,
     models::config::{
-        ConfigError, PartialRotary, RopeContext, divisible, nonzero, positive_finite, token_ids,
+        ConfigError, PartialRotary, RopeContext, divisible, expert_count, layer_count, nonzero,
+        positive_finite, token_ids,
     },
     moe::{RouterConfig, RouterProjectionPrecision, RouterScoring, RoutingPolicy, ScoringOrder},
     normalization::{RmsNormConfig, RmsNormRootMode},
@@ -233,7 +234,7 @@ impl GptOssArchitecture {
     }
 }
 
-/// Checks positive extents, grouped-query divisibility, and the epsilon.
+/// Checks positive extents, the layer and expert bounds, grouped-query divisibility, and the epsilon.
 fn validate_geometry(config: &GptOssConfig) -> Result<(), ConfigError> {
     for (field, value) in [
         ("vocab_size", config.vocab_size),
@@ -247,6 +248,10 @@ fn validate_geometry(config: &GptOssConfig) -> Result<(), ConfigError> {
     ] {
         nonzero(FAMILY, field, value)?;
     }
+    // Bounded before `layer_schedule` builds one entry per layer and before
+    // the router and expert banks size tables by the expert count.
+    layer_count(FAMILY, "num_hidden_layers", config.num_hidden_layers)?;
+    expert_count(FAMILY, "num_local_experts", config.num_local_experts)?;
     divisible(
         FAMILY,
         "num_attention_heads",

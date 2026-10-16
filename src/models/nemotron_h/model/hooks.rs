@@ -238,7 +238,7 @@ impl<B: Backend> NemotronHModel<B> {
             let context = BlockContext {
                 index,
                 token_mask: state.context.token_mask.as_ref(),
-                sliding_window: self.config.sliding_window,
+                attention_window: self.config.attention_window,
                 policy: Some(&policy),
             };
             let (hidden, _) =

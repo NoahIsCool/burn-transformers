@@ -520,12 +520,12 @@ fn cached_prefill_decode_matches_stateless() {
         .assert_approx_eq::<f32>(&full.into_data(), Tolerance::absolute(3e-5));
 }
 
-/// Sliding attention keeps full storage while stateless and cached math agree.
+/// An experiment window keeps full storage while stateless and cached math agree.
 #[test]
-fn sliding_window_cached_path_matches_stateless() {
+fn attention_window_cached_path_matches_stateless() {
     let device = Default::default();
     let mut config = tiny_config(false);
-    config.sliding_window = Some(2);
+    config.attention_window = Some(2);
     let model = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap();
     let full = model
         .forward(
@@ -1215,14 +1215,14 @@ fn assert_ragged_steps_match_independent_rows(model: &NemotronHForCausalLm<TestB
     assert_batched_matches_rows(model, &steps);
 }
 
-/// Sliding-window exclusions follow every row's own positions.
+/// Experiment-window exclusions follow every row's own positions.
 ///
 /// The left-padded second row has padded query slots beyond the window of
 /// its valid keys under the former `W_b + j` numbering (review NEMR-6).
 #[test]
-fn batched_sliding_window_matches_independent_rows() {
+fn batched_attention_window_matches_independent_rows() {
     for mut model in [contract_model(), clamped_dt_model(false)] {
-        model.model.config.sliding_window = Some(2);
+        model.model.config.attention_window = Some(2);
         let pad = |token| (token, false);
         let valid = |token| (token, true);
         let steps = vec![
@@ -1931,4 +1931,74 @@ fn reduced_precision_recurrent_cache_uses_the_declared_dtype() {
             .unwrap();
         assert_eq!(recurrent.matrix(0).unwrap().dtype(), dtype, "{name}");
     }
+}
+
+/// The serialized `sliding_window` never changes cached logits (regression for NUM-1).
+///
+/// The pinned reference ignores the key, so prefill plus decode under it must
+/// equal the full causal stateless pass, exactly like a `null` window.
+#[test]
+fn serialized_sliding_window_never_changes_cached_logits() {
+    let device = Default::default();
+    let mut config = tiny_config(false);
+    config.sliding_window = Some(2);
+    let model = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let full = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    let mut unwindowed = model.clone();
+    unwindowed.model.config.sliding_window = None;
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let cached = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[4, 5]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    cached
+        .into_data()
+        .assert_approx_eq::<f32>(&full.clone().into_data(), Tolerance::absolute(3e-5));
+    // Clearing the ignored key is a no-op for the stateless graph as well.
+    let cleared = unwindowed
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(
+        cleared.into_data().to_vec::<f32>().unwrap(),
+        full.into_data().to_vec::<f32>().unwrap()
+    );
 }

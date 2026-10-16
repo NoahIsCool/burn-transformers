@@ -729,6 +729,87 @@ fn every_registered_family_reaches_its_strict_loader() {
     }
 }
 
+/// Absurd counts in an untrusted `config.json` are contextual errors before any planning.
+///
+/// Regression for CFG-COUNT-1: a directory holding only a Llama
+/// `config.json` with `num_hidden_layers = 2^64 - 1` panicked with
+/// `capacity overflow`, and a one-tensor Qwen3-MoE checkpoint declaring
+/// `2^32` experts was killed while its tensor contract was being listed.
+#[test]
+fn absurd_counts_fail_before_checkpoint_planning() {
+    use crate::models::config::{MAX_EXPERTS, MAX_LAYERS};
+
+    let tiny_moe = |experts: usize| {
+        let mut config = serde_json::to_value(Qwen3MoeConfig {
+            num_hidden_layers: 48,
+            num_experts: experts,
+            ..Qwen3MoeConfig::default()
+        })
+        .unwrap();
+        config["moe_intermediate_size"] = json!(1_u64 << 32);
+        config
+    };
+    let cases = [
+        (
+            json!({"model_type": "llama", "num_hidden_layers": u64::MAX}),
+            "llama.num_hidden_layers",
+        ),
+        (
+            json!({"model_type": "llama", "num_hidden_layers": MAX_LAYERS + 1}),
+            "llama.num_hidden_layers",
+        ),
+        (tiny_moe(1 << 32), "qwen3_moe.num_experts"),
+        // Within the per-field bound, but 48 layers of it exceed the
+        // ten-million-tensor artifact limit.
+        (tiny_moe(MAX_EXPERTS), "qwen3_moe.num_experts"),
+    ];
+    for (config, field) in cases {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+        // One real tensor, so discovery would succeed if planning were reached.
+        let mut mappings = MappingPlan::new();
+        mappings.map("model.embed_tokens.weight", "model.embed_tokens.weight");
+        write_contract_checkpoint(
+            root.path(),
+            &[ExpectedTensor::new("model.embed_tokens.weight", vec![2, 2])],
+            &mappings,
+        );
+        let options = AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        };
+        let outcome = std::panic::catch_unwind(|| {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+        });
+        let error = outcome
+            .unwrap_or_else(|_| panic!("{field} panicked"))
+            .expect_err("absurd counts must not load");
+        assert!(
+            matches!(&error, Error::Configuration { field: actual, .. } if actual == field),
+            "{field}: {error}"
+        );
+    }
+
+    let root = tempfile::tempdir().expect("temporary model root");
+    std::fs::write(
+        root.path().join("config.json"),
+        json!({"model_type": "t5", "num_layers": u64::MAX}).to_string(),
+    )
+    .unwrap();
+    let error = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .expect_err("absurd T5 depth must not load");
+    assert!(error.to_string().contains("t5.num_layers"), "{error}");
+}
+
 /// Packed-sidecar certification names only registered causal families.
 #[test]
 fn packed_certification_names_registered_families() {
@@ -2260,6 +2341,7 @@ fn seq2seq_defaults_report_processor_constraints_that_beam_search_ignores() {
     assert_eq!(
         seq2seq.unsupported,
         BTreeMap::from([
+            ("do_sample".to_owned(), json!(true)),
             ("min_new_tokens".to_owned(), json!(300)),
             ("min_p".to_owned(), json!(0.05)),
             ("no_repeat_ngram_size".to_owned(), json!(3)),
@@ -2280,15 +2362,100 @@ fn seq2seq_defaults_report_processor_constraints_that_beam_search_ignores() {
         causal.unsupported.keys().collect::<Vec<_>>(),
         ["min_new_tokens", "num_beams"]
     );
-    // Neutral values (zero, null, and min-p under greedy decoding) are not reported.
+    // Neutral values (zero, null, unit penalties, and warpers under greedy
+    // decoding) are not reported.
     for neutral in [
-        json!({"min_new_tokens": 0, "no_repeat_ngram_size": 0, "do_sample": true, "min_p": 0.0}),
+        json!({"min_new_tokens": 0, "no_repeat_ngram_size": 0, "do_sample": false, "min_p": 0.0}),
         json!({"min_new_tokens": null, "no_repeat_ngram_size": null, "min_p": null}),
-        json!({"do_sample": false, "min_p": 0.3}),
+        json!({"do_sample": false, "min_p": 0.3, "temperature": 0.7, "top_k": 10, "top_p": 0.9}),
+        json!({"repetition_penalty": 1.0, "presence_penalty": 0.5}),
     ] {
         let resolved = resolve(GenerationConsumer::Seq2SeqBeamSearch, neutral.clone());
         assert!(resolved.unsupported.is_empty(), "{neutral}");
     }
+}
+
+/// Seq2seq loads leave sampling and the repetition penalty neutral and report them.
+///
+/// Regression for follow-up 170 (FU-BW): `repetition_penalty` and
+/// `do_sample` with its warpers were copied into the seq2seq defaults, which
+/// beam search never reads, and were not reported, although Hugging Face
+/// beam search applies `RepetitionPenaltyLogitsProcessor` and `do_sample`
+/// selects beam sampling.
+#[test]
+fn seq2seq_defaults_report_sampling_and_repetition_penalty() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let declared = json!({
+        "repetition_penalty": 1.3,
+        "presence_penalty": 0.5,
+        "do_sample": true,
+        "temperature": 0.7,
+        "top_k": 10,
+        "top_p": 0.9,
+        "seed": 7
+    });
+    std::fs::write(&path, serde_json::to_vec(&declared).unwrap()).unwrap();
+    let resolve = |consumer| {
+        resolve_generation_defaults(consumer, root.path(), None, None, 64, None).unwrap()
+    };
+    let seq2seq = resolve(GenerationConsumer::Seq2SeqBeamSearch);
+    let neutral = GenerationConfig::default();
+    assert_eq!(seq2seq.config.strategy, SamplingStrategy::Greedy);
+    assert_eq!(
+        (
+            seq2seq.config.repetition_penalty,
+            seq2seq.config.presence_penalty,
+            seq2seq.config.temperature,
+            seq2seq.config.top_k,
+            seq2seq.config.top_p,
+        ),
+        (
+            neutral.repetition_penalty,
+            neutral.presence_penalty,
+            neutral.temperature,
+            neutral.top_k,
+            neutral.top_p,
+        )
+    );
+    assert_eq!(seq2seq.config.seed, 7);
+    assert_eq!(
+        seq2seq.unsupported,
+        BTreeMap::from([
+            ("do_sample".to_owned(), json!(true)),
+            ("repetition_penalty".to_owned(), json!(1.3)),
+            ("temperature".to_owned(), json!(0.7)),
+            ("top_k".to_owned(), json!(10)),
+            ("top_p".to_owned(), json!(0.9)),
+        ])
+    );
+    // Causal generation applies every one of them and reports none.
+    let causal = resolve(GenerationConsumer::Causal);
+    assert_eq!(causal.config.strategy, SamplingStrategy::Sample);
+    assert_eq!(
+        (
+            causal.config.repetition_penalty,
+            causal.config.presence_penalty,
+            causal.config.temperature,
+            causal.config.top_k,
+            causal.config.top_p,
+        ),
+        (1.3, 0.5, 0.7, Some(10), Some(0.9))
+    );
+    assert!(causal.unsupported.is_empty(), "{:?}", causal.unsupported);
+    // Disabled warpers are not reported even while sampling.
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"do_sample": true, "temperature": 1.0, "top_k": 0, "top_p": 1.0}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resolve(GenerationConsumer::Seq2SeqBeamSearch).unsupported,
+        BTreeMap::from([("do_sample".to_owned(), json!(true))])
+    );
 }
 
 /// An automatic T5 load reports the n-gram and minimum-length constraints its beam search ignores.

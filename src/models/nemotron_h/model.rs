@@ -639,7 +639,7 @@ impl<B: Backend> NemotronHBlock<B> {
                     batch,
                     attention.query_heads,
                     sequence,
-                    context.sliding_window,
+                    context.attention_window,
                     &device,
                 )?;
                 let (mut bias, mut causal) = (None, true);
@@ -695,8 +695,8 @@ pub(super) struct BlockContext<'a, B: Backend> {
     pub(super) index: usize,
     /// Optional `[batch, sequence]` token validity (`true == valid`).
     pub(super) token_mask: Option<&'a TokenMask<B>>,
-    /// Optional causal attention window.
-    pub(super) sliding_window: Option<usize>,
+    /// Optional experiment-only causal attention window ([`NemotronHConfig::attention_window`]).
+    pub(super) attention_window: Option<usize>,
     /// Attention connectivity override for staged experiments.
     pub(super) policy: Option<&'a AttentionPolicy<B>>,
 }
@@ -812,7 +812,7 @@ impl<B: Backend> NemotronHModel<B> {
             let context = BlockContext {
                 index,
                 token_mask: input.token_mask.as_ref(),
-                sliding_window: self.config.sliding_window,
+                attention_window: self.config.attention_window,
                 policy: None,
             };
             let (next, routed) = layer.forward(hidden, &context, hooks.as_deref_mut())?;
@@ -884,7 +884,11 @@ pub struct NemotronHNextTokenHead<B: Backend> {
     pub moe: NemotronHMoe<B>,
     /// Final MTP normalization before the shared LM head.
     pub final_layer_norm: RmsNorm<B>,
-    /// Optional causal window applied by the MTP attention stage.
+    /// Optional experiment-only causal window applied by the MTP attention stage.
+    ///
+    /// Building the head from a configuration copies
+    /// [`NemotronHConfig::attention_window`], never the serialized
+    /// `sliding_window`, which the reference ignores.
     pub sliding_window: Option<usize>,
 }
 
@@ -928,7 +932,7 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
             moe_norm: norm()?,
             moe: NemotronHMoe::init(config, device)?,
             final_layer_norm: norm()?,
-            sliding_window: config.sliding_window,
+            sliding_window: config.attention_window,
         })
     }
 
@@ -1201,7 +1205,7 @@ fn mamba_config(config: &NemotronHConfig) -> NemotronMamba2Config {
     }
 }
 
-/// Combines true-valid padding semantics with an optional causal left window.
+/// Combines true-valid padding semantics with an optional experiment-only causal left window.
 fn stateless_attention_mask<B: Backend>(
     token_mask: Option<&TokenMask<B>>,
     batch: usize,
@@ -1228,7 +1232,7 @@ fn stateless_attention_mask<B: Backend>(
         .expand([batch, heads, sequence, sequence]);
     let window = i64::try_from(window).map_err(|_| {
         Error::configuration(
-            "nemotron_h.sliding_window",
+            "nemotron_h.attention_window",
             "window exceeds portable signed index range",
         )
     })?;

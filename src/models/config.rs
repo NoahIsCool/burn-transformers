@@ -16,6 +16,13 @@
 //! divisibility, token-ID ranges, the trained context and its precedence, and
 //! the lexer of the legacy `Infinity` normalization) live in the private
 //! `plan` module, which Verus verifies in place through `verus/config.rs`.
+//!
+//! Counts read from an untrusted `config.json` are bounded before anything
+//! proportional to them is allocated, so that no family describes a
+//! checkpoint contract longer than the [`MAX_CHECKPOINT_TENSORS`] artifact
+//! limit: [`MAX_LAYERS`] per stack (sized for the densest per-layer
+//! contract), [`MAX_EXPERTS`] per MoE layer, and, for checkpoint layouts with
+//! one tensor set per routed expert, the exact size of the whole contract.
 
 mod plan;
 pub mod rope;
@@ -28,9 +35,11 @@ use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use plan::{
-    DivisibilityFault, INFINITY_TOKEN_LENGTH, MropeSectionFault, TokenIdFault, divisibility_fault,
-    infinity_token_starts, mrope_section_fault, original_context_fits, token_id_fault,
+    CountFault, DivisibilityFault, INFINITY_TOKEN_LENGTH, MropeSectionFault, TokenIdFault,
+    count_fault, divisibility_fault, infinity_token_starts, mrope_section_fault,
+    original_context_fits, token_id_fault,
 };
+pub(crate) use plan::{MoeInventory, moe_inventory};
 
 pub use rope::{
     DEFAULT_ROPE_THETA, DynamicNtkContext, MropeHandling, PartialRotary, RopeContext,
@@ -187,15 +196,27 @@ where
 /// Hugging Face multimodal repositories conventionally store the language backbone
 /// under `text_config`. Historic/custom repositories also use `language_config` or
 /// `llm_config`; accepting those aliases is safe because this crate intentionally
-/// ignores the vision tower. NVIDIA's original Nemotron-H files contain the
-/// non-standard JSON literal `Infinity`; it is normalized to `null`, the same
-/// representation used by newer official checkpoints for an unbounded limit.
+/// ignores the vision tower.
+///
+/// JSON has no infinity, and checkpoints spell an unbounded limit (Nemotron-H's
+/// `time_step_limit` upper bound) in two non-standard ways, both read as `null`:
+///
+/// * NVIDIA's original files contain the bare Python literal `Infinity`, which
+///   a lexical pass rewrites before parsing.
+/// * Transformers 5 (`PreTrainedConfig.to_json_string`, since 5.2 and at the
+///   pinned `cfa309cf`) writes every non-finite float as a tagged object,
+///   `{"__float__": "Infinity"}`, so every config it saves carries one; the
+///   tag is decoded after parsing, exactly where Transformers recognizes it.
+///
+/// The tagged `-Infinity` and `NaN`, which no supported field can hold, are
+/// rejected with the JSON path of the offending value.
 pub fn parse_text_config<T>(json: &str) -> Result<T, ConfigLoadError>
 where
     T: Validate + DeserializeOwned,
 {
     let normalized = normalize_positive_infinity(json);
-    let value: serde_json::Value = serde_json::from_str(&normalized)?;
+    let mut value: serde_json::Value = serde_json::from_str(&normalized)?;
+    decode_float_tags(&mut value, &mut String::new())?;
     let text_value = ["text_config", "language_config", "llm_config"]
         .iter()
         .find_map(|key| value.get(*key).filter(|nested| !nested.is_null()))
@@ -229,6 +250,75 @@ fn normalize_positive_infinity(input: &str) -> String {
     }
     normalized.push_str(&input[copied..]);
     normalized
+}
+
+/// Object key under which Transformers 5 serializes a non-finite float.
+const FLOAT_TAG_KEY: &str = "__float__";
+
+/// Decodes Transformers 5's tagged non-finite floats in place, reporting errors at `path`.
+///
+/// Transformers' `_decode_special_floats` (pinned `cfa309cf`,
+/// `configuration_utils.py`) recognizes exactly an object whose only key is
+/// `__float__` and whose value is a string, and maps `"Infinity"`,
+/// `"-Infinity"`, and `"NaN"` to the IEEE values; any other object is
+/// ordinary data. This decoder recognizes the same objects:
+///
+/// * `"Infinity"` becomes `null`, the crate's representation of an unbounded
+///   limit (the same value the legacy `Infinity` repair produces);
+/// * `"-Infinity"`, `"NaN"`, and any other tag string are errors naming the
+///   tag and its JSON path (for example `time_step_limit[1]`), because no
+///   supported field accepts them and Transformers never writes other tags.
+///
+/// `path` is the location of `value` (empty at the root) and is restored
+/// before returning. Recursion follows the parsed document, whose depth
+/// `serde_json` already limits to 128 nested levels.
+fn decode_float_tags(
+    value: &mut serde_json::Value,
+    path: &mut String,
+) -> Result<(), serde_json::Error> {
+    use serde::de::Error as _;
+    use serde_json::Value;
+    use std::fmt::Write as _;
+
+    match value {
+        Value::Object(fields) => {
+            if fields.len() == 1
+                && let Some(Value::String(tag)) = fields.get(FLOAT_TAG_KEY)
+            {
+                if tag != "Infinity" {
+                    let location = if path.is_empty() { "<root>" } else { path };
+                    return Err(serde_json::Error::custom(format!(
+                        "unsupported float {{\"{FLOAT_TAG_KEY}\": \"{tag}\"}} at `{location}`; \
+                         only Transformers' tagged +Infinity (an unbounded limit, read as null) \
+                         is accepted"
+                    )));
+                }
+                *value = Value::Null;
+                return Ok(());
+            }
+            for (key, field) in fields.iter_mut() {
+                let restore = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(key);
+                decode_float_tags(field, path)?;
+                path.truncate(restore);
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let restore = path.len();
+                // Writing to a `String` cannot fail.
+                let _ = write!(path, "[{index}]");
+                decode_float_tags(item, path)?;
+                path.truncate(restore);
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
+    }
 }
 
 /// A token field that may contain one ID or several accepted end-of-sequence IDs.
@@ -268,6 +358,10 @@ pub enum RopeType {
     #[serde(rename = "linear")]
     Linear,
     /// Dynamic NTK scaling.
+    ///
+    /// It rescales only passes longer than the trained context; the built-in
+    /// families refuse such positions, so for them it is inert (see the
+    /// [`rope`] module documentation).
     #[serde(rename = "dynamic")]
     Dynamic,
     /// YaRN interpolation/extrapolation.
@@ -745,6 +839,163 @@ pub(crate) fn nonzero(
         Err(ConfigError::new(architecture, field, "must be nonzero"))
     } else {
         Ok(())
+    }
+}
+
+// Resource bounds for untrusted counts.
+//
+// A `config.json` is untrusted input: a few hundred bytes can declare
+// `num_hidden_layers = 2^64 - 1` or a million routed experts. Validation,
+// checkpoint contracts, and model construction each hold host structures with
+// one entry per layer (and, in per-expert checkpoint layouts, one entry per
+// routed expert of every MoE layer), so an unchecked count makes them overflow
+// a vector's capacity (a panic) or allocate until the process is killed,
+// instead of returning an error. Every family therefore checks its counts
+// against the bounds below before it builds anything proportional to them.
+//
+// The bounds follow from the default artifact tensor limit
+// [`MAX_CHECKPOINT_TENSORS`]: a configuration is only useful if some checkpoint
+// can satisfy it, and its checkpoint contract lists every parameter tensor, so
+// no accepted configuration may describe a longer contract than that limit.
+// A dense contract grows with the depth alone, by at most
+// `MAX_TENSORS_PER_LAYER` tensors per layer index summed over every stack,
+// which fixes [`MAX_LAYERS`]. A per-expert MoE contract grows with the product
+// of MoE layers and experts, so those families compute its exact length and
+// compare it with the limit itself.
+
+/// The default artifact tensor limit, ten million tensors.
+///
+/// Equal to [`ArtifactLimits::default`](crate::checkpoint::ArtifactLimits)'s
+/// `max_tensors`, the largest inventory that default checkpoint discovery
+/// accepts. A configuration whose complete checkpoint contract would list
+/// more tensors than this describes a checkpoint that no default-limited load
+/// can accept, so no family accepts one: dense families through
+/// [`MAX_LAYERS`], and families whose contracts grow with a product of two
+/// counts (one tensor set per routed expert of every MoE layer) by checking
+/// the exact contract length during validation, before a contract or graph
+/// exists.
+pub const MAX_CHECKPOINT_TENSORS: usize = 10_000_000;
+
+/// The most tensors a dense checkpoint contract lists per layer index, summed over all stacks.
+///
+/// Measured for every family by the configuration tests
+/// (`every_dense_contract_fits_the_artifact_limit_at_the_layer_bound`):
+/// Llama-family layouts list 9 tensors per layer (16 with every projection
+/// bias), Gemma 11 to 13, GPT-NeoX and Muse 12, GPT-2 16, gpt-oss 17, T5 23
+/// (one encoder and one decoder layer), and Qwen3.5 up to 25 (one decoder
+/// and one multi-token-prediction layer). Thirty-two leaves headroom for new
+/// optional tensors; the test fails if a contract outgrows it.
+const MAX_TENSORS_PER_LAYER: usize = 32;
+
+/// The largest accepted layer count of one stack, `2^18` (262,144).
+///
+/// Validation, checkpoint contracts, and graph construction keep one entry
+/// per layer, so an absurd count in an untrusted `config.json` would overflow
+/// a vector's capacity or exhaust memory before any error could be reported.
+/// The bound is the largest power of two whose densest contract,
+/// `MAX_TENSORS_PER_LAYER` (32) tensors per layer index, fits the
+/// [`MAX_CHECKPOINT_TENSORS`] artifact limit: `2^18 · 32` is about 8.4
+/// million tensors, leaving room for embeddings and heads, while `2^19 · 32`
+/// exceeds ten million. That is about a thousand times the depth of any
+/// released checkpoint (all below `2^8` layers).
+///
+/// The bound keeps contracts within the artifact limit, not small: at the
+/// bound a Llama contract lists about 2.4 million tensors, as many as a
+/// checkpoint of that depth would hold, and a per-layer schedule takes
+/// between a quarter of a megabyte (one flag per layer) and about twenty
+/// megabytes (gpt-oss's one string per layer).
+pub const MAX_LAYERS: usize = 1 << 18;
+
+/// The largest accepted routed-expert count of one MoE layer, `2^20`.
+///
+/// Released routers choose among at most a few hundred experts (DeepSeek-V3
+/// 256, Kimi K2 384). The bound keeps every per-expert table (router rows,
+/// routing groups, dispatch counts) small. Per-expert checkpoint layouts
+/// store two or three tensors per expert, so `2^20` experts in a single MoE
+/// layer already list a fifth to a third of the [`MAX_CHECKPOINT_TENSORS`]
+/// artifact limit; those families bound the product of MoE layers and
+/// experts exactly, as the length of their whole contract.
+pub const MAX_EXPERTS: usize = 1 << 20;
+
+/// Compile-time check of the [`MAX_LAYERS`] derivation: the largest power of two that fits.
+const _: () = assert!(
+    MAX_LAYERS.is_power_of_two()
+        && MAX_LAYERS * MAX_TENSORS_PER_LAYER <= MAX_CHECKPOINT_TENSORS
+        && 2 * MAX_LAYERS * MAX_TENSORS_PER_LAYER > MAX_CHECKPOINT_TENSORS
+);
+
+/// Validates a stack depth: nonzero and at most [`MAX_LAYERS`].
+///
+/// Call it before building anything with one entry per layer.
+pub(crate) fn layer_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+) -> Result<(), ConfigError> {
+    bounded_count(architecture, field, value, MAX_LAYERS, "layers")
+}
+
+/// Validates a routed-expert count: nonzero and at most [`MAX_EXPERTS`].
+///
+/// Call it before building anything with one entry per expert.
+pub(crate) fn expert_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+) -> Result<(), ConfigError> {
+    bounded_count(architecture, field, value, MAX_EXPERTS, "experts")
+}
+
+/// Validates the size of a complete checkpoint contract.
+///
+/// `count` is the exact number of tensors the family's contract lists, or
+/// `None` when that number overflows `usize`; either way an inventory beyond
+/// [`MAX_CHECKPOINT_TENSORS`] is reported at `field`, the count that drives it.
+pub(crate) fn checkpoint_tensor_count(
+    architecture: &'static str,
+    field: &'static str,
+    count: Option<usize>,
+) -> Result<(), ConfigError> {
+    match count {
+        Some(count) if count <= MAX_CHECKPOINT_TENSORS => Ok(()),
+        Some(count) => Err(ConfigError::new(
+            architecture,
+            field,
+            format!(
+                "the checkpoint would list {count} tensors, more than the \
+                 {MAX_CHECKPOINT_TENSORS}-tensor artifact limit"
+            ),
+        )),
+        None => Err(ConfigError::new(
+            architecture,
+            field,
+            format!(
+                "the checkpoint tensor count overflows usize, far beyond the \
+                 {MAX_CHECKPOINT_TENSORS}-tensor artifact limit"
+            ),
+        )),
+    }
+}
+
+/// Accepts `value` in `1..=maximum`, naming the bounded quantity (`layers`, `experts`).
+///
+/// The verdict is the Verus-verified `count_fault`: a zero is reported, with
+/// [`nonzero`]'s message, before an excess.
+fn bounded_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+    maximum: usize,
+    unit: &str,
+) -> Result<(), ConfigError> {
+    match count_fault(value, maximum) {
+        None => Ok(()),
+        Some(CountFault::Zero) => Err(ConfigError::new(architecture, field, "must be nonzero")),
+        Some(CountFault::AboveMaximum) => Err(ConfigError::new(
+            architecture,
+            field,
+            format!("{value} exceeds the supported maximum of {maximum} {unit}"),
+        )),
     }
 }
 

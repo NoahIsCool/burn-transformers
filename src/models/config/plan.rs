@@ -20,6 +20,11 @@
 //!   fallback sources with the documented precedence.
 //! * [`infinity_token_starts`]: the lexer behind the legacy `Infinity`
 //!   normalization finds exactly the `Infinity` tokens outside JSON strings.
+//! * [`count_fault`]: a layer or expert count from untrusted metadata lies in
+//!   `1..=maximum`, a zero reported before an excess.
+//! * [`moe_inventory`]: the tensor count of a per-expert MoE checkpoint,
+//!   `fixed + L·p_l + S·(p_s + E·p_e) + (L - S)·p_d`, exactly or `None` when it
+//!   exceeds `usize::MAX`.
 //!
 //! # Verified properties
 //!
@@ -784,6 +789,168 @@ pub(crate) fn infinity_token_starts(bytes: &[u8]) -> Vec<usize> {
         reveal(lists_tokens_below);
     }
     starts
+}
+
+// Resource bounds of untrusted counts.
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Exact tensor count of a checkpoint with one tensor set per routed expert.
+///
+/// `fixed + L·p_l + S·(p_s + E·p_e) + (L - S)·p_d` for `L` layers of which
+/// `S` are sparse (see [`MoeInventory`] for the terms).
+pub(crate) open spec fn spec_moe_inventory(shape: MoeInventory) -> int {
+    shape.fixed + shape.layers * shape.per_layer
+        + shape.sparse_layers * (shape.per_sparse_layer + shape.experts * shape.per_expert)
+        + (shape.layers - shape.sparse_layers) * shape.per_dense_layer
+}
+
+/// Expands the inventory into non-negative terms, each a lower bound of the total.
+proof fn lemma_moe_inventory_terms(shape: MoeInventory)
+    requires
+        shape.sparse_layers <= shape.layers,
+    ensures
+        spec_moe_inventory(shape) == shape.fixed + shape.layers * shape.per_layer
+            + (shape.layers - shape.sparse_layers) * shape.per_dense_layer
+            + shape.sparse_layers * shape.per_sparse_layer
+            + (shape.experts * shape.per_expert) * shape.sparse_layers,
+        shape.layers * shape.per_layer >= 0,
+        (shape.layers - shape.sparse_layers) * shape.per_dense_layer >= 0,
+        shape.sparse_layers * shape.per_sparse_layer >= 0,
+        shape.experts * shape.per_expert >= 0,
+        (shape.experts * shape.per_expert) * shape.sparse_layers >= 0,
+        shape.sparse_layers >= 1 ==> shape.experts * shape.per_expert
+            <= (shape.experts * shape.per_expert) * shape.sparse_layers,
+        shape.sparse_layers == 0 ==> (shape.experts * shape.per_expert) * shape.sparse_layers
+            == 0,
+{
+    let layers = shape.layers as int;
+    let sparse = shape.sparse_layers as int;
+    let routed = shape.experts as int * shape.per_expert as int;
+    assert(sparse * (shape.per_sparse_layer as int + routed) == sparse
+        * shape.per_sparse_layer as int + routed * sparse) by (nonlinear_arith);
+    assert(layers * shape.per_layer as int >= 0) by (nonlinear_arith)
+        requires layers >= 0, shape.per_layer as int >= 0;
+    assert((layers - sparse) * shape.per_dense_layer as int >= 0) by (nonlinear_arith)
+        requires layers - sparse >= 0, shape.per_dense_layer as int >= 0;
+    assert(sparse * shape.per_sparse_layer as int >= 0) by (nonlinear_arith)
+        requires sparse >= 0, shape.per_sparse_layer as int >= 0;
+    assert(routed >= 0) by (nonlinear_arith)
+        requires shape.experts as int >= 0, shape.per_expert as int >= 0, routed
+            == shape.experts as int * shape.per_expert as int;
+    assert(routed * sparse >= 0) by (nonlinear_arith) requires routed >= 0, sparse >= 0;
+    assert(sparse >= 1 ==> routed <= routed * sparse) by (nonlinear_arith)
+        requires routed >= 0;
+    assert(sparse == 0 ==> routed * sparse == 0) by (nonlinear_arith);
+}
+
+} // verus!
+
+/// Why a bounded count was rejected, in check order.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountFault {
+    /// The count is zero.
+    Zero,
+    /// The count exceeds its maximum.
+    AboveMaximum,
+}
+
+/// Checks a layer or expert count against `1..=maximum`.
+///
+/// Verified: `None` exactly when `1 <= value <= maximum`; otherwise a zero is
+/// reported before an excess.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(fault =>
+    ensures
+        fault == (if value == 0 {
+            Some(CountFault::Zero)
+        } else if value > maximum {
+            Some(CountFault::AboveMaximum)
+        } else {
+            None
+        }),
+))]
+pub(crate) fn count_fault(value: usize, maximum: usize) -> Option<CountFault> {
+    if value == 0 {
+        Some(CountFault::Zero)
+    } else if value > maximum {
+        Some(CountFault::AboveMaximum)
+    } else {
+        None
+    }
+}
+
+/// Tensor counts of a checkpoint whose sparse layers hold one tensor set per routed expert.
+///
+/// Every layer lists `per_layer` tensors (norms and attention); each of the
+/// `sparse_layers` MoE layers adds `per_sparse_layer` (router and shared
+/// experts) and `per_expert` for each of its `experts`, and each of the
+/// remaining `layers - sparse_layers` layers adds `per_dense_layer`; `fixed`
+/// covers the embeddings, final norm, and head.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MoeInventory {
+    /// Tensors outside the layers.
+    pub(crate) fixed: usize,
+    /// Decoder layers `L`.
+    pub(crate) layers: usize,
+    /// Tensors every layer lists, `p_l`.
+    pub(crate) per_layer: usize,
+    /// MoE layers `S <= L`.
+    pub(crate) sparse_layers: usize,
+    /// Expert-independent tensors of one MoE layer, `p_s`.
+    pub(crate) per_sparse_layer: usize,
+    /// Routed experts `E` of one MoE layer.
+    pub(crate) experts: usize,
+    /// Tensors of one routed expert, `p_e`.
+    pub(crate) per_expert: usize,
+    /// Feed-forward tensors of one dense layer, `p_d`.
+    pub(crate) per_dense_layer: usize,
+}
+
+/// Returns the exact inventory size, or `None` when it exceeds `usize::MAX`.
+///
+/// The routed term is formed as `(E · p_e) · S` and skipped when `S = 0`, so
+/// every intermediate value is at most the total and an overflow anywhere
+/// means the total itself overflows.
+///
+/// Verified: `Some(spec_moe_inventory(shape))` exactly when that value fits
+/// `usize`, `None` otherwise.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(total =>
+    requires
+        shape.sparse_layers <= shape.layers,
+    ensures
+        match total {
+            Some(total) => total == spec_moe_inventory(shape),
+            None => spec_moe_inventory(shape) > usize::MAX,
+        },
+))]
+pub(crate) fn moe_inventory(shape: MoeInventory) -> Option<usize> {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_moe_inventory_terms(shape);
+    }
+    let dense_layers = shape.layers - shape.sparse_layers;
+    let every_layer = shape.layers.checked_mul(shape.per_layer)?;
+    let dense = dense_layers.checked_mul(shape.per_dense_layer)?;
+    let sparse = shape.sparse_layers.checked_mul(shape.per_sparse_layer)?;
+    let routed = if shape.sparse_layers == 0 {
+        0
+    } else {
+        shape
+            .experts
+            .checked_mul(shape.per_expert)?
+            .checked_mul(shape.sparse_layers)?
+    };
+    let total = shape
+        .fixed
+        .checked_add(every_layer)?
+        .checked_add(dense)?
+        .checked_add(sparse)?;
+    total.checked_add(routed)
 }
 
 #[cfg(test)]

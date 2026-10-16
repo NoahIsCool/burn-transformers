@@ -44,8 +44,13 @@
 //!   `default_theta` go through the one shared translator
 //!   [`RopeParameters::to_rope_config`](crate::models::config::RopeParameters::to_rope_config)
 //!   with [`PartialRotary::FullHeadOnly`] and every other reference-faithful
-//!   default, so `llama3`, `linear`, `dynamic`, `yarn`, and `longrope`
-//!   scaling all execute, and a partial factor other than one is rejected.
+//!   default, so `llama3`, `linear`, `yarn`, and `longrope` scaling execute,
+//!   and a partial factor other than one is rejected. `dynamic` (NTK) is
+//!   accepted but inert: Transformers rescales its base only for a pass
+//!   longer than `max_position_embeddings`, and positions at or beyond that
+//!   limit are refused here (stateless and cached), so within every accepted
+//!   input it equals unscaled RoPE, as Transformers computes for those
+//!   lengths.
 //! * **Sliding windows.** A sliding layer sees the `W` newest valid tokens
 //!   (`AttentionConnectivity::SlidingWindow`), matching Transformers'
 //!   `kv_idx > q_idx - W`. Mistral applies `sliding_window` to every layer
@@ -82,7 +87,7 @@ use crate::{
     },
     feed_forward::GatedFeedForwardConfig,
     models::config::{
-        ConfigError, PartialRotary, RopeContext, divisible, nonzero, positive_finite,
+        ConfigError, PartialRotary, RopeContext, divisible, layer_count, nonzero, positive_finite,
     },
     normalization::{RmsNormConfig, RmsNormRootMode},
     position::RopeConfig,
@@ -310,7 +315,10 @@ impl LlamaArchitecture {
     }
 }
 
-/// Checks the positive extents and grouped-query divisibility.
+/// Checks the positive extents, the layer bound, and grouped-query divisibility.
+///
+/// The layer bound ([`crate::models::config::MAX_LAYERS`]) runs before
+/// [`layer_schedule`] builds its per-layer rotary and sliding flags.
 fn validate_geometry(config: &LlamaFamilyConfig, family: &'static str) -> Result<(), ConfigError> {
     for (field, value) in [
         ("vocab_size", config.vocab_size),
@@ -322,6 +330,7 @@ fn validate_geometry(config: &LlamaFamilyConfig, family: &'static str) -> Result
     ] {
         nonzero(family, field, value)?;
     }
+    layer_count(family, "num_hidden_layers", config.num_hidden_layers)?;
     divisible(
         family,
         "num_attention_heads",

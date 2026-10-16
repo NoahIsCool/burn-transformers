@@ -29,10 +29,15 @@
 //! `typical_p`, `max_length`, ...) are recorded on the [`LoadedModel`] rather
 //! than silently dropped. What counts as applied depends on the
 //! [`GenerationConsumer`]: causal generation applies every
-//! [`GenerationConfig`] logits processor, whereas encoder-decoder beam search
-//! reads only its own `BeamSearchConfig`, so seq2seq loads leave the
-//! `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` constraints unset and
-//! report them instead.
+//! [`GenerationConfig`] logits processor and warper, whereas encoder-decoder
+//! beam search reads only its own `BeamSearchConfig`. Seq2seq loads therefore
+//! leave every processor Hugging Face beam search would apply neutral on the
+//! defaults and report it instead: the `min_p`, `no_repeat_ngram_size`, and
+//! `min_new_tokens` constraints, the repetition penalty, and sampling
+//! (`do_sample`, which selects Hugging Face's beam *sampling*, with its
+//! temperature, top-k, and top-p warpers). `presence_penalty`, which Hugging
+//! Face's `GenerationConfig` does not define, is likewise left neutral and,
+//! matching Hugging Face, not reported.
 //! Floating casts, packed layouts, aliases, and tensor shapes remain the responsibility
 //! of the selected architecture contract and shared checkpoint planner.
 
@@ -274,6 +279,12 @@ where
 
 impl<B: Backend> AutoSeq2SeqLm<B> {
     /// Strictly loads one supported encoder-decoder model from a local directory.
+    ///
+    /// Like the causal pipeline, it parses the configuration, resolves
+    /// generation defaults, records provenance, loads the optional tokenizer,
+    /// and discovers and strictly plans the checkpoint before it allocates the
+    /// graph, so a checkpoint that cannot satisfy the configuration costs no
+    /// per-block module allocation.
     pub fn load_local(
         root: impl AsRef<Path>,
         options: &AutoLoadOptions,
@@ -306,9 +317,14 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         )?;
         let source = source_metadata(&root, &model_type, options)?;
         let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+        // Plan before building the graph, as the causal pipeline does: a
+        // configuration that the discovered checkpoint cannot satisfy fails
+        // here, before one module per encoder and decoder block is allocated.
+        let planned = config
+            .plan_checkpoint(&root, &options.checkpoint)
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
         let mut model = T5ForConditionalGeneration::init(config, device)?;
-        let outcome = model
-            .load_checkpoint(&root, &options.checkpoint)
+        let outcome = execute_local_load_plan(planned.manifest(), planned.load_plan(), &mut model)
             .map_err(|error| Error::Checkpoint(error.to_string()))?;
         LoadedModel::new_with_execution_stats(
             Self::T5(model),
@@ -395,14 +411,17 @@ enum GenerationConsumer {
     Causal,
     /// Encoder-decoder beam search, which reads only its own [`crate::generation::BeamSearchConfig`].
     ///
-    /// The `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` constraints
-    /// (all applied by Hugging Face beam search) are therefore left unset on
-    /// the defaults and reported instead.
+    /// Hugging Face beam search applies the `min_p`, `no_repeat_ngram_size`,
+    /// and `min_new_tokens` constraints and the repetition penalty, and
+    /// `do_sample` switches it to beam sampling with the temperature, top-k,
+    /// and top-p warpers. None of them reaches this beam search, so they are
+    /// left neutral on the defaults (greedy, unit penalties) and reported
+    /// instead.
     Seq2SeqBeamSearch,
 }
 
 impl GenerationConsumer {
-    /// Whether the loop applies the `min_p`, n-gram, and minimum-length constraints.
+    /// Whether the loop applies the logits processors and sampling warpers of [`GenerationConfig`].
     const fn applies_processor_constraints(self) -> bool {
         matches!(self, Self::Causal)
     }
@@ -476,8 +495,10 @@ fn resolve_generation_defaults(
 
 /// Applies one parsed `generation_config.json` with Hugging Face semantics.
 ///
-/// The `min_p`, n-gram, and minimum-length constraints are applied only when
-/// `consumer` reads them (see [`GenerationConsumer`]).
+/// The `min_p`, n-gram, and minimum-length constraints, the repetition and
+/// presence penalties, and sampling with its warpers are applied only when
+/// `consumer` reads them (see [`GenerationConsumer`]); otherwise the defaults
+/// stay neutral and `unsupported_settings` reports what Hugging Face would apply.
 fn apply_local_generation_config(
     config: &mut GenerationConfig,
     local: &LocalGenerationConfig,
@@ -497,7 +518,7 @@ fn apply_local_generation_config(
     if let Some(size) = local.no_repeat_ngram_size.filter(|_| constraints) {
         config.no_repeat_ngram_size = size;
     }
-    if local.do_sample.unwrap_or(false) {
+    if constraints && local.do_sample.unwrap_or(false) {
         config.strategy = SamplingStrategy::Sample;
         if let Some(temperature) = local.temperature {
             config.temperature = temperature;
@@ -508,12 +529,12 @@ fn apply_local_generation_config(
         config.top_p = local.top_p.filter(|top_p| top_p.is_nan() || *top_p < 1.0);
         // Hugging Face adds `MinPLogitsWarper` whenever `min_p` is set; validation
         // rejects values outside `[0, 1]`, as its warper does.
-        config.min_p = local.min_p.filter(|_| constraints);
+        config.min_p = local.min_p;
     }
-    if let Some(penalty) = local.repetition_penalty {
+    if let Some(penalty) = local.repetition_penalty.filter(|_| constraints) {
         config.repetition_penalty = penalty;
     }
-    if let Some(penalty) = local.presence_penalty {
+    if let Some(penalty) = local.presence_penalty.filter(|_| constraints) {
         config.presence_penalty = penalty;
     }
     if let Some(seed) = local.seed {
@@ -661,9 +682,11 @@ impl LocalGenerationConfig {
     /// Sampling-only warpers are reported only when `do_sample` is set,
     /// because Hugging Face ignores them under greedy decoding too. `applied`
     /// is the resolved configuration: for a consumer that does not read the
-    /// processor constraints, every active `min_p`, `no_repeat_ngram_size`,
-    /// and `min_new_tokens` is reported, and otherwise a `min_new_tokens`
-    /// that was clamped to `max_new_tokens` is reported with its declared value.
+    /// logits processors, every active `min_p`, `no_repeat_ngram_size`,
+    /// `min_new_tokens`, and `repetition_penalty` is reported, as are
+    /// `do_sample: true` and its declared non-neutral `temperature`, `top_k`,
+    /// and `top_p`; otherwise a `min_new_tokens` that was clamped to
+    /// `max_new_tokens` is reported with its declared value.
     fn unsupported_settings(
         &self,
         consumer: GenerationConsumer,
@@ -693,6 +716,23 @@ impl LocalGenerationConfig {
         }
         if let Some(min_p) = self.min_p.filter(|&min_p| sampling && min_p != 0.0) {
             report.insert("min_p".to_owned(), Value::from(min_p));
+        }
+        // Hugging Face applies its repetition penalty in every mode, beam search included.
+        if let Some(penalty) = self.repetition_penalty.filter(|&penalty| penalty != 1.0) {
+            report.insert("repetition_penalty".to_owned(), Value::from(penalty));
+        }
+        if sampling {
+            // `do_sample` selects beam sampling; its warpers act only then.
+            report.insert("do_sample".to_owned(), Value::Bool(true));
+            if let Some(temperature) = self.temperature.filter(|&temperature| temperature != 1.0) {
+                report.insert("temperature".to_owned(), Value::from(temperature));
+            }
+            if let Some(top_k) = self.top_k.filter(|&top_k| top_k != 0) {
+                report.insert("top_k".to_owned(), Value::from(top_k));
+            }
+            if let Some(top_p) = self.top_p.filter(|&top_p| top_p.is_nan() || top_p < 1.0) {
+                report.insert("top_p".to_owned(), Value::from(top_p));
+            }
         }
         report
     }

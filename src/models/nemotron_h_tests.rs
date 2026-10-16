@@ -372,23 +372,25 @@ fn attention_fields_are_rejected_only_when_attention_is_scheduled() {
             "must be finite and greater than zero",
         ),
         (
-            edited(|c| c.sliding_window = Some(0)),
-            "sliding_window",
+            edited(|c| c.attention_window = Some(0)),
+            "attention_window",
             "must be nonzero",
         ),
         (
-            edited(|c| c.sliding_window = Some(4097)),
-            "sliding_window",
+            edited(|c| c.attention_window = Some(4097)),
+            "attention_window",
             "cannot exceed max_position_embeddings",
         ),
     ];
     for (config, field, reason) in &cases {
         assert_rejected(config, field, reason);
     }
-    // A partial factor yielding an even integral width and a full window are valid.
+    // A partial factor yielding an even integral width and a full window are
+    // valid; the serialized `sliding_window` is ignored metadata at any value.
     edited(|c| {
         c.partial_rotary_factor = Some(0.5);
-        c.sliding_window = Some(4096);
+        c.attention_window = Some(4096);
+        c.sliding_window = Some(0);
     })
     .validate()
     .unwrap();
@@ -615,13 +617,19 @@ fn moe_fields_are_rejected_with_their_exact_diagnostics() {
             "each router group must contain at least two experts for top-2 group scoring",
         ),
         (
-            // (usize::MAX - 1) experts in one group, two groups kept.
+            // (usize::MAX - 1) experts in one group, two groups kept: the
+            // expert bound now rejects the count before routing groups would
+            // overflow their eligible-expert product.
             edited(|c| {
                 c.n_routed_experts = usize::MAX - 1;
                 c.topk_group = 2;
             }),
-            "topk_group",
-            "eligible expert count overflows usize",
+            "n_routed_experts",
+            String::leak(format!(
+                "{} exceeds the supported maximum of {} experts",
+                usize::MAX - 1,
+                crate::models::config::MAX_EXPERTS
+            )),
         ),
         (
             // Two groups of four keep one group: four eligible experts < five.
@@ -692,4 +700,156 @@ fn mtp_stage_shape_is_restricted_to_the_released_topology() {
     edited(|c| c.num_nextn_predict_layers = 1)
         .validate()
         .unwrap();
+}
+
+/// `NemotronHConfig(...).to_json_string()` at the pinned Transformers revision `cfa309cf`.
+///
+/// Produced with `vocab_size=32, hidden_size=8, layers_block_type=['mamba',
+/// 'attention', 'mlp', 'moe'], num_attention_heads=2, num_key_value_heads=1,
+/// head_dim=4, max_position_embeddings=32, intermediate_size=12,
+/// ssm_state_size=3, mamba_num_heads=4, mamba_head_dim=2, n_groups=2,
+/// conv_kernel=3, chunk_size=2, n_routed_experts=4, moe_intermediate_size=6,
+/// moe_shared_expert_intermediate_size=8, num_experts_per_tok=2, n_group=2,
+/// topk_group=1, sliding_window=3`. Transformers 5 serializes the default
+/// `time_step_limit = (0.0, inf)` with its `__float__` tag, so every config it
+/// saves carries one, and it writes `sliding_window` even though its
+/// Nemotron-H graph never reads the field.
+pub(super) const TRANSFORMERS_SAVED_CONFIG: &str = r#"{
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "chunk_size": 2,
+  "conv_kernel": 3,
+  "eos_token_id": 2,
+  "expand": 2,
+  "head_dim": 4,
+  "hidden_dropout": 0.0,
+  "hidden_size": 8,
+  "initializer_range": 0.02,
+  "intermediate_size": 12,
+  "layer_norm_epsilon": 1e-05,
+  "layers_block_type": [
+    "linear_attention",
+    "full_attention",
+    "mlp",
+    "moe"
+  ],
+  "mamba_head_dim": 2,
+  "mamba_hidden_act": "silu",
+  "mamba_num_heads": 4,
+  "mamba_proj_bias": false,
+  "mamba_ssm_cache_dtype": "float32",
+  "max_position_embeddings": 32,
+  "mlp_bias": false,
+  "mlp_hidden_act": "relu2",
+  "model_type": "nemotron_h",
+  "moe_intermediate_size": 6,
+  "moe_latent_size": null,
+  "moe_shared_expert_intermediate_size": 8,
+  "moe_shared_expert_overlap": true,
+  "mtp_layers_block_type": [
+    "full_attention",
+    "moe"
+  ],
+  "n_group": 2,
+  "n_groups": 2,
+  "n_routed_experts": 4,
+  "n_shared_experts": 1,
+  "norm_topk_prob": true,
+  "num_attention_heads": 2,
+  "num_experts_per_tok": 2,
+  "num_key_value_heads": 1,
+  "num_logits_to_keep": 1,
+  "num_nextn_predict_layers": 0,
+  "pad_token_id": 0,
+  "rescale_prenorm_residual": true,
+  "residual_in_fp32": false,
+  "routed_scaling_factor": 1.0,
+  "sliding_window": 3,
+  "ssm_state_size": 3,
+  "tie_word_embeddings": false,
+  "time_step_floor": 0.0001,
+  "time_step_limit": [
+    0.0,
+    {
+      "__float__": "Infinity"
+    }
+  ],
+  "time_step_max": 0.1,
+  "time_step_min": 0.001,
+  "topk_group": 1,
+  "transformers_version": "5.17.0.dev0",
+  "use_bias": false,
+  "use_cache": true,
+  "use_conv_bias": true,
+  "use_mamba_kernels": true,
+  "vocab_size": 32
+}"#;
+
+/// A config written by the pinned Transformers `save_pretrained` loads unchanged.
+///
+/// Regression for NUM-2: its `{"__float__": "Infinity"}` time-step limit
+/// failed with `invalid type: map, expected f64`.
+#[test]
+fn transformers_saved_config_loads_with_an_unbounded_time_step_limit() {
+    use crate::models::config::ModelConfig;
+
+    let config = NemotronHConfig::from_json_str(TRANSFORMERS_SAVED_CONFIG).unwrap();
+    assert_eq!(config.time_step_limit, [Some(0.0), None]);
+    assert_eq!(config.block_count(), 4);
+    // The serialized window is kept as metadata; only the experiment window applies.
+    assert_eq!(config.sliding_window, Some(3));
+    assert_eq!(config.attention_window, None);
+    for tag in ["-Infinity", "NaN"] {
+        let json = TRANSFORMERS_SAVED_CONFIG.replace(
+            r#""__float__": "Infinity""#,
+            &format!(r#""__float__": "{tag}""#),
+        );
+        let error = NemotronHConfig::from_json_str(&json).unwrap_err();
+        assert!(
+            error.to_string().contains("at `time_step_limit[1]`"),
+            "{error}"
+        );
+    }
+}
+
+/// The experiment window is validated but never serialized; the serialized key is unchecked metadata.
+#[test]
+fn attention_window_is_validated_and_never_serialized() {
+    use crate::models::config::ModelConfig;
+
+    let windowed = NemotronHConfig {
+        attention_window: Some(2),
+        ..NemotronHConfig::default()
+    };
+    windowed.validate().unwrap();
+    let json = serde_json::to_string(&windowed).unwrap();
+    assert!(!json.contains("attention_window"), "{json}");
+    assert_eq!(
+        NemotronHConfig::from_json_str(&json)
+            .unwrap()
+            .attention_window,
+        None
+    );
+    let json = json.replace(r#""sliding_window":null"#, r#""sliding_window":0"#);
+    // Like the reference, any serialized window (even zero) is accepted and ignored.
+    assert_eq!(
+        NemotronHConfig::from_json_str(&json)
+            .unwrap()
+            .sliding_window,
+        Some(0)
+    );
+    for (window, reason) in [
+        (0, "must be nonzero"),
+        (4097, "cannot exceed max_position_embeddings"),
+    ] {
+        assert_rejected(
+            &NemotronHConfig {
+                attention_window: Some(window),
+                ..NemotronHConfig::default()
+            },
+            "attention_window",
+            reason,
+        );
+    }
 }

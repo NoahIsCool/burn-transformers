@@ -28,8 +28,8 @@ pub use model::{
 };
 
 use super::config::{
-    ConfigError, ModelConfig, TokenIds, Validate, divisible, model_type, nonzero, positive_finite,
-    probability, token_ids,
+    ConfigError, ModelConfig, TokenIds, Validate, checkpoint_tensor_count, divisible, expert_count,
+    layer_count, model_type, nonzero, positive_finite, probability, token_ids,
 };
 
 /// Mixer/FFN operation owned by one Nemotron-H residual block.
@@ -157,8 +157,24 @@ pub struct NemotronHConfig {
     pub attention_bias: bool,
     /// Attention-probability dropout; inference rejects any nonzero value.
     pub attention_dropout: f64,
-    /// Optional causal sliding window for attention blocks.
+    /// Serialized `sliding_window`, retained as metadata; it never changes the graph.
+    ///
+    /// The pinned Transformers Nemotron-H graph (`cfa309cf`) never reads this
+    /// key: its attention builds plain causal masks and passes no window to
+    /// the attention interface, while `save_pretrained` still writes the key.
+    /// Applying it would silently diverge from the reference for any config
+    /// that sets it, so every value is accepted and ignored, as there. Set
+    /// [`Self::attention_window`] to window attention in an experiment.
     pub sliding_window: Option<usize>,
+    /// Experiment-only causal attention window, in tokens; never read from or written to JSON.
+    ///
+    /// `Some(w)` lets every attention block (and the MTP stage) see only keys
+    /// at most `w - 1` positions before each query, in the stateless,
+    /// cached, and hooked paths alike. Checkpoints cannot set it: the
+    /// reference ignores the serialized [`Self::sliding_window`], so a loaded
+    /// model always computes the reference's full causal attention.
+    #[serde(skip)]
+    pub attention_window: Option<usize>,
     /// Hidden width of dense MLP blocks.
     pub intermediate_size: usize,
     /// Dense MLP activation, normally squared ReLU (`relu2`).
@@ -194,6 +210,11 @@ pub struct NemotronHConfig {
     #[serde(alias = "mamba_dt_max")]
     pub time_step_max: f64,
     /// Runtime clamp `[lower, upper]` declared by NVIDIA's remote code; `None` is `+inf`.
+    ///
+    /// An unbounded upper limit is read from JSON `null`, from NVIDIA's legacy
+    /// bare `Infinity`, or from the `{"__float__": "Infinity"}` tag that
+    /// Transformers 5 writes into every config it saves (see
+    /// [`crate::models::config::parse_text_config`]).
     ///
     /// Retained and validated as compatibility metadata. The Transformers
     /// graph this crate executes ignores it (see [`Self::time_step_min`]);
@@ -310,6 +331,7 @@ impl Default for NemotronHConfig {
             attention_bias: false,
             attention_dropout: 0.0,
             sliding_window: None,
+            attention_window: None,
             intermediate_size: 21_504,
             mlp_hidden_act: "relu2".into(),
             mlp_bias: false,
@@ -387,6 +409,9 @@ impl Validate for NemotronHConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // The schedule's length is its own JSON size, but every block becomes
+        // contract entries and graph modules, so it is bounded like a count.
+        layer_count(FAMILY, "layers_block_type", self.block_count())?;
         if let Some(declared) = self.num_hidden_layers
             && declared != self.block_count()
         {
@@ -443,12 +468,14 @@ impl Validate for NemotronHConfig {
                 ));
             }
             positive_finite(FAMILY, "rope_theta", self.rope_theta.unwrap_or(10_000.0))?;
-            if let Some(window) = self.sliding_window {
-                nonzero(FAMILY, "sliding_window", window)?;
+            // The serialized `sliding_window` is ignored metadata (see its
+            // field); only the experiment's explicit window shapes attention.
+            if let Some(window) = self.attention_window {
+                nonzero(FAMILY, "attention_window", window)?;
                 if window > self.max_position_embeddings {
                     return Err(ConfigError::new(
                         FAMILY,
-                        "sliding_window",
+                        "attention_window",
                         "cannot exceed max_position_embeddings",
                     ));
                 }
@@ -560,6 +587,7 @@ impl Validate for NemotronHConfig {
             ] {
                 nonzero(FAMILY, field, value)?;
             }
+            expert_count(FAMILY, "n_routed_experts", self.n_routed_experts)?;
             if self.n_shared_experts != 1 {
                 return Err(ConfigError::new(
                     FAMILY,
@@ -627,6 +655,17 @@ impl Validate for NemotronHConfig {
                 )
             })?;
         }
+        // The contract and the graph hold one tensor set per routed expert of
+        // every MoE block, so the whole inventory is bounded.
+        checkpoint_tensor_count(
+            FAMILY,
+            if has_moe {
+                "n_routed_experts"
+            } else {
+                "layers_block_type"
+            },
+            self.checkpoint_tensor_count(),
+        )?;
         positive_finite(FAMILY, "initializer_range", self.initializer_range)?;
         positive_finite(FAMILY, "layer_norm_epsilon", self.layer_norm_epsilon)?;
         probability(FAMILY, "attention_dropout", self.attention_dropout)?;

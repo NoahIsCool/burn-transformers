@@ -760,3 +760,470 @@ fn load_errors_display_sources_and_back_architecture_validation() {
     assert!(error.to_string().contains("qwen3_moe.head_dim"), "{error}");
     ArchitectureConfig::validate(&crate::models::qwen3_moe::Qwen3MoeConfig::default()).unwrap();
 }
+
+// Resource bounds for untrusted counts (review findings CFG-COUNT-1 and LAYER-BOUND).
+
+/// The count helpers accept exactly `1..=bound` and name the field with the bound.
+#[test]
+fn count_bounds_accept_exactly_one_through_the_maximum() {
+    for (check, bound, unit) in [
+        (
+            layer_count as fn(&'static str, &'static str, usize) -> Result<(), ConfigError>,
+            MAX_LAYERS,
+            "layers",
+        ),
+        (expert_count, MAX_EXPERTS, "experts"),
+    ] {
+        check("test", "count", 1).unwrap();
+        check("test", "count", bound).unwrap();
+        assert_eq!(
+            check("test", "count", 0).unwrap_err().reason,
+            "must be nonzero"
+        );
+        for value in [bound + 1, usize::MAX] {
+            let error = check("test", "count", value).unwrap_err();
+            assert_eq!(error.field, "count");
+            assert_eq!(
+                error.reason,
+                format!("{value} exceeds the supported maximum of {bound} {unit}")
+            );
+        }
+    }
+}
+
+/// A contract inventory is accepted up to the artifact limit and rejected beyond it or on overflow.
+#[test]
+fn checkpoint_tensor_counts_are_bounded_by_the_artifact_limit() {
+    checkpoint_tensor_count("test", "experts", Some(0)).unwrap();
+    checkpoint_tensor_count("test", "experts", Some(MAX_CHECKPOINT_TENSORS)).unwrap();
+    let error =
+        checkpoint_tensor_count("test", "experts", Some(MAX_CHECKPOINT_TENSORS + 1)).unwrap_err();
+    assert_eq!(error.field, "experts");
+    assert!(
+        error.reason.contains("10000001 tensors"),
+        "{}",
+        error.reason
+    );
+    let error = checkpoint_tensor_count("test", "experts", None).unwrap_err();
+    assert!(error.reason.contains("overflows usize"), "{}", error.reason);
+}
+
+/// The shared tensor bound is the default artifact limit it is documented to equal.
+#[test]
+fn the_tensor_bound_equals_the_default_artifact_limit() {
+    assert_eq!(
+        MAX_CHECKPOINT_TENSORS,
+        crate::checkpoint::ArtifactLimits::default().max_tensors
+    );
+    assert_eq!(crate::models::gemma::MAX_LAYERS, MAX_LAYERS);
+}
+
+/// One registered family parser, a valid document for it, and its bounded count fields.
+struct CountCase {
+    /// Fixture name used in assertion messages.
+    name: &'static str,
+    /// A valid configuration document of the family.
+    json: String,
+    /// The family's `ModelConfig::from_json_str`, with the parsed value dropped.
+    parse: fn(&str) -> Result<(), ConfigLoadError>,
+    /// Layer-count fields, each bounded by [`MAX_LAYERS`].
+    layers: &'static [&'static str],
+    /// Routed-expert-count fields, each bounded by [`MAX_EXPERTS`].
+    experts: &'static [&'static str],
+}
+
+/// Parses and validates `json` as `T`, keeping only the outcome.
+fn parses<T: ModelConfig>(json: &str) -> Result<(), ConfigLoadError> {
+    T::from_json_str(json).map(drop)
+}
+
+/// Returns the text-model object of `document`: its `text_config` when present, else itself.
+fn text_object(
+    document: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    if document.get("text_config").is_some() {
+        document["text_config"].as_object_mut().unwrap()
+    } else {
+        document.as_object_mut().unwrap()
+    }
+}
+
+/// Every registered family parser with a valid document (fixtures or reference defaults).
+fn count_cases() -> Vec<CountCase> {
+    use crate::models::{
+        deepseek_v2::DeepseekV2Config, gemma::GemmaConfig, gpt_neox::GptNeoXConfig,
+        gpt_oss::GptOssConfig, gpt2::Gpt2Config, llama::LlamaFamilyConfig,
+        muse_glimmer::MuseGlimmerTextConfig, nemotron_h::NemotronHConfig,
+        qwen3_5::Qwen3_5TextConfig, qwen3_moe::Qwen3MoeConfig, t5::T5Config,
+    };
+    /// Reads a fixture below `tests/fixtures`.
+    fn fixture(path: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(path),
+        )
+        .unwrap()
+    }
+    let mut cases = Vec::new();
+    for variant in [
+        "llama3",
+        "llama-bias-tied",
+        "mistral-sliding",
+        "qwen2",
+        "qwen3",
+        "smollm3",
+        "olmo2",
+    ] {
+        cases.push(CountCase {
+            name: variant,
+            json: fixture(&format!("tiny_goldens/{variant}/config.json")),
+            parse: parses::<LlamaFamilyConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        });
+    }
+    for variant in ["gemma2", "gemma3-text"] {
+        cases.push(CountCase {
+            name: variant,
+            json: fixture(&format!("tiny_goldens/{variant}/config.json")),
+            parse: parses::<GemmaConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        });
+    }
+    cases.extend([
+        CountCase {
+            name: "gpt_oss",
+            json: fixture("tiny_goldens/gpt-oss/config.json"),
+            parse: parses::<GptOssConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &["num_local_experts"],
+        },
+        CountCase {
+            name: "qwen3_5",
+            json: fixture("qwen3_5_0_8b.json"),
+            parse: parses::<Qwen3_5TextConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "muse_glimmer",
+            json: fixture("muse_glimmer.json"),
+            parse: parses::<MuseGlimmerTextConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "qwen3_moe",
+            json: fixture("qwen3_30b_a3b.json"),
+            parse: parses::<Qwen3MoeConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &["num_experts"],
+        },
+        CountCase {
+            name: "deepseek_v2",
+            json: fixture("deepseek_v2_lite.json"),
+            parse: parses::<DeepseekV2Config>,
+            layers: &["num_hidden_layers"],
+            experts: &["n_routed_experts"],
+        },
+        CountCase {
+            // The declared depth must equal the schedule's length, which
+            // `nemotron_h_tests` bounds directly.
+            name: "nemotron_h",
+            json: fixture("nemotron_h_8b.json"),
+            parse: parses::<NemotronHConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "t5",
+            json: fixture("flan_t5_xl.json"),
+            parse: parses::<T5Config>,
+            layers: &["num_layers", "num_decoder_layers"],
+            experts: &[],
+        },
+        CountCase {
+            name: "gpt2",
+            json: serde_json::to_string(&Gpt2Config::default()).unwrap(),
+            parse: parses::<Gpt2Config>,
+            layers: &["n_layer"],
+            experts: &[],
+        },
+        CountCase {
+            name: "gpt_neox",
+            json: serde_json::to_string(&GptNeoXConfig::default()).unwrap(),
+            parse: parses::<GptNeoXConfig>,
+            layers: &["num_hidden_layers"],
+            experts: &[],
+        },
+    ]);
+    cases
+}
+
+/// Absurd layer and expert counts are contextual errors in every family, never panics or allocations.
+///
+/// Regression for CFG-COUNT-1/LAYER-BOUND: at `usize::MAX` the Llama,
+/// gpt-oss, Qwen3.5, and Muse validators panicked with `capacity overflow`
+/// while building per-layer schedules, and Qwen3-MoE, DeepSeek-V2, T5, and
+/// GPT-2/NeoX (up to the `i32` range) accepted counts whose contracts and
+/// graphs then grew without bound.
+#[test]
+fn absurd_layer_and_expert_counts_are_rejected_in_every_family() {
+    let cases = count_cases();
+    assert_eq!(cases.len(), 18, "one case per registered family or variant");
+    for case in cases {
+        (case.parse)(&case.json).unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        for (fields, bound) in [(case.layers, MAX_LAYERS), (case.experts, MAX_EXPERTS)] {
+            for &field in fields {
+                for value in [usize::MAX, bound + 1] {
+                    // The Nemotron fixture keeps NVIDIA's bare `Infinity`.
+                    let mut document: serde_json::Value =
+                        serde_json::from_str(&normalize_positive_infinity(&case.json)).unwrap();
+                    text_object(&mut document).insert(field.into(), value.into());
+                    let result = std::panic::catch_unwind(|| (case.parse)(&document.to_string()));
+                    match result {
+                        Ok(Err(ConfigLoadError::Validation(error))) => {
+                            assert_eq!(error.field, field, "{} {field}={value}", case.name);
+                        }
+                        Ok(other) => panic!("{} {field}={value}: {other:?}", case.name),
+                        Err(_) => panic!("{} {field}={value} panicked", case.name),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Dense families accept exactly [`MAX_LAYERS`] layers, so the bound is not off by one.
+#[test]
+fn dense_families_accept_exactly_the_layer_bound() {
+    for case in count_cases() {
+        if matches!(case.name, "qwen3_moe" | "deepseek_v2" | "nemotron_h") {
+            // MoE inventories at this depth exceed the tensor budget (tested
+            // with the families); Nemotron derives its depth from its schedule.
+            continue;
+        }
+        let mut document: serde_json::Value =
+            serde_json::from_str(&normalize_positive_infinity(&case.json)).unwrap();
+        let text = text_object(&mut document);
+        // Per-layer lists would no longer match the depth; the families'
+        // derived schedules take their place.
+        for key in ["layer_types", "no_rope_layers", "max_window_layers"] {
+            text.remove(key);
+        }
+        for &field in case.layers {
+            text.insert(field.into(), MAX_LAYERS.into());
+        }
+        (case.parse)(&document.to_string())
+            .unwrap_or_else(|error| panic!("{} at MAX_LAYERS: {error}", case.name));
+    }
+}
+
+/// Returns the length of `case`'s dense checkpoint contract with every stack `depth` layers deep.
+///
+/// Per-layer lists (`layer_types`, `no_rope_layers`, `max_window_layers`)
+/// are removed so the families derive schedules of the new depth; Qwen3.5
+/// also declares `depth` multi-token-prediction layers and lists them, its
+/// densest contract. Returns `None` for the per-expert MoE families, whose
+/// validation bounds their exact contract length instead.
+fn dense_contract_len(case: &CountCase, depth: usize) -> Option<usize> {
+    use crate::models::{
+        gemma::{GemmaCheckpointOptions, GemmaConfig},
+        gpt_neox::GptNeoXConfig,
+        gpt_oss::{GptOssCheckpointOptions, GptOssConfig},
+        gpt2::{Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2Config},
+        llama::{LlamaCheckpointOptions, LlamaFamilyConfig},
+        muse_glimmer::{MuseGlimmerCheckpointOptions, MuseGlimmerTextConfig},
+        qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5TextConfig},
+        t5::T5Config,
+    };
+    let mut document: serde_json::Value =
+        serde_json::from_str(&normalize_positive_infinity(&case.json)).unwrap();
+    let text = text_object(&mut document);
+    for key in ["layer_types", "no_rope_layers", "max_window_layers"] {
+        text.remove(key);
+    }
+    for &field in case.layers {
+        text.insert(field.into(), depth.into());
+    }
+    if case.name == "qwen3_5" {
+        text.insert("mtp_num_hidden_layers".into(), depth.into());
+    }
+    let json = document.to_string();
+    let len = match case.name {
+        "qwen3_moe" | "deepseek_v2" | "nemotron_h" => return None,
+        "gemma2" | "gemma3-text" => GemmaConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(GemmaCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "gpt_oss" => GptOssConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(GptOssCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "qwen3_5" => Qwen3_5TextConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(Qwen3_5CheckpointOptions {
+                include_mtp: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "muse_glimmer" => MuseGlimmerTextConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(MuseGlimmerCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "t5" => T5Config::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract()
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        "gpt2" => Gpt2CheckpointContract::new(
+            &Gpt2Config::from_json_str(&json).unwrap(),
+            Gpt2CheckpointLayout::LanguageModel,
+        )
+        .unwrap()
+        .expected_tensors()
+        .len(),
+        "gpt_neox" => GptNeoXConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract()
+            .unwrap()
+            .expected_tensors()
+            .len(),
+        _ => LlamaFamilyConfig::from_json_str(&json)
+            .unwrap()
+            .checkpoint_contract(LlamaCheckpointOptions::default())
+            .unwrap()
+            .expected_tensors()
+            .len(),
+    };
+    Some(len)
+}
+
+/// Every dense contract stays within the artifact limit at [`MAX_LAYERS`], the derivation of the bound.
+///
+/// Regression for the review of CFG-COUNT-1: at the former `2^20` bound the
+/// accepted gpt-oss (17 tensors per layer), T5 (23 per encoder and decoder
+/// layer), and most Llama-family, Gemma, GPT-2, GPT-NeoX, Muse, and Qwen3.5
+/// contracts listed more tensors than any default-limited checkpoint can
+/// hold. Each family's contract is measured at depths 1 to 12 (covering its
+/// layer-type periods); its largest per-layer growth must stay within
+/// `MAX_TENSORS_PER_LAYER`, and its extrapolated length at the bound within
+/// [`MAX_CHECKPOINT_TENSORS`].
+#[test]
+fn every_dense_contract_fits_the_artifact_limit_at_the_layer_bound() {
+    let mut measured = 0;
+    for case in count_cases() {
+        let Some(lengths) = (1..=12)
+            .map(|depth| dense_contract_len(&case, depth))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let per_layer = lengths
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .unwrap();
+        assert!(
+            per_layer <= MAX_TENSORS_PER_LAYER,
+            "{}: {per_layer} tensors per layer",
+            case.name
+        );
+        let at_bound = lengths[0] + (MAX_LAYERS - 1) * per_layer;
+        assert!(
+            at_bound <= MAX_CHECKPOINT_TENSORS,
+            "{}: {at_bound} tensors at MAX_LAYERS",
+            case.name
+        );
+        measured += 1;
+    }
+    assert_eq!(measured, 15, "every dense family and variant is measured");
+}
+
+// Transformers 5 tagged non-finite floats (review finding NUM-2).
+
+/// A topology with an optional-bounded limit pair, like Nemotron-H's `time_step_limit`.
+#[derive(Debug, Deserialize)]
+struct LimitConfig {
+    /// Lower and optional upper bound; `None` is unbounded.
+    limit: Vec<Option<f64>>,
+}
+
+impl Validate for LimitConfig {
+    /// Accepts every decoded limit; the tests inspect the decoded values.
+    fn validate(&self) -> Result<(), ConfigError> {
+        Ok(())
+    }
+}
+
+/// Transformers' tagged `+Infinity` reads as an unbounded `null`, wherever it is nested.
+///
+/// Regression for NUM-2: every Nemotron-H config written by Transformers
+/// 5's `save_pretrained` serializes `time_step_limit` as
+/// `[0.0, {"__float__": "Infinity"}]`, which failed with `invalid type: map,
+/// expected f64`.
+#[test]
+fn tagged_positive_infinity_reads_as_an_unbounded_limit() {
+    let config: LimitConfig =
+        parse_text_config(r#"{"limit":[0.0,{"__float__":"Infinity"}]}"#).unwrap();
+    assert_eq!(config.limit, [Some(0.0), None]);
+    let config: LimitConfig =
+        parse_text_config(r#"{"text_config":{"limit":[{"__float__":"Infinity"}]}}"#).unwrap();
+    assert_eq!(config.limit, [None]);
+    // The legacy bare literal and the tag decode identically.
+    let legacy: LimitConfig = parse_text_config(r#"{"limit":[0.0,Infinity]}"#).unwrap();
+    assert_eq!(legacy.limit, [Some(0.0), None]);
+}
+
+/// Tagged `-Infinity`, `NaN`, and unknown tags are errors naming the tag and its JSON path.
+#[test]
+fn other_float_tags_are_rejected_with_their_path() {
+    for (json, tag, path) in [
+        (
+            r#"{"limit":[0.0,{"__float__":"-Infinity"}]}"#,
+            "-Infinity",
+            "limit[1]",
+        ),
+        (r#"{"limit":[{"__float__":"NaN"}]}"#, "NaN", "limit[0]"),
+        (
+            r#"{"text_config":{"nested":{"x":[[{"__float__":"inf"}]]}},"limit":[]}"#,
+            "inf",
+            "text_config.nested.x[0][0]",
+        ),
+        (r#"{"__float__":"NaN"}"#, "NaN", "<root>"),
+    ] {
+        let error = parse_text_config::<LimitConfig>(json).unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, ConfigLoadError::Json(_)), "{message}");
+        assert!(
+            message.contains(&format!(r#"{{"__float__": "{tag}"}} at `{path}`"#)),
+            "{message}"
+        );
+    }
+}
+
+/// Objects Transformers does not decode stay ordinary data, and quoted text is never rewritten.
+#[test]
+fn untagged_objects_and_strings_are_left_alone() {
+    // Extra keys or a non-string tag make an ordinary object, as in Transformers.
+    let config: LimitConfig = parse_text_config(
+        r#"{"limit":[1.0],"a":{"__float__":"NaN","other":1},"b":{"__float__":1.5},"c":"{\"__float__\":\"NaN\"}"}"#,
+    )
+    .unwrap();
+    assert_eq!(config.limit, [Some(1.0)]);
+    // In a typed field such an object is still a type error.
+    let error = parse_text_config::<LimitConfig>(r#"{"limit":[{"__float__":"Infinity","x":0}]}"#)
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid type: map"), "{error}");
+}

@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use buckets::BucketGeometryError;
 
 use super::config::{
-    ConfigError, ModelConfig, TokenIds, Validate, model_type, nonzero, positive_finite,
-    probability, token_ids,
+    ConfigError, ModelConfig, TokenIds, Validate, layer_count, model_type, nonzero,
+    positive_finite, probability, token_ids,
 };
 
 mod buckets;
@@ -237,6 +237,9 @@ impl T5Config {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Both stacks are built, planned, and loaded one block at a time.
+        layer_count(FAMILY, "num_layers", self.num_layers)?;
+        layer_count(FAMILY, "num_decoder_layers", self.decoder_layers())?;
         match buckets::bucket_geometry(
             self.relative_attention_num_buckets,
             self.relative_attention_max_distance,

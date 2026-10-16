@@ -268,3 +268,72 @@ fn rope_config_rejects_partial_rotation() {
     );
     assert_eq!(valid().rope_config().unwrap().head_dimension(), 4);
 }
+
+proptest::proptest! {
+    /// The `O(L + M)` schedule check agrees with the verified per-block reference.
+    ///
+    /// Validation marks the `mlp_only_layers` overrides once; it must reject
+    /// exactly the repeated or out-of-range overrides and exactly the schedules
+    /// in which `plan::any_sparse_layer` (verified in `verus/qwen.rs`) finds no
+    /// sparse block.
+    #[test]
+    fn schedule_validation_matches_the_verified_reference(
+        layers in 1usize..12,
+        step in 1usize..5,
+        overrides in proptest::collection::vec(0usize..14, 0..8),
+    ) {
+        let config = Qwen3MoeConfig {
+            num_hidden_layers: layers,
+            max_window_layers: layers,
+            decoder_sparse_step: step,
+            mlp_only_layers: overrides.clone(),
+            ..valid()
+        };
+        let unique = overrides.iter().collect::<std::collections::HashSet<_>>().len() == overrides.len();
+        let in_range = overrides.iter().all(|&index| index < layers);
+        match config.validate() {
+            Ok(()) => {
+                proptest::prop_assert!(unique && in_range);
+                proptest::prop_assert!(plan::any_sparse_layer(layers, step, 8, &overrides));
+            }
+            Err(error) if error.field == "mlp_only_layers" => {
+                proptest::prop_assert!(!(unique && in_range));
+            }
+            Err(error) => {
+                proptest::prop_assert_eq!(error.field, "decoder_sparse_step");
+                proptest::prop_assert!(unique && in_range);
+                proptest::prop_assert!(!plan::any_sparse_layer(layers, step, 8, &overrides));
+            }
+        }
+    }
+}
+
+/// A long `mlp_only_layers` list validates in linear time, accepted or not.
+///
+/// Regression for the review of CFG-COUNT-1 (QWEN-MOE-LM-SCAN): validation
+/// scanned the whole override list once per block, `O(L · M)`. With every
+/// block but the last listed as dense, `2^16` blocks took seconds in a
+/// debug build (about `4 · 10^9` comparisons), and a 16 MiB config at the
+/// layer bound minutes. Both verdicts must arrive well within one second.
+#[test]
+fn long_override_lists_validate_in_linear_time() {
+    let layers = 1 << 16;
+    let mut config = Qwen3MoeConfig {
+        num_hidden_layers: layers,
+        max_window_layers: layers,
+        decoder_sparse_step: 1,
+        // Descending, so the last (only sparse) block is listed last.
+        mlp_only_layers: (0..layers - 1).rev().collect(),
+        ..valid()
+    };
+    let started = std::time::Instant::now();
+    config.validate().expect("the last block is sparse");
+    config.decoder_sparse_step = layers + 1;
+    let error = config.validate().expect_err("no block is sparse");
+    let elapsed = started.elapsed();
+    assert_eq!(error.field, "decoder_sparse_step");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "validation took {elapsed:?}"
+    );
+}

@@ -1,0 +1,8 @@
+{
+ "model_type": "gpt2",
+ "vocab_size": 128,
+ "n_embd": 64,
+ "n_layer": 18446744073709551615,
+ "n_head": 4,
+ "n_positions": 64
+}

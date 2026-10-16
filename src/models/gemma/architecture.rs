@@ -91,7 +91,7 @@ use crate::{
     models::{
         config::{
             ConfigError, PartialRotary, RopeContext, RopeParameterSet, RopeParameters,
-            RopeParametersByLayerType, divisible, nonzero, positive_finite,
+            RopeParametersByLayerType, divisible, layer_count, nonzero, positive_finite,
         },
         llama::{RotaryPrecision, model::graph::RotarySchedule},
     },
@@ -325,16 +325,15 @@ impl GemmaArchitecture {
     }
 }
 
-/// The largest accepted `num_hidden_layers`, `2^20`.
+/// The largest accepted `num_hidden_layers`, the shared [`crate::models::config::MAX_LAYERS`] (`2^18`).
 ///
 /// Validation materializes one schedule entry per layer, so an absurd count
 /// in an untrusted `config.json` would exhaust memory (or overflow a vector's
-/// capacity) before any error could be reported. Every layer owns at least
-/// eleven checkpoint tensors, so under the default artifact limit of ten
-/// million tensors no loadable checkpoint has more than about 909,000
-/// layers; the bound leaves headroom while capping validation at a few
-/// megabytes.
-pub const MAX_LAYERS: usize = 1 << 20;
+/// capacity) before any error could be reported. Every family checks the
+/// same bound, sized so that every dense checkpoint contract fits the
+/// artifact tensor limit; this re-export keeps the Gemma path it was first
+/// published at (with the value `2^20`, lowered when the bound became shared).
+pub use crate::models::config::MAX_LAYERS;
 
 /// Checks the positive extents, the layer bound, grouped-query divisibility, and scalars.
 fn validate_geometry(config: &GemmaConfig, family: &'static str) -> Result<(), ConfigError> {
@@ -349,16 +348,7 @@ fn validate_geometry(config: &GemmaConfig, family: &'static str) -> Result<(), C
     ] {
         nonzero(family, field, value)?;
     }
-    if config.num_hidden_layers > MAX_LAYERS {
-        return Err(ConfigError::new(
-            family,
-            "num_hidden_layers",
-            format!(
-                "{} exceeds the supported maximum of {MAX_LAYERS} layers",
-                config.num_hidden_layers
-            ),
-        ));
-    }
+    layer_count(family, "num_hidden_layers", config.num_hidden_layers)?;
     divisible(
         family,
         "num_attention_heads",
