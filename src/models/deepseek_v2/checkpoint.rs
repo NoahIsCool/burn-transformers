@@ -226,91 +226,32 @@ impl DeepseekV2Config {
     }
 }
 
-/// Checked dimensions used by the contract builder.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Token embedding and LM-head row count.
-    vocab: u64,
-    /// Residual-stream width.
-    hidden: u64,
-    /// Dense-prefix SwiGLU width.
-    intermediate: u64,
-    /// One routed expert's SwiGLU width.
-    moe_intermediate: u64,
-    /// Concatenated width of the checkpoint's shared-expert network.
-    shared_intermediate: u64,
-    /// Routed expert count.
-    experts: u64,
-    /// Concatenated per-head query width.
-    query: u64,
-    /// Optional low-rank query bottleneck width.
-    query_rank: Option<u64>,
-    /// Cacheable normalized-latent width.
-    kv_rank: u64,
-    /// Joint KV-A latent-plus-rotary output width.
-    compressed: u64,
-    /// Concatenated content-key and value expansion width.
-    expanded_kv: u64,
-    /// Concatenated value-head width consumed by the output projection.
-    output_heads: u64,
-}
+mod dimensions; // Verified latent-attention width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&DeepseekV2Config> for Dimensions {
-    /// Configuration failure from a dimension conversion, sum, or product.
+    /// Configuration failure from a dimension sum or product.
     type Error = ConfigError;
 
-    /// Converts all host dimensions to checked checkpoint extents.
+    /// Converts all host dimensions to checked checkpoint extents with the
+    /// verified [`checkpoint_dimensions`].
     fn try_from(config: &DeepseekV2Config) -> Result<Self, Self::Error> {
-        let qk = sum(
-            "qk_nope_head_dim + qk_rope_head_dim",
-            config.qk_nope_head_dim,
-            config.qk_rope_head_dim,
-        )?;
-        let kv_per_head = sum(
-            "qk_nope_head_dim + v_head_dim",
-            config.qk_nope_head_dim,
-            config.v_head_dim,
-        )?;
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            moe_intermediate: dimension("moe_intermediate_size", config.moe_intermediate_size)?,
-            shared_intermediate: product(
-                "moe_intermediate_size * n_shared_experts",
-                config.moe_intermediate_size,
-                config.n_shared_experts,
-            )?,
-            experts: dimension("n_routed_experts", config.n_routed_experts)?,
-            query: product(
-                "num_attention_heads * qk_head_dim",
-                config.num_attention_heads,
-                qk,
-            )?,
-            query_rank: config
-                .q_lora_rank
-                .map(|rank| dimension("q_lora_rank", rank))
-                .transpose()?,
-            kv_rank: dimension("kv_lora_rank", config.kv_lora_rank)?,
-            compressed: dimension(
-                "kv_lora_rank + qk_rope_head_dim",
-                sum(
-                    "kv_lora_rank + qk_rope_head_dim",
-                    config.kv_lora_rank,
-                    config.qk_rope_head_dim,
-                )?,
-            )?,
-            expanded_kv: product(
-                "num_attention_heads * expanded_kv_head_dim",
-                config.num_attention_heads,
-                kv_per_head,
-            )?,
-            output_heads: product(
-                "num_attention_heads * v_head_dim",
-                config.num_attention_heads,
-                config.v_head_dim,
-            )?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            moe_intermediate: config.moe_intermediate_size,
+            shared_experts: config.n_shared_experts,
+            routed_experts: config.n_routed_experts,
+            attention_heads: config.num_attention_heads,
+            qk_nope: config.qk_nope_head_dim,
+            qk_rope: config.qk_rope_head_dim,
+            value_head_dim: config.v_head_dim,
+            query_rank: config.q_lora_rank,
+            kv_rank: config.kv_lora_rank,
         })
+        .map_err(|error| ConfigError::new(FAMILY, error.field(), error.reason()))
     }
 }
 
@@ -359,30 +300,6 @@ fn add_mapped(
 ) {
     expected.push(ExpectedTensor::new(target, shape));
     mappings.map(source, target);
-}
-
-/// Converts one dimension without truncation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Adds two dimensions with overflow checking.
-fn sum(field: &'static str, left: usize, right: usize) -> Result<usize, ConfigError> {
-    left.checked_add(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension sum overflows usize"))
-}
-
-/// Multiplies two dimensions with overflow checking.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]

@@ -483,3 +483,22 @@ fn unsupported_mtp_schedule_is_rejected() {
             .is_err()
     );
 }
+
+/// An unrepresentable MTP fusion width `2 h` is a configuration error, not an overflow.
+///
+/// Validation rejects it first; the contract's checked width is a second guard.
+#[test]
+fn overflowing_mtp_fusion_width_is_rejected() {
+    let mut config = tiny_config();
+    config.hidden_size = usize::MAX / 2 + 1;
+    let error = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap_err();
+    assert_eq!(error.field, "hidden_size");
+    config.num_nextn_predict_layers = 0;
+    assert!(
+        config
+            .checkpoint_contract(NemotronHCheckpointOptions::default())
+            .is_ok()
+    );
+}

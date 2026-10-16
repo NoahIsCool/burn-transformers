@@ -177,83 +177,39 @@ impl Qwen3_5TextConfig {
 
 // Checked checkpoint geometry: no tensor data is allocated below.
 
-/// Portable checkpoint shape terms computed with checked arithmetic.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Vocabulary rows in the embedding and output projection.
-    vocab: u64,
-    /// Residual-stream width shared by decoder blocks.
-    hidden: u64,
-    /// Intermediate width of the gated feed-forward network.
-    intermediate: u64,
-    /// Query width before gating: query heads times head dimension.
-    query: u64,
-    /// Twice the query width for the combined query and output-gate projection.
-    gated_query: u64,
-    /// Native key/value heads times head dimension, before head repetition.
-    key_value: u64,
-    /// DeltaNet value heads times value-head dimension.
-    delta_value: u64,
-    /// DeltaNet convolution channels: twice the key width plus the value width.
-    delta_conv: u64,
-    /// Concatenated embedding and hidden-state width at the MTP input.
-    double_hidden: u64,
-    /// Per-head query/key width used by headwise normalization.
-    head_dim: u64,
-    /// Number of DeltaNet value heads and scalar gate outputs.
-    delta_value_heads: u64,
-    /// Value width normalized independently within each DeltaNet head.
-    delta_value_head_dim: u64,
-    /// Number of causal-convolution taps in each DeltaNet channel.
-    conv_kernel: u64,
-}
+mod dimensions; // Verified fused-width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions, query_projection};
 
 impl TryFrom<&Qwen3_5TextConfig> for Dimensions {
-    /// Configuration field and reason for a nonportable or overflowing dimension.
+    /// Configuration field and reason for an overflowing dimension.
     type Error = ConfigError;
 
     /// Computes portable tensor dimensions with checked products and sums.
     ///
     /// Projection widths are head counts times head widths; DeltaNet convolution
-    /// channels concatenate Q, K, and V. Overflow is rejected before allocation.
+    /// channels concatenate Q, K, and V. Overflow is rejected before allocation
+    /// by the verified [`checkpoint_dimensions`].
     fn try_from(config: &Qwen3_5TextConfig) -> Result<Self, Self::Error> {
-        let hidden = dimension("hidden_size", config.hidden_size)?;
-        let query = product(
-            "num_attention_heads * head_dim",
-            &[config.num_attention_heads, config.head_dim],
-        )?;
-        let key_value = product(
-            "num_key_value_heads * head_dim",
-            &[config.num_key_value_heads, config.head_dim],
-        )?;
-        let delta_key = product(
-            "linear_num_key_heads * linear_key_head_dim",
-            &[config.linear_num_key_heads, config.linear_key_head_dim],
-        )?;
-        let delta_value = product(
-            "linear_num_value_heads * linear_value_head_dim",
-            &[config.linear_num_value_heads, config.linear_value_head_dim],
-        )?;
-        let delta_conv = checked_sum(
-            "2 * delta key width + delta value width",
-            &[delta_key, delta_key, delta_value],
-        )?;
-        let gated_query = checked_sum("2 * query width", &[query, query])?;
-        let double_hidden = checked_sum("2 * hidden_size", &[hidden, hidden])?;
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            query,
-            gated_query,
-            key_value,
-            delta_value,
-            delta_conv,
-            double_hidden,
-            head_dim: dimension("head_dim", config.head_dim)?,
-            delta_value_heads: dimension("linear_num_value_heads", config.linear_num_value_heads)?,
-            delta_value_head_dim: dimension("linear_value_head_dim", config.linear_value_head_dim)?,
-            conv_kernel: dimension("linear_conv_kernel_dim", config.linear_conv_kernel_dim)?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            attention_heads: config.num_attention_heads,
+            key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+            delta_key_heads: config.linear_num_key_heads,
+            delta_key_head_dim: config.linear_key_head_dim,
+            delta_value_heads: config.linear_num_value_heads,
+            delta_value_head_dim: config.linear_value_head_dim,
+            conv_kernel: config.linear_conv_kernel_dim,
+        })
+        .map_err(|error| {
+            ConfigError::new(
+                FAMILY,
+                error.field(),
+                "overflows checkpoint tensor dimensions",
+            )
         })
     }
 }
@@ -401,11 +357,7 @@ impl ContractBuilder {
         dimensions: &Dimensions,
     ) {
         let prefix = format!("{layer}.self_attn");
-        let query_width = if config.attn_output_gate {
-            dimensions.gated_query
-        } else {
-            dimensions.query
-        };
+        let query_width = query_projection(dimensions, config.attn_output_gate);
         self.language(
             &format!("{prefix}.q_proj.weight"),
             vec![query_width, dimensions.hidden],
@@ -508,11 +460,7 @@ impl ContractBuilder {
         dimensions: &Dimensions,
     ) {
         let prefix = format!("{layer}.self_attn");
-        let query_width = if config.attn_output_gate {
-            dimensions.gated_query
-        } else {
-            dimensions.query
-        };
+        let query_width = query_projection(dimensions, config.attn_output_gate);
         self.mtp_tensor(
             &format!("{prefix}.q_proj.weight"),
             vec![query_width, dimensions.hidden],
@@ -554,38 +502,6 @@ impl ContractBuilder {
             TensorTransform::Identity,
         );
     }
-}
-
-// Portable shape arithmetic: reject overflow before producing a load plan.
-
-/// Converts a host dimension to the portable checkpoint `u64` representation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "does not fit the portable checkpoint dimension representation",
-        )
-    })
-}
-
-/// Multiplies shape factors with overflow checks and a configuration-field diagnostic.
-fn product(field: &'static str, values: &[usize]) -> Result<u64, ConfigError> {
-    values.iter().try_fold(1_u64, |accumulator, value| {
-        let value = dimension(field, *value)?;
-        accumulator.checked_mul(value).ok_or_else(|| {
-            ConfigError::new(FAMILY, field, "overflows checkpoint tensor dimensions")
-        })
-    })
-}
-
-/// Sums packed projection widths without permitting checkpoint-dimension overflow.
-fn checked_sum(field: &'static str, values: &[u64]) -> Result<u64, ConfigError> {
-    values.iter().try_fold(0_u64, |accumulator, value| {
-        accumulator.checked_add(*value).ok_or_else(|| {
-            ConfigError::new(FAMILY, field, "overflows checkpoint tensor dimensions")
-        })
-    })
 }
 
 #[cfg(test)]

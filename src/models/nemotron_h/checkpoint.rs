@@ -288,103 +288,34 @@ fn lightning_total_size_policy(
     }
 }
 
-/// Checked dimensions reused by contract sections.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Vocabulary rows in the embedding and output projection.
-    vocab: u64,
-    /// Residual-stream width.
-    hidden: u64,
-    /// Expanded width of each dense feed-forward block.
-    intermediate: u64,
-    /// Query projection width, `num_attention_heads * head_dim`.
-    attention_query: u64,
-    /// Key/value projection width, `num_key_value_heads * head_dim`.
-    attention_kv: u64,
-    /// Mamba value channels, `mamba_num_heads * mamba_head_dim`.
-    mamba_intermediate: u64,
-    /// Convolved channels: Mamba values plus both grouped B/C state projections.
-    mamba_convolution: u64,
-    /// Fused Mamba gate, convolution-input, and per-head timestep width.
-    mamba_projection: u64,
-    /// Independent Mamba heads with learned timestep, decay, and skip scalars.
-    mamba_heads: u64,
-    /// Temporal width of the depthwise convolution kernel.
-    mamba_kernel: u64,
-    /// Routed experts and router output channels.
-    routed_experts: u64,
-    /// Expanded width inside each routed expert.
-    moe_intermediate: u64,
-    /// Expanded width inside the shared expert.
-    shared_intermediate: u64,
-    /// Routed expert input/output width, using latent width when configured.
-    expert_input: u64,
-}
+mod dimensions; // Verified fused-width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&NemotronHConfig> for Dimensions {
-    /// Invalid or overflowing checkpoint geometry.
+    /// Contextual dimension sum or product failure.
     type Error = ConfigError;
 
-    /// Converts runtime dimensions and rejects every overflowing product/sum.
+    /// Computes every contract width with the verified [`checkpoint_dimensions`].
     fn try_from(config: &NemotronHConfig) -> Result<Self, Self::Error> {
-        let mamba_heads = dimension("mamba_num_heads", config.mamba_num_heads)?;
-        let mamba_intermediate = product(
-            "mamba_num_heads * mamba_head_dim",
-            config.mamba_num_heads,
-            config.mamba_head_dim,
-        )?;
-        let state_group = product(
-            "n_groups * ssm_state_size",
-            config.n_groups,
-            config.ssm_state_size,
-        )?;
-        let convolution = mamba_intermediate
-            .checked_add(state_group.checked_mul(2).ok_or_else(|| {
-                ConfigError::new(
-                    FAMILY,
-                    "mamba convolution",
-                    "dimension product overflows u64",
-                )
-            })?)
-            .ok_or_else(|| {
-                ConfigError::new(FAMILY, "mamba convolution", "dimension sum overflows u64")
-            })?;
-        let projection = mamba_intermediate
-            .checked_add(convolution)
-            .and_then(|value| value.checked_add(mamba_heads))
-            .ok_or_else(|| {
-                ConfigError::new(FAMILY, "mamba projection", "dimension sum overflows u64")
-            })?;
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            attention_query: product(
-                "num_attention_heads * head_dim",
-                config.num_attention_heads,
-                config.head_dim,
-            )?,
-            attention_kv: product(
-                "num_key_value_heads * head_dim",
-                config.num_key_value_heads,
-                config.head_dim,
-            )?,
-            mamba_intermediate,
-            mamba_convolution: convolution,
-            mamba_projection: projection,
-            mamba_heads,
-            mamba_kernel: dimension("conv_kernel", config.conv_kernel)?,
-            routed_experts: dimension("n_routed_experts", config.n_routed_experts)?,
-            moe_intermediate: dimension("moe_intermediate_size", config.moe_intermediate_size)?,
-            shared_intermediate: dimension(
-                "moe_shared_expert_intermediate_size",
-                config.moe_shared_expert_intermediate_size,
-            )?,
-            expert_input: dimension(
-                "moe_latent_size",
-                config.moe_latent_size.unwrap_or(config.hidden_size),
-            )?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            attention_heads: config.num_attention_heads,
+            key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+            mamba_heads: config.mamba_num_heads,
+            mamba_head_dim: config.mamba_head_dim,
+            groups: config.n_groups,
+            state_size: config.ssm_state_size,
+            conv_kernel: config.conv_kernel,
+            routed_experts: config.n_routed_experts,
+            moe_intermediate: config.moe_intermediate_size,
+            shared_intermediate: config.moe_shared_expert_intermediate_size,
+            latent: config.moe_latent_size,
         })
+        .map_err(|error| ConfigError::new(FAMILY, error.field(), error.reason()))
     }
 }
 
@@ -642,6 +573,9 @@ fn add_mtp(
             "v1 checkpoint loading supports one [attention, moe] Lightning MTP stage",
         ));
     }
+    let double_hidden = dimensions.double_hidden.ok_or_else(|| {
+        ConfigError::new(FAMILY, "hidden_size", "dimension product overflows u64")
+    })?;
     for (source, target) in [
         (
             "mtp.layers.0.enorm.weight",
@@ -671,7 +605,7 @@ fn add_mtp(
         mappings,
         "mtp.layers.0.eh_proj.weight",
         "next_token_head.eh_proj.weight",
-        vec![dimensions.hidden, dimensions.hidden * 2],
+        vec![dimensions.hidden, double_hidden],
     );
     add_attention(
         expected,
@@ -702,24 +636,6 @@ fn add_mapped(
 ) {
     expected.push(ExpectedTensor::new(target, shape));
     mappings.map(source, target);
-}
-
-/// Converts one runtime extent to SafeTensors' portable dimension type.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Multiplies two runtime extents without truncation or overflow.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]

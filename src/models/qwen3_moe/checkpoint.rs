@@ -180,50 +180,29 @@ impl Qwen3MoeConfig {
     }
 }
 
-/// Checked shape terms used by the contract builder.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Number of vocabulary rows in embedding and output matrices.
-    vocab: u64,
-    /// Residual-stream width shared by decoder blocks.
-    hidden: u64,
-    /// Intermediate width of dense feed-forward layers.
-    intermediate: u64,
-    /// Intermediate width of each routed expert.
-    moe_intermediate: u64,
-    /// Number of routed experts and router output channels.
-    experts: u64,
-    /// Concatenated query width: query heads times head dimension.
-    query: u64,
-    /// Concatenated native key/value width before head repetition.
-    key_value: u64,
-    /// Per-head query/key width used by headwise RMS normalization.
-    head_dim: u64,
-}
+mod dimensions; // Verified attention-width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&Qwen3MoeConfig> for Dimensions {
-    /// Configuration field and reason for a nonportable or overflowing dimension.
+    /// Configuration field and reason for an overflowing dimension.
     type Error = ConfigError;
 
-    /// Converts every dimension and checks projection-width products.
+    /// Converts every dimension and checks projection-width products with the
+    /// verified [`checkpoint_dimensions`].
     fn try_from(config: &Qwen3MoeConfig) -> Result<Self, Self::Error> {
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            moe_intermediate: dimension("moe_intermediate_size", config.moe_intermediate_size)?,
-            experts: dimension("num_experts", config.num_experts)?,
-            query: product(
-                "num_attention_heads * head_dim",
-                config.num_attention_heads,
-                config.head_dim,
-            )?,
-            key_value: product(
-                "num_key_value_heads * head_dim",
-                config.num_key_value_heads,
-                config.head_dim,
-            )?,
-            head_dim: dimension("head_dim", config.head_dim)?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            moe_intermediate: config.moe_intermediate_size,
+            experts: config.num_experts,
+            attention_heads: config.num_attention_heads,
+            key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+        })
+        .map_err(|error| {
+            ConfigError::new(FAMILY, error.field(), "dimension product overflows usize")
         })
     }
 }
@@ -273,24 +252,6 @@ fn add_mapped(
 ) {
     expected.push(ExpectedTensor::new(target, shape));
     mappings.map(source, target);
-}
-
-/// Converts one `usize` dimension without truncation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Multiplies two projection dimensions without overflow.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]
