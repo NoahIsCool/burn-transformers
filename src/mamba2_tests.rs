@@ -584,18 +584,21 @@ fn grouped_norm_rejects_invalid_geometry() {
             .is_err()
     );
 
-    let norm = GatedGroupRmsNorm::<TestBackend> {
-        weight: Param::from_tensor(Tensor::ones([4], &device)),
-        groups: 2,
-        epsilon: f64::NAN,
-    };
-    assert!(
-        norm.forward(
-            Tensor::ones([1, 2, 4], &device),
-            Tensor::ones([1, 2, 4], &device),
-        )
-        .is_err()
-    );
+    for epsilon in [f64::NAN, 0.0, -1e-6] {
+        let norm = GatedGroupRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(Tensor::ones([4], &device)),
+            groups: 2,
+            epsilon,
+        };
+        assert_configuration(
+            norm.forward(
+                Tensor::ones([1, 2, 4], &device),
+                Tensor::ones([1, 2, 4], &device),
+            ),
+            "mamba2.gated_norm.epsilon",
+            "greater than zero",
+        );
+    }
 }
 
 /// Invalid groups and state dtypes return contextual errors before kernels.

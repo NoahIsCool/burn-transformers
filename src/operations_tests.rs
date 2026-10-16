@@ -908,3 +908,21 @@ fn autodiff_projection_rejects_packed_weights() {
         other => panic!("expected a backend capability error, got {other:?}"),
     }
 }
+
+/// A projection with no output channels is a shape error, not an empty product.
+#[test]
+fn zero_width_projections_are_rejected() {
+    let device = Default::default();
+    let projection = Linear {
+        weight: Param::from_tensor(Tensor::<Flex, 2>::from_data(
+            TensorData::new(Vec::<f32>::new(), [2, 0]),
+            &device,
+        )),
+        bias: None,
+    };
+    assert!(matches!(
+        linear(Tensor::<Flex, 2>::ones([1, 2], &device), &projection),
+        Err(crate::Error::Shape { tensor, expected, actual })
+            if tensor == "linear.weight" && expected == "[2, nonzero_output]" && actual == "[2, 0]"
+    ));
+}

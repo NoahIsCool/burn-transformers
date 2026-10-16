@@ -509,6 +509,12 @@ impl<B: Backend> GatedDeltaNet<B> {
     /// Evaluates a stateless differentiable mixer forward.
     ///
     /// A temporary zero state is used but never serialized with model weights.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for an empty batch, raised while the
+    /// zero state is allocated, and otherwise the errors of
+    /// [`Self::forward_with_state`].
     pub fn forward(
         &self,
         hidden: Tensor<B, 3>,

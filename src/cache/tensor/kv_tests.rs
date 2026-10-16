@@ -558,3 +558,24 @@ fn working_reads_reject_incomplete_staging_planes() {
         Err(TensorCacheError::StagingDisabled)
     ));
 }
+
+/// Input plane counts must match the group kind, and the error names the right methods.
+#[test]
+fn plane_counts_name_the_methods_of_the_group_kind() {
+    let pair = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::Full, DType::F32).expect("pair");
+    let latent = NativeKvCacheSpec::latent(1, 4, KvCacheStorage::Full, DType::F32).expect("latent");
+    assert!(validate_plane_count(pair, 2).is_ok());
+    assert!(validate_plane_count(latent, 1).is_ok());
+    assert!(matches!(
+        validate_plane_count(pair, 1),
+        Err(TensorCacheError::PlaneKindMismatch {
+            expected: "a key/value pair; use the key/value methods"
+        })
+    ));
+    assert!(matches!(
+        validate_plane_count(latent, 2),
+        Err(TensorCacheError::PlaneKindMismatch {
+            expected: "one latent tensor; use the latent methods"
+        })
+    ));
+}

@@ -1840,3 +1840,19 @@ fn failing_output_projection_preserves_caller_state() {
             .assert_eq(&recurrent_before, true);
     }
 }
+
+/// The stateless forward reports an empty batch while allocating its zero state.
+#[test]
+fn stateless_forward_rejects_an_empty_batch() {
+    let device = Default::default();
+    let mixer = GatedDeltaNetConfig::new(4, 1, 2, 2, 2)
+        .init::<TestBackend>(&device)
+        .unwrap();
+    let error = mixer
+        .forward(Tensor::zeros([0, 2, 4], &device), None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, .. } if field == "delta_net.batch_size"),
+        "{error:?}"
+    );
+}

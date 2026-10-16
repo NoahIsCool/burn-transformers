@@ -603,7 +603,9 @@ impl<B: Backend> Mamba2<B> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::forward_with_state`].
+    /// Returns a configuration error for an empty batch, raised while the
+    /// zero state is allocated, and otherwise the errors of
+    /// [`Self::forward_with_state`].
     pub fn forward(
         &self,
         hidden: Tensor<B, 3>,
