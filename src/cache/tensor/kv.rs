@@ -27,6 +27,7 @@ use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 use crate::cache::identity::IdentityToken;
 use crate::cache::retention::first_unsafe_ring_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
+use crate::operations;
 
 use super::plan::{
     check_staged_commit, checked_product, first_index_out_of_range, next_version, portable_indices,
@@ -1523,17 +1524,16 @@ fn assign_segment<B: Backend>(
         input,
         0..spec.head_dimension(),
     ]);
-    destination.inplace(|tensor| {
-        tensor.slice_assign(
-            [
-                sequence..sequence + 1,
-                0..spec.key_value_heads(),
-                physical,
-                0..spec.head_dimension(),
-            ],
-            values,
-        )
-    });
+    operations::assign_region(
+        destination,
+        [
+            sequence..sequence + 1,
+            0..spec.key_value_heads(),
+            physical,
+            0..spec.head_dimension(),
+        ],
+        values,
+    );
 }
 
 /// Constructs one read segment from committed physical slots.
@@ -1672,16 +1672,10 @@ fn zero_4d_row<B: Backend>(
     time: usize,
     dimension: usize,
 ) {
-    let zeros = Tensor::zeros(
-        [1, heads, time, dimension],
-        (&tensor.device(), tensor.dtype()),
+    operations::zero_region(
+        tensor,
+        [sequence..sequence + 1, 0..heads, 0..time, 0..dimension],
     );
-    tensor.inplace(|value| {
-        value.slice_assign(
-            [sequence..sequence + 1, 0..heads, 0..time, 0..dimension],
-            zeros,
-        )
-    });
 }
 
 #[cfg(test)]

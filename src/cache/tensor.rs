@@ -9,9 +9,16 @@
 //!
 //! Burn tensor updates are ownership-based: [`burn::tensor::Tensor::inplace`]
 //! permits a backend to reuse an uniquely owned allocation, but Burn 0.21 does
-//! not promise that `slice_assign` or batch reordering is allocation-free.
-//! "Preallocated" here therefore guarantees stable cache *capacity and shape*,
-//! while physical buffer reuse remains a backend optimization.
+//! not promise that `slice_assign` or batch reordering is allocation-free, and
+//! Burn Flex 0.21's `slice_assign` in fact copies its whole destination. Cache
+//! writes therefore go through the crate's `operations::assign_region` and
+//! `operations::zero_region`, which on inference Flex write only the new
+//! slots into a uniquely owned plane and keep its buffer, so a token write
+//! costs `O(written slots)` rather than `O(capacity)`; other backends use
+//! `slice_assign`. "Preallocated" guarantees stable cache *capacity and
+//! shape*; physical buffer reuse is guaranteed on inference Flex while no read
+//! view of the plane is alive, and remains a backend optimization elsewhere.
+//! Batch reordering (`select`) still allocates.
 //!
 //! # Model step workflow
 //!

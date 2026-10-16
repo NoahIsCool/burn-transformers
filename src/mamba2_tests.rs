@@ -1306,6 +1306,271 @@ fn block_scan_timing() {
     eprintln!("mamba2 scan timing: speedup {:.2}x", legacy / blocked);
 }
 
+/// Exact bit patterns of a floating tensor of any rank, read in its own dtype.
+fn bits<const D: usize>(tensor: Tensor<TestBackend, D>) -> Vec<u32> {
+    let data = tensor.into_data();
+    match data.dtype {
+        DType::F32 => data
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect(),
+        DType::F16 => data
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(|value| u32::from(value.to_bits()))
+            .collect(),
+        DType::BF16 => data
+            .to_vec::<bf16>()
+            .unwrap()
+            .into_iter()
+            .map(|value| u32::from(value.to_bits()))
+            .collect(),
+        other => panic!("unexpected dtype {other:?}"),
+    }
+}
+
+/// The matmul and broadcast forms of the decode update round identically.
+///
+/// The update `(dt · B) ⊗ x` has a single summand per element, so the batched
+/// outer product used on Flex must reproduce the reference's two roundings
+/// bit for bit in F32, F16, and BF16, for a batch above one and values of
+/// both signs.
+#[test]
+fn input_update_forms_are_bit_identical() {
+    let (batch, heads, head_dim, state) = (3, 4, 5, 6);
+    for dtype in [DType::F32, DType::F16, DType::BF16] {
+        let dt = (waves([batch, heads, 1], 1.0, 0.3).abs() + 0.01)
+            .reshape([batch, heads])
+            .cast(dtype);
+        let b = waves([batch, heads, state], 2.0, 1.7).cast(dtype);
+        let x = waves([batch, heads, head_dim], 3.0, 2.3).cast(dtype);
+        let matmul = input_update(dt.clone(), b.clone(), x.clone(), true);
+        let broadcast = input_update(dt, b, x, false);
+        assert_eq!(matmul.dims(), [batch, heads, head_dim, state]);
+        assert_eq!(matmul.dtype(), dtype);
+        assert_eq!(bits(matmul), bits(broadcast), "{dtype:?}");
+    }
+}
+
+/// Recurrent scans with either update form return identical outputs, states, and snapshots.
+///
+/// Covers grouped heads (`heads != groups`), a batch above one, a non-zero
+/// initial state, several tokens with per-token snapshots, and the F16/BF16
+/// state dtypes whose per-token rounding makes the snapshots observable.
+#[test]
+fn recurrent_scan_update_forms_are_bit_identical() {
+    let device = Default::default();
+    let (batch, sequence, heads, groups, head_dim, state) = (2, 3, 4, 2, 3, 5);
+    for dtype in [DType::F32, DType::F16, DType::BF16] {
+        let x = waves4([batch, sequence, heads, head_dim], 1.0, 0.9).cast(dtype);
+        let b = waves4([batch, sequence, groups, state], 2.0, 0.7).cast(dtype);
+        let c = waves4([batch, sequence, groups, state], 3.0, 0.8).cast(dtype);
+        let dt = (waves([batch, sequence, heads], 4.0, 0.2).abs() + 0.01).cast(dtype);
+        let a = Tensor::<TestBackend, 1>::from_floats([-0.5, -1.0, -0.25, -2.0], &device);
+        let d = Tensor::<TestBackend, 1>::from_floats([1.0, 0.5, -0.5, 2.0], &device);
+        let initial = waves4([batch, heads, head_dim, state], 5.0, 0.1).cast(dtype);
+        let run = |as_matmul| {
+            recurrent_scan_with(
+                x.clone(),
+                b.clone(),
+                c.clone(),
+                dt.clone(),
+                a.clone(),
+                d.clone(),
+                initial.clone(),
+                true,
+                as_matmul,
+            )
+            .unwrap()
+        };
+        let (matmul_output, matmul_state, matmul_snapshots) = run(true);
+        let (broadcast_output, broadcast_state, broadcast_snapshots) = run(false);
+        assert_eq!(bits(matmul_output), bits(broadcast_output), "{dtype:?}");
+        assert_eq!(bits(matmul_state), bits(broadcast_state), "{dtype:?}");
+        assert_eq!(
+            bits(matmul_snapshots.unwrap()),
+            bits(broadcast_snapshots.unwrap()),
+            "{dtype:?}"
+        );
+    }
+}
+
+/// Release-mode timing of the decode update's two forms and of one recurrent decode token.
+///
+/// Shapes follow Nemotron-H Lightning's Mamba-2 layers (64 heads of width 64,
+/// state 128, 8 groups) at batch 1 and 8. The forms are interleaved and the
+/// median of 31 samples is reported. Run with `cargo test --release --lib
+/// mamba2::tests::recurrent_update_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn recurrent_update_timing() {
+    use std::time::Instant;
+    let device = Default::default();
+    let (heads, groups, head_dim, state) = (64, 8, 64, 128);
+    let median = |samples: &mut Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2] * 1e6
+    };
+    for batch in [1, 8] {
+        let dt = waves([batch, heads, 1], 1.0, 0.3)
+            .abs()
+            .reshape([batch, heads]);
+        let b = waves([batch, heads, state], 2.0, 1.0);
+        let x = waves([batch, heads, head_dim], 3.0, 1.0);
+        let (mut broadcast, mut matmul) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            for (as_matmul, samples) in [(false, &mut broadcast), (true, &mut matmul)] {
+                let started = Instant::now();
+                let _ = input_update(dt.clone(), b.clone(), x.clone(), as_matmul).into_data();
+                samples.push(started.elapsed().as_secs_f64());
+            }
+        }
+        let (before, after) = (median(&mut broadcast), median(&mut matmul));
+        eprintln!(
+            "mamba2 decode update [{batch}, {heads}, {head_dim}, {state}]: broadcast {before:.0} us, matmul {after:.0} us ({:.1}x)",
+            before / after
+        );
+
+        let x = waves4([batch, 1, heads, head_dim], 1.0, 0.9);
+        let b = waves4([batch, 1, groups, state], 2.0, 0.7);
+        let c = waves4([batch, 1, groups, state], 3.0, 0.8);
+        let dt = waves([batch, 1, heads], 4.0, 0.2).abs() + 0.01;
+        let a = Tensor::<TestBackend, 1>::ones([heads], &device) * -0.5;
+        let d = Tensor::<TestBackend, 1>::ones([heads], &device);
+        let initial = waves4([batch, heads, head_dim, state], 5.0, 0.1);
+        let (mut broadcast, mut matmul) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            for (as_matmul, samples) in [(false, &mut broadcast), (true, &mut matmul)] {
+                let started = Instant::now();
+                let (output, terminal, _) = recurrent_scan_with(
+                    x.clone(),
+                    b.clone(),
+                    c.clone(),
+                    dt.clone(),
+                    a.clone(),
+                    d.clone(),
+                    initial.clone(),
+                    false,
+                    as_matmul,
+                )
+                .unwrap();
+                let _ = (output.into_data(), terminal.into_data());
+                samples.push(started.elapsed().as_secs_f64());
+            }
+        }
+        let (before, after) = (median(&mut broadcast), median(&mut matmul));
+        eprintln!(
+            "mamba2 one-token recurrent_scan, batch {batch}: broadcast {before:.0} us, matmul {after:.0} us ({:.1}x)",
+            before / after
+        );
+    }
+}
+
+/// The former segment transitions: two `mask_fill`s over expanded Boolean masks (test oracle).
+fn legacy_transitions(log_decay: Tensor<TestBackend, 4>) -> Tensor<TestBackend, 5> {
+    let [batch, heads, chunks, width] = log_decay.dims();
+    let device = log_decay.device();
+    let rows = Tensor::<TestBackend, 1, Int>::arange(0..width as i64, &device)
+        .reshape([1, 1, 1, width, 1]);
+    let columns = Tensor::<TestBackend, 1, Int>::arange(0..width as i64, &device)
+        .reshape([1, 1, 1, 1, width]);
+    let mask_shape = [1, 1, 1, width, width];
+    let outside = columns
+        .clone()
+        .expand(mask_shape)
+        .greater_equal(rows.clone().expand(mask_shape));
+    let future = columns.expand(mask_shape).greater(rows.expand(mask_shape));
+    let shape = [batch, heads, chunks, width, width];
+    log_decay
+        .unsqueeze_dim::<5>(4)
+        .expand(shape)
+        .mask_fill(outside.expand(shape), 0.0)
+        .cumsum(3)
+        .mask_fill(future.expand(shape), f32::NEG_INFINITY)
+        .exp()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+
+    /// Table-based transitions equal the former `mask_fill` formulation bit for bit.
+    ///
+    /// Log decays are finite and non-positive, as `dt · A` is, and include
+    /// exact `+0.0` and `-0.0` (padded steps), at widths 1, 2, a chunk width,
+    /// and the `chunks + 1` width of the carry matrix. Both operand layouts
+    /// (the flattened Flex rows and the broadcast square views used on other
+    /// backends) are checked.
+    #[test]
+    fn segment_transitions_match_the_mask_fill_formulation(
+        width in proptest::sample::select(vec![1_usize, 2, 3, 8, 17]),
+        batch in 1_usize..3,
+        heads in 1_usize..3,
+        chunks in 1_usize..3,
+        seed in proptest::collection::vec((0_u8..4, -30.0_f32..0.0), 1..64),
+    ) {
+        let count = batch * heads * chunks * width;
+        let values = (0..count)
+            .map(|index| match seed[index % seed.len()] {
+                (0, _) => 0.0,
+                (1, _) => -0.0,
+                (_, value) => value * (1.0 + index as f32 * 0.01),
+            })
+            .collect::<Vec<_>>();
+        let log_decay = Tensor::<TestBackend, 4>::from_data(
+            TensorData::new(values, [batch, heads, chunks, width]),
+            &Default::default(),
+        );
+        let masks = SegmentMasks::new(width, &Default::default());
+        let expected = bits(legacy_transitions(log_decay.clone()));
+        proptest::prop_assert_eq!(bits(masks.transitions(log_decay.clone())), expected.clone());
+        proptest::prop_assert_eq!(bits(masks.transitions_with(log_decay.clone(), true)), expected.clone());
+        proptest::prop_assert_eq!(bits(masks.transitions_with(log_decay, false)), expected);
+    }
+}
+
+/// Release-mode timing of the segment transitions against the former `mask_fill` form.
+///
+/// Shapes are one Lightning Mamba-2 block (64 heads, 128-token chunks) with
+/// 4 and 16 chunks, a small batched block (batch 8, 8 heads, two 32-token
+/// chunks, as in the Nemotron-H batched decode benchmark), and a width-3
+/// chunk-carry matrix. Run with `cargo test --release --lib
+/// mamba2::tests::segment_transition_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn segment_transition_timing() {
+    use std::time::Instant;
+    for (batch, heads, chunks, width) in [
+        (1, 64, 4, 128),
+        (1, 64, 16, 128),
+        (8, 8, 2, 32),
+        (8, 64, 1, 3),
+    ] {
+        let masks = SegmentMasks::<TestBackend>::new(width, &Default::default());
+        let log_decay = -waves4([batch, heads, chunks, width], 1.0, 0.05).abs();
+        let (mut legacy, mut tables) = (Vec::new(), Vec::new());
+        for _ in 0..15 {
+            let started = Instant::now();
+            let _ = legacy_transitions(log_decay.clone()).into_data();
+            legacy.push(started.elapsed().as_secs_f64());
+            let started = Instant::now();
+            let _ = masks.transitions(log_decay.clone()).into_data();
+            tables.push(started.elapsed().as_secs_f64());
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2] * 1e3
+        };
+        let (before, after) = (median(&mut legacy), median(&mut tables));
+        eprintln!(
+            "mamba2 segment transitions [{batch}, {heads}, {chunks}, {width}, {width}]: mask_fill {before:.3} ms, tables {after:.3} ms ({:.2}x)",
+            before / after
+        );
+    }
+}
+
 /// Asserts that `result` is a configuration error for `field` whose reason contains `reason`.
 fn assert_configuration<T: core::fmt::Debug>(result: Result<T>, field: &str, reason: &str) {
     match result {

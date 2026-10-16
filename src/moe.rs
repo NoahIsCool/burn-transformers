@@ -43,6 +43,9 @@ use crate::{
 mod assignment;
 mod geometry;
 pub mod router;
+#[cfg(test)]
+/// Host-side grouping oracle and the uniform-precision dispatch shorthand used by tests.
+mod test_oracle;
 
 use assignment::{ExpertAssignmentPlan, InvalidExpertId, RoutedIdsError, plan_expert_assignments};
 use geometry::{
@@ -54,6 +57,8 @@ pub use router::{
     RenormalizationDenominator, RouteDecision, RouterConfig, RouterProjectionPrecision,
     RouterScoring, RoutingPolicy, ScoringOrder, router_logits,
 };
+#[cfg(test)]
+pub(crate) use test_oracle::group_selected_experts;
 
 /// Rounding boundary for selected router weights in a sparse expert block.
 ///
@@ -327,45 +332,6 @@ fn weighted_expert_contribution<B: Backend>(
     (expert_output.cast(precision.multiplication_dtype)
         * weights.cast(precision.multiplication_dtype))
     .cast(precision.accumulation_dtype)
-}
-
-/// Host metadata for one expert, ordered by flattened `(token, slot)` index.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ExpertAssignmentGroup {
-    /// Token rows selected from the residual stream.
-    pub(crate) token_indices: Vec<i64>,
-    /// Flattened `(token, top-k slot)` indices selected from router weights.
-    pub(crate) weight_indices: Vec<i64>,
-}
-
-/// Reads discrete routing IDs once and partitions assignments by expert.
-///
-/// Expert IDs are control-flow metadata rather than differentiable values, so
-/// copying this compact `tokens * top_k` tensor to the host does not sever the
-/// gradient graph for either residual states or selected router weights.
-/// Within each expert, assignments retain token-major, slot-minor order,
-/// making grouping deterministic across backends even when router scores tie.
-/// [`dispatch_routed_experts`] uses the same plan without materializing one
-/// vector pair per expert.
-#[cfg_attr(not(test), allow(dead_code))] // Production callers moved to dispatch_routed_experts.
-pub(crate) fn group_selected_experts<B: Backend>(
-    selected_experts: Tensor<B, 2, Int>,
-    routed_experts: usize,
-) -> Result<Vec<ExpertAssignmentGroup>> {
-    let slots = selected_experts.dims()[1];
-    let plan = read_assignment_plan(selected_experts, None, routed_experts)?;
-    let mut groups = Vec::with_capacity(routed_experts);
-    for expert in 0..routed_experts {
-        let assignments = &plan.order[plan.offsets[expert]..plan.offsets[expert + 1]];
-        let mut group = ExpertAssignmentGroup::default();
-        for &assignment in assignments {
-            // `read_assignment_plan` checked that every index fits in i64.
-            group.token_indices.push((assignment / slots) as i64);
-            group.weight_indices.push(assignment as i64);
-        }
-        groups.push(group);
-    }
-    Ok(groups)
 }
 
 /// Reads `[tokens, K]` expert IDs (and optional NaN flags) in one transfer and plans dispatch.
@@ -772,39 +738,23 @@ impl<B: Backend> SparseMoe<B> {
         }
     }
 
-    /// Evaluates and accumulates only the experts named by top-k assignments.
+    /// Validates dispatch shapes, then evaluates only the experts named by top-k assignments.
     ///
-    /// Discrete IDs are materialized once and grouped by expert. Input rows and
-    /// mixture weights remain device tensors gathered with the uploaded
-    /// permutation, so gradients still flow through expert parameters, selected
-    /// router probabilities, and the residual input. The caller chooses an
-    /// accumulation dtype independently of expert execution, allowing families
-    /// such as DeepSeek to sum reduced-precision experts in FP32 while Qwen
-    /// retains its residual-stream convention.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "no family dispatches through it since DeepSeek moved to dispatch_routed_experts"
-        )
-    )]
-    pub(crate) fn dispatch_selected_experts(
-        &self,
-        flat_input: Tensor<B, 2>,
-        flat_weights: Tensor<B, 2>,
-        selected_experts: Tensor<B, 2, Int>,
-        accumulation_dtype: DType,
-    ) -> Result<RoutedExpertDispatch<B>> {
-        self.dispatch_selected_experts_with_precision(
-            flat_input,
-            flat_weights,
-            selected_experts,
-            None,
-            RoutedExpertPrecision::uniform(accumulation_dtype),
-        )
-    }
-
-    /// Validates dispatch shapes, then dispatches with an explicit multiply/accumulate policy.
+    /// Discrete IDs (and the optional per-token non-finite flags) are read to
+    /// the host once and grouped by expert; input rows and mixture weights stay
+    /// device tensors gathered with the uploaded permutation, so gradients
+    /// still flow through expert parameters, selected router probabilities,
+    /// and the residual input. `precision` fixes the multiplication and
+    /// accumulation dtypes independently of expert execution, so DeepSeek can
+    /// sum reduced-precision experts in FP32 while Qwen keeps its
+    /// residual-stream convention. [`Self::forward`] is the production caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns a shape error for an empty or wrongly sized input or route
+    /// tensors, a configuration error for an invalid expert cardinality or
+    /// precision, a backend-capability error for operands on different
+    /// devices, and the expert-ID errors of [`dispatch_routed_experts`].
     fn dispatch_selected_experts_with_precision(
         &self,
         flat_input: Tensor<B, 2>,

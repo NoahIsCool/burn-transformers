@@ -513,11 +513,25 @@ fn prune_groups<B: Backend>(
 /// activations, weight, and optional bias to F32 first. The result keeps the
 /// projection dtype; [`RouterConfig::route`] casts to F32 itself.
 ///
+/// The F32 projection is the same rank-2 product as
+/// [`crate::operations::linear`]: `reshape(x, [-1, I]) · W + b`, restored to
+/// `[.., E]`. It deliberately avoids `burn::tensor::module::linear`. On
+/// Burn 0.21's `Autodiff<Flex>` that call left the router weight without a
+/// gradient on most backward passes after the first whenever the loss reached
+/// the router only through these logits (an auxiliary-only or z-loss phase,
+/// router distillation), so an optimizer silently skipped the router. The
+/// regression test `router_projection_receives_gradients_on_every_logits_only_backward_pass`
+/// in `moe_tests.rs` repeats such passes. The plain product also avoids
+/// `module::linear`'s per-call weight reshape copy on Flex. On Flex the logits
+/// are bit-identical to the former formulation
+/// (`fp32_router_projection_matches_module_linear_bitwise`); other backends
+/// agree up to F32 reassociation inside their GEMM.
+///
 /// # Errors
 ///
 /// Returns the shape and dtype errors of [`crate::operations::linear`] for
-/// model-dtype projection, and a shape error when the F32 weight does not
-/// match the activation width.
+/// model-dtype projection, and a shape error for a rank-zero input or when the
+/// F32 weight does not match the activation width.
 pub fn router_logits<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     router: &Linear<B>,
@@ -527,19 +541,32 @@ pub fn router_logits<B: Backend, const D: usize>(
         RouterProjectionPrecision::ModelDtype => crate::operations::linear(input, router),
         RouterProjectionPrecision::Fp32 => {
             let weight = router.weight.val();
-            let [weight_input, _] = weight.dims();
-            if input.dims()[D - 1] != weight_input {
+            let [weight_input, experts] = weight.dims();
+            let mut shape = input.dims();
+            let Some(&width) = shape.last() else {
+                return Err(Error::shape(
+                    "moe.router.input",
+                    "a tensor with at least one dimension",
+                    "rank zero",
+                ));
+            };
+            if width != weight_input {
                 return Err(Error::shape(
                     "moe.router.weight",
-                    format!("[{}, experts]", input.dims()[D - 1]),
+                    format!("[{width}, experts]"),
                     format!("{:?}", weight.dims()),
                 ));
             }
-            Ok(burn::tensor::module::linear(
-                input.cast(DType::F32),
-                weight.cast(DType::F32),
-                router.bias.as_ref().map(|bias| bias.val().cast(DType::F32)),
-            ))
+            let rows = crate::operations::leading_rows("moe.router.input", &shape)?;
+            let mut logits = input
+                .cast(DType::F32)
+                .reshape([rows, width])
+                .matmul(weight.cast(DType::F32));
+            if let Some(bias) = &router.bias {
+                logits = logits + bias.val().cast(DType::F32).unsqueeze();
+            }
+            shape[D - 1] = experts;
+            Ok(logits.reshape(shape))
         }
     }
 }

@@ -9,6 +9,8 @@
 
 use core::ops::Range;
 
+use burn::tensor::backend::Backend;
+
 use super::plan::{self, ChunkLimits, ChunkPlanError, plan_query_chunks, query_chunk_range};
 use crate::{Error, Result};
 
@@ -22,9 +24,14 @@ use crate::{Error, Result};
 /// score, mask, and probability buffers can be reclaimed before the next chunk.
 ///
 /// This policy bounds score-like intermediates, not parameters, Q/K/V storage,
-/// the linear-size output, or an autodiff tape. Multi-chunk execution is
-/// therefore rejected on autodiff backends; callers doing training can select
-/// [`Self::Unbounded`] explicitly after provisioning the required memory.
+/// the linear-size output, or an autodiff tape. On an autodiff backend the
+/// tape retains every chunk's workspace anyway, so chunking cannot lower the
+/// training peak. Autodiff backends therefore evaluate one [`Self::Unbounded`]
+/// call with the same values. [`Self::effective_on`] states that rule, and
+/// [`crate::attention::GroupedQueryAttention::attend_bounded`] applies it
+/// directly; the Muse Glimmer and MLA attention paths apply the same rule
+/// through their own autodiff checks, so every consumer of this policy shares
+/// one contract. Size training memory for the full `O(query * key)` plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionExecutionPolicy {
@@ -60,6 +67,24 @@ impl AttentionExecutionPolicy {
         Self::QueryChunked {
             max_query_tokens,
             max_score_elements,
+        }
+    }
+
+    /// Returns the policy that a call on `device` actually executes.
+    ///
+    /// Autodiff backends answer [`Self::Unbounded`]: their tape keeps every
+    /// chunk's score, mask, and probability planes alive until backward, so
+    /// query chunking would add synchronizations without lowering the peak.
+    /// Chunked and unbounded evaluation compute the same rows, so the values
+    /// are unchanged. Every other backend executes `self` as given. Call
+    /// [`Self::validate`] first: this mapping does not check limits, so an
+    /// invalid policy must not be silently replaced.
+    #[must_use]
+    pub fn effective_on<B: Backend>(self, device: &B::Device) -> Self {
+        if B::ad_enabled(device) {
+            Self::Unbounded
+        } else {
+            self
         }
     }
 

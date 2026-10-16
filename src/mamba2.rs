@@ -96,10 +96,7 @@ use burn::{
         Initializer, Linear, LinearConfig, LinearLayout, PaddingConfig1d,
         conv::{Conv1d, Conv1dConfig},
     },
-    tensor::{
-        Bool, DType, Int, Tensor, TensorData, activation, backend::Backend, module::conv1d,
-        ops::ConvOptions,
-    },
+    tensor::{Bool, DType, Int, Tensor, TensorData, activation, backend::Backend},
 };
 use serde::{Deserialize, Serialize};
 
@@ -845,11 +842,13 @@ impl<B: Backend> Mamba2<B> {
         // `joined` is `[batch, channels, (K - 1) + sequence]`: history, then inputs.
         let history = state.convolution.clone().cast(xbc.dtype());
         let joined = Tensor::cat(vec![history, xbc], 2);
-        let convolved = conv1d(
+        // Exactly Burn's `conv1d`; a one-token decode column skips Flex's
+        // per-channel rayon fan-out (`operations::depthwise_conv1d`).
+        let convolved = operations::depthwise_conv1d(
             joined.clone(),
             self.conv1d.weight.val(),
             self.conv1d.bias.as_ref().map(|bias| bias.val()),
-            ConvOptions::new([1], [0], [1], self.conv1d.groups),
+            self.conv1d.groups,
         );
         let convolved = zero_invalid(
             activation::silu(convolved).swap_dims(1, 2),
@@ -1205,6 +1204,12 @@ fn heads_from_groups<B: Backend>(grouped: Tensor<B, 3>, heads: usize) -> Tensor<
 ///
 /// Decode is one token, so the group-to-head expansion of `B` and `C` costs
 /// one `[b, h, n]` copy per token and keeps the reference contraction layout.
+/// The dominant non-GEMM cost is the `[b, h, p, n]` update itself: as a
+/// broadcast product of `[b, h, 1, n]` by `[b, h, p, 1]`, Burn Flex 0.21 first
+/// copies the stride-zero left operand with a scalar strided walk, about 18%
+/// of a Nemotron-H decode step. On inference Flex the update is therefore
+/// formed as a batched outer product with a single summand
+/// ([`input_update`]), which rounds identically and is 16–19x faster there.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn recurrent_scan<B: Backend>(
     x: Tensor<B, 4>,
@@ -1215,6 +1220,26 @@ pub(crate) fn recurrent_scan<B: Backend>(
     d: Tensor<B, 1>,
     state: Tensor<B, 4>,
     collect: bool,
+) -> Result<(Tensor<B, 4>, Tensor<B, 4>, Option<Tensor<B, 5>>)> {
+    let outer_product_as_matmul = operations::is_inference_flex::<B>(&x.device());
+    recurrent_scan_with(x, b, c, dt, a, d, state, collect, outer_product_as_matmul)
+}
+
+/// [`recurrent_scan`] with an explicit choice of [`input_update`] form.
+///
+/// Both forms round identically; tests and the timing benchmark call this to
+/// compare them on one backend.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn recurrent_scan_with<B: Backend>(
+    x: Tensor<B, 4>,
+    b: Tensor<B, 4>,
+    c: Tensor<B, 4>,
+    dt: Tensor<B, 3>,
+    a: Tensor<B, 1>,
+    d: Tensor<B, 1>,
+    state: Tensor<B, 4>,
+    collect: bool,
+    outer_product_as_matmul: bool,
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>, Option<Tensor<B, 5>>)> {
     let [batch, sequence, heads, head_dim] = x.dims();
     let state_size = b.dims()[3];
@@ -1233,8 +1258,7 @@ pub(crate) fn recurrent_scan<B: Backend>(
         let decay = (dt_t.clone().cast(DType::F32) * a.clone())
             .exp()
             .reshape([batch, heads, 1, 1]);
-        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.unsqueeze_dim::<4>(2);
-        let update = discretized_b * x_t.clone().unsqueeze_dim::<4>(3);
+        let update = input_update(dt_t, b_t, x_t.clone(), outer_product_as_matmul);
         let next_state = state * decay + update.cast(DType::F32);
 
         let state_for_output =
@@ -1269,6 +1293,45 @@ pub(crate) fn recurrent_scan<B: Backend>(
         state.cast(state_dtype),
         collect.then(|| Tensor::cat(snapshots, 1)),
     ))
+}
+
+/// Forms one token's input-dependent state update `(dt · B) ⊗ x`, shaped `[b, h, p, n]`.
+///
+/// `dt_t` is `[b, h]`, `b_t` the head-expanded `[b, h, n]`, and `x_t` is
+/// `[b, h, p]`, all in the activation dtype. The reference rounds twice:
+/// `dB = dt · B`, then `dB · x` (`modeling_mamba2.py`, `dB = dt * B` and
+/// `dBx = dB * x`). Both forms keep exactly those roundings:
+///
+/// - the broadcast form multiplies `[b, h, 1, n]` by `[b, h, p, 1]`;
+/// - the matmul form multiplies `x` as `[b·h, p, 1]` by `dB` as `[b·h, 1, n]`.
+///   A product over a single summand is one correctly rounded product per
+///   element (`x_i · dB_j`, and multiplication commutes exactly); half
+///   precision GEMMs on Flex form that product in F32, where an F16 or BF16
+///   product is exact, and round it once, like the elementwise kernels.
+///
+/// The matmul form avoids Burn Flex 0.21's scalar strided copy of the
+/// stride-zero broadcast operand, so [`recurrent_scan`] selects it on
+/// inference Flex (`outer_product_as_matmul`) and keeps the fused elementwise
+/// product on CubeCL and autodiff backends. `mamba2_tests.rs` checks that the
+/// two forms agree bit for bit in F32, F16, and BF16.
+fn input_update<B: Backend>(
+    dt_t: Tensor<B, 2>,
+    b_t: Tensor<B, 3>,
+    x_t: Tensor<B, 3>,
+    outer_product_as_matmul: bool,
+) -> Tensor<B, 4> {
+    let [batch, heads, head_dim] = x_t.dims();
+    let state_size = b_t.dims()[2];
+    if outer_product_as_matmul {
+        let discretized_b =
+            (dt_t.reshape([batch, heads, 1]) * b_t).reshape([batch * heads, 1, state_size]);
+        x_t.reshape([batch * heads, head_dim, 1])
+            .matmul(discretized_b)
+            .reshape([batch, heads, head_dim, state_size])
+    } else {
+        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.unsqueeze_dim::<4>(2);
+        discretized_b * x_t.unsqueeze_dim::<4>(3)
+    }
 }
 
 /// Score-plane element budget that bounds the number of chunks in one vectorized block.
@@ -1490,30 +1553,46 @@ fn scan_block<B: Backend>(
     Ok((diagonal + off_diagonal, terminal))
 }
 
-/// Triangular masks for stable segmented sums over one chunk width, built once per scan.
+/// Triangular tables for stable segmented sums over one chunk width, built once per scan.
+///
+/// Both tables are flattened `[1, 1, 1, w·w]` F32 rows indexed `u · w + s`
+/// for target (term) row `u` and source column `s`. On inference Flex the
+/// terms are multiplied in that flattened layout: a single row shared by
+/// every leading position is the broadcast Burn Flex 0.21 evaluates with its
+/// SIMD kernels, whereas the former Boolean `[1, 1, 1, w, w]` masks were
+/// expanded to the full `[b, h, c, w, w]` plane and copied byte by byte inside
+/// each of two `mask_fill` calls per block. Other backends broadcast the same
+/// tables as `[1, 1, 1, w, w]` views, which they read natively, so they do
+/// one elementwise pass per table exactly as the masks did.
 pub(crate) struct SegmentMasks<B: Backend> {
-    /// `[1, 1, 1, w, w]`, true where source `s >= u` term row: terms outside `s < u`.
-    outside_segment: Tensor<B, 5, Bool>,
-    /// `[1, 1, 1, w, w]`, true where source `s > t` target: future sources.
-    future: Tensor<B, 5, Bool>,
+    /// `1.0` where `s < u` (the term `ld[u]` belongs to segment `(s, t]`), else `0.0`.
+    inside: Tensor<B, 4>,
+    /// `-inf` where `s > u` (a future source), else `0.0`.
+    future_bias: Tensor<B, 4>,
     /// Width `w`.
     width: usize,
 }
 
 impl<B: Backend> SegmentMasks<B> {
-    /// Builds both masks for width `width` on `device`.
+    /// Builds both tables for width `width` on the host and uploads them to `device`.
     pub(crate) fn new(width: usize, device: &B::Device) -> Self {
-        let rows =
-            Tensor::<B, 1, Int>::arange(0..width as i64, device).reshape([1, 1, 1, width, 1]);
-        let columns =
-            Tensor::<B, 1, Int>::arange(0..width as i64, device).reshape([1, 1, 1, 1, width]);
-        let shape = [1, 1, 1, width, width];
+        let mut inside = Vec::with_capacity(width * width);
+        let mut future_bias = Vec::with_capacity(width * width);
+        for row in 0..width {
+            for column in 0..width {
+                inside.push(if column < row { 1.0_f32 } else { 0.0 });
+                future_bias.push(if column > row { f32::NEG_INFINITY } else { 0.0 });
+            }
+        }
+        let upload = |values: Vec<f32>| {
+            Tensor::from_data(
+                TensorData::new(values, [1, 1, 1, width * width]),
+                (device, DType::F32),
+            )
+        };
         Self {
-            outside_segment: columns
-                .clone()
-                .expand(shape)
-                .greater_equal(rows.clone().expand(shape)),
-            future: columns.expand(shape).greater(rows.expand(shape)),
+            inside: upload(inside),
+            future_bias: upload(future_bias),
             width,
         }
     }
@@ -1522,18 +1601,54 @@ impl<B: Backend> SegmentMasks<B> {
     ///
     /// A difference of two cumulative sums would lose every local decay after
     /// a very large earlier one; the masked cumulative sum of the per-step
-    /// terms is the stable formulation of the reference SSD algorithm.
+    /// terms is the stable formulation of the reference SSD algorithm. Terms
+    /// outside a segment are removed by multiplying with the `inside` table
+    /// and future sources by adding the `-inf` bias, which equals the
+    /// reference's two `mask_fill`s bit for bit when every log decay is
+    /// finite: `ld · 0` is a signed zero, and a signed zero changes neither a
+    /// non-zero cumulative sum nor `exp` (`exp(±0) = 1`), while `x - inf` is
+    /// `-inf` for finite `x`. The scan's log decays `dt · A` are finite for
+    /// finite inputs (padding uses `dt = 0`); a non-finite `dt` already makes
+    /// the scan output non-finite through `x · dt`, whichever form is used.
     pub(crate) fn transitions(&self, log_decay: Tensor<B, 4>) -> Tensor<B, 5> {
+        let flattened = operations::is_inference_flex::<B>(&log_decay.device());
+        self.transitions_with(log_decay, flattened)
+    }
+
+    /// [`Self::transitions`] with an explicit operand layout.
+    ///
+    /// `flattened` multiplies a materialized `[b, h, c, w·w]` term plane by
+    /// the flattened rows (the Flex layout); otherwise the `[b, h, c, w, 1]` terms
+    /// broadcast against `[1, 1, 1, w, w]` views of the same rows. Both
+    /// evaluate the same elementwise operations in the same order, so they
+    /// are bit-identical; tests compare them with the former masks.
+    fn transitions_with(&self, log_decay: Tensor<B, 4>, flattened: bool) -> Tensor<B, 5> {
         let [batch, heads, chunks, width] = log_decay.dims();
         debug_assert_eq!(width, self.width, "segment masks built for another width");
         let shape = [batch, heads, chunks, width, width];
-        log_decay
-            .unsqueeze_dim::<5>(4)
-            .expand(shape)
-            .mask_fill(self.outside_segment.clone().expand(shape), 0.0)
-            .cumsum(3)
-            .mask_fill(self.future.clone().expand(shape), f32::NEG_INFINITY)
+        let flat = [batch, heads, chunks, width * width];
+        let dtype = log_decay.dtype();
+        let table = |table: &Tensor<B, 4>| {
+            if table.dtype() == dtype {
+                table.clone()
+            } else {
+                table.clone().cast(dtype)
+            }
+        };
+        if !flattened {
+            let square = [1, 1, 1, width, width];
+            let terms = log_decay.unsqueeze_dim::<5>(4) * table(&self.inside).reshape(square);
+            return (terms.cumsum(3) + table(&self.future_bias).reshape(square)).exp();
+        }
+        // Reshaping the expanded `[.., w, 1 -> w]` view materializes it; Flex
+        // collapses that copy to a 2-D `[b·h·c·w, w]` tiled copy with a
+        // stride-zero column, several times faster than `repeat_dim`'s
+        // one-element chunks.
+        let terms =
+            log_decay.unsqueeze_dim::<5>(4).expand(shape).reshape(flat) * table(&self.inside);
+        (terms.reshape(shape).cumsum(3).reshape(flat) + table(&self.future_bias))
             .exp()
+            .reshape(shape)
     }
 }
 

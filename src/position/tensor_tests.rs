@@ -671,3 +671,201 @@ fn table_conversion_casts_mixed_dtype_tables() {
         [0.0, 0.0]
     );
 }
+
+/// Exact bit patterns of a floating tensor, read in its own dtype.
+fn bit_pattern(tensor: Tensor<TestBackend, 4>) -> Vec<u64> {
+    let data = tensor.into_data();
+    match data.dtype {
+        DType::F64 => data
+            .to_vec::<f64>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect(),
+        DType::F32 => data
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect(),
+        DType::F16 => data
+            .to_vec::<burn::tensor::f16>()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect(),
+        DType::BF16 => data
+            .to_vec::<burn::tensor::bf16>()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect(),
+        other => panic!("unexpected dtype {other:?}"),
+    }
+}
+
+/// Rotates `input` both ways and requires identical bits, shape, and dtype.
+///
+/// `fused` states whether the Flex kernel must handle the layout itself
+/// (`false` for the flipped view it hands back to the broadcast form).
+fn assert_fused_matches_broadcast(
+    input: Tensor<TestBackend, 4>,
+    angles: &RotaryAngles<TestBackend>,
+    fused: bool,
+    label: &str,
+) {
+    let (cosine, sine) = super::tables_in(angles, input.dtype());
+    let rotary = angles.rotary_dimension;
+    assert_eq!(
+        super::flex::rotate_prefix(&input, &cosine, &sine, rotary).is_some(),
+        fused,
+        "{label}"
+    );
+    let expected = super::rotate_prefix_broadcast(input.clone(), &cosine, &sine, rotary);
+    let actual = super::rotate_prefix(input, &cosine, &sine, rotary);
+    assert_eq!(actual.dims(), expected.dims(), "{label}");
+    assert_eq!(actual.dtype(), expected.dtype(), "{label}");
+    assert_eq!(bit_pattern(actual), bit_pattern(expected), "{label}");
+}
+
+/// The fused Flex rotary kernel equals the broadcast formulation bit for bit.
+///
+/// Covers F32, F64, F16, and BF16; full and partial rotary widths (an
+/// unrotated suffix); batch two with distinct position rows; and every
+/// operand layout the kernel reads: contiguous `[b, h, s, w]`, the
+/// heads-swapped view of `[b, s, h, w]` that projections produce, an offset
+/// slice of a larger buffer, a channel-strided view (the per-element path),
+/// and a flipped view (which falls back). Tables narrowed from longer tables
+/// exercise strided table reads.
+#[test]
+fn fused_flex_rotation_matches_the_broadcast_formulation_bitwise() {
+    let device = Default::default();
+    let (batch, heads, sequence) = (2, 3, 5);
+    let positions =
+        Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 2, 3, 4], [7, 9, 11, 13, 40]], &device);
+    for (width, rotary) in [(8, 8), (10, 6), (4, 2)] {
+        let config = RopeConfig::new(width, rotary, 10_000.0, RopeScaling::None).expect("rope");
+        let angles = rotary_angles(config, positions.clone(), 64).expect("angles");
+        for dtype in [DType::F32, DType::F64, DType::F16, DType::BF16] {
+            let label =
+                |layout: &str| format!("{layout}, {dtype:?}, width {width}, rotary {rotary}");
+            let contiguous = activations([batch, heads, sequence, width])
+                .mul_scalar(3.0)
+                .cast(dtype);
+            assert_fused_matches_broadcast(contiguous, &angles, true, &label("contiguous"));
+            let swapped = activations([batch, sequence, heads, width])
+                .cast(dtype)
+                .swap_dims(1, 2);
+            assert_fused_matches_broadcast(swapped, &angles, true, &label("heads-swapped"));
+            let offset = activations([batch, heads + 1, sequence, width])
+                .cast(dtype)
+                .narrow(1, 1, heads);
+            assert_fused_matches_broadcast(offset, &angles, true, &label("offset slice"));
+            let channel_strided = activations([batch, heads, width, sequence])
+                .cast(dtype)
+                .swap_dims(2, 3);
+            assert_fused_matches_broadcast(
+                channel_strided,
+                &angles,
+                true,
+                &label("channel-strided"),
+            );
+            let flipped = activations([batch, heads, sequence, width])
+                .cast(dtype)
+                .flip([2]);
+            assert_fused_matches_broadcast(flipped, &angles, false, &label("flipped"));
+        }
+        let long = rotary_angles(
+            config,
+            Tensor::<TestBackend, 2, Int>::from_ints(
+                [[0, 1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12, 13]],
+                &device,
+            ),
+            64,
+        )
+        .expect("long angles");
+        let narrowed = RotaryAngles {
+            cosine: long.cosine.narrow(2, 2, sequence),
+            sine: long.sine.narrow(2, 2, sequence),
+            rotary_dimension: rotary,
+        };
+        assert_fused_matches_broadcast(
+            activations([batch, heads, sequence, width]),
+            &narrowed,
+            true,
+            &format!("narrowed tables, width {width}"),
+        );
+    }
+}
+
+/// Grouped query and key heads rotate through the fused kernel exactly as before.
+#[test]
+fn fused_flex_rotation_preserves_grouped_query_key_rotation() {
+    let device = Default::default();
+    let config = RopeConfig::new(8, 8, 10_000.0, RopeScaling::None).expect("rope");
+    let angles = rotary_angles(
+        config,
+        Tensor::<TestBackend, 2, Int>::from_ints([[3, 4, 5], [1, 2, 3]], &device),
+        16,
+    )
+    .expect("angles");
+    let query = activations([2, 3, 4, 8]).swap_dims(1, 2);
+    let key = activations([2, 3, 2, 8]).mul_scalar(0.5).swap_dims(1, 2);
+    let (rotated_query, rotated_key) =
+        apply_rotary(query.clone(), key.clone(), &angles).expect("grouped heads");
+    let (cosine, sine) = super::tables_in(&angles, DType::F32);
+    assert_eq!(
+        bit_pattern(rotated_query),
+        bit_pattern(super::rotate_prefix_broadcast(query, &cosine, &sine, 8))
+    );
+    assert_eq!(
+        bit_pattern(rotated_key),
+        bit_pattern(super::rotate_prefix_broadcast(key, &cosine, &sine, 8))
+    );
+}
+
+/// Release-mode timing of the fused Flex rotary kernel against the broadcast formulation.
+///
+/// Operands are heads-swapped views of projected `[1, s, H, d]` activations:
+/// a SmolLM-geometry query (`H = 9`, `d = 64`), a Qwen3-4B query (`H = 32`,
+/// `d = 128`) at 512 prefill tokens, and the SmolLM decode token. Medians of
+/// 15 interleaved samples. Run with `cargo test --release --lib
+/// position::tensor::tests::rotary_prefill_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn rotary_prefill_timing() {
+    use std::time::Instant;
+    let device = Default::default();
+    for (heads, width, sequence) in [(9, 64, 512), (32, 128, 512), (9, 64, 1)] {
+        let config = RopeConfig::new(width, width, 10_000.0, RopeScaling::None).expect("rope");
+        let positions = Tensor::<TestBackend, 1, Int>::arange(0..sequence as i64, &device)
+            .reshape([1, sequence]);
+        let angles = rotary_angles(config, positions, sequence).expect("angles");
+        let operand = activations([1, sequence, heads, width]).swap_dims(1, 2);
+        let (mut broadcast, mut fused) = (Vec::new(), Vec::new());
+        for _ in 0..15 {
+            let started = Instant::now();
+            let _ = super::rotate_prefix_broadcast(
+                operand.clone(),
+                &angles.cosine,
+                &angles.sine,
+                width,
+            )
+            .into_data();
+            broadcast.push(started.elapsed().as_secs_f64());
+            let started = Instant::now();
+            let _ = super::rotate_prefix(operand.clone(), &angles.cosine, &angles.sine, width)
+                .into_data();
+            fused.push(started.elapsed().as_secs_f64());
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2] * 1e6
+        };
+        let (before, after) = (median(&mut broadcast), median(&mut fused));
+        eprintln!(
+            "rope [1, {heads}, {sequence}, {width}] heads-swapped F32: broadcast {before:.1} us, fused {after:.1} us ({:.1}x)",
+            before / after
+        );
+    }
+}

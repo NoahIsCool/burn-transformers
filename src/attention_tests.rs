@@ -1227,44 +1227,80 @@ fn bounded_attention_rejects_invalid_inputs() {
     assert!(error.to_string().contains("attention.key"));
 }
 
-/// Multi-chunk execution is refused on autodiff backends; a single chunk stays differentiable.
+/// Autodiff backends evaluate a chunked policy as one unbounded, differentiable call.
+///
+/// This is the contract Muse and MLA already follow: an autodiff tape retains
+/// every chunk's workspace, so chunking cannot bound training memory, and
+/// [`AttentionExecutionPolicy::effective_on`] substitutes
+/// [`AttentionExecutionPolicy::Unbounded`]. The chunked request must therefore
+/// succeed with exactly the unbounded values (global and sliding-window
+/// connectivity), stay differentiable, and agree with the chunked inference
+/// result. Invalid limits are still rejected first.
 #[cfg(feature = "autodiff")]
 #[test]
-fn bounded_attention_refuses_multi_chunk_autodiff() {
+fn bounded_attention_runs_unbounded_and_differentiable_on_autodiff() {
     use super::AttentionConnectivity;
-    use burn::backend::Autodiff;
+    use burn::{backend::Autodiff, module::AutodiffModule};
     /// Differentiable CPU backend for the bounded-attention policy check.
     type Ad = Autodiff<Flex>;
     let device = Default::default();
+    let chunked = AttentionExecutionPolicy::query_chunked(2, 1 << 20);
+    assert_eq!(
+        chunked.effective_on::<Ad>(&device),
+        AttentionExecutionPolicy::Unbounded
+    );
+    assert_eq!(chunked.effective_on::<Flex>(&device), chunked);
     let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
         .init::<Ad>(&device)
         .unwrap();
-    let projection = module
-        .project_self(Tensor::<Ad, 3>::ones([1, 4, 4], &device))
-        .unwrap();
+    let inference = module.valid();
+    let input = (Tensor::<Ad, 1, burn::tensor::Int>::arange(0..16, &device).float() * 0.41)
+        .sin()
+        .reshape([1, 4, 4]);
+    for connectivity in [
+        AttentionConnectivity::Global,
+        AttentionConnectivity::SlidingWindow { window: 2 },
+    ] {
+        let projection = module.project_self(input.clone()).unwrap();
+        let attend = |policy| {
+            module.attend_bounded(projection.clone(), None, None, true, connectivity, policy)
+        };
+        let output = attend(chunked).expect("autodiff evaluates the chunked policy unbounded");
+        let unbounded = attend(AttentionExecutionPolicy::Unbounded).unwrap();
+        assert_eq!(output.to_data(), unbounded.to_data(), "{connectivity:?}");
+        let reference = inference
+            .attend_bounded(
+                inference.project_self(input.clone().inner()).unwrap(),
+                None,
+                None,
+                true,
+                connectivity,
+                chunked,
+            )
+            .unwrap();
+        output
+            .clone()
+            .inner()
+            .to_data()
+            .assert_approx_eq::<f32>(&reference.to_data(), burn::tensor::Tolerance::default());
+        let gradients = output.sum().backward();
+        assert!(module.q_proj.weight.grad(&gradients).is_some());
+    }
+    let projection = module.project_self(input).unwrap();
     let error = module
-        .attend_bounded(
-            projection.clone(),
-            None,
-            None,
-            true,
-            AttentionConnectivity::Global,
-            AttentionExecutionPolicy::query_chunked(2, 1 << 20),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("inference-only"));
-    let output = module
         .attend_bounded(
             projection,
             None,
             None,
             true,
             AttentionConnectivity::Global,
-            AttentionExecutionPolicy::Unbounded,
+            AttentionExecutionPolicy::query_chunked(0, 1 << 20),
         )
-        .unwrap();
-    let gradients = output.sum().backward();
-    assert!(module.q_proj.weight.grad(&gradients).is_some());
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, .. } if field == "attention.execution.max_query_tokens"),
+        "{error:?}"
+    );
 }
 
 /// Validation accepts the unbounded policy and every positive limit, and planning names zero limits.

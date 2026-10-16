@@ -203,7 +203,7 @@ fn shape_validation_is_contextual() {
 fn config_validation_rejects_invalid_controls() {
     assert!(
         DeltaRuleConfig {
-            normalization_epsilon: f64::NAN,
+            qk_l2_epsilon: f64::NAN,
             ..Default::default()
         }
         .validate()
@@ -547,7 +547,7 @@ fn delta_public_contract_decay_shape_validation_and_scalar_recurrence() {
     };
     // For scalar normalized q,k, S' = exp(g)S + k*beta*(v-k*exp(g)S)
     // and y=q*S'. Use host f64 arithmetic, independently of either tensor path.
-    let epsilon = DeltaRuleConfig::default().normalization_epsilon;
+    let epsilon = DeltaRuleConfig::default().qk_l2_epsilon;
     let q = 2.0 / (4.0 + epsilon).sqrt();
     let k = 3.0 / (9.0 + epsilon).sqrt();
     let decayed = f64::from(log_decay).exp() * 1.25;
@@ -580,7 +580,7 @@ fn legacy_chunked(
     input: DeltaRuleInput<TestBackend>,
     config: DeltaRuleConfig,
 ) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>) {
-    let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon).unwrap();
+    let prepared = PreparedDeltaRule::new(input, config.qk_l2_epsilon).unwrap();
     // The oracle works head-major: `[batch, heads, sequence, ·]`.
     let head_major = |tensor: &Tensor<TestBackend, 4>| tensor.clone().swap_dims(1, 2);
     let head_scalars = |tensor: &Tensor<TestBackend, 3>| tensor.clone().swap_dims(1, 2);
@@ -728,7 +728,7 @@ fn short_prompts_and_partial_tails_run_unpadded() {
         chunk_size: 64,
         ..Default::default()
     };
-    let prepared = PreparedDeltaRule::new(long_fixture(10), config.normalization_epsilon).unwrap();
+    let prepared = PreparedDeltaRule::new(long_fixture(10), config.qk_l2_epsilon).unwrap();
     let operands = ChunkOperands::new(&prepared, config.chunk_size);
     assert_eq!((operands.chunk, operands.chunks), (10, 1));
     let block = ChunkBlock::new(&operands, 0..1);
@@ -1074,7 +1074,7 @@ fn query_key_and_output_norm_epsilons_are_independent() {
     config.qk_l2_epsilon = 1e-3;
     let mixer = config.init::<TestBackend>(&device).unwrap();
     assert_eq!(mixer.norm.epsilon, 1e-5);
-    assert_eq!(mixer.rule_config.normalization_epsilon, 1e-3);
+    assert_eq!(mixer.rule_config.qk_l2_epsilon, 1e-3);
     assert_eq!(mixer.config(), config);
     for (field, mutate) in [
         (
@@ -1739,22 +1739,57 @@ fn mixer_snapshots_match_column_by_column_states() {
     }
 }
 
-/// Every non-finite or non-positive key normalization epsilon is rejected.
+/// Every non-finite or non-positive query/key epsilon is rejected under the rule's own field name.
+///
+/// The error names `delta_net.rule.qk_l2_epsilon`, never the mixer's
+/// `delta_net.normalization_epsilon`, which is the output-norm stabilizer.
 #[test]
 fn rule_config_rejects_each_invalid_epsilon() {
-    for normalization_epsilon in [f64::NAN, f64::INFINITY, 0.0, -1e-6] {
+    for qk_l2_epsilon in [f64::NAN, f64::INFINITY, 0.0, -1e-6] {
         let error = DeltaRuleConfig {
-            normalization_epsilon,
+            qk_l2_epsilon,
             ..Default::default()
         }
         .validate()
         .unwrap_err();
         assert!(
             matches!(&error, crate::Error::Configuration { field, .. }
-                if field == "delta_net.normalization_epsilon"),
-            "{normalization_epsilon}: {error:?}"
+                if field == "delta_net.rule.qk_l2_epsilon"),
+            "{qk_l2_epsilon}: {error:?}"
         );
     }
+}
+
+/// The rule's query/key epsilon serializes under its new name and still reads the old key.
+///
+/// `DeltaRuleConfig::normalization_epsilon` was renamed to `qk_l2_epsilon`
+/// because the mixer config uses `normalization_epsilon` for the output RMS
+/// norm. JSON written before the rename must load into the renamed field, the
+/// new spelling must round-trip, and the deprecated accessor must keep
+/// returning the same value for source compatibility.
+#[test]
+fn rule_config_reads_the_legacy_epsilon_key_and_writes_the_new_one() {
+    let legacy: DeltaRuleConfig =
+        serde_json::from_str(r#"{"normalization_epsilon": 0.001, "chunk_size": 32}"#).unwrap();
+    assert_eq!(
+        legacy,
+        DeltaRuleConfig {
+            qk_l2_epsilon: 1e-3,
+            chunk_size: 32,
+        }
+    );
+    let written = serde_json::to_value(legacy).unwrap();
+    assert_eq!(written["qk_l2_epsilon"], 1e-3);
+    assert!(written.get("normalization_epsilon").is_none());
+    assert_eq!(
+        serde_json::from_value::<DeltaRuleConfig>(written).unwrap(),
+        legacy
+    );
+    #[allow(deprecated)]
+    let renamed = legacy.normalization_epsilon();
+    assert_eq!(renamed, legacy.qk_l2_epsilon);
+    let config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    assert_eq!(config.rule_config().qk_l2_epsilon, config.qk_l2_epsilon);
 }
 
 /// Without a token mask, snapshots and state equal those of an all-valid mask.
@@ -1931,10 +1966,10 @@ fn invalid_rule_config_fails_every_kernel_and_preserves_state() {
         ),
         (
             DeltaRuleConfig {
-                normalization_epsilon: 0.0,
+                qk_l2_epsilon: 0.0,
                 ..DeltaRuleConfig::default()
             },
-            "delta_net.normalization_epsilon",
+            "delta_net.rule.qk_l2_epsilon",
             "must be finite and greater than zero",
             "delta_net.qk_l2_epsilon",
         ),

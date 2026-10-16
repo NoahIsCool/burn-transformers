@@ -138,21 +138,23 @@ fn invalid_dispatch_metadata_is_rejected() {
     let device = Default::default();
     let module = deterministic_module(SparseMoeConfig::new(4, 8, 3, 2), &device);
     let error = module
-        .dispatch_selected_experts(
+        .dispatch_selected_experts_with_precision(
             Tensor::zeros([2, 4], &device),
             Tensor::ones([2, 1], &device),
             Tensor::<Flex, 2, Int>::from_ints([[0, 1], [1, 2]], &device),
-            DType::F32,
+            None,
+            RoutedExpertPrecision::uniform(DType::F32),
         )
         .expect_err("route weights with the wrong top-k width must fail");
     assert!(error.to_string().contains("moe.dispatch.routes"));
 
     let error = module
-        .dispatch_selected_experts(
+        .dispatch_selected_experts_with_precision(
             Tensor::zeros([1, 4], &device),
             Tensor::ones([1, 2], &device),
             Tensor::<Flex, 2, Int>::from_ints([[0, 1]], &device),
-            DType::I32,
+            None,
+            RoutedExpertPrecision::uniform(DType::I32),
         )
         .expect_err("integer accumulation must fail before a tensor cast");
     assert!(error.to_string().contains("moe.dispatch.precision"));
@@ -340,6 +342,62 @@ fn routing_extensions_train_their_parameters_but_not_the_correction_bias() {
     }
 }
 
+/// Every projection precision trains the router on every backward pass of a logits-only loss.
+///
+/// Regression for the FP32 projection: it used to call
+/// `burn::tensor::module::linear`, and on `Autodiff<Flex>` the router weight
+/// then received a gradient on the first backward pass but intermittently
+/// none afterwards whenever the loss reached the router only through its
+/// logits (an auxiliary-only or z-loss phase, router distillation, logit
+/// attribution), while the routed dispatch graph was left without a loss.
+/// The failure was nondeterministic, so the loop runs many consecutive
+/// forward/backward passes on one module, for an unbiased and a biased
+/// router, with both a plain logit sum and the load-balancing loss.
+#[cfg(feature = "autodiff")]
+#[test]
+fn router_projection_receives_gradients_on_every_logits_only_backward_pass() {
+    use burn::backend::Autodiff;
+
+    use super::RouterProjectionPrecision;
+
+    /// Differentiable CPU backend used to inspect router-parameter gradients.
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let input = (Tensor::<AdBackend, 1, Int>::arange(0..48, &device).float() * 0.37)
+        .sin()
+        .reshape([2, 3, 8]);
+    for projection in [
+        RouterProjectionPrecision::ModelDtype,
+        RouterProjectionPrecision::Fp32,
+    ] {
+        for router_bias in [false, true] {
+            let mut config = SparseMoeConfig::new(8, 16, 4, 2);
+            config.routing.projection = projection;
+            config.routing.router_bias = router_bias;
+            let module = config.init::<AdBackend>(&device).expect("valid MoE");
+            for step in 0..24 {
+                let output = module.forward(input.clone()).expect("finite routing");
+                let loss = if step % 2 == 0 {
+                    output.router_logits.sum()
+                } else {
+                    output.load_balancing_loss(None).expect("valid loss")
+                };
+                let gradients = loss.backward();
+                assert!(
+                    module.router.weight.grad(&gradients).is_some(),
+                    "{projection:?} router (bias {router_bias}) lost its weight gradient at step {step}"
+                );
+                if let Some(bias) = &module.router.bias {
+                    assert!(
+                        bias.grad(&gradients).is_some(),
+                        "{projection:?} router lost its bias gradient at step {step}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Load-balancing diagnostics reject mismatched masks before broadcasting.
 #[test]
 fn auxiliary_loss_validates_mask_shape() {
@@ -441,11 +499,12 @@ fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
         ([2, 2], [2, 1], [2, 2], "moe.dispatch.routes"),
     ] {
         let error = module
-            .dispatch_selected_experts(
+            .dispatch_selected_experts_with_precision(
                 Tensor::zeros(input, &device),
                 Tensor::zeros(weights, &device),
                 Tensor::zeros(ids, &device),
-                DType::F32,
+                None,
+                RoutedExpertPrecision::uniform(DType::F32),
             )
             .unwrap_err();
         assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == field));
@@ -454,11 +513,12 @@ fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
         let mut changed = module.clone();
         changed.experts_per_token = top_k;
         let error = changed
-            .dispatch_selected_experts(
+            .dispatch_selected_experts_with_precision(
                 Tensor::zeros([1, 2], &device),
                 Tensor::zeros([1, top_k], &device),
                 Tensor::zeros([1, top_k], &device),
-                DType::F32,
+                None,
+                RoutedExpertPrecision::uniform(DType::F32),
             )
             .unwrap_err();
         assert!(
@@ -468,8 +528,9 @@ fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
     let mut empty = module.clone();
     empty.routed.clear();
     assert!(
-        matches!(empty.dispatch_selected_experts(Tensor::zeros([1, 2], &device),
-        Tensor::zeros([1, 1], &device), Tensor::zeros([1, 1], &device), DType::F32),
+        matches!(empty.dispatch_selected_experts_with_precision(Tensor::zeros([1, 2], &device),
+        Tensor::zeros([1, 1], &device), Tensor::zeros([1, 1], &device), None,
+        RoutedExpertPrecision::uniform(DType::F32)),
         Err(crate::Error::Configuration { field, .. }) if field == "moe.dispatch.experts_per_token")
     );
     for (multiplication_dtype, accumulation_dtype) in
