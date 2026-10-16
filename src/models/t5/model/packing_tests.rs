@@ -19,7 +19,7 @@ fn columns(mask: &[Vec<bool>]) -> Vec<Vec<usize>> {
 /// Unpadded, right-padded, and inactive rows pack as a prefix view without indices.
 #[test]
 fn right_aligned_rows_use_the_prefix_layout() {
-    let rows = BatchedRows::new(
+    let rows = plan_rows(
         &columns(&[
             vec![true, true, false],
             vec![true, false, false],
@@ -39,7 +39,7 @@ fn right_aligned_rows_use_the_prefix_layout() {
 /// Left and interior padding need gathers whose indices address the right elements.
 #[test]
 fn left_and_interior_padding_use_exact_gathers() {
-    let rows = BatchedRows::new(
+    let rows = plan_rows(
         &columns(&[vec![false, true, true], vec![true, false, true]]),
         3,
     )
@@ -57,7 +57,7 @@ fn left_and_interior_padding_use_exact_gathers() {
 /// A call whose rows are all inactive has an empty block.
 #[test]
 fn all_inactive_rows_have_an_empty_block() {
-    let rows = BatchedRows::new(&[Vec::new(), Vec::new()], 2).unwrap();
+    let rows = plan_rows(&[Vec::new(), Vec::new()], 2).unwrap();
     assert!(rows.is_empty());
     assert_eq!(rows.packing, Packing::Prefix);
     assert_eq!(scatter_sources(&[0, 0], &[], 2, 0), Some(vec![0; 4]));
@@ -66,15 +66,36 @@ fn all_inactive_rows_have_an_empty_block() {
 /// Unsorted, duplicated, missing, or out-of-range columns produce no plan.
 #[test]
 fn malformed_columns_are_rejected() {
-    assert_eq!(BatchedRows::new(&[vec![2, 1]], 3), None);
-    assert_eq!(BatchedRows::new(&[vec![1, 1]], 3), None);
-    assert_eq!(BatchedRows::new(&[vec![0, 3]], 3), None);
-    assert_eq!(BatchedRows::new(&[vec![0, 1, 2, 3]], 3), None);
+    assert_eq!(plan_rows(&[vec![2, 1]], 3), None);
+    assert_eq!(plan_rows(&[vec![1, 1]], 3), None);
+    assert_eq!(plan_rows(&[vec![0, 3]], 3), None);
+    assert_eq!(plan_rows(&[vec![0, 1, 2, 3]], 3), None);
     assert_eq!(compaction_sources(&[2], &[1], 3, 2), None);
     assert_eq!(compaction_sources(&[3], &[0, 1, 2], 3, 2), None);
     assert_eq!(scatter_sources(&[1], &[], 3, 1), None);
     assert_eq!(compaction_sources(&[1, 1], &[0, 0], usize::MAX, 1), None);
     assert_eq!(scatter_sources(&[1, 1], &[0, 0], 1, usize::MAX), None);
+}
+
+/// An unrepresentable `B * S` refuses only plans that need flat gather indices.
+#[test]
+fn oversized_rectangles_refuse_only_gather_plans() {
+    let prefix = plan_rows(&[vec![0], Vec::new()], usize::MAX).unwrap();
+    assert_eq!(prefix.packing, Packing::Prefix);
+    assert_eq!(prefix.block, 1);
+    assert_eq!(plan_rows(&[vec![1], Vec::new()], usize::MAX), None);
+}
+
+/// Plan queries report padding exactly for slots past a row's count.
+#[test]
+fn plan_queries_mark_padding_past_each_count() {
+    let rows = plan_rows(&[vec![0, 2], vec![1]], 3).unwrap();
+    assert_eq!(rows.padded_slots(), [false, false, false, true]);
+    assert!(rows.has_padded_slots());
+    assert!(!rows.is_empty());
+    let full = plan_rows(&[vec![0, 1], vec![0, 1]], 3).unwrap();
+    assert_eq!(full.padded_slots(), [false; 4]);
+    assert!(!full.has_padded_slots());
 }
 
 /// A padded slot needs an in-row column to read, so a zero-width input refuses a block.
@@ -227,7 +248,7 @@ proptest! {
     ) {
         let sequence = mask[0].len();
         let valid = columns(&mask);
-        let rows = BatchedRows::new(&valid, sequence).unwrap();
+        let rows = plan_rows(&valid, sequence).unwrap();
         let block = rows.block;
         let prefix = valid
             .iter()

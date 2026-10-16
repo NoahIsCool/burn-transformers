@@ -4,19 +4,20 @@
 //! `src/models/t5/model/packing.rs`, the host plans behind batched T5
 //! stateful decoding:
 //!
-//! - `plan_rows` (behind `BatchedRows::new`): the block width is the largest
-//!   row count; the prefix layout is chosen exactly when every row's valid
-//!   columns are `0..n_b`; otherwise slot `(b, i)` gathers rectangular column
-//!   `c_{b,i}` of row `b` (or column 0 when padded), column `c_{b,k}` scatters
-//!   back from slot `(b, k)`, and every other column reads slot `(b, 0)`; a
-//!   plan exists only when every row is strictly increasing below `S`, and a
-//!   refusal means a malformed row or an unrepresentable `B * S`.
+//! - `plan_rows` (which builds every `BatchedRows`): the block width is the
+//!   largest row count; the prefix layout is chosen exactly when every row's
+//!   valid columns are `0..n_b`; otherwise slot `(b, i)` gathers rectangular
+//!   column `c_{b,i}` of row `b` (or column 0 when padded), column `c_{b,k}`
+//!   scatters back from slot `(b, k)`, and every other column reads slot
+//!   `(b, 0)`. A plan is refused exactly for a row that is not strictly
+//!   increasing below `S`, or for an unrepresentable `B * S` when some row is
+//!   not a prefix.
 //! - `compaction_sources` and `scatter_sources`: every returned entry equals
-//!   its formula over the flat column list, and each refusal is
-//!   characterized (a count above the block, too few columns, an unsorted or
-//!   out-of-range row, or an unrepresentable extent).
-//! - `padded_slots` and `has_padded_slot`: exactly the slots `i >= n_b` are
-//!   padding.
+//!   its formula over the flat column list, and each refusal rule (a count
+//!   above the block, too few columns, an unsorted or out-of-range row, or
+//!   an unrepresentable extent) holds in both directions.
+//! - `padded_slots` and `has_padded_slot`, and the `BatchedRows` methods over
+//!   them: exactly the slots `i >= n_b` are padding.
 //! - `row_positions`: every block slot's causal visibility and relative-bias
 //!   query position equal their documented formulas (`L + i` for new tokens,
 //!   the row's last new position for padding, `L - 1` for inactive rows), so
@@ -38,7 +39,9 @@
 //! of at least four buckets whose exact-distance region (`B / 4` for the
 //! encoder, `B / 2` for a causal decoder) lies below `max_distance`, naming
 //! each rejection's cause, and the explicit-position bias table has radius
-//! `min(bound, max_distance)` with every clamped displacement inside it.
+//! `min(bound, max_distance)`. A lemma states the index arithmetic of the
+//! device's clamped lookup (every clamped index lies inside the table's
+//! `2r + 1` entries); the device code itself is covered by Rust tests.
 //! `bias_owners` gives every encoder layer the first layer with its head
 //! count as relative-bias owner, so two layers share a learned table exactly
 //! when their head counts agree, and `positions_within` accepts staged

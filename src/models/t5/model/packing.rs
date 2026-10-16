@@ -21,25 +21,31 @@
 //!
 //! # Verified planning
 //!
-//! Every function here is dependency-free integer logic, verified in place by
-//! Verus (`verus/t5_gpt.rs`). [`plan_rows`] (behind [`BatchedRows::new`]) is
-//! proved end to end: the block width is the largest row count, the prefix
-//! layout is chosen exactly when every row is `0..n_b`, otherwise every
-//! compaction and scatter entry equals its formula above in terms of the
-//! caller's columns, and a plan is refused only for a row that is not
-//! strictly increasing below `S` or an unrepresentable `B * S`.
-//! [`compaction_sources`] and [`scatter_sources`] state every returned entry
-//! and characterize each refusal; [`padded_slots`] and [`has_padded_slot`]
-//! mark exactly the slots `i >= n_b`. [`row_positions`], which plans every
-//! slot's causal visibility and relative-bias position, computes exactly its
-//! documented formulas, never letting a slot see past its row's appended
-//! history; [`step_positions`] lays those positions out for the whole batch,
-//! takes the contiguous-bias shortcut exactly when every active row shares
-//! one committed length, and reports the attained largest bias position;
-//! [`displacement_bound`] then bounds every key-to-query displacement, the
-//! precondition of the exact positional bias. [`groups_preserved`] exactly
-//! characterizes group-preserving beam reorders, and [`first_out_of_range`]
-//! finds the first reorder index outside the batch.
+//! Every function and method here is dependency-free integer logic, verified
+//! in place by Verus through `verus/t5_gpt.rs`:
+//!
+//! - [`plan_rows`] builds every [`BatchedRows`] and is proved end to end. The
+//!   block width is the largest row count, and the prefix layout is chosen
+//!   exactly when every row is `0..n_b`. Otherwise every compaction and
+//!   scatter entry equals its formula above in terms of the caller's
+//!   columns. A plan is refused exactly for a row that is not strictly
+//!   increasing below `S`, or for an unrepresentable `B * S` when the gather
+//!   layout is needed.
+//! - [`compaction_sources`] and [`scatter_sources`] state every returned
+//!   entry, and each refusal rule is proved in both directions.
+//! - [`padded_slots`] and [`has_padded_slot`], and the [`BatchedRows`]
+//!   queries over them, mark exactly the slots `i >= n_b`.
+//! - [`row_positions`] computes every slot's causal visibility and
+//!   relative-bias position exactly as documented, so no slot sees past its
+//!   row's appended history.
+//! - [`step_positions`] lays those positions out for the whole batch. It
+//!   takes the contiguous-bias shortcut exactly when every active row shares
+//!   one committed length, and it reports the attained largest bias position.
+//! - [`displacement_bound`] bounds every key-to-query displacement, the
+//!   precondition of the exact positional bias.
+//! - [`groups_preserved`] exactly characterizes group-preserving beam
+//!   reorders, and [`first_out_of_range`] finds the first reorder index
+//!   outside the batch.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -206,7 +212,8 @@ pub open spec fn row_sorted_below(
 ) -> bool {
     &&& forall|i: int, j: int| 0 <= i < j < counts[row]
         ==> row_column(columns, counts, row, i) < row_column(columns, counts, row, j)
-    &&& forall|i: int| 0 <= i < counts[row] ==> #[trigger] row_column(columns, counts, row, i) < bound
+    &&& forall|i: int| 0 <= i < counts[row]
+        ==> #[trigger] row_column(columns, counts, row, i) < bound
 }
 
 /// Every flat entry of rows `0..rows` lies before the first entry of row `rows`.
@@ -292,27 +299,41 @@ pub(super) struct BatchedRows {
     pub(super) packing: Packing,
 }
 
+// Plans are built by [`plan_rows`]; these queries restate its verified
+// padding rule on the plan's own fields.
 impl BatchedRows {
-    /// Plans a call from each row's sorted valid columns below `sequence`.
-    ///
-    /// Returns `None` when the columns are malformed (unsorted, duplicated,
-    /// out of range) or a flat index would overflow `usize`; validated
-    /// stateful inputs never are. See [`plan_rows`] for the verified plan.
-    pub(super) fn new(valid_columns: &[Vec<usize>], sequence: usize) -> Option<Self> {
-        plan_rows(valid_columns, sequence)
-    }
-
     /// Whether block slot `(b, i)` is padding (`i >= n_b`), row-major over `[batch, Q]`.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(padded =>
+        ensures
+            padded.len() == self.counts.len() * self.block,
+            forall|b: int, i: int| 0 <= b < self.counts.len() && 0 <= i < self.block
+                ==> #[trigger] padded@[flat(b, i, self.block as int)] == (i >= self.counts@[b]),
+    ))]
     pub(super) fn padded_slots(&self) -> Vec<bool> {
         padded_slots(&self.counts, self.block)
     }
 
-    /// Whether any block slot is padding.
+    /// Whether any block slot is padding: some row has fewer than `Q` new tokens.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(padded =>
+        ensures
+            padded == exists|b: int| 0 <= b < self.counts.len()
+                && #[trigger] self.counts@[b] < self.block,
+    ))]
     pub(super) fn has_padded_slots(&self) -> bool {
         has_padded_slot(&self.counts, self.block)
     }
 
-    /// Whether every row is inactive (no new token anywhere).
+    /// Whether every row is inactive (no new token anywhere): `Q = 0`.
+    ///
+    /// For a plan from [`plan_rows`], `Q` is the largest row count, so this
+    /// holds exactly when every row has zero new tokens.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(empty =>
+        ensures
+            empty == (self.block == 0),
+    ))]
     pub(super) fn is_empty(&self) -> bool {
         self.block == 0
     }
@@ -323,11 +344,15 @@ impl BatchedRows {
 /// The block width is the largest row count `Q = max_b n_b`. When every
 /// row's valid columns are exactly `0..n_b` the block is a prefix view of
 /// the input; otherwise the plan holds the flat [`compaction_sources`] and
-/// [`scatter_sources`] of the rows. The proof establishes every entry of
-/// both gathers in terms of the caller's columns (slot `(b, i)` reads column
-/// `c_{b,i}` of row `b`, and column `c_{b,k}` reads slot `(b, k)`), that a
-/// plan exists only when every row is strictly increasing below `sequence`,
-/// and that a refusal means a malformed row or an unrepresentable `B * S`.
+/// [`scatter_sources`] of the rows.
+///
+/// The proof establishes every entry of both gathers in terms of the
+/// caller's columns: slot `(b, i)` reads column `c_{b,i}` of row `b`, and
+/// column `c_{b,k}` reads slot `(b, k)`. It also proves the exact refusal
+/// rule: `None` means a row that is not strictly increasing below
+/// `sequence`, or an unrepresentable `B * S` with some row that is not a
+/// prefix; every other input yields a plan. Validated stateful inputs are
+/// never refused.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(planned =>
     ensures
@@ -345,9 +370,11 @@ impl BatchedRows {
                     &&& increasing_below(valid_columns@[b]@, sequence as int)
                 }
                 &&& rows.block > 0
-                    ==> exists|b: int| 0 <= b < batch && #[trigger] valid_columns@[b]@.len() == rows.block
+                    ==> exists|b: int| 0 <= b < batch
+                        && #[trigger] valid_columns@[b]@.len() == rows.block
                 &&& (rows.packing is Prefix)
-                    == forall|b: int| 0 <= b < batch ==> is_prefix_row(#[trigger] valid_columns@[b]@)
+                    == forall|b: int| 0 <= b < batch
+                        ==> is_prefix_row(#[trigger] valid_columns@[b]@)
                 &&& match rows.packing {
                     Packing::Prefix => true,
                     Packing::Gather { compact, scatter } => {
@@ -356,15 +383,22 @@ impl BatchedRows {
                         &&& forall|b: int, i: int| 0 <= b < batch && 0 <= i < block
                             ==> #[trigger] compact@[flat(b, i, block)] == flat(
                                 b,
-                                if i < valid_columns@[b]@.len() { valid_columns@[b]@[i] as int } else { 0 },
+                                if i < valid_columns@[b]@.len() {
+                                    valid_columns@[b]@[i] as int
+                                } else {
+                                    0
+                                },
                                 sequence as int,
                             )
-                        &&& forall|b: int, k: int| 0 <= b < batch && 0 <= k < valid_columns@[b]@.len()
-                            ==> #[trigger] scatter@[flat(b, valid_columns@[b]@[k] as int, sequence as int)]
-                                == flat(b, k, block)
+                        &&& forall|b: int, k: int|
+                            0 <= b < batch && 0 <= k < valid_columns@[b]@.len()
+                            ==> #[trigger] scatter@[
+                                flat(b, valid_columns@[b]@[k] as int, sequence as int)
+                            ] == flat(b, k, block)
                         &&& forall|b: int, s: int| 0 <= b < batch && 0 <= s < sequence
                             && !valid_columns@[b]@.contains(s as usize)
-                            ==> #[trigger] scatter@[flat(b, s, sequence as int)] == flat(b, 0, block)
+                            ==> #[trigger] scatter@[flat(b, s, sequence as int)]
+                                == flat(b, 0, block)
                     },
                 }
             },
@@ -372,6 +406,8 @@ impl BatchedRows {
                 ||| exists|b: int| 0 <= b < valid_columns.len()
                     && !increasing_below(#[trigger] valid_columns@[b]@, sequence as int)
                 ||| valid_columns.len() * sequence > usize::MAX
+                    && exists|b: int| 0 <= b < valid_columns.len()
+                        && !is_prefix_row(#[trigger] valid_columns@[b]@)
             },
         },
 ))]
@@ -389,7 +425,8 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
                 &&& #[trigger] counts@[b] == valid_columns@[b]@.len()
                 &&& counts@[b] <= block
             },
-            block > 0 ==> exists|b: int| 0 <= b < row && #[trigger] valid_columns@[b]@.len() == block,
+            block > 0 ==> exists|b: int| 0 <= b < row
+                && #[trigger] valid_columns@[b]@.len() == block,
         decreases batch - row,
     ))]
     while row < batch {
@@ -424,8 +461,10 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
         invariant
             batch == valid_columns.len(),
             row <= batch,
-            prefix ==> forall|b: int| 0 <= b < row ==> is_prefix_row(#[trigger] valid_columns@[b]@),
-            !prefix ==> exists|b: int| 0 <= b < batch && !is_prefix_row(#[trigger] valid_columns@[b]@),
+            prefix ==> forall|b: int| 0 <= b < row
+                ==> is_prefix_row(#[trigger] valid_columns@[b]@),
+            !prefix ==> exists|b: int| 0 <= b < batch
+                && !is_prefix_row(#[trigger] valid_columns@[b]@),
         decreases batch - row,
     ))]
     while prefix && row < batch {
@@ -437,9 +476,11 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
                 row < batch,
                 columns@ == valid_columns@[row as int]@,
                 slot <= columns.len(),
-                prefix ==> forall|b: int| 0 <= b < row ==> is_prefix_row(#[trigger] valid_columns@[b]@),
+                prefix ==> forall|b: int| 0 <= b < row
+                    ==> is_prefix_row(#[trigger] valid_columns@[b]@),
                 prefix ==> forall|i: int| 0 <= i < slot ==> #[trigger] columns@[i] == i,
-                !prefix ==> exists|b: int| 0 <= b < batch && !is_prefix_row(#[trigger] valid_columns@[b]@),
+                !prefix ==> exists|b: int| 0 <= b < batch
+                    && !is_prefix_row(#[trigger] valid_columns@[b]@),
             decreases columns.len() - slot,
         ))]
         while prefix && slot < columns.len() {
@@ -482,7 +523,8 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
                 forall|b: int| 0 <= b < batch ==> #[trigger] counts@[b] == valid_columns@[b]@.len(),
                 stored.len() == prefix_count(counts@, row as int),
                 forall|b: int, i: int| 0 <= b < row && 0 <= i < counts@[b]
-                    ==> #[trigger] stored@[column_index(counts@, b, i)] == valid_columns@[b]@[i],
+                    ==> #[trigger] stored@[column_index(counts@, b, i)]
+                        == valid_columns@[b]@[i],
             decreases batch - row,
         ))]
         while row < batch {
@@ -493,7 +535,8 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
                 lemma_prefix_step(counts@, row as int);
                 lemma_prefix_nonnegative(counts@, row as int);
                 assert forall|b: int, i: int| 0 <= b < row && 0 <= i < counts@[b]
-                    implies 0 <= #[trigger] column_index(counts@, b, i) < prefix_count(counts@, row as int) by {
+                    implies 0 <= #[trigger] column_index(counts@, b, i)
+                        < prefix_count(counts@, row as int) by {
                     lemma_prefix_step(counts@, b);
                     lemma_prefix_monotone(counts@, b + 1, row as int);
                     lemma_prefix_nonnegative(counts@, b);
@@ -510,9 +553,11 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
                     stored.len() == prefix_count(counts@, row as int) + slot,
                     prefix_count(counts@, row as int) >= 0,
                     forall|b: int, i: int| 0 <= b < row && 0 <= i < counts@[b]
-                        ==> 0 <= #[trigger] column_index(counts@, b, i) < prefix_count(counts@, row as int),
+                        ==> 0 <= #[trigger] column_index(counts@, b, i)
+                            < prefix_count(counts@, row as int),
                     forall|b: int, i: int| 0 <= b < row && 0 <= i < counts@[b]
-                        ==> #[trigger] stored@[column_index(counts@, b, i)] == valid_columns@[b]@[i],
+                        ==> #[trigger] stored@[column_index(counts@, b, i)]
+                            == valid_columns@[b]@[i],
                     forall|i: int| 0 <= i < slot
                         ==> #[trigger] stored@[column_index(counts@, row as int, i)] == columns@[i],
                 decreases columns.len() - slot,
@@ -556,7 +601,11 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
             assert forall|b: int, i: int| 0 <= b < batch && 0 <= i < block
                 implies #[trigger] compact@[flat(b, i, block as int)] == flat(
                     b,
-                    if i < valid_columns@[b]@.len() { valid_columns@[b]@[i] as int } else { 0 },
+                    if i < valid_columns@[b]@.len() {
+                        valid_columns@[b]@[i] as int
+                    } else {
+                        0
+                    },
                     sequence as int,
                 ) by {
                 if i < valid_columns@[b]@.len() {
@@ -570,7 +619,8 @@ pub(super) fn plan_rows(valid_columns: &[Vec<usize>], sequence: usize) -> Option
             }
             assert forall|b: int, s: int| 0 <= b < batch && 0 <= s < sequence
                 && !valid_columns@[b]@.contains(s as usize)
-                implies #[trigger] scatter@[flat(b, s, sequence as int)] == flat(b, 0, block as int) by {
+                implies #[trigger] scatter@[flat(b, s, sequence as int)]
+                    == flat(b, 0, block as int) by {
                 if in_row(stored@, counts@, b, s) {
                     let k = choose|k: int| 0 <= k < counts@[b]
                         && #[trigger] row_column(stored@, counts@, b, k) == s;
@@ -674,13 +724,15 @@ pub(super) fn has_padded_slot(counts: &[usize], block: usize) -> bool {
 /// `b * sequence` otherwise. Returns `None` exactly for a count above
 /// `block`, too few columns, a column at or beyond `sequence`, a padded slot
 /// without any column to read (`sequence = 0`), or an unrepresentable
-/// extent; the proof establishes every returned entry.
+/// extent (`B * S` or `B * Q`). The proof establishes both directions of
+/// that rule and every returned entry.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(sources =>
     ensures
         match sources {
             Some(sources) => {
                 &&& sources.len() == counts.len() * block
+                &&& counts.len() * sequence <= usize::MAX
                 &&& forall|b: int| 0 <= b < counts.len() ==> #[trigger] counts@[b] <= block
                 &&& forall|b: int, i: int| 0 <= b < counts.len() && 0 <= i < counts@[b]
                     ==> #[trigger] row_column(columns@, counts@, b, i) < sequence
@@ -836,23 +888,26 @@ pub(super) fn compaction_sources(
 /// Column `(b, s)` reads block slot `b * block + k` when `s` is row `b`'s
 /// `k`-th valid column and `b * block` otherwise. Returns `None` exactly for
 /// a count above `block`, too few columns, a row whose columns are not
-/// strictly increasing below `sequence`, or an unrepresentable extent; the
-/// proof establishes every returned entry. With `block = 0` every row is
-/// inactive and every source is `0` (callers zero the whole output).
+/// strictly increasing below `sequence`, or an unrepresentable extent
+/// (`B * Q` or `B * S`). The proof establishes both directions of that rule
+/// and every returned entry. With `block = 0` every row is inactive and
+/// every source is `0` (callers zero the whole output).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(sources =>
     ensures
         match sources {
             Some(sources) => {
                 &&& sources.len() == counts.len() * sequence
+                &&& counts.len() * block <= usize::MAX
                 &&& forall|b: int| 0 <= b < counts.len() ==> {
                     &&& #[trigger] counts@[b] <= block
                     &&& prefix_count(counts@, b) + counts@[b] <= columns.len()
                     &&& row_sorted_below(columns@, counts@, b, sequence as int)
                 }
                 &&& forall|b: int, k: int| 0 <= b < counts.len() && 0 <= k < counts@[b]
-                    ==> #[trigger] sources@[flat(b, row_column(columns@, counts@, b, k), sequence as int)]
-                        == flat(b, k, block as int)
+                    ==> #[trigger] sources@[
+                        flat(b, row_column(columns@, counts@, b, k), sequence as int)
+                    ] == flat(b, k, block as int)
                 &&& forall|b: int, s: int| 0 <= b < counts.len() && 0 <= s < sequence
                     && !in_row(columns@, counts@, b, s)
                     ==> #[trigger] sources@[flat(b, s, sequence as int)] == flat(b, 0, block as int)
@@ -898,12 +953,15 @@ pub(super) fn scatter_sources(
                 &&& row_sorted_below(columns@, counts@, b, sequence as int)
             },
             forall|b: int, k: int| 0 <= b < row && 0 <= k < counts@[b]
-                ==> #[trigger] sources@[flat(b, row_column(columns@, counts@, b, k), sequence as int)]
-                    == flat(b, k, block as int),
+                ==> #[trigger] sources@[
+                    flat(b, row_column(columns@, counts@, b, k), sequence as int)
+                ] == flat(b, k, block as int),
             forall|b: int, s: int| 0 <= b < row && 0 <= s < sequence
                 && !in_row(columns@, counts@, b, s)
-                ==> #[trigger] sources@[flat(b, s, sequence as int)] == flat(b, 0, block as int),
-            block > 0 ==> forall|j: int| 0 <= j < sources.len() ==> #[trigger] sources[j] < limit,
+                ==> #[trigger] sources@[flat(b, s, sequence as int)]
+                    == flat(b, 0, block as int),
+            block > 0 ==> forall|j: int| 0 <= j < sources.len()
+                ==> #[trigger] sources[j] < limit,
         decreases batch - row,
     ))]
     while row < batch {
@@ -943,11 +1001,13 @@ pub(super) fn scatter_sources(
                 forall|b: int, k: int| 0 <= b < row && 0 <= k < counts@[b]
                     ==> 0 <= #[trigger] row_column(columns@, counts@, b, k) < sequence,
                 forall|b: int, k: int| 0 <= b < row && 0 <= k < counts@[b]
-                    ==> #[trigger] sources@[flat(b, row_column(columns@, counts@, b, k), sequence as int)]
-                        == flat(b, k, block as int),
+                    ==> #[trigger] sources@[
+                        flat(b, row_column(columns@, counts@, b, k), sequence as int)
+                    ] == flat(b, k, block as int),
                 forall|b: int, s: int| 0 <= b < row && 0 <= s < sequence
                     && !in_row(columns@, counts@, b, s)
-                    ==> #[trigger] sources@[flat(b, s, sequence as int)] == flat(b, 0, block as int),
+                    ==> #[trigger] sources@[flat(b, s, sequence as int)]
+                        == flat(b, 0, block as int),
                 // Matched columns were read, increase, and lie before the cursor.
                 forall|k: int| 0 <= k < rank
                     ==> #[trigger] row_column(columns@, counts@, row as int, k) < column
@@ -961,11 +1021,15 @@ pub(super) fn scatter_sources(
                     || (rank > 0 && row_column(columns@, counts@, row as int, rank as int)
                         <= row_column(columns@, counts@, row as int, rank - 1))),
                 forall|k: int| 0 <= k < rank
-                    ==> #[trigger] sources@[flat(row as int, row_column(columns@, counts@, row as int, k), sequence as int)]
-                        == flat(row as int, k, block as int),
+                    ==> #[trigger] sources@[flat(
+                        row as int,
+                        row_column(columns@, counts@, row as int, k),
+                        sequence as int,
+                    )] == flat(row as int, k, block as int),
                 forall|s: int| 0 <= s < column && !in_row(columns@, counts@, row as int, s)
                     ==> #[trigger] sources@[flat(row as int, s, sequence as int)] == base,
-                block > 0 ==> forall|j: int| 0 <= j < sources.len() ==> #[trigger] sources[j] < limit,
+                block > 0 ==> forall|j: int| 0 <= j < sources.len()
+                    ==> #[trigger] sources[j] < limit,
             decreases sequence - column,
         ))]
         while column < sequence {
@@ -983,7 +1047,8 @@ pub(super) fn scatter_sources(
                     #[cfg(verus_keep_ghost)]
                     proof! {
                         assert(in_row(columns@, counts@, row as int, column as int)) by {
-                            assert(row_column(columns@, counts@, row as int, rank as int) == column);
+                            assert(row_column(columns@, counts@, row as int, rank as int)
+                                == column);
                         }
                     }
                     rank += 1;
@@ -1141,7 +1206,11 @@ pub(super) struct StepPositions {
 #[cfg_attr(verus_keep_ghost, verus_spec(planned =>
     ensures
         ({
-            let rows = if lengths.len() < counts.len() { lengths.len() as int } else { counts.len() as int };
+            let rows = if lengths.len() < counts.len() {
+                lengths.len() as int
+            } else {
+                counts.len() as int
+            };
             match planned {
                 Some(plan) => {
                     &&& plan.mask_positions.len() == rows * block
@@ -1151,7 +1220,8 @@ pub(super) struct StepPositions {
                         &&& lengths@[b] + block <= i64::MAX
                     }
                     &&& forall|b: int, i: int| 0 <= b < rows && 0 <= i < block
-                        ==> #[trigger] plan.bias_positions@[flat(b, i, block as int)] == lengths@[b] + i
+                        ==> #[trigger] plan.bias_positions@[flat(b, i, block as int)]
+                            == lengths@[b] + i
                     &&& forall|b: int, i: int| 0 <= b < rows && 0 <= i < block
                         ==> #[trigger] plan.mask_positions@[flat(b, i, block as int)]
                             == visible_position(lengths@[b] as int, counts@[b] as int, i)
@@ -1390,7 +1460,8 @@ pub(super) fn groups_preserved(indices: &[usize], group_size: usize) -> bool {
         invariant
             row <= indices.len(),
             group_size > 0,
-            forall|d: int| 0 <= d < row ==> #[trigger] indices[d] / group_size == d / group_size as int,
+            forall|d: int| 0 <= d < row
+                ==> #[trigger] indices[d] / group_size == d / group_size as int,
         decreases indices.len() - row,
     ))]
     while row < indices.len() {

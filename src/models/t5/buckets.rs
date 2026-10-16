@@ -17,8 +17,15 @@
 //! at radius `r = min(bound, max_distance)`: a `(r + 1) x (r + 1)` table
 //! anchored at query `r` lists the bucket of every displacement `-r..=r` in
 //! its `2r + 1` entries, and the device clamps each displacement into
-//! `[-r, r]` before adding `r`. [`displacement_table`] sizes that table, and
-//! a lemma proves every clamped index lies inside it.
+//! `[-r, r]` before adding `r`. [`displacement_table`] sizes that table.
+//!
+//! The clamp and the gather are Burn device operations, outside what Verus
+//! checks. [`lemma_clamped_index_in_table`] states the integer fact they rely
+//! on: every clamped index lies inside a table of `2r + 1` entries. That
+//! length is `relative_table_length(r + 1, r + 1)`, whose formula
+//! `verus/position.rs` verifies. The host loop that fills the table and the
+//! device lookup itself are covered by Rust tests against the pairwise
+//! bucket mapping.
 //!
 //! # Table owners
 //!
@@ -29,12 +36,17 @@
 //! # Verified geometry
 //!
 //! Every function here is checked in place by Verus through `verus/t5_gpt.rs`
-//! (see `verus/README.md`): the geometry check accepts exactly the valid
-//! layouts and names each rejection's cause, an accepted layout has a
-//! non-empty exact region below `max_distance` in every built stack, the
-//! table radius and width are exact, every clamped displacement indexes the
-//! table (exactly, without clamping, for displacements within `r`), and two
-//! layers share a bias owner exactly when their head counts agree.
+//! (see `verus/README.md`):
+//!
+//! - the geometry check accepts exactly the valid layouts and names each
+//!   rejection's cause, and an accepted layout has a non-empty exact region
+//!   below `max_distance` in every built stack;
+//! - the table radius and width are exact;
+//! - two layers share a bias owner exactly when their head counts agree;
+//! - staged positions are accepted exactly when they lie in the context.
+//!
+//! The clamped-index lemma is a statement about integers, not about the
+//! device code that applies it (see above).
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -57,7 +69,9 @@ pub open spec fn clamp(value: int, low: int, high: int) -> int {
 ///
 /// The index `clamp(d, -r, r) + r` lies in `0..2r + 1`, the bucket-table
 /// length `2 (r + 1) - 1` of a `(r + 1) x (r + 1)` table, and a displacement
-/// within the radius is not altered by the clamp.
+/// within the radius is not altered by the clamp. This is the arithmetic
+/// that the unverified device clamp in `model/bias.rs` relies on; no
+/// executable code is checked against it.
 pub proof fn lemma_clamped_index_in_table(displacement: int, radius: int)
     requires
         radius >= 0,
@@ -213,7 +227,8 @@ pub(crate) fn bias_owners(heads: &[usize]) -> Vec<usize> {
     #[cfg(verus_keep_ghost)]
     proof! {
         assert forall|i: int, j: int| 0 <= i < heads.len() && 0 <= j < heads.len()
-            implies (#[trigger] owners@[i] == #[trigger] owners@[j]) == (heads@[i] == heads@[j]) by {
+            implies (#[trigger] owners@[i] == #[trigger] owners@[j])
+                == (heads@[i] == heads@[j]) by {
             if heads@[i] == heads@[j] {
                 if owners@[i] < owners@[j] {
                     assert(heads@[owners@[i] as int] == heads@[j]);

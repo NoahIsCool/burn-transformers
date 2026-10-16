@@ -33,9 +33,10 @@
 //! T5 mapping saturates (`log(d / E') / log(M / E')` reaches one at `d = M`,
 //! so every farther past key shares the final past bucket and every farther
 //! future key the final future bucket; causal future keys are bucket zero).
-//! A unit test checks the saturation against the pairwise mapping, and
-//! `src/models/t5/buckets.rs` verifies the table radius and that every
-//! clamped displacement indexes the table.
+//! A unit test checks the saturation against the pairwise mapping.
+//! `src/models/t5/buckets.rs` verifies the table radius and proves the index
+//! arithmetic of the clamped lookup; the device clamp and gather themselves
+//! are covered by those Rust tests.
 //!
 //! # Precision and gradients
 //!

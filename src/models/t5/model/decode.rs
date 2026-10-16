@@ -65,7 +65,7 @@ use super::{
     DECODER_INPUT, T5ForConditionalGeneration, bias,
     block::{CrossAttentionPlan, CrossSource, SelfAttentionPlan, SelfKeyValues, StackPlan},
     packing::{
-        BatchedRows, Packing, displacement_bound, first_out_of_range, groups_preserved,
+        BatchedRows, Packing, displacement_bound, first_out_of_range, groups_preserved, plan_rows,
         step_positions,
     },
     validate_encoder_layout, validate_encoder_output, validate_options,
@@ -539,14 +539,13 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         }
         let prepared = prepare_stateful_input(self, encoder, &decoder, state, phase)?;
         validate_logits_selection(&options.logits, prepared.sequence)?;
-        let rows =
-            BatchedRows::new(&prepared.valid_indices, prepared.sequence).ok_or_else(|| {
-                Error::shape(
-                    DECODER_INPUT.token_mask,
-                    "sorted valid columns below the sequence length",
-                    format!("{:?}", prepared.valid_indices),
-                )
-            })?;
+        let rows = plan_rows(&prepared.valid_indices, prepared.sequence).ok_or_else(|| {
+            Error::shape(
+                DECODER_INPUT.token_mask,
+                "sorted valid columns below the sequence length",
+                format!("{:?}", prepared.valid_indices),
+            )
+        })?;
 
         let pending_cross = if state.cross.is_none() {
             if phase == StatefulPhase::Decode {
