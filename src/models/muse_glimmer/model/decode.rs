@@ -175,10 +175,7 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
             ));
         }
         // Each ring group carries its own window, so the bank needs none.
-        let internal_config = CacheConfig::new(requested.sequence_count(), requested.capacity())
-            .map_err(|error| {
-                Error::configuration("muse_glimmer.decode_state", error.to_string())
-            })?;
+        let internal_config = CacheConfig::new(requested.sequence_count(), requested.capacity())?;
         let layout = planned_layout(model, requested.capacity())?;
         let mut tensors = TensorDecodeState::new(internal_config, batch_size, device)?;
         for (expected_group, spec) in layout.groups.iter().copied().enumerate() {

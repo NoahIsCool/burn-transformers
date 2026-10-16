@@ -556,23 +556,16 @@ fn decode_state_batch_must_match_the_cache_sequence_count() {
     };
     let device = Default::default();
     let cache = CacheConfig::new(2, 8).unwrap();
-    /// Family tensor caches report the typed mismatch; the modular reference
-    /// state reports the same two counts as a cache error.
+    /// Every model, the modular reference state included, reports the typed mismatch.
     #[track_caller]
     fn assert_mismatch<S: core::fmt::Debug>(name: &str, result: Result<S>, requested: usize) {
         let error = result.expect_err(name);
-        let typed = matches!(
-            error,
-            Error::TensorCache(TensorCacheError::BatchSizeMismatch { configured: 2, requested: found })
-                if found == requested
-        );
-        let modular = matches!(
-            &error,
-            Error::Cache(reason)
-                if *reason == format!("custom decode state expected 2 sequences, received batch size {requested}")
-        );
         assert!(
-            typed || (modular && name.starts_with("Modular")),
+            matches!(
+                error,
+                Error::TensorCache(TensorCacheError::BatchSizeMismatch { configured: 2, requested: found })
+                    if found == requested
+            ),
             "{name}: {error:?}"
         );
     }

@@ -42,7 +42,7 @@ use crate::{
     Result,
     architecture::{DecoderSpec, EncoderOutput, RouterDiagnostics, Seq2SeqOutput, TokenMask},
     cache::{
-        CacheConfig, SequenceLengths,
+        CacheConfig, SequenceLengths, TensorCacheError,
         tensor::{validate_repeated_allocation, validate_tensor_shape},
     },
     moe::SparseMoeOutput,
@@ -107,10 +107,11 @@ impl<B: Backend> ModularDecodeState<B> {
         device: &B::Device,
     ) -> Result<Self> {
         if config.sequence_count() != batch_size {
-            return Err(Error::Cache(format!(
-                "custom decode state expected {} sequences, received batch size {batch_size}",
-                config.sequence_count()
-            )));
+            return Err(TensorCacheError::BatchSizeMismatch {
+                configured: config.sequence_count(),
+                requested: batch_size,
+            }
+            .into());
         }
         let elements_per_history = validate_tensor_shape(
             "custom.decode.history",

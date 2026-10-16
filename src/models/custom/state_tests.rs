@@ -87,7 +87,7 @@ fn oversized_history_geometry_fails_for_causal_and_seq2seq_models() {
     }
 }
 
-/// A mismatched batch returns the original shape diagnostic before allocation preflight.
+/// A mismatched batch is the typed cache mismatch every family reports, before allocation preflight.
 #[test]
 fn history_batch_mismatch_preserves_contextual_error() {
     let error = ModularDecodeState::<B>::new(
@@ -99,9 +99,18 @@ fn history_batch_mismatch_preserves_contextual_error() {
     )
     .expect_err("mismatched batch");
     assert!(
-        error
-            .to_string()
-            .contains("expected 1 sequences, received batch size 2")
+        matches!(
+            error,
+            crate::Error::TensorCache(crate::cache::TensorCacheError::BatchSizeMismatch {
+                configured: 1,
+                requested: 2,
+            })
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "tensor cache error: cache config tracks 1 sequences but batch size is 2"
     );
 }
 

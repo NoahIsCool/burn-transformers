@@ -1127,7 +1127,16 @@ fn decode_state_rejects_batch_configuration_mismatch() {
     let error = model
         .new_decode_state(CacheConfig::new(2, 8).unwrap(), 1, &device)
         .expect_err("batch and cache geometry must agree");
-    assert!(error.to_string().contains("expected 2 sequences"));
+    assert!(
+        matches!(
+            error,
+            crate::Error::TensorCache(crate::cache::TensorCacheError::BatchSizeMismatch {
+                configured: 2,
+                requested: 1,
+            })
+        ),
+        "{error}"
+    );
 }
 
 /// State topology identity prevents passing a valid state to a different custom graph.
