@@ -5,6 +5,11 @@
 //! one source tensor and one converted output tensor at a time. This family
 //! bridge installs statically ranked Burn parameters without materializing a
 //! checkpoint-sized host record or executing repository code.
+//!
+//! Packed QFloat payloads from a certified Burnpack sidecar install exactly:
+//! packed where the backend keeps the artifact's blocks through the
+//! column-layout transpose, and as their exact dequantized values otherwise
+//! (see [`install_packed_parameter`]), never as a requantized approximation.
 
 use std::path::Path;
 
@@ -18,7 +23,8 @@ use thiserror::Error;
 use crate::{
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        PackedLayoutPolicy, ParameterInstallError, TensorSink, execute_local_load_plan,
+        install_packed_parameter,
     },
     feed_forward::GatedFeedForward,
     normalization::RmsNorm,
@@ -391,16 +397,28 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged, exactly as before packed loading existed.
+/// Packed (QFloat) data from a quantized Burnpack sidecar stays packed only when
+/// the backend reproduces the artifact's `[1, G]` blocks through the
+/// parameter's load mapper (for example Metal with column-major linear
+/// layouts). Otherwise, as on Burn Flex 0.21, whose quantized transpose
+/// requantizes, the exact dequantized values `q * s` are installed in float
+/// storage instead of a requantized approximation. The installed weight
+/// therefore always equals the certified artifact; only its memory footprint
+/// depends on the backend.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), Qwen3MoeLoadError> {
-    install_float_parameter(parameter, data).map_err(|source| Qwen3MoeLoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| Qwen3MoeLoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

@@ -457,6 +457,20 @@ fn automatic_packed_loading_rejects_uncertified_causal_families() {
     assert!(matches!(error, Error::BackendCapability(_)));
 }
 
+/// Reports whether a packed column-layout projection's dtype shows an exact install on the test backend.
+///
+/// The packed blocks survive the `[out, in]` to `[in, out]` load transpose only
+/// where [`crate::checkpoint::packed_layout_is_exact`] holds, and then stay
+/// QFloat; elsewhere (Burn Flex 0.21) certified loaders install the exact
+/// dequantized F32 values instead of a requantized approximation.
+fn is_exact_packed_install(dtype: DType) -> bool {
+    if crate::checkpoint::packed_layout_is_exact::<TestBackend>(&Default::default()) {
+        matches!(dtype, DType::QFloat(_))
+    } else {
+        dtype == DType::F32
+    }
+}
+
 /// Qwen3-MoE uses the public automatic path for a provenance-bound packed overlay.
 #[test]
 fn automatic_qwen3_moe_loads_v2_quantized_burnpack() {
@@ -535,15 +549,16 @@ fn automatic_qwen3_moe_loads_v2_quantized_burnpack() {
         AutoCausalLm::Qwen3Moe(model) => model,
         model => panic!("expected Qwen3-MoE automatic variant, found {model:?}"),
     };
-    assert!(matches!(
+    // Packed where the backend keeps the artifact's blocks through the
+    // column-layout transpose, exact dequantized F32 otherwise (Flex).
+    assert!(is_exact_packed_install(
         model
             .lm_head
             .as_ref()
             .expect("untied fixture LM head")
             .weight
             .val()
-            .dtype(),
-        DType::QFloat(_)
+            .dtype()
     ));
     assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F32);
     assert!(loaded.load_report().is_strictly_valid());
@@ -1584,8 +1599,8 @@ fn automatic_muse_glimmer_loads_q8_q4_and_preserves_all_execution_paths() {
                 ("FFN down", &layer.mlp.down_proj),
             ] {
                 assert!(
-                    matches!(linear.weight.val().dtype(), DType::QFloat(_)),
-                    "Muse layer {layer_index} {projection} must retain packed storage"
+                    is_exact_packed_install(linear.weight.val().dtype()),
+                    "Muse layer {layer_index} {projection} must hold the exact artifact"
                 );
             }
             for (projection, linear) in [
@@ -1613,15 +1628,14 @@ fn automatic_muse_glimmer_loads_q8_q4_and_preserves_all_execution_paths() {
                 assert_eq!(norm.weight.val().dtype(), DType::F32);
             }
         }
-        assert!(matches!(
+        assert!(is_exact_packed_install(
             model
                 .lm_head
                 .as_ref()
                 .expect("independent Muse LM head")
                 .weight
                 .val()
-                .dtype(),
-            DType::QFloat(_)
+                .dtype()
         ));
         assert!(loaded.load_report().is_strictly_valid());
         assert_eq!(loaded.load_report().applied.len(), 35);
