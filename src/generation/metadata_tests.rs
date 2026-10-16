@@ -6,8 +6,9 @@ use burn::{
 };
 
 use super::{
-    HostGrid, can_pack_token_ids, checked_token_id, empty_rows, nonempty_row_lengths, read_grid,
-    read_token_selection, rectangle_size, vec_with_capacity,
+    HostGrid, can_pack_token_ids, checked_token_id, empty_rows, next_positions,
+    nonempty_row_lengths, read_grid, read_token_selection, rectangle_size, tensor_i64_values,
+    vec_with_capacity,
 };
 use crate::generation::TokenSelection;
 
@@ -142,4 +143,62 @@ fn selection_readback_is_exact_in_both_paths() {
         log_probabilities: Tensor::from_data(TensorData::new(vec![0.0_f32], [1]), &device),
     };
     assert!(read_token_selection(ragged, 8).is_err());
+}
+
+/// Token values beyond `u32` are rejected even when the vocabulary is larger.
+#[test]
+fn selected_tokens_must_fit_the_u32_id_domain() {
+    let error = checked_token_id(2_f64.powi(32), usize::MAX).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::Error::Generation(ref reason)
+            if reason == "backend selected token 4294967296 outside the u32 token-ID domain"
+    ));
+    assert_eq!(
+        checked_token_id(f64::from(u32::MAX), usize::MAX).unwrap(),
+        u32::MAX
+    );
+}
+
+/// Positions and validity must each cover the whole prompt rectangle.
+#[test]
+fn next_positions_require_a_full_validity_rectangle() {
+    let error = next_positions(&[0, 1, 2, 3], &[true; 3], 2, 2, 4, "prompt").unwrap_err();
+    assert!(matches!(
+        error,
+        crate::Error::Generation(ref reason)
+            if reason == "prompt metadata is not rectangular: 4 positions and 3 mask entries for 4 slots"
+    ));
+    assert_eq!(
+        next_positions(&[0, 1, 5, 6], &[true, true, true, false], 2, 2, 4, "prompt").unwrap(),
+        [2, 6]
+    );
+}
+
+/// Integer readback accepts every integer storage type, not only the backend default.
+///
+/// Burn keeps an explicit `cast` to I64 even on an I32-default backend, so a
+/// caller's 64-bit token IDs or positions must read back unchanged.
+#[test]
+fn integer_readback_accepts_non_default_integer_storage() {
+    let device = Default::default();
+    let ids = Tensor::<TestBackend, 2, Int>::from_ints([[3, -4], [5, 6]], &device);
+    for dtype in [burn::tensor::IntDType::I32, burn::tensor::IntDType::I64] {
+        let cast = ids.clone().cast(dtype);
+        assert_eq!(
+            tensor_i64_values(cast, "token IDs").unwrap(),
+            [3, -4, 5, 6],
+            "{dtype:?}"
+        );
+    }
+    // The unpacked selection path (here forced by a vocabulary too wide for
+    // exact F32 IDs) reads 64-bit token IDs through the same readback.
+    let selection = TokenSelection::<TestBackend> {
+        token_ids: Tensor::<TestBackend, 1, Int>::from_ints([3, 0], &device)
+            .cast(burn::tensor::IntDType::I64),
+        log_probabilities: Tensor::<TestBackend, 1>::from_floats([-0.5, -2.0], &device),
+    };
+    let (ids, scores) = read_token_selection(selection, (1 << 24) + 1).unwrap();
+    assert_eq!(ids, [3, 0]);
+    assert_eq!(scores, [-0.5, -2.0]);
 }
