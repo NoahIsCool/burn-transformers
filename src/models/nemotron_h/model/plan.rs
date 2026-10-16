@@ -481,13 +481,19 @@ pub open spec fn lasts_rows(
 
 /// Right-padded compact layout of one ragged batch (see the module documentation).
 ///
-/// Per row, `gather` and `scatter` are the shared row plan
-/// ([`crate::models::shared::block_plan::row_maps`], which Qwen3.5 and the
-/// DeepSeek/Muse block layout use) in flat `[B * N]` / `[B * S]` form. This
-/// plan stays separate because Nemotron-H also needs what the per-row plan
-/// lacks: one flat select per tensor instead of a per-row gather, the
-/// `packed`/`unpack` maps that feed only the `T` valid tokens to the Mamba-2
-/// scan and restore them, and each row's flat last-token slot.
+/// Per row, the valid `gather` entries (`gather[b N + k] = b S + c_{b,k}`)
+/// and the valid `scatter` entries (`scatter[b S + c_{b,k}] = b N + k`) equal
+/// the shared row plan ([`crate::models::shared::block_plan::row_maps`],
+/// which Qwen3.5 and the DeepSeek/Muse block layout use) in flat
+/// `[B * N]` / `[B * S]` form. The padding entries differ: a padded `gather`
+/// entry reads the row's column 0 (`b S`) rather than `row_maps`' first valid
+/// column `c_{b,0}`, and callers overwrite those tokens before embedding them;
+/// a padded `scatter` entry reads the batch's single zero row `B N` rather
+/// than a per-row zero slot. This plan stays separate because Nemotron-H also
+/// needs what the per-row plan lacks: one flat select per tensor instead of a
+/// per-row gather, the `packed`/`unpack` maps that feed only the `T` valid
+/// tokens to the Mamba-2 scan and restore them, and each row's flat
+/// last-token slot.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
 #[derive(Debug, Clone, PartialEq, Eq)]

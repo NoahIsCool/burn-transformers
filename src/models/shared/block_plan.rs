@@ -27,10 +27,13 @@
 //! This module is dependency-free and family-independent: DeepSeek-V2 (latent
 //! attention) and Muse Glimmer (grouped-query attention with ring caches)
 //! drive their batched cached steps through it, and [`super::block`] applies
-//! the plans to tensors. Its functions are verified in place by Verus through
-//! `verus/models.rs` (no overflow, map correctness, exact extents and key
-//! limits, query validity, implicit positions, and per-row rotary contexts);
-//! index conversion to `i64` reuses the verified [`super::plan::signed_indices`].
+//! the plans to tensors. [`row_maps`] is also Qwen3.5's compact-row plan
+//! (`qwen3_5::plan::compact_row_plan` delegates to it), which gpt-oss and
+//! Qwen3-MoE use through Qwen3.5's `CompactBatch`. Its functions are verified
+//! in place by Verus through `verus/models.rs` (no overflow, map correctness,
+//! exact extents and key limits, query validity, implicit positions, and
+//! per-row rotary contexts); index conversion to `i64` reuses the verified
+//! [`super::plan::signed_indices`].
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;

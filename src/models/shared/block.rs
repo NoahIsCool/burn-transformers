@@ -17,8 +17,13 @@
 //! The layout is family-independent. DeepSeek-V2 (latent attention) and Muse
 //! Glimmer (grouped-query attention over full and ring caches) use it, since
 //! both need [`BlockLayout::visibility`]'s position-ordered key limits for
-//! bounded attention. Families whose cached attention needs no key limits
-//! compact rows with the right-padded row plans of [`super::plan`] instead.
+//! bounded attention. Families whose cached attention needs no key limits do
+//! not use `BlockLayout`: Qwen3.5's `CompactBatch` (which gpt-oss and
+//! Qwen3-MoE also use) applies this module's host plan
+//! [`super::block_plan::row_maps`] through `qwen3_5::plan::compact_row_plan`,
+//! the Llama family plans its own steps with `llama::plan::plan_step`, and
+//! Nemotron-H uses its flat `CompactPlan`, which also feeds the Mamba-2 scan
+//! only the valid tokens.
 
 use burn::tensor::{BasicOps, Bool, Int, Tensor, TensorData, TensorKind, backend::Backend};
 
