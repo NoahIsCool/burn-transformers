@@ -85,10 +85,20 @@ const fn default_qk_l2_epsilon() -> f64 {
 }
 
 /// Numerically sensitive controls for both DeltaNet execution paths.
+///
+/// The rule owns only the query/key L2-normalization stabilizer; the mixer's
+/// output RMS normalization has its own epsilon,
+/// [`GatedDeltaNetConfig::normalization_epsilon`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DeltaRuleConfig {
     /// Stabilizer in query/key L2 normalization: `x / sqrt(sum(x^2) + epsilon)`.
-    pub normalization_epsilon: f64,
+    ///
+    /// The same quantity as [`GatedDeltaNetConfig::qk_l2_epsilon`], which
+    /// [`GatedDeltaNetConfig::rule_config`] copies here. Configurations
+    /// serialized before the rename spelled it `normalization_epsilon`; that
+    /// key is still accepted on deserialization.
+    #[serde(alias = "normalization_epsilon")]
+    pub qk_l2_epsilon: f64,
     /// Maximum time-axis block processed by the parallel prefill path.
     pub chunk_size: usize,
 }
@@ -97,18 +107,37 @@ impl Default for DeltaRuleConfig {
     /// Uses the official Qwen reference constants.
     fn default() -> Self {
         Self {
-            normalization_epsilon: DEFAULT_QK_L2_EPSILON,
+            qk_l2_epsilon: DEFAULT_QK_L2_EPSILON,
             chunk_size: 64,
         }
     }
 }
 
 impl DeltaRuleConfig {
+    /// Returns the query/key L2-normalization stabilizer under its former name.
+    ///
+    /// The field was renamed to [`Self::qk_l2_epsilon`] because
+    /// `normalization_epsilon` named the *output* RMS-norm stabilizer on
+    /// [`GatedDeltaNetConfig`], so one name meant two different quantities.
+    #[deprecated(
+        note = "renamed to the `qk_l2_epsilon` field; `GatedDeltaNetConfig::normalization_epsilon` is the output-norm epsilon"
+    )]
+    #[must_use]
+    pub const fn normalization_epsilon(&self) -> f64 {
+        self.qk_l2_epsilon
+    }
+
     /// Validates constants before a backend operation is dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error naming `delta_net.rule.qk_l2_epsilon`
+    /// for a non-finite or non-positive query/key epsilon and
+    /// `delta_net.chunk_size` for a zero chunk size.
     pub fn validate(&self) -> Result<()> {
-        if !self.normalization_epsilon.is_finite() || self.normalization_epsilon <= 0.0 {
+        if !self.qk_l2_epsilon.is_finite() || self.qk_l2_epsilon <= 0.0 {
             return Err(Error::configuration(
-                "delta_net.normalization_epsilon",
+                "delta_net.rule.qk_l2_epsilon",
                 "must be finite and greater than zero",
             ));
         }
@@ -273,7 +302,7 @@ impl GatedDeltaNetConfig {
     #[must_use]
     pub const fn rule_config(&self) -> DeltaRuleConfig {
         DeltaRuleConfig {
-            normalization_epsilon: self.qk_l2_epsilon,
+            qk_l2_epsilon: self.qk_l2_epsilon,
             chunk_size: self.prefill_chunk_size,
         }
     }
@@ -542,7 +571,7 @@ impl<B: Backend> GatedDeltaNet<B> {
     /// mismatched mask, or state buffers that do not match this layer. A
     /// manually assembled module can also return projection shape errors and,
     /// from the delta-rule kernels, a configuration error for an invalid
-    /// `rule_config` (a non-finite or non-positive `normalization_epsilon`, or
+    /// `rule_config` (a non-finite or non-positive `qk_l2_epsilon`, or
     /// a zero `chunk_size`). On any error `state` is left exactly as supplied.
     pub fn forward_with_state(
         &self,
@@ -743,7 +772,7 @@ impl<B: Backend> GatedDeltaNet<B> {
             convolution_kernel: self.convolution_kernel,
             normalization_epsilon: self.norm.epsilon,
             prefill_chunk_size: self.rule_config.chunk_size,
-            qk_l2_epsilon: self.rule_config.normalization_epsilon,
+            qk_l2_epsilon: self.rule_config.qk_l2_epsilon,
         }
     }
 
@@ -1013,7 +1042,7 @@ pub fn recurrent_gated_delta_rule<B: Backend>(
     config: DeltaRuleConfig,
 ) -> Result<DeltaRuleOutput<B>> {
     config.validate()?;
-    let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon)?;
+    let prepared = PreparedDeltaRule::new(input, config.qk_l2_epsilon)?;
     let (values, final_state, _) = prepared.recurrence(false);
     Ok(DeltaRuleOutput {
         values,
@@ -1050,7 +1079,7 @@ pub fn recurrent_gated_delta_rule_with_snapshots<B: Backend>(
     config: DeltaRuleConfig,
 ) -> Result<DeltaRuleSnapshots<B>> {
     config.validate()?;
-    let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon)?;
+    let prepared = PreparedDeltaRule::new(input, config.qk_l2_epsilon)?;
     let (values, _, states) = prepared.recurrence(true);
     // `recurrence(true)` returns one state per token in token order.
     let states = Tensor::stack::<5>(states, 1);
@@ -1101,7 +1130,7 @@ pub fn chunked_gated_delta_rule<B: Backend>(
     config: DeltaRuleConfig,
 ) -> Result<DeltaRuleOutput<B>> {
     config.validate()?;
-    let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon)?;
+    let prepared = PreparedDeltaRule::new(input, config.qk_l2_epsilon)?;
     let [batch, sequence, heads, _] = prepared.query.dims();
     let value_width = prepared.value.dims()[3];
     let operands = ChunkOperands::new(&prepared, config.chunk_size);
