@@ -14,6 +14,7 @@ use burn::tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
+use crate::operations;
 
 use super::kv::validate_batch;
 use super::plan::{check_staged_commit, checked_product, rows_cleared_by_truncate, staging_end};
@@ -636,27 +637,25 @@ impl<B: Backend> RecurrentStateCache<B> {
                 matrix = matrix.mask_where(matrix_mask, state.matrix.clone());
                 convolution = convolution.mask_where(convolution_mask, state.convolution.clone());
             }
-            state.matrix.inplace(|tensor| {
-                tensor.slice_assign(
-                    [
-                        0..rows,
-                        0..spec.state_heads(),
-                        0..spec.state_rows(),
-                        0..spec.state_columns(),
-                    ],
-                    matrix,
-                )
-            });
-            state.convolution.inplace(|tensor| {
-                tensor.slice_assign(
-                    [
-                        0..rows,
-                        0..spec.convolution_channels(),
-                        0..spec.convolution_width(),
-                    ],
-                    convolution,
-                )
-            });
+            operations::assign_region(
+                &mut state.matrix,
+                [
+                    0..rows,
+                    0..spec.state_heads(),
+                    0..spec.state_rows(),
+                    0..spec.state_columns(),
+                ],
+                matrix,
+            );
+            operations::assign_region(
+                &mut state.convolution,
+                [
+                    0..rows,
+                    0..spec.convolution_channels(),
+                    0..spec.convolution_width(),
+                ],
+                convolution,
+            );
         }
     }
 
@@ -1079,29 +1078,27 @@ impl<B: Backend> RecurrentStateCache<B> {
             {
                 let rows = stage.rows.clone();
                 let snapshots = stage.snapshots.clone();
-                staged_matrix.inplace(|tensor| {
-                    tensor.slice_assign(
-                        [
-                            rows.clone(),
-                            snapshots.clone(),
-                            0..spec.state_heads(),
-                            0..spec.state_rows(),
-                            0..spec.state_columns(),
-                        ],
-                        stage.matrices,
-                    )
-                });
-                staged_convolution.inplace(|tensor| {
-                    tensor.slice_assign(
-                        [
-                            rows,
-                            snapshots,
-                            0..spec.convolution_channels(),
-                            0..spec.convolution_width(),
-                        ],
-                        stage.convolutions,
-                    )
-                });
+                operations::assign_region(
+                    staged_matrix,
+                    [
+                        rows.clone(),
+                        snapshots.clone(),
+                        0..spec.state_heads(),
+                        0..spec.state_rows(),
+                        0..spec.state_columns(),
+                    ],
+                    stage.matrices,
+                );
+                operations::assign_region(
+                    staged_convolution,
+                    [
+                        rows,
+                        snapshots,
+                        0..spec.convolution_channels(),
+                        0..spec.convolution_width(),
+                    ],
+                    stage.convolutions,
+                );
             }
             for sequence in stage.rows {
                 self.staged_lengths[stage.layer][sequence] = stage.snapshots.end;
@@ -1594,17 +1591,16 @@ fn assign_matrix_row<B: Backend>(
     matrix: Tensor<B, 4>,
     spec: RecurrentStateSpec,
 ) {
-    destination.inplace(|tensor| {
-        tensor.slice_assign(
-            [
-                sequence..sequence + 1,
-                0..spec.state_heads(),
-                0..spec.state_rows(),
-                0..spec.state_columns(),
-            ],
-            matrix,
-        )
-    });
+    operations::assign_region(
+        destination,
+        [
+            sequence..sequence + 1,
+            0..spec.state_heads(),
+            0..spec.state_rows(),
+            0..spec.state_columns(),
+        ],
+        matrix,
+    );
 }
 
 /// Assigns one committed convolution-history row.
@@ -1614,16 +1610,15 @@ fn assign_convolution_row<B: Backend>(
     convolution: Tensor<B, 3>,
     spec: RecurrentStateSpec,
 ) {
-    destination.inplace(|tensor| {
-        tensor.slice_assign(
-            [
-                sequence..sequence + 1,
-                0..spec.convolution_channels(),
-                0..spec.convolution_width(),
-            ],
-            convolution,
-        )
-    });
+    operations::assign_region(
+        destination,
+        [
+            sequence..sequence + 1,
+            0..spec.convolution_channels(),
+            0..spec.convolution_width(),
+        ],
+        convolution,
+    );
 }
 
 /// Applies a batch gather to a rank-three state tensor.

@@ -10,14 +10,26 @@
 //! cover the two usual padding conventions. Rows with `n_b = 0` are untouched.
 //!
 //! Adjacent rows with identical `(s_b, c_b, n_b)` form a *run* (the verified
-//! `row_runs`); a run is written with one `slice_assign` per physical segment
-//! over its whole row range. One-token decode at equal lengths and unpadded
-//! prefill are a single run, so a layer costs one assignment (two for a
-//! wrapping ring, four for a wrapping mirrored ring) instead of one per row;
-//! fully ragged rows fall back to exactly the per-row cost. A scatter was
-//! rejected as the general path: Burn's Flex `scatter_nd` copies the whole
-//! destination tensor, which is `O(capacity)` per call, whereas
-//! `slice_assign` on a uniquely owned cache tensor is in place.
+//! `row_runs`); a run is written with one region assignment per physical
+//! segment over its whole row range. One-token decode at equal lengths and
+//! unpadded prefill are a single run, so a layer costs one assignment (two
+//! for a wrapping ring, four for a wrapping mirrored ring) instead of one per
+//! row; fully ragged rows fall back to exactly the per-row cost.
+//!
+//! Each assignment goes through the crate's `operations::assign_region`.
+//! Burn Flex 0.21 implements both `scatter_nd` and `slice_assign` by copying
+//! the *whole* destination (its slice writer clones the buffer's `Arc` before
+//! `Arc::make_mut`, so even a uniquely owned plane is copied), which made every
+//! one-token write `O(batch · heads · capacity · head_dim)`: about 1.3 ms per
+//! 64 MiB plane, so a cache sized far beyond `prompt + max_new_tokens` paid
+//! for its unused capacity on every token. On inference Flex,
+//! `assign_region` instead writes the region's runs directly into the
+//! uniquely owned plane, `O(rows · heads · n · head_dim)`, and keeps the
+//! plane's buffer; a plane still shared with a live read view is copied
+//! first, so that view keeps its values. Other backends use `slice_assign`,
+//! which CubeCL executes in place on a uniquely owned plane. A scatter stays
+//! rejected as the general path: it needs uploaded index tensors, and Flex
+//! still copies the whole destination for it.
 //!
 //! # Reads
 //!
@@ -724,9 +736,11 @@ fn assign_rows<B: Backend>(
         input,
         channels.clone(),
     ]);
-    destination.inplace(|tensor| {
-        tensor.slice_assign([run.rows.clone(), heads, physical, channels], values)
-    });
+    crate::operations::assign_region(
+        destination,
+        [run.rows.clone(), heads, physical, channels],
+        values,
+    );
 }
 
 // Read plans.

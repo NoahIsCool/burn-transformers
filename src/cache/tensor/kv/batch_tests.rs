@@ -224,6 +224,68 @@ fn append_layouts_validate_rows_columns_and_positions() {
     assert!(message.contains("column 2"), "{message}");
 }
 
+/// Returns the address of the host buffer behind a Flex tensor without copying it.
+///
+/// Cloning a Flex tensor only increments its buffer's reference count, so
+/// the address read through the clone is the cache plane's own storage.
+fn storage_address(tensor: &Tensor<TestBackend, 4>) -> usize {
+    match tensor.clone().into_primitive() {
+        burn::tensor::TensorPrimitive::Float(primitive) => primitive.bytes().as_ptr() as usize,
+        burn::tensor::TensorPrimitive::QFloat(_) => unreachable!("cache planes are floating"),
+    }
+}
+
+/// One-token decode writes reuse the committed planes' buffers instead of copying them.
+///
+/// On Burn Flex 0.21 `slice_assign` copies its whole destination, so every
+/// one-token write used to cost `O(batch · heads · capacity · dim)` and moved
+/// each plane to a new allocation. Writes now go through
+/// `operations::assign_region`, which writes a uniquely owned plane in
+/// place: the buffer address is stable across many decode steps, at any
+/// capacity, while the written values equal the per-row reference. A read
+/// view still alive at write time must keep its values (copy-on-write).
+#[test]
+fn decode_writes_reuse_the_committed_plane_buffers() {
+    let rows = 2;
+    let mut batched = cache(rows, 64, KvCacheStorage::Full, 1, 0, false);
+    let mut reference = cache(rows, 64, KvCacheStorage::Full, 1, 0, false);
+    let prefill = KvBatchAppend::right_padded(&[0; 2], &[4; 2], 4).expect("layout");
+    for target in [&mut batched, &mut reference] {
+        target
+            .write_batch(0, &prefill, block(rows, 4, 1.0), block(rows, 4, 2.0))
+            .expect("prefill");
+    }
+    let addresses = |cache: &NativeKvCache<TestBackend>| {
+        cache.layers[0]
+            .planes
+            .iter()
+            .map(storage_address)
+            .collect::<Vec<_>>()
+    };
+    let before = addresses(&batched);
+    for step in 0..16 {
+        let append = KvBatchAppend::right_padded(&[4 + step; 2], &[1; 2], 1).expect("layout");
+        let (keys, values) = (block(rows, 1, 3.0 + step as f32), block(rows, 1, 5.0));
+        batched
+            .write_batch(0, &append, keys.clone(), values.clone())
+            .expect("decode write");
+        write_per_row(&mut reference, &append, &keys, &values);
+        assert_eq!(addresses(&batched), before, "step {step} copied a plane");
+    }
+    assert_eq!(snapshot(&batched), snapshot(&reference));
+
+    // A live read view shares the plane, so the next write must copy, not mutate it.
+    let plan = batched.plan_batch_read(&[20; 2]).expect("plan");
+    let view = batched.read_batch(0, &plan).expect("read");
+    let viewed = host(view.segments()[0].keys());
+    let append = KvBatchAppend::right_padded(&[3; 2], &[1; 2], 1).expect("layout");
+    batched
+        .write_batch(0, &append, block(rows, 1, 9.0), block(rows, 1, 9.0))
+        .expect("overwrite under a live view");
+    assert_eq!(host(view.segments()[0].keys()), viewed);
+    assert_ne!(addresses(&batched), before);
+}
+
 /// A uniform batch is one run; ragged rows split into per-row runs.
 #[test]
 fn uniform_batches_write_with_one_assignment_per_segment() {
