@@ -322,3 +322,96 @@ fn working_batch_read_timing() {
         "ragged working batch read: cat-free {optimized:?}, concatenating reference {reference:?}"
     );
 }
+
+/// Every committed and staged allocation total is checked before any tensor exists.
+///
+/// Each case keeps the per-tensor shapes small (or exactly at one boundary)
+/// and pushes one aggregate past `usize` bytes or one staged tensor past the
+/// portable element limit, so the rejection names exactly that allocation.
+/// Reduced-precision matrices let the matrix totals fit while the
+/// convolution totals of the same layer count do not.
+#[test]
+fn recurrent_allocation_totals_name_the_first_unrepresentable_buffer() {
+    let config = CacheConfig::new(1, 4).expect("config");
+    let device = Default::default();
+    let allocate = |spec: RecurrentStateSpec| {
+        RecurrentStateCache::<TestBackend>::new(config, 1, spec, &device).err()
+    };
+    let spec = |layers, channels, staging, matrix_dtype| {
+        RecurrentStateSpec::new_with_dtypes(layers, 1, 1, 1, channels, 1, matrix_dtype, DType::F32)
+            .expect("geometry")
+            .with_staging_capacity(staging)
+    };
+    let byte_overflow = |error: Option<TensorCacheError>, name: &str| {
+        assert!(
+            matches!(&error, Some(TensorCacheError::AllocationSizeOverflow { tensor, .. })
+                if *tensor == name),
+            "{name}: {error:?}"
+        );
+    };
+    byte_overflow(
+        allocate(spec(1 << 62, 1, 0, DType::F32)),
+        "committed recurrent matrices",
+    );
+    byte_overflow(
+        allocate(spec(1 << 62, 1, 0, DType::F16)),
+        "committed convolution states",
+    );
+    byte_overflow(
+        allocate(spec(1 << 60, 1, 4, DType::F32)),
+        "staged recurrent matrices",
+    );
+    byte_overflow(
+        allocate(spec(1 << 60, 1, 4, DType::F16)),
+        "staged convolution states",
+    );
+    let element_limit = |error: Option<TensorCacheError>, name: &str| {
+        assert!(
+            matches!(&error, Some(TensorCacheError::TensorElementLimitExceeded { tensor, .. })
+                if *tensor == name),
+            "{name}: {error:?}"
+        );
+    };
+    element_limit(
+        allocate(spec(1, 1, 1 << 31, DType::F32)),
+        "staged recurrent matrix",
+    );
+    element_limit(
+        allocate(spec(1, 1 << 29, 4, DType::F32)),
+        "staged convolution state",
+    );
+}
+
+/// Batched state writes need one activity flag per row, and commits one count per row.
+#[test]
+fn recurrent_row_vectors_must_match_the_batch() {
+    let cache = cache();
+    let device = Default::default();
+    let result = cache.prepare_batch_state(
+        0,
+        Tensor::<TestBackend, 4>::zeros([2, 1, 1, 1], &device),
+        Tensor::<TestBackend, 3>::zeros([2, 1, 1], &device),
+        &[true],
+    );
+    assert!(matches!(
+        result,
+        Err(TensorCacheError::Metadata(
+            DecodeStateError::SequenceCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ))
+    ));
+    for (proposed, accepted) in [(&[1][..], &[1, 1][..]), (&[1, 1], &[1])] {
+        assert!(matches!(
+            validate_commit_vector_lengths(2, proposed, accepted),
+            Err(TensorCacheError::Metadata(
+                DecodeStateError::SequenceCountMismatch {
+                    expected: 2,
+                    actual: 1
+                }
+            ))
+        ));
+    }
+    validate_commit_vector_lengths(2, &[1, 0], &[0, 0]).expect("one count per row");
+}

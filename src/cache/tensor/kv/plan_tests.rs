@@ -446,6 +446,10 @@ fn committed_reads_slice_each_storage_mode() {
         Err(SegmentViolation::WindowRequired)
     );
     assert_eq!(
+        committed_read_segments(SlidingRing, 5, 1, None),
+        Err(SegmentViolation::WindowRequired)
+    );
+    assert_eq!(
         committed_read_segments(SlidingRing, 9, 5, Some(4)),
         Err(SegmentViolation::Ring(
             RingPlanError::WindowExceedsCapacity {

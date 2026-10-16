@@ -174,3 +174,95 @@ fn groups_are_refused_after_tokens_are_committed() {
         .add_native_kv(kv)
         .expect("reset unlocks the auxiliary bank");
 }
+
+/// Without an auxiliary bank, a paired truncate fails before rewinding the main bank.
+#[test]
+fn paired_truncate_requires_an_auxiliary_bank() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let mut state =
+        TensorDecodeState::<TestBackend>::new(config, 1, &Default::default()).expect("state");
+    state.advance(&[3]).expect("main lengths");
+    assert!(matches!(
+        state.truncate_prefixes(&[1], &[0]),
+        Err(TensorCacheError::MtpNotEnabled)
+    ));
+    assert_eq!(state.lengths(), &[3]);
+}
+
+/// A mark must agree with the state on whether an auxiliary bank exists.
+///
+/// Transaction tokens already distinguish states, so these marks are stale
+/// twice over; the auxiliary-presence check must reject them on its own
+/// before either bank is touched, and the genuine mark still recovers.
+#[test]
+fn marks_must_match_the_auxiliary_bank_topology() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let device = Default::default();
+    let mut paired = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    paired.enable_mtp().expect("auxiliary bank");
+    let mut plain = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    let paired_mark = paired.begin_transaction().expect("paired transaction");
+    let plain_mark = plain.begin_transaction().expect("plain transaction");
+    assert!(matches!(
+        paired.rollback(plain_mark),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    assert!(matches!(
+        plain.rollback(paired_mark.clone()),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    paired
+        .rollback(paired_mark)
+        .expect("the genuine mark recovers");
+    assert!(!paired.has_active_transaction());
+}
+
+/// Bank staging transitions reject a second begin and a commit without a transaction.
+///
+/// The decode state checks its own transaction first, so these bank-level
+/// guards are defensive; each test drives the bank directly.
+#[test]
+fn bank_staging_guards_reject_out_of_order_transitions() {
+    let config = CacheConfig::new(1, 4).expect("valid config");
+    let mut bank = TensorCacheBank::<TestBackend>::with_config(config, &Default::default());
+    assert!(matches!(
+        bank.prepare_staging_commit(&[0], &[0], &[0]),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    bank.begin_staging(&[0]).expect("an empty bank can stage");
+    assert!(matches!(
+        bank.validate_can_begin_staging(),
+        Err(TensorCacheError::TransactionAlreadyActive)
+    ));
+}
+
+/// Commit violations keep their transaction-specific names, and others map through metadata.
+#[test]
+fn commit_violations_map_to_tensor_cache_errors() {
+    assert!(matches!(
+        commit_error(LengthViolation::TransactionInactive),
+        TensorCacheError::TransactionNotActive
+    ));
+    assert!(matches!(
+        commit_error(LengthViolation::PrefixExceedsProposal {
+            sequence: 1,
+            accepted: 3,
+            proposed: 2
+        }),
+        TensorCacheError::AcceptedPrefixExceedsProposal {
+            sequence: 1,
+            accepted: 3,
+            proposed: 2
+        }
+    ));
+    assert!(matches!(
+        commit_error(LengthViolation::CountMismatch {
+            expected: 2,
+            actual: 1
+        }),
+        TensorCacheError::Metadata(DecodeStateError::SequenceCountMismatch {
+            expected: 2,
+            actual: 1
+        })
+    ));
+}

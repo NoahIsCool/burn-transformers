@@ -125,6 +125,39 @@ fn rejects_nested_stale_and_foreign_marks() {
     );
 }
 
+/// A mark must carry both the active token and the exact baseline lengths.
+///
+/// The token alone identifies the transaction; the baseline guards against a
+/// mark whose recorded lengths no longer describe the committed state. A
+/// mark with the right token but a different baseline is rejected as stale
+/// for both commit and rollback, and the genuine mark still recovers.
+#[test]
+fn marks_with_a_foreign_baseline_are_stale() {
+    let mut lengths = state([1, 2]);
+    let mark = lengths.mark().expect("starts transaction");
+    let tampered = CacheMark {
+        token: mark.token.clone(),
+        baseline_lengths: vec![1, 3],
+    };
+    assert_eq!(
+        lengths.commit_prefix_per_sequence(tampered.clone(), &[0, 0]),
+        Err(DecodeStateError::Transaction(
+            TransactionError::StaleOrForeignMark
+        ))
+    );
+    assert_eq!(
+        lengths.rollback(tampered),
+        Err(DecodeStateError::Transaction(
+            TransactionError::StaleOrForeignMark
+        ))
+    );
+    assert!(lengths.has_active_transaction());
+    lengths
+        .rollback(mark)
+        .expect("the genuine mark still recovers");
+    assert_eq!(lengths.lengths(), &[1, 2]);
+}
+
 /// Forbids reset, reorder, and truncate while a transaction is active.
 #[test]
 fn blocks_topology_changes_during_transaction() {

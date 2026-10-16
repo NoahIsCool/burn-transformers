@@ -35,6 +35,8 @@ fn flat_snapshot_indices_address_each_rows_block() {
         Err(2 * capacity)
     );
     assert_eq!(flat_snapshot_indices(&[1, 1], usize::MAX), Err(usize::MAX));
+    // A representable row base plus an unrepresentable snapshot saturates.
+    assert_eq!(flat_snapshot_indices(&[0, usize::MAX], 2), Err(usize::MAX));
 }
 
 /// Offsets report the first row that differs from row zero.
