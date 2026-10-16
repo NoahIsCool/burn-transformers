@@ -9,7 +9,18 @@
 //!   row exactly to its target;
 //! - `pad_token_row` keeps every real token at its shifted index and fills
 //!   only the padding positions with the pad ID;
-//! - `validity_mask` marks exactly the real-token block as valid.
+//! - `validity_mask` marks exactly the real-token block as valid;
+//! - `encoding_limit_violation` reports exactly the first violated rule of
+//!   `max_length > 0`, fixed width `> 0`, and `max_length <= width`;
+//! - `longest_row` bounds every row and is attained by one;
+//! - `pad_batch` returns one row and one mask per input, each exactly the
+//!   single-row padding of its input to the target (so the batch is
+//!   rectangular), or the index of the first row longer than the target;
+//!   `unpadded_masks` marks every token of every unpadded row valid;
+//! - `first_ragged_row` finds the first token/mask pair whose width differs
+//!   from the batch width, and `flatten_token_rows` / `flatten_mask_rows` lay
+//!   rectangular rows out row-major: entry `r * width + c` is row `r`,
+//!   column `c`.
 //!
 //! and to `src/tokenization/calendar.rs`, against a transcription of CPython's
 //! `datetime` helpers (`_is_leap`, `_days_before_year`, `_days_in_month`,
@@ -28,8 +39,8 @@
 //! every day of an era from its monotonicity plus a `by (compute_only)`
 //! evaluation of each of the 400 years' first and last days.
 //!
-//! Tokenizer encoding, special-token insertion, and tensor conversion are
-//! outside the proof and remain covered by the Rust tests. See
+//! Tokenizer encoding, special-token insertion, and the Burn tensor
+//! constructors are outside the proof and remain covered by the Rust tests. See
 //! `verus/README.md` for the method, toolchain, and command.
 
 #![allow(unused)]
