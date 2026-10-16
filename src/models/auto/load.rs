@@ -71,7 +71,7 @@ use super::{
 };
 use crate::models::{
     config::{ModelConfig, TokenIds},
-    t5::{T5Config, T5ForConditionalGeneration},
+    t5::{T5CheckpointLoadError, T5Config, T5ForConditionalGeneration},
 };
 use burn::tensor::backend::Backend;
 
@@ -93,6 +93,11 @@ const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["muse_glimmer_text", "qwen3_5_text"
 #[derive(Debug, Clone)]
 pub struct AutoLoadOptions {
     /// Strict SafeTensors discovery, dtype, and exception policy.
+    ///
+    /// Its default [`DTypePolicy::Auto`](crate::checkpoint::DTypePolicy::Auto)
+    /// keeps the checkpoint's float dtype (for example BF16) whatever the
+    /// backend's float element; set `dtype_policy:
+    /// DTypePolicy::Cast(TensorDType::F32)` to execute in F32.
     pub checkpoint: LoadOptions,
     /// Explicit normalized generation defaults, bypassing local defaults when set.
     pub generation: Option<GenerationConfig>,
@@ -268,11 +273,11 @@ where
                 reason: error.to_string(),
             })?;
         execute_local_quantized_load_plan_audited(manifest, plan, &mut artifact, model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))
+            .map_err(Error::quantized_checkpoint_execution)
             .map(CausalExecutionOutcome::Quantized)
     } else {
         execute_local_load_plan(manifest, plan, model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))
+            .map_err(Error::checkpoint_execution)
             .map(CausalExecutionOutcome::FullPrecision)
     }
 }
@@ -322,10 +327,14 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         // here, before one module per encoder and decoder block is allocated.
         let planned = config
             .plan_checkpoint(&root, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            .map_err(|error| match error {
+                T5CheckpointLoadError::Config(error) => Error::from(error),
+                T5CheckpointLoadError::Checkpoint(error) => Error::CheckpointPlan(error),
+                T5CheckpointLoadError::Execution(failure) => Error::checkpoint_execution(failure),
+            })?;
         let mut model = T5ForConditionalGeneration::init(config, device)?;
         let outcome = execute_local_load_plan(planned.manifest(), planned.load_plan(), &mut model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            .map_err(Error::checkpoint_execution)?;
         LoadedModel::new_with_execution_stats(
             Self::T5(model),
             tokenizer,

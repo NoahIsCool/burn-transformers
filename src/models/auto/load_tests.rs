@@ -18,8 +18,8 @@ use crate::{
     CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection, Seq2SeqInput,
     cache::CacheConfig,
     checkpoint::{
-        CheckpointManifest, ExpectedTensor, LoadReport, MappingPlan, TensorOperation,
-        TensorTransform,
+        CheckpointError, CheckpointManifest, ExpectedTensor, LoadReport, MappingPlan,
+        TensorOperation, TensorTransform,
         quantization::{
             BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedExecutionSupport, QuantizationExclusion,
             QuantizationGroupSize, QuantizedBurnpackArtifact, QuantizedCheckpointOptions,
@@ -825,6 +825,103 @@ fn absurd_counts_fail_before_checkpoint_planning() {
     assert!(error.to_string().contains("t5.num_layers"), "{error}");
 }
 
+/// A configuration with no checkpoint beside it is a typed missing-artifact error.
+#[test]
+fn a_directory_without_weights_is_a_typed_missing_artifact() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &tiny_automatic_qwen_config());
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::CheckpointPlan(CheckpointError::ArtifactNotFound { .. })
+        ),
+        "{error}"
+    );
+
+    write_auto_metadata(root.path(), &tiny_automatic_t5_config());
+    let error = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::CheckpointPlan(CheckpointError::ArtifactNotFound { .. })
+        ),
+        "{error}"
+    );
+}
+
+/// In-bound depths far beyond a one-tensor checkpoint fail before any contract is built.
+///
+/// Regression for the residual of CFG-COUNT-1: a Llama `config.json` with
+/// 2^18 layers, or a T5 one with 2^18 blocks per stack, planned against a
+/// one-tensor checkpoint used to build the whole contract (seconds and
+/// gigabytes in debug builds) before strict validation failed. The depths
+/// here are smaller so that a regression stays cheap; the error variant
+/// proves the early exit, since a built contract fails strict validation
+/// instead.
+#[test]
+fn depths_beyond_the_checkpoint_fail_before_the_contract() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tiny_goldens/llama3/config.json");
+    let mut llama: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+    llama["num_hidden_layers"] = json!(4096);
+    let mut t5 = serde_json::to_value(tiny_automatic_t5_config()).unwrap();
+    t5["num_layers"] = json!(2048);
+    t5["num_decoder_layers"] = json!(2048);
+
+    let options = AutoLoadOptions {
+        load_tokenizer: false,
+        ..AutoLoadOptions::default()
+    };
+    for (config, required, seq2seq) in [(llama, 4096, false), (t5, 4096, true)] {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+        let mut mappings = MappingPlan::new();
+        mappings.map("model.embed_tokens.weight", "model.embed_tokens.weight");
+        write_contract_checkpoint(
+            root.path(),
+            &[ExpectedTensor::new("model.embed_tokens.weight", vec![2, 2])],
+            &mappings,
+        );
+        let error = if seq2seq {
+            AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+                .unwrap_err()
+        } else {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+                .unwrap_err()
+        };
+        assert!(
+            matches!(
+                &error,
+                Error::CheckpointPlan(CheckpointError::TooFewTensors { required: r, available: 1 })
+                    if *r == required
+            ),
+            "{error}"
+        );
+    }
+}
+
 /// Packed-sidecar certification names only registered causal families.
 #[test]
 fn packed_certification_names_registered_families() {
@@ -1365,7 +1462,9 @@ fn automatic_causal_load_preserves_namespace_and_sidecar_errors() {
         write_auto_metadata(root.path(), &config);
         for (names, expected) in [
             (
-                vec!["foreign.weight"],
+                // Two tensors, so the two-layer Muse fixture passes the
+                // pre-contract tensor budget and namespace detection is reached.
+                vec!["foreign.weight", "foreign.bias"],
                 format!(
                     "{family} checkpoint contains neither official language parameter namespace"
                 ),
@@ -1389,9 +1488,16 @@ fn automatic_causal_load_preserves_namespace_and_sidecar_errors() {
                 mappings.map(name, name);
             }
             write_contract_checkpoint(root.path(), &expected_tensors, &mappings);
+            let error = AutoCausalLm::<TestBackend>::load_local(
+                root.path(),
+                &AutoLoadOptions::default(),
+                &Default::default(),
+            )
+            .map(drop)
+            .unwrap_err();
             assert!(
-                matches!(AutoCausalLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
-                &Default::default()).unwrap_err(), Error::Checkpoint(reason) if reason == expected)
+                matches!(&error, Error::CheckpointPlan(cause) if cause.to_string() == expected),
+                "{error}"
             );
         }
     }
@@ -1815,7 +1921,8 @@ fn automatic_muse_glimmer_rejects_unaligned_reference_only_burnpack() {
     )
     .expect_err("automatic execution must reject row-unaligned sidecars");
     assert!(
-        matches!(&error, Error::Checkpoint(message) if message.contains("packed quantized execution is unavailable")),
+        matches!(&error, Error::CheckpointExecution { message, .. }
+            if message.contains("packed quantized execution is unavailable")),
         "unexpected error: {error}"
     );
 }
@@ -2625,7 +2732,12 @@ fn malformed_generation_artifacts_stop_causal_and_seq2seq_loads() {
 fn wrapped_muse_namespaces_plan_the_multimodal_contract() {
     let root = tempfile::tempdir().expect("temporary model root");
     write_auto_metadata(root.path(), &packed_muse_config());
-    let names = ["model.language_model.embed_tokens.weight"];
+    // Two wrapped tensors keep the two-layer fixture within the pre-contract
+    // tensor budget; the embedding is still the first mapped mismatch.
+    let names = [
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.norm.weight",
+    ];
     let expected_tensors = names
         .iter()
         .map(|name| ExpectedTensor::new(*name, vec![1]))
@@ -2643,9 +2755,14 @@ fn wrapped_muse_namespaces_plan_the_multimodal_contract() {
     .map(|_| ())
     .unwrap_err();
     assert!(
-        matches!(&error, Error::Checkpoint(reason)
-            if reason == "shape mismatch for `model.embed_tokens.weight`: mapped [1], expected [128, 64]"),
+        matches!(&error, Error::CheckpointPlan(CheckpointError::ShapeMismatch { tensor, .. })
+            if tensor == "model.embed_tokens.weight"),
         "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "checkpoint error: shape mismatch for `model.embed_tokens.weight`: mapped [1], \
+         expected [128, 64]"
     );
 }
 
@@ -2732,7 +2849,7 @@ fn nemotron_applies_pinned_accounting_only_with_complete_provenance() {
         };
         let error = load(&options).map(|_| ()).unwrap_err();
         assert!(
-            matches!(&error, Error::Checkpoint(reason) if *reason == generic),
+            matches!(&error, Error::CheckpointPlan(cause) if cause.to_string() == generic),
             "{repository:?} {revision:?}: {error}"
         );
     }
@@ -2740,7 +2857,7 @@ fn nemotron_applies_pinned_accounting_only_with_complete_provenance() {
     let complete = fixture_options("nvidia/fixture", "fixture-revision");
     let error = load(&complete).map(|_| ()).unwrap_err();
     assert!(
-        matches!(&error, Error::Checkpoint(reason) if reason
+        matches!(&error, Error::CheckpointPlan(cause) if cause.to_string()
             == "checkpoint index total-size policy mismatch: supplied repository \
                 `nvidia/fixture` does not match pinned \
                 `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`"),

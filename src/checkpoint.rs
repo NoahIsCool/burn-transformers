@@ -65,6 +65,7 @@
 
 pub(crate) mod accounting;
 mod artifact;
+mod budget;
 mod division;
 mod dtype;
 mod error;
@@ -83,6 +84,7 @@ pub use artifact::{
     ArtifactSource, CheckpointManifest, ResolvedIndexTensorAlias, ShardInventory, TensorInventory,
     discover_checkpoint,
 };
+pub(crate) use budget::require_source_tensors;
 pub use dtype::TensorDType;
 pub use error::{CheckpointError, Result};
 pub(crate) use mapping::build_load_plan_with_index_total_size_policy;

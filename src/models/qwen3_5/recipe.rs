@@ -256,8 +256,7 @@ impl Qwen3_5BackboneRecipe {
                 "recipe loading owns its explicit parameter exceptions; remove broad missing/unexpected allowlists",
             ));
         }
-        let manifest = CheckpointManifest::discover(root, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let manifest = CheckpointManifest::discover(root, &options.checkpoint)?;
         let source = source_namespace(&manifest, options.source)?;
         let source_contract = self
             .source_config
@@ -266,9 +265,7 @@ impl Qwen3_5BackboneRecipe {
                 include_mtp: false,
             })
             .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        let source_plan = source_contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let source_plan = source_contract.build_load_plan(&manifest, &options.checkpoint)?;
         let initialization_dtype = source_plan
             .tensors
             .iter()
@@ -381,8 +378,7 @@ impl Qwen3_5BackboneRecipe {
         if self.source_config.tie_word_embeddings {
             report.omitted.push(ParameterDisposition::new("lm_head.weight", "tied vocabulary view omitted; its embedding storage owner remains available to the backbone"));
         }
-        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)?;
         let new_parameters = report
             .newly_initialized
             .iter_mut()
@@ -399,7 +395,7 @@ impl Qwen3_5BackboneRecipe {
             dtype: initialization_dtype,
         });
         let checkpoint = execute_local_load_plan(&manifest, &plan, &mut model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            .map_err(Error::checkpoint_execution)?;
         for conversion in &checkpoint.report.dtype_converted {
             if let Some(index) = report
                 .reused

@@ -117,3 +117,97 @@ fn rope_configuration_errors_convert_with_question_mark() {
         Error::Rope(RopeConfigError::ZeroHeadDimension)
     ));
 }
+
+/// Checkpoint planning composes with `?` and keeps the typed cause and its message.
+#[test]
+fn checkpoint_planning_errors_convert_with_question_mark() {
+    use crate::checkpoint::{CheckpointError, CheckpointManifest, LoadOptions};
+
+    /// Discovers a checkpoint inside a function returning the crate result.
+    fn discover(root: &std::path::Path) -> Result<CheckpointManifest> {
+        Ok(CheckpointManifest::discover(root, &LoadOptions::default())?)
+    }
+    let root = tempfile::TempDir::new().unwrap();
+    let error = discover(root.path()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::CheckpointPlan(CheckpointError::ArtifactNotFound { .. })
+        ),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("checkpoint error: no SafeTensors checkpoint found")
+    );
+}
+
+/// An execution failure keeps its message, failed target, partial report, and counters.
+#[test]
+fn checkpoint_execution_failures_keep_their_audit() {
+    use crate::checkpoint::{
+        ExecutionFailure, ExecutionFailureCause, ExecutionStats, LoadReport,
+        quantization::{
+            AuditedQuantizedExecutionFailure, PackedLoadStats, PackedPreflightStats,
+            QuantizedExecutionFailure, QuantizedSinkError,
+        },
+    };
+
+    let mut report = LoadReport::default();
+    report.applied.push("model.embed_tokens.weight".into());
+    let stats = ExecutionStats {
+        tensors_applied: 1,
+        ..ExecutionStats::default()
+    };
+    let failure = Box::new(ExecutionFailure {
+        failed_target: Some("model.norm.weight".into()),
+        cause: ExecutionFailureCause::Sink("dtype rejected"),
+        report: report.clone(),
+        stats: stats.clone(),
+    });
+    let error = Error::checkpoint_execution(failure);
+    assert_eq!(
+        error.to_string(),
+        "checkpoint error: checkpoint execution failed at `model.norm.weight`: \
+         tensor sink failed: dtype rejected"
+    );
+    match &error {
+        Error::CheckpointExecution {
+            failed_target,
+            report: partial,
+            stats: counters,
+            ..
+        } => {
+            assert_eq!(failed_target.as_deref(), Some("model.norm.weight"));
+            assert_eq!(**partial, report);
+            assert_eq!(**counters, stats);
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+
+    let packed = Box::new(AuditedQuantizedExecutionFailure {
+        format_version: 2,
+        preflight: PackedPreflightStats::default(),
+        execution: QuantizedExecutionFailure {
+            failed_target: None,
+            cause: ExecutionFailureCause::Sink(QuantizedSinkError::Architecture("rejected")),
+            report: report.clone(),
+            execution: stats.clone(),
+            packed: PackedLoadStats::default(),
+            provenance: Default::default(),
+        },
+    });
+    let error = Error::quantized_checkpoint_execution(packed);
+    assert!(
+        error
+            .to_string()
+            .starts_with("checkpoint error: quantized checkpoint execution failed: "),
+        "{error}"
+    );
+    assert!(matches!(
+        &error,
+        Error::CheckpointExecution { failed_target: None, report: partial, stats: counters, .. }
+            if **partial == report && **counters == stats
+    ));
+}

@@ -75,6 +75,38 @@ impl NemotronHCheckpointOptions {
         self.provenance = Some(provenance);
         self
     }
+
+    /// Discovers headers under the artifact policy these options select.
+    ///
+    /// Equal to [`NemotronHCheckpointContract::discover_checkpoint`] for a
+    /// contract built from these options, because the policy depends only on
+    /// the provenance; automatic loading uses it to discover (and bound the
+    /// configuration against the discovered tensors) before it builds the
+    /// contract.
+    pub(crate) fn discover_checkpoint(
+        &self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+    ) -> crate::checkpoint::Result<CheckpointManifest> {
+        discover_with_policy(root, options, self.total_size_policy().as_ref())
+    }
+
+    /// Returns the pinned index-accounting policy the provenance selects, if any.
+    fn total_size_policy(&self) -> Option<PinnedIndexTotalSizePolicy> {
+        self.provenance.as_ref().map(lightning_total_size_policy)
+    }
+}
+
+/// Discovers with the generic strict policy, or with `policy` when one is pinned.
+fn discover_with_policy(
+    root: impl AsRef<Path>,
+    options: &LoadOptions,
+    policy: Option<&PinnedIndexTotalSizePolicy>,
+) -> crate::checkpoint::Result<CheckpointManifest> {
+    match policy {
+        Some(policy) => discover_checkpoint_with_index_total_size_policy(root, options, policy),
+        None => discover_checkpoint(root, options),
+    }
 }
 
 /// Complete internal tensor inventory plus explicit source renames.
@@ -111,10 +143,7 @@ impl NemotronHCheckpointContract {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> crate::checkpoint::Result<CheckpointManifest> {
-        match &self.total_size_policy {
-            Some(policy) => discover_checkpoint_with_index_total_size_policy(root, options, policy),
-            None => discover_checkpoint(root, options),
-        }
+        discover_with_policy(root, options, self.total_size_policy.as_ref())
     }
 
     /// Strictly compares a discovered artifact with this complete contract.
@@ -268,7 +297,7 @@ impl NemotronHConfig {
         if self.num_nextn_predict_layers > 0 {
             add_mtp(&mut expected, &mut mappings, dimensions, self)?;
         }
-        let total_size_policy = options.provenance.as_ref().map(lightning_total_size_policy);
+        let total_size_policy = options.total_size_policy();
         Ok(NemotronHCheckpointContract {
             expected,
             mappings,

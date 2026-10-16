@@ -80,11 +80,49 @@ pub enum Error {
     },
 
     /// Checkpoint tensors fail strict validation or application.
+    ///
+    /// Checkpoint discovery and planning failures with a typed cause are
+    /// [`Error::CheckpointPlan`]; failures while streaming tensors into a model
+    /// are [`Error::CheckpointExecution`]. This variant carries the remaining
+    /// checkpoint diagnostics, such as load-report audit violations.
     #[error("checkpoint error: {0}")]
     Checkpoint(
         /// Checkpoint validation or application failure with tensor context.
         String,
     ),
+
+    /// Checkpoint discovery, header validation, or strict planning failed
+    /// before any parameter was written (pass one).
+    ///
+    /// Converted automatically, so `CheckpointManifest::discover(..)?` and
+    /// `build_load_plan(..)?` work in any function returning [`Result`].
+    /// Automatic loading returns this variant for every typed planning failure,
+    /// for example [`crate::checkpoint::CheckpointError::ArtifactNotFound`] for a
+    /// directory without SafeTensors files.
+    #[error("checkpoint error: {0}")]
+    CheckpointPlan(
+        /// Typed discovery, namespace, mapping, or strict-validation failure.
+        #[from]
+        crate::checkpoint::CheckpointError,
+    ),
+
+    /// Streaming a planned checkpoint into a model failed after zero or more
+    /// audited parameter writes (pass two).
+    ///
+    /// `report.applied` lists exactly the writes that succeeded; discard the
+    /// partially loaded model rather than continue inference.
+    #[error("checkpoint error: {message}")]
+    CheckpointExecution {
+        /// Complete diagnostic, naming the failed target when known and the
+        /// checkpoint-side or model-side cause.
+        message: String,
+        /// Target being materialized or written, or `None` for plan or source failures.
+        failed_target: Option<String>,
+        /// Finalized partial load report.
+        report: Box<crate::checkpoint::LoadReport>,
+        /// Runtime I/O and staging counters observed before the failure.
+        stats: Box<crate::checkpoint::ExecutionStats>,
+    },
 
     /// Tokenizer files or operations are invalid.
     #[error("tokenizer error: {0}")]
@@ -213,6 +251,45 @@ impl Error {
         Self::Json {
             path: path.into(),
             source,
+        }
+    }
+
+    /// Converts a pass-two execution failure into [`Error::CheckpointExecution`].
+    ///
+    /// The sink error type `E` is family-specific, so its text is kept in the
+    /// message while the partial report and counters stay structured.
+    pub(crate) fn checkpoint_execution<E: core::fmt::Display>(
+        failure: Box<crate::checkpoint::ExecutionFailure<E>>,
+    ) -> Self {
+        let message = failure.to_string();
+        let crate::checkpoint::ExecutionFailure {
+            failed_target,
+            report,
+            stats,
+            ..
+        } = *failure;
+        Self::CheckpointExecution {
+            message,
+            failed_target,
+            report: Box::new(report),
+            stats: Box::new(stats),
+        }
+    }
+
+    /// Converts a packed (Burnpack sidecar) execution failure into [`Error::CheckpointExecution`].
+    ///
+    /// The SafeTensors counters are kept; the packed-sidecar and provenance
+    /// counters are available only from the checkpoint module's own API.
+    pub(crate) fn quantized_checkpoint_execution<E: core::fmt::Display>(
+        failure: Box<crate::checkpoint::quantization::AuditedQuantizedExecutionFailure<E>>,
+    ) -> Self {
+        let message = failure.to_string();
+        let execution = failure.into_execution();
+        Self::CheckpointExecution {
+            message,
+            failed_target: execution.failed_target,
+            report: Box::new(execution.report),
+            stats: Box::new(execution.execution),
         }
     }
 }

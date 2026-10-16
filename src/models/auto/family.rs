@@ -24,7 +24,9 @@ use burn::tensor::backend::Backend;
 
 use crate::{
     Error, Result,
-    checkpoint::{CheckpointError, CheckpointManifest, LanguageNamespace, LoadPlan, TensorSink},
+    checkpoint::{
+        CheckpointManifest, LanguageNamespace, LoadPlan, TensorSink, require_source_tensors,
+    },
     models::{
         config::{ModelConfig, TokenIds},
         deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
@@ -87,6 +89,17 @@ pub(super) trait CausalFamily<B: Backend>: Sized + TensorSink {
     /// Returns the vocabulary size and generation token IDs of a configuration.
     fn token_metadata(config: &Self::Config) -> TokenMetadata<'_>;
 
+    /// Returns a lower bound on the distinct source tensors a loadable
+    /// checkpoint must contain, computed from the configuration alone.
+    ///
+    /// Planning compares it with the discovered checkpoint before it builds
+    /// the per-tensor contract, whose cost grows with the declared depth and
+    /// expert count (see [`require_source_tensors`]). Every layer owns at
+    /// least one tensor, so the depth is always a bound; families whose
+    /// contract maps one source tensor to each parameter return their exact
+    /// inventory less the LM head, which a tied configuration aliases.
+    fn minimum_checkpoint_tensors(config: &Self::Config) -> usize;
+
     /// Discovers the local checkpoint and plans its strict installation.
     fn plan_checkpoint(
         config: &Self::Config,
@@ -104,18 +117,38 @@ pub(super) trait CausalFamily<B: Backend>: Sized + TensorSink {
 
 // Shared planning helpers.
 
-/// Maps a checkpoint discovery, namespace, or planning failure to a crate error.
-///
-/// Every typed [`CheckpointError`] of automatic planning passes through this
-/// one function. [`Error`] has no typed checkpoint variant yet, so the error is
-/// rendered into [`Error::Checkpoint`] with its complete message.
-fn checkpoint_error(error: CheckpointError) -> Error {
-    Error::Checkpoint(error.to_string())
+// Every typed `CheckpointError` of automatic planning converts into
+// [`Error::CheckpointPlan`] through `?`, so callers can match the cause.
+
+/// Discovers headers with the crate's generic strict artifact policy and
+/// checks that they can hold `required` source tensors.
+fn discover(root: &Path, options: &AutoLoadOptions, required: usize) -> Result<CheckpointManifest> {
+    holding(
+        CheckpointManifest::discover(root, &options.checkpoint)?,
+        options,
+        required,
+    )
 }
 
-/// Discovers headers with the crate's generic strict artifact policy.
-fn discover(root: &Path, options: &AutoLoadOptions) -> Result<CheckpointManifest> {
-    CheckpointManifest::discover(root, &options.checkpoint).map_err(checkpoint_error)
+/// Returns `manifest` once it can provide `required` distinct source tensors.
+///
+/// Runs before the family contract is built, so a configuration far larger
+/// than its checkpoint fails without allocating one entry per parameter.
+fn holding(
+    manifest: CheckpointManifest,
+    options: &AutoLoadOptions,
+    required: usize,
+) -> Result<CheckpointManifest> {
+    require_source_tensors(&manifest, &options.checkpoint, required)?;
+    Ok(manifest)
+}
+
+/// Exact inventory less the LM head, for contracts mapping one source per parameter.
+///
+/// `count` is the family's validated `checkpoint_tensor_count()`, which
+/// validation proved finite; `layers` is the fallback bound otherwise.
+fn one_to_one_minimum(count: Option<usize>, layers: usize) -> usize {
+    count.map_or(layers, |count| count.saturating_sub(1))
 }
 
 /// Classifies a discovered manifest's language namespace for `family`.
@@ -126,7 +159,7 @@ fn manifest_namespace(
     manifest: &CheckpointManifest,
     family: &'static str,
 ) -> Result<LanguageNamespace> {
-    LanguageNamespace::of_manifest(manifest, family).map_err(checkpoint_error)
+    Ok(LanguageNamespace::of_manifest(manifest, family)?)
 }
 
 // Registered families.
@@ -144,17 +177,20 @@ impl<B: Backend> CausalFamily<B> for DeepseekV2ForCausalLm<B> {
         )
     }
 
+    /// The exact one-to-one inventory less the LM head a tied configuration aliases.
+    fn minimum_checkpoint_tensors(config: &DeepseekV2Config) -> usize {
+        one_to_one_minimum(config.checkpoint_tensor_count(), config.num_hidden_layers)
+    }
+
     /// Plans the single published DeepSeek-V2 namespace.
     fn plan_checkpoint(
         config: &DeepseekV2Config,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let contract = config.checkpoint_contract(DeepseekV2CheckpointOptions::default())?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -181,21 +217,25 @@ impl<B: Backend> CausalFamily<B> for MuseGlimmerForCausalLm<B> {
         )
     }
 
+    /// The depth: every block owns at least one tensor, and this dense
+    /// contract grows only linearly with it.
+    fn minimum_checkpoint_tensors(config: &MuseGlimmerTextConfig) -> usize {
+        config.num_hidden_layers
+    }
+
     /// Plans the multimodal or text-only namespace present in the checkpoint.
     fn plan_checkpoint(
         config: &MuseGlimmerTextConfig,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let source = match manifest_namespace(&manifest, "Muse")? {
             LanguageNamespace::Wrapped => MuseGlimmerCheckpointSource::Multimodal,
             LanguageNamespace::TextOnly => MuseGlimmerCheckpointSource::TextOnly,
         };
         let contract = config.checkpoint_contract(MuseGlimmerCheckpointOptions { source })?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -222,6 +262,14 @@ impl<B: Backend> CausalFamily<B> for NemotronHForCausalLm<B> {
         )
     }
 
+    /// The exact one-to-one inventory less the LM head a tied configuration aliases.
+    fn minimum_checkpoint_tensors(config: &NemotronHConfig) -> usize {
+        one_to_one_minimum(
+            config.checkpoint_tensor_count(),
+            config.layers_block_type.len(),
+        )
+    }
+
     /// Plans with Nemotron's own discovery, which knows pinned NVIDIA provenance.
     ///
     /// When both a repository and a revision are recorded, the contract may
@@ -237,13 +285,13 @@ impl<B: Backend> CausalFamily<B> for NemotronHForCausalLm<B> {
                 .with_provenance(NemotronHCheckpointProvenance::new(repository, revision)),
             _ => NemotronHCheckpointOptions::default(),
         };
+        let manifest = holding(
+            architecture_options.discover_checkpoint(root, &options.checkpoint)?,
+            options,
+            Self::minimum_checkpoint_tensors(config),
+        )?;
         let contract = config.checkpoint_contract(architecture_options)?;
-        let manifest = contract
-            .discover_checkpoint(root, &options.checkpoint)
-            .map_err(checkpoint_error)?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -270,13 +318,19 @@ impl<B: Backend> CausalFamily<B> for Qwen3_5ForCausalLm<B> {
         )
     }
 
+    /// The depth: every block owns at least one tensor, and this dense
+    /// contract grows only linearly with it.
+    fn minimum_checkpoint_tensors(config: &Qwen3_5TextConfig) -> usize {
+        config.num_hidden_layers
+    }
+
     /// Plans the namespace present in the checkpoint, with MTP tensors on request.
     fn plan_checkpoint(
         config: &Qwen3_5TextConfig,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let source = match manifest_namespace(&manifest, "Qwen")? {
             LanguageNamespace::Wrapped => Qwen3_5CheckpointSource::Multimodal,
             LanguageNamespace::TextOnly => Qwen3_5CheckpointSource::TextOnly,
@@ -285,9 +339,7 @@ impl<B: Backend> CausalFamily<B> for Qwen3_5ForCausalLm<B> {
             source,
             include_mtp: options.qwen_mtp,
         })?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -320,17 +372,20 @@ impl<B: Backend> CausalFamily<B> for Qwen3MoeForCausalLm<B> {
         )
     }
 
+    /// The exact one-to-one inventory less the LM head a tied configuration aliases.
+    fn minimum_checkpoint_tensors(config: &Qwen3MoeConfig) -> usize {
+        one_to_one_minimum(config.checkpoint_tensor_count(), config.num_hidden_layers)
+    }
+
     /// Plans the single published Qwen3-MoE namespace.
     fn plan_checkpoint(
         config: &Qwen3MoeConfig,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let contract = config.checkpoint_contract(Qwen3MoeCheckpointOptions::default())?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -357,17 +412,21 @@ impl<B: Backend> CausalFamily<B> for LlamaForCausalLm<B> {
         )
     }
 
+    /// The depth: every block owns at least one tensor, and this dense
+    /// contract grows only linearly with it.
+    fn minimum_checkpoint_tensors(config: &LlamaFamilyConfig) -> usize {
+        config.num_hidden_layers
+    }
+
     /// Plans the single text namespace every Llama-family reference publishes.
     fn plan_checkpoint(
         config: &LlamaFamilyConfig,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let contract = config.checkpoint_contract(LlamaCheckpointOptions::default())?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -394,6 +453,12 @@ impl<B: Backend> CausalFamily<B> for GemmaForCausalLm<B> {
         )
     }
 
+    /// The depth: every block owns at least one tensor, and this dense
+    /// contract grows only linearly with it.
+    fn minimum_checkpoint_tensors(config: &GemmaConfig) -> usize {
+        config.num_hidden_layers
+    }
+
     /// Plans the text-only, multimodal, or original-release namespace present in the checkpoint.
     ///
     /// A multimodal checkpoint's vision tower is exempted by the contract
@@ -403,13 +468,11 @@ impl<B: Backend> CausalFamily<B> for GemmaForCausalLm<B> {
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))
             .map_err(Error::Checkpoint)?;
         let contract = config.checkpoint_contract(GemmaCheckpointOptions { source })?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 
@@ -436,17 +499,22 @@ impl<B: Backend> CausalFamily<B> for GptOssForCausalLm<B> {
         )
     }
 
+    /// The depth: every block owns at least one tensor, and gpt-oss stores
+    /// each layer's experts in fused banks, so the contract grows only
+    /// linearly with it.
+    fn minimum_checkpoint_tensors(config: &GptOssConfig) -> usize {
+        config.num_hidden_layers
+    }
+
     /// Plans the single published namespace; MXFP4 experts decode when the config declares them.
     fn plan_checkpoint(
         config: &GptOssConfig,
         root: &Path,
         options: &AutoLoadOptions,
     ) -> Result<PlannedCheckpoint> {
-        let manifest = discover(root, options)?;
+        let manifest = discover(root, options, Self::minimum_checkpoint_tensors(config))?;
         let contract = config.checkpoint_contract(GptOssCheckpointOptions::default())?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(checkpoint_error)?;
+        let plan = contract.build_load_plan(&manifest, &options.checkpoint)?;
         Ok(PlannedCheckpoint { manifest, plan })
     }
 

@@ -55,6 +55,25 @@ pub enum CheckpointError {
         /// Model family whose namespaces were probed, such as `Muse`.
         family: &'static str,
     },
+    /// The configuration needs more source tensors than the checkpoint holds.
+    ///
+    /// Every layer of every family owns at least one checkpoint tensor, so a
+    /// configuration's depth (or, for one-to-one contracts, its exact
+    /// inventory) bounds the tensors any loadable checkpoint must contain.
+    /// Automatic loading checks that bound against the discovered tensors and
+    /// index aliases before it builds the per-tensor contract, whose cost grows
+    /// with the declared depth and expert count. It is not checked when
+    /// [`super::LoadOptions::allow_missing`] can excuse missing tensors.
+    #[error(
+        "the configuration needs at least {required} checkpoint tensors, but the checkpoint \
+         provides only {available} (tensors plus index aliases)"
+    )]
+    TooFewTensors {
+        /// Lower bound on the distinct source tensors the configuration needs.
+        required: usize,
+        /// Discovered tensors plus resolved index-only aliases.
+        available: usize,
+    },
     /// A user- or index-supplied relative path was unsafe.
     #[error("unsafe checkpoint-relative path `{path}`: {reason}")]
     UnsafeRelativePath {
