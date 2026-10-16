@@ -66,13 +66,25 @@
 //! read view) or strided is first copied exactly as `slice_assign` would, so
 //! no other tensor can observe the write. Every other backend, autodiff
 //! included, and every packed or mismatched operand, uses `slice_assign`.
+//!
+//! # One-column depthwise convolution
+//!
+//! Recurrent mixers (Mamba-2, Gated DeltaNet) run a `K`-tap depthwise
+//! convolution over `[history | new tokens]`; a one-token decode step has
+//! exactly one output column, `C · K` multiply-adds. Burn Flex 0.21's
+//! depthwise kernel nevertheless fans every `(batch, channel)` plane out to
+//! rayon, and under CPU contention the decode thread then waits in rayon's
+//! latch. The crate-internal `depthwise_conv1d` evaluates that single column
+//! on inference Flex in F32 as one elementwise product and one sequential
+//! middle-axis sum, which reproduces the Flex kernel's accumulation order bit
+//! for bit; every other case is Burn's `conv1d`.
 
 use core::ops::Range;
 
 use burn::{
     module::Param,
     nn::{Linear, LinearConfig, LinearLayout},
-    tensor::{DType, Tensor, backend::Backend},
+    tensor::{DType, Tensor, backend::Backend, module::conv1d, ops::ConvOptions},
 };
 
 use crate::{Error, Result};
@@ -368,6 +380,61 @@ fn region_runs<const D: usize>(
             .collect();
     }
     (run, offsets)
+}
+
+/// Depthwise one-dimensional convolution with no padding, unit stride, and unit dilation.
+///
+/// `input` is `[batch, channels, width]`, `weight` the depthwise
+/// `[channels, 1, kernel]` (with `groups == channels`), and `bias` an optional
+/// `[channels]`; the result is `[batch, channels, width - kernel + 1]` with
+/// `y[b, c, t] = bias[c] + Σ_k weight[c, 0, k] · input[b, c, t + k]`. It equals
+/// Burn's `conv1d` with `ConvOptions::new([1], [0], [1], groups)`, which it
+/// calls in every case but one.
+///
+/// The exception is a single output column (`width == kernel`, the one-token
+/// decode step) on inference Flex with F32 operands and `groups == channels`.
+/// Flex's depthwise kernel would spawn one rayon task per `(batch, channel)`
+/// for `kernel` multiply-adds each. Instead, the products `x · w` are one
+/// elementwise multiplication of `[batch, channels · kernel]` by a shared
+/// `[1, channels · kernel]` weight row (Flex's SIMD shared-row path), and the
+/// taps are summed as the middle axis of `[batch · channels, kernel, 1]`,
+/// which Flex accumulates sequentially from zero. Flex's kernel computes
+/// `((0 + w₀x₀) + w₁x₁) + …` and then adds the bias, so the result is bit
+/// for bit the same (tested); this is not a reassociated sum. F16 and BF16
+/// keep `conv1d`, whose per-tap rounding the F32-accumulating reduction would
+/// not reproduce.
+pub(crate) fn depthwise_conv1d<B: Backend>(
+    input: Tensor<B, 3>,
+    weight: Tensor<B, 3>,
+    bias: Option<Tensor<B, 1>>,
+    groups: usize,
+) -> Tensor<B, 3> {
+    let [batch, channels, width] = input.dims();
+    let [output_channels, channels_per_group, kernel] = weight.dims();
+    let single_column = width == kernel
+        && groups == channels
+        && output_channels == channels
+        && channels_per_group == 1
+        && input.dtype() == DType::F32
+        && weight.dtype() == DType::F32
+        && bias
+            .as_ref()
+            .is_none_or(|bias| bias.dtype() == DType::F32 && bias.dims() == [channels])
+        && is_inference_flex::<B>(&input.device());
+    if !single_column {
+        return conv1d(input, weight, bias, ConvOptions::new([1], [0], [1], groups));
+    }
+    let taps = channels * kernel;
+    let products = input.reshape([batch, taps]) * weight.reshape([1, taps]);
+    let summed = products
+        .reshape([batch * channels, kernel, 1])
+        .sum_dim(1)
+        .reshape([batch, channels]);
+    let output = match bias {
+        Some(bias) => summed + bias.reshape([1, channels]),
+        None => summed,
+    };
+    output.reshape([batch, channels, 1])
 }
 
 /// Applies a Burn linear module without dequantizing a packed weight up front.

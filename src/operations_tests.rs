@@ -1215,3 +1215,148 @@ fn region_write_timing() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// One-column depthwise convolution
+// ---------------------------------------------------------------------------
+
+/// Burn's depthwise `conv1d` with unit stride and dilation and no padding (the reference).
+fn reference_depthwise(
+    input: Tensor<Flex, 3>,
+    weight: Tensor<Flex, 3>,
+    bias: Option<Tensor<Flex, 1>>,
+) -> Tensor<Flex, 3> {
+    let groups = weight.dims()[0];
+    burn::tensor::module::conv1d(
+        input,
+        weight,
+        bias,
+        burn::tensor::ops::ConvOptions::new([1], [0], [1], groups),
+    )
+}
+
+/// The decode column reproduces Flex's depthwise kernel bit for bit, with and without bias.
+///
+/// Covers kernels 1 through 4, a batch of one and above one, channel counts
+/// that are and are not SIMD multiples, and inputs whose products cancel to
+/// signed zeros, so the sequential accumulation order is checked exactly.
+#[test]
+fn single_column_depthwise_convolution_matches_conv1d_bitwise() {
+    for kernel in 1..=4 {
+        for (batch, channels) in [(1, 5), (3, 37), (8, 16)] {
+            let input = irregular([batch, channels, kernel]).mul_scalar(3.0);
+            let weight = irregular([channels, 1, kernel]).add_scalar(0.25);
+            let bias = irregular([channels]).mul_scalar(-0.5);
+            for bias in [None, Some(bias)] {
+                let expected = reference_depthwise(input.clone(), weight.clone(), bias.clone());
+                let actual = super::depthwise_conv1d(input.clone(), weight.clone(), bias, channels);
+                assert_eq!(actual.dims(), [batch, channels, 1]);
+                assert_eq!(
+                    bit_pattern(actual),
+                    bit_pattern(expected),
+                    "{batch}x{channels}x{kernel}"
+                );
+            }
+        }
+    }
+    let zeros = Tensor::<Flex, 3>::zeros([2, 3, 4], &Default::default()).neg();
+    let weight = irregular([3, 1, 4]);
+    assert_eq!(
+        bit_pattern(super::depthwise_conv1d(
+            zeros.clone(),
+            weight.clone(),
+            None,
+            3
+        )),
+        bit_pattern(reference_depthwise(zeros, weight, None))
+    );
+}
+
+/// Every other convolution is exactly Burn's `conv1d`.
+///
+/// Prefill widths, grouped (non-depthwise) weights, and F16/BF16 operands
+/// take Burn's kernel, so their results are identical by construction.
+#[test]
+fn other_depthwise_convolutions_are_burn_conv1d() {
+    let input = irregular([2, 4, 6]);
+    let weight = irregular([4, 1, 3]);
+    assert_eq!(
+        bit_pattern(super::depthwise_conv1d(
+            input.clone(),
+            weight.clone(),
+            None,
+            4
+        )),
+        bit_pattern(reference_depthwise(input.clone(), weight.clone(), None))
+    );
+    for dtype in [DType::F16, DType::BF16] {
+        let input = irregular([2, 4, 3]).cast(dtype);
+        let weight = irregular([4, 1, 3]).cast(dtype);
+        assert_eq!(
+            bit_pattern(super::depthwise_conv1d(
+                input.clone(),
+                weight.clone(),
+                None,
+                4
+            )),
+            bit_pattern(reference_depthwise(input, weight, None)),
+            "{dtype:?}"
+        );
+    }
+    let grouped = irregular([4, 2, 3]);
+    let expected = burn::tensor::module::conv1d(
+        irregular([1, 4, 3]),
+        grouped.clone(),
+        None,
+        burn::tensor::ops::ConvOptions::new([1], [0], [1], 2),
+    );
+    assert_eq!(
+        bit_pattern(super::depthwise_conv1d(
+            irregular([1, 4, 3]),
+            grouped,
+            None,
+            2
+        )),
+        bit_pattern(expected)
+    );
+}
+
+/// Release-mode timing of the decode column against Burn Flex's depthwise `conv1d`.
+///
+/// Shapes are a Lightning Mamba-2 layer (10,240 channels, with bias) and a
+/// Qwen3.5-0.8B DeltaNet layer (6,144 channels, no bias), kernel 4, at batch
+/// 1 and 8; medians of 41 interleaved samples. Run with `cargo test --release
+/// --lib operations::tests::depthwise_column_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn depthwise_column_timing() {
+    use std::time::Instant;
+    let median = |samples: &mut Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2] * 1e6
+    };
+    for (channels, biased) in [(10_240, true), (6_144, false)] {
+        for batch in [1, 8] {
+            let input = irregular([batch, channels, 4]);
+            let weight = irregular([channels, 1, 4]);
+            let bias = biased.then(|| irregular([channels]));
+            let (mut burn, mut column) = (Vec::new(), Vec::new());
+            for _ in 0..41 {
+                let started = Instant::now();
+                let _ =
+                    reference_depthwise(input.clone(), weight.clone(), bias.clone()).into_data();
+                burn.push(started.elapsed().as_secs_f64());
+                let started = Instant::now();
+                let _ =
+                    super::depthwise_conv1d(input.clone(), weight.clone(), bias.clone(), channels)
+                        .into_data();
+                column.push(started.elapsed().as_secs_f64());
+            }
+            let (before, after) = (median(&mut burn), median(&mut column));
+            eprintln!(
+                "depthwise decode column [{batch}, {channels}, 4] bias {biased}: conv1d {before:.0} us, column {after:.0} us ({:.1}x)",
+                before / after
+            );
+        }
+    }
+}

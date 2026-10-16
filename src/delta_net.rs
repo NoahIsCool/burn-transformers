@@ -51,7 +51,7 @@ use burn::{
     },
     tensor::{
         Bool, DType, Distribution, FloatDType, IndexingUpdateOp, Int, Tensor, activation,
-        backend::Backend, module::conv1d, ops::ConvOptions,
+        backend::Backend,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -794,13 +794,10 @@ impl<B: Backend> GatedDeltaNet<B> {
     ) -> CausalConvolution<B> {
         let [batch, channels, sequence] = projected.dims();
         let history_width = self.convolution_kernel - 1;
+        // A one-token decode step has one output column, which
+        // `depthwise_conv1d` evaluates exactly without Flex's rayon fan-out.
         let convolve = |input: Tensor<B, 3>| {
-            conv1d(
-                input,
-                self.conv1d.weight.val(),
-                None,
-                ConvOptions::new([1], [0], [1], self.conv1d.groups),
-            )
+            operations::depthwise_conv1d(input, self.conv1d.weight.val(), None, self.conv1d.groups)
         };
         if history_width == 0 {
             // No temporal taps: the empty history is preserved as-is and

@@ -96,10 +96,7 @@ use burn::{
         Initializer, Linear, LinearConfig, LinearLayout, PaddingConfig1d,
         conv::{Conv1d, Conv1dConfig},
     },
-    tensor::{
-        Bool, DType, Int, Tensor, TensorData, activation, backend::Backend, module::conv1d,
-        ops::ConvOptions,
-    },
+    tensor::{Bool, DType, Int, Tensor, TensorData, activation, backend::Backend},
 };
 use serde::{Deserialize, Serialize};
 
@@ -845,11 +842,13 @@ impl<B: Backend> Mamba2<B> {
         // `joined` is `[batch, channels, (K - 1) + sequence]`: history, then inputs.
         let history = state.convolution.clone().cast(xbc.dtype());
         let joined = Tensor::cat(vec![history, xbc], 2);
-        let convolved = conv1d(
+        // Exactly Burn's `conv1d`; a one-token decode column skips Flex's
+        // per-channel rayon fan-out (`operations::depthwise_conv1d`).
+        let convolved = operations::depthwise_conv1d(
             joined.clone(),
             self.conv1d.weight.val(),
             self.conv1d.bias.as_ref().map(|bias| bias.val()),
-            ConvOptions::new([1], [0], [1], self.conv1d.groups),
+            self.conv1d.groups,
         );
         let convolved = zero_invalid(
             activation::silu(convolved).swap_dims(1, 2),
