@@ -61,8 +61,9 @@
 //! - `round_digits_to_tens` (Python's `round(float, -k)` on a float's exact
 //!   decimal expansion) returns the digits of the quotient by `10^k` plus
 //!   round-half-even's carry, a fraction breaking ties upward; its
-//!   comparison of the dropped digits with `50...0` orders twice their value
-//!   against the unit exactly.
+//!   comparison of the dropped digits with `50...0`
+//!   (`compare_dropped_with_half`) orders twice their value against the unit
+//!   exactly.
 //!
 //! and to `src/tokenization/chat_template/scan.rs`, the tag scanner shared by
 //! the chat-template source rewrites, against a step-by-step reference model
@@ -84,7 +85,10 @@
 //!   (`is_basic_tag`) for names that start with a non-space byte, and
 //!   `raw_section_end` ends at the first such `endraw` tag (`raw_end_scan`);
 //! - `next_tag_opening` and `find_pattern` return exactly the first tag
-//!   opening or pattern occurrence at or after their start;
+//!   opening or pattern occurrence at or after their start, built on
+//!   `starts_with_at` (exactly an in-bounds, byte-for-byte match) and
+//!   `is_ascii_space` (exactly space, tab, line feed, form feed, and
+//!   carriage return);
 //!   `marker_widths` never exceeds the tag body, and `char_boundary_at_most`
 //!   returns the largest character boundary at or below its limit (against
 //!   vstd's UTF-8 model of `str`); `is_identifier`, which picks the namespace
@@ -105,6 +109,11 @@
 //!   out of a name, string, or number; an error means no tokenization exists
 //!   (`lemma_no_tokenization`) and names an unterminated quote or a byte no
 //!   token starts with;
+//! - the byte classes `is_space`, `is_digit`, `is_name_byte`,
+//!   `is_single_symbol`, and `is_double_symbol` equal their specifications
+//!   (ASCII whitespace, digits, identifier continuations, MiniJinja's
+//!   one-byte symbols, and the two-byte symbols `//`, `**`, `==`, `!=`,
+//!   `>=`, `<=`);
 //! - `string_end` returns exactly `string_close`, and `number_end` stops
 //!   exactly where the transcribed state machine (`number_step`) stops
 //!   (`number_stops_at`, which at most one end satisfies) and reports a float
