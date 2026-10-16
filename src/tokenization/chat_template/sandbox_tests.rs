@@ -771,6 +771,22 @@ fn assert_render_error(source: &str, detail: &str) {
     assert!(format!("{error:#}").contains(detail), "{source}: {error:#}");
 }
 
+/// `reverse` views a list without a copy and leaves scalars to MiniJinja's own error.
+///
+/// A value with neither a length nor an iterator, such as a number, passes
+/// the copy charge untouched and then fails exactly as in MiniJinja (Jinja2
+/// also fails, with "argument must be iterable"), not with a resource limit.
+#[test]
+fn reverse_views_lists_and_rejects_scalars_like_minijinja() {
+    assert_eq!(
+        render("{{ [1, 2, 3] | reverse | list }}").unwrap(),
+        "[3, 2, 1]"
+    );
+    let error = render("{{ 5 | reverse }}").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidOperation);
+    assert_eq!(error.detail(), Some("cannot reverse values of type number"));
+}
+
 /// Repetition is commutative over a sequence and refuses counts whose size overflows.
 #[test]
 fn repetition_accepts_either_operand_order_and_refuses_overflowing_counts() {

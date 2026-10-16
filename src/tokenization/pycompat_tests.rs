@@ -29,6 +29,24 @@ fn rendered(source: &str, context: serde_json::Value) -> String {
     render(source, context).unwrap_or_else(|error| panic!("{source}: {error:#}"))
 }
 
+/// Undefined container items print as `Undefined`, and `tojson` escapes `\\` and `\r`.
+///
+/// Jinja2's `Undefined.__repr__` is `Undefined`, so a list or dict holding an
+/// undefined value prints it unquoted; `json.dumps` writes a backslash as
+/// `\\` and a carriage return as `\r`. Goldens are Jinja2 3.1.5 renders with
+/// Hugging Face's `tojson` (`json.dumps(..., ensure_ascii=False)`).
+#[test]
+fn undefined_items_and_escaped_controls_print_like_python() {
+    assert_eq!(
+        rendered("{{ [missing] }}|{{ {'a': missing} }}", json!({})),
+        "[Undefined]|{'a': Undefined}"
+    );
+    assert_eq!(
+        rendered(r"{{ 'a\\b\rc' | tojson }}", json!({})),
+        r#""a\\b\rc""#
+    );
+}
+
 /// `{{ value }}` prints like Python's `str()`, including nested reprs.
 #[test]
 fn printing_matches_python_str() {

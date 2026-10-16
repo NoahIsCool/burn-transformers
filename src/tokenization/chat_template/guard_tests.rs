@@ -258,6 +258,24 @@ fn unreadable_tags_with_guarded_operators_are_refused() {
     );
 }
 
+/// Syntax errors in tags with guarded operators are refused with the parser's exact expectation.
+///
+/// MiniJinja rejects the same tags at compile time; the guard refuses them
+/// first because it cannot rewrite what it cannot parse. `not` after an
+/// operand must begin `not in`, and a filter needs a name.
+#[test]
+fn guarded_syntax_errors_name_the_expected_token() {
+    for (source, reason) in [
+        ("{{ a + 1 not b }}", "expected `in`, found `b`"),
+        ("{{ a + 1 not }}", "expected `in`, found the end of the tag"),
+        ("{{ a + 1 | 5 }}", "expected a name, found `5`"),
+    ] {
+        let error = guard_operators(source).unwrap_err();
+        assert_eq!(error.reason, reason, "{source}");
+        assert_eq!((error.offset, error.tag.as_str()), (0, source));
+    }
+}
+
 /// Nesting and chains beyond the limits are refused before MiniJinja can overflow its stack.
 #[test]
 fn excessive_nesting_and_chains_are_refused() {

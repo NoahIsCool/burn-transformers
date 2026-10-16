@@ -105,7 +105,8 @@ pub(crate) const MAX_CHAIN: usize = 1024;
 pub(crate) struct GuardError {
     /// Byte offset of the tag in the source the guard received.
     pub(crate) offset: usize,
-    /// The tag text, shortened to at most 80 bytes for messages.
+    /// The tag text for messages; a tag over 80 bytes is cut to an 80-byte
+    /// prefix on a character boundary followed by `...` (see `shorten`).
     pub(crate) tag: String,
     /// Why the tag was refused.
     pub(crate) reason: String,

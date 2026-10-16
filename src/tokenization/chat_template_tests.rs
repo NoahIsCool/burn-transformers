@@ -666,6 +666,38 @@ fn guarded_operands_give_and_its_runtime_result() {
     assert_eq!(rendered("{{ 1 and 0 }}", json!({})), "False");
 }
 
+/// Rarely generated guarded shapes render as in Jinja2 and as MiniJinja's own operators.
+///
+/// The expression property tests reach these shapes only for some seeds: a
+/// tuple with a trailing comma; splatted arguments, where a non-unary operand
+/// such as `x or [1, 3]` is parenthesized before the bounded splat applies
+/// while a rewritten sum is already a filter call; a conditional without
+/// `else`, which is undefined (printed empty) when its test is falsy; and
+/// `not in` after a guarded operand. Expected strings are Jinja2 3.1.5 renders.
+#[test]
+fn rare_guarded_shapes_match_jinja2_and_minijinja() {
+    for (source, context, expected) in [
+        ("{{ (1 + 1, 2,) | sum }}", json!({}), "4"),
+        ("{{ range(*[1] + [3]) | list }}", json!({}), "[1, 2]"),
+        ("{{ range(*x or [1, 3]) | list }}", json!({}), "[1, 2]"),
+        ("{{ 'a' if x + 1 }}|", json!({"x": 0}), "a|"),
+        ("{{ 'a' if x + 1 }}|", json!({"x": -1}), "|"),
+        ("{{ x + 1 not in [2] }}", json!({"x": 0}), "True"),
+        ("{{ x + 1 not in [2] }}", json!({"x": 1}), "False"),
+    ] {
+        assert!(
+            matches!(guard::guard_operators(source), Ok(Cow::Owned(_))),
+            "{source} was not rewritten"
+        );
+        assert_eq!(rendered(source, context.clone()), expected, "{source}");
+        assert_eq!(
+            render_unguarded(source, &context).unwrap(),
+            expected,
+            "{source}"
+        );
+    }
+}
+
 /// Errors of operators the bounded filters delegate report the template's own line.
 ///
 /// Review finding ENGINE-ERROR-LOCATION: the engine's operator ran in a helper
