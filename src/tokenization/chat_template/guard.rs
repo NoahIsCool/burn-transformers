@@ -88,7 +88,7 @@
 
 use std::borrow::Cow;
 
-use super::{TagKind, sandbox, statement_parts, try_rewrite_tags};
+use super::{TagKind, sandbox, scan::char_boundary_at_most, statement_parts, try_rewrite_tags};
 
 // Documents itself with `//!`; an outer `///` here would change its link scope.
 mod lexer; // Byte-level tag-body lexer mirroring MiniJinja (Verus-verified).
@@ -151,10 +151,8 @@ fn shorten(tag: &str) -> String {
     if tag.len() <= LIMIT {
         return tag.to_owned();
     }
-    let mut end = LIMIT;
-    while !tag.is_char_boundary(end) {
-        end -= 1;
-    }
+    // Verified: the largest character boundary at or below the limit.
+    let end = char_boundary_at_most(tag, LIMIT);
     format!("{}...", &tag[..end])
 }
 

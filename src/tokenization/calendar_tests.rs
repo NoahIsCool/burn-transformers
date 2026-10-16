@@ -112,6 +112,15 @@ fn reference_civil_time(unix_seconds: i64) -> CivilTime {
     }
 }
 
+/// Pre-epoch clock readings round toward negative infinity.
+#[test]
+fn pre_epoch_seconds_round_down() {
+    assert_eq!(seconds_before_epoch(0, false), 0);
+    assert_eq!(seconds_before_epoch(0, true), -1);
+    assert_eq!(seconds_before_epoch(5, true), -6);
+    assert_eq!(seconds_before_epoch(i64::MAX, true), i64::MIN);
+}
+
 proptest! {
     /// Hinnant's closed form agrees with day counting across the modern range.
     #[test]

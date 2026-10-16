@@ -34,10 +34,14 @@
 //!   with the delimiter of its kind, closes with the matching delimiter, and
 //!   ends after the position, so a scan over the source makes progress and
 //!   every slice it takes is in bounds;
-//! - [`marker_widths`] never measures more than the tag body holds.
+//! - [`marker_widths`] never measures more than the tag body holds;
+//! - [`char_boundary_at_most`] returns the largest character boundary at or
+//!   below its limit.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
+#[cfg(verus_keep_ghost)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 /// The kinds of Jinja tag a source rewrite may change.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -612,6 +616,43 @@ pub(crate) fn marker_widths(inner: &[u8]) -> (usize, usize) {
         0
     };
     (open, close)
+}
+
+/// The largest character boundary of `text` at or below `limit`.
+///
+/// Used to shorten a tag for an error message without splitting a
+/// character. Verified: the result is at most `limit`, is a character
+/// boundary, and no larger offset up to `limit` is one; the backward search
+/// stops at zero at the latest, which is always a boundary.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(end =>
+    requires
+        limit <= text.spec_bytes().len(),
+    ensures
+        end <= limit,
+        vstd::utf8::is_char_boundary(text.spec_bytes(), end as int),
+        forall|later: int| end < later <= limit
+            ==> !vstd::utf8::is_char_boundary(text.spec_bytes(), later),
+))]
+pub(crate) fn char_boundary_at_most(text: &str, limit: usize) -> usize {
+    let mut end = limit;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            end <= limit,
+            limit <= text.spec_bytes().len(),
+            forall|later: int| end < later <= limit
+                ==> !vstd::utf8::is_char_boundary(text.spec_bytes(), later),
+        decreases end,
+    ))]
+    while !text.is_char_boundary(end) {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            vstd::utf8::encode_utf8_valid_utf8(text@);
+            vstd::utf8::is_char_boundary_start_end_of_seq(text.spec_bytes());
+        }
+        end -= 1;
+    }
+    end
 }
 
 #[cfg(test)]

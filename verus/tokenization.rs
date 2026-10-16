@@ -33,7 +33,8 @@
 //!   719163`, the time of day `hour * 3600 + minute * 60 + second == t mod
 //!   86400`, Python's `weekday()` `(ordinal + 6) mod 7`, and the day of year
 //!   `_days_before_month + day`;
-//! - `is_leap_year` equals Python's `_is_leap` on non-negative years.
+//! - `is_leap_year` equals Python's `_is_leap` on non-negative years, and
+//!   `seconds_before_epoch` floors a pre-epoch host clock reading exactly.
 //!
 //! Hinnant's year-of-era estimate is shown to name the March-based year of
 //! every day of an era from its monotonicity plus a `by (compute_only)`
@@ -64,7 +65,9 @@
 //! - `next_tag` returns spans that start at or after the scan position, open
 //!   with their kind's delimiter, close with the matching one, and end inside
 //!   the source, so the rewrite loop makes progress and slices in bounds;
-//!   `marker_widths` never exceeds the tag body.
+//!   `marker_widths` never exceeds the tag body, and `char_boundary_at_most`
+//!   returns the largest character boundary at or below its limit (against
+//!   vstd's UTF-8 model of `str`).
 //!
 //! and to `src/tokenization/chat_template/guard/lexer.rs`, the operator
 //! guard's tag-body lexer:

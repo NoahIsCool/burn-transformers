@@ -40,7 +40,8 @@
 //! - `hour * 3600 + minute * 60 + second` is `t mod 86400`, each field in range;
 //! - the weekday is Python's `weekday()`, `(ordinal + 6) mod 7`;
 //! - the day of year is `_days_before_month(year, month) + day`;
-//! - `is_leap_year` is Python's `_is_leap` for non-negative years.
+//! - `is_leap_year` is Python's `_is_leap` for non-negative years;
+//! - `seconds_before_epoch` floors a pre-epoch host clock reading exactly.
 //!
 //! The crux, that Hinnant's year-of-era estimate names the March-based year
 //! containing every day of an era, is proved from the estimate's monotonicity
@@ -602,6 +603,23 @@ fn civil_time_in_supported_range(unix_seconds: i64) -> CivilTime {
 ))]
 pub(crate) fn is_leap_year(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// Unix seconds, rounded toward negative infinity, of an instant `whole` seconds
+/// (plus a fraction when `fractional`) before the epoch.
+///
+/// Verified: exactly `-whole`, or `-whole - 1` when a fraction remains,
+/// which is the floor of `-(whole + fraction)` for any fraction in `(0, 1)`,
+/// and it never overflows for a non-negative `whole`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(seconds =>
+    requires
+        0 <= whole,
+    ensures
+        seconds == -whole - if fractional { 1int } else { 0 },
+))]
+pub(crate) fn seconds_before_epoch(whole: i64, fractional: bool) -> i64 {
+    if fractional { -whole - 1 } else { -whole }
 }
 
 #[cfg(test)]

@@ -557,7 +557,11 @@ fn host_unix_seconds() -> Result<i64, Error> {
         Err(before) => {
             let before = before.duration();
             let whole = i64::try_from(before.as_secs()).map_err(|_| clock_error())?;
-            Ok(-whole - i64::from(before.subsec_nanos() > 0))
+            // Verified floor of `-(whole + fraction)`.
+            Ok(calendar::seconds_before_epoch(
+                whole,
+                before.subsec_nanos() > 0,
+            ))
         }
     }
 }

@@ -76,6 +76,16 @@ fn scanner_helpers_match_reference_offsets() {
     assert!(!is_ascii_space(0x0b));
 }
 
+/// Shortening never splits a character.
+#[test]
+fn boundaries_never_split_characters() {
+    assert_eq!(char_boundary_at_most("abc", 2), 2);
+    assert_eq!(char_boundary_at_most("aé", 2), 1);
+    assert_eq!(char_boundary_at_most("é", 1), 0);
+    assert_eq!(char_boundary_at_most("a😀b", 4), 1);
+    assert_eq!(char_boundary_at_most("a😀b", 5), 5);
+}
+
 proptest! {
     /// Every span is in bounds, delimited by its kind, and after the previous one.
     #[test]
