@@ -29,7 +29,7 @@
 use burn::tensor::{bf16, f16};
 
 use super::rounding::{BFLOAT16, BINARY16, round_f64_bits};
-use super::tiles::{TILE_EDGE, transpose_plan};
+use super::tiles::{PARALLEL_MIN_SCALARS, TILE_EDGE, transpose_plan};
 use crate::checkpoint::{CheckpointError, Result, TensorDType};
 
 /// An element-wise operation instantiated for one statically selected conversion.
@@ -359,7 +359,12 @@ pub(super) fn transpose_tiles<const SOURCE: usize, const TARGET: usize>(
     if rows == 0 || columns == 0 {
         return;
     }
-    let available = std::thread::available_parallelism().map_or(1, usize::from);
+    // The plan stays on one thread below the threshold, so skip the system query there.
+    let available = if rows.saturating_mul(columns) < PARALLEL_MIN_SCALARS {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, usize::from)
+    };
     let plan = transpose_plan(rows, columns, available);
     std::thread::scope(|scope| {
         for (band, target_band) in target.chunks_mut(rows * plan.band_columns).enumerate() {

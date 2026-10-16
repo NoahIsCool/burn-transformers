@@ -20,8 +20,10 @@
 //!   storage for every Qwen3.5-0.8B projection shape (for example 608 µs versus
 //!   297 µs for `1 × 1024 · 1024 × 4096` in F32); multi-row prefill products were
 //!   within run-to-run noise of each other.
-//! - CubeCL on Metal reads the strided view natively: single-row F32 products were
-//!   20-27% *faster* strided, and F16 single-row products were equal or faster.
+//! - CubeCL on Metal reads the strided view natively: single-row F32 products
+//!   took 18-27% *less* time strided, and single-row F16 products were equal or
+//!   faster strided; only multi-row F16 prefill products favoured contiguous
+//!   storage, by 8-15%.
 //!
 //! [`stored_for_mapper`] therefore materializes contiguous `[input, output]`
 //! storage only on backends listed by [`prefers_contiguous_matrices`] (Flex
@@ -50,7 +52,9 @@
 //! unambiguous for square checkpoint matrices too, and no value is read back.
 //! A mapper that accepts only one shape (for example `reshape([4, 4])`) panics on
 //! the probe; the panic is caught, the default panic hook still reports it on
-//! standard error, and the install falls back to checkpoint order.
+//! standard error, and the install falls back to checkpoint order. A binary
+//! built with `panic = "abort"` cannot catch it, so such mappers must not be
+//! installed on Flex in that configuration.
 //!
 //! # Cost
 //!

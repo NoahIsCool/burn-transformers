@@ -240,8 +240,9 @@ impl Error for ParameterInstallError {}
 /// contiguous storage; other backends keep the zero-copy view, which measured as
 /// fast or faster there. Detecting a transposing mapper loads a `[2, 3]` probe
 /// into a clone of the parameter; a mapper that panics on that shape is treated
-/// as non-transposing (the default panic hook still prints its message). The
-/// host transpose briefly holds a second host copy of this one tensor.
+/// as non-transposing (the default panic hook still prints its message, and a
+/// `panic = "abort"` build aborts instead). The host transpose briefly holds a
+/// second host copy of this one tensor.
 pub fn install_float_parameter<B: Backend, const D: usize>(
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
