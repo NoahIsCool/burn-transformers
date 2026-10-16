@@ -30,18 +30,21 @@
 //!   when no used set has one; `widest_context` is the largest active
 //!   row's context, 1 when no row is active;
 //! - batched steps: `plan_step` plans the whole `[batch, Q]` block. It fails
-//!   with `NoActiveRow` exactly when no row has a token; when every row is a
-//!   run it slices the minimal input window `[lo, hi)` (some row starts at
-//!   `lo`, some ends at `hi`) and places row `b`'s `k`-th valid column at
-//!   slot `c_b + k` (input column `lo + c_b + k`); otherwise it gathers into a
-//!   block as wide as the longest row with every `c_b = 0`; every row fits
-//!   (`c_b + n_b <= Q`), which discharges the contracts of the per-row
-//!   plans it composes, and a position error names a row whose end overflows.
-//!   `plan_row_step` gives each row exactly its slot positions (as `i64`),
+//!   with `NoActiveRow` exactly when no row has a token; otherwise it
+//!   succeeds exactly when every row's positions are representable (its end
+//!   fits `usize` and its fill position fits `i64`), and else reports the
+//!   first unrepresentable row's error. When every row is a run it slices
+//!   the minimal input window `[lo, hi)` (some row starts at `lo`, some ends
+//!   at `hi`) and places row `b`'s `k`-th valid column at slot `c_b + k`
+//!   (input column `lo + c_b + k`); otherwise it gathers into a block as wide
+//!   as the longest row with every `c_b = 0`; every row fits
+//!   (`c_b + n_b <= Q`), which discharges the contracts of the per-row plans
+//!   it composes. `plan_row_step` succeeds exactly when the row's positions
+//!   are representable and gives it exactly its slot positions (as `i64`),
 //!   slot flags `c_b <= t < c_b + n_b`, restoring gather, compaction gather,
 //!   and in-range last-token slot; `signed_indices` converts gather indices
-//!   to `i64` exactly or rejects the batch. The per-row plans are the contiguous-run
-//!   test, the cache positions of a block's slots (exact
+//!   to `i64` exactly or rejects the batch. The per-row plans are the
+//!   contiguous-run test, the cache positions of a block's slots (exact
 //!   `start + (t - column)` inside the run, the fill position elsewhere, and
 //!   no overflow), the compaction gather of interior-padded rows, and the two
 //!   restoring gathers (from a compact row, and from a run at any block

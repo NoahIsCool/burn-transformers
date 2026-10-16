@@ -1223,6 +1223,32 @@ pub open spec fn first_slot(columns: Seq<usize>, lo: int, sliced: bool) -> int {
     }
 }
 
+/// A row appending `count` tokens at cursor `start` has representable positions.
+///
+/// Its end `start + count` fits `usize` and its largest position, the fill
+/// position, fits `i64` (Burn's index range).
+pub open spec fn row_fits(start: int, count: int) -> bool {
+    &&& start + count <= usize::MAX
+    &&& fill_position(start, count) <= i64::MAX
+}
+
+/// Rows `0..end` all have representable positions.
+pub open spec fn rows_fit(starts: Seq<usize>, rows: Seq<Vec<usize>>, end: int) -> bool {
+    forall|b: int| 0 <= b < end ==> #[trigger] row_fits(starts[b] as int, rows[b].len() as int)
+}
+
+/// Some row has a valid column.
+pub open spec fn some_active(rows: Seq<Vec<usize>>) -> bool {
+    exists|b: int| 0 <= b < rows.len() && #[trigger] rows[b].len() > 0
+}
+
+/// Row `b` is the first row whose positions are not representable.
+pub open spec fn first_unfit(starts: Seq<usize>, rows: Seq<Vec<usize>>, b: int) -> bool {
+    &&& 0 <= b < rows.len()
+    &&& rows_fit(starts, rows, b)
+    &&& !row_fits(starts[b] as int, rows[b].len() as int)
+}
+
 /// `step` is exactly the share of the block of a row with valid `columns`.
 pub(crate) open spec fn row_step_matches(
     step: RowStep,
@@ -1263,8 +1289,11 @@ pub(crate) open spec fn row_step_matches(
 /// The row's `n` valid `columns` occupy block slots `[column, column + n)`
 /// and append at cache position `start`. Proved: the positions, slot
 /// flags, restoring gather, compaction gather (only when `gathered`), and
-/// last-token slot are exactly those of `row_step_matches`; an error means
-/// `start + n` overflows `usize` or a position exceeds `i64::MAX`.
+/// last-token slot are exactly those of `row_step_matches`. The result is
+/// `Ok` exactly when the positions are representable (`row_fits`): it is
+/// `PositionOverflow` exactly when `start + n` overflows `usize`, and
+/// `PositionBeyondI64` exactly when it does not but the largest position,
+/// the fill position, exceeds `i64::MAX`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(step =>
     requires
@@ -1273,17 +1302,23 @@ pub(crate) open spec fn row_step_matches(
         block > 0,
     ensures
         match step {
-            Ok(step) => row_step_matches(
-                step,
-                columns@,
-                start as int,
-                column as int,
-                block as int,
-                sequence as int,
-                gathered,
-            ),
+            Ok(step) => {
+                &&& row_fits(start as int, columns.len() as int)
+                &&& row_step_matches(
+                    step,
+                    columns@,
+                    start as int,
+                    column as int,
+                    block as int,
+                    sequence as int,
+                    gathered,
+                )
+            },
             Err(StepPlanError::PositionOverflow) => start + columns.len() > usize::MAX,
-            Err(StepPlanError::PositionBeyondI64) => start + columns.len() > i64::MAX,
+            Err(StepPlanError::PositionBeyondI64) => {
+                &&& start + columns.len() <= usize::MAX
+                &&& fill_position(start as int, columns.len() as int) > i64::MAX
+            },
             Err(StepPlanError::NoActiveRow) => false,
         },
 ))]
@@ -1307,6 +1342,7 @@ pub(crate) fn plan_row_step(
             cache.len() == block,
             column + count <= block,
             count == columns.len(),
+            start + count <= usize::MAX,
             positions.len() == slot,
             forall|t: int| 0 <= t < block ==> #[trigger] cache@[t] <= start + count,
             forall|t: int| 0 <= t < block ==>
@@ -1317,9 +1353,23 @@ pub(crate) fn plan_row_step(
     while slot < block {
         match i64::try_from(cache[slot]) {
             Ok(position) => positions.push(position),
-            Err(_) => return Err(StepPlanError::PositionBeyondI64),
+            Err(_) => {
+                // No slot lies past the fill position, so it exceeds `i64::MAX` too.
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    assert(cache@[slot as int] <= fill_position(start as int, count as int));
+                }
+                return Err(StepPlanError::PositionBeyondI64);
+            }
         }
         slot += 1;
+    }
+    // The fill position is some slot's position: the run's last slot, or
+    // every slot of an empty row.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let witness: int = if count > 0 { (column + count - 1) as int } else { 0 };
+        assert(positions@[witness] as int == fill_position(start as int, count as int));
     }
     let mut valid: Vec<bool> = Vec::with_capacity(block);
     let mut slot: usize = 0;
@@ -1357,14 +1407,16 @@ pub(crate) fn plan_row_step(
 /// input window `[lo, hi)` holding every valid column (one slice); otherwise
 /// every row is compacted into a right-padded block as wide as the longest
 /// row (one gather). Proved: `NoActiveRow` exactly when no row has a valid
-/// column; for a slice, every row's `k`-th valid column is input column
+/// column; otherwise the first row (in batch order) whose positions are not
+/// representable determines the error (`PositionOverflow` when its end
+/// overflows `usize`, else `PositionBeyondI64`), and the plan is `Ok`
+/// exactly when every row's positions are representable. For a slice, every row's `k`-th valid column is input column
 /// `lo + c_b + k` (so slots `[c_b, c_b + n_b)` hold exactly its tokens), the
 /// window lies inside the input and is minimal (some row starts at `lo`,
 /// some row ends at `hi`); for a gather, some row is not a run, every
 /// `c_b = 0`, and the block is the longest row; in both, every row fits its
 /// block (`c_b + n_b <= Q`, so the per-row plans' preconditions hold) and
-/// each row's slots are exactly `row_step_matches`. Position errors come
-/// from a row whose end position overflows.
+/// each row's slots are exactly `row_step_matches`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(plan =>
     requires
@@ -1372,14 +1424,20 @@ pub(crate) fn plan_row_step(
         rows_sorted_below(valid_columns@, sequence as int),
     ensures
         match plan {
-            Err(StepPlanError::NoActiveRow) => forall|b: int| 0 <= b < valid_columns.len() ==>
-                #[trigger] valid_columns@[b].len() == 0,
-            Err(StepPlanError::PositionOverflow) => exists|b: int| 0 <= b < valid_columns.len()
-                && #[trigger] starts@[b] + valid_columns@[b].len() > usize::MAX,
-            Err(StepPlanError::PositionBeyondI64) => exists|b: int| 0 <= b < valid_columns.len()
-                && #[trigger] starts@[b] + valid_columns@[b].len() > i64::MAX,
+            Err(StepPlanError::NoActiveRow) => !some_active(valid_columns@),
+            Err(StepPlanError::PositionOverflow) => {
+                &&& some_active(valid_columns@)
+                &&& exists|b: int| #[trigger] first_unfit(starts@, valid_columns@, b)
+                    && starts@[b] + valid_columns@[b].len() > usize::MAX
+            },
+            Err(StepPlanError::PositionBeyondI64) => {
+                &&& some_active(valid_columns@)
+                &&& exists|b: int| #[trigger] first_unfit(starts@, valid_columns@, b)
+                    && starts@[b] + valid_columns@[b].len() <= usize::MAX
+            },
             Ok(plan) => {
-                &&& exists|b: int| 0 <= b < valid_columns.len() && #[trigger] valid_columns@[b].len() > 0
+                &&& some_active(valid_columns@)
+                &&& rows_fit(starts@, valid_columns@, valid_columns.len() as int)
                 &&& plan.block > 0
                 &&& plan.columns.len() == valid_columns.len()
                 &&& plan.rows.len() == valid_columns.len()
@@ -1535,6 +1593,8 @@ pub(crate) fn plan_step(
             starts.len() == batch,
             block > 0,
             gathered == !contiguous,
+            some_active(valid_columns@),
+            rows_fit(starts@, valid_columns@, row as int),
             rows_sorted_below(valid_columns@, sequence as int),
             contiguous ==> forall|b: int| 0 <= b < batch ==> #[trigger] is_run(valid_columns@[b]@),
             forall|b: int| 0 <= b < batch && #[trigger] valid_columns@[b].len() > 0 ==>
@@ -1574,18 +1634,10 @@ pub(crate) fn plan_step(
         let step = match plan_row_step(columns, sequence, starts[row], column, block, gathered) {
             Ok(step) => step,
             Err(error) => {
-                // The failing row witnesses the reported overflow.
+                // Every earlier row fits, so this row is the first that does not.
                 #[cfg(verus_keep_ghost)]
                 proof! {
-                    match error {
-                        StepPlanError::PositionOverflow => {
-                            assert(starts@[row as int] + valid_columns@[row as int].len() > usize::MAX);
-                        }
-                        StepPlanError::PositionBeyondI64 => {
-                            assert(starts@[row as int] + valid_columns@[row as int].len() > i64::MAX);
-                        }
-                        StepPlanError::NoActiveRow => {}
-                    }
+                    assert(first_unfit(starts@, valid_columns@, row as int));
                 }
                 return Err(error);
             }

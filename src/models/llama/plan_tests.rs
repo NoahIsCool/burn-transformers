@@ -361,6 +361,29 @@ fn step_plans_reject_idle_batches_and_overflowing_positions() {
     assert!(plan_step(&[vec![0]], &[beyond], 1).is_ok());
 }
 
+/// Only the fill position must fit `i64`, and the first unrepresentable row picks the error.
+#[test]
+fn step_plans_accept_representable_fills_and_report_the_first_bad_row() {
+    let past = usize::try_from(i64::MAX).unwrap() + 1;
+    // An idle row at cursor 2^63 pads with position 2^63 - 1, which fits.
+    let plan = plan_step(&[vec![0], vec![]], &[0, past], 1).unwrap();
+    assert_eq!(plan.rows[1].positions, [i64::MAX]);
+    // An idle batch is idle however far its cursors are.
+    assert_eq!(
+        plan_step(&[vec![], vec![]], &[past, usize::MAX], 1),
+        Err(StepPlanError::NoActiveRow)
+    );
+    // Rows fail in batch order: the earlier row's error wins.
+    assert_eq!(
+        plan_step(&[vec![0, 1], vec![0]], &[past, usize::MAX], 2),
+        Err(StepPlanError::PositionBeyondI64)
+    );
+    assert_eq!(
+        plan_step(&[vec![0], vec![0, 1]], &[usize::MAX, past], 2),
+        Err(StepPlanError::PositionOverflow)
+    );
+}
+
 proptest! {
     /// Step plans reproduce every row's tokens, positions, and restoration.
     #[test]
