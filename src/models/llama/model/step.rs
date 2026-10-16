@@ -28,7 +28,7 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{Error, Result, architecture::bool_tensor_from_values, models::shared::StatefulRows};
 
-use super::super::plan::{StepPlanError, plan_step};
+use super::super::plan::{StepPlanError, plan_step, signed_indices};
 
 /// How the block is cut from the rectangular input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,11 +283,8 @@ fn int_tensor<B: Backend, const D: usize>(
     shape: [usize; D],
     device: &B::Device,
 ) -> Result<Tensor<B, D, Int>> {
-    let values = values
-        .iter()
-        .map(|&value| i64::try_from(value))
-        .collect::<core::result::Result<Vec<_>, _>>()
-        .map_err(|_| Error::configuration("decoder.step.index", "an index exceeds i64"))?;
+    let values = signed_indices(values)
+        .ok_or_else(|| Error::configuration("decoder.step.index", "an index exceeds i64"))?;
     Ok(Tensor::from_data(TensorData::new(values, shape), device))
 }
 

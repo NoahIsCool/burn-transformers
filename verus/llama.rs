@@ -39,7 +39,8 @@
 //!   plans it composes, and a position error names a row whose end overflows.
 //!   `plan_row_step` gives each row exactly its slot positions (as `i64`),
 //!   slot flags `c_b <= t < c_b + n_b`, restoring gather, compaction gather,
-//!   and in-range last-token slot. The per-row plans are the contiguous-run
+//!   and in-range last-token slot; `signed_indices` converts gather indices
+//!   to `i64` exactly or rejects the batch. The per-row plans are the contiguous-run
 //!   test, the cache positions of a block's slots (exact
 //!   `start + (t - column)` inside the run, the fill position elsewhere, and
 //!   no overflow), the compaction gather of interior-padded rows, and the two

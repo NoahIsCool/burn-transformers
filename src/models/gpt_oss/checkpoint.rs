@@ -122,6 +122,8 @@ struct Dimensions {
     hidden: u64,
     /// Expert width `f`.
     intermediate: u64,
+    /// Fused gate/up width `2f`.
+    fused: u64,
     /// Query projection width `H·h`.
     query: u64,
     /// Key/value projection width `K·h`.
@@ -153,6 +155,16 @@ impl Dimensions {
             vocab: extent("vocab_size", architecture.vocab_size)?,
             hidden: extent("hidden_size", architecture.hidden_size)?,
             intermediate: extent("intermediate_size", architecture.intermediate_size)?,
+            fused: projection_extent(2, architecture.intermediate_size).map_err(
+                |error| match error {
+                    ExtentError::Overflow => ConfigError::new(
+                        FAMILY,
+                        "intermediate_size",
+                        "the stacked expert projections overflow usize",
+                    ),
+                    ExtentError::Format => format("intermediate_size"),
+                },
+            )?,
             query: product("num_attention_heads", architecture.query_heads)?,
             key_value: product("num_key_value_heads", architecture.key_value_heads)?,
             heads: extent("num_attention_heads", architecture.query_heads)?,
@@ -223,13 +235,12 @@ impl ContractBuilder {
         let Dimensions {
             hidden,
             intermediate,
+            fused,
             experts,
             ..
         } = self.dimensions;
         self.same(&format!("{prefix}.router.weight"), vec![experts, hidden]);
         self.same(&format!("{prefix}.router.bias"), vec![experts]);
-        // `2 · f` cannot overflow: the configuration bounds `E · d · 2f` in usize.
-        let fused = 2 * intermediate;
         for (name, shape) in [
             ("gate_up_proj", vec![experts, hidden, fused]),
             ("down_proj", vec![experts, intermediate, hidden]),

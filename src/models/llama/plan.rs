@@ -26,7 +26,8 @@
 //!   the gathers that restore the rectangular layout with exact zeros
 //!   (`scatter_sources` from a compact row, `restore_slots` from any run
 //!   offset), composed for one row by `plan_row_step` and for the whole
-//!   batch by `plan_step`, which chooses between slicing and gathering.
+//!   batch by `plan_step`, which chooses between slicing and gathering, and
+//!   `signed_indices`, which uploads gather indices as `i64`.
 //!
 //! A batched step places row `b`'s `n_b` new tokens in block slots
 //! `[c_b, c_b + n_b)`. Slot `t` in that run is the token at absolute cache
@@ -1788,6 +1789,42 @@ pub(crate) fn tightest_limit(limits: &[Option<usize>], used: &[bool]) -> Option<
         set += 1;
     }
     best
+}
+
+/// Converts host indices to Burn's signed index type, or `None` beyond `i64`.
+///
+/// Proved: `Some` exactly when every index is at most `i64::MAX`, and then
+/// each converted index equals its source.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(signed =>
+    ensures
+        match signed {
+            Some(signed) => {
+                &&& signed.len() == values.len()
+                &&& forall|i: int| 0 <= i < values.len() ==>
+                    #[trigger] signed@[i] as int == values@[i] as int
+            },
+            None => exists|i: int| 0 <= i < values.len() && #[trigger] values@[i] > i64::MAX,
+        },
+))]
+pub(crate) fn signed_indices(values: &[usize]) -> Option<Vec<i64>> {
+    let mut signed: Vec<i64> = Vec::with_capacity(values.len());
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= values.len(),
+            signed.len() == index,
+            forall|i: int| 0 <= i < index ==> #[trigger] signed@[i] as int == values@[i] as int,
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        match i64::try_from(values[index]) {
+            Ok(value) => signed.push(value),
+            Err(_) => return None,
+        }
+        index += 1;
+    }
+    Some(signed)
 }
 
 #[cfg(test)]

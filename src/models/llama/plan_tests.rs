@@ -493,3 +493,12 @@ proptest! {
         prop_assert_eq!(tightest_limit(&limits, &used), expected);
     }
 }
+
+/// Indices convert to `i64` exactly, and any index beyond `i64` rejects the batch.
+#[test]
+fn signed_indices_convert_exactly_or_reject() {
+    assert_eq!(signed_indices(&[0, 3, 7]), Some(vec![0, 3, 7]));
+    assert_eq!(signed_indices(&[]), Some(Vec::new()));
+    let beyond = usize::try_from(i64::MAX).unwrap() + 1;
+    assert_eq!(signed_indices(&[1, beyond]), None);
+}
