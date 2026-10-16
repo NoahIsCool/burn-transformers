@@ -534,3 +534,58 @@ fn history_record_timing() {
         previous.as_secs_f64() / current.as_secs_f64()
     );
 }
+
+/// Host validity supplied by the caller must cover every prompt slot.
+#[test]
+fn host_prompt_validity_must_match_the_prompt_rectangle() {
+    let device = Default::default();
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device);
+    let mask = || {
+        TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true, false, true]].into(),
+            &device,
+        ))
+    };
+    let error = TokenHistory::from_prompt_values(
+        &penalized(),
+        4,
+        prompt.clone(),
+        Some(mask()),
+        &[true, true],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::Error::Generation(ref reason)
+            if reason == "history mask contains 2 entries, expected 3"
+    ));
+    let history = TokenHistory::from_prompt_values(
+        &penalized(),
+        4,
+        prompt,
+        Some(mask()),
+        &[true, false, true],
+    )
+    .unwrap();
+    assert_eq!(counts(&history, CountView::All), [0, 1, 0, 1]);
+}
+
+/// Each history update carries exactly one token and one activity flag per row.
+#[test]
+fn history_updates_need_one_activity_flag_per_row() {
+    let device = Default::default();
+    let mut history = TokenHistory::<TestBackend>::from_prompt(
+        &penalized(),
+        4,
+        Tensor::<TestBackend, 2, Int>::from_ints([[1], [2]], &device),
+        None,
+    )
+    .unwrap();
+    let error = history.record(&[1, 2], &[true]).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::Error::Generation(ref reason)
+            if reason == "history update has 2 tokens and 1 activity flags for batch size 2"
+    ));
+    assert_eq!(counts(&history, CountView::Generated), [0; 8]);
+}

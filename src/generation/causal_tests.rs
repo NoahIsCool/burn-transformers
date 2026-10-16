@@ -892,6 +892,66 @@ fn neutralization_is_row_local_and_checks_batch_metadata() {
     assert!(error.to_string().contains("active-row count 1"));
 }
 
+/// With history-dependent penalties, out-of-vocabulary prompt IDs fail before any model call.
+#[test]
+fn penalized_prompts_reject_out_of_vocabulary_ids() {
+    let (model, device) = tiny_model();
+    let mut invalid = request(
+        &device,
+        GenerationConfig {
+            max_new_tokens: 2,
+            repetition_penalty: 1.2,
+            ..Default::default()
+        },
+    );
+    invalid.prompt.token_ids = Tensor::<TestBackend, 2, Int>::from_ints([[1, 40]], &device);
+    let error = generate_causal(&model, invalid).unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, actual, .. }
+            if tensor == "generation.history" && actual == "token 40 at row 0, column 1"),
+        "{error}"
+    );
+}
+
+/// Step metadata must provide one token, one score, and one output row per batch row.
+#[test]
+fn emitted_steps_require_one_entry_per_row_in_every_buffer() {
+    let tracker = || {
+        super::GenerationTracker::new(
+            GenerationConfig {
+                max_new_tokens: 2,
+                ..Default::default()
+            },
+            32,
+            2,
+        )
+        .unwrap()
+    };
+    for (ids, scores, rows) in [
+        (vec![1], vec![-0.5, -0.5], 2),
+        (vec![1, 2], vec![-0.5], 2),
+        (vec![1, 2], vec![-0.5, -0.5], 1),
+    ] {
+        let mut output_rows = vec![Vec::new(); rows];
+        let mut emitted = 0;
+        let error = super::emit_step(&mut tracker(), &ids, &scores, &mut output_rows, &mut |_| {
+            emitted += 1;
+            Ok(())
+        })
+        .err()
+        .expect("misaligned step metadata must fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "generation error: step metadata has {} token IDs, {} log probabilities, and {rows} output rows for batch size 2",
+                ids.len(),
+                scores.len()
+            )
+        );
+        assert_eq!(emitted, 0);
+    }
+}
+
 /// Public output assembly rejects incomplete tracking or misaligned log probabilities.
 #[test]
 fn output_assembly_never_fabricates_terminal_metadata() {
