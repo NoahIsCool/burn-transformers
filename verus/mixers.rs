@@ -33,7 +33,7 @@
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![allow(unused)]
-#![feature(proc_macro_hygiene)]
+#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
 #[path = "../src/delta_net/plan.rs"]
 pub mod delta_net_plan;

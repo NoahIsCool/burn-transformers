@@ -34,8 +34,12 @@
 //! non-empty run of whole experts within the budget (or one oversized
 //! expert) and is maximal. [`dispatch_blocks`] iterates it and is proved to
 //! partition all experts into such blocks, [`range_lengths`] yields the exact
-//! per-expert counts, and [`block_expert_rows`] locates each expert's rows
-//! inside its block without passing the block's end.
+//! per-expert counts, [`block_row_range`] locates each block's slice of the
+//! order, and [`block_expert_rows`] locates each expert's rows inside its
+//! block without passing the block's end. The planner's postcondition
+//! includes the pairwise offset order these functions require, and
+//! [`signed_order`] and [`signed_index`] convert the order and the slot count
+//! to Burn's `i64` indices exactly.
 //!
 //! Before planning, [`routed_assignment_count`] bounds `tokens * K` by the
 //! `i64` index range and [`routed_ids`] flattens the host copy of the
@@ -175,6 +179,11 @@ pub(crate) struct InvalidExpertId {
 
 /// Groups flattened assignments by expert with a stable counting sort.
 ///
+/// Besides the plan properties in the module documentation, the proof states
+/// that any two offsets are ordered by index, which is exactly the
+/// precondition of [`next_dispatch_block`], [`dispatch_blocks`],
+/// [`block_row_range`], and [`block_expert_rows`].
+///
 /// # Errors
 ///
 /// Returns the first assignment whose ID lies outside `0..experts`.
@@ -194,6 +203,8 @@ pub(crate) struct InvalidExpertId {
                 &&& plan.offsets[0] == 0
                 &&& plan.offsets[experts as int] == ids.len()
                 &&& plan.order.len() == ids.len()
+                &&& forall|low: int, high: int| 0 <= low <= high < plan.offsets.len() ==>
+                    #[trigger] plan.offsets[low] <= #[trigger] plan.offsets[high]
                 &&& forall|e: int| 0 <= e < experts ==> {
                     &&& plan.offsets[e] <= #[trigger] plan.offsets[e + 1]
                     &&& plan.offsets[e + 1] - plan.offsets[e]
@@ -558,6 +569,88 @@ pub(crate) fn range_lengths(offsets: &[usize]) -> Vec<usize> {
         range += 1;
     }
     lengths
+}
+
+/// Locates the routed rows of the dispatch block of experts `first..end` in the expert-major order.
+///
+/// Returns `(start, rows)`: the block's assignments are
+/// `order[start..start + rows]`. The proof shows `start` is expert `first`'s
+/// offset, `rows` is the block's exact assignment count, and the slice ends
+/// at expert `end`'s offset, never past the last offset (the assignment
+/// count), so narrowing the uploaded order to it stays in bounds.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(range =>
+    requires
+        first <= end,
+        end < offsets.len(),
+        forall|low: int, high: int| 0 <= low <= high < offsets.len() ==>
+            #[trigger] offsets[low] <= #[trigger] offsets[high],
+    ensures
+        range.0 == offsets[first as int],
+        range.1 == offsets[end as int] - offsets[first as int],
+        range.0 + range.1 == offsets[end as int],
+        range.0 + range.1 <= offsets[offsets.len() - 1],
+))]
+pub(crate) fn block_row_range(offsets: &[usize], first: usize, end: usize) -> (usize, usize) {
+    (offsets[first], offsets[end] - offsets[first])
+}
+
+/// Converts the expert-major order to the `i64` values Burn index tensors use.
+///
+/// The proof shows every index is preserved exactly, or that `None` is
+/// returned exactly because some index exceeds `i64::MAX`. A plan built from
+/// [`routed_assignment_count`] assignments never takes the `None` branch,
+/// since every entry is an assignment index below that count.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(signed =>
+    ensures
+        match signed {
+            Some(values) => {
+                &&& values.len() == order.len()
+                &&& forall|k: int| 0 <= k < order.len() ==> #[trigger] values[k] == order[k]
+            },
+            None => exists|k: int| 0 <= k < order.len() && #[trigger] order[k] > i64::MAX,
+        },
+))]
+pub(crate) fn signed_order(order: &[usize]) -> Option<Vec<i64>> {
+    let mut values: Vec<i64> = Vec::with_capacity(order.len());
+    let mut index = 0usize;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= order.len(),
+            values.len() == index,
+            forall|k: int| 0 <= k < index ==> #[trigger] values[k] == order[k],
+        decreases order.len() - index,
+    ))]
+    while index < order.len() {
+        let entry = order[index];
+        if entry as u64 > i64::MAX as u64 {
+            return None;
+        }
+        values.push(entry as i64);
+        index += 1;
+    }
+    Some(values)
+}
+
+/// Converts one index to `i64`, or `None` exactly when it exceeds `i64::MAX`.
+///
+/// Dispatch divides the uploaded order by the slot count `K` on the device;
+/// `K <= tokens * K <= i64::MAX` for every accepted plan, so this is exact.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(signed =>
+    ensures
+        match signed {
+            Some(value) => value == index,
+            None => index > i64::MAX,
+        },
+))]
+pub(crate) fn signed_index(index: usize) -> Option<i64> {
+    if index as u64 > i64::MAX as u64 {
+        None
+    } else {
+        Some(index as i64)
+    }
 }
 
 /// Locates expert `expert`'s rows inside a dispatch block that starts at expert `first`.

@@ -102,6 +102,33 @@ fn block_expert_rows_locate_each_expert_inside_its_block() {
     assert_eq!(block_expert_rows(&offsets, 3, 3), (0, 1));
 }
 
+/// A block's slice of the order starts at its first expert's offset and ends at its end's.
+#[test]
+fn block_row_range_spans_the_blocks_experts() {
+    let offsets = [0, 3, 3, 7, 8];
+    assert_eq!(block_row_range(&offsets, 0, 1), (0, 3));
+    assert_eq!(block_row_range(&offsets, 1, 2), (3, 0));
+    assert_eq!(block_row_range(&offsets, 1, 4), (3, 5));
+    assert_eq!(block_row_range(&offsets, 0, 4), (0, 8));
+    assert_eq!(block_row_range(&offsets, 4, 4), (8, 0));
+}
+
+/// Order entries and slot counts convert to `i64` exactly, or not at all.
+#[test]
+fn signed_conversions_are_exact_or_rejected() {
+    assert_eq!(signed_order(&[2, 0, 1]), Some(vec![2, 0, 1]));
+    assert_eq!(signed_order(&[]), Some(vec![]));
+    assert_eq!(
+        signed_order(&[0, i64::MAX as usize]),
+        Some(vec![0, i64::MAX])
+    );
+    assert_eq!(signed_order(&[0, i64::MAX as usize + 1, 1]), None);
+    assert_eq!(signed_order(&[usize::MAX]), None);
+    assert_eq!(signed_index(7), Some(7));
+    assert_eq!(signed_index(i64::MAX as usize), Some(i64::MAX));
+    assert_eq!(signed_index(i64::MAX as usize + 1), None);
+}
+
 /// Assignment counts must be addressable by `i64` indices.
 #[test]
 fn routed_assignment_count_is_exact_or_rejected() {
@@ -235,6 +262,17 @@ proptest::proptest! {
         let plan = plan_expert_assignments(&ids, experts).expect("in-range IDs");
         proptest::prop_assert_eq!(plan.offsets.len(), experts + 1);
         proptest::prop_assert_eq!(plan.order.len(), ids.len());
+        // Offsets are ordered pairwise, as the block planners require.
+        proptest::prop_assert!(plan.offsets.windows(2).all(|pair| pair[0] <= pair[1]));
+        let signed = signed_order(&plan.order).expect("small assignment indices");
+        proptest::prop_assert!(signed.iter().zip(&plan.order).all(|(&s, &u)| s as usize == u));
+        for first in 0..=experts {
+            for end in first..=experts {
+                let (start, rows) = block_row_range(&plan.offsets, first, end);
+                proptest::prop_assert_eq!(start, plan.offsets[first]);
+                proptest::prop_assert_eq!(start + rows, plan.offsets[end]);
+            }
+        }
         for expert in 0..experts {
             let naive = (0..ids.len())
                 .filter(|&index| ids[index] == expert as i64)

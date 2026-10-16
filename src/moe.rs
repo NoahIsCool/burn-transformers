@@ -515,33 +515,39 @@ where
     let device = flat_input.device();
     let plan = read_assignment_plan(selected_experts, non_finite_tokens, routed_experts)?;
     let assignments = plan.order.len();
-    let order = Tensor::<B, 1, Int>::from_data(
-        TensorData::new(
-            plan.order
-                .iter()
-                .map(|&index| index as i64)
-                .collect::<Vec<_>>(),
-            [assignments],
-        ),
-        &device,
-    );
+    // `read_assignment_plan` accepted `tokens * K <= i64::MAX` with `tokens > 0`,
+    // and every order entry is an assignment index below that count, so both
+    // exact conversions succeed.
+    let (Some(signed_order), Some(signed_slots)) = (
+        assignment::signed_order(&plan.order),
+        assignment::signed_index(slots),
+    ) else {
+        return Err(Error::shape(
+            "moe.selected_experts",
+            "a tokens * top_k product representable by the i64 index type",
+            format!("{assignments} assignments of {slots} slots"),
+        ));
+    };
+    let order =
+        Tensor::<B, 1, Int>::from_data(TensorData::new(signed_order, [assignments]), &device);
     let flat_weights = flat_weights.reshape([assignments]);
     let expert_token_counts = assignment::range_lengths(&plan.offsets);
-    // The plan has `routed_experts + 1` nondecreasing offsets, so the blocks
-    // partition `0..routed_experts` into runs of whole experts.
+    // The plan's offsets are ordered pairwise, which is the precondition of
+    // the block planners; the blocks partition `0..routed_experts` into runs
+    // of whole experts.
     let blocks = assignment::dispatch_blocks(&plan.offsets, budget);
 
     let mut hidden_state: Option<Tensor<B, 2>> = None;
     let mut evaluated_experts = 0;
     for bounds in blocks.windows(2) {
         let (first, end) = (bounds[0], bounds[1]);
-        let (block_start, block_rows) =
-            (plan.offsets[first], plan.offsets[end] - plan.offsets[first]);
+        // The block's slice `order[block_start..block_start + block_rows]`.
+        let (block_start, block_rows) = assignment::block_row_range(&plan.offsets, first, end);
         if block_rows == 0 {
             continue;
         }
         let block_order = order.clone().narrow(0, block_start, block_rows);
-        let token_rows = block_order.clone().div_scalar(slots as i64);
+        let token_rows = block_order.clone().div_scalar(signed_slots);
         let inputs = flat_input.clone().select(0, token_rows.clone());
         let weights = flat_weights
             .clone()
