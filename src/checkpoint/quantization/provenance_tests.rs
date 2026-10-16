@@ -1005,3 +1005,36 @@ fn hash_stat_accumulation_names_the_overflowing_counter() {
         (2, 2, 2)
     );
 }
+
+/// An unreadable shard fails the hash pass at open, before any buffer is charged.
+///
+/// Canonicalization and the no-follow inspection both succeed on a mode-000
+/// file, so the open is the first failing step. A privileged process can
+/// still open it; the shard must then hash completely.
+#[cfg(unix)]
+#[test]
+fn unreadable_shard_fails_provenance_hashing_at_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_root, manifest, _plan) = local_fixture(4);
+    let shard = &manifest.shards[0];
+    std::fs::set_permissions(&shard.path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let privileged = File::open(&shard.path).is_ok();
+    let mut stats = ProvenanceHashStats::default();
+    let result = hash_one_shard(&manifest, shard, &mut stats);
+    std::fs::set_permissions(&shard.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    if privileged {
+        assert!(result.unwrap().is_some());
+        assert_eq!(stats.bytes_hashed, shard.file_bytes);
+        return;
+    }
+    assert!(matches!(
+        result,
+        Err(QuantizationError::ArtifactIo {
+            operation: "open checkpoint shard for provenance",
+            ref path,
+            ref source,
+        }) if *path == shard.path && source.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert_eq!(stats, ProvenanceHashStats::default());
+}

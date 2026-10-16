@@ -1855,3 +1855,40 @@ fn manifest_estimate_is_a_tight_upper_bound() {
         "{per_entry} bytes per entry"
     );
 }
+
+/// An unreadable output directory still publishes atomically, reporting no sync.
+///
+/// Creating, linking, and removing entries needs only write and search
+/// permission, but synchronizing the directory needs a readable handle. The
+/// published artifact must therefore be complete and valid while the summary
+/// truthfully reports that its directory entry was not synchronized. A
+/// privileged process can open the directory anyway and then reports a sync.
+#[cfg(unix)]
+#[test]
+fn publication_without_a_readable_parent_reports_unsynchronized_durability() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let parent = directory.path().join("write-only");
+    fs::create_dir(&parent).unwrap();
+    let output = parent.join("weights.bpk");
+    let source = TensorData::new(vec![0.5_f32; 64], [2, 32]);
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append("q.weight", &source, config(SymmetricQuantization::Q8))
+        .unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+    let privileged = fs::File::open(&parent).is_ok();
+    let summary = session.finalize();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    let summary = summary.unwrap();
+    assert_eq!(summary.parent_directory_synchronized, privileged);
+    assert_eq!(summary.tensor_count, 1);
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    assert_eq!(artifact.validate_all().unwrap().tensor_count, 1);
+    let names: Vec<_> = fs::read_dir(&parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["weights.bpk"]);
+}

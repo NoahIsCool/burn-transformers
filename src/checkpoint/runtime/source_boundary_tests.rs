@@ -371,3 +371,34 @@ fn payload_read_throughput_against_zero_filled_reads() {
         gib / best_zeroed
     );
 }
+
+/// An unreadable shard fails at open with the contextual I/O error.
+///
+/// Every path check passes (the file is still the discovered regular file),
+/// so the open itself is the first failing step. A privileged process can
+/// still open a mode-000 file; the read must then succeed unchanged.
+#[cfg(unix)]
+#[test]
+fn unreadable_shard_fails_at_open_without_counting_a_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_directory, manifest, descriptor) = fixture();
+    let path = &manifest.shards[0].path;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+    let privileged = File::open(path).is_ok();
+    let mut source = LocalShardSource::new(&manifest);
+    let result = source.read_tensor(&descriptor);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    if privileged {
+        assert_eq!(result.unwrap().bytes().len(), 8);
+        return;
+    }
+    let error = result.unwrap_err();
+    assert!(
+        matches!(&error, CheckpointError::Io { operation: "open checkpoint shard", path: reported, source }
+            if reported == path && source.kind() == std::io::ErrorKind::PermissionDenied),
+        "{error}"
+    );
+    assert_eq!(source.stats().tensor_reads, 0);
+    assert_eq!(source.stats().payload_bytes_read, 0);
+}
