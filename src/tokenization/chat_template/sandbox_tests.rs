@@ -400,20 +400,45 @@ fn format_widths_follow_printf() {
     );
 }
 
-/// Counts dropped [`Probe`] objects, to observe whether a render leaked them.
-static DROPPED_PROBES: AtomicUsize = AtomicUsize::new(0);
-
-/// A template value that records its own destruction.
+/// A template value that counts its own destruction, to observe whether a render leaked it.
+///
+/// Each test owns its counter, so tests running in parallel cannot disturb
+/// one another's counts.
 #[derive(Debug)]
-struct Probe;
+struct Probe(Arc<AtomicUsize>);
 
 impl minijinja::value::Object for Probe {}
 
 impl Drop for Probe {
     /// Counts the drop.
     fn drop(&mut self) {
-        DROPPED_PROBES.fetch_add(1, Ordering::SeqCst);
+        self.0.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// Renders `source` with a `probe()` global and returns the result and the probes dropped since.
+///
+/// Every probe the template creates must be dropped by the time the render
+/// returns; `explode()` panics inside the render.
+fn render_with_probes(source: &str) -> (Result<String, Error>, usize) {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&dropped);
+    let result = render_template_with(
+        source,
+        &json!({}),
+        Some(0),
+        RenderLimits::for_context_bytes(0),
+        move |environment| {
+            environment.add_function("probe", move || {
+                Value::from_object(Probe(Arc::clone(&counter)))
+            });
+            environment.add_function("explode", || -> Result<Value, Error> {
+                panic!("unwinding through the render");
+            });
+        },
+    );
+    let dropped = dropped.load(Ordering::SeqCst);
+    (result, dropped)
 }
 
 /// Reference cycles through namespaces are broken when the render ends.
@@ -443,26 +468,93 @@ fn namespace_cycles_do_not_outlive_the_render() {
         ),
     ];
     for (source, succeeds) in cases {
-        let before = DROPPED_PROBES.load(Ordering::SeqCst);
-        let result = render_template_with(
-            source,
-            &json!({}),
-            Some(0),
-            RenderLimits::for_context_bytes(0),
-            |environment| {
-                environment.add_function("probe", || Value::from_object(Probe));
-                environment.add_function("explode", || -> Result<Value, Error> {
-                    panic!("unwinding through the render");
-                });
-            },
-        );
+        let (result, dropped) = render_with_probes(source);
         assert_eq!(result.is_ok(), succeeds, "{source}: {result:?}");
-        assert_eq!(
-            DROPPED_PROBES.load(Ordering::SeqCst),
-            before + 1,
-            "{source}: the probe leaked"
-        );
+        assert_eq!(dropped, 1, "{source}: the probe leaked");
     }
+}
+
+/// Cleanup work is proportional to the attributes it clears, not to namespaces times names.
+///
+/// Review finding CHAT-CLEANUP-AMPLIFICATION: the cleanup assigned the union
+/// of every attribute name to every namespace, inserting new entries as it
+/// went, without fuel. One namespace with 1 000 names plus 20 000 empty
+/// namespaces took 2.97 s and 2.3 GB inside the destructor. The plan now
+/// groups namespaces by the names they hold and clears only values that can
+/// hold a reference.
+#[test]
+fn namespace_cleanup_costs_only_what_the_render_built() {
+    let registry = Arc::new(NamespaceRegistry::default());
+    let budget = Arc::new(RenderBudget::new(RenderLimits::for_context_bytes(0)));
+    let mut environment = Environment::new();
+    install_namespace_registry(&mut environment, &registry, &budget);
+    let mut source = String::from("{% set ns = namespace() %}");
+    for index in 0..1_000 {
+        source.push_str(&format!("{{% set ns.a{index} = {index} %}}"));
+    }
+    source.push_str("{% set ns.me = ns %}{% set ns.all = [ns, 'x'] %}");
+    source.push_str("{% for i in range(20000) %}{% set x = namespace(i=i) %}{% endfor %}");
+    environment.render_str(&source, ()).unwrap();
+    let plan = registry.cleanup_plan();
+    assert_eq!(plan.assignments(), 2);
+    assert_eq!(plan.names().collect::<Vec<_>>(), ["all", "me"]);
+    assert_eq!(
+        plan.source(),
+        "{% for n in groups[0] %}{% set n.all = none %}{% endfor %}\
+         {% for n in groups[1] %}{% set n.me = none %}{% endfor %}"
+    );
+    // Two assignments, two loops, and the template itself.
+    assert_eq!(plan.fuel(), 5 * CleanupPlan::FUEL_PER_STEP);
+    let started = std::time::Instant::now();
+    registry.break_cycles();
+    assert!(started.elapsed().as_secs_f64() < 1.0);
+    assert_eq!(registry.cleanup_plan().assignments(), 0);
+}
+
+/// Every reference-holding attribute is cleared, whatever its name and however many share it.
+#[test]
+fn namespace_cleanup_clears_every_reference_holder() {
+    let names = [
+        "none", "true", "false", "if", "else", "not", "and", "or", "in", "is", "loop", "for",
+        "set", "self", "_x9",
+    ];
+    for name in names {
+        let source = format!(
+            "{{% set ns = namespace(p=probe()) %}}{{% set ns.{name} = ns %}}\
+             {{% for i in range(3) %}}{{% set other = namespace(o=ns) %}}{{% set other.{name} = [other] %}}{{% endfor %}}ok"
+        );
+        let (result, dropped) = render_with_probes(&source);
+        assert_eq!(result.unwrap(), "ok", "{name}");
+        assert_eq!(dropped, 1, "{name}: the probe leaked");
+    }
+}
+
+/// `namespace()` charges the namespace and every attribute it copies, which the registry keeps alive.
+#[test]
+fn namespaces_are_charged_to_the_budget() {
+    // Each namespace copies seven attributes: eight items (192 bytes) plus
+    // seven bytes of keys.
+    assert_limited(
+        "{% set d = dict(a=1, b=2, c=3, d=4, e=5, f=6, g=7) %}{% for i in range(6) %}{% set x = namespace(d) %}{% endfor %}",
+        SMALL,
+    );
+    assert_eq!(
+        render_with(
+            "{% set d = dict(a=1, b=2, c=3, d=4, e=5, f=6, g=7) %}{% for i in range(2) %}{% set x = namespace(d) %}{% endfor %}{{ namespace(d).g }}",
+            SMALL,
+        )
+        .unwrap(),
+        "7"
+    );
+    // More attributes than one sequence may hold, and key text past the value limit.
+    assert_limited(
+        "{% set x = namespace(a=1, b=2, c=3, d=4, e=5, f=6, g=7, h=8, i=9) %}",
+        SMALL,
+    );
+    assert_limited("{% set x = namespace({'k' * 65: 1}) %}", SMALL);
+    // A non-map default keeps MiniJinja's own error.
+    let error = render_with("{% set x = namespace(3) %}", SMALL).unwrap_err();
+    assert!(error.to_string().contains("expected object"), "{error}");
 }
 
 /// The registry clears only identifier-named attributes, and an empty registry is a no-op.
@@ -471,7 +563,11 @@ fn namespace_registry_clears_identifier_attributes() {
     // An empty registry has nothing to clear.
     NamespaceRegistry::default().break_cycles();
     let mut environment = Environment::new();
-    install_namespace_registry(&mut environment, &Arc::new(NamespaceRegistry::default()));
+    install_namespace_registry(
+        &mut environment,
+        &Arc::new(NamespaceRegistry::default()),
+        &Arc::new(RenderBudget::new(RenderLimits::for_context_bytes(0))),
+    );
     assert_eq!(
         environment
             .render_str("{% set ns = namespace({'a b': 1}, ) %}{{ ns['a b'] }}", ())

@@ -66,9 +66,11 @@
 //! - **Cycles.** Namespaces are MiniJinja's only mutable values, so a
 //!   template can make one reference itself (`{% set ns.me = ns %}`), and the
 //!   cycle would outlive the render and leak everything it reaches. Every
-//!   namespace a render creates is recorded, and its attributes are cleared
-//!   when the render ends (even by a panic), as MiniJinja already does for
-//!   macro closures.
+//!   namespace a render creates is recorded (and charged to the budget, since
+//!   the record keeps it alive), and its attributes that can hold a
+//!   reference are cleared when the render ends (even by a panic), as
+//!   MiniJinja already does for macro closures. The clearing costs one
+//!   assignment per such attribute, which the render itself already paid for.
 //!
 //! What remains unbounded, because MiniJinja exposes no hook for it:
 //!
@@ -186,7 +188,7 @@ fn render_bounded(
     environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
     pycompat::install(&mut environment, &budget);
     sandbox::install(&mut environment, &budget);
-    sandbox::install_namespace_registry(&mut environment, &registry);
+    sandbox::install_namespace_registry(&mut environment, &registry, &budget);
     environment.add_function("raise_exception", raise_exception);
     environment.add_function("strftime_now", move |format: &str| {
         strftime_now(format, fixed_time)

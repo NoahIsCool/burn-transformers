@@ -26,9 +26,11 @@
 //!   that print arbitrary values with MiniJinja's `Display` (`upper`, `lower`,
 //!   `title`, `capitalize`, `escape`, `pprint`, and the `startingwith` and
 //!   `endingwith` tests) with bounded versions.
-//! - [`NamespaceRegistry`] records every namespace a render creates and,
-//!   through [`CycleBreaker`], clears their attributes when the render ends,
-//!   so reference cycles (`{% set ns.me = ns %}`) cannot outlive it.
+//! - [`NamespaceRegistry`] records (and charges) every namespace a render
+//!   creates and, through [`CycleBreaker`], clears their reference-holding
+//!   attributes when the render ends, so reference cycles
+//!   (`{% set ns.me = ns %}`) cannot outlive it; [`CleanupPlan`] keeps that
+//!   clearing proportional to what the render built.
 //!
 //! Numbers keep MiniJinja's own arithmetic: the bounded operators delegate
 //! every operand pair they do not size-check to the engine's operator.
@@ -36,7 +38,7 @@
 use core::fmt;
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::BTreeMap,
     io,
     sync::{
         Arc, Mutex,
@@ -807,48 +809,143 @@ impl NamespaceRegistry {
         }
     }
 
-    /// Sets every attribute of every recorded namespace to `none`, breaking any cycle.
+    /// Plans the clearing of every recorded namespace without running it.
+    #[cfg(test)]
+    pub(crate) fn cleanup_plan(&self) -> CleanupPlan {
+        match self.namespaces.lock() {
+            Ok(namespaces) => CleanupPlan::for_namespaces(&namespaces),
+            Err(_) => CleanupPlan::default(),
+        }
+    }
+
+    /// Clears every attribute that can hold a reference, on every recorded namespace.
     ///
-    /// A cycle through a namespace needs an attribute assigned after the
-    /// namespace existed, and `{% set ns.name = value %}` only assigns
-    /// identifier names, so clearing the identifier-named attributes breaks
-    /// every cycle. Templates cannot assign attributes any other way, so the
-    /// clearing runs as a generated template,
-    /// `{% for n in namespaces %}{% set n.name = none %}...{% endfor %}`, over
-    /// the union of attribute names. Failures are ignored: this runs from a
-    /// destructor, possibly while a panic unwinds.
+    /// See [`CleanupPlan`] for why this breaks every cycle and what it costs.
+    /// Failures are ignored: this runs from a destructor, possibly while a
+    /// panic unwinds.
     pub(crate) fn break_cycles(&self) {
         let namespaces = match self.namespaces.lock() {
             Ok(mut namespaces) => std::mem::take(&mut *namespaces),
             Err(_) => return,
         };
-        if namespaces.is_empty() {
-            return;
-        }
-        let mut names = BTreeSet::new();
-        for namespace in &namespaces {
-            if let Ok(keys) = namespace.try_iter() {
-                names.extend(
-                    keys.filter_map(|key| key.as_str().map(str::to_owned))
-                        .filter(|name| is_identifier(name)),
-                );
+        CleanupPlan::for_namespaces(&namespaces).run();
+    }
+}
+
+/// The attribute assignments that break every reference cycle through a render's namespaces.
+///
+/// A cycle through a namespace needs an attribute assigned after the
+/// namespace existed: lists and maps are immutable, and `namespace(defaults)`
+/// can only refer to older values. `{% set ns.name = value %}` assigns only
+/// identifier names, so setting every identifier-named attribute whose value
+/// can hold a reference (a sequence, map, iterable, or object such as another
+/// namespace or a macro) to `none` breaks every cycle. Undefined, `none`,
+/// booleans, numbers, strings, and bytes hold no references and are left
+/// alone.
+///
+/// Templates cannot assign attributes any other way, so the plan runs as a
+/// generated template with one loop per attribute *name* over the namespaces
+/// that hold it:
+/// `{% for n in groups[0] %}{% set n.name = none %}{% endfor %}...`. Its work
+/// is one assignment per `(namespace, attribute)` pair it clears, and every
+/// such pair was created by an instruction of the render's fuel or charged to
+/// its budget by `namespace(defaults)`; the generated source holds each
+/// distinct name once. It runs with fuel proportional to that work, so even
+/// a template that creates tens of thousands of namespaces and thousands of
+/// attribute names costs only what it built.
+#[derive(Debug, Default)]
+pub(crate) struct CleanupPlan {
+    /// For each attribute name, the namespaces whose attribute of that name must be cleared.
+    groups: BTreeMap<String, Vec<Value>>,
+    /// Total `(namespace, attribute)` pairs across all groups.
+    assignments: usize,
+}
+
+impl CleanupPlan {
+    /// Instructions of fuel granted per assignment and per group, with ample headroom.
+    ///
+    /// One loop iteration and its assignment take about six instructions and
+    /// one loop about eight, so a quarter of the grant suffices; the fuel
+    /// only stops a plan that is somehow far larger than its accounting.
+    const FUEL_PER_STEP: u64 = 32;
+
+    /// Groups the identifier-named, reference-holding attributes of `namespaces` by name.
+    fn for_namespaces(namespaces: &[Value]) -> Self {
+        let mut plan = Self::default();
+        for namespace in namespaces {
+            let Ok(keys) = namespace.try_iter() else {
+                continue;
+            };
+            for key in keys {
+                let Some(name) = key.as_str().filter(|name| is_identifier(name)) else {
+                    continue;
+                };
+                let holds_references = namespace.get_attr(name).is_ok_and(|value| {
+                    matches!(
+                        value.kind(),
+                        ValueKind::Seq | ValueKind::Map | ValueKind::Iterable | ValueKind::Plain
+                    )
+                });
+                if holds_references {
+                    plan.groups
+                        .entry(name.to_owned())
+                        .or_default()
+                        .push(namespace.clone());
+                    plan.assignments += 1;
+                }
             }
         }
-        if names.is_empty() {
+        plan
+    }
+
+    /// Number of `(namespace, attribute)` assignments the plan makes.
+    #[cfg(test)]
+    pub(crate) fn assignments(&self) -> usize {
+        self.assignments
+    }
+
+    /// The distinct attribute names the plan clears, in order.
+    #[cfg(test)]
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.groups.keys().map(String::as_str)
+    }
+
+    /// The generated template: one loop per name over `groups[i]`.
+    pub(crate) fn source(&self) -> String {
+        let mut source = String::new();
+        for (index, name) in self.groups.keys().enumerate() {
+            source.push_str(&format!(
+                "{{% for n in groups[{index}] %}}{{% set n.{name} = none %}}{{% endfor %}}"
+            ));
+        }
+        source
+    }
+
+    /// Fuel for the generated template: [`Self::FUEL_PER_STEP`] per assignment and per group.
+    pub(crate) fn fuel(&self) -> u64 {
+        let steps = self
+            .assignments
+            .saturating_add(self.groups.len())
+            .saturating_add(1);
+        u64::try_from(steps)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(Self::FUEL_PER_STEP)
+    }
+
+    /// Runs the assignments in a fresh, fuel-limited environment, ignoring failures.
+    fn run(self) {
+        if self.groups.is_empty() {
             return;
         }
-        let mut source = String::from("{% for n in namespaces %}");
-        for name in &names {
-            source.push_str("{% set n.");
-            source.push_str(name);
-            source.push_str(" = none %}");
-        }
-        source.push_str("{% endfor %}");
-        let environment = Environment::new();
-        let _ = environment.render_str(
-            &source,
-            minijinja::context! { namespaces => Value::from(namespaces) },
-        );
+        let source = self.source();
+        let mut environment = Environment::new();
+        environment.set_fuel(Some(self.fuel()));
+        let groups = self
+            .groups
+            .into_values()
+            .map(Value::from)
+            .collect::<Vec<_>>();
+        let _ = environment.render_str(&source, minijinja::context! { groups => groups });
     }
 }
 
@@ -872,15 +969,37 @@ impl Drop for CycleBreaker {
     }
 }
 
-/// Replaces `namespace()` with MiniJinja's own function plus registration in `registry`.
+/// Replaces `namespace()` with MiniJinja's own function plus registration and charging.
+///
+/// The registry keeps every namespace alive until the render ends, so each
+/// one is charged to `budget` as one item plus one item and the key text per
+/// attribute copied from `defaults` (a map or keyword arguments), before it
+/// is built. A template that creates namespaces in a loop therefore stays
+/// within the render's budget like any other production.
 pub(crate) fn install_namespace_registry(
     environment: &mut Environment<'_>,
     registry: &Arc<NamespaceRegistry>,
+    budget: &Arc<RenderBudget>,
 ) {
     let shared = Arc::clone(registry);
+    let budget = Arc::clone(budget);
     environment.add_function(
         "namespace",
         move |defaults: Option<Value>| -> Result<Value, Error> {
+            const OPERATION: &str = "namespace()";
+            let (attributes, key_bytes) = match &defaults {
+                // Other values are MiniJinja's error, reported by the call below.
+                Some(map) if map.kind() == ValueKind::Map => {
+                    map.try_iter()?
+                        .fold((0usize, 0usize), |(count, bytes), key| {
+                            let length = key.as_str().map_or(0, str::len);
+                            (count.saturating_add(1), bytes.saturating_add(length))
+                        })
+                }
+                _ => (0, 0),
+            };
+            budget.reserve_items(attributes.saturating_add(1), OPERATION)?;
+            budget.reserve_text(key_bytes, OPERATION)?;
             let namespace = functions::namespace(defaults)?;
             shared.record(namespace.clone());
             Ok(namespace)
