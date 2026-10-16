@@ -26,8 +26,10 @@
 //!   one over advancing rows (`[0, 0)` when none advances), cell `(r, j)` is
 //!   written exactly when `L_r <= start + j < L_r + n_r`, and a written cell
 //!   gathers the unique valid column whose rank is `start + j - L_r`;
-//! - `plan_history`: composes both, discharging the window's precondition
-//!   from the append's postcondition;
+//! - `plan_history`: reports a validity grid that does not hold exactly
+//!   `rows * step` cells (computed without overflow) as a layout error, and
+//!   otherwise composes both, discharging the window's precondition from the
+//!   append's postcondition, so its decode-state caller assumes nothing;
 //! - `full_range`, `valid_range`, and `first_position_violation`: decode
 //!   validation reads attained token bounds and reports the first row whose
 //!   valid explicit positions leave `0..limit`, ignoring masked cells;
@@ -40,10 +42,8 @@
 //! `src/models/custom/*_tests.rs`: the host bucket evaluation that fills the
 //! displacement table (its exactness relies on the floating-point saturation
 //! argument in the module documentation and is checked exhaustively against
-//! the pairwise reference), the trusted shape precondition
-//! `validity.len() == lengths.len() * step` at the unverified decode-state
-//! call site (checked there by a debug assertion), and every Burn tensor
-//! program driven by these plans.
+//! the pairwise reference) and every Burn tensor program driven by these
+//! plans.
 
 #![allow(unused)]
 // Loop invariants are attributes on `while` statements, which Verus parses as

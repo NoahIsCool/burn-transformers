@@ -210,8 +210,7 @@ impl<B: Backend> ModularDecodeState<B> {
         let host = HostInput::read(&input, batch, step, "custom decode input")?;
         validate_decode_token_ids(&host.tokens, vocabulary_size)?;
         let validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
-        // The verified planner requires one validity cell per row and column.
-        debug_assert_eq!(validity.len(), self.metadata.lengths().len() * step);
+        // The verified planner checks one validity cell per row and column itself.
         let (plan, writes) = plan_history(
             &validity,
             step,
@@ -273,6 +272,10 @@ impl<B: Backend> ModularDecodeState<B> {
     /// Converts a planning failure into this state's contextual error.
     fn append_error(&self, error: HistoryAppendError) -> Error {
         match error {
+            HistoryAppendError::Layout { cells, rows, step } => Error::Cache(format!(
+                "custom decode state holds {rows} rows, but the step mask has {cells} cells \
+                 for {step} columns"
+            )),
             HistoryAppendError::EmptyRow { .. } => Error::shape(
                 "custom.prefill.token_mask",
                 "at least one valid token in every prompt row",

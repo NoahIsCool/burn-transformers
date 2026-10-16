@@ -213,6 +213,34 @@ fn history_appends_without_cells_report_the_first_policy() {
     );
 }
 
+/// A validity grid of the wrong size is reported instead of being planned or indexed.
+#[test]
+fn composed_history_plans_reject_a_mismatched_validity_layout() {
+    for (validity, step, lengths) in [
+        (&[true, true, true][..], 2, &[0, 0][..]),
+        (&[true; 5][..], 2, &[0, 0][..]),
+        (&[][..], 1, &[0][..]),
+        (&[true][..], 0, &[0][..]),
+        // The product `rows * step` overflows `usize`, so no grid can match it.
+        (&[true, true][..], usize::MAX, &[0, 0][..]),
+    ] {
+        assert_eq!(
+            plan_history(validity, step, lengths, 8, false),
+            Err(HistoryAppendError::Layout {
+                cells: validity.len(),
+                rows: lengths.len(),
+                step,
+            })
+        );
+    }
+    // A matching grid, including the empty one, reaches the policy checks.
+    assert_eq!(
+        plan_history(&[], 0, &[1, 2], 8, false),
+        Err(HistoryAppendError::EmptyStep)
+    );
+    assert!(plan_history(&[true, false], 1, &[0, 3], 8, false).is_ok());
+}
+
 /// The window spans the appended slots of every advancing row and nothing else.
 #[test]
 fn history_writes_cover_exactly_the_appended_slots() {

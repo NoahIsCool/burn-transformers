@@ -1,8 +1,11 @@
-//! Pure index planning for modular models: relative-position tables and history appends.
+//! Pure index planning for modular models: displacement tables, history appends, and decode checks.
 //!
-//! Two pieces of host-side integer logic decide which device indices the
-//! modular graphs read and write. Both are dependency-free and checked in place
-//! by Verus through `verus/custom.rs` (see `verus/README.md`).
+//! Three areas of host-side integer logic decide which device indices the
+//! modular graphs read and write and which inputs they accept: clamped
+//! displacement tables, compact history appends with their write windows, and
+//! decode-input validation with history-prefix views. All of them are
+//! dependency-free and checked in place by Verus through `verus/custom.rs`
+//! (see `verus/README.md`).
 //!
 //! # Clamped displacement tables
 //!
@@ -30,7 +33,8 @@
 //! prefill empty-row, and the never-started-row policies.
 //! [`plan_history_writes`] turns the slots into one rectangular gather window
 //! `[start, end)` so every row's history is written by a constant number of
-//! tensor kernels, and [`plan_history`] composes the two.
+//! tensor kernels, and [`plan_history`] composes the two after checking that
+//! the validity grid holds exactly one cell per row and column.
 //!
 //! # Decode-input validation and history views
 //!
@@ -45,7 +49,9 @@
 //!
 //! - the append planner returns exactly the documented first error in policy
 //!   order, or per-row counts `n_r`, new lengths `L_r + n_r <= capacity`, and
-//!   slots `L_r + rank(c)` for valid cells and zero for masked cells;
+//!   slots `L_r + rank(c)` for valid cells and zero for masked cells, and the
+//!   composed planner reports a validity grid of the wrong size instead of
+//!   assuming its shape;
 //! - the write window is the tightest one: `start` is the smallest committed
 //!   length and `end` the largest new length among advancing rows (both zero
 //!   when no row advances);
@@ -187,6 +193,7 @@ pub(crate) open spec fn history_append_outcome(
 ) -> bool {
     let rows = lengths.len() as int;
     match planned {
+        Err(HistoryAppendError::Layout { .. }) => false,
         Err(HistoryAppendError::EmptyRow { row }) => {
             &&& require_every_row
             &&& row < rows
@@ -554,6 +561,18 @@ pub(crate) fn slot_displacement(slot: usize, radius: usize) -> i64 {
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryAppendError {
+    /// The validity grid does not hold one cell per row and column.
+    ///
+    /// Only [`plan_history`] reports it; it guards the shape that the
+    /// lower-level planners require.
+    Layout {
+        /// Cells in the validity grid.
+        cells: usize,
+        /// Rows with a committed length.
+        rows: usize,
+        /// Columns of the append step.
+        step: usize,
+    },
     /// A prompt row has no valid token.
     EmptyRow {
         /// First offending batch row.
@@ -1115,17 +1134,24 @@ pub(crate) fn plan_history_writes(
 
 /// Plans an append and its write window in one verified step.
 ///
-/// `validity` must hold `lengths.len() * step` cells. The result is exactly
-/// [`plan_history_append`]'s outcome, and on success the window of
-/// [`plan_history_writes`] for that plan, so the window's precondition is
-/// discharged by the proof rather than by the caller.
+/// A `validity` grid that does not hold exactly `lengths.len() * step` cells
+/// is reported as [`HistoryAppendError::Layout`] (with the product computed
+/// without overflow), so callers need not establish the shape themselves.
+/// Otherwise the result is exactly [`plan_history_append`]'s outcome, and on
+/// success the window of [`plan_history_writes`] for that plan, so the
+/// window's precondition is discharged by the proof rather than by the caller.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(planned =>
-    requires
-        validity.len() == lengths.len() * step,
     ensures
         match planned {
+            Err(HistoryAppendError::Layout { cells, rows, step: columns }) => {
+                &&& cells == validity.len()
+                &&& rows == lengths.len()
+                &&& columns == step
+                &&& validity.len() != lengths.len() * step
+            },
             Ok((plan, writes)) => {
+                &&& validity.len() == lengths.len() * step
                 &&& history_append_outcome(
                     validity@,
                     step as int,
@@ -1136,14 +1162,17 @@ pub(crate) fn plan_history_writes(
                 )
                 &&& history_writes_outcome(plan, validity@, step as int, writes)
             },
-            Err(error) => history_append_outcome(
-                validity@,
-                step as int,
-                lengths@,
-                capacity as int,
-                require_every_row,
-                Err(error),
-            ),
+            Err(error) => {
+                &&& validity.len() == lengths.len() * step
+                &&& history_append_outcome(
+                    validity@,
+                    step as int,
+                    lengths@,
+                    capacity as int,
+                    require_every_row,
+                    Err(error),
+                )
+            },
         },
 ))]
 pub(crate) fn plan_history(
@@ -1153,6 +1182,17 @@ pub(crate) fn plan_history(
     capacity: usize,
     require_every_row: bool,
 ) -> Result<(HistoryAppend, HistoryWrites), HistoryAppendError> {
+    let shaped = match lengths.len().checked_mul(step) {
+        Some(cells) => cells == validity.len(),
+        None => false,
+    };
+    if !shaped {
+        return Err(HistoryAppendError::Layout {
+            cells: validity.len(),
+            rows: lengths.len(),
+            step,
+        });
+    }
     match plan_history_append(validity, step, lengths, capacity, require_every_row) {
         Ok(plan) => {
             #[cfg(verus_keep_ghost)]
