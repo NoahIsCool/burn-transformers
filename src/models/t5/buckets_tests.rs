@@ -39,7 +39,27 @@ fn displacement_table_takes_the_smaller_radius() {
     assert_eq!(displacement_table(usize::MAX, 7), Some((7, 8)));
 }
 
+/// Layers share the learned table of the first layer with their head count.
+#[test]
+fn bias_owners_share_tables_by_head_count() {
+    assert_eq!(bias_owners(&[8, 8, 4, 8, 4, 2]), [0, 0, 2, 0, 2, 5]);
+    assert!(bias_owners(&[]).is_empty());
+    assert_eq!(bias_owners(&[6]), [0]);
+}
+
 proptest! {
+    /// Owners equal the map-based first occurrence they replaced.
+    #[test]
+    fn bias_owners_match_first_occurrences(heads in proptest::collection::vec(1_usize..4, 0..10)) {
+        let mut first = std::collections::BTreeMap::new();
+        let expected = heads
+            .iter()
+            .enumerate()
+            .map(|(index, &count)| *first.entry(count).or_insert(index))
+            .collect::<Vec<_>>();
+        prop_assert_eq!(bias_owners(&heads), expected);
+    }
+
     /// The geometry check equals the configuration validator's former inline checks.
     #[test]
     fn bucket_geometry_matches_the_inline_checks(

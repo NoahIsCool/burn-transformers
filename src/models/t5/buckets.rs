@@ -20,14 +20,21 @@
 //! `[-r, r]` before adding `r`. [`displacement_table`] sizes that table, and
 //! a lemma proves every clamped index lies inside it.
 //!
+//! # Table owners
+//!
+//! An edited encoder may mix head counts. A `[B, heads]` table serves only
+//! layers with its head count, so [`bias_owners`] assigns every layer the
+//! first layer with the same head count, which registers the shared table.
+//!
 //! # Verified geometry
 //!
-//! Both functions are checked in place by Verus through `verus/t5_gpt.rs`
+//! Every function here is checked in place by Verus through `verus/t5_gpt.rs`
 //! (see `verus/README.md`): the geometry check accepts exactly the valid
 //! layouts and names each rejection's cause, an accepted layout has a
 //! non-empty exact region below `max_distance` in every built stack, the
-//! table radius and width are exact, and every clamped displacement indexes
-//! the table (exactly, without clamping, for displacements within `r`).
+//! table radius and width are exact, every clamped displacement indexes the
+//! table (exactly, without clamping, for displacements within `r`), and two
+//! layers share a bias owner exactly when their head counts agree.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -150,6 +157,79 @@ pub(crate) fn displacement_table(bound: usize, max_distance: usize) -> Option<(u
     };
     let width = radius.checked_add(1)?;
     Some((radius, width))
+}
+
+/// Learned relative-bias owner of every layer of an edited encoder.
+///
+/// A table `[B, heads]` serves only layers with its head count, so layer `i`
+/// uses the table of the first layer with `heads[i]` heads. The proof
+/// establishes that every owner precedes (or is) its layer, has the layer's
+/// head count, and is the first such layer, so two layers share a table
+/// exactly when their head counts agree and every owner owns itself.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(owners =>
+    ensures
+        owners.len() == heads.len(),
+        forall|i: int| 0 <= i < heads.len() ==> {
+            &&& #[trigger] owners@[i] <= i
+            &&& heads@[owners@[i] as int] == heads@[i]
+            &&& forall|j: int| 0 <= j < owners@[i] ==> #[trigger] heads@[j] != heads@[i]
+        },
+        forall|i: int, j: int| 0 <= i < heads.len() && 0 <= j < heads.len()
+            ==> (#[trigger] owners@[i] == #[trigger] owners@[j]) == (heads@[i] == heads@[j]),
+        forall|i: int| 0 <= i < heads.len() ==> owners@[owners@[i] as int] == #[trigger] owners@[i],
+))]
+pub(crate) fn bias_owners(heads: &[usize]) -> Vec<usize> {
+    let mut owners: Vec<usize> = Vec::with_capacity(heads.len());
+    let mut layer: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= heads.len(),
+            owners.len() == layer,
+            forall|i: int| 0 <= i < layer ==> {
+                &&& #[trigger] owners@[i] <= i
+                &&& heads@[owners@[i] as int] == heads@[i]
+                &&& forall|j: int| 0 <= j < owners@[i] ==> #[trigger] heads@[j] != heads@[i]
+            },
+        decreases heads.len() - layer,
+    ))]
+    while layer < heads.len() {
+        // The first layer with this head count; the layer itself at the latest.
+        let mut owner: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                layer < heads.len(),
+                owner <= layer,
+                forall|j: int| 0 <= j < owner ==> #[trigger] heads@[j] != heads@[layer as int],
+            decreases layer - owner,
+        ))]
+        while owner < layer && heads[owner] != heads[layer] {
+            owner += 1;
+        }
+        owners.push(owner);
+        layer += 1;
+    }
+    // First occurrences coincide exactly for equal head counts.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|i: int, j: int| 0 <= i < heads.len() && 0 <= j < heads.len()
+            implies (#[trigger] owners@[i] == #[trigger] owners@[j]) == (heads@[i] == heads@[j]) by {
+            if heads@[i] == heads@[j] {
+                if owners@[i] < owners@[j] {
+                    assert(heads@[owners@[i] as int] == heads@[j]);
+                } else if owners@[j] < owners@[i] {
+                    assert(heads@[owners@[j] as int] == heads@[i]);
+                }
+            }
+        }
+        assert forall|i: int| 0 <= i < heads.len()
+            implies owners@[owners@[i] as int] == #[trigger] owners@[i] by {
+            let o = owners@[i] as int;
+            assert(heads@[o] == heads@[i]);
+            assert((owners@[o] == owners@[i]) == (heads@[o] == heads@[i]));
+        }
+    }
+    owners
 }
 
 #[cfg(test)]

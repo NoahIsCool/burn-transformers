@@ -39,6 +39,9 @@
 //! encoder, `B / 2` for a causal decoder) lies below `max_distance`, naming
 //! each rejection's cause, and the explicit-position bias table has radius
 //! `min(bound, max_distance)` with every clamped displacement inside it.
+//! `bias_owners` gives every encoder layer the first layer with its head
+//! count as relative-bias owner, so two layers share a learned table exactly
+//! when their head counts agree.
 //!
 //! For the GPT families it verifies `src/models/gpt2/extents.rs` (the first
 //! extent outside `1..=i32::MAX`, GPT-2's MLP width rule `n_inner` or `4 d`,
