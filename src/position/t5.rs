@@ -457,6 +457,7 @@ fn combine_bucket(
 /// Invalid parameters for [`T5RelativePositionBuckets`].
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum T5BucketError {
     /// There are not enough buckets to divide exact and logarithmic regions.
     TooFewBuckets {

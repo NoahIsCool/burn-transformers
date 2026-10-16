@@ -427,6 +427,7 @@ pub(crate) fn length_error(
 
 /// Failure while updating [`SequenceLengths`] lifecycle metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeStateError {
     /// The caller supplied a different number of per-sequence values.
     SequenceCountMismatch {

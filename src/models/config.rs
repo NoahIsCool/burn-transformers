@@ -84,6 +84,7 @@ impl Error for ConfigError {}
 
 /// Failure to decode a serialized configuration or validate its topology.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ConfigLoadError {
     /// The input was not compatible JSON or a field had the wrong serialized type.
     Json(
