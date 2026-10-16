@@ -506,8 +506,9 @@ fn tied_modular_decoder(
 /// `tiny` (width 64, vocabulary 1,024) is dominated by per-call overhead;
 /// `small` (width 576, vocabulary 49,152, SmolLM-135M's table) and
 /// `qwen3.5-small` (width 1,024, vocabulary 248,320, four hybrid layers) are
-/// dominated by the tied readout and the projections. Every model is drawn
-/// from the same backend seed, so checksums are comparable across revisions.
+/// dominated by the tied readout and the projections. Each model is drawn
+/// from its own fixed backend seed, so checksums are comparable across
+/// revisions.
 #[test]
 #[ignore = "timing measurement; run in release with --ignored --nocapture"]
 fn tied_vocabulary_decode_throughput() {
