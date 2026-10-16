@@ -1557,8 +1557,14 @@ pub enum ResidualTopology {
     Add,
     /// Apply a learned multiplicative gate before the residual addition.
     ///
-    /// Reserved: the gate's activation, shape, and initialization are not yet
-    /// specified, so the modular models reject it at `init`.
+    /// Reserved, and rejected by the modular models' `init` with a capability
+    /// error. No shipped family or pinned reference uses a learned residual
+    /// gate, so its activation, shape, and initialization are unspecified
+    /// (LayerScale's per-channel `x + γ ⊙ F(x)`, ReZero's scalar, and
+    /// input-dependent highway gates are all candidates), and executing one
+    /// would add gate parameters to every block, changing the binary record
+    /// layout of existing modular checkpoints. A gate added later should be a
+    /// separately named, fully specified variant.
     Gated,
 }
 
