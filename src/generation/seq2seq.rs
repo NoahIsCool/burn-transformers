@@ -1215,6 +1215,13 @@ fn validate_encoder_batch<B: Backend>(encoder: &EncoderOutput<B>, batch: usize) 
 /// cannot reach the host ranking. F16/BF16 logits are promoted to F32 before
 /// the log-sum-exp, as Hugging Face does, so near-tied beams are not ranked
 /// by half-precision rounding; F64 stays F64.
+///
+/// A row whose every logit is `-inf` (every token excluded) has no
+/// distribution: `log_softmax` would compute `-inf - (-inf) = NaN` for it.
+/// Such rows stay `-inf` instead, so candidate selection reports the empty
+/// candidate set rather than a spurious numerical failure. A row containing
+/// any NaN logit is not fully excluded and still yields NaN, which candidate
+/// selection rejects as non-finite. Every other row is unchanged.
 fn host_log_probabilities<B: Backend>(
     logits: Tensor<B, 2>,
     active: &[bool],
@@ -1230,8 +1237,13 @@ fn host_log_probabilities<B: Backend>(
     let active_mask =
         bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
     let dtype = probability_accumulation_dtype(logits.dtype());
-    let log_probabilities =
-        log_softmax(logits.cast(dtype).mask_fill(active_mask.bool_not(), 0.0), 1);
+    let logits = logits.cast(dtype).mask_fill(active_mask.bool_not(), 0.0);
+    let fully_excluded = logits
+        .clone()
+        .equal_elem(f64::NEG_INFINITY)
+        .all_dim(1)
+        .expand([batch, vocabulary]);
+    let log_probabilities = log_softmax(logits, 1).mask_fill(fully_excluded, f64::NEG_INFINITY);
     metadata::tensor_f64_values(log_probabilities, "beam-search log probabilities")
 }
 
