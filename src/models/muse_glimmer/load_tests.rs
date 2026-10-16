@@ -444,6 +444,16 @@ fn tied_alias_requires_the_tied_topology_and_an_installed_owner() {
     tied.write_tensor(embedding, TensorData::zeros::<f32, _>([16, 4]))
         .unwrap();
     tied.alias_tensor(head, embedding).unwrap();
+    // A tied configuration whose graph regained an independent head is refused.
+    let mut regrown = untied.clone();
+    regrown.model.config.tie_word_embeddings = true;
+    assert_eq!(
+        regrown.alias_tensor(head, embedding).unwrap_err(),
+        alias_error(
+            embedding,
+            "the configured model declares an independent LM head"
+        )
+    );
 }
 
 /// The default loader reads the released multimodal layout and audits visual keys.

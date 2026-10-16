@@ -1200,14 +1200,18 @@ fn stateless_window_mask_unites_padding_with_the_causal_window() {
         alone,
         [false, false, false, true, false, false, true, true, false]
     );
-    let error = stateless_attention_mask::<TestBackend>(None, 1, 1, 3, Some(usize::MAX), &device)
-        .unwrap_err();
-    assert!(
-        matches!(&error, Error::Configuration { field, reason }
-            if field == "nemotron_h.sliding_window"
-            && reason == "window exceeds portable signed index range"),
-        "{error}"
-    );
+    // Only a 64-bit `usize` can hold a window beyond the signed index range.
+    if usize::BITS == 64 {
+        let error =
+            stateless_attention_mask::<TestBackend>(None, 1, 1, 3, Some(usize::MAX), &device)
+                .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "nemotron_h.sliding_window"
+                && reason == "window exceeds portable signed index range"),
+            "{error}"
+        );
+    }
 }
 
 /// A padded windowed batch excludes old keys: shrinking the window changes only late rows.
