@@ -348,3 +348,41 @@ with the limitations stated for the earlier rounds; in particular the
 documented residual gaps of the renderer (comparisons of containers that share
 a value, template text replayed into captures) are not exercised by the
 fragment table.
+
+### Round 4: review fix phase at `4657536`
+
+An independent review of the package found that three fixes were incomplete
+(the namespace cleanup itself could be amplified to seconds and gigabytes,
+copying builtins were not charged to the render budget, and a LongRoPE factor
+of `f32::MIN_POSITIVE` kept frequencies finite but overflowed angles) plus
+smaller fidelity issues in the operator guard. After the fixes (commits
+`a7e743a` through `4657536`), the `chat_templates` fragment table gained the
+review's vectors: loops that keep `list`, `reverse`, slice, and `split` copies
+alive, string and sequence slices including `[::-1]`, `*`/`**` call arguments,
+a 20 000-namespace flood, a self-referencing namespace, a zero `divisibleby`
+divisor, and `debug()`. `rope_parameters` now also checks every accepted
+frequency times the largest integer position (`2^63`) for overflow.
+
+`src/` tree `f188cf411833cb82bfd56148f6fdbbf4762c5dcb`, fuzz package tree
+`bf1a167145e8852cdf63ad605d9130d18b9085d4`, same toolchain, lockfile, and
+flags as rounds 1 and 2, all five targets side by side; each target also read
+its latest earlier corpus (round 2, or the round-3 `chat_templates` corpus) as
+a second, read-only corpus.
+
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | `lim` | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logits_processing` | 300 | 1,002,119 | 3,329 | 2818 | 7664 | 425 | 4096 | 48 MiB |
+| `generation` | 300 | 1,161,375 | 3,858 | 2289 | 6121 | 1721 | 4096 | 46 MiB |
+| `rope_parameters` | 300 | 1,338,447 | 4,446 | 2337 | 8006 | 1641 | 4096 | 48 MiB |
+| `chat_templates` | 300 | 63,451 | 210 | 9120 | 36368 | 1600 | 4096 | 110 MiB |
+| `configuration` | 120 | 431,908 | 3,569 | 4437 | 10127 | 1186 | 2111 | 47 MiB |
+
+All five exited with status 0 and wrote no crash, timeout, or out-of-memory
+artifact. `chat_templates` reached
+new coverage (cov 9120 against 8853 in round 3) but ran about three times
+slower than in round 3: the new fragments are deliberately expensive (one
+namespace flood is 20 000 `namespace()` calls, and each retention loop runs
+300 iterations until the budget stops it), and the input's fragments are
+re-rendered with every mutation. Its peak RSS was 110 MiB, against 673 MiB in
+round 3 with the earlier fragment table. Source changes after `4657536` are
+documentation, tests, and these records only.
