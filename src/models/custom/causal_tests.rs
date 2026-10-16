@@ -32,7 +32,8 @@ type Device = <TestBackend as BackendTypes>::Device;
 
 /// A heterogeneous decoder exercising every mixer and every feed-forward kind.
 ///
-/// Layers: RoPE attention with a dense MLP, latent attention with a clamped
+/// Layers: RoPE attention with a dense MLP, latent attention (with a low-rank
+/// query bottleneck, so its `query_latent` point exists) with a clamped
 /// SwiGLU, differential attention with an ungated MLP, DeltaNet with routed
 /// experts, and Mamba-2 with the dense MLP. Attention runs eagerly, so score
 /// and pattern points exist.
@@ -48,7 +49,7 @@ fn every_kind(device: &Device) -> ModularCausalLm<TestBackend> {
         rotary_head_dim: 4,
         value_head_dim: 4,
         key_value_lora_rank: 4,
-        query_lora_rank: None,
+        query_lora_rank: Some(4),
         position: rope.clone(),
         score_scale: ScoreScale::Auto,
         connectivity: AttentionConnectivity::Global,

@@ -750,3 +750,21 @@ fn every_variant_propagates_edit_failures() {
         assert_staged_edit_failures_propagate(&model, &padded(), &points);
     }
 }
+
+/// A replaced vocabulary head of the wrong input width fails at projection.
+#[test]
+fn replaced_heads_are_checked_at_projection() {
+    let mut model = tiny_model(GemmaVariant::Gemma2, 32);
+    model.lm_head = Some(burn::nn::LinearConfig::new(15, VOCABULARY).init(&Default::default()));
+    let error = model
+        .forward(
+            input(ints([[1, 2]]), None, None),
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "linear.weight" && expected == "[16, nonzero_output]" && actual == "[15, 32]"),
+        "{error:?}"
+    );
+}

@@ -2330,6 +2330,36 @@ fn first_prefill_validates_the_encoder_width() {
     assert!(!state.has_encoder_cache());
 }
 
+/// A first prefill rejects an encoder mask whose grid differs from the encoder states.
+#[test]
+fn first_prefill_validates_the_encoder_mask_grid() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.token_mask = Some(validity([[true, true]], &device));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "t5.encoder_output.token_mask" && expected == "[1, 3]" && actual == "[1, 2]"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+}
+
 /// A vocabulary head that contradicts tying fails after the pass without binding the encoder.
 #[test]
 fn prefill_projection_failure_binds_nothing() {
