@@ -267,10 +267,9 @@ pub fn relative_table_index(query: usize, key: usize, query_length: usize) -> us
         total.is_some() ==> total.unwrap() == sections[0] + sections[1] + sections[2],
 ))]
 pub(crate) fn mrope_section_total(sections: [usize; 3]) -> Option<usize> {
-    let Some(partial) = sections[0].checked_add(sections[1]) else {
-        return None;
-    };
-    partial.checked_add(sections[2])
+    sections[0]
+        .checked_add(sections[1])?
+        .checked_add(sections[2])
 }
 
 /// Whether rotary tables fit one `[batch, heads, sequence, width]` operand.

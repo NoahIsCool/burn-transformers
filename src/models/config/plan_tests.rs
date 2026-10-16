@@ -163,3 +163,18 @@ fn infinity_tokens_are_found_only_outside_strings() {
         vec![3]
     );
 }
+
+/// One automaton step handles quotes, escapes, and ordinary bytes in each state.
+#[test]
+fn lexer_step_tracks_strings_and_escapes() {
+    // Outside a string: only a quote opens one.
+    assert_eq!(lexer_advance(false, false, b'"'), (true, false));
+    assert_eq!(lexer_advance(false, false, b'\\'), (false, false));
+    assert_eq!(lexer_advance(false, false, b'I'), (false, false));
+    // Inside: backslash escapes, an unescaped quote closes, an escaped byte only clears.
+    assert_eq!(lexer_advance(true, false, b'\\'), (true, true));
+    assert_eq!(lexer_advance(true, false, b'"'), (false, false));
+    assert_eq!(lexer_advance(true, false, 0xE6), (true, false));
+    assert_eq!(lexer_advance(true, true, b'"'), (true, false));
+    assert_eq!(lexer_advance(true, true, b'\\'), (true, false));
+}

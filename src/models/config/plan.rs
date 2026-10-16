@@ -60,6 +60,10 @@ proof fn lemma_prefix_sum_monotone(values: Seq<usize>, start: int, end: int)
 }
 
 /// `Infinity` occupies `bytes[start..start + 8]`.
+///
+/// Opaque: proofs see its bytes only through [`lemma_infinity_bytes`], which
+/// keeps the lexer loop's quantifiers cheap.
+#[verifier::opaque]
 pub open spec fn spec_infinity_at(bytes: Seq<u8>, start: int) -> bool {
     &&& 0 <= start
     &&& start + 8 <= bytes.len()
@@ -73,36 +77,78 @@ pub open spec fn spec_infinity_at(bytes: Seq<u8>, start: int) -> bool {
     &&& bytes[start + 7] == 121u8
 }
 
-/// JSON string state `(in_string, escaped)` after reading `bytes[0..end]`.
+/// A token lies inside the input, starts with `I`, and has no other `I` or `"`.
+proof fn lemma_infinity_bytes(bytes: Seq<u8>, start: int)
+    requires
+        spec_infinity_at(bytes, start),
+    ensures
+        0 <= start && start + 8 <= bytes.len(),
+        bytes[start] == 73u8,
+        forall|offset: int| 0 <= offset < 8 ==> #[trigger] bytes[start + offset] != 34u8,
+        forall|offset: int| 1 <= offset < 8 ==> #[trigger] bytes[start + offset] != 73u8,
+{
+    reveal(spec_infinity_at);
+    assert forall|offset: int| 0 <= offset < 8 implies #[trigger] bytes[start + offset] != 34u8
+        && (offset >= 1 ==> bytes[start + offset] != 73u8) by {
+        if offset == 0 {
+        } else if offset == 1 {
+        } else if offset == 2 {
+        } else if offset == 3 {
+        } else if offset == 4 {
+        } else if offset == 5 {
+        } else if offset == 6 {
+        } else {
+            assert(offset == 7);
+        }
+    }
+}
+
+/// One byte of the JSON string automaton applied to the state `(in_string, escaped)`.
 ///
 /// A `"` outside a string opens one; inside, a backslash escapes the next byte
-/// and an unescaped `"` closes the string. Multi-byte UTF-8 sequences contain
-/// only bytes of at least `0x80`, so reading bytes instead of characters gives
-/// the same states at every character boundary.
+/// and an unescaped `"` closes the string.
+pub open spec fn lexer_step(state: (bool, bool), byte: u8) -> (bool, bool) {
+    if state.0 {
+        if state.1 {
+            (true, false)
+        } else if byte == 92u8 {
+            (true, true)
+        } else if byte == 34u8 {
+            (false, false)
+        } else {
+            (true, false)
+        }
+    } else if byte == 34u8 {
+        (true, false)
+    } else {
+        (false, false)
+    }
+}
+
+/// JSON string state `(in_string, escaped)` after reading `bytes[0..end]`.
+///
+/// Multi-byte UTF-8 sequences contain only bytes of at least `0x80`, so
+/// reading bytes instead of characters gives the same states at every
+/// character boundary. Opaque: proofs advance it one byte at a time with
+/// [`lemma_lexer_unfold`].
+#[verifier::opaque]
 pub open spec fn lexer_state(bytes: Seq<u8>, end: int) -> (bool, bool)
     decreases end,
 {
     if end <= 0 {
         (false, false)
     } else {
-        let previous = lexer_state(bytes, end - 1);
-        let byte = bytes[end - 1];
-        if previous.0 {
-            if previous.1 {
-                (true, false)
-            } else if byte == 92u8 {
-                (true, true)
-            } else if byte == 34u8 {
-                (false, false)
-            } else {
-                (true, false)
-            }
-        } else if byte == 34u8 {
-            (true, false)
-        } else {
-            (false, false)
-        }
+        lexer_step(lexer_state(bytes, end - 1), bytes[end - 1])
     }
+}
+
+/// The automaton starts outside a string and advances by [`lexer_step`].
+proof fn lemma_lexer_unfold(bytes: Seq<u8>, end: int)
+    ensures
+        end <= 0 ==> lexer_state(bytes, end) == (false, false),
+        end > 0 ==> lexer_state(bytes, end) == lexer_step(lexer_state(bytes, end - 1), bytes[end - 1]),
+{
+    reveal_with_fuel(lexer_state, 1);
 }
 
 /// Reading a token outside a string stays outside a string after each of its bytes.
@@ -111,17 +157,83 @@ proof fn lemma_token_stays_outside_strings(bytes: Seq<u8>, start: int)
         spec_infinity_at(bytes, start),
         !lexer_state(bytes, start).0,
     ensures
-        forall|offset: int|
-            1 <= offset <= 8 ==> #[trigger] lexer_state(bytes, start + offset) == (false, false),
+        lexer_state(bytes, start + 8) == (false, false),
 {
-    assert(lexer_state(bytes, start + 1) == (false, false));
-    assert(lexer_state(bytes, start + 2) == (false, false));
-    assert(lexer_state(bytes, start + 3) == (false, false));
-    assert(lexer_state(bytes, start + 4) == (false, false));
-    assert(lexer_state(bytes, start + 5) == (false, false));
-    assert(lexer_state(bytes, start + 6) == (false, false));
-    assert(lexer_state(bytes, start + 7) == (false, false));
-    assert(lexer_state(bytes, start + 8) == (false, false));
+    lemma_infinity_bytes(bytes, start);
+    // Each token byte is not `"`, so every step outside a string stays outside.
+    assert(bytes[start + 0] != 34u8);
+    lemma_lexer_unfold(bytes, start + 1);
+    assert(bytes[start + 1] != 34u8);
+    lemma_lexer_unfold(bytes, start + 2);
+    assert(bytes[start + 2] != 34u8);
+    lemma_lexer_unfold(bytes, start + 3);
+    assert(bytes[start + 3] != 34u8);
+    lemma_lexer_unfold(bytes, start + 4);
+    assert(bytes[start + 4] != 34u8);
+    lemma_lexer_unfold(bytes, start + 5);
+    assert(bytes[start + 5] != 34u8);
+    lemma_lexer_unfold(bytes, start + 6);
+    assert(bytes[start + 6] != 34u8);
+    lemma_lexer_unfold(bytes, start + 7);
+    assert(bytes[start + 7] != 34u8);
+    lemma_lexer_unfold(bytes, start + 8);
+}
+
+/// Every `Infinity` start outside a string below `end` is listed in `starts`.
+///
+/// Opaque: the lexer loop maintains it only through
+/// [`lemma_listing_advances`] and [`lemma_listing_records_token`], which keeps
+/// its existential out of the loop's proof obligation.
+#[verifier::opaque]
+pub open spec fn lists_tokens_below(bytes: Seq<u8>, starts: Seq<usize>, end: int) -> bool {
+    forall|position: int|
+        0 <= position < end && #[trigger] spec_infinity_at(bytes, position) && !lexer_state(
+            bytes,
+            position,
+        ).0 ==> starts.contains(position as usize)
+}
+
+/// A position that does not start a token outside a string extends the listing unchanged.
+proof fn lemma_listing_advances(bytes: Seq<u8>, starts: Seq<usize>, end: int)
+    requires
+        lists_tokens_below(bytes, starts, end),
+        !(spec_infinity_at(bytes, end) && !lexer_state(bytes, end).0),
+    ensures
+        lists_tokens_below(bytes, starts, end + 1),
+{
+    reveal(lists_tokens_below);
+}
+
+/// Recording a token outside a string lists it and covers its eight bytes.
+///
+/// No token starts inside another: only a token's first byte is `I`.
+proof fn lemma_listing_records_token(bytes: Seq<u8>, starts: Seq<usize>, start: int)
+    requires
+        lists_tokens_below(bytes, starts, start),
+        spec_infinity_at(bytes, start),
+        !lexer_state(bytes, start).0,
+    ensures
+        lists_tokens_below(bytes, starts.push(start as usize), start + 8),
+{
+    reveal(lists_tokens_below);
+    lemma_infinity_bytes(bytes, start);
+    let pushed = starts.push(start as usize);
+    assert forall|position: int|
+        0 <= position < start + 8 && #[trigger] spec_infinity_at(bytes, position) && !lexer_state(
+            bytes,
+            position,
+        ).0 implies pushed.contains(position as usize) by {
+        if position < start {
+            let witness = choose|witness: int|
+                0 <= witness < starts.len() && starts[witness] == position as usize;
+            assert(pushed[witness] == position as usize);
+        } else if position == start {
+            assert(pushed[starts.len() as int] == position as usize);
+        } else {
+            lemma_infinity_bytes(bytes, position);
+            assert(bytes[start + (position - start)] != 73u8);
+        }
+    }
 }
 
 /// The trained context resolved before the zero check, following the precedence table.
@@ -499,13 +611,15 @@ pub(crate) fn resolve_original_context(
             Some(value) => value,
             None => max_position_embeddings,
         };
-        if let Some(top) = top_level {
-            if reject_conflicts && top != resolved {
+        // A guard rather than a let-chain, which the Verus edition lacks.
+        match top_level {
+            Some(top) if reject_conflicts && top != resolved => {
                 return Err(OriginalContextFault::LayerConflict {
                     top_level: top,
                     resolved,
                 });
             }
+            _ => {}
         }
         resolved
     } else {
@@ -544,6 +658,10 @@ pub(crate) const INFINITY_TOKEN_LENGTH: usize = 8;
         found == spec_infinity_at(bytes@, start as int),
 ))]
 fn infinity_at(bytes: &[u8], start: usize) -> bool {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        reveal(spec_infinity_at);
+    }
     start <= bytes.len()
         && bytes.len() - start >= INFINITY_TOKEN_LENGTH
         && bytes[start] == b'I'
@@ -556,12 +674,43 @@ fn infinity_at(bytes: &[u8], start: usize) -> bool {
         && bytes[start + 7] == b'y'
 }
 
+/// Advances the JSON string automaton `(in_string, escaped)` by one byte.
+///
+/// Inside a string an escaped byte only clears the escape, a backslash
+/// escapes the next byte, and an unescaped `"` closes the string; outside, a
+/// `"` opens one.
+///
+/// Verified: exactly `lexer_step((in_string, escaped), byte)`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(state =>
+    ensures
+        state == lexer_step((in_string, escaped), byte),
+))]
+fn lexer_advance(in_string: bool, escaped: bool, byte: u8) -> (bool, bool) {
+    if in_string {
+        if escaped {
+            (true, false)
+        } else if byte == b'\\' {
+            (true, true)
+        } else if byte == b'"' {
+            (false, false)
+        } else {
+            (true, false)
+        }
+    } else {
+        (byte == b'"', false)
+    }
+}
+
 /// Lists the byte offsets of every `Infinity` token outside JSON strings.
 ///
 /// The scan tracks whether it is inside a string literal and whether the
 /// previous string byte was an escaping backslash; outside strings it records
-/// a token and skips its eight bytes. Tokens are ASCII, so every reported
-/// offset and offset `+ 8` is a UTF-8 character boundary of a `str`.
+/// a token and skips its eight bytes. A token starts with `I`, never with the
+/// `"` that would open a string, so testing for it before advancing the
+/// automaton is the same as testing after the quote check. Tokens are ASCII,
+/// so every reported offset and offset `+ 8` is a UTF-8 character boundary of
+/// a `str`.
 ///
 /// Verified: the offsets are strictly increasing and at least eight apart;
 /// each starts an `Infinity` token outside a string (`lexer_state`); and
@@ -584,6 +733,11 @@ pub(crate) fn infinity_token_starts(bytes: &[u8]) -> Vec<usize> {
     let mut index = 0usize;
     let mut in_string = false;
     let mut escaped = false;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_lexer_unfold(bytes@, 0);
+        reveal(lists_tokens_below);
+    }
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             index <= bytes.len(),
@@ -596,64 +750,38 @@ pub(crate) fn infinity_token_starts(bytes: &[u8]) -> Vec<usize> {
             },
             forall|token: int| 0 < token < starts.len()
                 ==> starts[token - 1] + INFINITY_TOKEN_LENGTH <= #[trigger] starts[token],
-            forall|position: int|
-                0 <= position < index && #[trigger] spec_infinity_at(bytes@, position)
-                    && !lexer_state(bytes@, position).0 ==> starts@.contains(position as usize),
+            lists_tokens_below(bytes@, starts@, index as int),
         decreases bytes.len() - index,
     ))]
     while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            // Inside a string no token is recorded; only the escape state moves.
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            index += 1;
-        } else if byte == b'"' {
-            // A quote is not the token's first byte, and it opens a string.
-            in_string = true;
-            index += 1;
-        } else if infinity_at(bytes, index) {
-            #[cfg(verus_keep_ghost)]
-            proof_decl! {
-                let ghost before = starts@;
-                let ghost start = index as int;
-            }
+        if !in_string && infinity_at(bytes, index) {
             #[cfg(verus_keep_ghost)]
             proof! {
-                lemma_token_stays_outside_strings(bytes@, start);
+                // Outside a string the automaton is never escaped, so the
+                // unchanged `escaped == false` matches the state after the token.
+                lemma_lexer_unfold(bytes@, index as int);
+                lemma_infinity_bytes(bytes@, index as int);
+                lemma_token_stays_outside_strings(bytes@, index as int);
+                lemma_listing_records_token(bytes@, starts@, index as int);
             }
             starts.push(index);
             index += INFINITY_TOKEN_LENGTH;
+        } else {
+            // No token starts here outside a string; advance the automaton.
             #[cfg(verus_keep_ghost)]
             proof! {
-                assert(lexer_state(bytes@, index as int) == (false, false));
-                assert(starts@[starts.len() - 1] == start);
-                // Earlier tokens keep their witnesses, the new one is last, and
-                // no token starts inside this one: only its first byte is `I`.
-                assert forall|position: int|
-                    0 <= position < index && #[trigger] spec_infinity_at(bytes@, position)
-                        && !lexer_state(bytes@, position).0 implies starts@.contains(
-                        position as usize,
-                    ) by {
-                    if position < start {
-                        let witness = choose|witness: int|
-                            0 <= witness < before.len() && before[witness] == position as usize;
-                        assert(starts@[witness] == position as usize);
-                    } else if position == start {
-                        assert(starts@[starts.len() - 1] == position as usize);
-                    } else {
-                        assert(bytes@[position] != 73u8);
-                    }
-                }
+                lemma_lexer_unfold(bytes@, index as int + 1);
+                lemma_listing_advances(bytes@, starts@, index as int);
             }
-        } else {
+            let state = lexer_advance(in_string, escaped, bytes[index]);
+            in_string = state.0;
+            escaped = state.1;
             index += 1;
         }
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        reveal(lists_tokens_below);
     }
     starts
 }
