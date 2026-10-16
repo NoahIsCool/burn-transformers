@@ -402,14 +402,6 @@ fn configurations_load_through_the_shared_model_config_api() {
     );
 }
 
-/// The former name is an alias of the renamed causal language model.
-#[test]
-fn former_model_name_aliases_the_causal_language_model() {
-    let model: GptNeoXModel<B> = model();
-    let renamed: &GptNeoXForCausalLm<B> = &model;
-    assert_eq!(renamed.layers.len(), 1);
-}
-
 /// Unwraps a shape error into `(tensor, expected, actual)`.
 fn shape_parts(error: Error) -> (String, String, String) {
     match error {
