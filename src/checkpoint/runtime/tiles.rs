@@ -32,25 +32,16 @@
 //! checks of a ragged `[1031, 1037]` matrix with injected parallelism budgets
 //! of 1, 2, 3, 7, 14 and 64 threads, for identity and dtype-converting copies.
 //!
-//! The module has no crate, Burn, or allocator dependencies so that Verus can
-//! check it in isolation.
+//! The module depends only on the shared, verified
+//! [`ceil_div_usize`](crate::checkpoint::division::ceil_div_usize), with no
+//! Burn or allocator dependencies, so that Verus can check it in place.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
+use crate::checkpoint::division::ceil_div_usize;
 #[cfg(verus_keep_ghost)]
-verus! {
-
-/// Specification: the exact rounded-up quotient `⌈dividend / divisor⌉` for `divisor > 0`.
-pub open spec fn ceiling(dividend: int, divisor: int) -> int {
-    if dividend % divisor == 0 {
-        dividend / divisor
-    } else {
-        dividend / divisor + 1
-    }
-}
-
-} // verus!
+use crate::checkpoint::division::ceiling;
 
 /// Maximum tile edge in scalars, independent of byte width.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -76,36 +67,6 @@ pub(crate) struct TransposePlan {
     pub(crate) bands: usize,
     /// Threads to run the bands on; one means the caller's thread alone.
     pub(crate) threads: usize,
-}
-
-/// Returns `⌈dividend / divisor⌉` without forming the overflow-prone `dividend + divisor - 1`.
-///
-/// Verified: the result is exactly the mathematical ceiling, never exceeds
-/// `dividend`, and is positive whenever `dividend` is.
-#[cfg_attr(verus_keep_ghost, verus_verify)]
-#[cfg_attr(verus_keep_ghost, verus_spec(quotient =>
-    requires
-        divisor > 0,
-    ensures
-        quotient == ceiling(dividend as int, divisor as int),
-        dividend <= quotient * divisor,
-        quotient == 0 || (quotient - 1) * divisor < dividend,
-        dividend > 0 ==> quotient > 0,
-        quotient <= dividend,
-))]
-fn ceiling_division(dividend: usize, divisor: usize) -> usize {
-    #[cfg(verus_keep_ghost)]
-    proof! {
-        ceiling_division_bounds(dividend, divisor);
-    }
-    let quotient = dividend / divisor;
-    // A named remainder keeps this Verus-checkable (`is_multiple_of` has no spec).
-    let remainder = dividend % divisor;
-    if remainder == 0 {
-        quotient
-    } else {
-        quotient + 1
-    }
 }
 
 /// Plans the blocks, bands, and threads of one `[rows, columns]` transpose.
@@ -155,7 +116,7 @@ pub(crate) fn transpose_plan(rows: usize, columns: usize, available: usize) -> T
     } else {
         TILE_EDGE
     };
-    let blocks = ceiling_division(columns, block_columns);
+    let blocks = ceil_div_usize(columns, block_columns);
     let threads = if rows * columns < PARALLEL_MIN_SCALARS {
         1
     } else if available < blocks {
@@ -163,7 +124,7 @@ pub(crate) fn transpose_plan(rows: usize, columns: usize, available: usize) -> T
     } else {
         blocks
     };
-    let blocks_per_band = ceiling_division(blocks, threads);
+    let blocks_per_band = ceil_div_usize(blocks, threads);
     #[cfg(verus_keep_ghost)]
     proof! {
         band_width_bounds(columns, block_columns, blocks, threads, blocks_per_band);
@@ -173,7 +134,7 @@ pub(crate) fn transpose_plan(rows: usize, columns: usize, available: usize) -> T
     } else {
         blocks_per_band * block_columns
     };
-    let bands = ceiling_division(columns, band_columns);
+    let bands = ceil_div_usize(columns, band_columns);
     #[cfg(verus_keep_ghost)]
     proof! {
         band_count_bounds(rows, columns, band_columns, bands, threads, blocks_per_band >= blocks);
@@ -188,53 +149,6 @@ pub(crate) fn transpose_plan(rows: usize, columns: usize, available: usize) -> T
 
 #[cfg(verus_keep_ghost)]
 verus! {
-
-/// Euclidean division facts behind [`ceiling_division`], including the absence of overflow.
-proof fn ceiling_division_bounds(dividend: usize, divisor: usize)
-    requires
-        divisor > 0,
-    ensures
-        dividend % divisor != 0 ==> dividend / divisor < usize::MAX,
-        dividend % divisor == 0 ==> dividend <= (dividend / divisor) * divisor,
-        dividend % divisor != 0 ==> dividend <= (dividend / divisor + 1) * divisor,
-        dividend / divisor * divisor <= dividend,
-        dividend % divisor != 0 ==> dividend / divisor * divisor < dividend,
-        dividend % divisor != 0 ==> dividend / divisor + 1 <= dividend,
-        dividend / divisor <= dividend,
-        dividend % divisor == 0 ==> (dividend / divisor == 0 || (dividend / divisor - 1)
-            * divisor < dividend),
-        dividend % divisor == 0 && dividend > 0 ==> dividend / divisor > 0,
-{
-    let q = dividend as int / divisor as int;
-    let r = dividend as int % divisor as int;
-    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(dividend as int, divisor as int);
-    assert(0 <= r < divisor);
-    assert(dividend == q * divisor + r);
-    assert(q * divisor >= q) by (nonlinear_arith)
-        requires
-            divisor >= 1,
-            q >= 0,
-    ;
-    if q == 0 {
-        assert(q * divisor == 0) by (nonlinear_arith)
-            requires
-                q == 0,
-        ;
-    }
-    if r == 0 && q > 0 {
-        assert((q - 1) * divisor == q * divisor - divisor) by (nonlinear_arith);
-    }
-    if r != 0 {
-        // A nonzero remainder needs a divisor of at least two, so q <= dividend / 2.
-        assert(divisor >= 2);
-        assert(q * divisor >= 2 * q) by (nonlinear_arith)
-            requires
-                divisor >= 2,
-                q >= 0,
-        ;
-        assert((q + 1) * divisor == q * divisor + divisor) by (nonlinear_arith);
-    }
-}
 
 /// Bounds the band width: whole blocks strictly inside the width, without overflow.
 proof fn band_width_bounds(

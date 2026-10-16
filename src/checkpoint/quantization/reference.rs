@@ -25,10 +25,11 @@ use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizationGroupSize,
     QuantizedTensorMetadata, Result, SourceFloatDType, SymmetricQuantization,
     WeightQuantizationConfig, classify_weight_for_quantization,
-    counts::{block_scale_count, ceil_div_usize, group_index},
-    packing::{CodeViolation, CodeWidth, first_code_violation, push_code, read_code},
+    counts::{block_scale_count, group_index},
+    packing::{CodeViolation, first_code_violation, push_code, read_code},
     provenance::quantized_payload_sha256,
 };
+use crate::checkpoint::division::ceil_div_usize;
 
 /// Bytes of little-endian scales encoded per staging write or digest update.
 ///
@@ -185,7 +186,7 @@ impl QuantizedWeight {
                 context: "dequantized f32 tensor",
                 requested: elements,
             })?;
-        let width = code_width(self.metadata.scheme);
+        let width = self.metadata.scheme.code_width();
         for index in 0..elements {
             let code = read_code(width, &self.packed_values, index).ok_or(
                 QuantizationError::PackedLengthMismatch {
@@ -348,7 +349,7 @@ pub fn quantize_tensor_data(
             requested: groups,
         })?;
 
-    let width = code_width(config.scheme);
+    let width = config.scheme.code_width();
     let mut buffer = [0.0_f32; QuantizationGroupSize::MAX];
     for (group, encoded) in source
         .as_bytes()
@@ -455,12 +456,10 @@ fn validate_source_bytes(
     dtype: SourceFloatDType,
     elements: usize,
 ) -> Result<()> {
-    let expected =
-        elements
-            .checked_mul(dtype.byte_width())
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "source tensor byte length",
-            })?;
+    let expected = crate::checkpoint::layout::dense_byte_len(&[elements], dtype.byte_width())
+        .ok_or(QuantizationError::ByteLengthOverflow {
+            context: "source tensor byte length",
+        })?;
     let actual = source.as_bytes().len();
     if actual != expected {
         return Err(QuantizationError::SourceByteLengthMismatch { expected, actual });
@@ -486,14 +485,6 @@ fn quantize_value(value: f32, scale: f32, scheme: SymmetricQuantization) -> i8 {
     (value / scale).round().clamp(-qmax, qmax) as i8
 }
 
-/// Maps a quantization precision to its packed code width.
-const fn code_width(scheme: SymmetricQuantization) -> CodeWidth {
-    match scheme {
-        SymmetricQuantization::Q8 => CodeWidth::Byte,
-        SymmetricQuantization::Q4 => CodeWidth::Nibble,
-    }
-}
-
 /// Requires each persisted F32 scale to be finite and strictly positive.
 fn validate_scales(scales: &[f32]) -> Result<()> {
     for (group, &scale) in scales.iter().enumerate() {
@@ -509,7 +500,7 @@ fn validate_scales(scales: &[f32]) -> Result<()> {
 /// The verified [`first_code_violation`] scans the codes in index order and
 /// reports the first defect, which maps to the matching contextual error.
 fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8]) -> Result<()> {
-    match first_code_violation(code_width(scheme), elements, packed) {
+    match first_code_violation(scheme.code_width(), elements, packed) {
         None => Ok(()),
         Some(CodeViolation::Short) => Err(QuantizationError::PackedLengthMismatch {
             expected: elements,

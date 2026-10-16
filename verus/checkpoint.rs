@@ -104,8 +104,10 @@
 //!   packing then reading is the identity; `first_code_violation` returns
 //!   `None` exactly for canonical buffers and otherwise names the first short
 //!   read, reserved code, or dirty Q4 padding;
-//! - `src/checkpoint/quantization/counts.rs`: exact ceilings in `u64` and
-//!   `usize`; persisted group (`⌈n / G⌉`), packed-byte, and scale-byte counts,
+//! - `src/checkpoint/division.rs` (shared with `verus/perf.rs`): exact
+//!   ceilings in `u64` and `usize`, each the least `q` with `n <= q · d`,
+//!   never above `n` and positive for positive `n`;
+//! - `src/checkpoint/quantization/counts.rs`: persisted group (`⌈n / G⌉`), packed-byte, and scale-byte counts,
 //!   with the scale length proved never to overflow for `G >= 32`; and the Burn
 //!   block count `rows · (columns / G)`, proved equal to the flat group count
 //!   `⌈rows · columns / G⌉` whenever `G` divides the width; `group_index` places
@@ -128,6 +130,9 @@
 // only with this feature; it applies solely under Verus.
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #![allow(unused)]
+
+#[path = "../src/checkpoint/division.rs"]
+pub mod division;
 
 #[path = "../src/checkpoint/layout.rs"]
 pub mod layout;
@@ -158,3 +163,8 @@ pub mod counts;
 
 #[path = "../src/checkpoint/quantization/staging.rs"]
 pub mod staging;
+
+/// Mirrors the crate path `crate::checkpoint::division` used by the counts.
+pub mod checkpoint {
+    pub use crate::division;
+}

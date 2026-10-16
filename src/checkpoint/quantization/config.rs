@@ -30,16 +30,24 @@ impl SymmetricQuantization {
         }
     }
 
+    /// Maps this precision to the packed code width that stores it.
+    ///
+    /// Q8 stores one two's-complement code per byte and Q4 two codes per byte,
+    /// low nibble first; every packed-length, wire-count, and code-validation
+    /// computation takes its width from here.
+    pub(crate) const fn code_width(self) -> super::packing::CodeWidth {
+        match self {
+            Self::Q8 => super::packing::CodeWidth::Byte,
+            Self::Q4 => super::packing::CodeWidth::Nibble,
+        }
+    }
+
     /// Computes the packed bytes required for `elements` values.
     ///
     /// This is `n` for Q8 and `ceil(n / 2)` for Q4; the Verus-checked
     /// `packing::packed_len` proves the formula never overflows.
     pub(crate) fn packed_bytes(self, elements: usize) -> Result<usize> {
-        let width = match self {
-            Self::Q8 => super::packing::CodeWidth::Byte,
-            Self::Q4 => super::packing::CodeWidth::Nibble,
-        };
-        Ok(super::packing::packed_len(width, elements))
+        Ok(super::packing::packed_len(self.code_width(), elements))
     }
 }
 

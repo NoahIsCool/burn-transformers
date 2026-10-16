@@ -17,7 +17,6 @@ use super::{
     QuantizedGroupLayout, QuantizedPayloadLayout, Result, ScaleLayout, SymmetricQuantization,
     WeightQuantizationConfig,
     counts::{block_scale_count, wire_counts},
-    packing::CodeWidth,
     provenance::validate_sha256,
 };
 
@@ -213,7 +212,7 @@ impl QuantizedTensorMetadata {
             }
         })?;
         // Verified exact counts: `⌈n / G⌉` groups, `n` or `⌈n / 2⌉` code bytes, four scale bytes per group.
-        let counts = wire_counts(num_elements, group_size, code_width(config.scheme));
+        let counts = wire_counts(num_elements, group_size, config.scheme.code_width());
         let group_count = counts.group_count;
         let packed_value_bytes = counts.packed_value_bytes;
         let scale_bytes = counts
@@ -269,7 +268,7 @@ impl QuantizedTensorMetadata {
                 context: "group size conversion",
             }
         })?;
-        let counts = wire_counts(expected_elements, group_size, code_width(self.scheme));
+        let counts = wire_counts(expected_elements, group_size, self.scheme.code_width());
         let expected_groups = counts.group_count;
         if self.group_count != expected_groups {
             return invalid_metadata(format!(
@@ -563,14 +562,6 @@ impl Default for BurnpackQuantizationManifest {
     /// Retains the original constructor's explicit provenance-free v1 semantics.
     fn default() -> Self {
         Self::new_legacy_v1()
-    }
-}
-
-/// Maps a precision to the packed code width that stores it.
-const fn code_width(scheme: SymmetricQuantization) -> CodeWidth {
-    match scheme {
-        SymmetricQuantization::Q8 => CodeWidth::Byte,
-        SymmetricQuantization::Q4 => CodeWidth::Nibble,
     }
 }
 
