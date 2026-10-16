@@ -157,9 +157,29 @@ impl core::fmt::Display for Mxfp4ShapeError {
 
 /// Validates a blocks/scales shape pair and returns the decoded shape `[E, 32 G, R]`.
 ///
+/// Verified: `Ok` exactly for the pairs [`mxfp4_geometry`] accepts, with the
+/// transposed shape `[E, 32 G, R]` of the blocks' axes, and otherwise the same
+/// first-violated-rule error; the planner and the runtime validator both
+/// derive the target shape here.
+///
 /// # Errors
 ///
 /// Returns the [`Mxfp4ShapeError`] of [`mxfp4_geometry`].
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(shape =>
+    ensures
+        shape is Ok <==> accepts(blocks@, scales@),
+        shape matches Ok(dimensions)
+            ==> dimensions@ == seq![blocks@[0], (32 * blocks@[2]) as u64, blocks@[1]],
+        shape matches Err(Mxfp4ShapeError::Blocks) <==> !blocks_shaped(blocks@),
+        shape matches Err(Mxfp4ShapeError::Scales) <==>
+            blocks_shaped(blocks@) && !scales_match(blocks@, scales@),
+        shape matches Err(Mxfp4ShapeError::Empty) <==>
+            blocks_shaped(blocks@) && scales_match(blocks@, scales@) && !axes_nonzero(blocks@),
+        shape matches Err(Mxfp4ShapeError::Overflow) <==>
+            blocks_shaped(blocks@) && scales_match(blocks@, scales@) && axes_nonzero(blocks@)
+                && !count_fits(blocks@),
+))]
 pub(crate) fn decoded_shape(blocks: &[u64], scales: &[u64]) -> Result<Vec<u64>, Mxfp4ShapeError> {
     let geometry = mxfp4_geometry(blocks, scales)?;
     // Every extent fits `u64`: the geometry bounds their product.
