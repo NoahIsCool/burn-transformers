@@ -1,4 +1,4 @@
-//! Verus harness for the tokenizer's pure layout, calendar, and decimal arithmetic.
+//! Verus harness for the tokenizer's pure layout, calendar, decimal, and scanning arithmetic.
 //!
 //! Verifies, in place, the specifications attached to
 //! `src/tokenization/layout.rs`:
@@ -51,6 +51,21 @@
 //! - `increment_decimal_digits` adds exactly one to the number its ASCII
 //!   digits spell, growing by a digit only when every digit was `9`.
 //!
+//! and to `src/tokenization/chat_template/scan.rs`, the tag scanner shared by
+//! the chat-template source rewrites:
+//!
+//! - `next_tag_opening` and `find_pattern` return exactly the first tag
+//!   opening or pattern occurrence at or after their start;
+//! - `skip_string` moves strictly forward to just past the closing quote or
+//!   to the end; `find_tag_end` returns only offsets where the closing
+//!   delimiter occurs; `basic_tag_end` accepts exactly
+//!   `[-+]? ws* name ws* [-+]? %}` and `raw_section_end` ends at such an
+//!   `endraw` tag;
+//! - `next_tag` returns spans that start at or after the scan position, open
+//!   with their kind's delimiter, close with the matching one, and end inside
+//!   the source, so the rewrite loop makes progress and slices in bounds;
+//!   `marker_widths` never exceeds the tag body.
+//!
 //! Tokenizer encoding, special-token insertion, and the Burn tensor
 //! constructors are outside the proof and remain covered by the Rust tests. See
 //! `verus/README.md` for the method, toolchain, and command.
@@ -66,3 +81,5 @@ pub mod calendar;
 pub mod layout;
 #[path = "../src/tokenization/pycompat/decimal.rs"]
 pub mod decimal;
+#[path = "../src/tokenization/chat_template/scan.rs"]
+pub mod scan;

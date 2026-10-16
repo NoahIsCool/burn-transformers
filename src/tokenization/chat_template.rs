@@ -137,8 +137,10 @@ use super::{calendar, pycompat};
 mod guard;
 mod limits;
 pub(crate) mod sandbox;
+mod scan;
 
 use sandbox::{BoundedOutput, CycleBreaker, NamespaceRegistry, RenderBudget, RenderLimits};
+use scan::{TagKind, TagSpan, marker_widths, next_tag, skip_string};
 
 /// Instruction budget limiting each chat-template evaluation.
 const CHAT_TEMPLATE_FUEL: u64 = 250_000;
@@ -253,15 +255,6 @@ fn raise_exception(message: String) -> Result<Value, Error> {
 
 // Lexical tag scanning shared by the source rewrites.
 
-/// The kinds of Jinja tag a source rewrite may change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TagKind {
-    /// An expression tag, `{{ ... }}`.
-    Expression,
-    /// A statement tag, `{% ... %}`.
-    Statement,
-}
-
 /// Applies `rewrite` to every expression and statement tag MiniJinja would parse.
 ///
 /// The scan follows MiniJinja's lexer so a rewrite can never see text the
@@ -291,7 +284,10 @@ fn rewrite_tags(
 
 /// [`rewrite_tags`] with a fallible rewrite that also receives each tag's byte offset.
 ///
-/// The first error stops the scan and is returned.
+/// The first error stops the scan and is returned. Tag boundaries come from
+/// the verified [`next_tag`]: every span lies inside the source, starts at or
+/// after the previous one's end, and is delimited by ASCII bytes, so every
+/// slice below is in bounds and on character boundaries.
 fn try_rewrite_tags<E>(
     source: &str,
     mut rewrite: impl FnMut(TagKind, usize, &str) -> Result<Option<String>, E>,
@@ -300,34 +296,7 @@ fn try_rewrite_tags<E>(
     // Bytes of `source` already copied into `rewritten`; zero until the first change.
     let mut copied = 0;
     let mut position = 0;
-    while let Some((start, opening)) = next_tag_opening(source, position) {
-        let body_start = start + 2;
-        if opening == "{#" {
-            let Some(length) = source[body_start..].find("#}") else {
-                break;
-            };
-            position = body_start + length + 2;
-            continue;
-        }
-        if opening == "{%"
-            && let Some(length) = basic_tag_length(&source[body_start..], "raw")
-        {
-            // Like MiniJinja, copy everything up to the matching `{% endraw %}`.
-            let Some(raw_length) = raw_section_length(&source[body_start + length..]) else {
-                break;
-            };
-            position = body_start + length + raw_length;
-            continue;
-        }
-        let (kind, closing) = if opening == "{{" {
-            (TagKind::Expression, "}}")
-        } else {
-            (TagKind::Statement, "%}")
-        };
-        let Some(length) = find_tag_end(&source[body_start..], closing) else {
-            break;
-        };
-        let end = body_start + length + closing.len();
+    while let Some(TagSpan { kind, start, end }) = next_tag(source.as_bytes(), position) {
         if let Some(replacement) = rewrite(kind, start, &source[start..end])? {
             rewritten.push_str(&source[copied..start]);
             rewritten.push_str(&replacement);
@@ -343,89 +312,13 @@ fn try_rewrite_tags<E>(
     })
 }
 
-/// Returns the byte offset and delimiter of the first `{{`, `{%`, or `{#` at or after `from`.
-fn next_tag_opening(source: &str, from: usize) -> Option<(usize, &'static str)> {
-    let bytes = source.as_bytes();
-    let mut index = from;
-    while let Some(offset) = source[index..].find('{') {
-        let brace = index + offset;
-        match bytes.get(brace + 1) {
-            Some(b'{') => return Some((brace, "{{")),
-            Some(b'%') => return Some((brace, "{%")),
-            Some(b'#') => return Some((brace, "{#")),
-            _ => index = brace + 1,
-        }
-    }
-    None
-}
-
-/// Matches `[-+]? ws* name ws* [-+]? %}` at the start of `text` (the text after `{%`).
-///
-/// Returns the matched length. This is MiniJinja's `skip_basic_tag`, which
-/// recognizes `raw` and `endraw` before any expression parsing.
-fn basic_tag_length(text: &str, name: &str) -> Option<usize> {
-    /// Skips the ASCII whitespace MiniJinja allows around the tag name.
-    fn skip_whitespace(text: &str) -> &str {
-        text.trim_start_matches(|character: char| character.is_ascii_whitespace())
-    }
-    let rest = text.strip_prefix(['-', '+']).unwrap_or(text);
-    let rest = skip_whitespace(rest).strip_prefix(name)?;
-    let rest = skip_whitespace(rest);
-    let rest = rest.strip_prefix(['-', '+']).unwrap_or(rest);
-    let rest = rest.strip_prefix("%}")?;
-    Some(text.len() - rest.len())
-}
-
-/// Returns the length of a raw section's body plus its `{% endraw %}` tag.
-///
-/// As in MiniJinja, the first `{%` that starts an `endraw` tag ends the
-/// section; every other byte is data.
-fn raw_section_length(text: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(offset) = text[from..].find("{%") {
-        let after_opening = from + offset + 2;
-        if let Some(length) = basic_tag_length(&text[after_opening..], "endraw") {
-            return Some(after_opening + length);
-        }
-        from = after_opening;
-    }
-    None
-}
-
-/// Finds a tag's closing delimiter outside string literals and open brackets.
-///
-/// `body` starts just after the opening delimiter. Like MiniJinja's lexer,
-/// the delimiter only counts at bracket depth zero, so a `}}` that closes a
-/// nested dict literal does not end an expression tag.
-fn find_tag_end(body: &str, closing: &str) -> Option<usize> {
-    let bytes = body.as_bytes();
-    let mut depth = 0_isize;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            quote @ (b'\'' | b'"') => {
-                index = skip_string(bytes, index, quote);
-                continue;
-            }
-            // Byte comparison: `index` may sit inside a multi-byte character.
-            _ if depth == 0 && bytes[index..].starts_with(closing.as_bytes()) => {
-                return Some(index);
-            }
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
-            _ => {}
-        }
-        index += 1;
-    }
-    None
-}
-
 /// Splits `{%- keyword -%}` into its opening marker, trimmed body, and closing marker.
+///
+/// `tag` holds both two-byte delimiters; the marker widths come from the
+/// verified [`marker_widths`], which never exceed the inner text.
 fn statement_parts(tag: &str) -> (&str, &str, &str) {
     let inner = &tag[2..tag.len() - 2];
-    let marker = |text: &str| -> usize { usize::from(text.starts_with(['-', '+'])) };
-    let open = marker(inner);
-    let close = usize::from(inner.len() > open && inner.ends_with(['-', '+']));
+    let (open, close) = marker_widths(inner.as_bytes());
     let body = &inner[open..inner.len() - close];
     (&inner[..open], body.trim(), &inner[inner.len() - close..])
 }
@@ -487,19 +380,6 @@ pub(crate) fn parenthesize_conditional_keyword_arguments(source: &str) -> Cow<'_
             Cow::Owned(wrapped) => Some(format!("{opening}{wrapped}{closing}")),
         }
     })
-}
-
-/// Returns the index just past the string literal opened by `quote` at `start`.
-fn skip_string(bytes: &[u8], start: usize, quote: u8) -> usize {
-    let mut index = start + 1;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            byte if byte == quote => return index + 1,
-            _ => index += 1,
-        }
-    }
-    bytes.len()
 }
 
 /// One lexical item of a tag body that matters for keyword-argument detection.
