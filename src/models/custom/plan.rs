@@ -1,8 +1,11 @@
-//! Pure index planning for modular models: relative-position tables and history appends.
+//! Pure index planning for modular models: displacement tables, history appends, and decode checks.
 //!
-//! Two pieces of host-side integer logic decide which device indices the
-//! modular graphs read and write. Both are dependency-free and checked in place
-//! by Verus through `verus/custom.rs` (see `verus/README.md`).
+//! Three areas of host-side integer logic decide which device indices the
+//! modular graphs read and write and which inputs they accept: clamped
+//! displacement tables, compact history appends with their write windows, and
+//! decode-input validation with history-prefix views. All of them are
+//! dependency-free and checked in place by Verus through `verus/custom.rs`
+//! (see `verus/README.md`).
 //!
 //! # Clamped displacement tables
 //!
@@ -14,9 +17,10 @@
 //! so a lookup table of `2R + 1` host-evaluated buckets indexed by
 //! `clamp(d, -R, R) + R` reproduces the pairwise reference exactly for any
 //! (gapped, offset, or per-row) positions. [`displacement_table`] sizes that
-//! table, `displacement_slot` (compiled for tests and proofs) is the scalar
-//! specification of the device index, and [`slot_displacement`] is its inverse
-//! used to fill the table.
+//! table, [`portable_displacement_table`] additionally bounds it by the
+//! portable 32-bit index range, `displacement_slot` (compiled for tests and
+//! proofs) is the scalar specification of the device index, and
+//! [`slot_displacement`] is its inverse used to fill the table.
 //!
 //! # Compact history appends
 //!
@@ -28,7 +32,35 @@
 //! lengths, and slots while enforcing the capacity, the empty-step, the
 //! prefill empty-row, and the never-started-row policies.
 //! [`plan_history_writes`] turns the slots into one rectangular gather window
-//! so every row's history is written by a constant number of tensor kernels.
+//! `[start, end)` so every row's history is written by a constant number of
+//! tensor kernels, and [`plan_history`] composes the two after checking that
+//! the validity grid holds exactly one cell per row and column.
+//!
+//! # Decode-input validation and history views
+//!
+//! [`full_range`] and [`first_position_violation`] validate a decode step's
+//! token IDs and valid explicit positions from the host readback, and
+//! [`prefix_validity`] builds the validity grid of the shortest rectangular
+//! history prefix `[batch, max L_r]` that the model recomputes.
+//!
+//! # Verified properties
+//!
+//! For every admissible input the proofs establish, without overflow:
+//!
+//! - the append planner returns exactly the documented first error in policy
+//!   order, or per-row counts `n_r`, new lengths `L_r + n_r <= capacity`, and
+//!   slots `L_r + rank(c)` for valid cells and zero for masked cells, and the
+//!   composed planner reports a validity grid of the wrong size instead of
+//!   assuming its shape;
+//! - the write window is the tightest one: `start` is the smallest committed
+//!   length and `end` the largest new length among advancing rows (both zero
+//!   when no row advances);
+//! - window cell `(r, j)` is written exactly when `L_r <= start + j < L_r + n_r`,
+//!   and then gathers the unique valid input column whose rank is
+//!   `start + j - L_r`, so valid cells and written window cells correspond
+//!   one to one;
+//! - decode validation reports attained bounds and the first failing row, and
+//!   the history prefix marks exactly the stored cells `c < L_r`.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -37,7 +69,7 @@ use vstd::prelude::*;
 verus! {
 
 /// Number of `true` cells in `cells[start..end)`.
-pub open spec fn count_valid(cells: Seq<bool>, start: int, end: int) -> int
+pub(crate) open spec fn count_valid(cells: Seq<bool>, start: int, end: int) -> int
     decreases end - start,
 {
     if end <= start {
@@ -48,7 +80,7 @@ pub open spec fn count_valid(cells: Seq<bool>, start: int, end: int) -> int
 }
 
 /// Counting a range never exceeds its width and is never negative.
-pub proof fn lemma_count_bounds(cells: Seq<bool>, start: int, end: int)
+pub(crate) proof fn lemma_count_bounds(cells: Seq<bool>, start: int, end: int)
     requires
         start <= end,
     ensures
@@ -61,7 +93,7 @@ pub proof fn lemma_count_bounds(cells: Seq<bool>, start: int, end: int)
 }
 
 /// Extending a counted prefix never decreases the count.
-pub proof fn lemma_count_monotone(cells: Seq<bool>, middle: int, end: int)
+pub(crate) proof fn lemma_count_monotone(cells: Seq<bool>, middle: int, end: int)
     requires
         0 <= middle <= end,
     ensures
@@ -71,6 +103,320 @@ pub proof fn lemma_count_monotone(cells: Seq<bool>, middle: int, end: int)
     if end > middle {
         lemma_count_monotone(cells, middle, end - 1);
     }
+}
+
+/// Radius `R = min(max_distance, C - 1)` of the clamped displacement table.
+pub(crate) open spec fn clamped_radius(max_distance: int, evaluated_context: int) -> int {
+    if max_distance < evaluated_context - 1 {
+        max_distance
+    } else {
+        evaluated_context - 1
+    }
+}
+
+/// Row `row` of a row-major grid with `step` columns: `cells[row·step .. row·step + step)`.
+pub(crate) open spec fn grid_row<T>(cells: Seq<T>, step: int, row: int) -> Seq<T> {
+    cells.subrange(row * step, row * step + step)
+}
+
+/// Valid tokens `n_r` in row `row` of a `[rows, step]` validity grid.
+pub(crate) open spec fn row_count(validity: Seq<bool>, step: int, row: int) -> int {
+    count_valid(grid_row(validity, step, row), 0, step)
+}
+
+/// `slots` gives valid column `c` the slot `committed + rank(c)` and masked columns zero.
+///
+/// `rank(c)` counts the valid columns before `c`, so valid columns fill
+/// `committed..committed + n` in order without gaps.
+pub(crate) open spec fn slots_follow_ranks(
+    validity: Seq<bool>,
+    committed: int,
+    slots: Seq<usize>,
+) -> bool {
+    &&& slots.len() == validity.len()
+    &&& forall|c: int| 0 <= c < validity.len() ==> {
+        &&& validity[c] ==> #[trigger] slots[c] as int == committed + count_valid(validity, 0, c)
+        &&& !validity[c] ==> slots[c] == 0
+    }
+}
+
+/// When `require_every_row` holds, every one of the first `rows` rows has a valid token.
+pub(crate) open spec fn rows_nonempty_as_required(
+    validity: Seq<bool>,
+    step: int,
+    rows: int,
+    require_every_row: bool,
+) -> bool {
+    require_every_row ==> forall|r: int|
+        0 <= r < rows ==> #[trigger] row_count(validity, step, r) > 0
+}
+
+/// Some row among the first `rows` appends at least one token.
+pub(crate) open spec fn some_row_advances(validity: Seq<bool>, step: int, rows: int) -> bool {
+    exists|r: int| 0 <= r < rows && #[trigger] row_count(validity, step, r) > 0
+}
+
+/// Rows `0..end` keep `L_r + n_r <= capacity`.
+pub(crate) open spec fn rows_fit(
+    validity: Seq<bool>,
+    step: int,
+    lengths: Seq<usize>,
+    capacity: int,
+    end: int,
+) -> bool {
+    forall|r: int| 0 <= r < end ==> lengths[r] + #[trigger] row_count(validity, step, r) <= capacity
+}
+
+/// Rows `0..end` hold at least one token after the append: `L_r + n_r > 0`.
+pub(crate) open spec fn rows_started(
+    validity: Seq<bool>,
+    step: int,
+    lengths: Seq<usize>,
+    end: int,
+) -> bool {
+    forall|r: int| 0 <= r < end ==> lengths[r] + #[trigger] row_count(validity, step, r) > 0
+}
+
+/// Exact outcome of planning one append, including the order of policy errors.
+///
+/// Each error names the first offending row and implies that every earlier
+/// policy passed: an empty prompt row (only when `require_every_row`), an
+/// entirely masked step, a capacity overflow (with the requested length when
+/// it fits `usize`), and a row that holds no token after the append.
+pub(crate) open spec fn history_append_outcome(
+    validity: Seq<bool>,
+    step: int,
+    lengths: Seq<usize>,
+    capacity: int,
+    require_every_row: bool,
+    planned: Result<HistoryAppend, HistoryAppendError>,
+) -> bool {
+    let rows = lengths.len() as int;
+    match planned {
+        Err(HistoryAppendError::Layout { .. }) => false,
+        Err(HistoryAppendError::EmptyRow { row }) => {
+            &&& require_every_row
+            &&& row < rows
+            &&& row_count(validity, step, row as int) == 0
+            &&& forall|r: int| 0 <= r < row ==> #[trigger] row_count(validity, step, r) > 0
+        },
+        Err(HistoryAppendError::EmptyStep) => {
+            &&& rows_nonempty_as_required(validity, step, rows, require_every_row)
+            &&& !some_row_advances(validity, step, rows)
+        },
+        Err(HistoryAppendError::Capacity { row, requested }) => {
+            &&& rows_nonempty_as_required(validity, step, rows, require_every_row)
+            &&& some_row_advances(validity, step, rows)
+            &&& row < rows
+            &&& rows_fit(validity, step, lengths, capacity, row as int)
+            &&& lengths[row as int] + row_count(validity, step, row as int) > capacity
+            &&& requested == if lengths[row as int] + row_count(validity, step, row as int)
+                <= usize::MAX {
+                Some((lengths[row as int] + row_count(validity, step, row as int)) as usize)
+            } else {
+                None::<usize>
+            }
+        },
+        Err(HistoryAppendError::NeverStarted { row }) => {
+            &&& rows_nonempty_as_required(validity, step, rows, require_every_row)
+            &&& some_row_advances(validity, step, rows)
+            &&& rows_fit(validity, step, lengths, capacity, rows)
+            &&& row < rows
+            &&& rows_started(validity, step, lengths, row as int)
+            &&& lengths[row as int] + row_count(validity, step, row as int) == 0
+        },
+        Ok(plan) => {
+            &&& rows_nonempty_as_required(validity, step, rows, require_every_row)
+            &&& some_row_advances(validity, step, rows)
+            &&& rows_fit(validity, step, lengths, capacity, rows)
+            &&& rows_started(validity, step, lengths, rows)
+            &&& plan.counts.len() == rows
+            &&& plan.lengths.len() == rows
+            &&& plan.slots.len() == validity.len()
+            &&& forall|r: int| 0 <= r < rows ==> {
+                &&& #[trigger] plan.counts@[r] as int == row_count(validity, step, r)
+                &&& plan.lengths@[r] == lengths[r] + plan.counts@[r]
+                &&& slots_follow_ranks(
+                    grid_row(validity, step, r),
+                    lengths[r] as int,
+                    grid_row(plan.slots@, step, r),
+                )
+            }
+        },
+    }
+}
+
+/// `plan` is a successful append of `validity`, as [`plan_history_writes`] requires.
+///
+/// Committed lengths are recovered as `L_r = lengths[r] - counts[r]`.
+pub(crate) open spec fn planned_append(
+    plan: HistoryAppend,
+    validity: Seq<bool>,
+    step: int,
+) -> bool {
+    let rows = plan.counts.len() as int;
+    &&& plan.lengths.len() == rows
+    &&& validity.len() == rows * step
+    &&& plan.slots.len() == rows * step
+    &&& forall|r: int| 0 <= r < rows ==> {
+        &&& #[trigger] plan.counts@[r] as int == row_count(validity, step, r)
+        &&& plan.counts@[r] <= plan.lengths@[r]
+        &&& slots_follow_ranks(
+            grid_row(validity, step, r),
+            plan.lengths@[r] - plan.counts@[r],
+            grid_row(plan.slots@, step, r),
+        )
+    }
+}
+
+/// `[start, end)` is the tightest window containing every appended slot.
+///
+/// It spans from the smallest committed length to the largest new length of
+/// the advancing rows (`n_r > 0`), and is `[0, 0)` when no row advances.
+pub(crate) open spec fn tight_window(plan: HistoryAppend, start: int, end: int) -> bool {
+    let rows = plan.counts.len() as int;
+    if exists|r: int| 0 <= r < rows && #[trigger] plan.counts@[r] > 0 {
+        &&& forall|r: int| 0 <= r < rows && #[trigger] plan.counts@[r] > 0
+            ==> start <= plan.lengths@[r] - plan.counts@[r] && plan.lengths@[r] <= end
+        &&& exists|r: int| 0 <= r < rows && #[trigger] plan.counts@[r] > 0
+            && start == plan.lengths@[r] - plan.counts@[r]
+        &&& exists|r: int| 0 <= r < rows && #[trigger] plan.counts@[r] > 0
+            && end == plan.lengths@[r]
+    } else {
+        start == 0 && end == 0
+    }
+}
+
+/// One row of the write window: cell `j` holds history slot `start + j`.
+///
+/// The cell is written exactly when `committed <= start + j < length`, and
+/// then gathers the valid column of `cells` whose rank is
+/// `start + j - committed`; unwritten cells hold source zero.
+pub(crate) open spec fn window_row(
+    cells: Seq<bool>,
+    committed: int,
+    length: int,
+    start: int,
+    written: Seq<bool>,
+    sources: Seq<usize>,
+) -> bool {
+    &&& sources.len() == written.len()
+    &&& forall|j: int| 0 <= j < written.len() ==> {
+        &&& #[trigger] written[j] == (committed <= start + j < length)
+        &&& written[j] ==> {
+            &&& sources[j] < cells.len()
+            &&& cells[sources[j] as int]
+            &&& committed + count_valid(cells, 0, sources[j] as int) == start + j
+        }
+        &&& !written[j] ==> sources[j] == 0
+    }
+}
+
+/// `writes` is the exact write window of the successful append `plan`.
+pub(crate) open spec fn history_writes_outcome(
+    plan: HistoryAppend,
+    validity: Seq<bool>,
+    step: int,
+    writes: HistoryWrites,
+) -> bool {
+    let rows = plan.counts.len() as int;
+    let width = writes.end - writes.start;
+    &&& writes.start <= writes.end
+    &&& tight_window(plan, writes.start as int, writes.end as int)
+    &&& writes.written.len() == rows * width
+    &&& writes.sources.len() == rows * width
+    &&& forall|r: int| 0 <= r < rows ==> window_row(
+        grid_row(validity, step, r),
+        plan.lengths@[r] - plan.counts@[r],
+        plan.lengths@[r] as int,
+        writes.start as int,
+        #[trigger] grid_row(writes.written@, width, r),
+        grid_row(writes.sources@, width, r),
+    )
+}
+
+/// Appending a whole row to a row-major prefix keeps earlier rows and adds the new one.
+pub(crate) proof fn lemma_append_grid_row<T>(prefix: Seq<T>, tail: Seq<T>, step: int, rows: int)
+    requires
+        0 <= rows,
+        0 <= step,
+        prefix.len() == rows * step,
+        tail.len() == step,
+    ensures
+        (prefix + tail).len() == (rows + 1) * step,
+        grid_row(prefix + tail, step, rows) == tail,
+        forall|r: int| 0 <= r < rows ==> #[trigger] grid_row(prefix + tail, step, r)
+            == grid_row(prefix, step, r),
+{
+    assert((rows + 1) * step == rows * step + step) by (nonlinear_arith);
+    assert(grid_row(prefix + tail, step, rows) =~= tail);
+    assert forall|r: int| 0 <= r < rows implies #[trigger] grid_row(prefix + tail, step, r)
+        == grid_row(prefix, step, r) by {
+        assert(r * step + step <= rows * step) by (nonlinear_arith)
+            requires
+                r < rows,
+                0 <= step,
+        ;
+        assert(0 <= r * step) by (nonlinear_arith)
+            requires
+                0 <= r,
+                0 <= step,
+        ;
+        assert(grid_row(prefix + tail, step, r) =~= grid_row(prefix, step, r));
+    }
+}
+
+/// Every valid cell's value lies in `0..limit`.
+pub(crate) open spec fn valid_values_within(
+    values: Seq<i64>,
+    validity: Seq<bool>,
+    limit: int,
+) -> bool {
+    forall|c: int| 0 <= c < validity.len() && validity[c] ==> 0 <= #[trigger] values[c] < limit
+}
+
+/// `minimum` is attained by a valid cell and bounds every valid cell from below.
+pub(crate) open spec fn valid_minimum(values: Seq<i64>, validity: Seq<bool>, minimum: int) -> bool {
+    &&& forall|c: int| 0 <= c < validity.len() && validity[c] ==> minimum <= #[trigger] values[c]
+    &&& exists|c: int| 0 <= c < validity.len() && validity[c] && values[c] == minimum
+}
+
+/// `maximum` is attained by a valid cell and bounds every valid cell from above.
+pub(crate) open spec fn valid_maximum(values: Seq<i64>, validity: Seq<bool>, maximum: int) -> bool {
+    &&& forall|c: int| 0 <= c < validity.len() && validity[c] ==> #[trigger] values[c] <= maximum
+    &&& exists|c: int| 0 <= c < validity.len() && validity[c] && values[c] == maximum
+}
+
+/// Row `row` of `[rows, step]` positions keeps its valid positions in `0..limit`.
+pub(crate) open spec fn row_positions_within(
+    positions: Seq<i64>,
+    validity: Seq<bool>,
+    step: int,
+    row: int,
+    limit: int,
+) -> bool {
+    valid_values_within(grid_row(positions, step, row), grid_row(validity, step, row), limit)
+}
+
+/// Row `row` of a `[rows, step]` grid lies inside it, so its offsets are representable.
+pub(crate) proof fn lemma_grid_row_in_bounds(row: int, rows: int, step: int)
+    requires
+        0 <= row < rows,
+        0 <= step,
+    ensures
+        0 <= row * step,
+        row * step + step <= rows * step,
+{
+    assert(0 <= row * step) by (nonlinear_arith)
+        requires
+            0 <= row,
+            0 <= step,
+    ;
+    assert(row * step + step <= rows * step) by (nonlinear_arith)
+        requires
+            row < rows,
+            0 <= step,
+    ;
 }
 
 } // verus!
@@ -91,17 +437,25 @@ pub(crate) struct DisplacementTable {
 
 /// Sizes the clamped table for buckets saturating at `max_distance` over a context `C`.
 ///
-/// Returns `R = min(max_distance, C - 1)` and `2R + 1`, or `None` for an empty
-/// context or a length that does not fit `usize`.
+/// Returns `R = min(max_distance, C - 1)` and `2R + 1`. The result is `None`
+/// exactly for an empty context or a length that does not fit `usize`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(table =>
     ensures
-        evaluated_context == 0 ==> table.is_none(),
+        match table {
+            Some(t) => {
+                &&& evaluated_context > 0
+                &&& t.radius == clamped_radius(max_distance as int, evaluated_context as int)
+                &&& t.length == 2 * t.radius + 1
+            },
+            None => {
+                let radius = clamped_radius(max_distance as int, evaluated_context as int);
+                evaluated_context == 0 || 2 * radius + 1 > usize::MAX
+            },
+        },
         table matches Some(t) ==> {
             &&& t.radius <= max_distance
             &&& t.radius < evaluated_context
-            &&& (t.radius == max_distance || t.radius + 1 == evaluated_context)
-            &&& t.length == 2 * t.radius + 1
         },
 ))]
 pub(crate) fn displacement_table(
@@ -120,6 +474,41 @@ pub(crate) fn displacement_table(
     let doubled = radius.checked_mul(2)?;
     let length = doubled.checked_add(1)?;
     Some(DisplacementTable { radius, length })
+}
+
+/// Largest displacement table, so every slot fits a signed 32-bit integer dtype.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub(crate) const PORTABLE_INDEX_LIMIT: usize = i32::MAX as usize;
+
+/// Sizes a displacement table whose slots also fit the portable 32-bit index range.
+///
+/// Returns [`displacement_table`]'s table when its length is at most
+/// `i32::MAX`, and `None` otherwise. A returned radius then satisfies
+/// `2R + 1 <= i32::MAX`, so it converts to `i64` (and every slot to `i32`)
+/// without loss.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(table =>
+    ensures
+        match table {
+            Some(t) => {
+                &&& evaluated_context > 0
+                &&& t.radius == clamped_radius(max_distance as int, evaluated_context as int)
+                &&& t.length == 2 * t.radius + 1
+                &&& t.length <= i32::MAX
+                &&& t.radius <= i32::MAX / 2
+            },
+            None => evaluated_context == 0
+                || 2 * clamped_radius(max_distance as int, evaluated_context as int) + 1 > i32::MAX,
+        },
+))]
+pub(crate) fn portable_displacement_table(
+    max_distance: usize,
+    evaluated_context: usize,
+) -> Option<DisplacementTable> {
+    match displacement_table(max_distance, evaluated_context) {
+        Some(table) if table.length <= PORTABLE_INDEX_LIMIT => Some(table),
+        _ => None,
+    }
 }
 
 /// Device index of displacement `d` in a table of radius `R`: `clamp(d, -R, R) + R`.
@@ -169,8 +558,21 @@ pub(crate) fn slot_displacement(slot: usize, radius: usize) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Why an append to the reference history cannot be planned.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryAppendError {
+    /// The validity grid does not hold one cell per row and column.
+    ///
+    /// Only [`plan_history`] reports it; it guards the shape that the
+    /// lower-level planners require.
+    Layout {
+        /// Cells in the validity grid.
+        cells: usize,
+        /// Rows with a committed length.
+        rows: usize,
+        /// Columns of the append step.
+        step: usize,
+    },
     /// A prompt row has no valid token.
     EmptyRow {
         /// First offending batch row.
@@ -210,8 +612,8 @@ pub(crate) struct RowAppend {
 ///
 /// Valid column `c` receives slot `committed + rank(c)`, where `rank(c)` counts
 /// the valid columns before it, so valid columns fill
-/// `committed..committed + n` in order without gaps. Returns `None` when the
-/// new length would exceed `capacity` (or `usize`).
+/// `committed..committed + n` in order without gaps. Returns `None` exactly
+/// when the new length would exceed `capacity` (or `usize`).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(planned =>
     ensures
@@ -219,13 +621,9 @@ pub(crate) struct RowAppend {
             &&& plan.count as int == count_valid(validity@, 0, validity.len() as int)
             &&& plan.length == committed + plan.count
             &&& plan.length <= capacity
-            &&& plan.slots.len() == validity.len()
-            &&& forall|c: int| 0 <= c < validity.len() ==> {
-                &&& validity[c] ==> #[trigger] plan.slots[c] as int
-                    == committed + count_valid(validity@, 0, c)
-                &&& validity[c] ==> committed <= plan.slots[c] < plan.length
-                &&& !validity[c] ==> plan.slots[c] == 0
-            }
+            &&& slots_follow_ranks(validity@, committed as int, plan.slots@)
+            &&& forall|c: int| 0 <= c < validity.len() && validity[c]
+                ==> committed <= #[trigger] plan.slots[c] < plan.length
             &&& forall|a: int, b: int| 0 <= a < b < validity.len()
                 && validity[a] && validity[b] ==> #[trigger] plan.slots[a] < #[trigger] plan.slots[b]
         },
@@ -297,7 +695,8 @@ pub(crate) fn plan_row_append(
 }
 
 /// Counts, new lengths, and per-cell history slots of one append step.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HistoryAppend {
     /// Valid tokens appended to each row, `n_r`.
     pub(crate) counts: Vec<usize>,
@@ -311,12 +710,120 @@ pub(crate) struct HistoryAppend {
     pub(crate) slots: Vec<usize>,
 }
 
+/// Counts the `true` cells of one row.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(count =>
+    ensures
+        count as int == count_valid(cells@, 0, cells.len() as int),
+))]
+fn count_valid_cells(cells: &[bool]) -> usize {
+    let mut count: usize = 0;
+    let mut column: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            column <= cells.len(),
+            count <= column,
+            count as int == count_valid(cells@, 0, column as int),
+        decreases cells.len() - column,
+    ))]
+    while column < cells.len() {
+        if cells[column] {
+            count += 1;
+        }
+        column += 1;
+    }
+    count
+}
+
+/// Counts the valid cells `n_r` of every row of a row-major `[rows, step]` grid.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(counts =>
+    requires
+        validity.len() == rows * step,
+    ensures
+        counts.len() == rows,
+        forall|r: int|
+            #![trigger counts@[r]]
+            #![trigger row_count(validity@, step as int, r)]
+            0 <= r < rows ==> counts@[r] as int == row_count(validity@, step as int, r),
+))]
+fn grid_row_counts(validity: &[bool], step: usize, rows: usize) -> Vec<usize> {
+    let mut counts: Vec<usize> = Vec::with_capacity(rows);
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            validity.len() == rows * step,
+            counts.len() == row,
+            forall|r: int| 0 <= r < row
+                ==> #[trigger] counts@[r] as int == row_count(validity@, step as int, r),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_grid_row_in_bounds(row as int, rows as int, step as int);
+        }
+        let offset = row * step;
+        counts.push(count_valid_cells(&validity[offset..offset + step]));
+        row += 1;
+    }
+    counts
+}
+
+/// Returns the first zero entry of `values`, if any.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    ensures
+        match found {
+            Some(index) => {
+                &&& index < values.len()
+                &&& values[index as int] == 0
+                &&& forall|j: int| 0 <= j < index ==> #[trigger] values[j] != 0
+            },
+            None => forall|j: int| 0 <= j < values.len() ==> #[trigger] values[j] != 0,
+        },
+))]
+fn first_zero(values: &[usize]) -> Option<usize> {
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= values.len(),
+            forall|j: int| 0 <= j < index ==> #[trigger] values[j] != 0,
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] == 0 {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Plans one append of a row-major `[batch, step]` validity grid to rows of `lengths`.
 ///
-/// Every row is planned by the verified [`plan_row_append`]. Errors are
-/// checked in a fixed order, each reporting the first offending row: an empty
-/// prompt row (when `require_every_row`), an entirely masked step, a capacity
-/// overflow, and finally a never-started row that appends nothing.
+/// `validity` must hold `lengths.len() * step` cells. Every row is planned by
+/// the verified [`plan_row_append`]. Errors are checked in a fixed order, each
+/// reporting the first offending row: an empty prompt row (when
+/// `require_every_row`), an entirely masked step, a capacity overflow, and
+/// finally a never-started row that appends nothing. The proof shows the
+/// result is exactly `history_append_outcome`: the first applicable error, or
+/// counts, new lengths, and rank slots for every row.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(planned =>
+    requires
+        validity.len() == lengths.len() * step,
+    ensures
+        history_append_outcome(
+            validity@,
+            step as int,
+            lengths@,
+            capacity as int,
+            require_every_row,
+            planned,
+        ),
+))]
 pub(crate) fn plan_history_append(
     validity: &[bool],
     step: usize,
@@ -324,40 +831,110 @@ pub(crate) fn plan_history_append(
     capacity: usize,
     require_every_row: bool,
 ) -> Result<HistoryAppend, HistoryAppendError> {
-    debug_assert!(step > 0 && validity.len() == lengths.len() * step);
-    let counts = validity
-        .chunks_exact(step)
-        .map(|cells| cells.iter().filter(|&&valid| valid).count())
-        .collect::<Vec<_>>();
-    // Harnesses compile as Rust 2021 under Verus, so this avoids `let` chains.
-    if let Some(row) = counts
-        .iter()
-        .position(|&count| require_every_row && count == 0)
-    {
+    let rows = lengths.len();
+    let counts = grid_row_counts(validity, step, rows);
+    // Verus compiles verified bodies as Rust 2021, so this avoids a `let` chain.
+    let empty_row = if require_every_row {
+        first_zero(counts.as_slice())
+    } else {
+        None
+    };
+    if let Some(row) = empty_row {
         return Err(HistoryAppendError::EmptyRow { row });
     }
-    if counts.iter().all(|&count| count == 0) {
+    let Some(_) = first_nonzero(counts.as_slice()) else {
         return Err(HistoryAppendError::EmptyStep);
-    }
-    let mut plan = HistoryAppend {
-        counts,
-        lengths: Vec::with_capacity(lengths.len()),
-        slots: Vec::with_capacity(validity.len()),
     };
-    for (row, (cells, &committed)) in validity.chunks_exact(step).zip(lengths).enumerate() {
-        let appended =
-            plan_row_append(cells, committed, capacity).ok_or(HistoryAppendError::Capacity {
+    let mut new_lengths: Vec<usize> = Vec::with_capacity(rows);
+    let mut slots: Vec<usize> = Vec::with_capacity(validity.len());
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows == lengths.len(),
+            validity.len() == rows * step,
+            counts.len() == rows,
+            forall|r: int|
+                #![trigger counts@[r]]
+                #![trigger row_count(validity@, step as int, r)]
+                0 <= r < rows ==> counts@[r] as int == row_count(validity@, step as int, r),
+            rows_nonempty_as_required(validity@, step as int, rows as int, require_every_row),
+            some_row_advances(validity@, step as int, rows as int),
+            rows_fit(validity@, step as int, lengths@, capacity as int, row as int),
+            new_lengths.len() == row,
+            forall|r: int|
+                #![trigger new_lengths@[r]]
+                #![trigger counts@[r]]
+                0 <= r < row ==> new_lengths@[r] == lengths[r] + counts@[r],
+            slots.len() == row * step,
+            forall|r: int| 0 <= r < row ==> slots_follow_ranks(
+                grid_row(validity@, step as int, r),
+                lengths[r] as int,
+                #[trigger] grid_row(slots@, step as int, r),
+            ),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_grid_row_in_bounds(row as int, rows as int, step as int);
+        }
+        let offset = row * step;
+        let cells = &validity[offset..offset + step];
+        let committed = lengths[row];
+        let Some(appended) = plan_row_append(cells, committed, capacity) else {
+            return Err(HistoryAppendError::Capacity {
                 row,
-                requested: committed.checked_add(plan.counts[row]),
-            })?;
-        debug_assert_eq!(appended.count, plan.counts[row]);
-        plan.lengths.push(appended.length);
-        plan.slots.extend(appended.slots);
+                requested: committed.checked_add(counts[row]),
+            });
+        };
+        new_lengths.push(appended.length);
+        let mut row_slots = appended.slots;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_append_grid_row(slots@, row_slots@, step as int, row as int);
+        }
+        slots.append(&mut row_slots);
+        row += 1;
     }
-    if let Some(row) = plan.lengths.iter().position(|&length| length == 0) {
+    if let Some(row) = first_zero(new_lengths.as_slice()) {
         return Err(HistoryAppendError::NeverStarted { row });
     }
-    Ok(plan)
+    Ok(HistoryAppend {
+        counts,
+        lengths: new_lengths,
+        slots,
+    })
+}
+
+/// Returns the first nonzero entry of `values`, if any.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    ensures
+        match found {
+            Some(index) => {
+                &&& index < values.len()
+                &&& values[index as int] != 0
+                &&& forall|j: int| 0 <= j < index ==> #[trigger] values[j] == 0
+            },
+            None => forall|j: int| 0 <= j < values.len() ==> #[trigger] values[j] == 0,
+        },
+))]
+fn first_nonzero(values: &[usize]) -> Option<usize> {
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= values.len(),
+            forall|j: int| 0 <= j < index ==> #[trigger] values[j] == 0,
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] != 0 {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// One rectangular write window covering every slot appended in a step.
@@ -367,7 +944,8 @@ pub(crate) fn plan_history_append(
 /// row-major `[batch, end - start]`. Slot `j` of row `r` is written exactly
 /// when `L_r <= j < L_r + n_r`, and then reads the input column whose rank is
 /// `j - L_r`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HistoryWrites {
     /// First rewritten history column.
     pub(crate) start: usize,
@@ -383,33 +961,168 @@ pub(crate) struct HistoryWrites {
 ///
 /// `start` is the smallest committed length of an advancing row and `end` the
 /// largest new length, so the window is empty only when no row advances
-/// (which [`plan_history_append`] rejects).
+/// (which [`plan_history_append`] rejects). The proof shows the window is
+/// tight and that each row's written cells are exactly its appended slots,
+/// each gathering the valid column of matching rank (`history_writes_outcome`).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(writes =>
+    requires
+        planned_append(*plan, validity@, step as int),
+    ensures
+        history_writes_outcome(*plan, validity@, step as int, writes),
+))]
 pub(crate) fn plan_history_writes(
     plan: &HistoryAppend,
     validity: &[bool],
     step: usize,
 ) -> HistoryWrites {
-    let advancing = plan
-        .counts
-        .iter()
-        .zip(&plan.lengths)
-        .filter(|(count, _)| **count > 0);
-    let start = advancing
-        .clone()
-        .map(|(count, length)| length - count)
-        .min()
-        .unwrap_or(0);
-    let end = advancing.map(|(_, length)| *length).max().unwrap_or(start);
-    let width = end - start;
-    let mut sources = vec![0; plan.counts.len() * width];
-    let mut written = vec![false; plan.counts.len() * width];
-    for (cell, (&valid, &slot)) in validity.iter().zip(&plan.slots).enumerate() {
-        if valid {
-            let row = cell / step;
-            let index = row * width + (slot - start);
-            sources[index] = cell % step;
-            written[index] = true;
+    let rows = plan.counts.len();
+    // The tightest window over advancing rows; `[0, 0)` when none advances.
+    let mut advancing = false;
+    let mut start: usize = 0;
+    let mut end: usize = 0;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! {
+        let ghost mut first_row: int = 0;
+        let ghost mut last_row: int = 0;
+    }
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows == plan.counts.len(),
+            planned_append(*plan, validity@, step as int),
+            advancing == exists|r: int| 0 <= r < row && #[trigger] plan.counts@[r] > 0,
+            !advancing ==> start == 0 && end == 0,
+            advancing ==> {
+                &&& 0 <= first_row < row
+                &&& plan.counts@[first_row] > 0
+                &&& start == plan.lengths@[first_row] - plan.counts@[first_row]
+                &&& 0 <= last_row < row
+                &&& plan.counts@[last_row] > 0
+                &&& end == plan.lengths@[last_row]
+            },
+            forall|r: int| 0 <= r < row && #[trigger] plan.counts@[r] > 0
+                ==> start <= plan.lengths@[r] - plan.counts@[r] && plan.lengths@[r] <= end,
+        decreases rows - row,
+    ))]
+    while row < rows {
+        let count = plan.counts[row];
+        if count > 0 {
+            let length = plan.lengths[row];
+            let first = length - count;
+            if !advancing || first < start {
+                start = first;
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    first_row = row as int;
+                }
+            }
+            if !advancing || length > end {
+                end = length;
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    last_row = row as int;
+                }
+            }
+            advancing = true;
         }
+        row += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if advancing {
+            assert(start <= end);
+        }
+    }
+    let width = end - start;
+    let mut sources: Vec<usize> = Vec::new();
+    let mut written: Vec<bool> = Vec::new();
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows == plan.counts.len(),
+            planned_append(*plan, validity@, step as int),
+            start <= end,
+            width == end - start,
+            forall|r: int| 0 <= r < rows && #[trigger] plan.counts@[r] > 0
+                ==> start <= plan.lengths@[r] - plan.counts@[r] && plan.lengths@[r] <= end,
+            written.len() == row * width,
+            sources.len() == row * width,
+            forall|r: int| 0 <= r < row ==> window_row(
+                grid_row(validity@, step as int, r),
+                plan.lengths@[r] - plan.counts@[r],
+                plan.lengths@[r] as int,
+                start as int,
+                #[trigger] grid_row(written@, width as int, r),
+                grid_row(sources@, width as int, r),
+            ),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_grid_row_in_bounds(row as int, rows as int, step as int);
+        }
+        let offset = row * step;
+        let cells = &validity[offset..offset + step];
+        let slots = &plan.slots[offset..offset + step];
+        #[cfg(verus_keep_ghost)]
+        proof_decl! {
+            let ghost count = plan.counts@[row as int] as int;
+            let ghost committed = plan.lengths@[row as int] - count;
+        }
+        let mut row_sources: Vec<usize> = vec![0; width];
+        let mut row_written: Vec<bool> = vec![false; width];
+        let mut column: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                column <= step,
+                cells@ == grid_row(validity@, step as int, row as int),
+                slots@ == grid_row(plan.slots@, step as int, row as int),
+                cells.len() == step,
+                count == count_valid(cells@, 0, step as int),
+                committed == plan.lengths@[row as int] - count,
+                slots_follow_ranks(cells@, committed, slots@),
+                count > 0 ==> start <= committed && committed + count <= end,
+                width == end - start,
+                row_written.len() == width,
+                row_sources.len() == width,
+                forall|j: int| 0 <= j < width ==> {
+                    &&& #[trigger] row_written@[j]
+                        == (committed <= start + j
+                            < committed + count_valid(cells@, 0, column as int))
+                    &&& row_written@[j] ==> {
+                        &&& row_sources@[j] < step
+                        &&& cells@[row_sources@[j] as int]
+                        &&& committed + count_valid(cells@, 0, row_sources@[j] as int) == start + j
+                    }
+                    &&& !row_written@[j] ==> row_sources@[j] == 0
+                },
+            decreases step - column,
+        ))]
+        while column < step {
+            if cells[column] {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_count_monotone(cells@, column as int + 1, step as int);
+                    lemma_count_bounds(cells@, 0, column as int);
+                }
+                let index = slots[column] - start;
+                row_sources[index] = column;
+                row_written[index] = true;
+            }
+            column += 1;
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_append_grid_row(written@, row_written@, width as int, row as int);
+            lemma_append_grid_row(sources@, row_sources@, width as int, row as int);
+        }
+        sources.append(&mut row_sources);
+        written.append(&mut row_written);
+        row += 1;
     }
     HistoryWrites {
         start,
@@ -417,6 +1130,359 @@ pub(crate) fn plan_history_writes(
         sources,
         written,
     }
+}
+
+/// Plans an append and its write window in one verified step.
+///
+/// A `validity` grid that does not hold exactly `lengths.len() * step` cells
+/// is reported as [`HistoryAppendError::Layout`] (with the product computed
+/// without overflow), so callers need not establish the shape themselves.
+/// Otherwise the result is exactly [`plan_history_append`]'s outcome, and on
+/// success the window of [`plan_history_writes`] for that plan, so the
+/// window's precondition is discharged by the proof rather than by the caller.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(planned =>
+    ensures
+        match planned {
+            Err(HistoryAppendError::Layout { cells, rows, step: columns }) => {
+                &&& cells == validity.len()
+                &&& rows == lengths.len()
+                &&& columns == step
+                &&& validity.len() != lengths.len() * step
+            },
+            Ok((plan, writes)) => {
+                &&& validity.len() == lengths.len() * step
+                &&& history_append_outcome(
+                    validity@,
+                    step as int,
+                    lengths@,
+                    capacity as int,
+                    require_every_row,
+                    Ok(plan),
+                )
+                &&& history_writes_outcome(plan, validity@, step as int, writes)
+            },
+            Err(error) => {
+                &&& validity.len() == lengths.len() * step
+                &&& history_append_outcome(
+                    validity@,
+                    step as int,
+                    lengths@,
+                    capacity as int,
+                    require_every_row,
+                    Err(error),
+                )
+            },
+        },
+))]
+pub(crate) fn plan_history(
+    validity: &[bool],
+    step: usize,
+    lengths: &[usize],
+    capacity: usize,
+    require_every_row: bool,
+) -> Result<(HistoryAppend, HistoryWrites), HistoryAppendError> {
+    let shaped = match lengths.len().checked_mul(step) {
+        Some(cells) => cells == validity.len(),
+        None => false,
+    };
+    if !shaped {
+        return Err(HistoryAppendError::Layout {
+            cells: validity.len(),
+            rows: lengths.len(),
+            step,
+        });
+    }
+    match plan_history_append(validity, step, lengths, capacity, require_every_row) {
+        Ok(plan) => {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert forall|r: int| 0 <= r < plan.counts.len() implies
+                    #[trigger] plan.counts@[r] <= plan.lengths@[r] by {
+                    assert(plan.lengths@[r] == lengths[r] + plan.counts@[r]);
+                }
+            }
+            let writes = plan_history_writes(&plan, validity, step);
+            Ok((plan, writes))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decode-input validation and history views
+// ---------------------------------------------------------------------------
+
+/// Exact bounds of every value, or `None` for an empty list.
+///
+/// Both bounds are attained and enclose every value.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(range =>
+    ensures
+        match range {
+            Some((minimum, maximum)) => {
+                &&& values.len() > 0
+                &&& forall|i: int|
+                    0 <= i < values.len() ==> minimum <= #[trigger] values[i] <= maximum
+                &&& exists|i: int| 0 <= i < values.len() && values[i] == minimum
+                &&& exists|i: int| 0 <= i < values.len() && values[i] == maximum
+            },
+            None => values.len() == 0,
+        },
+))]
+pub(crate) fn full_range(values: &[i64]) -> Option<(i64, i64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut minimum = values[0];
+    let mut maximum = values[0];
+    let mut index: usize = 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= index <= values.len(),
+            forall|i: int| 0 <= i < index ==> minimum <= #[trigger] values[i] <= maximum,
+            exists|i: int| 0 <= i < index && values[i] == minimum,
+            exists|i: int| 0 <= i < index && values[i] == maximum,
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] < minimum {
+            minimum = values[index];
+        }
+        if values[index] > maximum {
+            maximum = values[index];
+        }
+        index += 1;
+    }
+    Some((minimum, maximum))
+}
+
+/// Exact bounds of the valid cells of one row, or `None` when no cell is valid.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(range =>
+    requires
+        values.len() == validity.len(),
+    ensures
+        match range {
+            Some((minimum, maximum)) => {
+                &&& valid_minimum(values@, validity@, minimum as int)
+                &&& valid_maximum(values@, validity@, maximum as int)
+            },
+            None => forall|c: int| 0 <= c < validity.len() ==> !#[trigger] validity[c],
+        },
+))]
+fn valid_range(values: &[i64], validity: &[bool]) -> Option<(i64, i64)> {
+    let mut range: Option<(i64, i64)> = None;
+    let mut column: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            column <= validity.len(),
+            values.len() == validity.len(),
+            match range {
+                Some((minimum, maximum)) => {
+                    &&& forall|c: int| 0 <= c < column && validity[c]
+                        ==> minimum <= #[trigger] values[c] <= maximum
+                    &&& exists|c: int| 0 <= c < column && validity[c] && values[c] == minimum
+                    &&& exists|c: int| 0 <= c < column && validity[c] && values[c] == maximum
+                },
+                None => forall|c: int| 0 <= c < column ==> !#[trigger] validity[c],
+            },
+        decreases validity.len() - column,
+    ))]
+    while column < validity.len() {
+        if validity[column] {
+            let value = values[column];
+            range = match range {
+                Some((minimum, maximum)) => Some((
+                    if value < minimum { value } else { minimum },
+                    if value > maximum { value } else { maximum },
+                )),
+                None => Some((value, value)),
+            };
+        }
+        column += 1;
+    }
+    range
+}
+
+/// Finds the first row whose valid explicit positions leave `0..limit`.
+///
+/// `positions` and `validity` are row-major `[rows, step]`. Positions at
+/// masked cells never enter the history and are ignored. The result is that
+/// row's attained valid range, or `None` when every row passes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(violation =>
+    requires
+        positions.len() == rows * step,
+        validity.len() == rows * step,
+    ensures
+        match violation {
+            Some((minimum, maximum)) => exists|row: int| 0 <= row < rows && {
+                &&& forall|r: int| 0 <= r < row ==> #[trigger] row_positions_within(
+                    positions@,
+                    validity@,
+                    step as int,
+                    r,
+                    limit as int,
+                )
+                &&& !row_positions_within(positions@, validity@, step as int, row, limit as int)
+                &&& valid_minimum(
+                    grid_row(positions@, step as int, row),
+                    grid_row(validity@, step as int, row),
+                    minimum as int,
+                )
+                &&& valid_maximum(
+                    grid_row(positions@, step as int, row),
+                    grid_row(validity@, step as int, row),
+                    maximum as int,
+                )
+            },
+            None => forall|r: int| 0 <= r < rows ==> #[trigger] row_positions_within(
+                positions@,
+                validity@,
+                step as int,
+                r,
+                limit as int,
+            ),
+        },
+))]
+pub(crate) fn first_position_violation(
+    positions: &[i64],
+    validity: &[bool],
+    rows: usize,
+    step: usize,
+    limit: usize,
+) -> Option<(i64, i64)> {
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            positions.len() == rows * step,
+            validity.len() == rows * step,
+            forall|r: int| 0 <= r < row ==> #[trigger] row_positions_within(
+                positions@,
+                validity@,
+                step as int,
+                r,
+                limit as int,
+            ),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_grid_row_in_bounds(row as int, rows as int, step as int);
+        }
+        let offset = row * step;
+        let values = &positions[offset..offset + step];
+        let valid = &validity[offset..offset + step];
+        if let Some((minimum, maximum)) = valid_range(values, valid) {
+            let within = minimum >= 0 && maximum >= 0 && (maximum as u64) < (limit as u64);
+            if !within {
+                // The attained bound outside `0..limit` is a failing valid cell.
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    let low = choose|c: int|
+                        0 <= c < valid@.len() && valid@[c] && values@[c] == minimum;
+                    let high = choose|c: int|
+                        0 <= c < valid@.len() && valid@[c] && values@[c] == maximum;
+                    if minimum < 0 {
+                        assert(!(0 <= values@[low]));
+                    } else {
+                        assert(!(values@[high] < limit));
+                    }
+                    assert(!row_positions_within(
+                        positions@,
+                        validity@,
+                        step as int,
+                        row as int,
+                        limit as int,
+                    ));
+                }
+                return Some((minimum, maximum));
+            }
+        }
+        row += 1;
+    }
+    None
+}
+
+/// Validity of the shortest rectangular history prefix holding every row.
+///
+/// The width is the largest row length `S = max L_r`, and cell `(r, c)` is
+/// valid exactly when `c < L_r`. Returns `None` for an empty batch.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(prefix =>
+    ensures
+        match prefix {
+            Some((sequence, validity)) => {
+                &&& lengths.len() > 0
+                &&& forall|r: int| 0 <= r < lengths.len() ==> #[trigger] lengths[r] <= sequence
+                &&& exists|r: int| 0 <= r < lengths.len() && lengths[r] == sequence
+                &&& validity.len() == lengths.len() * sequence
+                &&& forall|r: int, c: int| 0 <= r < lengths.len() && 0 <= c < sequence
+                    ==> #[trigger] grid_row(validity@, sequence as int, r)[c] == (c < lengths[r])
+            },
+            None => lengths.len() == 0,
+        },
+))]
+pub(crate) fn prefix_validity(lengths: &[usize]) -> Option<(usize, Vec<bool>)> {
+    if lengths.is_empty() {
+        return None;
+    }
+    let rows = lengths.len();
+    let mut sequence: usize = lengths[0];
+    let mut row: usize = 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= row <= rows,
+            rows == lengths.len(),
+            forall|r: int| 0 <= r < row ==> #[trigger] lengths[r] <= sequence,
+            exists|r: int| 0 <= r < row && lengths[r] == sequence,
+        decreases rows - row,
+    ))]
+    while row < rows {
+        if lengths[row] > sequence {
+            sequence = lengths[row];
+        }
+        row += 1;
+    }
+    let mut validity: Vec<bool> = Vec::new();
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows == lengths.len(),
+            validity.len() == row * sequence,
+            forall|r: int, c: int| 0 <= r < row && 0 <= c < sequence
+                ==> #[trigger] grid_row(validity@, sequence as int, r)[c] == (c < lengths[r]),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        let mut cells: Vec<bool> = Vec::with_capacity(sequence);
+        let mut column: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                column <= sequence,
+                row < rows,
+                rows == lengths.len(),
+                cells.len() == column,
+                forall|c: int|
+                    0 <= c < column ==> #[trigger] cells@[c] == (c < lengths[row as int]),
+            decreases sequence - column,
+        ))]
+        while column < sequence {
+            cells.push(column < lengths[row]);
+            column += 1;
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_append_grid_row(validity@, cells@, sequence as int, row as int);
+        }
+        validity.append(&mut cells);
+        row += 1;
+    }
+    Some((sequence, validity))
 }
 
 #[cfg(test)]

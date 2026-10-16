@@ -12,10 +12,10 @@
 //! Every step is executed for the whole batch at once, whatever the rows' raggedness:
 //!
 //! 1. one device read validates the step's mask, token IDs, and explicit positions;
-//! 2. the host plans the append ([`plan_history_append`], verified per row by Verus): row `r`
-//!    appends its `n_r` valid tokens at slots `L_r..L_r + n_r` in input order;
+//! 2. the host plans the append ([`plan_history`], verified by Verus): row `r` appends its
+//!    `n_r` valid tokens at slots `L_r..L_r + n_r` in input order;
 //! 3. one rectangular window `[min L_r, max(L_r + n_r))` of the token and position histories is
-//!    rewritten with a gather and a masked select ([`plan_history_writes`]), so the number of
+//!    rewritten with a gather and a masked select, from the same verified plan, so the number of
 //!    kernels is independent of the batch size and of each row's padding layout;
 //! 4. the model evaluates the shortest rectangular history prefix in one stateless pass, with
 //!    each row's committed length as its validity mask;
@@ -44,7 +44,9 @@ use super::{
         BackboneOutput, causal_output, gathered_router_diagnostics, mask_hidden, select_hidden,
         token_mask_from_values, validate_forward_options,
     },
-    plan::{HistoryAppendError, plan_history_append, plan_history_writes},
+    plan::{
+        HistoryAppendError, first_position_violation, full_range, plan_history, prefix_validity,
+    },
 };
 
 /// Model role encoded into state so equal-looking causal and seq2seq specs cannot be mixed.
@@ -208,7 +210,8 @@ impl<B: Backend> ModularDecodeState<B> {
         let host = HostInput::read(&input, batch, step, "custom decode input")?;
         validate_decode_token_ids(&host.tokens, vocabulary_size)?;
         let validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
-        let plan = plan_history_append(
+        // The verified planner checks one validity cell per row and column itself.
+        let (plan, writes) = plan_history(
             &validity,
             step,
             self.metadata.lengths(),
@@ -220,11 +223,11 @@ impl<B: Backend> ModularDecodeState<B> {
             validate_explicit_positions(
                 positions,
                 &validity,
+                batch,
                 step,
                 self.model_spec.max_position_embeddings,
             )?;
         }
-        let writes = plan_history_writes(&plan, &validity, step);
         let window = writes.start..writes.end;
         let width = window.len();
         let sources = Tensor::<B, 2, Int>::from_data(
@@ -269,6 +272,10 @@ impl<B: Backend> ModularDecodeState<B> {
     /// Converts a planning failure into this state's contextual error.
     fn append_error(&self, error: HistoryAppendError) -> Error {
         match error {
+            HistoryAppendError::Layout { cells, rows, step } => Error::Cache(format!(
+                "custom decode state holds {rows} rows, but the step mask has {cells} cells \
+                 for {step} columns"
+            )),
             HistoryAppendError::EmptyRow { .. } => Error::shape(
                 "custom.prefill.token_mask",
                 "at least one valid token in every prompt row",
@@ -382,11 +389,8 @@ impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
     /// Indices are validated before selection; repeated indices duplicate the
     /// same history without changing token or position semantics.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
-        let selection = indices
-            .iter()
-            .map(|&index| i64::try_from(index))
-            .collect::<core::result::Result<Vec<_>, _>>()
-            .map_err(|_| Error::Cache("custom reorder index does not fit i64".into()))?;
+        let selection = plan::signed_indices(indices)
+            .ok_or_else(|| Error::Cache("custom reorder index does not fit i64".into()))?;
         self.metadata
             .reorder(indices)
             .map_err(|error| Error::Cache(error.to_string()))?;
@@ -438,14 +442,9 @@ impl<B: Backend> PreparedAppend<B> {
     /// Materializes the shortest rectangular prefix containing every compact row.
     fn history_input(&self, device: &B::Device) -> Result<CausalLmInput<B>> {
         let batch = self.new_lengths.len();
-        let sequence = *self
-            .new_lengths
-            .iter()
-            .max()
+        // Verified: width `max L_r`, and cell `(r, c)` is valid exactly when `c < L_r`.
+        let (sequence, validity) = prefix_validity(&self.new_lengths)
             .ok_or_else(|| Error::Cache("custom prepared append lost its batch".into()))?;
-        let validity = (0..batch)
-            .flat_map(|row| (0..sequence).map(move |column| column < self.new_lengths[row]))
-            .collect::<Vec<_>>();
         Ok(CausalLmInput {
             token_ids: self.tokens.clone().slice([0..batch, 0..sequence]),
             token_mask: Some(token_mask_from_values(validity, [batch, sequence], device)),
@@ -565,7 +564,7 @@ impl<B: Backend> PreparedAppend<B> {
 /// Every supplied ID is checked, including padded columns, because the custom
 /// decoder's contract treats the whole token tensor as caller data.
 fn validate_decode_token_ids(tokens: &[i64], vocabulary: usize) -> Result<()> {
-    let (Some(&minimum), Some(&maximum)) = (tokens.iter().min(), tokens.iter().max()) else {
+    let Some((minimum, maximum)) = full_range(tokens) else {
         return Ok(());
     };
     if plan::range_within(minimum, maximum, vocabulary) {
@@ -583,38 +582,38 @@ fn validate_decode_token_ids(tokens: &[i64], vocabulary: usize) -> Result<()> {
 
 /// Rejects explicit positions of valid cells outside the model context.
 ///
-/// Positions supplied at padded cells never enter the history and are not
-/// checked. Implicit positions are history slots below the capacity, which
-/// the model already bounds by its position range, so they need no check.
+/// `positions` and `validity` are row-major `[batch, step]`. Positions
+/// supplied at padded cells never enter the history and are not checked; the
+/// error reports the first failing row's valid range. Implicit positions are
+/// history slots below the capacity, which the model already bounds by its
+/// position range, so they need no check.
 fn validate_explicit_positions(
     positions: &[i64],
     validity: &[bool],
+    batch: usize,
     step: usize,
     limit: usize,
 ) -> Result<()> {
-    for (values, valid) in positions
-        .chunks_exact(step)
-        .zip(validity.chunks_exact(step))
-    {
-        let columns = plan::valid_columns(valid);
-        if let Some((minimum, maximum)) = plan::value_range(values, &columns)
-            && !plan::range_within(minimum, maximum, limit)
-        {
-            return Err(range_error(
-                "custom.decode.position_ids",
-                "position",
-                limit,
-                minimum,
-                maximum,
-            ));
-        }
+    match first_position_violation(positions, validity, batch, step, limit) {
+        Some((minimum, maximum)) => Err(range_error(
+            "custom.decode.position_ids",
+            "position",
+            limit,
+            minimum,
+            maximum,
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Converts host indices into Burn's signed `i64` index type.
 fn to_indices(indices: &[usize]) -> Result<Vec<i64>> {
-    indices.iter().map(|&index| to_index(index)).collect()
+    plan::signed_indices(indices).ok_or_else(|| {
+        Error::configuration(
+            "custom.decode",
+            "history index exceeds the signed tensor-index range",
+        )
+    })
 }
 
 /// Converts a host index into Burn's signed `i64` index type.

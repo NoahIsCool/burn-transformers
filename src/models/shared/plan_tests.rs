@@ -192,6 +192,275 @@ fn append_plans_report_first_failure() {
     );
 }
 
+/// Former iterator-based host planning of a stateful call, kept as the reference.
+#[allow(clippy::too_many_arguments)]
+fn reference_host_rows(
+    mask: Option<&[bool]>,
+    tokens: &[i64],
+    positions: Option<&[i64]>,
+    batch: usize,
+    sequence: usize,
+    lengths: &[usize],
+    capacity: usize,
+    reject_empty_rows: bool,
+    vocabulary: usize,
+    position_limit: Option<usize>,
+) -> Result<HostRows, HostRowsError> {
+    let valid_indices = match mask {
+        Some(mask) => mask
+            .chunks_exact(sequence)
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(_, valid)| **valid)
+                    .map(|(column, _)| column)
+                    .collect()
+            })
+            .collect::<Vec<Vec<usize>>>(),
+        None => vec![(0..sequence).collect::<Vec<_>>(); batch],
+    };
+    let last_columns = match mask {
+        Some(mask) => mask
+            .chunks_exact(sequence)
+            .map(|row| row.iter().rposition(|&valid| valid).unwrap_or(sequence - 1))
+            .collect(),
+        None => vec![sequence - 1; batch],
+    };
+    if reject_empty_rows && valid_indices.iter().any(Vec::is_empty) {
+        return Err(HostRowsError::EmptyRow);
+    }
+    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut ends = Vec::new();
+    for (row, (&length, &additional)) in lengths.iter().zip(&token_counts).enumerate() {
+        match length.checked_add(additional) {
+            None => {
+                return Err(HostRowsError::Append(AppendError::Overflow {
+                    row,
+                    length,
+                    additional,
+                }));
+            }
+            Some(requested) if requested > capacity => {
+                return Err(HostRowsError::Append(AppendError::Capacity {
+                    row,
+                    requested,
+                }));
+            }
+            Some(requested) => ends.push(requested),
+        }
+    }
+    let mut evaluated_contexts = Vec::new();
+    for (row, columns) in valid_indices.iter().enumerate() {
+        let window = row * sequence..(row + 1) * sequence;
+        let listed = |values: &[i64]| {
+            let row_values = &values[window.clone()];
+            let picked = columns.iter().map(|&column| row_values[column]);
+            picked.clone().min().zip(picked.max())
+        };
+        if let Some((minimum, maximum)) = listed(tokens)
+            && !(minimum >= 0 && maximum >= 0 && (maximum as u64) < vocabulary as u64)
+        {
+            return Err(HostRowsError::Values(RowValueError::Tokens {
+                minimum,
+                maximum,
+            }));
+        }
+        let context = match positions.and_then(listed) {
+            Some((minimum, maximum)) => {
+                if let Some(limit) = position_limit
+                    && !(minimum >= 0 && maximum >= 0 && (maximum as u64) < limit as u64)
+                {
+                    return Err(HostRowsError::Values(RowValueError::Positions {
+                        minimum,
+                        maximum,
+                        limit,
+                    }));
+                }
+                usize::try_from(maximum)
+                    .ok()
+                    .and_then(|maximum| maximum.checked_add(1))
+                    .ok_or(HostRowsError::Values(RowValueError::Unrepresentable))?
+            }
+            None => ends[row],
+        };
+        evaluated_contexts.push(context);
+    }
+    Ok(HostRows {
+        valid_indices,
+        token_counts,
+        evaluated_contexts,
+        last_columns,
+    })
+}
+
+/// Last-column lists are classified as invalid, a final-column slice, or a gather.
+#[test]
+fn last_selection_classifies_column_lists() {
+    assert_eq!(
+        plan_last_selection(&[2, 2], 2, 3),
+        LastSelection::FinalColumn
+    );
+    assert_eq!(plan_last_selection(&[2, 0], 2, 3), LastSelection::Gather);
+    assert_eq!(plan_last_selection(&[2], 2, 3), LastSelection::Invalid);
+    assert_eq!(plan_last_selection(&[0, 3], 2, 3), LastSelection::Invalid);
+    // An out-of-range entry after a gather entry still invalidates the list.
+    assert_eq!(
+        plan_last_selection(&[0, 1, 9], 3, 3),
+        LastSelection::Invalid
+    );
+    assert_eq!(plan_last_selection(&[], 0, 3), LastSelection::FinalColumn);
+}
+
+/// Only a non-negative count equal to the width means no row is padded.
+#[test]
+fn count_fills_width_requires_an_exact_count() {
+    assert!(count_fills_width(4, 4));
+    assert!(!count_fills_width(3, 4));
+    assert!(!count_fills_width(-1, 4));
+    assert!(count_fills_width(0, 0));
+    assert!(!count_fills_width(i64::MIN, 0));
+}
+
+/// The fused readback splits into mask flags, tokens, and positions by segment.
+#[test]
+fn readback_splits_into_registered_segments() {
+    let values = vec![1, 0, 7, 8, 5, 6];
+    assert_eq!(
+        split_readback(values.clone(), 2, true, true),
+        (Some(vec![true, false]), vec![7, 8], Some(vec![5, 6]))
+    );
+    assert_eq!(
+        split_readback(values[..4].to_vec(), 2, true, false),
+        (Some(vec![true, false]), vec![7, 8], None)
+    );
+    assert_eq!(
+        split_readback(values[2..].to_vec(), 2, false, true),
+        (None, vec![7, 8], Some(vec![5, 6]))
+    );
+    assert_eq!(
+        split_readback(Vec::new(), 0, true, true),
+        (Some(Vec::new()), Vec::new(), Some(Vec::new()))
+    );
+}
+
+/// Active rows are listed once each, in order, with their contexts.
+#[test]
+fn active_row_contexts_list_appending_rows_in_order() {
+    assert_eq!(
+        active_row_contexts(&[2, 4, 2], &[1, 0, 2]),
+        vec![(0, 2), (2, 2)]
+    );
+    assert_eq!(active_row_contexts(&[5, 6], &[0, 0]), Vec::new());
+    assert_eq!(active_row_contexts(&[], &[]), Vec::new());
+}
+
+/// Row grids list valid and last columns per row, treating no mask as dense.
+#[test]
+fn row_grids_list_valid_and_last_columns() {
+    let mask = [false, true, true, false, false, false, true, false, true];
+    assert_eq!(
+        row_valid_columns(Some(&mask), 3, 3),
+        vec![vec![1, 2], vec![], vec![0, 2]]
+    );
+    assert_eq!(row_last_columns(Some(&mask), 3, 3), vec![2, 2, 2]);
+    let mask = [true, false, false, false];
+    assert_eq!(row_last_columns(Some(&mask), 2, 2), vec![0, 1]);
+    assert_eq!(
+        row_valid_columns(None, 2, 3),
+        vec![vec![0, 1, 2], vec![0, 1, 2]]
+    );
+    assert_eq!(row_last_columns(None, 2, 3), vec![2, 2]);
+    assert_eq!(
+        row_valid_columns(Some(&[]), 2, 0),
+        vec![Vec::<usize>::new(); 2]
+    );
+    assert_eq!(row_valid_columns(None, 0, 4), Vec::<Vec<usize>>::new());
+}
+
+/// Host planning reports errors in precedence order and resolves both context kinds.
+#[test]
+fn host_rows_follow_error_precedence() {
+    let mask = [true, false, false, false];
+    // An empty prompt row wins over a capacity overflow in an earlier row.
+    assert_eq!(
+        plan_host_rows(Some(&mask), &[0; 4], None, 2, 2, &[9, 0], 1, true, 4, None),
+        Err(HostRowsError::EmptyRow)
+    );
+    assert_eq!(
+        plan_host_rows(Some(&mask), &[0; 4], None, 2, 2, &[9, 0], 1, false, 4, None),
+        Err(HostRowsError::Append(AppendError::Capacity {
+            row: 0,
+            requested: 10
+        }))
+    );
+    // Padding sentinels are inert; a valid out-of-vocabulary token is not.
+    let tokens = [3, -7, 99, 99];
+    assert!(plan_host_rows(Some(&mask), &tokens, None, 2, 2, &[0, 0], 4, false, 4, None).is_ok());
+    let tokens = [4, -7, 99, 99];
+    assert_eq!(
+        plan_host_rows(Some(&mask), &tokens, None, 2, 2, &[0, 0], 4, false, 4, None),
+        Err(HostRowsError::Values(RowValueError::Tokens {
+            minimum: 4,
+            maximum: 4
+        }))
+    );
+    // Tokens are checked before positions; positions before representability.
+    let positions = [5, -1, 0, 0];
+    assert_eq!(
+        plan_host_rows(
+            None,
+            &[0; 4],
+            Some(&positions),
+            2,
+            2,
+            &[0, 0],
+            4,
+            false,
+            4,
+            Some(5)
+        ),
+        Err(HostRowsError::Values(RowValueError::Positions {
+            minimum: -1,
+            maximum: 5,
+            limit: 5
+        }))
+    );
+    let positions = [-3, -1, 0, 0];
+    assert_eq!(
+        plan_host_rows(
+            None,
+            &[0; 4],
+            Some(&positions),
+            2,
+            2,
+            &[0, 0],
+            4,
+            false,
+            4,
+            None
+        ),
+        Err(HostRowsError::Values(RowValueError::Unrepresentable))
+    );
+    // Explicit rows use `1 + max p`; inactive rows keep their cursor.
+    let positions = [7, 2, 0, 0];
+    let planned = plan_host_rows(
+        Some(&mask),
+        &[0; 4],
+        Some(&positions),
+        2,
+        2,
+        &[1, 3],
+        4,
+        false,
+        4,
+        None,
+    )
+    .unwrap();
+    assert_eq!(planned.evaluated_contexts, vec![8, 3]);
+    assert_eq!(planned.token_counts, vec![1, 0]);
+    assert_eq!(planned.last_columns, vec![0, 1]);
+}
+
 /// Strategy for a random padded mask row of up to 24 columns.
 fn mask_row() -> impl Strategy<Value = Vec<bool>> {
     prop::collection::vec(any::<bool>(), 0..24)
@@ -245,6 +514,37 @@ proptest! {
         let listed = columns.iter().map(|&column| values[column]);
         let expected = listed.clone().min().zip(listed.max());
         prop_assert_eq!(value_range(&values, &columns), expected);
+    }
+
+    /// Host planning agrees with the former iterator-based planner on random calls.
+    #[test]
+    fn host_rows_match_reference(
+        batch in 1usize..4,
+        sequence in 1usize..5,
+        flags in prop::collection::vec(any::<bool>(), 16),
+        values in prop::collection::vec(-2i64..8, 32),
+        lengths in prop::collection::vec(0usize..6, 4),
+        capacity in 0usize..10,
+        masked in any::<bool>(),
+        explicit in any::<bool>(),
+        reject_empty_rows in any::<bool>(),
+        limit in prop::option::of(0usize..8),
+    ) {
+        let cells = batch * sequence;
+        let mask = masked.then(|| &flags[..cells]);
+        let tokens = &values[..cells];
+        let positions = explicit.then(|| &values[16..16 + cells]);
+        let lengths = &lengths[..batch];
+        prop_assert_eq!(
+            plan_host_rows(
+                mask, tokens, positions, batch, sequence, lengths, capacity,
+                reject_empty_rows, 6, limit,
+            ),
+            reference_host_rows(
+                mask, tokens, positions, batch, sequence, lengths, capacity,
+                reject_empty_rows, 6, limit,
+            )
+        );
     }
 
     /// Append plans agree with checked per-row arithmetic.

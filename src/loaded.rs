@@ -34,6 +34,7 @@ use crate::{
     },
     experiment::HiddenState,
     intervention::{Hooks, PointInfo, Stack},
+    models::shared::load_audit::{equivalence_reads, payload_totals},
 };
 
 /// Tokenizer type carried by [`LoadedModel`] when tokenizer support is enabled.
@@ -601,25 +602,22 @@ fn validate_quantized_load_audit(report: &LoadReport, audit: &QuantizedLoadAudit
             report.quantized.len()
         )));
     }
-    let reported_payload_bytes = report
+    // Verified: the exact total (or overflow) and the largest record, zero when empty.
+    let record_bytes = report
         .quantized
         .iter()
-        .try_fold(0_u64, |total, record| total.checked_add(record.bytes));
-    let reported_payload_bytes = reported_payload_bytes.ok_or_else(|| {
-        Error::Checkpoint("quantized load-report payload byte count overflowed".into())
-    })?;
+        .map(|record| record.bytes)
+        .collect::<Vec<_>>();
+    let (reported_payload_bytes, reported_largest_payload) = payload_totals(&record_bytes)
+        .ok_or_else(|| {
+            Error::Checkpoint("quantized load-report payload byte count overflowed".into())
+        })?;
     if reported_payload_bytes != packed.payload_bytes {
         return Err(Error::Checkpoint(format!(
             "Burnpack decoded {} payload bytes but the load report accounts for {reported_payload_bytes}",
             packed.payload_bytes
         )));
     }
-    let reported_largest_payload = report
-        .quantized
-        .iter()
-        .map(|record| record.bytes)
-        .max()
-        .unwrap_or(0);
     if packed.largest_payload_bytes != reported_largest_payload {
         return Err(Error::Checkpoint(format!(
             "largest Burnpack payload is {}, but the load report records {reported_largest_payload}",
@@ -729,9 +727,7 @@ fn validate_execution_stats(report: &LoadReport, stats: &ExecutionStats) -> Resu
             report.equivalence_verified.len()
         )));
     }
-    let expected_equivalence_reads = u64::try_from(stats.equivalences_verified)
-        .ok()
-        .and_then(|count| count.checked_mul(2))
+    let expected_equivalence_reads = equivalence_reads(stats.equivalences_verified)
         .ok_or_else(|| Error::Checkpoint("equivalence read count overflowed".into()))?;
     if stats.equivalence_source_reads != expected_equivalence_reads {
         return Err(Error::Checkpoint(format!(

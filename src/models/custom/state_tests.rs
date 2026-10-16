@@ -103,6 +103,28 @@ fn history_batch_mismatch_preserves_contextual_error() {
     );
 }
 
+/// A validity layout the planner rejects becomes a contextual cache error, not a panic.
+#[test]
+fn history_layout_mismatch_maps_to_a_cache_error() {
+    let state = ModularDecodeState::<B>::new(
+        CacheConfig::new(2, 3).expect("small positive geometry"),
+        2,
+        spec(),
+        StatePurpose::Causal,
+        &Default::default(),
+    )
+    .expect("small histories");
+    let error = plan_history(&[true; 3], 2, state.lengths(), state.capacity(), false)
+        .map_err(|error| state.append_error(error))
+        .expect_err("three cells cannot cover two rows of two columns");
+    assert!(matches!(error, Error::Cache(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("holds 2 rows, but the step mask has 3 cells for 2 columns")
+    );
+}
+
 /// Successful and rejected reorders preserve history geometry and accounting before reset.
 #[test]
 fn history_element_accounting_stays_fixed_across_lifecycle_operations() {

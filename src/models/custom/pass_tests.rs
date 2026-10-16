@@ -11,7 +11,7 @@ use super::*;
 use crate::{
     attention::{AttentionConnectivity, padding_attention_mask},
     models::custom::{
-        plan::displacement_slot,
+        plan::{displacement_slot, displacement_table},
         test_support::{TestBackend, mask},
     },
     position::{RopeScaling, T5RelativePositionBiasConfig, rotary_angles},

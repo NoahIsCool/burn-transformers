@@ -89,6 +89,23 @@ fn displacement_table_clamps_to_the_shorter_of_distance_and_context() {
     );
 }
 
+/// Portable tables keep the verified table only while its length fits `i32::MAX`.
+#[test]
+fn portable_displacement_tables_stop_at_the_32_bit_index_limit() {
+    let limit = i32::MAX as usize;
+    assert_eq!(portable_displacement_table(128, 0), None);
+    assert_eq!(
+        portable_displacement_table(128, 10),
+        displacement_table(128, 10)
+    );
+    // `R = i32::MAX / 2` gives `2R + 1 = i32::MAX`, the largest portable table.
+    let largest = portable_displacement_table(limit / 2, usize::MAX).unwrap();
+    assert_eq!((largest.radius, largest.length), (limit / 2, limit));
+    assert_eq!(portable_displacement_table(limit / 2 + 1, usize::MAX), None);
+    assert!(displacement_table(limit / 2 + 1, usize::MAX).is_some());
+    assert_eq!(portable_displacement_table(usize::MAX, usize::MAX), None);
+}
+
 /// Slots clamp out-of-range displacements and invert the stored displacement exactly.
 #[test]
 fn displacement_slots_clamp_and_invert() {
@@ -162,6 +179,68 @@ fn history_appends_report_policy_violations_in_order() {
     assert_eq!(plan.slots, vec![2, 0, 0, 0, 1, 2]);
 }
 
+/// The scalar helpers count, locate zeros, and split rows exactly.
+#[test]
+fn history_helpers_count_and_search_rows() {
+    assert_eq!(count_valid_cells(&[]), 0);
+    assert_eq!(count_valid_cells(&[true, false, true, true]), 3);
+    assert_eq!(
+        grid_row_counts(&[true, false, false, false, true, true], 2, 3),
+        vec![1, 0, 2]
+    );
+    assert_eq!(grid_row_counts(&[], 0, 4), vec![0, 0, 0, 0]);
+    assert_eq!(first_zero(&[3, 1, 0, 0]), Some(2));
+    assert_eq!(first_zero(&[3, 1]), None);
+    assert_eq!(first_nonzero(&[0, 0, 4, 1]), Some(2));
+    assert_eq!(first_nonzero(&[0, 0]), None);
+    assert_eq!(first_nonzero(&[]), None);
+}
+
+/// Degenerate grids follow the policy order instead of panicking.
+#[test]
+fn history_appends_without_cells_report_the_first_policy() {
+    assert_eq!(
+        plan_history_append(&[], 3, &[], 4, true),
+        Err(HistoryAppendError::EmptyStep)
+    );
+    assert_eq!(
+        plan_history_append(&[], 0, &[1, 2], 4, true),
+        Err(HistoryAppendError::EmptyRow { row: 0 })
+    );
+    assert_eq!(
+        plan_history_append(&[], 0, &[1, 2], 4, false),
+        Err(HistoryAppendError::EmptyStep)
+    );
+}
+
+/// A validity grid of the wrong size is reported instead of being planned or indexed.
+#[test]
+fn composed_history_plans_reject_a_mismatched_validity_layout() {
+    for (validity, step, lengths) in [
+        (&[true, true, true][..], 2, &[0, 0][..]),
+        (&[true; 5][..], 2, &[0, 0][..]),
+        (&[][..], 1, &[0][..]),
+        (&[true][..], 0, &[0][..]),
+        // The product `rows * step` overflows `usize`, so no grid can match it.
+        (&[true, true][..], usize::MAX, &[0, 0][..]),
+    ] {
+        assert_eq!(
+            plan_history(validity, step, lengths, 8, false),
+            Err(HistoryAppendError::Layout {
+                cells: validity.len(),
+                rows: lengths.len(),
+                step,
+            })
+        );
+    }
+    // A matching grid, including the empty one, reaches the policy checks.
+    assert_eq!(
+        plan_history(&[], 0, &[1, 2], 8, false),
+        Err(HistoryAppendError::EmptyStep)
+    );
+    assert!(plan_history(&[true, false], 1, &[0, 3], 8, false).is_ok());
+}
+
 /// The window spans the appended slots of every advancing row and nothing else.
 #[test]
 fn history_writes_cover_exactly_the_appended_slots() {
@@ -189,7 +268,87 @@ fn history_writes_cover_exactly_the_appended_slots() {
     );
 }
 
+/// Full ranges are attained bounds; an empty list has none.
+#[test]
+fn full_range_reports_attained_bounds() {
+    assert_eq!(full_range(&[]), None);
+    assert_eq!(full_range(&[4]), Some((4, 4)));
+    assert_eq!(full_range(&[3, -2, 9, 0]), Some((-2, 9)));
+}
+
+/// Position violations ignore masked cells and report the first failing row's valid range.
+#[test]
+fn position_violations_report_the_first_failing_row() {
+    let validity = [true, false, true, true];
+    assert_eq!(
+        first_position_violation(&[1, 99, 0, 3], &validity, 2, 2, 4),
+        None
+    );
+    assert_eq!(
+        first_position_violation(&[1, 0, -1, 7], &validity, 2, 2, 4),
+        Some((-1, 7))
+    );
+    assert_eq!(
+        first_position_violation(&[4, 0, -1, 7], &validity, 2, 2, 4),
+        Some((4, 4))
+    );
+    assert_eq!(first_position_violation(&[], &[], 0, 3, 4), None);
+}
+
+/// The history prefix spans the longest row and marks each row's stored length.
+#[test]
+fn prefix_validity_marks_each_rows_length() {
+    assert_eq!(prefix_validity(&[]), None);
+    assert_eq!(
+        prefix_validity(&[2, 0, 3]),
+        Some((
+            3,
+            vec![true, true, false, false, false, false, true, true, true]
+        ))
+    );
+    assert_eq!(prefix_validity(&[0, 0]), Some((0, Vec::new())));
+}
+
 proptest::proptest! {
+    /// Position violations agree with a naive per-row scan of valid cells.
+    #[test]
+    fn position_violations_match_the_reference(
+        rows in 0usize..4,
+        step in 1usize..5,
+        values in proptest::collection::vec(-2i64..8, 16),
+        flags in proptest::collection::vec(proptest::bool::ANY, 16),
+        limit in 0usize..8,
+    ) {
+        let positions = &values[..rows * step];
+        let validity = &flags[..rows * step];
+        let expected = positions
+            .chunks_exact(step)
+            .zip(validity.chunks_exact(step))
+            .find_map(|(values, valid)| {
+                let listed = values.iter().zip(valid).filter(|(_, valid)| **valid).map(|(v, _)| *v);
+                let range = listed.clone().min().zip(listed.max())?;
+                let within = range.0 >= 0 && range.1 >= 0 && (range.1 as u64) < limit as u64;
+                (!within).then_some(range)
+            });
+        proptest::prop_assert_eq!(
+            first_position_violation(positions, validity, rows, step, limit),
+            expected
+        );
+    }
+
+    /// The prefix validity agrees with a naive comparison grid.
+    #[test]
+    fn prefix_validity_matches_the_reference(
+        lengths in proptest::collection::vec(0usize..6, 1..5),
+    ) {
+        let sequence = *lengths.iter().max().unwrap();
+        let expected = lengths
+            .iter()
+            .flat_map(|&length| (0..sequence).map(move |column| column < length))
+            .collect::<Vec<_>>();
+        proptest::prop_assert_eq!(prefix_validity(&lengths), Some((sequence, expected)));
+    }
+
     /// The planner agrees with the naive reference, and its window writes exactly the new slots.
     #[test]
     fn history_planning_matches_the_reference(
@@ -207,6 +366,18 @@ proptest::proptest! {
             &planned,
             &reference_append(validity, step, lengths, capacity, require_every_row)
         );
+        let combined = plan_history(validity, step, lengths, capacity, require_every_row);
+        match (&planned, &combined) {
+            (Ok(plan), Ok((combined_plan, combined_writes))) => {
+                proptest::prop_assert_eq!(plan, combined_plan);
+                proptest::prop_assert_eq!(
+                    &plan_history_writes(plan, validity, step),
+                    combined_writes
+                );
+            }
+            (Err(error), Err(combined_error)) => proptest::prop_assert_eq!(error, combined_error),
+            _ => proptest::prop_assert!(false, "plan_history disagrees with its parts"),
+        }
         if let Ok(plan) = planned {
             let writes = plan_history_writes(&plan, validity, step);
             let width = writes.end - writes.start;
