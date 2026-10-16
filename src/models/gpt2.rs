@@ -294,3 +294,7 @@ impl ModelConfig for Gpt2Config {
     /// Serialized model discriminators supported by this GPT-2 schema.
     const MODEL_TYPES: &'static [&'static str] = &["gpt2"];
 }
+
+#[cfg(test)]
+#[path = "gpt2_tests.rs"]
+mod tests;

@@ -479,6 +479,149 @@ fn input_value_errors_are_shape_errors_with_shared_tensor_names() {
     );
 }
 
+/// A failing edit at any emitted point aborts both the backbone and the causal language model.
+#[test]
+fn every_activation_point_propagates_edit_failures() {
+    use crate::models::shared::test_support::assert_edit_failures_propagate;
+    let fixture = fixture();
+    let model = Gpt2ForCausalLm::<B>::init(fixture.config.clone(), &Default::default()).unwrap();
+    let points = model.activation_points();
+    assert_edit_failures_propagate(&points, |hooks| {
+        model.forward_with_hooks(input(&fixture), &ForwardOptions::default(), hooks)
+    });
+    assert_edit_failures_propagate(&points, |hooks| {
+        model
+            .model
+            .forward_with_hooks(&input(&fixture), true, hooks)
+    });
+}
+
+/// The backbone's hooked pass equals its plain pass and retains `L + 2` hidden states.
+#[test]
+fn backbone_hooked_pass_matches_the_plain_pass() {
+    let fixture = fixture();
+    let model = loaded(fixture.config.clone());
+    let plain = model.model.forward(&input(&fixture), true).unwrap();
+    let mut hooks = Hooks::new();
+    let embedding = hooks.capture(Stack::Decoder.embedding());
+    let hooked = model
+        .model
+        .forward_with_hooks(&input(&fixture), true, &mut hooks)
+        .unwrap();
+    assert_eq!(
+        values(plain.last_hidden_state),
+        values(hooked.last_hidden_state)
+    );
+    assert_eq!(hooked.hidden_states.len(), fixture.config.n_layer + 2);
+    assert_eq!(
+        values(hooks.get(&embedding).unwrap()),
+        values(hooked.hidden_states[0].clone())
+    );
+}
+
+/// The backbone's precision builder drops score and pattern points and keeps the outputs.
+#[test]
+fn backbone_precision_builder_matches_eager_attention() {
+    let fixture = fixture();
+    let eager = loaded(fixture.config.clone()).model;
+    let expected = eager.forward(&input(&fixture), false).unwrap();
+    let fused = eager
+        .clone()
+        .with_attention_precision(AttentionPrecisionMode::BackendDefault);
+    let actual = fused.forward(&input(&fixture), false).unwrap();
+    close(
+        &values(actual.last_hidden_state),
+        &values(expected.last_hidden_state),
+        2e-5,
+    );
+    assert_eq!(
+        fused.activation_points().len() + 2 * fixture.config.n_layer,
+        eager.activation_points().len()
+    );
+}
+
+/// Token grids that are empty or longer than the position table fail before embedding.
+#[test]
+fn token_grids_beyond_the_position_table_are_rejected() {
+    let fixture = fixture();
+    let model = Gpt2ForCausalLm::<B>::init(fixture.config.clone(), &Default::default()).unwrap();
+    for dims in [[0, 2], [1, fixture.config.n_positions + 1]] {
+        let input = CausalLmInput {
+            token_ids: Tensor::<B, 2, Int>::zeros(dims, &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        };
+        assert_eq!(
+            shape_parts(
+                model
+                    .forward(input, &ForwardOptions::default())
+                    .unwrap_err()
+            ),
+            (
+                "gpt2.token_ids".into(),
+                "nonempty batch and sequence within position capacity".into(),
+                format!("{dims:?}"),
+            )
+        );
+    }
+}
+
+/// Attention probabilities are hook-only; the tied projection checks width and dtype.
+#[test]
+fn readout_and_diagnostic_requests_are_validated() {
+    use burn::tensor::DType;
+    let fixture = fixture();
+    let model = loaded(fixture.config.clone());
+    let error = model
+        .forward(
+            input(&fixture),
+            &ForwardOptions {
+                attentions: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("pattern() hooks")),
+        "{error}"
+    );
+    assert_eq!(
+        shape_parts(
+            model
+                .project(Tensor::<B, 3>::zeros([1, 2, 11], &Default::default()))
+                .unwrap_err()
+        ),
+        (
+            "gpt2.hidden".into(),
+            "[batch>0, token>0, 12]".into(),
+            "[1, 2, 11]".into()
+        )
+    );
+    let error = model
+        .project(Tensor::<B, 3>::zeros([1, 2, 12], &Default::default()).cast(DType::F64))
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("share a floating dtype")),
+        "{error}"
+    );
+}
+
+/// An edited final norm is reported by the complete pass after the blocks have run.
+#[test]
+fn edited_final_norm_width_is_reported_by_the_complete_pass() {
+    let fixture = fixture();
+    let mut model = loaded(fixture.config.clone());
+    model.model.final_norm = burn::nn::LayerNormConfig::new(11).init(&Default::default());
+    assert_eq!(
+        shape_parts(
+            model
+                .forward(input(&fixture), &ForwardOptions::default())
+                .unwrap_err()
+        ),
+        ("gpt2.final_norm".into(), "[12]".into(), "[11]".into())
+    );
+}
+
 /// Matching duplicate head bytes preserve reference logits; mismatches leave fresh parameters uninitialized.
 #[test]
 fn language_model_namespace_verifies_tied_head_bytes_before_installing_parameters() {
