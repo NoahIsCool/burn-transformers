@@ -26,9 +26,8 @@ use crate::{
     Result, TokenMask, architecture::bool_tensor_from_values, cache::CacheConfig,
 };
 
-use super::bookkeeping::{
-    advance_active_positions, prefill_chunk_end, required_cache_capacity, row_span,
-};
+use super::bookkeeping::{advance_active_positions, prefill_chunk_end, required_cache_capacity};
+use super::layout::{ChunkCall, chunk_activity, chunk_call};
 use super::metadata::{self, extract_last_logits};
 use super::{
     FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenHistory,
@@ -336,13 +335,9 @@ where
     let mut start = 0;
     while start < sequence {
         let end = prefill_chunk_end(start, chunk_size, sequence);
-        let active = (0..batch)
-            .map(|row| {
-                let (row_start, row_end) = row_span(row, batch, sequence, start, end);
-                prompt_valid[row_start..row_end].iter().any(|&valid| valid)
-            })
-            .collect::<Vec<_>>();
-        if active.iter().all(|&row_active| !row_active) {
+        let active = chunk_activity(prompt_valid, batch, sequence, start, end);
+        let call = chunk_call(&active);
+        if call == ChunkCall::Skip {
             start = end;
             continue;
         }
@@ -357,7 +352,7 @@ where
             .map(|positions| positions.clone().slice([0..batch, start..end]));
         // Architecture prefill contracts reject a completely inactive row,
         // whereas decode explicitly treats it as a cache no-op.
-        let output = if active.iter().all(|&row_active| row_active) {
+        let output = if call == ChunkCall::Prefill {
             model.prefill(
                 CausalLmInput {
                     token_ids,

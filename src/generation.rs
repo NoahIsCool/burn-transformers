@@ -116,6 +116,7 @@
 mod bookkeeping;
 mod causal;
 mod history;
+mod layout;
 mod metadata;
 mod random;
 mod seq2seq;
@@ -148,6 +149,7 @@ use crate::{Error, Result, TokenMask};
 
 use bookkeeping::{StopDecision, stop_decision};
 use history::CountView;
+use layout::{push_constraint_row, repeat_row};
 
 /// Selects deterministic greedy decoding or stochastic categorical sampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -743,17 +745,25 @@ impl<B: Backend> LogitsProcessor<B> {
     /// Every row receives the same `(token, bias)` pairs, so the `[batch,
     /// entries]` index and value tensors need no padding; only they cross to
     /// the device. Biases are finite in the logits dtype (validated), so the
-    /// sum is finite or `+-inf` from overflow, never NaN.
+    /// sum is finite or `+-inf` from overflow, never NaN. Validation keeps
+    /// every biased token inside the vocabulary, so `entries <= vocabulary`
+    /// and `batch * entries` never exceeds the logits' own element count; the
+    /// Verus-verified [`repeat_row`] then copies the pairs into every row.
     fn apply_logit_bias(&self, logits: Tensor<B, 2>) -> Tensor<B, 2> {
         let entries = self.config.logit_bias.len();
         if entries == 0 {
             return logits;
         }
         let batch = logits.dims()[0];
-        let row_indices = self.config.logit_bias.keys().map(|&token| i64::from(token));
-        let row_biases = self.config.logit_bias.values().copied();
-        let indices = row_indices.clone().cycle().take(batch * entries).collect();
-        let biases = row_biases.clone().cycle().take(batch * entries).collect();
+        let row_indices = self
+            .config
+            .logit_bias
+            .keys()
+            .map(|&token| i64::from(token))
+            .collect::<Vec<_>>();
+        let row_biases = self.config.logit_bias.values().copied().collect::<Vec<_>>();
+        let indices = repeat_row(&row_indices, batch);
+        let biases = repeat_row(&row_biases, batch);
         let device = logits.device();
         let dtype = logits.dtype();
         let indices =
@@ -770,7 +780,8 @@ impl<B: Backend> LogitsProcessor<B> {
     /// The caller has already saturated positive overflow, so no `+inf`
     /// remains to meet the `-inf` and every constrained token becomes exactly
     /// `-inf` (adding is idempotent, so a token banned twice is fine). Only the
-    /// small `[batch, width]` index and value tensors cross to the device.
+    /// small `[batch, width]` index and value tensors cross to the device. The
+    /// Verus-verified [`push_constraint_row`] lays out each row's indices.
     fn apply_hard_constraints(
         &self,
         logits: Tensor<B, 2>,
@@ -794,19 +805,17 @@ impl<B: Backend> LogitsProcessor<B> {
         let mut indices = metadata::vec_with_capacity::<i64>(elements, "constraint indices")?;
         let mut deltas = metadata::vec_with_capacity::<f64>(elements, "constraint values")?;
         for row in 0..batch {
-            let row_end = indices.len() + width;
-            if self.suppresses_eos(history, row) {
-                for &token in &self.config.eos_token_ids {
-                    indices.push(i64::from(token));
-                    deltas.push(f64::NEG_INFINITY);
-                }
-            }
-            for &token in history.banned_tokens(row) {
-                indices.push(i64::from(token));
-                deltas.push(f64::NEG_INFINITY);
-            }
-            // Pad to the common width with a no-op addition at token zero.
-            indices.resize(row_end, 0);
+            let row_end = deltas.len() + width;
+            // `width` is the maximum of these per-row counts, so every row fits.
+            let constrained = push_constraint_row(
+                &mut indices,
+                &self.config.eos_token_ids,
+                self.suppresses_eos(history, row),
+                history.banned_tokens(row),
+                width,
+            );
+            // `-inf` for every real entry, then a no-op `0.0` for the padding.
+            deltas.resize(deltas.len() + constrained, f64::NEG_INFINITY);
             deltas.resize(row_end, 0.0);
         }
         let device = logits.device();

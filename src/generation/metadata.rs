@@ -11,7 +11,8 @@
 //! fails with an error instead of aborting.
 //!
 //! Integer index arithmetic delegates to the Verus-verified functions in
-//! `bookkeeping`; this module adds tensor readback and error context.
+//! `bookkeeping` and `layout`; this module adds tensor readback and error
+//! context.
 
 use burn::tensor::{
     Bool, DType, Element, ElementConversion, Int, Tensor, TensorData, backend::Backend,
@@ -24,6 +25,7 @@ use crate::{
 
 use super::TokenSelection;
 use super::bookkeeping::{PositionError, next_position_after, row_span};
+use super::layout::{deinterleave, fill_row_lengths, last_valid};
 
 /// Returns an empty vector with exactly `capacity` reserved slots.
 pub(super) fn vec_with_capacity<T>(capacity: usize, label: &str) -> Result<Vec<T>> {
@@ -211,16 +213,8 @@ pub(super) fn nonempty_row_lengths(
         )));
     }
     let mut lengths = vec_with_capacity(batch, label)?;
-    for row in 0..batch {
-        let (start, end) = row_span(row, batch, sequence, 0, sequence);
-        let length = valid[start..end].iter().filter(|&&value| value).count();
-        if length == 0 {
-            return Err(Error::Generation(format!(
-                "{label} row {row} has no valid tokens"
-            )));
-        }
-        lengths.push(length);
-    }
+    fill_row_lengths(&mut lengths, valid, batch, sequence)
+        .map_err(|row| Error::Generation(format!("{label} row {row} has no valid tokens")))?;
     Ok(lengths)
 }
 
@@ -248,11 +242,8 @@ pub(super) fn next_positions(
     let mut next = vec_with_capacity(batch, label)?;
     for row in 0..batch {
         let (start, end) = row_span(row, batch, sequence, 0, sequence);
-        let last = positions[start..end]
-            .iter()
-            .zip(&valid[start..end])
-            .rev()
-            .find_map(|(&position, &is_valid)| is_valid.then_some(position))
+        let last = last_valid(valid, start, end)
+            .map(|index| positions[index])
             .ok_or_else(|| Error::Generation(format!("{label} row {row} has no valid position")))?;
         let position = next_position_after(last, max_new_tokens).map_err(|error| match error {
             PositionError::Negative => Error::Generation(format!(
@@ -336,14 +327,8 @@ pub(super) fn read_token_selection<B: Backend>(
                 1,
             );
             let values = tensor_f64_values(packed, "selected tokens and log probabilities")?;
-            let ids = values.iter().step_by(2).copied().collect::<Vec<_>>();
-            let scores = values
-                .iter()
-                .skip(1)
-                .step_by(2)
-                .copied()
-                .collect::<Vec<_>>();
-            (ids, scores)
+            // Row-major `(id, score)` pairs: even entries are IDs, odd are scores.
+            deinterleave(&values)
         } else {
             let ids = tensor_i64_values(token_ids, "selected token IDs")?
                 .into_iter()

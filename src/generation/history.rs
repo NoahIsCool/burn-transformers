@@ -38,6 +38,8 @@ use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, backend::Bac
 
 use crate::{Error, Result, TokenMask};
 
+use super::bookkeeping::row_span;
+use super::layout::{count_valid, history_token_id, push_history_row, record_scatter};
 use super::{GenerationConfig, metadata};
 
 /// Which occurrence counts a penalty reads.
@@ -403,15 +405,16 @@ impl<B: Backend> TokenHistory<B> {
         }
         let values = grid.values.unwrap_or_default();
         for row in 0..batch {
+            let (start, end) = row_span(row, batch, width, 0, width);
+            if as_generated {
+                history.generated_lengths[row] = count_valid(&valid, start, end);
+            }
+            if !needs_values {
+                continue;
+            }
             for column in 0..width {
-                let offset = row * width + column;
+                let offset = start + column;
                 if !valid[offset] {
-                    continue;
-                }
-                if as_generated {
-                    history.generated_lengths[row] += 1;
-                }
-                if !needs_values {
                     continue;
                 }
                 let token = checked_history_token(values[offset], vocabulary_size, row, column)?;
@@ -454,15 +457,7 @@ impl<B: Backend> TokenHistory<B> {
         self.count_bound = self.count_bound.saturating_add(1);
         if self.counts.is_tracking() {
             // Inactive rows scatter a zero increment at token zero.
-            let ids = tokens
-                .iter()
-                .zip(active)
-                .map(|(&token, &is_active)| if is_active { i64::from(token) } else { 0 })
-                .collect::<Vec<_>>();
-            let increments = active
-                .iter()
-                .map(|&is_active| i64::from(is_active))
-                .collect::<Vec<_>>();
+            let (ids, increments) = record_scatter(tokens, active);
             let ids =
                 Tensor::<B, 2, Int>::from_data(TensorData::new(ids, [batch, 1]), &self.device);
             let increments = Tensor::<B, 2, Int>::from_data(
@@ -633,12 +628,14 @@ fn row_counts<B: Backend>(
     let mut observed = metadata::vec_with_capacity::<i64>(elements, "history row increments")?;
     let mut generated = metadata::vec_with_capacity::<i64>(elements, "generated increments")?;
     for (&tokens, &prompt_length) in rows.iter().zip(prompt_lengths) {
-        for column in 0..width {
-            let token = tokens.get(column).copied();
-            ids.push(token.map_or(0, i64::from));
-            observed.push(i64::from(token.is_some()));
-            generated.push(i64::from(token.is_some() && column >= prompt_length));
-        }
+        push_history_row(
+            &mut ids,
+            &mut observed,
+            &mut generated,
+            tokens,
+            prompt_length,
+            width,
+        );
     }
     let upload = |values: Vec<i64>| {
         Tensor::<B, 2, Int>::from_data(TensorData::new(values, [batch, width]), device)
@@ -662,16 +659,13 @@ fn checked_history_token(
     row: usize,
     column: usize,
 ) -> Result<u32> {
-    u32::try_from(value)
-        .ok()
-        .filter(|&token| (token as usize) < vocabulary_size)
-        .ok_or_else(|| {
-            Error::shape(
-                "generation.history",
-                format!("token values in 0..{vocabulary_size}"),
-                format!("token {value} at row {row}, column {column}"),
-            )
-        })
+    history_token_id(value, vocabulary_size).ok_or_else(|| {
+        Error::shape(
+            "generation.history",
+            format!("token values in 0..{vocabulary_size}"),
+            format!("token {value} at row {row}, column {column}"),
+        )
+    })
 }
 
 #[cfg(test)]
