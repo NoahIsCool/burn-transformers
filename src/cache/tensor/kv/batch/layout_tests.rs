@@ -146,6 +146,18 @@ fn token_tables_mark_each_rows_columns() {
     assert!(positions.is_empty() && valid.is_empty());
 }
 
+/// Single-row stages use one-hot counts and start at each row's proposal cursor.
+#[test]
+fn row_stage_layouts_are_one_hot_at_the_cursor() {
+    assert_eq!(one_hot_counts(4, 2, 3), [0, 0, 3, 0]);
+    assert_eq!(one_hot_counts(1, 0, 0), [0]);
+    assert_eq!(proposal_starts(&[1, 2], Some(&[5, 6]), 2), [6, 8]);
+    assert_eq!(proposal_starts(&[1, 2], None, 2), [1, 2]);
+    assert_eq!(proposal_starts(&[1], Some(&[usize::MAX]), 1), [usize::MAX]);
+    assert_eq!(proposal_cursor_of(4, 3), 7);
+    assert_eq!(proposal_cursor_of(usize::MAX, 3), usize::MAX);
+}
+
 proptest! {
     /// Staging updates agree with a naive per-row scan.
     #[test]

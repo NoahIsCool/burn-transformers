@@ -467,6 +467,79 @@ pub(crate) fn mirrored_window_slots(start: usize, keep: usize, window: usize) ->
     physical_start..physical_start + keep
 }
 
+/// Returns the absolute and linear-staging ranges of a working read's staged part.
+///
+/// With committed length `C`, `P` staged proposals, and a working window
+/// that skips the oldest `skip` proposals, the staged segment covers
+/// absolute positions `[C + skip, C + P)` read from staging offsets
+/// `[skip, P)`.
+///
+/// Proved: both ranges have exactly `P - skip` entries and offset `j` of the
+/// staging range holds absolute position `C + j`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(ranges =>
+    requires
+        committed + staged <= usize::MAX,
+        plan.staged_skip <= staged,
+    ensures
+        ranges.0.start == committed + plan.staged_skip,
+        ranges.0.end == committed + staged,
+        ranges.1.start == plan.staged_skip,
+        ranges.1.end == staged,
+        ranges.0.end - ranges.0.start == ranges.1.end - ranges.1.start,
+))]
+pub(crate) fn staged_read_ranges(
+    committed: usize,
+    staged: usize,
+    plan: WorkingWindow,
+) -> (Range<usize>, Range<usize>) {
+    (
+        committed + plan.staged_skip..committed + staged,
+        plan.staged_skip..staged,
+    )
+}
+
+/// Integer reason a write-ahead would expose unpublished tokens.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteAheadViolation {
+    /// Ring storage would overwrite a slot that is still visible.
+    RingStorage,
+    /// Inside a transaction only in-place staging writes final slots.
+    SeparateStaging,
+}
+
+/// Decides whether a group may write a step's tokens ahead of attention.
+///
+/// Proved: allowed exactly for full storage outside a transaction, or for
+/// full storage with in-place staging inside one; ring storage is rejected
+/// first.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        result is Ok <==> (storage == KvCacheStorage::Full && (!staging || in_place)),
+        storage != KvCacheStorage::Full ==> result == Err::<(), WriteAheadViolation>(
+            WriteAheadViolation::RingStorage),
+        storage == KvCacheStorage::Full && staging && !in_place ==>
+            result == Err::<(), WriteAheadViolation>(WriteAheadViolation::SeparateStaging),
+))]
+pub(crate) fn write_ahead_allowed(
+    storage: KvCacheStorage,
+    in_place: bool,
+    staging: bool,
+) -> Result<(), WriteAheadViolation> {
+    match storage {
+        KvCacheStorage::Full => {}
+        KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => {
+            return Err(WriteAheadViolation::RingStorage);
+        }
+    }
+    if staging && !in_place {
+        return Err(WriteAheadViolation::SeparateStaging);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "plan_tests.rs"]
 mod tests;

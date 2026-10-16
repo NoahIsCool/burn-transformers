@@ -13,7 +13,8 @@
 //!   rollback, truncate, reorder, reset) preserves `committed <= working <=
 //!   capacity`, computes its documented formula without overflow, and is
 //!   rejected exactly when its rule is violated, naming the first offending
-//!   row or the blocking transaction state. Proposal lengths are exact.
+//!   row or the blocking transaction state. Proposal lengths and remaining
+//!   capacities are exact.
 //! * `src/cache/retention.rs`: ring and recurrent rewind predicates, proved
 //!   sound and complete against the ring eviction model (row scans name the
 //!   lowest offending row), the working window
@@ -43,15 +44,18 @@
 //!   storage/window configuration is rejected with its first rule; committed
 //!   reads keep `min(L, W)` positions; working reads check every end and
 //!   split each window exactly as the verified working window does; mirrored
-//!   runs read the slot of each matching position below `2W`.
+//!   runs read the slot of each matching position below `2W`; a working
+//!   read's staged ranges align offset `j` with position `C + j`; write-ahead
+//!   is admitted exactly for full storage, in place inside a transaction.
 //! * `src/cache/tensor/kv/batch/layout.rs`: batched write layouts. Append
 //!   layouts are accepted exactly when every row fits its block and the
 //!   position space; left padding and ends are exact; a staging write is
 //!   accepted exactly when every active row passes its cursor, staging, and
 //!   capacity checks and then updates exactly the active rows; linear
 //!   staging runs partition the active rows and address each row's own
-//!   columns and proposal offsets; a step's token table marks exactly each
-//!   row's columns with their absolute positions.
+//!   columns and proposal offsets; single-row stages use exactly one-hot
+//!   counts starting at each row's proposal cursor; a step's token table
+//!   marks exactly each row's columns with their absolute positions.
 //! * `src/cache/tensor/kv/batch/slots.rs`: batched read slot tables. Full
 //!   storage marks exactly each row's visible window; each written ring slot
 //!   reports the newest position with its residue and is valid exactly when

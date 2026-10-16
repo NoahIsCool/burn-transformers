@@ -33,7 +33,7 @@ use crate::cache::{
 
 use super::plan::{
     check_staged_commit, first_index_out_of_range, next_version, portable_indices,
-    rows_cleared_by_truncate, write_end,
+    repeated_elements, rows_cleared_by_truncate, write_end,
 };
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
@@ -46,7 +46,10 @@ pub use batch::{KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment};
 pub(crate) use batch::{PreparedNativeKvBatchWrite, left_padded_columns, token_segment_table};
 pub use plan::KvCacheStorage;
 
-use plan::{TimeSlotViolation, mirrored_window_slots, visible_count, working_window};
+use plan::{
+    TimeSlotViolation, mirrored_window_slots, staged_read_ranges, visible_count, working_window,
+};
+pub(crate) use plan::{WriteAheadViolation, write_ahead_allowed};
 
 impl KvCacheStorage {
     /// Returns a stable human-readable storage name for diagnostics.
@@ -588,11 +591,12 @@ impl<B: Backend> NativeKvCache<B> {
         ];
         let committed_elements =
             validate_tensor_shape("committed KV tensor", &committed_shape, spec.dtype())?;
-        let plane_layers = spec.layers().checked_mul(spec.plane_count()).ok_or(
-            TensorCacheError::TensorShapeOverflow {
-                tensor: "committed KV planes",
-            },
-        )?;
+        // One-byte elements make the verified count reject exactly `layers *
+        // planes` overflow, reported as a shape overflow of the plane set.
+        let plane_layers =
+            repeated_elements(spec.layers(), spec.plane_count(), 1).map_err(|violation| {
+                TensorCacheError::allocation("committed KV planes", violation, 1)
+            })?;
         validate_repeated_allocation(
             "committed KV planes",
             committed_elements,
@@ -893,11 +897,12 @@ impl<B: Backend> NativeKvCache<B> {
         let plan = working_window(committed_length, staged, self.window.map(NonZeroUsize::get));
         let mut segments =
             self.committed_segments(cache_layer, sequence, committed_length, plan.committed_keep)?;
+        let (absolute, staged_offsets) = staged_read_ranges(committed_length, staged, plan);
         segments.push(read_staged_segment(
             cache_layer,
             sequence,
-            committed_length + plan.staged_skip..working_length,
-            plan.staged_skip..staged,
+            absolute,
+            staged_offsets,
             self.spec,
         )?);
         Ok(KvCacheRead {

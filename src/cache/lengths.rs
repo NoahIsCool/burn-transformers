@@ -875,6 +875,46 @@ impl LengthLedger {
         })
     }
 
+    /// Returns how many more tokens row `sequence`'s active cursor accepts.
+    ///
+    /// Verified: exactly `capacity - cursor[sequence]`, which cannot underflow
+    /// because the ledger invariant bounds every cursor by the capacity.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(remaining =>
+        requires
+            self.well_formed(),
+            sequence < self.committed_view().len(),
+        ensures
+            remaining == self.capacity_view() - self.cursor_view()[sequence as int],
+    ))]
+    pub(crate) fn remaining(&self, sequence: usize) -> usize {
+        match &self.working {
+            Some(working) => self.capacity - working[sequence],
+            None => self.capacity - self.committed[sequence],
+        }
+    }
+
+    /// Returns row `sequence`'s proposal length `cursor - committed` (zero outside a transaction).
+    ///
+    /// Verified: exactly `cursor[sequence] - committed[sequence]`, which cannot
+    /// underflow because the ledger invariant brackets the working cursor.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(proposal =>
+        requires
+            self.well_formed(),
+            sequence < self.committed_view().len(),
+        ensures
+            proposal == self.cursor_view()[sequence as int]
+                - self.committed_view()[sequence as int],
+            !self.active() ==> proposal == 0,
+    ))]
+    pub(crate) fn proposal(&self, sequence: usize) -> usize {
+        match &self.working {
+            Some(working) => working[sequence] - self.committed[sequence],
+            None => 0,
+        }
+    }
+
     /// Borrows committed lengths, which only `committed_prefix` changes mid-transaction.
     pub(crate) fn committed(&self) -> &[usize] {
         &self.committed

@@ -97,6 +97,34 @@ fn mirrored_slots_are_one_contiguous_run() {
     assert_eq!(mirrored_window_slots(7, 1, 4), 3..4);
 }
 
+/// Staged read ranges cover proposals `[skip, P)` at positions `[C + skip, C + P)`.
+#[test]
+fn staged_read_ranges_align_offsets_with_positions() {
+    let plan = working_window(6, 3, Some(2));
+    assert_eq!(plan.staged_skip, 1);
+    assert_eq!(staged_read_ranges(6, 3, plan), (7..9, 1..3));
+    let full = working_window(6, 3, None);
+    assert_eq!(staged_read_ranges(6, 3, full), (6..9, 0..3));
+}
+
+/// Write-ahead is admitted only for full storage, in place inside a transaction.
+#[test]
+fn write_ahead_requires_full_storage_and_in_place_staging() {
+    use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
+    assert_eq!(write_ahead_allowed(Full, false, false), Ok(()));
+    assert_eq!(write_ahead_allowed(Full, true, true), Ok(()));
+    assert_eq!(
+        write_ahead_allowed(Full, false, true),
+        Err(WriteAheadViolation::SeparateStaging)
+    );
+    for ring in [SlidingRing, MirroredSlidingRing] {
+        assert_eq!(
+            write_ahead_allowed(ring, true, false),
+            Err(WriteAheadViolation::RingStorage)
+        );
+    }
+}
+
 proptest! {
     /// Working windows hold exactly the newest `min(C + P, W)` positions.
     #[test]

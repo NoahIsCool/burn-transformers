@@ -172,7 +172,19 @@ impl SequenceLengths {
     /// Returns [`DecodeStateError::SequenceOutOfBounds`] for an invalid index.
     pub fn remaining_capacity(&self, sequence: usize) -> Result<usize, DecodeStateError> {
         self.validate_sequence(sequence)?;
-        Ok(self.config.capacity() - self.ledger.working()[sequence])
+        // The ledger's capacity is `config.capacity()`; the verified accessor
+        // proves the subtraction cannot underflow.
+        Ok(self.ledger.remaining(sequence))
+    }
+
+    /// Returns one row's tentative proposal length (zero outside a transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeStateError::SequenceOutOfBounds`] for an invalid index.
+    pub(crate) fn proposal_length(&self, sequence: usize) -> Result<usize, DecodeStateError> {
+        self.validate_sequence(sequence)?;
+        Ok(self.ledger.proposal(sequence))
     }
 
     /// Advances one sequence by a checked token count.

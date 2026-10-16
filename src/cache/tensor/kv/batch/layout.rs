@@ -323,6 +323,97 @@ pub(crate) fn append_ends(starts: &[usize], counts: &[usize]) -> Vec<usize> {
     ends
 }
 
+/// Returns the proposal cursor `baseline + staged`, saturated at `usize::MAX`.
+///
+/// Proved: exactly the saturated sum.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(cursor =>
+    ensures
+        cursor as int == proposal_cursor(baseline, staged),
+))]
+pub(crate) fn proposal_cursor_of(baseline: usize, staged: usize) -> usize {
+    baseline.saturating_add(staged)
+}
+
+/// Returns every row's next proposal start: its baseline (zero if unknown) plus its staged length.
+///
+/// The caller passes one staged length (and baseline) per row.
+///
+/// Proved: row `b` starts exactly at the saturated `baseline_b + staged_b`,
+/// or at `staged_b` when the baseline is unknown.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(starts =>
+    requires
+        rows <= staged.len(),
+        baseline matches Some(base) ==> rows <= base.len(),
+    ensures
+        starts.len() == rows,
+        forall|r: int| 0 <= r < rows ==> #[trigger] starts[r] as int == match baseline {
+            Some(base) => proposal_cursor(base@[r], staged[r]),
+            None => staged[r] as int,
+        },
+))]
+pub(crate) fn proposal_starts(
+    staged: &[usize],
+    baseline: Option<&[usize]>,
+    rows: usize,
+) -> Vec<usize> {
+    let mut starts: Vec<usize> = Vec::with_capacity(rows);
+    let mut row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows <= staged.len(),
+            baseline matches Some(base) ==> rows <= base.len(),
+            starts.len() == row,
+            forall|r: int| 0 <= r < row ==> #[trigger] starts[r] as int == match baseline {
+                Some(base) => proposal_cursor(base@[r], staged[r]),
+                None => staged[r] as int,
+            },
+        decreases rows - row,
+    ))]
+    while row < rows {
+        let start = match baseline {
+            Some(base) => proposal_cursor_of(base[row], staged[row]),
+            None => staged[row],
+        };
+        starts.push(start);
+        row += 1;
+    }
+    starts
+}
+
+/// Returns `rows` token counts that are zero except `count` at row `sequence`.
+///
+/// Proved: exactly that one-hot vector, so the only possibly active row is
+/// `sequence` and every run of a single-row staging write starts there.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(counts =>
+    requires
+        sequence < rows,
+    ensures
+        counts.len() == rows,
+        counts[sequence as int] == count,
+        forall|r: int| 0 <= r < rows && r != sequence ==> #[trigger] counts[r] == 0,
+))]
+pub(crate) fn one_hot_counts(rows: usize, sequence: usize, count: usize) -> Vec<usize> {
+    let mut counts: Vec<usize> = Vec::with_capacity(rows);
+    let mut row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            counts.len() == row,
+            forall|r: int| 0 <= r < row ==>
+                #[trigger] counts[r] == if r == sequence { count } else { 0 },
+        decreases rows - row,
+    ))]
+    while row < rows {
+        counts.push(if row == sequence { count } else { 0 });
+        row += 1;
+    }
+    counts
+}
+
 /// Integer reason a proposal staging write is rejected.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,10 +538,7 @@ pub(crate) fn plan_stage_updates(
             continue;
         }
         if let Some(base) = baseline {
-            let expected = match base[sequence].checked_add(staged[sequence]) {
-                Some(cursor) => cursor,
-                None => usize::MAX,
-            };
+            let expected = proposal_cursor_of(base[sequence], staged[sequence]);
             if start != expected {
                 #[cfg(verus_keep_ghost)]
                 proof! {

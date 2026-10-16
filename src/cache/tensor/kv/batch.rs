@@ -79,8 +79,8 @@ mod layout;
 mod slots;
 
 use layout::{
-    AppendViolation, StageViolation, append_ends, linear_stage_runs, plan_stage_updates,
-    validate_append_layout,
+    AppendViolation, StageViolation, append_ends, linear_stage_runs, one_hot_counts,
+    plan_stage_updates, proposal_cursor_of, proposal_starts, validate_append_layout,
 };
 pub(crate) use layout::{left_padded_columns, token_segment_table};
 use slots::{
@@ -445,15 +445,14 @@ impl<B: Backend> NativeKvCache<B> {
         }
         let count = self.validate_planes(layer, sequence, &planes)?;
         let rows = self.config.sequence_count();
-        let mut counts = vec![0; rows];
-        counts[sequence] = count;
-        let staged = &self.staged_lengths[layer];
-        let starts: Vec<usize> = (0..rows)
-            .map(|row| {
-                let baseline = self.staging_baseline.as_ref().map_or(0, |base| base[row]);
-                baseline.saturating_add(staged[row])
-            })
-            .collect();
+        // Only row `sequence` is active, so every staging run starts at the
+        // source offset `sequence` (verified one-hot counts).
+        let counts = one_hot_counts(rows, sequence, count);
+        let starts = proposal_starts(
+            &self.staged_lengths[layer],
+            self.staging_baseline.as_deref(),
+            rows,
+        );
         let plan = self.plan_stage(layer, &starts, &vec![0; rows], &counts, sequence)?;
         Ok(plan.into_write(layer, planes))
     }
@@ -604,18 +603,19 @@ impl<B: Backend> NativeKvCache<B> {
     ) -> TensorCacheResult<()> {
         self.layer(layer)?;
         validate_sequence(sequence, self.config.sequence_count())?;
-        match &self.staging_baseline {
-            Some(baseline)
-                if baseline[sequence] + self.staged_lengths[layer][sequence] != start =>
-            {
-                Err(TensorCacheError::TransactionCursorMismatch {
-                    sequence,
-                    cursor: "proposal start",
-                    expected: baseline[sequence] + self.staged_lengths[layer][sequence],
-                    actual: start,
-                })
-            }
-            _ => Ok(()),
+        let Some(baseline) = &self.staging_baseline else {
+            return Ok(());
+        };
+        let expected = proposal_cursor_of(baseline[sequence], self.staged_lengths[layer][sequence]);
+        if expected == start {
+            Ok(())
+        } else {
+            Err(TensorCacheError::TransactionCursorMismatch {
+                sequence,
+                cursor: "proposal start",
+                expected,
+                actual: start,
+            })
         }
     }
 

@@ -346,6 +346,10 @@ proptest! {
             for (&committed, &working) in ledger.committed().iter().zip(ledger.working()) {
                 prop_assert!(committed <= working && working <= capacity);
             }
+            for (row, (&committed, &working)) in model.committed.iter().zip(working).enumerate() {
+                prop_assert_eq!(ledger.remaining(row), capacity - working);
+                prop_assert_eq!(ledger.proposal(row), working - committed);
+            }
         }
     }
 }

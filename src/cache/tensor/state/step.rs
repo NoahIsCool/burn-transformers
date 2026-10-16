@@ -62,8 +62,8 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use crate::cache::SequenceLengths;
 use crate::cache::identity::IdentityToken;
 use crate::cache::tensor::kv::{
-    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, left_padded_columns,
-    token_segment_table,
+    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, WriteAheadViolation,
+    left_padded_columns, token_segment_table, write_ahead_allowed,
 };
 use crate::cache::tensor::kv::{PreparedNativeKvBatchWrite, PreparedNativeKvWrite};
 use crate::cache::tensor::plan::{checked_ends, first_index_above, portable_indices};
@@ -986,8 +986,7 @@ impl<B: Backend> TensorDecodeState<B> {
 
 /// Returns a row's committed length and proposal length.
 fn row_cursors(lengths: &SequenceLengths, row: usize) -> TensorCacheResult<(usize, usize)> {
-    let committed = lengths.length(row)?;
-    Ok((committed, lengths.working_lengths()[row] - committed))
+    Ok((lengths.length(row)?, lengths.proposal_length(row)?))
 }
 
 /// Requires a layer's staged count to equal the row's logical proposal length.
@@ -1010,19 +1009,20 @@ fn validate_write_ahead(
     in_place: bool,
     staging: bool,
 ) -> TensorCacheResult<()> {
-    if storage != KvCacheStorage::Full {
-        return Err(TensorCacheError::WriteAheadUnsupported {
+    // The verified rule admits exactly full storage, in place inside a transaction.
+    write_ahead_allowed(storage, in_place, staging).map_err(|violation| {
+        TensorCacheError::WriteAheadUnsupported {
             storage: storage.as_str(),
-            reason: "a ring write would overwrite a slot that is still visible",
-        });
-    }
-    if staging && !in_place {
-        return Err(TensorCacheError::WriteAheadUnsupported {
-            storage: storage.as_str(),
-            reason: "inside a transaction only groups with in-place staging can write ahead",
-        });
-    }
-    Ok(())
+            reason: match violation {
+                WriteAheadViolation::RingStorage => {
+                    "a ring write would overwrite a slot that is still visible"
+                }
+                WriteAheadViolation::SeparateStaging => {
+                    "inside a transaction only groups with in-place staging can write ahead"
+                }
+            },
+        }
+    })
 }
 
 /// Checks that the step writes every active row of every layer of the bank exactly once.
