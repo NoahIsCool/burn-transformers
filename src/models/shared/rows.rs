@@ -15,7 +15,7 @@
 //! inert. The per-row rotary extent is `1 + max p_b` for explicit positions and
 //! `L_b + n_b` for the implicit positions `L_b, …, L_b + n_b - 1`.
 //!
-//! [`CompactRow`] realizes the verified [`plan::plan_scatter`] layouts with a
+//! `CompactRow` realizes the verified [`plan::plan_scatter`] layouts with a
 //! constant number of kernels per tensor (identity, one concatenation, or one
 //! gather), instead of one slice per valid token.
 

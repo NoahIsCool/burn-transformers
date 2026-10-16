@@ -231,7 +231,7 @@ const fn is_ascii_letter(byte: u8) -> bool {
 /// (`a//b`, a trailing `/`) and later `.` components are ignored, as
 /// `Path::components` ignores them.
 ///
-/// Verified: true exactly when [`all_normal`] holds, so a `..` component can
+/// Verified: true exactly when `all_normal` holds, so a `..` component can
 /// never pass and a passing path cannot climb above the directory it is
 /// joined to.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -289,7 +289,7 @@ pub(crate) fn normal_components(path: &[u8]) -> bool {
 /// `.` components that `Path::components` silently drops, so two spellings of
 /// one file (`a/b` and `a//./b`) cannot both pass.
 ///
-/// Verified: true exactly when [`canonical_segments`] holds.
+/// Verified: true exactly when `canonical_segments` holds.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(canonical =>
     ensures

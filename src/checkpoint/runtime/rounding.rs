@@ -152,7 +152,7 @@ pub(crate) fn round_f64_bits(bits: u64, format: HalfWidthFormat) -> u16 {
 /// The kept quotient is incremented when the discarded remainder exceeds half
 /// an output unit `2^(shift - 1)`, or equals it while the quotient is odd.
 ///
-/// Verified: the result is exactly [`nearest_even_quotient`]; it lies within
+/// Verified: the result is exactly `nearest_even_quotient`; it lies within
 /// half a unit of the exact quotient (`|r · 2^shift - significand| <= 2^(shift
 /// - 1)`), an exact tie rounds to an even result, and the result never exceeds
 /// `2^(53 - shift)`, so the caller's exponent arithmetic cannot overflow.

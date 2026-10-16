@@ -20,7 +20,7 @@
 //! `[-r, r]` before adding `r`. [`displacement_table`] sizes that table.
 //!
 //! The clamp and the gather are Burn device operations, outside what Verus
-//! checks. [`lemma_clamped_index_in_table`] states the integer fact they rely
+//! checks. `lemma_clamped_index_in_table` states the integer fact they rely
 //! on: every clamped index lies inside a table of `2r + 1` entries. That
 //! length is `relative_table_length(r + 1, r + 1)`, whose formula
 //! `verus/position.rs` verifies. The host loop that fills the table and the

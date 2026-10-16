@@ -875,7 +875,7 @@ pub(crate) fn unit_coordinates(geometry: Mxfp4Geometry, unit: usize) -> (usize, 
 ///
 /// Verified: the offsets are exactly `(2 b · R + r) · W` and
 /// `((2 b + 1) · R + r) · W`, both values fit inside the unit's `32 · R · W`
-/// bytes without overlapping, and (with [`lemma_value_slots_injective`]) no two
+/// bytes without overlapping, and (with `lemma_value_slots_injective`) no two
 /// `(column, row)` pairs share an element, so each unit element is written once.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(offsets =>

@@ -19,13 +19,16 @@
 //!
 //! # One list of causal families
 //!
-//! Every causal family is declared once, in the `causal_registry!` invocation
-//! below. The macro generates the four parallel enums ([`AutoCausalConfig`],
-//! [`AutoCausalConfigRef`], [`AutoCausalDecodeState`], [`AutoCausalLm`]),
-//! `MODEL_TYPES`, and every dispatch `match`, so they cannot drift apart.
-//! Adding a dense Llama-style decoder, for example, is one registry entry plus
-//! one `CausalFamily` implementation in `auto/family.rs` describing how its
-//! checkpoint is planned.
+//! Every causal family is listed once, in the `causal_registry!` invocation
+//! below. The four dispatch enums ([`AutoCausalConfig`],
+//! [`AutoCausalConfigRef`], [`AutoCausalDecodeState`], [`AutoCausalLm`]) are
+//! written out as plain Rust with one documented variant per family; the macro
+//! generates `MODEL_TYPES` and every dispatch `match` from the list. They
+//! cannot drift apart: an entry without variants, or a variant without an
+//! entry, fails to compile. Adding a dense Llama-style decoder, for example,
+//! is one registry entry, its four enum variants, and one `CausalFamily`
+//! implementation in `auto/family.rs` describing how its checkpoint is
+//! planned.
 //!
 //! # Experiments through the automatic enums
 //!
@@ -47,8 +50,8 @@
 
 // Dispatch enums hold whole parameter graphs inline (Burn cannot traverse a
 // boxed `Module`), so their variants differ in size by design. The allowance is
-// module-wide because `#[derive(Module)]` also emits a record enum from inside
-// the registry macro, where an item-level attribute cannot reach it.
+// module-wide because `#[derive(Module)]` also emits a record enum that an
+// item-level attribute cannot reach.
 #![allow(clippy::large_enum_variant)]
 
 use std::{ops::Range, path::Path};
@@ -102,20 +105,199 @@ macro_rules! by_experiments {
     (pending { $($supported:tt)* } else { $($pending:tt)* }) => {{ $($pending)* }};
 }
 
-/// Defines the causal registry from one list of executable families.
+// The registry's dispatch enums, one variant per executable family.
+//
+// They are written out so each reads as plain Rust; `causal_registry!` below
+// generates their per-family `match` methods. The compiler keeps the two in
+// step: an entry without a variant names a missing `Self::Variant`, and a
+// variant without an entry leaves every generated `match` non-exhaustive.
+
+/// Registry-level configuration associated with [`CausalLanguageModel`].
 ///
-/// Each entry gives the enum variant, its documentation, the checkpoint
-/// `model_type`, optional `aliases` (further `model_type` values executed by
-/// the same family, such as `mistral` for the Llama family), the family's
-/// model, configuration, and decode-state types, and its `experiments`
-/// capability (`supported` or `pending`, see the module documentation). The
-/// expansion defines [`AutoCausalConfig`], [`AutoCausalConfigRef`],
-/// [`AutoCausalDecodeState`], and [`AutoCausalLm`] with one variant per entry,
-/// together with every method whose body is a per-family `match`, including
-/// the [`HookedModel`] and [`StagedModel`] dispatch.
+/// The detailed checkpoint configuration remains available through
+/// [`AutoCausalLm::config`]. This lightweight discriminator lets generic
+/// code use the architecture trait without duplicating a model's complete
+/// config inside the dispatch enum. Each variant names one executable
+/// causal family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AutoCausalConfig {
+    /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
+    DeepseekV2,
+    /// Muse Glimmer dense decoder with sliding/full hybrid attention.
+    MuseGlimmer,
+    /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
+    NemotronH,
+    /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
+    Qwen3_5,
+    /// Qwen3 decoder with token-routed sparse SwiGLU experts.
+    Qwen3Moe,
+    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    GptOss,
+    /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
+    Llama,
+    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    Gemma,
+}
+
+/// Immutable architecture configuration borrowed from an automatic causal model.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum AutoCausalConfigRef<'a> {
+    /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
+    DeepseekV2(
+        /// Borrowed configuration owned by the selected model.
+        &'a DeepseekV2Config,
+    ),
+    /// Muse Glimmer dense decoder with sliding/full hybrid attention.
+    MuseGlimmer(
+        /// Borrowed configuration owned by the selected model.
+        &'a MuseGlimmerTextConfig,
+    ),
+    /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
+    NemotronH(
+        /// Borrowed configuration owned by the selected model.
+        &'a NemotronHConfig,
+    ),
+    /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
+    Qwen3_5(
+        /// Borrowed configuration owned by the selected model.
+        &'a Qwen3_5TextConfig,
+    ),
+    /// Qwen3 decoder with token-routed sparse SwiGLU experts.
+    Qwen3Moe(
+        /// Borrowed configuration owned by the selected model.
+        &'a Qwen3MoeConfig,
+    ),
+    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    GptOss(
+        /// Borrowed configuration owned by the selected model.
+        &'a GptOssConfig,
+    ),
+    /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
+    Llama(
+        /// Borrowed configuration owned by the selected model.
+        &'a LlamaFamilyConfig,
+    ),
+    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    Gemma(
+        /// Borrowed configuration owned by the selected model.
+        &'a GemmaConfig,
+    ),
+}
+
+/// External decode state paired with an [`AutoCausalLm`] variant.
+///
+/// States are boxed so the enum stays small however large one family's
+/// cache bookkeeping is. No cache participates in Burn parameter traversal.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum AutoCausalDecodeState<B: Backend> {
+    /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
+    DeepseekV2(
+        /// The family's own cache and sequence-length state.
+        Box<DeepseekV2DecodeState<B>>,
+    ),
+    /// Muse Glimmer dense decoder with sliding/full hybrid attention.
+    MuseGlimmer(
+        /// The family's own cache and sequence-length state.
+        Box<MuseGlimmerDecodeState<B>>,
+    ),
+    /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
+    NemotronH(
+        /// The family's own cache and sequence-length state.
+        Box<NemotronHDecodeState<B>>,
+    ),
+    /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
+    Qwen3_5(
+        /// The family's own cache and sequence-length state.
+        Box<Qwen3_5DecodeState<B>>,
+    ),
+    /// Qwen3 decoder with token-routed sparse SwiGLU experts.
+    Qwen3Moe(
+        /// The family's own cache and sequence-length state.
+        Box<Qwen3MoeDecodeState<B>>,
+    ),
+    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    GptOss(
+        /// The family's own cache and sequence-length state.
+        Box<GptOssDecodeState<B>>,
+    ),
+    /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
+    Llama(
+        /// The family's own cache and sequence-length state.
+        Box<LlamaDecodeState<B>>,
+    ),
+    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    Gemma(
+        /// The family's own cache and sequence-length state.
+        Box<GemmaDecodeState<B>>,
+    ),
+}
+
+/// Automatic dispatch over all causal architectures with executable graphs.
+///
+/// Variants hold their parameter graphs inline: Burn 0.21 does not
+/// implement `Module` for `Box<M>`, so boxing them would prevent
+/// derive-generated device, dtype, and parameter traversal.
+#[derive(Module, Debug)]
+#[non_exhaustive]
+pub enum AutoCausalLm<B: Backend> {
+    /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
+    DeepseekV2(
+        /// Parameter graph of the selected family.
+        DeepseekV2ForCausalLm<B>,
+    ),
+    /// Muse Glimmer dense decoder with sliding/full hybrid attention.
+    MuseGlimmer(
+        /// Parameter graph of the selected family.
+        MuseGlimmerForCausalLm<B>,
+    ),
+    /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
+    NemotronH(
+        /// Parameter graph of the selected family.
+        NemotronHForCausalLm<B>,
+    ),
+    /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
+    Qwen3_5(
+        /// Parameter graph of the selected family.
+        Qwen3_5ForCausalLm<B>,
+    ),
+    /// Qwen3 decoder with token-routed sparse SwiGLU experts.
+    Qwen3Moe(
+        /// Parameter graph of the selected family.
+        Qwen3MoeForCausalLm<B>,
+    ),
+    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    GptOss(
+        /// Parameter graph of the selected family.
+        GptOssForCausalLm<B>,
+    ),
+    /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
+    Llama(
+        /// Parameter graph of the selected family.
+        LlamaForCausalLm<B>,
+    ),
+    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    Gemma(
+        /// Parameter graph of the selected family.
+        GemmaForCausalLm<B>,
+    ),
+}
+
+/// Generates the causal registry's per-family dispatch from one list.
+///
+/// Each entry names the family's variant in the dispatch enums above, its
+/// checkpoint `model_type`, optional `aliases` (further `model_type` values
+/// executed by the same family, such as `mistral` for the Llama family), the
+/// family's model, configuration, and decode-state types, and its
+/// `experiments` capability (`supported` or `pending`, see the module
+/// documentation). The expansion implements every method whose body is a
+/// per-family `match` on [`AutoCausalConfig`], [`AutoCausalConfigRef`],
+/// [`AutoCausalDecodeState`], and [`AutoCausalLm`], including the
+/// [`HookedModel`] and [`StagedModel`] dispatch.
 macro_rules! causal_registry {
     ($(
-        $(#[$family_doc:meta])*
         $variant:ident {
             model_type: $model_type:literal,
             $(aliases: [$($alias:literal),+ $(,)?],)?
@@ -125,19 +307,6 @@ macro_rules! causal_registry {
             experiments: $experiments:ident $(,)?
         }
     ),+ $(,)?) => {
-        /// Registry-level configuration associated with [`CausalLanguageModel`].
-        ///
-        /// The detailed checkpoint configuration remains available through
-        /// [`AutoCausalLm::config`]. This lightweight discriminator lets generic
-        /// code use the architecture trait without duplicating a model's complete
-        /// config inside the dispatch enum. Each variant names one executable
-        /// causal family.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[non_exhaustive]
-        pub enum AutoCausalConfig {
-            $( $(#[$family_doc])* $variant, )+
-        }
-
         impl AutoCausalConfig {
             /// Every registered causal family, in registry order.
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
@@ -182,19 +351,6 @@ macro_rules! causal_registry {
             }
         }
 
-        /// Immutable architecture configuration borrowed from an automatic causal model.
-        #[derive(Debug, Clone, Copy)]
-        #[non_exhaustive]
-        pub enum AutoCausalConfigRef<'a> {
-            $(
-                $(#[$family_doc])*
-                $variant(
-                    /// Borrowed configuration owned by the selected model.
-                    &'a $config,
-                ),
-            )+
-        }
-
         impl AutoCausalConfigRef<'_> {
             /// Returns the registered family of the borrowed configuration.
             pub fn family(self) -> AutoCausalConfig {
@@ -219,22 +375,6 @@ macro_rules! causal_registry {
         }
 
         // External state dispatch; no caches participate in Burn parameter traversal.
-
-        /// External decode state paired with an [`AutoCausalLm`] variant.
-        ///
-        /// States are boxed so the enum stays small however large one family's
-        /// cache bookkeeping is.
-        #[derive(Debug)]
-        #[non_exhaustive]
-        pub enum AutoCausalDecodeState<B: Backend> {
-            $(
-                $(#[$family_doc])*
-                $variant(
-                    /// The family's own cache and sequence-length state.
-                    Box<$state<B>>,
-                ),
-            )+
-        }
 
         impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
             /// Returns the selected state's batch width, without inspecting parameter tensors.
@@ -288,23 +428,6 @@ macro_rules! causal_registry {
         }
 
         // Executable module dispatch and architecture-trait adapters.
-
-        /// Automatic dispatch over all causal architectures with executable graphs.
-        ///
-        /// Variants hold their parameter graphs inline: Burn 0.21 does not
-        /// implement `Module` for `Box<M>`, so boxing them would prevent
-        /// derive-generated device, dtype, and parameter traversal.
-        #[derive(Module, Debug)]
-        #[non_exhaustive]
-        pub enum AutoCausalLm<B: Backend> {
-            $(
-                $(#[$family_doc])*
-                $variant(
-                    /// Parameter graph of the selected family.
-                    $model<B>,
-                ),
-            )+
-        }
 
         impl<B: Backend> AutoCausalLm<B> {
             /// Checkpoint model types (primary types and aliases) accepted by this executable registry.
@@ -556,7 +679,7 @@ macro_rules! causal_registry {
 // implementation has not landed on this branch; switching it to `supported`
 // is the whole integration step once it has.
 causal_registry! {
-    /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
+    // DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
     DeepseekV2 {
         model_type: "deepseek_v2",
         model: DeepseekV2ForCausalLm,
@@ -564,7 +687,7 @@ causal_registry! {
         state: DeepseekV2DecodeState,
         experiments: supported,
     },
-    /// Muse Glimmer dense decoder with sliding/full hybrid attention.
+    // Muse Glimmer dense decoder with sliding/full hybrid attention.
     MuseGlimmer {
         model_type: "muse_glimmer_text",
         model: MuseGlimmerForCausalLm,
@@ -572,7 +695,7 @@ causal_registry! {
         state: MuseGlimmerDecodeState,
         experiments: supported,
     },
-    /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
+    // NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
     NemotronH {
         model_type: "nemotron_h",
         model: NemotronHForCausalLm,
@@ -580,7 +703,7 @@ causal_registry! {
         state: NemotronHDecodeState,
         experiments: supported,
     },
-    /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
+    // Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
     Qwen3_5 {
         model_type: "qwen3_5_text",
         model: Qwen3_5ForCausalLm,
@@ -588,7 +711,7 @@ causal_registry! {
         state: Qwen3_5DecodeState,
         experiments: supported,
     },
-    /// Qwen3 decoder with token-routed sparse SwiGLU experts.
+    // Qwen3 decoder with token-routed sparse SwiGLU experts.
     Qwen3Moe {
         model_type: "qwen3_moe",
         model: Qwen3MoeForCausalLm,
@@ -596,7 +719,7 @@ causal_registry! {
         state: Qwen3MoeDecodeState,
         experiments: supported,
     },
-    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    // OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
     GptOss {
         model_type: "gpt_oss",
         model: GptOssForCausalLm,
@@ -604,7 +727,7 @@ causal_registry! {
         state: GptOssDecodeState,
         experiments: supported,
     },
-    /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
+    // Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
     Llama {
         model_type: "llama",
         aliases: ["mistral", "qwen2", "qwen3", "smollm3", "olmo2"],
@@ -613,7 +736,7 @@ causal_registry! {
         state: LlamaDecodeState,
         experiments: supported,
     },
-    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    // Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
     Gemma {
         model_type: "gemma2",
         aliases: ["gemma3_text"],

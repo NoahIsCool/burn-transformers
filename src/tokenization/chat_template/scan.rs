@@ -25,18 +25,18 @@
 //! all inputs the proofs establish that no index leaves its buffer and no
 //! arithmetic overflows, and:
 //!
-//! - [`next_tag`] returns exactly the model's next tag ([`next_tag_scan`]):
+//! - [`next_tag`] returns exactly the model's next tag (`next_tag_scan`):
 //!   no tag MiniJinja would parse is skipped, and no comment, raw section, or
 //!   template text is returned as a tag. A returned span starts at or after
 //!   its position, opens with the delimiter of its kind, closes with the
 //!   matching delimiter, and ends after the position, so a scan over the
 //!   source makes progress and every slice it takes is in bounds;
 //! - [`find_tag_end`] returns exactly the first closing delimiter at bracket
-//!   depth zero outside string literals ([`tag_end_scan`]), and
+//!   depth zero outside string literals (`tag_end_scan`), and
 //!   [`skip_string`] exactly the offset after the first unescaped closing
-//!   quote, or the end of the buffer ([`string_skip_end`]);
-//! - [`basic_tag_end`] returns exactly [`basic_tag_scan`], which finds every
-//!   tag `[-+]? ws* name ws* [-+]? %}` ([`is_basic_tag`]) and only those, for
+//!   quote, or the end of the buffer (`string_skip_end`);
+//! - [`basic_tag_end`] returns exactly `basic_tag_scan`, which finds every
+//!   tag `[-+]? ws* name ws* [-+]? %}` (`is_basic_tag`) and only those, for
 //!   names such as `raw` and `endraw` that start with a non-space byte; and
 //!   [`raw_section_end`] ends at the first such `endraw` tag;
 //! - [`next_tag_opening`] returns exactly the first `{{`, `{%`, or `{#` at or
@@ -647,7 +647,7 @@ pub(crate) fn starts_with_at(bytes: &[u8], index: usize, pattern: &[u8]) -> bool
 ///
 /// This is `str::find` on `&source[from..]`, shifted by `from`. Verified: the
 /// result is the first offset at or after `from` where the pattern occurs
-/// ([`first_occurrence`]), and `None` means it occurs nowhere there.
+/// (`first_occurrence`), and `None` means it occurs nowhere there.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
@@ -693,7 +693,7 @@ pub(crate) fn find_pattern(bytes: &[u8], from: usize, pattern: &[u8]) -> Option<
 /// Offset and delimiter of the first `{{`, `{%`, or `{#` at or after `from`.
 ///
 /// Verified: exactly the first tag opening at or after `from`
-/// ([`first_opening`]); `None` when there is none.
+/// (`first_opening`); `None` when there is none.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     ensures
@@ -739,7 +739,7 @@ pub(crate) fn next_tag_opening(bytes: &[u8], from: usize) -> Option<(usize, TagO
 /// Returns the index just past the string literal opened by `quote` at `start`.
 ///
 /// A backslash escapes the next byte. An unterminated literal runs to the end
-/// of the buffer. Verified: the result is exactly [`string_skip_end`], just
+/// of the buffer. Verified: the result is exactly `string_skip_end`, just
 /// past the first `quote` byte after `start` that no backslash escapes, or
 /// the buffer length when there is none; so it is after `start`, at most the
 /// buffer length, and unless it is the buffer length just past a `quote`.
@@ -784,7 +784,7 @@ pub(crate) fn skip_string(bytes: &[u8], start: usize, quote: u8) -> usize {
 /// delimiter only counts at bracket depth zero, so a `}}` that closes a
 /// nested dict literal does not end an expression tag; a closing bracket
 /// without an opening one makes the depth negative, which no delimiter can
-/// then end. Verified: the result is exactly [`tag_end_scan`] from `from` at
+/// then end. Verified: the result is exactly `tag_end_scan` from `from` at
 /// depth zero, so it is the first offset where the delimiter occurs outside
 /// every string literal at bracket depth zero, and `None` means there is
 /// none; a returned offset is at or after `from` and the closing delimiter
@@ -840,8 +840,8 @@ pub(crate) fn find_tag_end(bytes: &[u8], from: usize, closing: &[u8]) -> Option<
 ///
 /// This is MiniJinja's `skip_basic_tag`, which recognizes `raw` and `endraw`
 /// before any expression parsing. Verified: the result is exactly
-/// [`basic_tag_scan`]; a returned end is the end of such a tag
-/// ([`is_basic_tag`]), and for a name that starts with a non-space byte
+/// `basic_tag_scan`; a returned end is the end of such a tag
+/// (`is_basic_tag`), and for a name that starts with a non-space byte
 /// (`raw`, `endraw`) every such tag is found: `None` means there is none, and
 /// a tag has only the one end returned.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
@@ -948,9 +948,9 @@ pub(crate) fn basic_tag_end(bytes: &[u8], from: usize, name: &[u8]) -> Option<us
 ///
 /// As in MiniJinja, the first `{%` that starts an `endraw` tag ends the
 /// section; every other byte is data. Verified: the result is exactly
-/// [`raw_end_scan`], the end of the `endraw` tag after the first `{%` at or
+/// `raw_end_scan`, the end of the `endraw` tag after the first `{%` at or
 /// after `from` that starts one; it is after `from`, at most the buffer
-/// length, and ends a basic `endraw` tag ([`is_basic_tag`]).
+/// length, and ends a basic `endraw` tag (`is_basic_tag`).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(found =>
     requires
@@ -999,7 +999,7 @@ pub(crate) fn raw_section_end(bytes: &[u8], from: usize) -> Option<usize> {
 /// Template text is skipped, and so are `{# comments #}` and `{% raw %}`
 /// sections (through their `{% endraw %}`). An unterminated comment, raw
 /// section, or tag ends the scan (`None`): MiniJinja's parser then rejects
-/// the remainder itself. Verified: the result is exactly [`next_tag_scan`],
+/// the remainder itself. Verified: the result is exactly `next_tag_scan`,
 /// the reference model of MiniJinja's lexer, so no tag MiniJinja would parse
 /// is skipped and none it treats as data is returned; a returned span starts
 /// at or after `position`, opens with `{{` (expressions) or `{%`

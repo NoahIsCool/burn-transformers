@@ -202,7 +202,7 @@ impl Qwen3_5TextConfig {
     /// Returns an explicit schedule, deriving it from `full_attention_interval`
     /// when an older config omitted `layer_types`.
     ///
-    /// The derived schedule ([`plan::derived_full_attention`], verified in
+    /// The derived schedule (`plan::derived_full_attention`, verified in
     /// `verus/qwen.rs`) places full attention exactly at layers `i` with
     /// `(i + 1) mod interval = 0`, `floor(num_hidden_layers / interval)` of them.
     pub fn resolved_layer_types(&self) -> Vec<Qwen3_5LayerType> {
@@ -269,7 +269,7 @@ impl Qwen3_5TextConfig {
     ///
     /// Output-gated Qwen packs an equally sized gate beside Q, hence the factor of
     /// two. For Qwen3.8-27B this is `24 * 256 * 2 = 12_288` channels. The
-    /// product is [`plan::gated_query_width`], verified in `verus/qwen.rs`:
+    /// product is `plan::gated_query_width`, verified in `verus/qwen.rs`:
     /// it is exact for every configuration that passes validation, which
     /// rejects an unrepresentable width; an unvalidated configuration whose
     /// width overflows saturates at `usize::MAX` instead of wrapping.
