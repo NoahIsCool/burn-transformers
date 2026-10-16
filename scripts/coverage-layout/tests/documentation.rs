@@ -479,6 +479,145 @@ macro_rules! fixed { () => { /// Generic record.
     );
 }
 
+/// Verus proof and specification functions are audited through their mode words.
+#[test]
+fn verus_mode_words_resolve_proof_and_spec_function_prefixes() {
+    let fixture = Fixture::new(
+        r#"//! Root.
+verus! {
+/// Documented specification.
+pub open spec fn twice(x: int) -> int { x + x }
+/// Documented lemma.
+#[verifier::spinoff_prover]
+pub proof fn lemma_twice(x: int) ensures twice(x) == 2 * x {}
+pub(crate) broadcast proof fn undocumented(x: int) {}
+/// Documented uninterpreted function.
+uninterp spec fn opaque_measure(x: int) -> nat;
+}
+"#,
+    );
+    for report in [fixture.audit(), fixture.standards()] {
+        assert!(report.complete);
+        assert!(!report.passed);
+        let verus: Vec<_> = report.files[0]
+            .sites
+            .iter()
+            .filter(|site| site.kind == "verus_function")
+            .collect();
+        assert_eq!(verus.len(), 4);
+        assert!(
+            verus
+                .iter()
+                .all(|site| site.origin == "verus_function_prefix")
+        );
+        assert!(site(&report, "twice").style_present);
+        assert!(site(&report, "lemma_twice").style_present);
+        assert!(site(&report, "opaque_measure").style_present);
+        assert!(!site(&report, "undocumented").style_present);
+    }
+}
+
+/// Mode words are Verus syntax only; another macro's identical prefix stays opaque.
+#[test]
+fn verus_mode_words_are_not_stripped_outside_the_verus_macro() {
+    let fixture = Fixture::new(
+        r#"//! Root.
+other! {
+/// Looks like a lemma.
+pub proof fn lemma_elsewhere() {}
+}
+"#,
+    );
+    let report = fixture.standards();
+    assert!(!report.complete);
+    assert!(
+        !report.files[0]
+            .sites
+            .iter()
+            .any(|site| site.kind == "verus_function")
+    );
+    assert_eq!(
+        report.files[0]
+            .macros
+            .iter()
+            .map(|boundary| boundary.unresolved_functions.len())
+            .sum::<usize>(),
+        1
+    );
+}
+
+/// Fixed-name constants and aliases in unparseable templates are audited by prefix.
+#[test]
+fn standards_resolve_member_free_template_declarations_by_prefix() {
+    let fixture = Fixture::new(
+        r#"//! Root.
+/// Generates registry tables.
+macro_rules! registry { ($($variant:ident),+) => {
+    impl Registry {
+        /// Every variant, in declaration order.
+        pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        const COUNT: usize = [$(stringify!($variant)),+].len();
+        /// Names one variant.
+        pub fn name(self) -> &'static str { match self { $(Self::$variant => stringify!($variant),)+ } }
+    }
+    /// The variant list as a type-level alias.
+    type Variants = [Registry; [$(stringify!($variant)),+].len()];
+}; }
+"#,
+    );
+    let report = fixture.standards();
+    assert!(report.complete);
+    assert!(!report.passed);
+    let all = site(&report, "ALL");
+    assert_eq!(all.kind, "constant_template");
+    assert!(all.style_present);
+    let count = site(&report, "COUNT");
+    assert_eq!(count.kind, "constant_template");
+    assert!(!count.style_present);
+    assert_eq!(site(&report, "Variants").kind, "type_alias_template");
+    assert!(site(&report, "Variants").style_present);
+    assert!(site(&report, "name").style_present);
+    // The `'static` lifetimes are types, never opaque `static` declarations.
+    assert!(
+        !report.files[0]
+            .sites
+            .iter()
+            .any(|site| site.kind == "static_template")
+    );
+    assert!(
+        report.files[0].macros.iter().all(|boundary| boundary
+            .unresolved_items
+            .as_ref()
+            .unwrap()
+            .is_empty())
+    );
+}
+
+/// Template types with bodies and pointer `const` spellings keep their own rules.
+#[test]
+fn standards_keep_template_bodies_opaque_and_ignore_raw_pointer_const() {
+    let fixture = Fixture::new(
+        r#"//! Root.
+/// Generates a record and a pointer helper.
+macro_rules! generated { ($field:ident) => {
+    /// A record whose members come from the invocation.
+    pub struct Record { $field: u8 }
+    /// Reads through a raw pointer.
+    fn read(pointer: *const u8) -> u8 { unsafe { *pointer } }
+}; }
+"#,
+    );
+    let report = fixture.standards();
+    assert!(!report.complete);
+    let opaque: Vec<_> = report.files[0]
+        .macros
+        .iter()
+        .flat_map(|boundary| boundary.unresolved_items.as_ref().unwrap())
+        .collect();
+    assert_eq!(opaque.len(), 1);
+    assert_eq!(opaque[0].start.line, 5);
+}
+
 /// Local aliases within macro test bodies keep real spans despite non-Rust strategies.
 #[test]
 fn standards_visit_local_items_in_parseable_macro_statement_bodies() {

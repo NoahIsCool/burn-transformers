@@ -3,8 +3,11 @@
 //! Syn supplies item and attribute boundaries; the existing classifier supplies
 //! all module-reference contexts and structural test ownership. Literal `///`
 //! and `//!` are distinguished from equivalent rustdoc attributes. Macro item
-//! fragments are inspected when they parse; unresolved authored function tokens
-//! remain explicit review blockers, never silently generated or documented code.
+//! fragments are inspected when they parse; function templates, Verus proof
+//! and specification functions, and member-free declaration templates are
+//! checked through their authored attribute and visibility prefix. Unresolved
+//! authored function tokens and declaration templates with members remain
+//! explicit review blockers, never silently generated or documented code.
 
 use std::{
     collections::BTreeSet,
@@ -125,8 +128,9 @@ pub fn audit_documentation(
 ///
 /// Schema 2 preserves source coordinates and macro limitations from the legacy
 /// audit. Imports, implementation blocks, generic parameters, and local bindings
-/// introduce no separate documentation requirement. Opaque declaration templates
-/// remain explicit blockers; compiler-generated items are outside this audit.
+/// introduce no separate documentation requirement. Declaration templates with
+/// members or metavariable names remain explicit blockers; compiler-generated
+/// items are outside this audit.
 pub fn audit_standards(root: &Path, entries: &[PathBuf]) -> Result<DocumentationReport, String> {
     audit(root, entries, AuditMode::Standards)
 }
@@ -485,7 +489,9 @@ impl DocumentationWalker<'_> {
                 )
                 && (matches!(&pair[1], TokenTree::Ident(name) if name != "fn")
                     || matches!(&pair[1], TokenTree::Punct(punct) if punct.as_char() == '$'))
+                && !keyword_continues_type(&trees, index)
                 && let Some(span) = self.span(pair[0].span())
+                && !self.declaration_template(&trees, index, span.clone())
             {
                 opaque_items.push(span);
             }
@@ -494,10 +500,7 @@ impl DocumentationWalker<'_> {
                     || matches!(&pair[1], TokenTree::Punct(punct) if punct.as_char() == '$'))
                 && let Some(span) = self.span(pair[0].span())
             {
-                let start = trees[..index].iter().rposition(|token| {
-                    matches!(token, TokenTree::Punct(p) if p.as_char() == ';')
-                        || matches!(token, TokenTree::Group(group) if group.delimiter() == proc_macro2::Delimiter::Brace)
-                }).map_or(0, |previous| previous + 1);
+                let start = prefix_start(&trees, index);
                 let name = match &pair[1] {
                     TokenTree::Ident(name) => name.to_string(),
                     _ => trees
@@ -529,6 +532,67 @@ impl DocumentationWalker<'_> {
         self.depth -= 1;
     }
 
+    /// Resolves a fixed-name declaration without members from its authored prefix.
+    ///
+    /// A constant, static, or type alias ends at its own `;` and declares no
+    /// members, so its literal documentation is decided entirely by the
+    /// attributes and visibility before the keyword. Those parse independently
+    /// of metavariables in its type or initializer, exactly as a function
+    /// template's prefix does. Returns `false`, leaving the declaration an
+    /// opaque review blocker, for types with bodies, metavariable names, and
+    /// prefixes that are not ordinary attributes and visibility.
+    fn declaration_template(
+        &mut self,
+        trees: &[TokenTree],
+        index: usize,
+        span: SourceSpan,
+    ) -> bool {
+        let kind = match &trees[index] {
+            TokenTree::Ident(keyword) if keyword == "const" => "constant_template",
+            TokenTree::Ident(keyword) if keyword == "static" => "static_template",
+            TokenTree::Ident(keyword) if keyword == "type" => "type_alias_template",
+            _ => return false,
+        };
+        let Some(TokenTree::Ident(name)) = trees.get(index + 1) else {
+            return false;
+        };
+        let prefix: TokenStream = trees[prefix_start(trees, index)..index]
+            .iter()
+            .cloned()
+            .collect();
+        let (mut prefix, computed_documentation) = without_template_doc_values(prefix);
+        let Ok(probe) = "struct __documentation_prefix_probe;".parse::<TokenStream>() else {
+            self.issue(
+                "invalid_prefix_probe",
+                "fixed declaration probe did not tokenize",
+            );
+            return false;
+        };
+        prefix.extend(probe);
+        let attrs = syn::parse2::<syn::File>(prefix).ok().and_then(|file| {
+            let mut items = file.items.into_iter();
+            match (items.next(), items.next()) {
+                (Some(syn::Item::Struct(item)), None) => Some(item.attrs),
+                _ => None,
+            }
+        });
+        let Some(attrs) = attrs else {
+            return false;
+        };
+        if crate::cfg::attributes(&attrs).0.test_only() {
+            self.local_test_spans.push(span.clone());
+        }
+        let previous = self.origin;
+        self.origin = "authored_macro_template_prefix";
+        let recorded = self.sites.len();
+        self.record(span, kind, &name.to_string(), &attrs, false);
+        if computed_documentation && self.sites.len() > recorded {
+            self.sites[recorded].computed_documentation = true;
+        }
+        self.origin = previous;
+        true
+    }
+
     /// Separates parseable authored fragments from unresolved template functions.
     fn macro_boundary(&mut self, mac: &syn::Macro, span: proc_macro2::Span, name: String) {
         let Some(span) = self.span(span) else {
@@ -547,11 +611,21 @@ impl DocumentationWalker<'_> {
                 .iter()
                 .any(|site| function_kind(&site.kind) && contains(&site.span, &token.span))
         });
+        // Verus writes proof and specification functions inside `verus!` with
+        // mode words (`proof fn`, `pub open spec fn`) that Syn cannot parse.
+        // Only those words are dropped; attributes, docs, and visibility are
+        // still validated exactly as for any other macro function prefix.
+        let verus = name.rsplit("::").next() == Some("verus");
         let mut unresolved_functions = Vec::new();
         for function in functions {
+            let prefix = if verus {
+                without_verus_modes(function.prefix)
+            } else {
+                function.prefix
+            };
             // Only the authored prefix is parsed here. The fixed dummy signature
             // validates attributes/visibility without expanding or guessing `$name`.
-            let (mut prefix, computed_documentation) = without_template_doc_values(function.prefix);
+            let (mut prefix, computed_documentation) = without_template_doc_values(prefix);
             let signature = "fn __documentation_prefix_probe() {}".parse::<TokenStream>();
             let Ok(signature) = signature else {
                 self.issue(
@@ -582,10 +656,18 @@ impl DocumentationWalker<'_> {
                     self.local_test_spans.push(function.span.clone());
                 }
                 let previous = self.origin;
-                self.origin = "authored_macro_template_prefix";
+                self.origin = if verus {
+                    "verus_function_prefix"
+                } else {
+                    "authored_macro_template_prefix"
+                };
                 self.record(
                     function.span,
-                    "macro_function_template",
+                    if verus {
+                        "verus_function"
+                    } else {
+                        "macro_function_template"
+                    },
                     &function.name,
                     &parsed.attrs,
                     false,
@@ -824,7 +906,64 @@ fn function_kind(kind: &str) -> bool {
             | "trait_method"
             | "foreign_function"
             | "macro_function_template"
+            | "verus_function"
     )
+}
+
+/// Returns where the authored prefix of the declaration keyword at `index` begins.
+///
+/// The prefix is everything at the same token level after the previous `;` or
+/// braced body: the declaration's attributes, documentation, and visibility.
+fn prefix_start(trees: &[TokenTree], index: usize) -> usize {
+    trees[..index]
+        .iter()
+        .rposition(|token| {
+            matches!(token, TokenTree::Punct(p) if p.as_char() == ';')
+                || matches!(token, TokenTree::Group(group) if group.delimiter() == proc_macro2::Delimiter::Brace)
+        })
+        .map_or(0, |previous| previous + 1)
+}
+
+/// Whether a declaration keyword is part of a type rather than a declaration.
+///
+/// Proc-macro tokens split the lifetime `'static` into a `'` punct and the
+/// `static` keyword, and a raw pointer spells `*const T`; neither declares an
+/// item, so neither may become an opaque declaration finding.
+fn keyword_continues_type(trees: &[TokenTree], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|previous| trees.get(previous))
+        .is_some_and(|previous| {
+            matches!(previous, TokenTree::Punct(punct) if punct.as_char() == '\'' || punct.as_char() == '*')
+        })
+}
+
+/// Verus mode and modifier words that may precede `fn` inside `verus!`.
+const VERUS_FUNCTION_MODIFIERS: [&str; 10] = [
+    "axiom",
+    "broadcast",
+    "closed",
+    "exec",
+    "ghost",
+    "open",
+    "proof",
+    "spec",
+    "tracked",
+    "uninterp",
+];
+
+/// Removes top-level Verus mode words so Syn can validate the remaining prefix.
+///
+/// Attribute and visibility groups are kept whole, so a mode word inside an
+/// attribute argument is never touched.
+fn without_verus_modes(tokens: TokenStream) -> TokenStream {
+    tokens
+        .into_iter()
+        .filter(|token| {
+            !matches!(token, TokenTree::Ident(word)
+                if VERUS_FUNCTION_MODIFIERS.contains(&word.to_string().as_str()))
+        })
+        .collect()
 }
 
 /// Recognizes explicit repository integration roots, never a helper filename alone.

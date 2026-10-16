@@ -114,8 +114,12 @@ produce informational diagnostics, rather than an incomplete audit.
 Macro boundaries remain visible. The checker visits parseable authored item
 fragments and checks real attribute spans on simple `fn $name` templates. A
 template's `#[doc = $description]` cannot substitute for literal `///`; an
-accompanying literal comment can satisfy the style. Unresolvable authored function
-prefixes block completion. Macro expansion, generated derive methods (including
+accompanying literal comment can satisfy the style. Inside `verus!` blocks, the
+Verus mode words before `fn` (`proof`, `spec`, `open`, `closed`, `broadcast`,
+`uninterp`, `axiom`, `exec`, `ghost`, `tracked`) are dropped before the same
+prefix check, so every proof and specification function is a `verus_function`
+site with its own literal documentation requirement; other macros keep those
+words and stay opaque. Unresolvable authored function prefixes block completion. Macro expansion, generated derive methods (including
 Burn, Serde, and thiserror), and externally generated source are outside this
 authored-source claim: `macro_expansion_resolved` always remains false. This is
 not a universal expansion or compiler-reachability proof.
@@ -153,9 +157,14 @@ Imports, implementation blocks, generic parameters, and local bindings introduce
 no separate documentation requirement. File/module documentation explains those
 contexts; documentation on a container cannot satisfy its members' requirements.
 
-Parseable authored macro fragments retain their original source spans. Opaque
-named declaration templates appear in `macros[].unresolved_items`, including in
-test-owned macros, and block completion. A syntax audit cannot evaluate generated
+Parseable authored macro fragments retain their original source spans. A
+fixed-name constant, static, or type alias inside an unparseable template has
+no members, so its attribute and visibility prefix is checked like a function
+template's (`constant_template`, `static_template`, `type_alias_template`).
+Other opaque named declaration templates, such as a struct with metavariable
+members or a metavariable name, appear in `macros[].unresolved_items`,
+including in test-owned macros, and block completion. The lifetime `'static`
+and the raw-pointer spelling `*const T` are types, never declarations. A syntax audit cannot evaluate generated
 fields or declarations introduced by macro expansion. `complete` describes the
 parsed authored scope, and `macro_expansion_resolved` remains false.
 
