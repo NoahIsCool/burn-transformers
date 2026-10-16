@@ -26,10 +26,12 @@ use crate::{Error, Result};
 /// This policy bounds score-like intermediates, not parameters, Q/K/V storage,
 /// the linear-size output, or an autodiff tape. On an autodiff backend the
 /// tape retains every chunk's workspace anyway, so chunking cannot lower the
-/// training peak: every consumer ([`crate::attention::GroupedQueryAttention::attend_bounded`],
-/// Muse Glimmer, and MLA) evaluates the policy through [`Self::effective_on`],
-/// which substitutes one [`Self::Unbounded`] call with the same values. Size
-/// training memory for the full `O(query * key)` plane.
+/// training peak. Autodiff backends therefore evaluate one [`Self::Unbounded`]
+/// call with the same values. [`Self::effective_on`] states that rule, and
+/// [`crate::attention::GroupedQueryAttention::attend_bounded`] applies it
+/// directly; the Muse Glimmer and MLA attention paths apply the same rule
+/// through their own autodiff checks, so every consumer of this policy shares
+/// one contract. Size training memory for the full `O(query * key)` plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionExecutionPolicy {
