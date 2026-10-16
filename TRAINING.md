@@ -138,11 +138,13 @@ gradients, unchanged backbone tensors, and an identical next optimizer update
 after resume. The fixture reports training-set accuracy only.
 
 To start from pretrained weights of a known family, initialize the model from
-its configuration and call its `load_checkpoint`, for example
-`Qwen3_5ForCausalLm::load_checkpoint(root, &LoadOptions::default())` for the
-advertised Qwen3.5 family; the `checkpoint` module documentation's "Loading a
-concrete family" lists every family's method and options, and
-`AutoCausalLm::load_local` chooses the family from `config.json` instead.
+its configuration and call its `load_checkpoint` method. For the advertised
+Qwen3.5 family, create the model with
+`Qwen3_5ForCausalLm::init(config, &device)` and then call
+`model.load_checkpoint(root, &LoadOptions::default())` on it. The `checkpoint`
+module documentation's "Loading a concrete family" lists every family's method
+and options, and `AutoCausalLm::load_local` chooses the family from
+`config.json` instead.
 
 Use the same ownership principle for parameter groups: keep their parameters
 discoverable and apply the desired policies through Burn's optimizer APIs or

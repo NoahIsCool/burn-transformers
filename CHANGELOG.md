@@ -146,8 +146,11 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   `CacheConfig::new` and `RopeConfig::new`; `Error::CheckpointPlan`, with a
   `From<CheckpointError>` conversion, for discovery and planning failures, and
   `Error::CheckpointExecution`, which keeps a failed load's target, partial
-  `LoadReport`, and `ExecutionStats`; `CheckpointError::LanguageNamespaceNotFound`,
-  `AmbiguousLanguageNamespace`, and `TooFewTensors`.
+  `LoadReport`, and `ExecutionStats`; `CheckpointError::LanguageNamespaceNotFound`
+  and `AmbiguousLanguageNamespace` (Qwen3.5 and Muse layout detection),
+  `LanguageEmbeddingNotFound` and `AmbiguousLanguageEmbedding` (Gemma's
+  three-layout detection, which lists the candidate or present embeddings),
+  and `TooFewTensors`.
 - Configuration bounds: `models::config::MAX_LAYERS` (2^18 = 262,144, the
   largest power of two at which every dense checkpoint contract fits the
   artifact limit), `MAX_EXPERTS` (2^20), and `MAX_CHECKPOINT_TENSORS`
@@ -279,7 +282,11 @@ code written against unreleased sources.
   instead of `Error::Checkpoint(String)`, with unchanged messages, and a
   checkpoint holding fewer tensors than the configuration's depth (or exact
   one-to-one inventory) needs fails with `CheckpointError::TooFewTensors`
-  before the contract is built. A modular decode state rejects a batch
+  before the contract is built. Direct T5 loading applies the same bound:
+  `T5Config::plan_checkpoint` and `T5ForConditionalGeneration::load_checkpoint`
+  return `T5CheckpointLoadError::Checkpoint(TooFewTensors)` for a checkpoint
+  with fewer tensors than encoder plus decoder blocks, after any configuration
+  error and before the contract is built. A modular decode state rejects a batch
   mismatch as `Error::TensorCache(BatchSizeMismatch)`, as every family does.
   GPT-NeoX `attentions: true` is `Error::BackendCapability`.
 - **Tokenization.** `EncodeOptions::max_length` truncates content before the
