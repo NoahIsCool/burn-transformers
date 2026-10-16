@@ -37,8 +37,10 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   [model status page](ARCHITECTURE_COMPATIBILITY.md). No new checkpoint is
   advertised as supported.
 - DeepSeek-V2 runs V3-style sigmoid `noaux_tc` routing with a correction bias
-  and V2 group-limited routing. `GptNeoXForCausalLm` is the GPT-NeoX model
-  name (`GptNeoXModel` remains an alias).
+  and V2 group-limited routing. `GptNeoXForCausalLm` is the one GPT-NeoX
+  model name.
+- `NemotronHConfig::attention_window` (never serialized) opts Nemotron-H's
+  attention into a sliding window for experiments; the pinned graph has none.
 
 #### Experiment interface
 
@@ -51,8 +53,11 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   support.
 - New activation catalogs: DeepSeek MLA and router points, Muse gate and
   sandwich-norm points, Nemotron-H points per block kind, Qwen3-MoE router
-  points (`router_logits_point`, `router_weights_point`) and a headless
-  backbone, gpt-oss router points, and staged execution for all of them.
+  points and a headless backbone, gpt-oss router points, and staged execution
+  for all of them. Every mixture-of-experts family addresses its router points
+  through the shared `Layer::router_logits`, `router_weights`,
+  `routed_output`, and `shared_output` constructors, whose expert axes are
+  `Axis::EXPERT` and `Axis::EXPERT_SLOT`.
 - `Hooks::capture_dynamic`/`get_dynamic` with `DynamicActivation`,
   `Point::<D>::try_from(PointInfo)`, `PointInfo::rank`, `Layer::new`,
   `Layer::mixer_input`/`mixer_output`, and `Stack::layer`.
@@ -68,7 +73,11 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   projections, path overrides, `ParameterInit::{Keep, Normal, Zeros, Ones,
   Constant}`, `validate_for`, `apply`, and lazy `apply_lazy`;
   `ModularCausalLm::init_with` and `scaled_init_policy` (and the seq2seq
-  equivalents); `Gpt2Config::init_policy` and `GptNeoXConfig::init_policy`.
+  equivalents), also available without a backend type parameter as
+  `DecoderSpec::scaled_init_policy` and `Seq2SeqSpec::scaled_init_policy`;
+  `Gpt2Config::init_policy` and `GptNeoXConfig::init_policy`, and
+  `Gpt2Config::reinit_policy` and `GptNeoXConfig::reinit_policy`, complete
+  Hugging Face re-initializations that also reset every LayerNorm.
 - Modular specifications: `MixerSpec::AttentionWithOptions`
   (`AttentionOptions`: global, sliding, or chunked-local connectivity, score
   scale, soft cap, sinks, per-projection bias, Q/K-norm scope, SiLU gate),
@@ -77,6 +86,13 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   connectivity, MoE routing policy, shared-expert gate, and expert biases,
   `Seq2SeqSpec::cross_attention_options`, every RoPE scaling rule, and
   `encoder_stages`/`decoder_stages` views of `ModularSeq2SeqLm`.
+  `DecoderSpec::{embedding_scale, final_logit_softcap}` add Gemma's
+  dtype-rounded `sqrt(d)` embedding multiplier and the `c·tanh(z/c)` logit cap
+  (an encoder stack rejects a cap), and
+  `FeedForwardSpec::ClampedMixtureOfExperts { experts, limit, alpha, up_offset }`
+  adds gpt-oss's clamped SwiGLU routed and shared experts, with
+  `FeedForwardSpec::{experts, expert_glu}`; modular parity tests reproduce
+  Gemma 2 and gpt-oss block for block.
 
 #### Shared mechanisms
 
@@ -84,7 +100,8 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   `AttentionConnectivity` (global, sliding-window, chunked-local) with
   `MaskGeometry::with_key_start`, learned sinks, `ProjectionBias`,
   `QueryKeyNormScope::FullWidth`, `attend_bounded` (score-bounded chunked
-  execution), and `DifferentialAttention`.
+  execution) with `AttentionExecutionPolicy::effective_on`, and
+  `DifferentialAttention`.
 - Feed-forward: `forward_with_hooks` and `mlp_hook_points`, `ClampedSwiGlu`
   and `forward_clamped`; `normalization::scale_free_rms_norm`.
 - `moe::router`: `RouterConfig`/`RoutingPolicy` with softmax or sigmoid
@@ -114,7 +131,27 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   message fields; `SpecialTokens` `sep`, `cls`, and `mask`.
 - Loading: `LoadedModel::into_named_parts` (`LoadedModelParts`) and
   `unsupported_generation_settings()`; `generation_config.json` `min_p`,
-  `no_repeat_ngram_size`, and `min_new_tokens` are applied.
+  `no_repeat_ngram_size`, and `min_new_tokens` are applied. Every family
+  model loads a local checkpoint directly with `load_checkpoint`, including
+  the new `Qwen3_5ForCausalLm::load_checkpoint`, and every family with layout
+  or provenance options (Qwen3.5, Llama, Gemma, gpt-oss, DeepSeek-V2,
+  Qwen3-MoE, Muse, Nemotron-H) also with `load_checkpoint_with` and its
+  `…CheckpointOptions`; the `checkpoint` module section "Loading a concrete
+  family" lists them, and the whole-load errors `Gpt2CheckpointLoadError` and
+  `Qwen3_5CheckpointLoadError` are exported.
+  `CausalLanguageModel::new_decode_state_for` and
+  `Seq2SeqLanguageModel::new_decode_state_for` size a decode state from its
+  `CacheConfig` alone.
+- Errors: `Error::CacheConfig` and `Error::Rope`, so `?` works on
+  `CacheConfig::new` and `RopeConfig::new`; `Error::CheckpointPlan`, with a
+  `From<CheckpointError>` conversion, for discovery and planning failures, and
+  `Error::CheckpointExecution`, which keeps a failed load's target, partial
+  `LoadReport`, and `ExecutionStats`; `CheckpointError::LanguageNamespaceNotFound`,
+  `AmbiguousLanguageNamespace`, and `TooFewTensors`.
+- Configuration bounds: `models::config::MAX_LAYERS` (2^18 = 262,144, the
+  largest power of two at which every dense checkpoint contract fits the
+  artifact limit), `MAX_EXPERTS` (2^20), and `MAX_CHECKPOINT_TENSORS`
+  (10,000,000).
 - Checkpoints: exact MXFP4 decoding (`MappingPlan::dequantize_mxfp4`,
   `TensorOperation::DequantizeMxfp4`), `install_packed_parameter`
   (`PackedInstall`, `packed_layout_is_exact`), `CheckpointError::InvalidTensorHeader`
@@ -124,7 +161,10 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   references for any causal checkpoint, with `--dtype {float32,float64,bfloat16}`
   and `--num-hidden-layers`; a `float64` reference measures this crate's
   error alone when an F32 reference's own rounding is as large as the
-  tolerance, as for Qwen2-7B) and `scripts/generate_tiny_goldens.py`.
+  tolerance, as for Qwen2-7B) and `scripts/generate_tiny_goldens.py`;
+  `scripts/generate_diffllama_reference.py` and
+  `scripts/generate_tokenization_goldens.py` regenerate and check the pinned
+  DiffLlama and tokenizer and chat-template goldens.
 
 #### Earlier in this cycle (v0.2 and v0.3)
 
@@ -181,11 +221,20 @@ code written against unreleased sources.
   for their new variants. `GenerationConfig`, `ChatMessage`,
   `ChatTemplateOptions`, `SpecialTokens`, `SparseMoeConfig`,
   `GroupedQueryAttentionConfig`, `GatedDeltaNetConfig`, `MlaSpec`,
-  `MixtureOfExpertsSpec`, `Seq2SeqSpec`, `RopeParameters`,
-  `QuantizedCheckpointOptions`, and `BurnpackArtifactSummary` gained public
-  fields, so exhaustive literals need them. The Burn records of
-  `DeepseekV2Moe` and of Nemotron-H's dense, Mamba-2, and gated-norm modules
-  are now the shared modules' record types.
+  `MixtureOfExpertsSpec`, `Seq2SeqSpec`, `DecoderSpec`, `NemotronHConfig`,
+  `RopeParameters`, `QuantizedCheckpointOptions`, and
+  `BurnpackArtifactSummary` gained public fields, so exhaustive literals need
+  them, and `FeedForwardSpec` gained `ClampedMixtureOfExperts`. The Burn
+  records of `DeepseekV2Moe` and of Nemotron-H's dense, Mamba-2, and
+  gated-norm modules are now the shared modules' record types.
+  `CacheConfigError`, `TransactionError`, `DecodeStateError`,
+  `RingPlanError`, `T5BucketError`, `PositionIdError`, and `ConfigLoadError`
+  are now `#[non_exhaustive]`, like every other public error enum.
+  `DeltaRuleConfig::normalization_epsilon` is renamed `qk_l2_epsilon`: a
+  serde alias keeps old configs loading, `normalization_epsilon()` remains as
+  a deprecated accessor, and validation names the field
+  `delta_net.rule.qk_l2_epsilon`. `T5BeamSearchOptions::early_stopping` is
+  `EarlyStopping` (below). The pre-release alias `GptNeoXModel` is removed.
 - **Generation.** Presence and frequency penalties count generated tokens only
   by default (`PenaltyScope::PromptAndGenerated` restores prompt counting);
   `LogitsProcessor::process` treats its whole history as generated. Greedy
@@ -199,10 +248,16 @@ code written against unreleased sources.
   an explicit one is clamped to the vocabulary, and `top_p >= 1` disables
   top-p; causal loads also apply `min_p`, `no_repeat_ngram_size`, and
   `min_new_tokens` (clamping an unreachable `min_new_tokens` and reporting
-  it), while seq2seq loads report those three as unsupported.
+  it). Seq2seq loads keep `repetition_penalty`, `presence_penalty`, and
+  sampling neutral in their defaults and report those three processor
+  settings, `repetition_penalty`, and `do_sample` with its non-neutral
+  `temperature`, `top_k`, and `top_p` as unsupported, because beam search
+  does not apply them.
 - **Beam search.** `BeamSearchConfig::early_stopping` is the `EarlyStopping`
   enum: `false` now selects Transformers' heuristic default, and the previous
-  `false` behavior is `EarlyStopping::Never`. The cache needs capacity
+  `false` behavior is `EarlyStopping::Never`. `T5BeamSearchOptions::early_stopping`
+  is also `EarlyStopping` (default `Heuristic`); 0.1.0's default `false` is
+  `EarlyStopping::Never`. The cache needs capacity
   `prompt + max_new_tokens - 1`; log probabilities are F32.
 - **Speculative decoding.** `Qwen3_5SpeculativeDecoder` and the Nemotron-H
   speculative decoder take a `prompt_length` argument; penalties and
@@ -219,12 +274,31 @@ code written against unreleased sources.
   `Error::Shape`. Value errors now follow every layout error, messages read
   `token values in 0..V`, `position values in 0..N`, and
   `{tensor} and {owner} are on different devices`, and automatic config
-  errors name the family's field instead of `auto_causal.config`.
+  errors name the family's field instead of `auto_causal.config`. Automatic
+  loading reports typed `Error::CheckpointPlan` and `Error::CheckpointExecution`
+  instead of `Error::Checkpoint(String)`, with unchanged messages, and a
+  checkpoint holding fewer tensors than the configuration's depth (or exact
+  one-to-one inventory) needs fails with `CheckpointError::TooFewTensors`
+  before the contract is built. A modular decode state rejects a batch
+  mismatch as `Error::TensorCache(BatchSizeMismatch)`, as every family does.
+  GPT-NeoX `attentions: true` is `Error::BackendCapability`.
 - **Tokenization.** `EncodeOptions::max_length` truncates content before the
   post-processor's special tokens; truncation and padding serialized in
   `tokenizer.json` are no longer applied implicitly. Chat templates follow
   `apply_chat_template` semantics, including Python `str()` conversions in
-  filters and Python rounding; mapping keys reach templates sorted.
+  filters and Python rounding; mapping keys reach templates sorted. Template
+  discovery follows Transformers 5.2: `chat_template.jinja` (as `default`)
+  and `additional_chat_templates/<name>.jinja` replace the `chat_template`
+  entry of `tokenizer_config.json`; a template path counts only when it
+  resolves to a regular file (and the directory only when it resolves to a
+  directory), so dangling or looping symlinks, directories, and other
+  non-files are skipped; template files are read with universal newlines; and
+  `"chat_template": null` means no template. Without `template_name`,
+  `render_chat` and `encode_chat` use a checkpoint's `tool_use` template
+  whenever `ChatTemplateOptions::tools` is set and not JSON null, as
+  Transformers 5.2's `get_chat_template` does (CHAT-4). Errors for an unknown
+  or ambiguous template name list the available names, and a non-UTF-8
+  template file is `Error::Artifact`.
 - **Models.** Qwen3-MoE sliding windows apply to every block and
   `max_window_layers` is ignored, as in Transformers 5.2. DeepSeek and Muse
   reject `partial_rotary_factor` other than one. DeepSeek's `seq_aux = false`
@@ -233,11 +307,23 @@ code written against unreleased sources.
   T5 configs with `relative_attention_max_distance <= buckets / 2` are
   rejected. GPT-2 random initialization matches GPT-2; modular T5 biases start
   from `N(0, 1/hidden_size)`. Stateful DeepSeek and Muse decoding accept any
-  sentinel in masked columns.
+  sentinel in masked columns. `CacheConfig`'s sliding window only sizes raw
+  cache-bank rings; every model family, DeepSeek-V2 now included, ignores it.
+  `MuseGlimmerForCausalLm::load_checkpoint` detects the text-only layout
+  instead of assuming the multimodal one, and the Qwen3.5 backbone recipe
+  uses the same shared namespace classifier as family and automatic loading.
+  GPT-NeoX accepts `router_logits` and `auxiliary_losses` and returns empty
+  diagnostics. The modular reference decode accepts a row without history and
+  an entirely inactive step as exact-zero no-ops, so chunked `generate_causal`
+  works for `ModularCausalLm` on left-padded batches.
 - **Specs.** `RopeScaling` is no longer `Copy` and `Yarn` has `truncate`;
   `ModularLayer::init` takes `Option<&CrossAttentionSpec>`; validation accepts
   and rejects a few more corner cases (see MIGRATION); an explicit attention
   policy replaces all structural connectivity.
+- **Attention.** `GroupedQueryAttention::attend_bounded` on autodiff backends
+  evaluates one unbounded call with the same values, as Muse and DeepSeek do,
+  instead of returning `Error::BackendCapability`; MLA's bounded path now
+  rejects a zero-limit policy on every backend.
 - **Transfer.** Fan-out copies of one source parameter are independent; under
   `TiePolicy::Preserve`, fanning out a member of an existing tie is an error.
   `transfer::parameters` lists packed and rank-zero parameters.
@@ -246,7 +332,13 @@ code written against unreleased sources.
   reports ambiguity. F32 to BF16 and F64 to F16/BF16 casts round to nearest
   even; FP8 conversions fail at plan time. `embed_out` is quantization-eligible.
   Packed Qwen3.5 overrides install exactly (dequantized on Flex, packed on
-  Metal).
+  Metal). SafeTensors discovery reports out-of-section ranges at the first
+  violation in byte-offset order, through the verified tiling, and reports
+  header-entry errors such as byte-length mismatches before any layout error.
+  `LoadReport::quantized` and `QuantizationRecord` describe the artifact's
+  packed form, not in-memory storage. `AutoSeq2SeqLm::load_local` plans the
+  checkpoint before it builds the graph, and Nemotron-H and T5 planning
+  discover the checkpoint before building their contracts.
 - **Caches.** `SequenceLengths::lengths()` reports committed lengths inside a
   transaction. A failed cached call leaves every length and readable slot
   unchanged, but write-ahead may leave bytes beyond the lengths. Steps and read
@@ -254,9 +346,24 @@ code written against unreleased sources.
 - **MoE.** A token with a non-finite router score is an error instead of a NaN.
 - **Build.** The `flex` feature enables Flex's SIMD kernels and rayon-parallel
   matrix products.
+- **Internal structure.** Ragged-row block planning (`BlockLayout` and its
+  verified host plan) moved from DeepSeek-V2 into
+  `models::shared::{block, block_plan}`; the dense decoders' cache-group
+  numbering, step context, and checkpoint extents are verified once in
+  `models::shared::decoder_plan`, and Qwen3.5's compact row plan reuses the
+  shared row maps; embedding-multiplier rounding and logit soft caps live once
+  in `models::shared::scaling`; one verified ceiling (`crate::division`)
+  replaces three copies; and modular clamped experts run through the shared
+  `SparseMoe` forward. Outputs are bit-identical.
 - **Deprecated:** `LoadedModel::into_parts` (and its variants),
-  `CacheConfig::physical_capacity`, `BURNPACK_QUANTIZATION_FORMAT_VERSION`, and
-  `BurnpackQuantizationManifest::new`.
+  `CacheConfig::physical_capacity`, `BURNPACK_QUANTIZATION_FORMAT_VERSION`,
+  `BurnpackQuantizationManifest::new`,
+  `MuseGlimmerForCausalLm::load_checkpoint_with_family_options` and
+  `NemotronHForCausalLm::load_checkpoint_with_architecture_options` (use
+  `load_checkpoint_with`), `DeltaRuleConfig::normalization_epsilon()` (use the
+  `qk_l2_epsilon` field), and the unreleased `qwen3_moe::router_logits_point`
+  and `router_weights_point` (use `Layer::router_logits` and
+  `router_weights`).
 
 ### Fixed
 
@@ -316,6 +423,45 @@ code written against unreleased sources.
   since concrete types' inherent method returns the list directly. The new
   `scripts/check_release.py --gate guides`, which CI runs, compiles every Rust
   block of the guides as a doctest.
+- Configuration robustness: absurd layer and expert counts in `config.json`
+  produce contextual `ConfigError`s in every family instead of
+  capacity-overflow panics or unbounded allocation. Stack depths above
+  `MAX_LAYERS`, routed-expert counts above `MAX_EXPERTS`, and, for Qwen3-MoE,
+  DeepSeek-V2, and Nemotron-H, per-expert inventories above
+  `MAX_CHECKPOINT_TENSORS` fail validation; `gemma::MAX_LAYERS` re-exports
+  `MAX_LAYERS`, so its value drops from 2^20 to 2^18. Qwen3-MoE validation,
+  contract building, and model initialization process `mlp_only_layers` in
+  `O(L + M)` instead of `O(L · M)` (a 2^16-block override list validated in
+  0.01 s instead of 5.9 s in debug).
+- Configs written by Transformers 5, which spell infinity as
+  `{"__float__": "Infinity"}` (for example Nemotron-H's `time_step_limit`),
+  load; a tagged `-Infinity` or `NaN`, or an unknown tag, is rejected with its
+  JSON path.
+- Nemotron-H ignores the serialized `sliding_window`, as the pinned
+  Transformers graph does; `NemotronHConfig::attention_window` opts into a
+  window for experiments.
+- Packed loading: certified packed Qwen3-MoE and Muse Burnpack loads install
+  every packed projection exactly. Projections stay QFloat where the backend
+  keeps the artifact's blocks (Metal) and are stored as exact dequantized F32
+  where the quantized transpose requantizes (Burn Flex 0.21); previously Flex
+  silently requantized them. Every other family's tensor sink does the same
+  when driven through the quantized executor directly.
+- The packed Q4/Q8 Metal guard also rejects builds with
+  `attention-kernel-tracing`, which enables CubeCL autotuning.
+- The FP32 router projection (`RouterProjectionPrecision::Fp32`, used by
+  DeepSeek-V2 and Nemotron-H) gets a weight and bias gradient on every
+  backward pass. Under `Autodiff<Flex>`, a loss that reached the router only
+  through its logits used to lose the gradient after the first pass. Logits on
+  Flex are bit-identical.
+- Automatic decode states forward `reorder_within_groups`, so beam search
+  through `AutoSeq2SeqLm` keeps T5's encoder binding and cross-attention K/V in
+  place (about 0.15 ms instead of 1.3–1.5 ms per reorder at FLAN-T5-small
+  geometry with 4 beams and 512 source tokens on Flex).
+- Top-p ranks candidates by logit, like Transformers' `TopPLogitsWarper`, and
+  never drops a logit one ulp above a kept one (TOPP-TIE-1).
+- Chat templates: the renderer reads `\r\n` and `\r` in template source as
+  `\n`, as Jinja2 does, and keeps the newline right after `{% raw %}`, which
+  Jinja2 does not trim and MiniJinja did.
 - Packaging: the source archive now includes `verus/*.rs` and
   `verus/README.md`, which `tests/verus_harness.rs` reads, so `cargo test`
   passes from the extracted archive (all three Verus structure tests failed
@@ -351,6 +497,15 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   sliding attention slices window unions (13.6× fewer score elements at 32K);
   input validation and generation bookkeeping read back to the host once per
   step.
+- `generate_causal` and seq2seq beam search no longer materialize a negated
+  `[batch, vocabulary]` mask per step: about 5–6 ms per step saved at batch 8
+  with a 248,320-token vocabulary on Flex, with bit-identical results.
+- On Flex, all bit-identical: cache token writes are in place, costing
+  O(written slots) instead of O(capacity); the Mamba-2 decode update is a
+  `k = 1` outer product (8–18×); Mamba-2 segment transitions use flattened
+  tables (about 2.8–4.2×); the one-token DeltaNet and Mamba-2 depthwise
+  convolution column avoids rayon (1.5–13×); and RoPE application is one fused
+  pass (22–65× on 512-token prefill operands).
 - On Metal, checkpoint weights upload as persistent allocations (`45ac457`),
   so CubeCL gives each weight an exact-size page instead of carving it from
   the pool meant for activations. Loading Qwen2-7B with F32 casts (30.5 GB of
@@ -368,7 +523,9 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   dispatch, DeltaNet, Mamba-2, and MLA geometry, position indices,
   configuration validation, selections, transfer plans, tokenizer layout and
   chat-template scanning and budgets, family checkpoint loaders, and every
-  family's batching and cache-slot plans. See [verus/README.md](verus/README.md).
+  family's batching and cache-slot plans, including the configuration count
+  bounds and exact per-expert checkpoint inventories and one shared ceiling
+  division. See [verus/README.md](verus/README.md).
 - CI runs the proofs on every push and pull request that changes `src/` or
   `verus/`, through the new `scripts/check_release.py --gate verus`. The gate
   pins the prover release, fails when a harness's count differs from the table
@@ -393,7 +550,12 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   the MTP bank of cache transactions) and property suites for generation,
   RoPE, and connectivity; open findings are kept as ignored reproducers.
 - Ignored real-checkpoint gates for the Llama family, Gemma (including a
-  long-context bundle), and gpt-oss.
+  long-context bundle), and gpt-oss, and artifact-gated tokenizer and
+  chat-template parity tests for the pinned FLAN-T5-small, Qwen3.5, Nemotron-H,
+  and Muse Glimmer tokenizers.
+- The configuration fuzz target covers all eleven family parsers without
+  count filters, and the modular-spec generator draws clamped experts,
+  embedding scales, and logit caps.
 
 ## [0.1.0] - 2026-09-10
 
