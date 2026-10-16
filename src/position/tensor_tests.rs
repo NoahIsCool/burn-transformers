@@ -370,6 +370,50 @@ fn long_rope_tables_scale_amplitude_and_switch_with_context() {
     assert!((f64::from(long_cosine[5]) - expected_long).abs() < 1e-6);
 }
 
+/// Every accepted LongRoPE factor keeps the angle tables finite at every integer position.
+///
+/// Review finding ROPE-ANGLE-OVERFLOW: a factor of `f32::MIN_POSITIVE` kept
+/// the inverse frequency `1 / r` finite (`8.5e37`), but the angle `p / r`
+/// overflowed from position 4 on and `cos(inf)` is NaN. Factors below
+/// [`LongRopeScaling::MIN_FACTOR`] (`2^-64`) are now refused, and those at or
+/// above it stay finite up to the largest `i32` position (and, by the bound
+/// `2^63 * 2^64 = 2^127 < f32::MAX`, every `i64` position too).
+#[test]
+fn accepted_long_rope_factors_keep_angles_finite_at_every_position() {
+    let device = Default::default();
+    let floor = f64::from(LongRopeScaling::MIN_FACTOR);
+    assert_eq!(floor, 2f64.powi(-64));
+    for factor in [
+        1e-45,
+        f64::from(f32::MIN_POSITIVE),
+        1e-37,
+        1e-20,
+        floor * 0.999,
+        floor,
+        1e-19,
+        1.0,
+    ] {
+        let Ok(long) = LongRopeScaling::new(&[factor, 1.0], &[1.0, 1.0], 4096, 2.0) else {
+            assert!(factor < floor, "factor {factor} must be accepted");
+            continue;
+        };
+        assert!(factor >= floor, "factor {factor} must be refused");
+        let config = RopeConfig::new(4, 4, 1.0, long.into()).expect("rope");
+        let positions = Tensor::<TestBackend, 2, Int>::from_ints(
+            [[0, 1, 3, 4, 5, 35, 4095, 1 << 24, i32::MAX - 1, i32::MAX]],
+            &device,
+        );
+        let angles = rotary_angles(config, positions, 4096).expect("angles");
+        for table in [angles.cosine, angles.sine] {
+            let values = table.into_data().to_vec::<f32>().expect("f32 table");
+            assert!(
+                values.iter().all(|value| value.is_finite()),
+                "factor {factor}: {values:?}"
+            );
+        }
+    }
+}
+
 /// Proportional RoPE leaves its zero-frequency pairs, which interleave the head, unrotated.
 #[test]
 fn proportional_tail_pairs_are_not_rotated() {

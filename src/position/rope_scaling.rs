@@ -165,6 +165,18 @@ pub struct LongRopeScaling {
 }
 
 impl LongRopeScaling {
+    /// Smallest accepted factor, `2^-64` (about `5.4e-20`), after rounding to `f32`.
+    ///
+    /// A factor `r` divides a base frequency of at most one (bases are at
+    /// least one), so `omega / r <= 2^64`. The device forms the angle
+    /// `p * omega / r` in `f32`, and every integer position satisfies
+    /// `|p| <= 2^63`, so the angle stays below `2^127 < f32::MAX` and its
+    /// cosine and sine are finite. A smaller normal factor such as
+    /// `f32::MIN_POSITIVE` keeps the frequency itself finite (`8.5e37`) but
+    /// overflows the angle from position 4 on, and `cos(inf)` is NaN.
+    /// Published checkpoints use factors of at least one.
+    pub const MIN_FACTOR: f32 = f32::from_bits(63 << 23);
+
     /// Creates LongRoPE scaling with the reference default amplitude.
     ///
     /// `factor` is the checkpoint's context-extension factor; configs that omit
@@ -177,11 +189,11 @@ impl LongRopeScaling {
     ///
     /// Returns an error when the tables are empty, longer than
     /// [`MAX_LONG_ROPE_FREQUENCIES`], of unequal length, or contain a value that
-    /// does not round to a normal positive `f32` (at least
-    /// [`f32::MIN_POSITIVE`], at most [`f32::MAX`]); when `factor` is not
-    /// finite and at least one; or when the original context is zero. The
-    /// normal range keeps every scaled frequency `omega_i / r_i` finite in
-    /// `f32` for bases `theta >= 1` (see [`super::RopeConfig::new`]).
+    /// does not round to an `f32` from [`Self::MIN_FACTOR`] (`2^-64`) to
+    /// [`f32::MAX`]; when `factor` is not finite and at least one; or when the
+    /// original context is zero. That range keeps every angle
+    /// `p * omega_i / r_i` finite in `f32` for bases `theta >= 1` (see
+    /// [`super::RopeConfig::new`]) at every integer position `p`.
     pub fn new(
         short_factor: &[f64],
         long_factor: &[f64],
@@ -298,20 +310,29 @@ impl fmt::Debug for LongRopeScaling {
     }
 }
 
+/// Whether `value` is an accepted LongRoPE factor: finite in `f32` and at least [`LongRopeScaling::MIN_FACTOR`].
+///
+/// The check rounds exactly as the stored table does (`value as f32`), so a
+/// huge `f64` cannot overflow to infinity, a tiny one can neither flush to a
+/// zero divisor nor (as a subnormal such as `1e-45`) overflow the frequency,
+/// and no accepted factor can overflow an angle `p * omega / r`. NaN fails
+/// both comparisons.
+fn is_long_rope_factor(value: f64) -> bool {
+    let rounded = value as f32;
+    rounded.is_finite() && rounded >= LongRopeScaling::MIN_FACTOR
+}
+
 /// Copies a checked factor list into fixed-capacity `f32` storage.
 ///
-/// Each value is rounded to `f32` first and must be a normal positive `f32`
-/// ([`is_normal_positive_f32`]): a huge `f64` cannot overflow to infinity,
-/// and a tiny one can neither flush to a zero divisor nor, as a subnormal
-/// such as `1e-45`, divide a base frequency of one into `7e44`, which is
-/// infinite in `f32`.
+/// Each value is rounded to `f32` first and must pass
+/// [`is_long_rope_factor`].
 fn factor_table(
     table: &'static str,
     values: &[f64],
 ) -> Result<[f32; MAX_LONG_ROPE_FREQUENCIES], RopeConfigError> {
     let mut stored = [1.0_f32; MAX_LONG_ROPE_FREQUENCIES];
     for (index, (&value, slot)) in values.iter().zip(stored.iter_mut()).enumerate() {
-        if !is_normal_positive_f32(value) {
+        if !is_long_rope_factor(value) {
             return Err(RopeConfigError::InvalidLongRopeFactor {
                 table,
                 index,

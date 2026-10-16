@@ -1276,13 +1276,13 @@ fn bases_and_factors_that_overflow_f32_frequencies_are_rejected() {
             r#"{{"rope_type": "longrope", "short_factor": [{short}, 1, 1, 1, 1, 1, 1, 1], "long_factor": [1, 1, 1, 1, 1, 1, 1, 1], "original_max_position_embeddings": 64}}"#
         ))
     };
-    for factor in ["1e-45", "1e-39", "1e39"] {
+    for factor in ["1e-45", "1e-39", "1.1754943508222875e-38", "1e-20", "1e39"] {
         let error = rejects(&longrope(factor), &context(), "test.rope.short_factor");
-        assert!(error.to_string().contains("normal positive f32"), "{error}");
+        assert!(error.to_string().contains("2^-64 to f32::MAX"), "{error}");
     }
-    let config = longrope("1.1754943508222875e-38")
+    let config = longrope("5.421010862427522e-20")
         .to_rope_config(&context())
-        .expect("f32::MIN_POSITIVE is a valid factor");
+        .expect("2^-64 is the smallest valid factor");
     for evaluated in [1, 64, 65] {
         let frequencies = crate::position::RotaryFrequencies::new(config, evaluated).unwrap();
         assert!(frequencies.inverse().iter().all(|omega| omega.is_finite()));

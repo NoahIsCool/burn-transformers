@@ -36,7 +36,7 @@ use transformers::{
         DynamicNtkContext, MropeHandling, PartialRotary, RopeContext, RopeParameterSet,
         RopeParameters, SoftmaxMscale, UnusedRopeFields, YarnMscaleConvention,
     },
-    position::{RopeScaling, RotaryFrequencies},
+    position::{LongRopeScaling, RopeScaling, RotaryFrequencies},
 };
 
 use crate::Bytes;
@@ -201,6 +201,12 @@ fn context(bytes: &mut Bytes<'_>) -> RopeContext {
     context
 }
 
+/// The largest magnitude of any integer position, `2^63`, as the device's `f32` angle factor.
+///
+/// Every accepted frequency `omega` must keep the angle `2^63 * omega`
+/// finite in `f32`, the precision in which the device forms angles.
+pub(crate) const LARGEST_POSITION: f32 = 9_223_372_036_854_775_808.0;
+
 /// Whether `value` rounds to a normal positive `f32`, the documented range of
 /// RoPE amplitudes and of the softmax multiplier.
 fn normal_positive_f32(value: f64) -> bool {
@@ -235,7 +241,7 @@ fn check_config(config: transformers::position::RopeConfig, context: &RopeContex
                 long.short_factors()
                     .iter()
                     .chain(long.long_factors())
-                    .all(|factor| factor.is_normal() && *factor > 0.0),
+                    .all(|factor| factor.is_finite() && *factor >= LongRopeScaling::MIN_FACTOR),
                 "{config:?}"
             );
         }
@@ -243,6 +249,10 @@ fn check_config(config: transformers::position::RopeConfig, context: &RopeContex
             assert!(
                 omega.is_finite() && omega >= 0.0,
                 "inverse frequency {omega} for {config:?}"
+            );
+            assert!(
+                (LARGEST_POSITION * omega).is_finite(),
+                "angle 2^63 * {omega} overflows for {config:?}"
             );
         }
     }

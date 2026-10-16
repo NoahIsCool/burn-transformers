@@ -170,20 +170,26 @@ fn long_rope_rejects_invalid_tables() {
     ));
 }
 
-/// LongRoPE accepts exactly the factors that round to normal positive `f32` values.
+/// LongRoPE accepts exactly the factors that round to `f32` values in `[2^-64, f32::MAX]`.
 ///
 /// Regression for fuzz finding ROPE-F32-2: the smallest subnormal `1e-45` was
 /// accepted and divided a base frequency of one into `7e44`, which is `inf` in
-/// `f32`. The boundaries `f32::MIN_POSITIVE` and `f32::MAX` (and an `f64` just
-/// above it that rounds down to it) are accepted and keep every frequency finite.
+/// `f32`. Review finding ROPE-ANGLE-OVERFLOW then showed that the normal
+/// `f32::MIN_POSITIVE` still overflows the *angle* `p * omega / r` from
+/// position 4 on, so the floor is [`LongRopeScaling::MIN_FACTOR`]. The
+/// boundaries `2^-64` and `f32::MAX` (and an `f64` just above it that rounds
+/// down to it) are accepted and keep every frequency finite.
 #[test]
-fn long_rope_factors_must_be_normal_f32_values() {
+fn long_rope_factors_must_keep_angles_finite() {
+    let smallest = f64::from(LongRopeScaling::MIN_FACTOR);
+    assert_eq!(smallest, 2f64.powi(-64));
+    assert!(is_long_rope_factor(smallest));
     let largest = f64::from(f32::MAX);
     let rounds_to_largest = largest * (1.0 + f64::EPSILON);
     assert_eq!(rounds_to_largest as f32, f32::MAX);
-    for factor in [f64::from(f32::MIN_POSITIVE), largest, rounds_to_largest] {
+    for factor in [smallest, largest, rounds_to_largest] {
         let long = LongRopeScaling::new(&[factor, 1.0], &[1.0, factor], 8, 2.0)
-            .expect("normal f32 factors are accepted");
+            .expect("factors in range are accepted");
         // A base of one is the extreme: every unscaled frequency is one.
         for theta in [1.0, 10_000.0] {
             for context in [1, 8, 9] {
@@ -201,7 +207,17 @@ fn long_rope_factors_must_be_normal_f32_values() {
             }
         }
     }
-    for factor in [1e-45, f64::from(f32::MIN_POSITIVE) * 0.999] {
+    for factor in [
+        1e-45,
+        f64::from(f32::MIN_POSITIVE),
+        smallest * 0.999,
+        f64::NAN,
+        f64::INFINITY,
+        1e39,
+        0.0,
+        -1.0,
+    ] {
+        assert!(!is_long_rope_factor(factor), "{factor}");
         assert!(matches!(
             LongRopeScaling::new(&[factor, 1.0], &[1.0, 1.0], 8, 2.0),
             Err(RopeConfigError::InvalidLongRopeFactor {
@@ -376,7 +392,7 @@ fn new_errors_have_actionable_messages() {
                 index: 3,
                 value: -1.0,
             },
-            "long_factor[3] must be a normal positive f32 value (1.1754944e-38..=3.4028235e38), got -1",
+            "long_factor[3] must round to an f32 value in 5.421011e-20..=3.4028235e38 (2^-64 to f32::MAX), got -1",
         ),
         (
             RopeConfigError::LongRopeFactorCount {

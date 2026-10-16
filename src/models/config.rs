@@ -673,20 +673,21 @@ impl RopeParameters {
                     let values = values.ok_or_else(|| {
                         ConfigError::new(architecture, field, "is required for longrope")
                     })?;
-                    // Factors divide `f32` frequencies, so each must round to a
-                    // normal positive `f32` (see `LongRopeScaling::new`).
+                    // Factors divide `f32` frequencies, so each must round to an
+                    // `f32` that keeps every angle `p * omega / r` finite (see
+                    // `LongRopeScaling::MIN_FACTOR`).
+                    let minimum = crate::position::LongRopeScaling::MIN_FACTOR;
                     if values.len() != expected
                         || values.iter().any(|&value| {
                             let rounded = value as f32;
-                            !(rounded.is_finite() && rounded >= f32::MIN_POSITIVE)
+                            !(rounded.is_finite() && rounded >= minimum)
                         })
                     {
                         return Err(ConfigError::new(
                             architecture,
                             field,
                             format!(
-                                "must contain {expected} factors that are normal positive f32 values ({:e}..={:e})",
-                                f32::MIN_POSITIVE,
+                                "must contain {expected} factors that round to f32 values in {minimum:e}..={:e} (2^-64 to f32::MAX)",
                                 f32::MAX
                             ),
                         ));

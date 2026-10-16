@@ -176,16 +176,25 @@ fn longrope_factor_vectors_match_complex_frequency_count() {
     assert!(invalid.validate_for("test", 8, 128, None).is_err());
 
     // Factors divide `f32` frequencies: a subnormal or overflowing value is
-    // rejected (ROPE-F32-2), the smallest normal one is accepted.
-    for factor in [1e-45, 1e-39, 1e39, 0.0, f64::NAN] {
+    // rejected (ROPE-F32-2), and so is a normal one below `2^-64` whose
+    // angles overflow (ROPE-ANGLE-OVERFLOW); `2^-64` itself is accepted.
+    for factor in [
+        1e-45,
+        1e-39,
+        f64::from(f32::MIN_POSITIVE),
+        1e-20,
+        1e39,
+        0.0,
+        f64::NAN,
+    ] {
         let mut tiny = valid.clone();
         tiny.short_factor = Some(vec![factor, 1.0, 1.0, 1.0]);
         let error = tiny.validate_for("test", 8, 128, None).unwrap_err();
         assert_eq!(error.field, "short_factor", "{factor}");
-        assert!(error.reason.contains("normal positive f32"), "{error}");
+        assert!(error.reason.contains("2^-64 to f32::MAX"), "{error}");
     }
     let mut smallest = valid;
-    smallest.short_factor = Some(vec![f64::from(f32::MIN_POSITIVE), 1.0, 1.0, 1.0]);
+    smallest.short_factor = Some(vec![2f64.powi(-64), 1.0, 1.0, 1.0]);
     smallest.validate_for("test", 8, 128, None).unwrap();
 }
 

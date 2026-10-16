@@ -31,9 +31,10 @@
 //!
 //! # Precision envelope
 //!
-//! Frequencies are rounded once to `f32` and the amplitude multiplies `f32`
-//! cosine/sine tables, so validation guarantees finite tables for every
-//! accepted configuration, not only finite `f64` parameters:
+//! Frequencies are rounded once to `f32`, angles are formed in `f32`, and the
+//! amplitude multiplies `f32` cosine/sine tables, so validation guarantees
+//! finite tables for every accepted configuration at every integer position,
+//! not only finite `f64` parameters:
 //!
 //! - `theta >= 1` keeps every base frequency `omega_i = theta^(-2i/d)` in
 //!   `(0, 1]` (a base below one makes them grow geometrically: `theta =
@@ -41,10 +42,16 @@
 //!   Every published checkpoint uses `theta >= 10^4`.
 //! - Every policy except LongRoPE divides `omega_i` by a factor of at least
 //!   one or blends it with such a quotient, so it stays in `[0, 1]`.
-//! - LongRoPE divides by searched per-pair factors, which must be *normal*
-//!   positive `f32` values, at least [`f32::MIN_POSITIVE`]; then
-//!   `omega_i / r_i <= 1 / f32::MIN_POSITIVE < f32::MAX`. A subnormal factor
-//!   such as `1e-45` would overflow, and GPU kernels may flush it to zero.
+//! - LongRoPE divides by searched per-pair factors, which must round to `f32`
+//!   values of at least [`LongRopeScaling::MIN_FACTOR`] (`2^-64`); then
+//!   `omega_i / r_i <= 2^64`. A subnormal factor such as `1e-45` would
+//!   overflow the frequency itself, and GPU kernels may flush it to zero.
+//! - The device forms each angle `p * omega_i` in `f32`. Integer positions
+//!   satisfy `|p| <= 2^63`, so with every frequency at most `2^64` the angle
+//!   stays below `2^127 < f32::MAX`, and its cosine and sine are finite at
+//!   every position, not only at small ones (a LongRoPE factor of
+//!   `f32::MIN_POSITIVE` keeps `omega_i / r_i` finite but overflows the angle
+//!   from position 4 on, and `cos(inf)` is NaN).
 //! - Amplitudes (YaRN and LongRoPE `attention_factor`) must be normal positive
 //!   `f32` values too: an amplitude above `f32::MAX` turns `sin(0) = 0` at
 //!   position zero into `0 * inf = NaN`.
@@ -889,8 +896,8 @@ impl fmt::Display for RopeConfigError {
                 value,
             } => write!(
                 formatter,
-                "LongRoPE {table}[{index}] must be a normal positive f32 value ({:e}..={:e}), got {value}",
-                f32::MIN_POSITIVE,
+                "LongRoPE {table}[{index}] must round to an f32 value in {:e}..={:e} (2^-64 to f32::MAX), got {value}",
+                LongRopeScaling::MIN_FACTOR,
                 f32::MAX
             ),
             Self::LongRopeFactorCount { expected, actual } => write!(

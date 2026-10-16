@@ -179,9 +179,12 @@ fn accepted_bases_have_finite_frequencies() {
 ///
 /// Factors only had to be finite and positive after rounding to `f32`, so the
 /// smallest subnormal `1e-45` passed and divided `omega_0 = 1` into `7e44`,
-/// which is `inf` in `f32`. Factors must now be normal `f32` values (at least
-/// `f32::MIN_POSITIVE`, so `omega / factor <= 8.5e37`); the boundary itself
-/// translates with finite frequencies.
+/// which is `inf` in `f32`. A normal factor such as `f32::MIN_POSITIVE` kept
+/// the frequency finite but still overflowed the angle `p * omega` from
+/// position 4 on. Factors must now round to at least
+/// `LongRopeScaling::MIN_FACTOR = 2^-64`, so `omega / factor <= 2^64` and
+/// every angle at a position `|p| <= 2^63` stays below `2^127`; the boundary
+/// itself translates with finite frequencies and angles.
 #[test]
 fn accepted_long_rope_factors_have_finite_frequencies() {
     let context = RopeContext::new(ARCHITECTURE, 4, 16);
@@ -192,19 +195,26 @@ fn accepted_long_rope_factors_have_finite_frequencies() {
         }))
         .unwrap()
     };
-    let error = long_rope(1e-45)
-        .to_rope_config("full_attention", &context)
-        .unwrap_err();
-    assert!(
-        matches!(&error, Error::Configuration { field, .. } if field == "fuzz.rope.short_factor"),
-        "{error}"
-    );
-    let config = long_rope(f64::from(f32::MIN_POSITIVE))
+    for rejected in [1e-45, f64::from(f32::MIN_POSITIVE), 1e-20] {
+        let error = long_rope(rejected)
+            .to_rope_config("full_attention", &context)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "fuzz.rope.short_factor"),
+            "{error}"
+        );
+    }
+    let config = long_rope(f64::from(LongRopeScaling::MIN_FACTOR))
         .to_rope_config("full_attention", &context)
         .unwrap();
     for evaluated in [4, 16] {
         let frequencies = RotaryFrequencies::new(config, evaluated).unwrap();
-        assert!(frequencies.inverse().iter().all(|omega| omega.is_finite()));
+        assert!(
+            frequencies
+                .inverse()
+                .iter()
+                .all(|omega| (LARGEST_POSITION * omega).is_finite())
+        );
     }
 }
 

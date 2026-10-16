@@ -31,6 +31,9 @@ use crate::position::{
     ProportionalRopeScaling, RopeConfig, RopeScaling, YarnConfig,
 };
 
+/// The largest magnitude of any integer position, `2^63`, as the device's `f32` angle factor.
+const LARGEST_POSITION: f32 = 9_223_372_036_854_775_808.0;
+
 /// Relative tolerance between F64-then-F32 frequencies and the F32 reference.
 const RELATIVE_TOLERANCE: f64 = 2e-6;
 
@@ -371,13 +374,16 @@ proptest::proptest! {
         }
     }
 
-    /// Every configuration the validators accept has finite `f32` frequencies and amplitude.
+    /// Every configuration the validators accept has finite `f32` frequencies, angles, and amplitude.
     ///
     /// Bases span `10^-320..10^308` and LongRoPE factors and amplitudes
     /// `10^-50..10^40`, so the search crosses every `f32` and `f64` boundary
     /// (findings ROPE-F32-1/2). Rejection is exact: a base is refused iff it is
-    /// below one, and a factor or amplitude iff it does not round to a normal
-    /// positive `f32`.
+    /// below one, a factor iff it does not round to an `f32` in
+    /// `[2^-64, f32::MAX]`, and an amplitude iff it does not round to a normal
+    /// positive `f32`. Angles are checked as the device forms them, an `f32`
+    /// product with the largest integer position `2^63` (review finding
+    /// ROPE-ANGLE-OVERFLOW: frequency checks alone missed `p * omega = inf`).
     #[test]
     fn accepted_configurations_have_finite_tables(
         pairs in 1usize..=8,
@@ -392,6 +398,10 @@ proptest::proptest! {
             let rounded = value as f32;
             rounded.is_finite() && rounded >= f32::MIN_POSITIVE
         };
+        let factor_in_range = |value: f64| {
+            let rounded = value as f32;
+            rounded.is_finite() && rounded >= LongRopeScaling::MIN_FACTOR
+        };
         let short: Vec<f64> = (0..pairs)
             .map(|index| 10f64.powf(factor_exponents[index % 2]))
             .collect();
@@ -401,7 +411,7 @@ proptest::proptest! {
             .and_then(|scaling| scaling.with_attention_factor(amplitude));
         proptest::prop_assert_eq!(
             long_rope.is_ok(),
-            short.iter().all(|&factor| normal(factor)) && normal(amplitude)
+            short.iter().all(|&factor| factor_in_range(factor)) && normal(amplitude)
         );
         let yarn = YarnConfig::new(4.0, 16).and_then(|yarn| yarn.with_attention_factor(amplitude));
         proptest::prop_assert_eq!(yarn.is_ok(), normal(amplitude));
@@ -428,6 +438,8 @@ proptest::proptest! {
                 let frequencies = RotaryFrequencies::new(config, evaluated).expect("context");
                 for omega in frequencies.inverse() {
                     proptest::prop_assert!(omega.is_finite() && *omega >= 0.0, "{config:?}: {omega}");
+                    let angle = LARGEST_POSITION * omega;
+                    proptest::prop_assert!(angle.is_finite(), "{config:?}: 2^63 * {omega}");
                 }
                 proptest::prop_assert!(normal(frequencies.amplitude()), "{config:?}");
             }
