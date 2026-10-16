@@ -26,7 +26,9 @@ use crate::{
     Result, TokenMask, architecture::bool_tensor_from_values, cache::CacheConfig,
 };
 
-use super::bookkeeping::{prefill_chunk_end, row_span};
+use super::bookkeeping::{
+    advance_active_positions, prefill_chunk_end, required_cache_capacity, row_span,
+};
 use super::metadata::{self, extract_last_logits};
 use super::{
     FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenHistory,
@@ -467,7 +469,7 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
     let prompt_lengths = metadata::nonempty_row_lengths(&prompt_valid, batch, sequence, "prompt")?;
     let maximum_prompt = prompt_lengths.iter().copied().max().unwrap_or(0);
     let required_capacity =
-        metadata::required_cache_capacity(maximum_prompt, request.generation.max_new_tokens)
+        required_cache_capacity(maximum_prompt, request.generation.max_new_tokens)
             .ok_or_else(|| Error::Generation("required cache capacity overflows usize".into()))?;
     if request.cache.capacity() < required_capacity {
         return Err(Error::Generation(format!(
@@ -532,7 +534,8 @@ fn position_column<B: Backend>(positions: &[i64], device: &B::Device) -> Tensor<
 ///
 /// The request preflight (`metadata::next_positions`) guarantees every
 /// position sent during `max_new_tokens - 1` decode steps fits `i32`, so the
-/// checked increment cannot fail for a validated request.
+/// checked increment cannot fail for a validated request. The per-row update
+/// is the Verus-verified [`advance_active_positions`].
 fn advance_positions(positions: &mut [i64], active: &[bool]) -> Result<()> {
     if positions.len() != active.len() {
         return Err(Error::Generation(format!(
@@ -541,14 +544,8 @@ fn advance_positions(positions: &mut [i64], active: &[bool]) -> Result<()> {
             active.len()
         )));
     }
-    for (row, (position, is_active)) in positions.iter_mut().zip(active).enumerate() {
-        if *is_active {
-            *position = position.checked_add(1).ok_or_else(|| {
-                Error::Generation(format!("explicit position overflow for row {row}"))
-            })?;
-        }
-    }
-    Ok(())
+    advance_active_positions(positions, active)
+        .map_err(|row| Error::Generation(format!("explicit position overflow for row {row}")))
 }
 
 /// Combines tracker tokens, probabilities, and prompt lengths into public output.

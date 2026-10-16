@@ -7,9 +7,11 @@
 use proptest::prelude::*;
 
 use super::{
-    PositionError, SpeculativeCommit, SpeculativeOutcome, StopDecision, beam_row, ends_with_stop,
-    fill_beam_expansion, frontier_capacity, longest_stop_suffix, next_position_after,
-    prefill_chunk_end, prompt_lookup_span, row_span, speculative_commit, stop_decision,
+    FrontierPlan, PositionError, RowSpanError, SpeculativeCommit, SpeculativeOutcome, StopDecision,
+    advance_active_positions, beam_row, ends_with_stop, fill_beam_expansion, frontier_capacity,
+    longest_stop_suffix, matrix_row_span, next_position_after, partition_frontier,
+    prefill_chunk_end, prompt_lookup_draft_span, prompt_lookup_span, required_cache_capacity,
+    row_span, speculative_commit, stop_decision,
 };
 
 /// Naive longest-suffix search: maximum length, then smallest index.
@@ -137,6 +139,108 @@ fn next_position_boundaries() {
     );
 }
 
+/// The cache holds the prompt plus every fed-back token, never the final one.
+#[test]
+fn cache_capacity_excludes_the_final_token() {
+    assert_eq!(required_cache_capacity(5, 1), Some(5));
+    assert_eq!(required_cache_capacity(5, 3), Some(7));
+    assert_eq!(required_cache_capacity(5, 0), Some(5));
+    assert_eq!(required_cache_capacity(usize::MAX, 1), Some(usize::MAX));
+    assert_eq!(required_cache_capacity(usize::MAX, 2), None);
+}
+
+/// Active rows advance by one, inactive rows stay, and overflow names the first row.
+#[test]
+fn active_positions_advance_and_report_the_first_overflow() {
+    let mut positions = [3, 7, 9];
+    assert_eq!(
+        advance_active_positions(&mut positions, &[true, false, true]),
+        Ok(())
+    );
+    assert_eq!(positions, [4, 7, 10]);
+    let mut positions = [1, i64::MAX, i64::MAX, 5];
+    assert_eq!(
+        advance_active_positions(&mut positions, &[true, false, true, true]),
+        Err(2)
+    );
+    // Rows before the failure advanced; rows from it on are unchanged.
+    assert_eq!(positions, [2, i64::MAX, i64::MAX, 5]);
+    let mut empty: [i64; 0] = [];
+    assert_eq!(advance_active_positions(&mut empty, &[]), Ok(()));
+}
+
+/// Matrix rows are exact spans, and each failure reports its first cause.
+#[test]
+fn matrix_row_spans_report_overflow_and_bounds() {
+    assert_eq!(matrix_row_span(0, 4, 8), Ok((0, 4)));
+    assert_eq!(matrix_row_span(1, 4, 8), Ok((4, 8)));
+    assert_eq!(matrix_row_span(2, 4, 8), Err(RowSpanError::OutOfBounds));
+    assert_eq!(matrix_row_span(3, 0, 0), Ok((0, 0)));
+    assert_eq!(
+        matrix_row_span(usize::MAX, 2, usize::MAX),
+        Err(RowSpanError::OffsetOverflow)
+    );
+    assert_eq!(
+        matrix_row_span(1, usize::MAX / 2 + 1, usize::MAX),
+        Err(RowSpanError::EndOverflow)
+    );
+}
+
+/// The frontier partition keeps in-width finished ranks and the best live ranks.
+#[test]
+fn frontier_partition_examples() {
+    let finished = [true, false, true, false, false, true, false];
+    assert_eq!(
+        partition_frontier(&finished, 2),
+        FrontierPlan {
+            finalized: vec![0],
+            selected: vec![1, 3],
+        }
+    );
+    assert_eq!(
+        partition_frontier(&finished, 3),
+        FrontierPlan {
+            finalized: vec![0, 2],
+            selected: vec![1, 3, 4],
+        }
+    );
+    assert_eq!(
+        partition_frontier(&[true, true], 4),
+        FrontierPlan {
+            finalized: vec![0, 1],
+            selected: vec![],
+        }
+    );
+    assert_eq!(
+        partition_frontier(&[], 4),
+        FrontierPlan {
+            finalized: vec![],
+            selected: vec![],
+        }
+    );
+    assert_eq!(
+        partition_frontier(&[false, true], 0),
+        FrontierPlan {
+            finalized: vec![],
+            selected: vec![],
+        }
+    );
+}
+
+/// Prompt lookup across sizes prefers the largest matching n-gram.
+#[test]
+fn prompt_lookup_draft_prefers_the_largest_size() {
+    let history = [7, 1, 2, 3, 4, 1, 2, 5, 1, 2];
+    // Size 3 ("5 1 2") has no earlier match; size 2 ("1 2") does.
+    assert_eq!(prompt_lookup_draft_span(&history, 1, 3, 3), Some((2, 3, 6)));
+    assert_eq!(prompt_lookup_draft_span(&history, 3, 3, 3), None);
+    // A zero minimum behaves like one; an empty range proposes nothing.
+    assert_eq!(prompt_lookup_draft_span(&[4, 4], 0, 1, 2), Some((1, 1, 2)));
+    assert_eq!(prompt_lookup_draft_span(&history, 3, 2, 3), None);
+    assert_eq!(prompt_lookup_draft_span(&history, 0, 0, 3), None);
+    assert_eq!(prompt_lookup_draft_span(&history, 1, 3, 0), None);
+}
+
 /// Prompt lookup proposes the continuation of the earliest earlier occurrence.
 #[test]
 fn prompt_lookup_examples() {
@@ -215,6 +319,40 @@ proptest! {
     #[test]
     fn frontier_capacity_matches_formula(beams in 0_usize..1 << 20, eos in 0_usize..64) {
         prop_assert_eq!(frontier_capacity(beams, eos), Some(beams * (eos + 1).max(2)));
+    }
+
+    /// The frontier partition agrees with the original single-pass selection loop.
+    #[test]
+    fn frontier_partition_matches_reference(
+        finished in proptest::collection::vec(any::<bool>(), 0..24),
+        beams in 0_usize..8,
+    ) {
+        let mut finalized = Vec::new();
+        let mut selected = Vec::new();
+        for (rank, &is_finished) in finished.iter().enumerate() {
+            if is_finished {
+                if rank < beams {
+                    finalized.push(rank);
+                }
+            } else if selected.len() < beams {
+                selected.push(rank);
+            }
+        }
+        prop_assert_eq!(partition_frontier(&finished, beams), FrontierPlan { finalized, selected });
+    }
+
+    /// Multi-size prompt lookup agrees with trying each size from the largest down.
+    #[test]
+    fn prompt_lookup_draft_matches_reference(
+        history in proptest::collection::vec(0_u32..3, 0..12),
+        min_ngram in 0_usize..4,
+        max_ngram in 0_usize..5,
+        budget in 0_usize..4,
+    ) {
+        let expected = (min_ngram.max(1)..=max_ngram).rev().find_map(|ngram| {
+            prompt_lookup_span(&history, ngram, budget).map(|(start, end)| (ngram, start, end))
+        });
+        prop_assert_eq!(prompt_lookup_draft_span(&history, min_ngram, max_ngram, budget), expected);
     }
 
     /// Prompt lookup agrees with a naive earliest-match scan.

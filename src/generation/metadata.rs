@@ -285,17 +285,6 @@ pub(super) fn extract_last_logits<B: Backend>(
     Ok(logits.squeeze_dim::<2>(1))
 }
 
-/// Minimum decode-cache capacity for a prompt and a new-token budget.
-///
-/// The final generated token is returned but never fed back, so a cache holds
-/// at most `prompt + max_new_tokens - 1` tokens.
-pub(super) fn required_cache_capacity(
-    longest_prompt: usize,
-    max_new_tokens: usize,
-) -> Option<usize> {
-    longest_prompt.checked_add(max_new_tokens.saturating_sub(1))
-}
-
 /// Largest integer `n` such that every integer in `0..=n` is exact in `dtype`.
 fn exact_integer_limit(dtype: DType) -> u64 {
     match dtype {

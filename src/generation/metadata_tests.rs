@@ -7,7 +7,7 @@ use burn::{
 
 use super::{
     HostGrid, can_pack_token_ids, checked_token_id, empty_rows, nonempty_row_lengths, read_grid,
-    read_token_selection, rectangle_size, required_cache_capacity, vec_with_capacity,
+    read_token_selection, rectangle_size, vec_with_capacity,
 };
 use crate::generation::TokenSelection;
 
@@ -99,15 +99,6 @@ fn grids_reject_misshaped_tensors_and_overflowing_rectangles() {
     let error = read_grid(Some(mask), None, 1, 2, "prompt").unwrap_err();
     assert!(error.to_string().contains("prompt mask has shape [1, 1]"));
     assert!(read_grid::<TestBackend>(None, None, usize::MAX, 2, "prompt").is_err());
-}
-
-/// The cache holds the prompt plus every fed-back token, never the final one.
-#[test]
-fn cache_capacity_excludes_the_final_token() {
-    assert_eq!(required_cache_capacity(5, 1), Some(5));
-    assert_eq!(required_cache_capacity(5, 3), Some(7));
-    assert_eq!(required_cache_capacity(5, 0), Some(5));
-    assert_eq!(required_cache_capacity(usize::MAX, 2), None);
 }
 
 /// Packing requires every token ID to be exact in both float dtypes.

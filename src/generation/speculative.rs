@@ -38,7 +38,7 @@ use burn::tensor::{Tensor, activation::softmax, backend::Backend};
 
 use crate::{Error, Result};
 
-use super::bookkeeping::prompt_lookup_span;
+use super::bookkeeping::prompt_lookup_draft_span;
 use super::{SamplingStrategy, SplitMix64, metadata, probability_accumulation_dtype};
 
 pub use super::bookkeeping::{SpeculativeCommit, SpeculativeOutcome, speculative_commit};
@@ -332,13 +332,11 @@ pub fn prompt_lookup_draft(
     max_ngram: usize,
     max_draft_tokens: usize,
 ) -> &[u32] {
-    let min_ngram = min_ngram.max(1);
-    for ngram in (min_ngram..=max_ngram).rev() {
-        if let Some((start, end)) = prompt_lookup_span(history, ngram, max_draft_tokens) {
-            return &history[start..end];
-        }
+    // Verified: the largest matching size in `max(min_ngram, 1)..=max_ngram` wins.
+    match prompt_lookup_draft_span(history, min_ngram, max_ngram, max_draft_tokens) {
+        Some((_, start, end)) => &history[start..end],
+        None => &[],
     }
-    &[]
 }
 
 #[cfg(test)]
