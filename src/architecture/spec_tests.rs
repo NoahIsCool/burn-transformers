@@ -1801,3 +1801,74 @@ fn differential_attention_specs_are_validated() {
         "mixer.position.rotary_dim",
     );
 }
+
+/// A zero head width reaching RoPE construction names `head_dim`, the field to repair.
+#[test]
+fn rope_construction_errors_name_the_repairable_field() {
+    let rope = PositionEncodingSpec::Rope {
+        theta: 10_000.0,
+        rotary_dim: 8,
+        scaling: RopeScaling::None,
+    };
+    assert_configuration_field(rope.rope_config(0).map(|_| ()), "position.head_dim");
+    assert_configuration_field(rope.validate(0, "layers[0]"), "layers[0].head_dim");
+    assert_eq!(
+        rope_error_field(&RopeConfigError::ZeroHeadDimension),
+        "head_dim"
+    );
+}
+
+/// MLA multipliers: `1/sqrt(d_qk)` by default, one when unscaled, and the fixed value otherwise.
+#[test]
+fn latent_scales_follow_each_score_scale_variant() {
+    assert_eq!(ScoreScale::Auto.latent_scale(16), 0.25);
+    assert_eq!(ScoreScale::InverseSqrtHeadDim.latent_scale(4), 0.5);
+    assert_eq!(ScoreScale::Unscaled.latent_scale(16), 1.0);
+    assert_eq!(ScoreScale::Fixed { value: 0.125 }.latent_scale(16), 0.125);
+}
+
+/// Invalid MLA connectivity is reported below the mixer with the shared component's reason.
+#[test]
+fn mla_connectivity_errors_are_reported_below_the_mixer() {
+    let spec = MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 2,
+        value_head_dim: 4,
+        key_value_lora_rank: 2,
+        query_lora_rank: None,
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 2,
+            scaling: RopeScaling::None,
+        },
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::SlidingWindow { window: 0 },
+    };
+    match MixerSpec::Mla(spec).validate("layers[0].mixer") {
+        Err(Error::Configuration { field, reason }) => {
+            assert_eq!(field, "layers[0].mixer.connectivity");
+            assert_eq!(reason, "must be greater than zero");
+        }
+        other => panic!("expected a connectivity configuration error, got {other:?}"),
+    }
+}
+
+/// Field helpers prefix configuration errors and pass every other error through unchanged.
+#[test]
+fn field_helpers_pass_non_configuration_errors_through() {
+    let generation = || Error::Generation("backend failed".into());
+    assert_eq!(reason_of(generation()), generation().to_string());
+    assert_eq!(
+        reason_of(Error::configuration("inner", "must be positive")),
+        "must be positive"
+    );
+    assert!(matches!(
+        nested("layers[0]", generation()),
+        Error::Generation(reason) if reason == "backend failed"
+    ));
+    assert!(matches!(
+        nested("layers[0]", Error::configuration("inner", "must be positive")),
+        Error::Configuration { field, .. } if field == "layers[0].inner"
+    ));
+}

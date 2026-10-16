@@ -806,3 +806,169 @@ fn validation_cost_report() {
         assert!(low <= high);
     });
 }
+
+/// Explicit connectivity without padding excludes exactly the disallowed links.
+#[test]
+fn allowed_links_without_padding_exclude_only_disallowed_pairs() {
+    let device = Default::default();
+    // Query 0 may see key 0 only; query 1 may see both keys.
+    let allowed = Tensor::<B, 4, Int>::from_ints([[[[1, 0], [1, 1]]]], &device).bool();
+    let mask = AttentionPolicy::custom(allowed)
+        .exclusion_mask(None, [2, 1, 2, 2], &device)
+        .unwrap()
+        .expect("connectivity always produces a mask");
+    assert_eq!(mask.dims(), [2, 1, 2, 2]);
+    assert_eq!(
+        mask.int().into_data().to_vec::<i32>().unwrap(),
+        [0, 1, 0, 0, 0, 1, 0, 0]
+    );
+    assert!(
+        AttentionPolicy::<B>::bidirectional()
+            .exclusion_mask(None, [1, 1, 2, 2], &device)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Contexts and representations reject empty axes with the field a caller must repair.
+#[test]
+fn empty_positions_sources_and_representations_are_rejected() {
+    let device = Default::default();
+    let error =
+        ExecutionContext::<B>::new(Tensor::<B, 2, Int>::zeros([1, 0], &device), None).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid configuration at execution.positions: positions must be nonempty"
+    );
+    for [tokens, width] in [[0, 4], [2, 0]] {
+        let mut changed = context();
+        changed.encoder = Some(EncoderContext {
+            hidden: Tensor::<B, 3>::ones([1, tokens, width], &device),
+            positions: Tensor::<B, 2, Int>::zeros([1, tokens], &device),
+            token_mask: None,
+        });
+        let error = changed.validate_layout([1, 3], &device).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("matching nonempty batch/token axes"),
+            "{tokens}x{width}: {error}"
+        );
+    }
+    let state = HiddenState::<B>::new(Tensor::ones([1, 3, 4], &device), context()).unwrap();
+    assert!(
+        state
+            .validate(0)
+            .unwrap_err()
+            .to_string()
+            .contains("execution.hidden")
+    );
+    for shape in [[0, 3, 4], [1, 0, 4]] {
+        let mut empty = state.clone();
+        empty.hidden = Tensor::ones(shape, &device);
+        assert!(
+            empty
+                .validate(4)
+                .unwrap_err()
+                .to_string()
+                .contains("execution.hidden"),
+            "{shape:?}"
+        );
+    }
+}
+
+/// Encoder output, like encoder context, is exported only after final normalization.
+#[test]
+fn encoder_output_requires_a_normalized_source_stack() {
+    let device = Default::default();
+    let state = HiddenState::<B>::new(Tensor::ones([1, 3, 4], &device), context()).unwrap();
+    assert_eq!(
+        state.into_encoder_output().unwrap_err().to_string(),
+        "invalid configuration at execution.encoder: normalize the source stack before exporting encoder output"
+    );
+}
+
+/// Residual blocks reject empty batch or token axes before running any branch.
+#[test]
+fn residual_blocks_reject_empty_batch_and_token_axes() {
+    let device = Default::default();
+    let block =
+        ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), matrix(2, 2, &[0.0; 4]))
+            .unwrap();
+    for shape in [[0, 3, 2], [1, 0, 2]] {
+        let mut hooks = Hooks::new();
+        let error = block
+            .forward(
+                Tensor::<B, 3>::ones(shape, &device),
+                &context(),
+                Layer::decoder(0),
+                &mut hooks,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("residual_block.input"),
+            "{shape:?}: {error}"
+        );
+    }
+}
+
+/// A failing edit before the feed-forward nonlinearity aborts dense and gated branches.
+#[test]
+fn pre_activation_edit_failures_abort_dense_and_gated_feed_forwards() {
+    use crate::{
+        architecture::Activation,
+        feed_forward::{DenseFeedForward, GatedFeedForward},
+    };
+    let device = Default::default();
+    let input = Tensor::<B, 3>::ones([1, 3, 2], &device);
+    let identity = || matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let failing_hooks = || {
+        let mut hooks = Hooks::new();
+        hooks.try_edit(Layer::decoder(0).mlp_pre_activation(), |_| {
+            Err(Error::configuration("test.edit", "rejected pre-activation"))
+        });
+        hooks
+    };
+    let dense = ResidualBlock::without_normalization(
+        2,
+        matrix(2, 2, &[0.0; 4]),
+        DenseFeedForward {
+            up_proj: identity(),
+            down_proj: identity(),
+            activation: Activation::Relu,
+        },
+    )
+    .unwrap();
+    let gated = ResidualBlock::without_normalization(
+        2,
+        matrix(2, 2, &[0.0; 4]),
+        GatedFeedForward {
+            gate_proj: identity(),
+            up_proj: identity(),
+            down_proj: identity(),
+            activation: Activation::Relu,
+        },
+    )
+    .unwrap();
+    let errors = [
+        dense
+            .run_with_hooks(
+                input.clone(),
+                &context(),
+                Layer::decoder(0),
+                &mut failing_hooks(),
+            )
+            .unwrap_err(),
+        gated
+            .run_with_hooks(input, &context(), Layer::decoder(0), &mut failing_hooks())
+            .unwrap_err(),
+    ];
+    for error in errors {
+        let message = error.to_string();
+        assert!(
+            message.contains("edit callback returned an error"),
+            "{message}"
+        );
+        assert!(matches!(error, Error::Intervention { .. }), "{error:?}");
+    }
+}

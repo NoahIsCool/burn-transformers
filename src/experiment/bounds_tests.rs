@@ -68,6 +68,7 @@ fn staged_ranges_resume_at_the_cursor() {
     assert!(!follows_cursor(1, 2, 3, 3), "skip");
     assert!(!follows_cursor(2, 2, 4, 3), "overrun");
     assert!(!follows_cursor(2, 3, 2, 3), "reversed");
+    assert!(!follows_cursor(3, 3, 2, 3), "reversed at the cursor");
     let mut cursor = 0;
     for end in [1, 1, 3, 4] {
         assert!(follows_cursor(cursor, cursor, end, 4));
