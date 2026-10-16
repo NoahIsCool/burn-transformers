@@ -56,3 +56,16 @@ proptest! {
         );
     }
 }
+
+/// Each overflow names the configuration expression reported by the contract.
+#[test]
+fn dimension_errors_name_their_expressions() {
+    assert_eq!(
+        DimensionError::Query.field(),
+        "num_attention_heads * head_dim"
+    );
+    assert_eq!(
+        DimensionError::KeyValue.field(),
+        "num_key_value_heads * head_dim"
+    );
+}
