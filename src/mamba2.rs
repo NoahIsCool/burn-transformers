@@ -1554,30 +1554,43 @@ fn scan_block<B: Backend>(
     Ok((diagonal + off_diagonal, terminal))
 }
 
-/// Triangular masks for stable segmented sums over one chunk width, built once per scan.
+/// Triangular tables for stable segmented sums over one chunk width, built once per scan.
+///
+/// Both tables are flattened `[1, 1, 1, w·w]` F32 rows indexed `u · w + s`
+/// for target (term) row `u` and source column `s`. A flattened row is a
+/// single row shared by every leading position, the broadcast that Burn Flex
+/// 0.21 evaluates with its SIMD kernels; the former Boolean `[1, 1, 1, w, w]`
+/// masks were expanded to the full `[b, h, c, w, w]` plane and copied byte by
+/// byte inside each of two `mask_fill` calls per block.
 pub(crate) struct SegmentMasks<B: Backend> {
-    /// `[1, 1, 1, w, w]`, true where source `s >= u` term row: terms outside `s < u`.
-    outside_segment: Tensor<B, 5, Bool>,
-    /// `[1, 1, 1, w, w]`, true where source `s > t` target: future sources.
-    future: Tensor<B, 5, Bool>,
+    /// `1.0` where `s < u` (the term `ld[u]` belongs to segment `(s, t]`), else `0.0`.
+    inside: Tensor<B, 4>,
+    /// `-inf` where `s > u` (a future source), else `0.0`.
+    future_bias: Tensor<B, 4>,
     /// Width `w`.
     width: usize,
 }
 
 impl<B: Backend> SegmentMasks<B> {
-    /// Builds both masks for width `width` on `device`.
+    /// Builds both tables for width `width` on the host and uploads them to `device`.
     pub(crate) fn new(width: usize, device: &B::Device) -> Self {
-        let rows =
-            Tensor::<B, 1, Int>::arange(0..width as i64, device).reshape([1, 1, 1, width, 1]);
-        let columns =
-            Tensor::<B, 1, Int>::arange(0..width as i64, device).reshape([1, 1, 1, 1, width]);
-        let shape = [1, 1, 1, width, width];
+        let mut inside = Vec::with_capacity(width * width);
+        let mut future_bias = Vec::with_capacity(width * width);
+        for row in 0..width {
+            for column in 0..width {
+                inside.push(if column < row { 1.0_f32 } else { 0.0 });
+                future_bias.push(if column > row { f32::NEG_INFINITY } else { 0.0 });
+            }
+        }
+        let upload = |values: Vec<f32>| {
+            Tensor::from_data(
+                TensorData::new(values, [1, 1, 1, width * width]),
+                (device, DType::F32),
+            )
+        };
         Self {
-            outside_segment: columns
-                .clone()
-                .expand(shape)
-                .greater_equal(rows.clone().expand(shape)),
-            future: columns.expand(shape).greater(rows.expand(shape)),
+            inside: upload(inside),
+            future_bias: upload(future_bias),
             width,
         }
     }
@@ -1586,18 +1599,36 @@ impl<B: Backend> SegmentMasks<B> {
     ///
     /// A difference of two cumulative sums would lose every local decay after
     /// a very large earlier one; the masked cumulative sum of the per-step
-    /// terms is the stable formulation of the reference SSD algorithm.
+    /// terms is the stable formulation of the reference SSD algorithm. Terms
+    /// outside a segment are removed by multiplying with the `inside` table
+    /// and future sources by adding the `-inf` bias, which equals the
+    /// reference's two `mask_fill`s bit for bit when every log decay is
+    /// finite: `ld · 0` is a signed zero, and a signed zero changes neither a
+    /// non-zero cumulative sum nor `exp` (`exp(±0) = 1`), while `x - inf` is
+    /// `-inf` for finite `x`. The scan's log decays `dt · A` are finite for
+    /// finite inputs (padding uses `dt = 0`); a non-finite `dt` already makes
+    /// the scan output non-finite through `x · dt`, whichever form is used.
     pub(crate) fn transitions(&self, log_decay: Tensor<B, 4>) -> Tensor<B, 5> {
         let [batch, heads, chunks, width] = log_decay.dims();
         debug_assert_eq!(width, self.width, "segment masks built for another width");
         let shape = [batch, heads, chunks, width, width];
-        log_decay
+        let flat = [batch, heads, chunks, width * width];
+        let dtype = log_decay.dtype();
+        let table = |table: &Tensor<B, 4>| {
+            if table.dtype() == dtype {
+                table.clone()
+            } else {
+                table.clone().cast(dtype)
+            }
+        };
+        let terms = log_decay
             .unsqueeze_dim::<5>(4)
-            .expand(shape)
-            .mask_fill(self.outside_segment.clone().expand(shape), 0.0)
-            .cumsum(3)
-            .mask_fill(self.future.clone().expand(shape), f32::NEG_INFINITY)
+            .repeat_dim(4, width)
+            .reshape(flat)
+            * table(&self.inside);
+        (terms.reshape(shape).cumsum(3).reshape(flat) + table(&self.future_bias))
             .exp()
+            .reshape(shape)
     }
 }
 

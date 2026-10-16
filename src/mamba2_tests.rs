@@ -1469,6 +1469,98 @@ fn recurrent_update_timing() {
     }
 }
 
+/// The former segment transitions: two `mask_fill`s over expanded Boolean masks (test oracle).
+fn legacy_transitions(log_decay: Tensor<TestBackend, 4>) -> Tensor<TestBackend, 5> {
+    let [batch, heads, chunks, width] = log_decay.dims();
+    let device = log_decay.device();
+    let rows = Tensor::<TestBackend, 1, Int>::arange(0..width as i64, &device)
+        .reshape([1, 1, 1, width, 1]);
+    let columns = Tensor::<TestBackend, 1, Int>::arange(0..width as i64, &device)
+        .reshape([1, 1, 1, 1, width]);
+    let mask_shape = [1, 1, 1, width, width];
+    let outside = columns
+        .clone()
+        .expand(mask_shape)
+        .greater_equal(rows.clone().expand(mask_shape));
+    let future = columns.expand(mask_shape).greater(rows.expand(mask_shape));
+    let shape = [batch, heads, chunks, width, width];
+    log_decay
+        .unsqueeze_dim::<5>(4)
+        .expand(shape)
+        .mask_fill(outside.expand(shape), 0.0)
+        .cumsum(3)
+        .mask_fill(future.expand(shape), f32::NEG_INFINITY)
+        .exp()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+
+    /// Table-based transitions equal the former `mask_fill` formulation bit for bit.
+    ///
+    /// Log decays are finite and non-positive, as `dt · A` is, and include
+    /// exact `+0.0` and `-0.0` (padded steps), at widths 1, 2, a chunk width,
+    /// and the `chunks + 1` width of the carry matrix.
+    #[test]
+    fn segment_transitions_match_the_mask_fill_formulation(
+        width in proptest::sample::select(vec![1_usize, 2, 3, 8, 17]),
+        batch in 1_usize..3,
+        heads in 1_usize..3,
+        chunks in 1_usize..3,
+        seed in proptest::collection::vec((0_u8..4, -30.0_f32..0.0), 1..64),
+    ) {
+        let count = batch * heads * chunks * width;
+        let values = (0..count)
+            .map(|index| match seed[index % seed.len()] {
+                (0, _) => 0.0,
+                (1, _) => -0.0,
+                (_, value) => value * (1.0 + index as f32 * 0.01),
+            })
+            .collect::<Vec<_>>();
+        let log_decay = Tensor::<TestBackend, 4>::from_data(
+            TensorData::new(values, [batch, heads, chunks, width]),
+            &Default::default(),
+        );
+        let actual = SegmentMasks::new(width, &Default::default()).transitions(log_decay.clone());
+        let expected = legacy_transitions(log_decay);
+        proptest::prop_assert_eq!(bits(actual), bits(expected));
+    }
+}
+
+/// Release-mode timing of the segment transitions against the former `mask_fill` form.
+///
+/// Shapes are one Lightning Mamba-2 block (64 heads, 128-token chunks) with
+/// 4 and 16 chunks. Run with `cargo test --release --lib
+/// mamba2::tests::segment_transition_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn segment_transition_timing() {
+    use std::time::Instant;
+    let (heads, width) = (64, 128);
+    let masks = SegmentMasks::<TestBackend>::new(width, &Default::default());
+    for chunks in [4, 16] {
+        let log_decay = -waves4([1, heads, chunks, width], 1.0, 0.05).abs();
+        let (mut legacy, mut tables) = (Vec::new(), Vec::new());
+        for _ in 0..15 {
+            let started = Instant::now();
+            let _ = legacy_transitions(log_decay.clone()).into_data();
+            legacy.push(started.elapsed().as_secs_f64());
+            let started = Instant::now();
+            let _ = masks.transitions(log_decay.clone()).into_data();
+            tables.push(started.elapsed().as_secs_f64());
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2] * 1e3
+        };
+        let (before, after) = (median(&mut legacy), median(&mut tables));
+        eprintln!(
+            "mamba2 segment transitions [1, {heads}, {chunks}, {width}, {width}]: mask_fill {before:.1} ms, tables {after:.1} ms ({:.2}x)",
+            before / after
+        );
+    }
+}
+
 /// Asserts that `result` is a configuration error for `field` whose reason contains `reason`.
 fn assert_configuration<T: core::fmt::Debug>(result: Result<T>, field: &str, reason: &str) {
     match result {
