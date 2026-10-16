@@ -47,6 +47,19 @@ fn token_lists_are_checked_in_order_and_canonicalized() {
     );
 }
 
+/// Long adversarial lists canonicalize in `O(n log n)`, keeping each distinct ID once.
+#[test]
+fn long_token_lists_canonicalize_quickly() {
+    let ids = (0..200_000_usize)
+        .rev()
+        .chain(0..200_000)
+        .collect::<Vec<_>>();
+    let canonical = canonical_token_ids(&ids, 200_000).unwrap();
+    assert_eq!(canonical.len(), 200_000);
+    assert!(canonical.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!((canonical[0], canonical[199_999]), (0, 199_999));
+}
+
 proptest::proptest! {
     /// Canonical lists equal the former sort-and-deduplicate normalization.
     #[test]

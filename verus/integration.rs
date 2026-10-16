@@ -13,7 +13,8 @@
 //!   `canonical_token_ids` accepts an EOS or padding list exactly when every
 //!   ID is in the vocabulary and fits `u32`, reporting the first offending ID
 //!   in order, and otherwise returns the strictly increasing list of exactly
-//!   the distinct IDs (`insert_sorted_unique` keeps a sorted set).
+//!   the distinct IDs, sorted in `O(n log n)` by the verified recursive
+//!   `sorted_unique` over the verified linear `merge_unique`.
 //! - `src/models/custom/mamba2_geometry.rs`: the Mamba-2 head grouping of a
 //!   modular specification. A group count exists exactly when the group size
 //!   is positive and divides the heads, and it then multiplies back to the

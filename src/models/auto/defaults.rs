@@ -17,7 +17,8 @@
 //! - [`canonical_token_ids`] accepts a token list exactly when every ID lies
 //!   in the vocabulary and fits `u32`, reporting the first offending ID
 //!   otherwise, and returns the strictly increasing list of the distinct IDs:
-//!   the same set, sorted and deduplicated.
+//!   the same set, sorted and deduplicated by a verified `O(n log n)` merge
+//!   sort, so adversarially long configuration lists stay cheap.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -35,70 +36,37 @@ pub open spec fn ids_accepted(ids: Seq<usize>, count: int, vocabulary_size: int)
     forall|i: int| 0 <= i < count ==> #[trigger] ids[i] < vocabulary_size && ids[i] <= u32::MAX
 }
 
+/// `token` is one of the first `count` IDs.
+pub open spec fn id_listed(ids: Seq<usize>, count: int, token: u32) -> bool {
+    exists|i: int| 0 <= i < count && ids[i] == token as usize
+}
+
 /// `tokens` holds exactly the distinct values among the first `count` IDs.
 pub open spec fn same_token_set(tokens: Seq<u32>, ids: Seq<usize>, count: int) -> bool {
     &&& forall|i: int| 0 <= i < count ==> tokens.contains(#[trigger] ids[i] as u32)
-    &&& forall|k: int| #![trigger tokens[k]] 0 <= k < tokens.len()
-        ==> exists|i: int| 0 <= i < count && #[trigger] ids[i] == tokens[k] as usize
+    &&& forall|k: int| 0 <= k < tokens.len() ==> id_listed(ids, count, #[trigger] tokens[k])
 }
 
-/// Inserting `token` between smaller and larger entries keeps the list strictly
-/// increasing and adds exactly `token` to its set of values.
-pub proof fn lemma_insert_between(before: Seq<u32>, position: int, token: u32)
-    requires
-        strictly_increasing(before),
-        0 <= position <= before.len(),
-        forall|k: int| 0 <= k < position ==> #[trigger] before[k] < token,
-        position < before.len() ==> token < before[position],
-    ensures
-        strictly_increasing(before.insert(position, token)),
-        forall|value: u32| #[trigger] before.insert(position, token).contains(value)
-            <==> (before.contains(value) || value == token),
-{
-    let after = before.insert(position, token);
-    assert(after.len() == before.len() + 1);
-    assert(after[position] == token);
-    assert forall|k: int| 0 <= k < position implies #[trigger] after[k] == before[k] by {}
-    assert forall|k: int| position < k < after.len()
-        implies #[trigger] after[k] == before[k - 1] by {}
-    assert forall|a: int, b: int| 0 <= a < b < after.len() implies after[a] < after[b] by {
-        if b < position {
-            assert(before[a] < before[b]);
-        } else if a > position {
-            assert(before[a - 1] < before[b - 1]);
-        } else if b > position {
-            if b - 1 > position {
-                assert(before[position] < before[b - 1]);
-            }
-            if a < position {
-                assert(before[a] < token);
-            }
-        } else {
-            assert(before[a] < token);
-        }
-    }
-    assert forall|value: u32| #[trigger] after.contains(value)
-        <==> (before.contains(value) || value == token) by {
-        if after.contains(value) {
-            let k = choose|k: int| 0 <= k < after.len() && after[k] == value;
-            if k < position {
-                assert(before[k] == value);
-            } else if k > position {
-                assert(before[k - 1] == value);
-            }
-        }
-        if before.contains(value) {
-            let k = choose|k: int| 0 <= k < before.len() && before[k] == value;
-            if k < position {
-                assert(after[k] == value);
-            } else {
-                assert(after[k + 1] == value);
-            }
-        }
-        if value == token {
-            assert(after[position] == value);
-        }
-    }
+/// Every value of `values` occurs in `out`.
+pub open spec fn covers(out: Seq<u32>, values: Seq<u32>) -> bool {
+    forall|a: int| 0 <= a < values.len() ==> out.contains(#[trigger] values[a])
+}
+
+/// Every value of `out` occurs in `left` or in `right`.
+pub open spec fn drawn_from(out: Seq<u32>, left: Seq<u32>, right: Seq<u32>) -> bool {
+    forall|k: int| 0 <= k < out.len() ==> left.contains(#[trigger] out[k]) || right.contains(out[k])
+}
+
+/// `value` occurs in `values[start..end)`.
+pub open spec fn occurs_in(values: Seq<u32>, start: int, end: int, value: u32) -> bool {
+    exists|i: int| start <= i < end && values[i] == value
+}
+
+/// `out` holds exactly the distinct values of `values[start..end)`, strictly increasing.
+pub open spec fn sorted_set_of(out: Seq<u32>, values: Seq<u32>, start: int, end: int) -> bool {
+    &&& strictly_increasing(out)
+    &&& forall|i: int| start <= i < end ==> out.contains(#[trigger] values[i])
+    &&& forall|k: int| 0 <= k < out.len() ==> occurs_in(values, start, end, #[trigger] out[k])
 }
 
 } // verus!
@@ -177,38 +145,181 @@ pub(crate) enum TokenIdError {
     },
 }
 
-/// Inserts `token` into a strictly increasing list unless it is already present.
+/// Merges two strictly increasing lists into the strictly increasing list of their union.
+///
+/// A value present in both lists appears once; the merge is linear in the
+/// combined length.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
-#[cfg_attr(verus_keep_ghost, verus_spec(
+#[cfg_attr(verus_keep_ghost, verus_spec(merged =>
     requires
-        strictly_increasing(old(tokens)@),
+        strictly_increasing(left@),
+        strictly_increasing(right@),
     ensures
-        strictly_increasing(final(tokens)@),
-        forall|value: u32| #[trigger] final(tokens)@.contains(value)
-            <==> (old(tokens)@.contains(value) || value == token),
+        strictly_increasing(merged@),
+        covers(merged@, left@),
+        covers(merged@, right@),
+        drawn_from(merged@, left@, right@),
 ))]
-fn insert_sorted_unique(tokens: &mut Vec<u32>, token: u32) {
-    let mut position: usize = 0;
+fn merge_unique(left: &[u32], right: &[u32]) -> Vec<u32> {
+    let mut merged: Vec<u32> = Vec::new();
+    let mut i: usize = 0;
+    let mut j: usize = 0;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
-            position <= tokens.len(),
-            tokens@ == old(tokens)@,
-            strictly_increasing(tokens@),
-            forall|k: int| 0 <= k < position ==> #[trigger] tokens@[k] < token,
-        decreases tokens.len() - position,
+            i <= left.len(),
+            j <= right.len(),
+            strictly_increasing(left@),
+            strictly_increasing(right@),
+            strictly_increasing(merged@),
+            covers(merged@, left@.subrange(0, i as int)),
+            covers(merged@, right@.subrange(0, j as int)),
+            drawn_from(merged@, left@, right@),
+            forall|k: int| 0 <= k < merged.len() ==> {
+                &&& (i < left.len() ==> #[trigger] merged@[k] < left@[i as int])
+                &&& (j < right.len() ==> merged@[k] < right@[j as int])
+            },
+        decreases left.len() - i + right.len() - j,
     ))]
-    while position < tokens.len() && tokens[position] < token {
-        position += 1;
+    while i < left.len() || j < right.len() {
+        #[cfg(verus_keep_ghost)]
+        proof_decl! {
+            let ghost before = merged@;
+            let ghost old_i = i as int;
+            let ghost old_j = j as int;
+        }
+        let take_left = j == right.len() || (i < left.len() && left[i] <= right[j]);
+        let take_right = i == left.len() || (j < right.len() && right[j] <= left[i]);
+        let value = if take_left { left[i] } else { right[j] };
+        merged.push(value);
+        if take_left {
+            i += 1;
+        }
+        if take_right {
+            j += 1;
+        }
+        // The pushed value exceeds every earlier one and stays below the next candidates.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(merged@ == before.push(value));
+            assert forall|a: int, b: int| 0 <= a < b < merged@.len()
+                implies merged@[a] < merged@[b] by {
+                if b < before.len() {
+                    assert(before[a] < before[b]);
+                }
+            }
+            assert forall|a: int| 0 <= a < i
+                implies merged@.contains(#[trigger] left@.subrange(0, i as int)[a]) by {
+                if a < old_i {
+                    assert(left@.subrange(0, old_i)[a] == left@[a]);
+                    let k = choose|k: int| 0 <= k < before.len() && before[k] == left@[a];
+                    assert(merged@[k] == left@[a]);
+                } else {
+                    assert(merged@[before.len() as int] == left@[a]);
+                }
+            }
+            assert forall|b: int| 0 <= b < j
+                implies merged@.contains(#[trigger] right@.subrange(0, j as int)[b]) by {
+                if b < old_j {
+                    assert(right@.subrange(0, old_j)[b] == right@[b]);
+                    let k = choose|k: int| 0 <= k < before.len() && before[k] == right@[b];
+                    assert(merged@[k] == right@[b]);
+                } else {
+                    assert(merged@[before.len() as int] == right@[b]);
+                }
+            }
+            assert forall|k: int| 0 <= k < merged@.len()
+                implies left@.contains(#[trigger] merged@[k]) || right@.contains(merged@[k]) by {
+                if k < before.len() {
+                    assert(merged@[k] == before[k]);
+                } else if take_left {
+                    assert(left@[old_i] == value);
+                } else {
+                    assert(right@[old_j] == value);
+                }
+            }
+            assert forall|k: int| 0 <= k < merged@.len() implies {
+                &&& (i < left.len() ==> #[trigger] merged@[k] < left@[i as int])
+                &&& (j < right.len() ==> merged@[k] < right@[j as int])
+            } by {
+                if i < left.len() && i > old_i {
+                    assert(left@[old_i] < left@[i as int]);
+                }
+                if j < right.len() && j > old_j {
+                    assert(right@[old_j] < right@[j as int]);
+                }
+            }
+        }
     }
-    if position < tokens.len() && tokens[position] == token {
-        return;
-    }
-    // Every entry before `position` is below `token`, and the entry at it (if any) above.
     #[cfg(verus_keep_ghost)]
     proof! {
-        lemma_insert_between(tokens@, position as int, token);
+        assert(left@.subrange(0, left.len() as int) =~= left@);
+        assert(right@.subrange(0, right.len() as int) =~= right@);
     }
-    tokens.insert(position, token);
+    merged
+}
+
+/// Sorts and deduplicates `values[start..end)` by recursive merging.
+///
+/// The result is the strictly increasing list of exactly the distinct values
+/// in the range, in `O(n log n)` time.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(sorted =>
+    requires
+        start <= end <= values.len(),
+    ensures
+        sorted_set_of(sorted@, values@, start as int, end as int),
+    decreases end - start,
+))]
+fn sorted_unique(values: &[u32], start: usize, end: usize) -> Vec<u32> {
+    if end - start == 0 {
+        return Vec::new();
+    }
+    if end - start == 1 {
+        let single: Vec<u32> = vec![values[start]; 1];
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(single@[0] == values@[start as int]);
+        }
+        return single;
+    }
+    let middle = start + (end - start) / 2;
+    let left = sorted_unique(values, start, middle);
+    let right = sorted_unique(values, middle, end);
+    let merged = merge_unique(left.as_slice(), right.as_slice());
+    // Both halves' values reach the merge, and the merge adds nothing else.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(sorted_set_of(left@, values@, start as int, middle as int));
+        assert(sorted_set_of(right@, values@, middle as int, end as int));
+        assert forall|i: int| start <= i < end implies merged@.contains(#[trigger] values@[i]) by {
+            if i < middle {
+                assert(left@.contains(values@[i]));
+                let a = choose|a: int| 0 <= a < left@.len() && left@[a] == values@[i];
+                assert(merged@.contains(left@[a]));
+            } else {
+                assert(right@.contains(values@[i]));
+                let b = choose|b: int| 0 <= b < right@.len() && right@[b] == values@[i];
+                assert(merged@.contains(right@[b]));
+            }
+        }
+        assert forall|k: int| 0 <= k < merged@.len()
+            implies occurs_in(values@, start as int, end as int, #[trigger] merged@[k]) by {
+            if left@.contains(merged@[k]) {
+                let a = choose|a: int| 0 <= a < left@.len() && left@[a] == merged@[k];
+                assert(occurs_in(values@, start as int, middle as int, left@[a]));
+                let i = choose|i: int| start <= i < middle && values@[i] == left@[a];
+                assert(values@[i] == merged@[k]);
+            } else {
+                assert(right@.contains(merged@[k]));
+                let b = choose|b: int| 0 <= b < right@.len() && right@[b] == merged@[k];
+                assert(occurs_in(values@, middle as int, end as int, right@[b]));
+                let i = choose|i: int| middle <= i < end && values@[i] == right@[b];
+                assert(values@[i] == merged@[k]);
+            }
+        }
+        assert(sorted_set_of(merged@, values@, start as int, end as int));
+    }
+    merged
 }
 
 /// Converts a token ID list into its canonical sorted, deduplicated `u32` form.
@@ -245,14 +356,14 @@ pub(crate) fn canonical_token_ids(
     ids: &[usize],
     vocabulary_size: usize,
 ) -> Result<Vec<u32>, TokenIdError> {
-    let mut tokens: Vec<u32> = Vec::new();
+    let mut tokens: Vec<u32> = Vec::with_capacity(ids.len());
     let mut index: usize = 0;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             index <= ids.len(),
             ids_accepted(ids@, index as int, vocabulary_size as int),
-            strictly_increasing(tokens@),
-            same_token_set(tokens@, ids@, index as int),
+            tokens.len() == index,
+            forall|i: int| 0 <= i < index ==> #[trigger] tokens@[i] as usize == ids@[i],
         decreases ids.len() - index,
     ))]
     while index < ids.len() {
@@ -263,38 +374,27 @@ pub(crate) fn canonical_token_ids(
         if id > u32::MAX as usize {
             return Err(TokenIdError::ExceedsU32 { id });
         }
-        #[cfg(verus_keep_ghost)]
-        proof_decl! {
-            let ghost before = tokens@;
-        }
-        insert_sorted_unique(&mut tokens, id as u32);
-        // The new set adds exactly `ids[index]`; earlier witnesses survive.
-        #[cfg(verus_keep_ghost)]
-        proof! {
-            assert forall|i: int| 0 <= i < index + 1
-                implies tokens@.contains(#[trigger] ids@[i] as u32) by {
-                if i < index {
-                    assert(before.contains(ids@[i] as u32));
-                }
-            }
-            assert forall|k: int| #![trigger tokens@[k]] 0 <= k < tokens@.len()
-                implies exists|i: int|
-                    0 <= i < index + 1 && #[trigger] ids@[i] == tokens@[k] as usize by {
-                assert(tokens@.contains(tokens@[k]));
-                if tokens@[k] == id as u32 {
-                    assert(ids@[index as int] == tokens@[k] as usize);
-                } else {
-                    assert(before.contains(tokens@[k]));
-                    let j = choose|j: int| 0 <= j < before.len() && before[j] == tokens@[k];
-                    let i = choose|i: int|
-                        0 <= i < index && #[trigger] ids@[i] == before[j] as usize;
-                    assert(ids@[i] == tokens@[k] as usize);
-                }
-            }
-        }
+        tokens.push(id as u32);
         index += 1;
     }
-    Ok(tokens)
+    let canonical = sorted_unique(tokens.as_slice(), 0, tokens.len());
+    // Converted IDs equal the inputs, so the sorted set is the input set.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(sorted_set_of(canonical@, tokens@, 0, tokens.len() as int));
+        assert forall|i: int| 0 <= i < ids.len()
+            implies canonical@.contains(#[trigger] ids@[i] as u32) by {
+            assert(canonical@.contains(tokens@[i]));
+            assert(tokens@[i] == ids@[i] as u32);
+        }
+        assert forall|k: int| 0 <= k < canonical@.len()
+            implies id_listed(ids@, ids.len() as int, #[trigger] canonical@[k]) by {
+            assert(occurs_in(tokens@, 0, tokens.len() as int, canonical@[k]));
+            let i = choose|i: int| 0 <= i < tokens.len() && tokens@[i] == canonical@[k];
+            assert(ids@[i] == canonical@[k] as usize);
+        }
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]
