@@ -27,11 +27,13 @@ use crate::{Error, Result};
 /// the linear-size output, or an autodiff tape. On an autodiff backend the
 /// tape retains every chunk's workspace anyway, so chunking cannot lower the
 /// training peak. Autodiff backends therefore evaluate one [`Self::Unbounded`]
-/// call with the same values. [`Self::effective_on`] states that rule, and
-/// [`crate::attention::GroupedQueryAttention::attend_bounded`] applies it
-/// directly; the Muse Glimmer and MLA attention paths apply the same rule
-/// through their own autodiff checks, so every consumer of this policy shares
-/// one contract. Size training memory for the full `O(query * key)` plane.
+/// call with the same values. [`Self::effective_on`] states that rule, and all
+/// three consumers of this policy call it after validating the policy:
+/// [`crate::attention::GroupedQueryAttention::attend_bounded`], which serves
+/// custom code, and the two families that execute a policy, Muse Glimmer's
+/// attention and DeepSeek-V2's multi-latent attention (MLA). Other families
+/// always evaluate unbounded attention. Size training memory for the full
+/// `O(query * key)` plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionExecutionPolicy {

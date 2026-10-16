@@ -815,8 +815,8 @@ impl<B: Backend> MultiLatentAttention<B> {
     /// elements. Multi-chunk execution synchronizes the backend between chunks
     /// so dropped planes are reclaimed. On autodiff backends the tape retains
     /// every chunk anyway, so one unbounded call is evaluated instead (same
-    /// values, no false bound); this keeps training on long sequences working
-    /// with the default policy.
+    /// values, no false bound; see [`AttentionExecutionPolicy::effective_on`]);
+    /// this keeps training on long sequences working with the default policy.
     ///
     /// `all_latents` is `[batch, key, rank]` and `all_rotary_keys`
     /// `[batch, 1, key, rotary]` (already rotated).
@@ -824,8 +824,9 @@ impl<B: Backend> MultiLatentAttention<B> {
     /// # Errors
     ///
     /// Returns [`Error::Shape`] for inconsistent history or visibility
-    /// extents, the policy's planning errors, and a backend error when a chunk
-    /// synchronization fails.
+    /// extents, [`Error::Configuration`] for a policy with a zero limit (on
+    /// every backend), the policy's planning errors, and a backend error when
+    /// a chunk synchronization fails.
     pub(crate) fn mix_unabsorbed_bounded(
         &self,
         projection: &MlaProjection<B>,
@@ -865,14 +866,13 @@ impl<B: Backend> MultiLatentAttention<B> {
             3,
         );
         let keys = Tensor::cat(vec![content_keys, rotary_keys], 3);
-        let device = query.device();
         // An autodiff tape keeps every chunk's planes alive until backward, so
-        // chunking would cost synchronizations without bounding memory.
-        let policy = if B::ad_enabled(&device) {
-            AttentionExecutionPolicy::Unbounded
-        } else {
-            policy
-        };
+        // chunking would cost synchronizations without bounding memory; the
+        // shared rule evaluates one unbounded call there. Validating first
+        // keeps an invalid policy an error on every backend.
+        let device = query.device();
+        policy.validate()?;
+        let policy = policy.effective_on::<B>(&device);
         let plan = policy.plan(batch, heads, query_sequence, key_sequence)?;
         let chunked = plan.chunk_count() > 1;
         let mut contexts = Vec::with_capacity(plan.chunk_count());

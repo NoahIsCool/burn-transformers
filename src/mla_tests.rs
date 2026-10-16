@@ -1371,6 +1371,22 @@ fn bounded_reference_attention_is_differentiable_under_any_policy() {
         .unwrap();
     let gradients = output.sum().backward();
     assert!(hidden.grad(&gradients).is_some());
+
+    // The autodiff substitution never hides an invalid policy.
+    let error = mla
+        .mix_unabsorbed_bounded(
+            &projection,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &visibility,
+            AttentionExecutionPolicy::query_chunked(0, 1 << 20),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. }
+            if field == "attention.execution.max_query_tokens"),
+        "{error}"
+    );
 }
 
 /// Windowed suffix visibility equals the shared scalar connectivity rule.

@@ -230,13 +230,11 @@ impl<B: Backend> MuseGlimmerAttention<B> {
     ///
     /// An autodiff tape keeps every chunk's planes alive until backward, so
     /// chunking would cost synchronizations without bounding memory: autodiff
-    /// backends evaluate one unbounded call (same values) instead of failing.
+    /// backends evaluate one unbounded call (same values) instead of failing,
+    /// by the shared [`AttentionExecutionPolicy::effective_on`] rule. The
+    /// stored policy was validated by its setter.
     fn effective_policy(&self, device: &B::Device) -> AttentionExecutionPolicy {
-        if B::ad_enabled(device) {
-            AttentionExecutionPolicy::Unbounded
-        } else {
-            self.execution_policy
-        }
+        self.execution_policy.effective_on::<B>(device)
     }
 
     /// Evaluates bottom-right-aligned causal attention and returns the head context.
