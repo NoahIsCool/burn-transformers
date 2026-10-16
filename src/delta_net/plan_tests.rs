@@ -108,6 +108,20 @@ fn mixer_layout_tiles_the_fused_channels() {
     assert_eq!(layout.value_start + layout.value_width, widths.channels);
 }
 
+/// Each key head repeats into an equal, contiguous run of value heads.
+#[test]
+fn head_repetitions_tile_the_value_heads() {
+    assert_eq!(head_repetitions(32, 16), 2);
+    assert_eq!(head_repetitions(16, 16), 1);
+    assert_eq!(head_repetitions(0, 4), 0);
+    for key_heads in 1..9 {
+        assert_eq!(
+            head_repetitions(key_heads * 6, key_heads) * key_heads,
+            key_heads * 6
+        );
+    }
+}
+
 /// Zero widths are reported before uneven head grouping.
 #[test]
 fn delta_geometry_reports_the_first_violation() {

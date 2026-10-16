@@ -13,7 +13,9 @@
 //! The proofs establish, for every input, that no arithmetic overflows (in
 //! particular `T * (E / G) <= E` once `T <= G`), that each check accepts
 //! exactly the documented configurations, and that each rejection names the
-//! first violated condition in the order the configuration is validated.
+//! first violated condition in the order the configuration is validated. For
+//! accepted groups, [`group_widths`] tiles the experts exactly and never
+//! ranks more scores than a group holds.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -199,6 +201,45 @@ pub(crate) fn check_group_geometry(
         return Err(GroupGeometryViolation::TooFewEligible { eligible });
     }
     Ok(width)
+}
+
+/// Group-limited routing widths: experts per group and the scores ranked inside each group.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GroupWidths {
+    /// Experts in each contiguous group, `experts / groups`.
+    pub(crate) per_group: usize,
+    /// Scores a top-two group score sums, `min(2, per_group)`.
+    pub(crate) ranked: usize,
+}
+
+/// Returns the per-group expert count and the top-two group-score width.
+///
+/// The proof shows `per_group * groups == experts`, so `[groups, per_group]`
+/// reshapes the expert axis exactly into contiguous groups, and that the
+/// ranked width is `min(2, per_group)`, never more than a group holds, which
+/// is the `k <= columns` precondition of the deterministic top-k. The
+/// precondition is what [`check_group_geometry`] accepts.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(widths =>
+    requires
+        groups > 0,
+        experts % groups == 0,
+    ensures
+        widths.per_group * groups == experts,
+        widths.ranked == if widths.per_group < 2 { widths.per_group } else { 2 },
+        widths.ranked <= widths.per_group,
+))]
+pub(crate) fn group_widths(experts: usize, groups: usize) -> GroupWidths {
+    let per_group = experts / groups;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_groups_tile(experts as int, groups as int, 0);
+    }
+    GroupWidths {
+        per_group,
+        ranked: per_group.min(2),
+    }
 }
 
 /// Returns whether an observed expert-ID range `[minimum, maximum]` lies in `0..experts`.

@@ -84,6 +84,37 @@ fn group_geometry_reports_width_or_first_violation() {
     );
 }
 
+/// Group widths tile the experts and rank at most two scores, never more than a group holds.
+#[test]
+fn group_widths_tile_the_experts() {
+    assert_eq!(
+        group_widths(256, 8),
+        GroupWidths {
+            per_group: 32,
+            ranked: 2
+        }
+    );
+    assert_eq!(
+        group_widths(6, 6),
+        GroupWidths {
+            per_group: 1,
+            ranked: 1
+        }
+    );
+    assert_eq!(
+        group_widths(0, 3),
+        GroupWidths {
+            per_group: 0,
+            ranked: 0
+        }
+    );
+    for groups in [1, 2, 4, 8] {
+        let widths = group_widths(64, groups);
+        assert_eq!(widths.per_group * groups, 64);
+        assert!(widths.ranked <= widths.per_group);
+    }
+}
+
 /// The expert-ID range check is exact at both ends.
 #[test]
 fn expert_id_range_is_exact() {

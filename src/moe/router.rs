@@ -33,8 +33,8 @@ use burn::{
 use serde::{Deserialize, Serialize};
 
 use super::geometry::{
-    GroupGeometryViolation, RouterCardinalityViolation, check_group_geometry,
-    check_router_cardinality,
+    GroupGeometryViolation, GroupWidths, RouterCardinalityViolation, check_group_geometry,
+    check_router_cardinality, group_widths,
 };
 use crate::{Error, Result};
 
@@ -479,13 +479,15 @@ fn prune_groups<B: Backend>(
         return scores;
     }
     let [tokens, experts] = scores.dims();
-    let per_group = experts / selection.groups;
+    // `route` validated the geometry, so the verified widths tile the experts
+    // exactly and rank at most one group's worth of scores.
+    let GroupWidths { per_group, ranked } = group_widths(experts, selection.groups);
     let grouped = scores
         .clone()
         .reshape([tokens, selection.groups, per_group]);
     let group_scores = match selection.group_score {
         GroupScore::Max => grouped.max_dim(2),
-        GroupScore::TopTwoSum => deterministic_top_k(grouped, 2.min(per_group)).0.sum_dim(2),
+        GroupScore::TopTwoSum => deterministic_top_k(grouped, ranked).0.sum_dim(2),
     }
     .reshape([1, tokens, selection.groups]);
     let kept_groups = deterministic_top_k(group_scores, selection.top_groups)

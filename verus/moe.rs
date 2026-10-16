@@ -14,14 +14,18 @@
 //!   of whole experts whose assignment count fits the row budget (or a single
 //!   expert that alone exceeds it) and is maximal; the block boundaries
 //!   partition all experts; per-expert counts and block-local row slices are
-//!   exact and never pass their block's end. The host copy of routed IDs is
-//!   rejected for a wrong length or reports its first non-finite token, and
-//!   otherwise flattens to exactly the ID columns in token-major order; the
-//!   assignment count is exact and addressable by `i64` indices.
+//!   exact and never pass their block's end, as are each block's slice of the
+//!   order; the order and slot count convert to `i64` indices exactly. The
+//!   host copy of routed IDs is rejected for a wrong length or reports its
+//!   first non-finite token, and otherwise flattens to exactly the ID columns
+//!   in token-major order; the assignment count is exact and addressable by
+//!   `i64` indices.
 //! - `src/moe/geometry.rs`: expert-bank, router-cardinality, and
 //!   group-limited routing checks accept exactly the admissible integer
 //!   configurations and name the first violated condition; equal groups tile
-//!   the experts and the eligible count `T * (E / G)` cannot overflow; the
+//!   the experts and the eligible count `T * (E / G)` cannot overflow; group
+//!   pruning reshapes the experts into exactly `G` groups of `E / G` and its
+//!   top-two group score ranks at most one group's experts; the
 //!   load-balancing expert-ID range check is exact.
 //!
 //! Not proved here: the device gathers, expert evaluation, and scatter-add

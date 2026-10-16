@@ -112,9 +112,9 @@ mod plan;
 
 use plan::{
     ConvolutionSlices, Mamba2GeometryViolation, ModePartition, ProjectionSlices, ScanBlock,
-    WidthOverflow, check_mamba2_geometry, convolution_slices, partition_modes, projection_slices,
-    right_padded_flags, row_counts_fit, row_end_columns, rows_full, scan_block_chunks, scan_blocks,
-    signed_rows, window_columns,
+    WidthOverflow, check_mamba2_geometry, convolution_slices, heads_per_group, partition_modes,
+    projection_slices, right_padded_flags, row_counts_fit, row_end_columns, rows_full,
+    scan_block_chunks, scan_blocks, signed_rows, window_columns,
 };
 pub use plan::{Mamba2Mode, Mamba2Row};
 
@@ -514,19 +514,23 @@ impl<B: Backend> GatedGroupRmsNorm<B> {
                 "must be finite and greater than zero",
             ));
         }
-        if gate.dims() != [batch, sequence, width]
-            || self.groups == 0
-            || !width.is_multiple_of(self.groups)
-            || self.weight.shape().dims() != [width]
-        {
-            return Err(Error::shape(
-                "mamba2.gated_norm",
-                format!("matching [batch, sequence, {width}] tensors and {width} scale values"),
-                format!("values={:?}, gate={:?}", values.dims(), gate.dims()),
-            ));
-        }
+        // The verified width exists exactly when the groups divide `width`.
+        let group_width = match plan::group_width(width, self.groups) {
+            Some(group_width)
+                if gate.dims() == [batch, sequence, width]
+                    && self.weight.shape().dims() == [width] =>
+            {
+                group_width
+            }
+            _ => {
+                return Err(Error::shape(
+                    "mamba2.gated_norm",
+                    format!("matching [batch, sequence, {width}] tensors and {width} scale values"),
+                    format!("values={:?}, gate={:?}", values.dims(), gate.dims()),
+                ));
+            }
+        };
         let dtype = values.dtype();
-        let group_width = width / self.groups;
         let gated = values.cast(DType::F32) * activation::silu(gate.cast(DType::F32));
         let grouped = gated.reshape([batch, sequence, self.groups, group_width]);
         let inverse_rms = (grouped.clone().square().mean_dim(3) + self.epsilon)
@@ -1166,9 +1170,10 @@ fn heads_from_groups<B: Backend>(grouped: Tensor<B, 3>, heads: usize) -> Tensor<
     if groups == heads {
         return grouped;
     }
+    // The validated geometry makes `groups` divide `heads`.
     grouped
         .unsqueeze_dim::<4>(2)
-        .expand([batch, groups, heads / groups, state])
+        .expand([batch, groups, heads_per_group(heads, groups), state])
         .reshape([batch, heads, state])
 }
 
@@ -1412,7 +1417,8 @@ fn scan_block<B: Backend>(
     let BlockOperands { x, dt, b, c } = operands;
     let [batch, heads, chunks, width, head_dim] = x.dims();
     let [_, groups, _, _, state_size] = b.dims();
-    let per_group = heads / groups;
+    // `chunked_scan_with_budget` checked that `groups > 0` divides `heads`.
+    let per_group = heads_per_group(heads, groups);
     let log_decay = dt.clone() * a;
     let cumulative = log_decay.clone().cumsum(3);
     let transitions = masks.transitions(log_decay);

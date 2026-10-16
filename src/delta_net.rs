@@ -62,8 +62,8 @@ pub(crate) mod plan;
 
 use plan::{
     ChunkPlan, DeltaGeometryViolation, InverseLevel, MixerLayout, ProjectionWidths,
-    block_chunk_ranges, check_delta_geometry, chunk_plan, inverse_levels, mixer_layout,
-    prefers_recurrence, projection_widths,
+    block_chunk_ranges, check_delta_geometry, chunk_plan, head_repetitions, inverse_levels,
+    mixer_layout, prefers_recurrence, projection_widths,
 };
 
 /// Number of prefill chunks whose intra-chunk algebra is batched together.
@@ -975,9 +975,12 @@ fn gated_delta_norm<B: Backend>(
 }
 
 /// Repeats normalized key heads into contiguous value-head groups.
+///
+/// The validated geometry makes `key_heads` divide `value_heads`, so the
+/// verified repetition count tiles the value heads exactly.
 fn repeat_delta_heads<B: Backend>(tensor: Tensor<B, 4>, value_heads: usize) -> Tensor<B, 4> {
     let [batch, sequence, key_heads, head_dim] = tensor.dims();
-    let repetitions = value_heads / key_heads;
+    let repetitions = head_repetitions(value_heads, key_heads);
     if repetitions == 1 {
         return tensor;
     }

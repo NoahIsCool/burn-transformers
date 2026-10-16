@@ -11,21 +11,23 @@
 //!   exactly down to two, and its levels hold `2^k` blocks that tile the
 //!   padded tile; the key, value, and fused convolution widths are exact or
 //!   rejected exactly on overflow; the query, key, and value channel slices
-//!   tile the convolution output and the recurrent state size is exact;
-//!   integer configuration checks accept exactly the admissible geometry;
-//!   and the recurrence-versus-chunked choice equals its closed-form cost
-//!   comparison and is monotone.
+//!   tile the convolution output, key heads repeat exactly onto the value
+//!   heads, and the recurrent state size is exact; integer configuration
+//!   checks accept exactly the admissible geometry; and the
+//!   recurrence-versus-chunked choice equals its closed-form cost comparison
+//!   and is monotone.
 //! - `src/mamba2/plan.rs`: Mamba-2 bookkeeping. Projection and convolution
 //!   widths are exact or name the first overflowing step in validation
 //!   order, and the `[z | xBC | dt]` projection and `[x | B | C]`
-//!   convolution slices tile their layouts exactly; geometry and row-count
+//!   convolution slices tile their layouts exactly; normalization and
+//!   `B`/`C` head groups split their axes exactly; geometry and row-count
 //!   checks accept exactly the admissible inputs; right-padding flags,
 //!   row-end history columns, per-token window columns, and batch-row
 //!   selectors follow their closed forms or are rejected exactly when an
-//!   index exceeds `i64`; the mode grouping holds
-//!   every row once, in ascending order, by effective mode (inactive rows
-//!   take the first active row's mode), with a restore permutation that is a
-//!   two-sided inverse of the grouped order; and the SSD scan blocks hold
+//!   index exceeds `i64`; the mode grouping holds every row once, in
+//!   ascending order, by effective mode (inactive rows take the first active
+//!   row's mode), with a restore permutation that is a two-sided inverse of
+//!   the grouped order; and the SSD scan blocks hold
 //!   `clamp(budget / plane, 1, chunks)` chunks and tile the tokens in
 //!   chunk-aligned blocks with only the last padded, by less than one chunk.
 //!

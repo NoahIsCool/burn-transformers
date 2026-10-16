@@ -72,6 +72,26 @@ fn channel_slices_tile_the_fused_layouts() {
     assert_eq!(inner.c_start + inner.group_state_width, channels);
 }
 
+/// Group widths exist exactly for non-zero divisors; heads split evenly across groups.
+#[test]
+fn group_widths_exist_exactly_for_divisors() {
+    assert_eq!(group_width(128 * 64, 8), Some(1024));
+    assert_eq!(group_width(12, 12), Some(1));
+    assert_eq!(group_width(0, 3), Some(0));
+    assert_eq!(group_width(12, 5), None);
+    assert_eq!(group_width(12, 0), None);
+    assert_eq!(heads_per_group(128, 8), 16);
+    assert_eq!(heads_per_group(8, 8), 1);
+    for groups in 1..13 {
+        let expected = (24 % groups == 0).then_some(24 / groups);
+        assert_eq!(group_width(24, groups), expected);
+        if let Some(width) = expected {
+            assert_eq!(width * groups, 24);
+            assert_eq!(heads_per_group(24, groups), width);
+        }
+    }
+}
+
 /// Zero widths and short kernels are reported before uneven groups.
 #[test]
 fn geometry_reports_the_first_violation() {

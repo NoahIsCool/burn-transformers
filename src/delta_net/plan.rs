@@ -24,8 +24,9 @@
 //! two, and its levels tile the `P x P` tile with twice as many blocks per
 //! level; the projection widths are exact or rejected exactly when the
 //! channel count overflows; the query, key, and value slices tile the fused
-//! channels; and the recurrence-versus-chunked choice equals its closed-form
-//! cost comparison and is monotone in the segment length and the state size.
+//! channels and key heads repeat exactly onto the value heads; and the
+//! recurrence-versus-chunked choice equals its closed-form cost comparison
+//! and is monotone in the segment length and the state size.
 
 use core::ops::Range;
 
@@ -636,6 +637,32 @@ pub(super) fn state_elements(
             requires key_head_dim > 0, value_head_dim > 0, value_heads >= 0;
     }
     value_heads * key_head_dim * value_head_dim
+}
+
+/// Returns how many consecutive value heads share each query/key head.
+///
+/// The proof shows `repetitions * key_heads == value_heads`, so repeating
+/// each of the `key_heads` heads `repetitions` times yields exactly
+/// `value_heads` contiguous groups. The precondition is the divisibility that
+/// [`check_delta_geometry`] accepts.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(repetitions =>
+    requires
+        key_heads > 0,
+        value_heads % key_heads == 0,
+    ensures
+        repetitions * key_heads == value_heads,
+))]
+pub(super) fn head_repetitions(value_heads: usize, key_heads: usize) -> usize {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(value_heads as int, key_heads as int);
+        assert((value_heads / key_heads) * key_heads == value_heads) by (nonlinear_arith)
+            requires
+                value_heads == key_heads * (value_heads / key_heads) + value_heads % key_heads,
+                value_heads % key_heads == 0;
+    }
+    value_heads / key_heads
 }
 
 /// First violated integer constraint of a Gated DeltaNet configuration.

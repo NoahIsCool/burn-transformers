@@ -15,11 +15,12 @@
 //! Every function here is checked in place by Verus through
 //! `verus/mixers.rs`. The proofs establish, for every admissible input, that
 //! no arithmetic overflows and that each result is exact: widths equal their
-//! formulas or name the first overflowing step, and the `[z | xBC | dt]` and
-//! `[x | B | C]` channel slices tile their layouts; geometry and row-count
-//! checks accept exactly the admissible inputs; validity flags and gather
-//! indices follow their closed forms or are rejected exactly when an index
-//! exceeds `i64`; the mode grouping partitions the rows by effective mode, in
+//! formulas or name the first overflowing step, the `[z | xBC | dt]` and
+//! `[x | B | C]` channel slices tile their layouts, and normalization groups
+//! and head groups split their axes exactly; geometry and row-count checks
+//! accept exactly the admissible inputs; validity flags and gather indices
+//! follow their closed forms or are rejected exactly when an index exceeds
+//! `i64`; the mode grouping partitions the rows by effective mode, in
 //! ascending order, and its restore permutation is a two-sided inverse; and
 //! the scan blocks tile the tokens in chunk-aligned blocks that respect the
 //! plane budget, with only the last block padded, by less than one chunk.
@@ -300,6 +301,52 @@ pub(super) fn convolution_slices(
         group_state_width,
         c_start: intermediate + group_state_width,
     }
+}
+
+/// Returns the width of each of `groups` equal contiguous groups of `total`, if they exist.
+///
+/// The proof shows the result is `Some(w)` with `w * groups == total`
+/// exactly when `groups > 0` divides `total`, and `None` otherwise, so a
+/// `[groups, w]` reshape of the grouped axis is exact.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        match width {
+            Some(width) => groups > 0 && width * groups == total,
+            None => groups == 0 || total % groups != 0,
+        },
+))]
+pub(super) fn group_width(total: usize, groups: usize) -> Option<usize> {
+    if groups == 0 || !total.is_multiple_of(groups) {
+        return None;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_exact_quotient(total as int, groups as int);
+    }
+    Some(total / groups)
+}
+
+/// Returns the heads per group-shared `B`/`C` group.
+///
+/// The proof shows `per_group * groups == heads`, so broadcasting each group
+/// over `per_group` contiguous heads covers every head exactly once. The
+/// precondition is the divisibility that [`check_mamba2_geometry`] accepts
+/// and the chunked scan checks again.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(per_group =>
+    requires
+        groups > 0,
+        heads % groups == 0,
+    ensures
+        per_group * groups == heads,
+))]
+pub(super) fn heads_per_group(heads: usize, groups: usize) -> usize {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_exact_quotient(heads as int, groups as int);
+    }
+    heads / groups
 }
 
 /// First violated integer constraint of a Mamba-2 configuration.
@@ -1047,6 +1094,22 @@ pub(super) fn scan_blocks(
 
 #[cfg(verus_keep_ghost)]
 verus! {
+
+/// A divisor of `total` splits it into `total / groups` equal parts exactly.
+proof fn lemma_exact_quotient(total: int, groups: int)
+    requires
+        total >= 0,
+        groups > 0,
+        total % groups == 0,
+    ensures
+        (total / groups) * groups == total,
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(total, groups);
+    assert((total / groups) * groups == total) by (nonlinear_arith)
+        requires
+            total == groups * (total / groups) + total % groups,
+            total % groups == 0;
+}
 
 /// Products of nonnegative widths are nonnegative.
 proof fn lemma_products_nonnegative(heads: int, head_dim: int, groups: int, state_size: int)
