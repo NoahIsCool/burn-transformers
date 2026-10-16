@@ -148,3 +148,67 @@ fn schedule_rules_match_the_reference_formulas() {
     assert!(rotary_by_interval(0, 2) && !rotary_by_interval(1, 1));
     assert!(sliding_from_layer(28, 28) && !sliding_from_layer(27, 28));
 }
+
+/// Whole schedules: SmolLM3's NoPE interval, explicit lists, Qwen suffixes, and NoPE sliding.
+#[test]
+fn whole_schedules_follow_their_rules() {
+    assert_eq!(
+        interval_rotary_flags(8, 4),
+        [true, true, true, false, true, true, true, false]
+    );
+    assert!(interval_rotary_flags(0, 3).is_empty());
+    assert_eq!(
+        listed_rotary_flags(&[1, 0, 1]),
+        Some(vec![true, false, true])
+    );
+    assert_eq!(listed_rotary_flags(&[]), Some(Vec::new()));
+    assert_eq!(listed_rotary_flags(&[1, 2, 0]), None);
+    assert_eq!(suffix_sliding_flags(4, 2, true), [false, false, true, true]);
+    assert_eq!(suffix_sliding_flags(3, 0, false), [false, false, false]);
+    assert_eq!(
+        nope_sliding_flags(&[true, false, true, false], true),
+        [false, true, false, true]
+    );
+    assert_eq!(nope_sliding_flags(&[false], false), [false]);
+}
+
+/// The first set flag is found; an all-clear list has none.
+#[test]
+fn first_set_finds_the_earliest_flag() {
+    assert_eq!(first_set(&[false, true, true]), Some(1));
+    assert_eq!(first_set(&[false, false]), None);
+    assert_eq!(first_set(&[]), None);
+}
+
+/// The derived head width divides, and is zero without heads.
+#[test]
+fn derived_head_dim_divides_or_is_zero() {
+    assert_eq!(derived_head_dim(4096, 32), 128);
+    assert_eq!(derived_head_dim(10, 3), 3);
+    assert_eq!(derived_head_dim(64, 0), 0);
+}
+
+proptest! {
+    /// NoPE schedules match the reference formula and count `⌊L / k⌋` NoPE layers.
+    #[test]
+    fn interval_schedules_count_their_nope_layers(layers in 0usize..200, interval in 1usize..40) {
+        let flags = interval_rotary_flags(layers, interval);
+        prop_assert_eq!(flags.len(), layers);
+        for (layer, &rotates) in flags.iter().enumerate() {
+            prop_assert_eq!(rotates, (layer + 1) % interval != 0);
+        }
+        prop_assert_eq!(flags.iter().filter(|&&rotates| !rotates).count(), layers / interval);
+    }
+
+    /// Explicit lists are accepted exactly when every entry is 0 or 1.
+    #[test]
+    fn listed_flags_accept_exactly_binary_lists(listed in prop::collection::vec(0usize..3, 0..12)) {
+        let parsed = listed_rotary_flags(&listed);
+        if listed.iter().all(|&flag| flag <= 1) {
+            let expected: Vec<bool> = listed.iter().map(|&flag| flag == 1).collect();
+            prop_assert_eq!(parsed, Some(expected));
+        } else {
+            prop_assert_eq!(parsed, None);
+        }
+    }
+}

@@ -72,7 +72,9 @@ use burn::tensor::DType;
 use serde::{Deserialize, Serialize};
 
 use super::config::{FAMILY, LlamaFamilyConfig, LlamaVariant};
-use super::plan::{rotary_by_interval, sliding_from_layer};
+use super::plan::{
+    first_set, interval_rotary_flags, listed_rotary_flags, nope_sliding_flags, suffix_sliding_flags,
+};
 use crate::{
     architecture::Activation,
     attention::{
@@ -457,25 +459,23 @@ fn layer_schedule(
             "must be nonzero",
         ));
     }
-    (0..layers)
-        .map(|layer| {
-            let connectivity = match (sliding[layer], window) {
-                (false, _) => AttentionConnectivity::Global,
+    // Without a window, the first sliding layer (if any) is the error.
+    if let (None, Some(layer)) = (window, first_set(&sliding)) {
+        return Err(ConfigError::new(
+            family,
+            "layer_types",
+            format!("layer {layer} is sliding_attention but no sliding_window applies"),
+        ));
+    }
+    Ok((0..layers)
+        .map(|layer| LlamaLayerSchedule {
+            rotary: rotary[layer],
+            connectivity: match (sliding[layer], window) {
                 (true, Some(window)) => AttentionConnectivity::SlidingWindow { window },
-                (true, None) => {
-                    return Err(ConfigError::new(
-                        family,
-                        "layer_types",
-                        format!("layer {layer} is sliding_attention but no sliding_window applies"),
-                    ));
-                }
-            };
-            Ok(LlamaLayerSchedule {
-                rotary: rotary[layer],
-                connectivity,
-            })
+                _ => AttentionConnectivity::Global,
+            },
         })
-        .collect()
+        .collect())
 }
 
 /// Returns the window the variant's reference applies to sliding layers.
@@ -499,14 +499,19 @@ fn rotary_flags(
     let layers = config.num_hidden_layers;
     let explicit = match &config.no_rope_layers {
         Some(flags) => {
-            if flags.len() != layers || flags.iter().any(|&flag| flag > 1) {
+            let parsed = if flags.len() == layers {
+                listed_rotary_flags(flags)
+            } else {
+                None
+            };
+            let Some(parsed) = parsed else {
                 return Err(ConfigError::new(
                     family,
                     "no_rope_layers",
                     format!("must list {layers} flags, each 0 (NoPE) or 1 (RoPE)"),
                 ));
-            }
-            Some(flags.iter().map(|&flag| flag == 1).collect::<Vec<_>>())
+            };
+            Some(parsed)
         }
         None => None,
     };
@@ -528,9 +533,7 @@ fn rotary_flags(
     }
     let interval = config.no_rope_layer_interval.unwrap_or(0);
     nonzero(family, "no_rope_layer_interval", interval)?;
-    Ok((0..layers)
-        .map(|layer| rotary_by_interval(layer, interval))
-        .collect())
+    Ok(interval_rotary_flags(layers, interval))
 }
 
 /// Returns one sliding flag per layer from `layer_types` or the variant's default rule.
@@ -564,14 +567,11 @@ fn sliding_flags(
         LlamaVariant::Mistral => vec![window.is_some(); layers],
         LlamaVariant::Qwen2 | LlamaVariant::Qwen3 => {
             let first = config.max_window_layers.unwrap_or(layers);
-            (0..layers)
-                .map(|layer| window.is_some() && sliding_from_layer(layer, first))
-                .collect()
+            suffix_sliding_flags(layers, first, window.is_some())
         }
-        LlamaVariant::SmolLm3 => rotary
-            .iter()
-            .map(|&rotates| config.use_sliding_window && window.is_some() && !rotates)
-            .collect(),
+        LlamaVariant::SmolLm3 => {
+            nope_sliding_flags(rotary, config.use_sliding_window && window.is_some())
+        }
         LlamaVariant::Llama | LlamaVariant::Olmo2 => vec![false; layers],
     })
 }

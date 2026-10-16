@@ -2,7 +2,13 @@
 //!
 //! Verifies, in place, the specifications attached to
 //! `src/models/llama/plan.rs`: the SmolLM3 NoPE period and Qwen sliding-layer
-//! rules, the numbering of layers inside their KV cache groups (each slot is
+//! rules and the whole-model schedules built from them (the NoPE schedule
+//! equals `(l + 1) mod k != 0` per layer and has exactly `⌊L / k⌋` NoPE
+//! layers; an explicit `no_rope_layers` list is accepted exactly when every
+//! entry is 0 or 1; Qwen's default sliding layers are the suffix
+//! `l >= max_window_layers`; SmolLM3's are its NoPE layers when enabled; the
+//! first sliding layer without a window is the earliest one), the derived
+//! `head_dim = hidden / heads`, the numbering of layers inside their KV cache groups (each slot is
 //! the count of earlier layers of its group, so slots are dense and in
 //! range), the contiguous-run test of a row's valid columns (overflow-free),
 //! the cache positions of a batched step's block slots (exact

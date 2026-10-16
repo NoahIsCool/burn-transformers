@@ -3,7 +3,11 @@
 //! Everything here is integer bookkeeping that the tensor code consumes:
 //!
 //! * the SmolLM3 NoPE rule (`rotary_by_interval`) and the Qwen sliding
-//!   rule (`sliding_from_layer`) that derive per-layer schedules;
+//!   rule (`sliding_from_layer`) that derive per-layer schedules, and the
+//!   whole-model schedules built from them (`interval_rotary_flags`,
+//!   `listed_rotary_flags`, `suffix_sliding_flags`, `nope_sliding_flags`,
+//!   and `first_set` for the first sliding layer without a window);
+//! * `derived_head_dim`, the head width of a config that omits it;
 //! * `cache_slots`, which numbers layers inside their KV cache group (full
 //!   storage or sliding ring);
 //! * the batched-step layout of one row of a `[batch, block]` token block:
@@ -95,6 +99,51 @@ pub proof fn lemma_successor_mod(a: int, c: int)
     }
 }
 
+/// Stepping `n` to `n + 1` raises `⌊n / k⌋` exactly when `k` divides `n + 1`.
+///
+/// With `n = k·q + r` and `0 <= r < k`: if `r + 1 < k` the quotient stays
+/// `q` and the remainder `r + 1` is nonzero; otherwise `n + 1 = k·(q + 1)`.
+pub proof fn lemma_div_successor(n: int, k: int)
+    requires
+        n >= 0,
+        k > 0,
+    ensures
+        (n + 1) / k == n / k + if (n + 1) % k == 0 { 1int } else { 0int },
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(n, k);
+    let q = n / k;
+    let r = n % k;
+    if r + 1 < k {
+        assert(n + 1 == q * k + (r + 1)) by (nonlinear_arith)
+            requires
+                n == k * q + r,
+        ;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(n + 1, k, q, r + 1);
+    } else {
+        assert(n + 1 == (q + 1) * k + 0) by (nonlinear_arith)
+            requires
+                n == k * q + r,
+                r + 1 == k,
+        ;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(n + 1, k, q + 1, 0);
+    }
+}
+
+/// `count_equal` reads only the prefix it counts.
+pub proof fn lemma_count_prefix_stable(a: Seq<bool>, b: Seq<bool>, end: int, flag: bool)
+    requires
+        0 <= end <= a.len(),
+        end <= b.len(),
+        forall|i: int| 0 <= i < end ==> a[i] == b[i],
+    ensures
+        count_equal(a, end, flag) == count_equal(b, end, flag),
+    decreases end,
+{
+    if end > 0 {
+        lemma_count_prefix_stable(a, b, end - 1, flag);
+    }
+}
+
 /// Proves `0 <= count_equal(flags, end, flag) <= end`.
 pub proof fn count_equal_bounds(flags: Seq<bool>, end: int, flag: bool)
     requires
@@ -155,6 +204,188 @@ pub(crate) fn rotary_by_interval(layer: usize, interval: usize) -> bool {
 ))]
 pub(crate) const fn sliding_from_layer(layer: usize, first: usize) -> bool {
     layer >= first
+}
+
+/// Returns SmolLM3's default rotary flag of each of `layers` layers.
+///
+/// Proved: layer `l` rotates exactly when `(l + 1) mod interval != 0`, as
+/// Transformers derives `no_rope_layers`, so exactly `⌊layers / interval⌋`
+/// layers (the 1-based multiples of the interval) are NoPE layers.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(flags =>
+    requires
+        interval > 0,
+    ensures
+        flags.len() == layers,
+        forall|l: int| 0 <= l < layers ==>
+            #[trigger] flags@[l] == ((l + 1) % (interval as int) != 0),
+        count_equal(flags@, layers as int, false) == layers / interval,
+))]
+pub(crate) fn interval_rotary_flags(layers: usize, interval: usize) -> Vec<bool> {
+    let mut flags: Vec<bool> = Vec::with_capacity(layers);
+    let mut layer: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= layers,
+            interval > 0,
+            flags.len() == layer,
+            forall|l: int| 0 <= l < layer ==>
+                #[trigger] flags@[l] == ((l + 1) % (interval as int) != 0),
+            count_equal(flags@, layer as int, false) == layer / interval,
+        decreases layers - layer,
+    ))]
+    while layer < layers {
+        #[cfg(verus_keep_ghost)]
+        proof_decl! { let ghost before = flags@; }
+        flags.push(rotary_by_interval(layer, interval));
+        // The new flag counts as NoPE exactly when the quotient steps.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_count_prefix_stable(before, flags@, layer as int, false);
+            lemma_div_successor(layer as int, interval as int);
+        }
+        layer += 1;
+    }
+    flags
+}
+
+/// Returns the rotary flags of an explicit `no_rope_layers` list, or `None`.
+///
+/// Proved: the list is accepted exactly when every entry is `0` (NoPE) or
+/// `1` (RoPE), and then layer `l` rotates exactly when its entry is `1`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(flags =>
+    ensures
+        match flags {
+            Some(flags) => {
+                &&& flags.len() == listed.len()
+                &&& forall|l: int| 0 <= l < listed.len() ==> #[trigger] listed@[l] <= 1
+                &&& forall|l: int| 0 <= l < listed.len() ==>
+                    #[trigger] flags@[l] == (listed@[l] == 1)
+            },
+            None => exists|l: int| 0 <= l < listed.len() && #[trigger] listed@[l] > 1,
+        },
+))]
+pub(crate) fn listed_rotary_flags(listed: &[usize]) -> Option<Vec<bool>> {
+    let mut flags: Vec<bool> = Vec::with_capacity(listed.len());
+    let mut layer: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= listed.len(),
+            flags.len() == layer,
+            forall|l: int| 0 <= l < layer ==> #[trigger] listed@[l] <= 1,
+            forall|l: int| 0 <= l < layer ==> #[trigger] flags@[l] == (listed@[l] == 1),
+        decreases listed.len() - layer,
+    ))]
+    while layer < listed.len() {
+        if listed[layer] > 1 {
+            return None;
+        }
+        flags.push(listed[layer] == 1);
+        layer += 1;
+    }
+    Some(flags)
+}
+
+/// Returns Qwen's default sliding flag of each of `layers` layers.
+///
+/// Proved: layer `l` slides exactly when a window applies (`windowed`) and
+/// `l >= first` (`max_window_layers`), so the sliding layers form a suffix.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(flags =>
+    ensures
+        flags.len() == layers,
+        forall|l: int| 0 <= l < layers ==> #[trigger] flags@[l] == (windowed && l >= first),
+))]
+pub(crate) fn suffix_sliding_flags(layers: usize, first: usize, windowed: bool) -> Vec<bool> {
+    let mut flags: Vec<bool> = Vec::with_capacity(layers);
+    let mut layer: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= layers,
+            flags.len() == layer,
+            forall|l: int| 0 <= l < layer ==> #[trigger] flags@[l] == (windowed && l >= first),
+        decreases layers - layer,
+    ))]
+    while layer < layers {
+        flags.push(windowed && sliding_from_layer(layer, first));
+        layer += 1;
+    }
+    flags
+}
+
+/// Returns SmolLM3's default sliding flags: its NoPE layers, when enabled.
+///
+/// Proved: layer `l` slides exactly when sliding is `enabled` (the config's
+/// `use_sliding_window` with a window present) and the layer does not rotate.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(flags =>
+    ensures
+        flags.len() == rotary.len(),
+        forall|l: int| 0 <= l < rotary.len() ==> #[trigger] flags@[l] == (enabled && !rotary@[l]),
+))]
+pub(crate) fn nope_sliding_flags(rotary: &[bool], enabled: bool) -> Vec<bool> {
+    let mut flags: Vec<bool> = Vec::with_capacity(rotary.len());
+    let mut layer: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= rotary.len(),
+            flags.len() == layer,
+            forall|l: int| 0 <= l < layer ==> #[trigger] flags@[l] == (enabled && !rotary@[l]),
+        decreases rotary.len() - layer,
+    ))]
+    while layer < rotary.len() {
+        flags.push(enabled && !rotary[layer]);
+        layer += 1;
+    }
+    flags
+}
+
+/// Returns the first set flag's index, or `None` when no flag is set.
+///
+/// Proved: a returned index holds a set flag and every earlier flag is
+/// clear; `None` means every flag is clear. The schedule reports the first
+/// sliding layer without a window this way.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(first =>
+    ensures
+        match first {
+            Some(index) => {
+                &&& index < flags.len()
+                &&& flags@[index as int]
+                &&& forall|l: int| 0 <= l < index ==> !#[trigger] flags@[l]
+            },
+            None => forall|l: int| 0 <= l < flags.len() ==> !#[trigger] flags@[l],
+        },
+))]
+pub(crate) fn first_set(flags: &[bool]) -> Option<usize> {
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= flags.len(),
+            forall|l: int| 0 <= l < index ==> !#[trigger] flags@[l],
+        decreases flags.len() - index,
+    ))]
+    while index < flags.len() {
+        if flags[index] {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Returns the head width derived when `head_dim` is absent or `null`.
+///
+/// Proved: `hidden / heads`, rounded down, or zero when there are no heads
+/// (validation then rejects the configuration with a field error).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(width =>
+    ensures
+        width == if heads == 0 { 0 } else { hidden / heads },
+))]
+pub(crate) fn derived_head_dim(hidden: usize, heads: usize) -> usize {
+    hidden.checked_div(heads).unwrap_or(0)
 }
 
 /// Layer numbering inside the two KV cache groups of a decode state.
