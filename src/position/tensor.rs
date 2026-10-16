@@ -99,11 +99,18 @@ pub fn rotary_angles_from_frequencies<B: Backend>(
 /// Builds Qwen multimodal RoPE tables from three position axes.
 ///
 /// `position_ids` is `[3, batch, sequence]` for temporal, height, and width.
-/// `sections` counts complex frequencies assigned to those axes and must sum to
-/// half the rotary dimension. Qwen interleaves H at `1 mod 3`, W at `2 mod 3`,
-/// and uses T for the remaining frequencies (see
-/// [`mrope_frequency_axis`]). Text supplies equal values on
-/// all three axes, reducing exactly to ordinary RoPE.
+/// `sections = [t, h, w]` must sum to `half = rotary_dimension / 2`. Qwen
+/// interleaves H at `1 mod 3` within the first `h` groups of three, W at
+/// `2 mod 3` within the first `w` groups, and uses T for the remaining
+/// frequencies (see [`mrope_frequency_axis`]). Height therefore receives
+/// `min(h, (half + 1) / 3)` frequencies, width `min(w, half / 3)`, and
+/// temporal the rest (Verus lemma `lemma_mrope_axis_counts` in
+/// `src/position/index_plan.rs`). Sections within those limits, such as
+/// Qwen3-VL's `[24, 20, 20]` over 64 frequencies, receive exactly their
+/// counts. Larger height or width sections are not rejected: they are
+/// clamped exactly as the Transformers interleaved slices `[1 : 3 * h : 3]`
+/// and `[2 : 3 * w : 3]` stop at `half`. Text supplies equal values on all
+/// three axes, reducing exactly to ordinary RoPE.
 ///
 /// # Errors
 ///

@@ -247,6 +247,39 @@ fn distinct_mrope_axes_match_a_scalar_complex_phase_oracle() {
     assert!((cosine[0] - cosine[6]).abs() > 0.5);
 }
 
+/// Oversized height and width sections are clamped by the interleaving, not rejected.
+///
+/// With `half = 6` frequencies, height can hold `(6 + 1) / 3 = 2` and width
+/// `6 / 3 = 2`, so sections `[0, 3, 3]` give height frequencies 1 and 4,
+/// width 2 and 5, and temporal the remaining 0 and 3, as Transformers'
+/// `[1 : 3 * h : 3]` and `[2 : 3 * w : 3]` slices do.
+#[test]
+fn oversized_mrope_sections_are_clamped_like_the_reference_slices() {
+    let device = Default::default();
+    let config = RopeConfig::new(12, 12, 10_000.0, RopeScaling::None).expect("full rope");
+    let positions = [1, 3, 5];
+    let angles = mrope_angles(
+        config,
+        Tensor::<TestBackend, 3, Int>::from_ints([[[1]], [[3]], [[5]]], &device),
+        [0, 3, 3],
+        8,
+    )
+    .expect("sections sum to half the rotary width");
+    let cosine = angles
+        .cosine
+        .into_data()
+        .to_vec::<f32>()
+        .expect("F32 cosine");
+    let sine = angles.sine.into_data().to_vec::<f32>().expect("F32 sine");
+    for (frequency, axis) in [0, 1, 2, 0, 1, 2].into_iter().enumerate() {
+        let phase = f64::from(positions[axis]) * 10_000.0_f64.powf(-2.0 * frequency as f64 / 12.0);
+        for channel in [frequency, frequency + 6] {
+            assert!((f64::from(cosine[channel]) - phase.cos()).abs() < 1e-6);
+            assert!((f64::from(sine[channel]) - phase.sin()).abs() < 1e-6);
+        }
+    }
+}
+
 /// Deterministic `[batch, heads, sequence, width]` activations with distinct entries.
 fn activations(shape: [usize; 4]) -> Tensor<TestBackend, 4> {
     let count = shape.iter().product::<usize>();

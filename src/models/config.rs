@@ -790,10 +790,17 @@ pub(crate) fn divisible(
 ) -> Result<(), ConfigError> {
     match divisibility_fault(numerator, denominator) {
         None => Ok(()),
-        Some(DivisibilityFault::ZeroNumerator) => nonzero(architecture, numerator_field, numerator),
-        Some(DivisibilityFault::ZeroDenominator) => {
-            nonzero(architecture, denominator_field, denominator)
-        }
+        // The verified fault names the zero count; the message matches `nonzero`.
+        Some(DivisibilityFault::ZeroNumerator) => Err(ConfigError::new(
+            architecture,
+            numerator_field,
+            "must be nonzero",
+        )),
+        Some(DivisibilityFault::ZeroDenominator) => Err(ConfigError::new(
+            architecture,
+            denominator_field,
+            "must be nonzero",
+        )),
         Some(DivisibilityFault::Indivisible) => Err(ConfigError::new(
             architecture,
             numerator_field,
