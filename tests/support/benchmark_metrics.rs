@@ -199,6 +199,21 @@ impl RunEnvironment {
     }
 }
 
+/// Serializes tests that spawn child processes with tests that need a closed socket to stay closed.
+///
+/// A child process spawned by a concurrent test holds a copy of every open
+/// descriptor of this process until it executes its program, and keeps for its
+/// whole life any descriptor that was not yet close-on-exec (Darwin creates a
+/// socket and marks it close-on-exec in two steps). While a child holds such a
+/// copy, a listener the test has dropped keeps accepting connections and a peer
+/// the test has dropped stays open. Without this lock the stale-socket check
+/// below failed in 59 of 80 runs of the `small_model_benchmarks` test binary,
+/// whose identity tests spawn `git`, `rustc` and `sysctl`; with it, in none.
+/// Tests that depend on a socket really closing, and tests that spawn
+/// processes, hold this lock; the timed benchmarks never take it.
+#[cfg(all(test, target_os = "macos"))]
+pub static CHILD_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Returns whether this is a separate, timing-incomparable process-memory run.
 ///
 /// The private Unix socket is test-harness instrumentation only. Caching the
@@ -457,6 +472,11 @@ mod tests {
     #[test]
     fn memory_channel_failure_boundaries_are_bounded() {
         use std::io::{Read, Write};
+        // A concurrently spawned child could inherit the stale listener or a
+        // dropped peer and keep it open; see `CHILD_PROCESS_LOCK`.
+        let _no_concurrent_children = CHILD_PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = tempfile::tempdir().unwrap();
         assert!(MemoryChannel::connect(&directory.path().join("stale.sock")).is_err());
         let stale = directory.path().join("stale.sock");

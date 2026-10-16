@@ -232,10 +232,26 @@ mod tests {
 
     use super::{cargo_features, command_text, file_sha256, host_load, source_identity};
 
+    /// Holds the shared child-process lock while a test spawns metadata probes.
+    ///
+    /// On macOS a spawned child can hold another test's dropped socket open;
+    /// see `benchmark_metrics::CHILD_PROCESS_LOCK`.
+    #[cfg(target_os = "macos")]
+    fn spawning_children() -> std::sync::MutexGuard<'static, ()> {
+        crate::benchmark_metrics::CHILD_PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The only socket test that needs the lock runs on macOS alone.
+    #[cfg(not(target_os = "macos"))]
+    fn spawning_children() {}
+
     /// A compiled source is identified by the hash of the bytes in the binary,
     /// matched against the build tree, alongside toolchain, features and host.
     #[test]
     fn source_identity_names_compiled_sources_toolchain_and_host() {
+        let _children = spawning_children();
         let bytes: &[u8] = include_bytes!("benchmark_identity.rs");
         let identity = source_identity(&[("tests/support/benchmark_identity.rs", bytes)]);
         let source = &identity["compiled_sources"][0];
@@ -266,6 +282,7 @@ mod tests {
     /// A source that differs from the build tree is reported, not rejected.
     #[test]
     fn edited_sources_are_flagged_against_the_build_tree() {
+        let _children = spawning_children();
         let identity = source_identity(&[("Cargo.toml", b"not the manifest".as_slice())]);
         assert_eq!(identity["compiled_sources"][0]["matches_build_tree"], false);
         let missing = source_identity(&[("tests/support/missing.rs", b"".as_slice())]);
@@ -275,6 +292,7 @@ mod tests {
     /// Failing metadata probes are preserved as explicit errors.
     #[test]
     fn failing_probes_are_recorded_as_errors() {
+        let _children = spawning_children();
         let missing = command_text(
             "transformers-benchmark-probe-that-does-not-exist",
             &[],
