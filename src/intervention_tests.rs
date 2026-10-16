@@ -831,14 +831,14 @@ fn moe_layer_points_have_documented_names_and_axes() {
         Layer::encoder(0).router_logits().info().name,
         "encoder.layers.0.mlp.router_logits"
     );
-    assert_eq!(
-        layer.router_logits(),
-        crate::models::qwen3_moe::router_logits_point(layer)
+    // The deprecated Qwen3-MoE spellings name the same shared points.
+    #[allow(deprecated)]
+    let (legacy_logits, legacy_weights) = (
+        crate::models::qwen3_moe::router_logits_point(layer),
+        crate::models::qwen3_moe::router_weights_point(layer),
     );
-    assert_eq!(
-        layer.router_weights(),
-        crate::models::qwen3_moe::router_weights_point(layer)
-    );
+    assert_eq!(layer.router_logits(), legacy_logits);
+    assert_eq!(layer.router_weights(), legacy_weights);
 }
 
 /// Captures every MoE point a sparse model lists through the [`Layer`] constructors.

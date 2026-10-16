@@ -60,7 +60,7 @@ use crate::{
     Error, ForwardOptions, Result,
     architecture::{RouterDiagnostics, TokenMask},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
-    intervention::{Axis, Hooks, Layer, Point, PointInfo},
+    intervention::{Hooks, Layer, PointInfo},
     moe::{
         ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
         RenormalizationDenominator, RoutedExpertPrecision, RouterConfig, RouterProjectionPrecision,
@@ -229,9 +229,9 @@ impl<B: Backend> DeepseekV2Moe<B> {
 
     /// Evaluates the block while emitting its router-logit and branch-output points.
     ///
-    /// Editing [`router_logits_point`] changes which experts run and their
-    /// weights; [`routed_output_point`] and [`shared_output_point`] are the two
-    /// branch outputs before they are added. Call inside the caller's
+    /// Editing [`Layer::router_logits`] changes which experts run and their
+    /// weights; [`Layer::routed_output`] and [`Layer::shared_output`] are the
+    /// two branch outputs before they are added. Call inside the caller's
     /// [`Hooks::run`] scope.
     ///
     /// # Errors
@@ -277,7 +277,7 @@ impl<B: Backend> DeepseekV2Moe<B> {
             self.routed.routing.projection,
         )?;
         if let Some((layer, hooks)) = hooks.as_mut() {
-            logits = hooks.apply(router_logits_point(*layer), logits)?;
+            logits = hooks.apply(layer.router_logits(), logits)?;
         }
         let decision = self.routed.router_config().route(
             logits.clone().reshape([tokens, experts]),
@@ -301,8 +301,8 @@ impl<B: Backend> DeepseekV2Moe<B> {
             .reshape([batch, sequence, hidden]);
         let mut shared_hidden = self.shared_experts.forward(input)?;
         if let Some((layer, hooks)) = hooks.as_mut() {
-            routed_hidden = hooks.apply(routed_output_point(*layer), routed_hidden)?;
-            shared_hidden = hooks.apply(shared_output_point(*layer), shared_hidden)?;
+            routed_hidden = hooks.apply(layer.routed_output(), routed_hidden)?;
+            shared_hidden = hooks.apply(layer.shared_output(), shared_hidden)?;
         }
         Ok(DeepseekMoeOutput {
             hidden_state: routed_hidden.clone() + shared_hidden,
@@ -318,36 +318,12 @@ impl<B: Backend> DeepseekV2Moe<B> {
     }
 }
 
-/// F32 router logits `[batch, token, expert]` of a sparse layer; edits change routing.
-pub(super) fn router_logits_point(layer: Layer) -> Point<3> {
-    Point::custom(
-        format!("decoder.layers.{}.mlp.router_logits", layer.index()),
-        [Axis::Batch, Axis::Token, Axis::Other("expert")],
-    )
-}
-
-/// Weighted routed-expert sum `[batch, token, channel]`, before the shared branch is added.
-pub(super) fn routed_output_point(layer: Layer) -> Point<3> {
-    Point::custom(
-        format!("decoder.layers.{}.mlp.routed_output", layer.index()),
-        [Axis::Batch, Axis::Token, Axis::Channel],
-    )
-}
-
-/// Always-active shared-expert output `[batch, token, channel]`.
-pub(super) fn shared_output_point(layer: Layer) -> Point<3> {
-    Point::custom(
-        format!("decoder.layers.{}.mlp.shared_output", layer.index()),
-        [Axis::Batch, Axis::Token, Axis::Channel],
-    )
-}
-
 /// Sparse-block points in emission order: router logits, routed sum, shared output.
 pub(super) fn activation_points(layer: Layer) -> [PointInfo; 3] {
     [
-        router_logits_point(layer).info(),
-        routed_output_point(layer).info(),
-        shared_output_point(layer).info(),
+        layer.router_logits().info(),
+        layer.routed_output().info(),
+        layer.shared_output().info(),
     ]
 }
 

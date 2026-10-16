@@ -1198,14 +1198,8 @@ fn activation_catalog_names_router_and_dense_points() {
             .unwrap();
         assert_eq!(names[input + 1], router);
         assert_eq!(names[input + 2], weights);
-        assert_eq!(
-            router_logits_point(Layer::decoder(layer)).info().name,
-            router
-        );
-        assert_eq!(
-            router_weights_point(Layer::decoder(layer)).info().name,
-            weights
-        );
+        assert_eq!(Layer::decoder(layer).router_logits().info().name, router);
+        assert_eq!(Layer::decoder(layer).router_weights().info().name, weights);
     }
 }
 
@@ -1277,7 +1271,7 @@ fn router_edits_change_the_routed_computation() {
     let mut forced = crate::intervention::Hooks::new();
     // Force experts 2 and 3 for every token of layer 1.
     forced.edit(
-        router_logits_point(Layer::decoder(1)),
+        Layer::decoder(1).router_logits(),
         |logits: Tensor<TestBackend, 3>| {
             let bonus =
                 Tensor::<TestBackend, 1>::from_floats([0.0, 0.0, 50.0, 40.0], &logits.device())
@@ -1297,7 +1291,7 @@ fn router_edits_change_the_routed_computation() {
 
     let mut silenced = crate::intervention::Hooks::new();
     silenced.edit(
-        router_weights_point(Layer::decoder(1)),
+        Layer::decoder(1).router_weights(),
         |weights: Tensor<TestBackend, 3>| weights.zeros_like(),
     );
     let mlp = silenced.capture(Layer::decoder(1).mlp_output());
@@ -1348,7 +1342,7 @@ fn staged_execution_matches_the_fused_backbone() {
     assert_eq!(points, model.activation_points());
     // A hooked range emits exactly its own blocks' points.
     let mut hooks = crate::intervention::Hooks::new();
-    let router = hooks.capture(router_logits_point(Layer::decoder(2)));
+    let router = hooks.capture(Layer::decoder(2).router_logits());
     let state = model.model.embed(&input).unwrap();
     let state = model.model.run_layers(state, 0..2).unwrap();
     model

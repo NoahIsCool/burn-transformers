@@ -40,10 +40,7 @@ use crate::{
     attention::AttentionPrecisionMode,
     experiment::{ExecutionContext, HiddenState},
     intervention::{AttentionPoints, Hooks, Layer, PointInfo, PointValidity, Stack},
-    models::{
-        qwen3_moe::{router_logits_point, router_weights_point},
-        shared::validate_input,
-    },
+    models::shared::validate_input,
 };
 
 use super::{GptOssForCausalLm, INPUT_NAMES, sequence::SequenceKeys};
@@ -155,8 +152,8 @@ impl<B: Backend> GptOssForCausalLm<B> {
                 point.attention_input(),
                 point.attention_output(),
                 point.mlp_input(),
-                router_logits_point(point),
-                router_weights_point(point),
+                point.router_logits(),
+                point.router_weights(),
                 point.mlp_output(),
                 point.residual_post(),
             ] {

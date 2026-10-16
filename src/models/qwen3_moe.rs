@@ -36,8 +36,12 @@ pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
 pub use model::{
     Qwen3MoeBackboneOutput, Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm,
-    Qwen3MoeModel, qwen3_moe_load_balancing_loss, router_logits_point, router_weights_point,
+    Qwen3MoeModel, qwen3_moe_load_balancing_loss,
 };
+// Deprecated spellings of `Layer::router_logits` and `Layer::router_weights`,
+// kept for code written against unreleased sources.
+#[allow(deprecated)]
+pub use model::{router_logits_point, router_weights_point};
 
 use super::config::{
     ConfigError, ModelConfig, PartialRotary, RopeContext, RopeParameters, TokenIds, Validate,

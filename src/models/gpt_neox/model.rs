@@ -276,16 +276,6 @@ pub struct GptNeoXForCausalLm<B: Backend> {
     pub(super) config: GptNeoXConfig,
 }
 
-/// Pre-release name of [`GptNeoXForCausalLm`], scheduled for removal; use that name instead.
-///
-/// GPT-NeoX was never part of a release, so no released code depends on this
-/// alias, and it breaks the crate's naming convention: elsewhere `…Model`
-/// (such as [`crate::models::gpt2::Gpt2Model`] or
-/// [`crate::models::llama::LlamaModel`]) names a headless backbone, while this
-/// type owns its vocabulary head. It is not `#[deprecated]` only because the
-/// family module re-exports it; both lines go away together before release.
-pub type GptNeoXModel<B> = GptNeoXForCausalLm<B>;
-
 impl<B: Backend> GptNeoXForCausalLm<B> {
     /// Validates the recipe before allocating randomly initialized modules.
     pub fn init(config: GptNeoXConfig, device: &B::Device) -> Result<Self> {

@@ -65,7 +65,6 @@ use crate::{
     },
     feed_forward::{ClampedSwiGlu, GatedFeedForward},
     intervention::{AttentionPoints, Hooks, Layer, PointInfo, Stack},
-    models::qwen3_moe::{router_logits_point, router_weights_point},
     moe::{
         RoutedExpertPrecision, RouterConfig, deterministic_top_k, dispatch_routed_experts,
         load_balancing_loss, router_logits,
@@ -200,7 +199,7 @@ impl<B: Backend> GptOssSparseMlp<B> {
         let dtype = input.dtype();
         let flat = input.clone().reshape([rows, hidden]);
         let logits = hooks.apply(
-            router_logits_point(layer),
+            layer.router_logits(),
             router_logits(input, &self.router, self.routing.policy.projection)?,
         )?;
         let experts = self.routing.experts;
@@ -210,7 +209,7 @@ impl<B: Backend> GptOssSparseMlp<B> {
         let slots = self.routing.experts_per_token;
         let weights = hooks
             .apply(
-                router_weights_point(layer),
+                layer.router_weights(),
                 decision.weights.reshape([batch, tokens, slots]),
             )?
             .reshape([rows, slots])
@@ -328,8 +327,8 @@ impl<B: Backend> GptOssDecoderLayer<B> {
             attention.head_context().info(),
             layer.attention_output().info(),
             layer.mlp_input().info(),
-            router_logits_point(layer).info(),
-            router_weights_point(layer).info(),
+            layer.router_logits().info(),
+            layer.router_weights().info(),
             layer.mlp_output().info(),
             layer.residual_post().info(),
         ]);

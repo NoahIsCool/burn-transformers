@@ -419,7 +419,7 @@ fn hooks_capture_and_edit_listed_points() {
 
     // Captured router logits equal the diagnostics of an unhooked pass.
     let mut hooks = Hooks::new();
-    let capture = hooks.capture(router_logits_point(Layer::decoder(2)));
+    let capture = hooks.capture(Layer::decoder(2).router_logits());
     let hooked = model
         .forward_with_hooks(
             input(ints(TOKENS), Some(mask(VALID)), None),
@@ -454,7 +454,7 @@ fn hooks_capture_and_edit_listed_points() {
 
     // Zeroing every expert weight removes the MLP branch of that layer.
     let mut edit = Hooks::new();
-    edit.edit(router_weights_point(Layer::decoder(0)), |weights| {
+    edit.edit(Layer::decoder(0).router_weights(), |weights| {
         weights.zeros_like()
     });
     let edited = model
