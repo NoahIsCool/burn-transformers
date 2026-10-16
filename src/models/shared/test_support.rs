@@ -1,10 +1,10 @@
 //! Deterministic fixtures shared by the family-glue unit tests.
 //!
 //! [`assert_edit_failures_propagate`] and
-//! [`assert_staged_edit_failures_propagate`] are shared by every family's unit
-//! tests: they pin the hook contract that a failing user edit at any emitted
-//! point aborts the whole pass, or the staged call, with that point's
-//! [`Error::Intervention`].
+//! [`assert_staged_edit_failures_propagate`] pin the hook contract that a
+//! failing user edit at any emitted point aborts the whole pass, or the staged
+//! call, with that point's [`Error::Intervention`]. The modular custom models
+//! and the T5, GPT-2, GPT-NeoX, Llama, Gemma, and gpt-oss unit tests use them.
 
 use burn::{
     backend::Flex,
