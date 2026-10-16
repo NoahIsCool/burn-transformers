@@ -29,8 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ArchitectureConfig, Error, Result,
     checkpoint::{
-        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LoadOptions, MappingPlan,
-        TensorDType, TensorOperation, build_load_plan, execute_local_load_plan,
+        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LanguageNamespace,
+        LoadOptions, MappingPlan, TensorDType, TensorOperation, build_load_plan,
+        execute_local_load_plan,
     },
     normalization::RmsNormConfig,
     transfer::{
@@ -569,9 +570,13 @@ impl<B: Backend> ModuleMapper<B> for InitializeDtype {
     }
 }
 
-/// Uses an explicit namespace or requires exactly one recognized embedding key.
+/// Uses an explicit namespace or detects exactly one language namespace.
 ///
-/// Ambiguous or absent namespaces fail rather than guessing a model layout.
+/// Detection is the shared [`LanguageNamespace`] classifier, so recipe,
+/// concrete-family, and automatic loading choose the same layout for the same
+/// checkpoint. Ambiguous or absent namespaces fail rather than guessing a
+/// model layout, as [`crate::checkpoint::CheckpointError::AmbiguousLanguageNamespace`]
+/// or [`crate::checkpoint::CheckpointError::LanguageNamespaceNotFound`].
 fn source_namespace(
     manifest: &CheckpointManifest,
     explicit: Option<Qwen3_5CheckpointSource>,
@@ -579,19 +584,10 @@ fn source_namespace(
     if let Some(source) = explicit {
         return Ok(source);
     }
-    match (
-        manifest.tensor("model.embed_tokens.weight").is_some(),
-        manifest
-            .tensor("model.language_model.embed_tokens.weight")
-            .is_some(),
-    ) {
-        (true, false) => Ok(Qwen3_5CheckpointSource::TextOnly),
-        (false, true) => Ok(Qwen3_5CheckpointSource::Multimodal),
-        _ => Err(Error::configuration(
-            "qwen.recipe.source",
-            "expected exactly one Qwen embedding namespace",
-        )),
-    }
+    Ok(match LanguageNamespace::of_manifest(manifest, "Qwen")? {
+        LanguageNamespace::Wrapped => Qwen3_5CheckpointSource::Multimodal,
+        LanguageNamespace::TextOnly => Qwen3_5CheckpointSource::TextOnly,
+    })
 }
 
 /// Reads and parses local `config.json` under a 16 MiB bound.
