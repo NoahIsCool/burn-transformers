@@ -2,6 +2,7 @@
 
 use proptest::prelude::*;
 
+use super::lexer::{number_end, string_end};
 use super::*;
 
 /// Rewrites `source`, panicking on a guard error.

@@ -66,6 +66,20 @@
 //!   the source, so the rewrite loop makes progress and slices in bounds;
 //!   `marker_widths` never exceeds the tag body.
 //!
+//! and to `src/tokenization/chat_template/guard/lexer.rs`, the operator
+//! guard's tag-body lexer:
+//!
+//! - `lex_spans` partitions a body into ordered, disjoint, non-empty tokens
+//!   separated only by ASCII whitespace, each of its kind's lexical class (a
+//!   quoted string, a number starting with a digit, a maximal identifier, or a
+//!   one- or two-byte symbol from MiniJinja's tables), so no operator byte can
+//!   hide inside a name; its errors name an unterminated quote or a byte no
+//!   token starts with;
+//! - `string_end` ends just past the matching quote, and `number_end`
+//!   consumes at least the leading digit and only number characters, accepts
+//!   a sign only after a decimal exponent letter, and reports a float exactly
+//!   for a decimal number containing `.` or an exponent.
+//!
 //! Tokenizer encoding, special-token insertion, and the Burn tensor
 //! constructors are outside the proof and remain covered by the Rust tests. See
 //! `verus/README.md` for the method, toolchain, and command.
@@ -83,3 +97,5 @@ pub mod layout;
 pub mod decimal;
 #[path = "../src/tokenization/chat_template/scan.rs"]
 pub mod scan;
+#[path = "../src/tokenization/chat_template/guard/lexer.rs"]
+pub mod lexer;
