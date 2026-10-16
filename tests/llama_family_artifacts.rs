@@ -47,11 +47,14 @@
 //! first-position deviations on its third prompt are `1.6e-3` for F32
 //! Transformers itself, `1.8e-4` for Flex, and `1.9e-3` for Metal; every other
 //! position stays below `3e-4` on both backends, and both reproduce all 32
-//! greedy tokens. The Metal figure is ordinary F32 accumulation order, as
-//! large as the reference implementation's own, so that checkpoint's Metal
-//! run uses `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. Llama-3.1-8B at
-//! `d04e592b` (Llama 3 RoPE scaling) stays within `7.6e-5` on both backends
-//! against an F32 bundle.
+//! greedy tokens. The Metal figure is ordinary F32 accumulation order,
+//! comparable to (slightly above) the reference implementation's own `1.6e-3`,
+//! so that checkpoint's Metal run uses
+//! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. `meta-llama/Llama-3.1-8B` at
+//! `d04e592bb4f6aa9cfee91e2e20afa771667e1d4b` (Llama 3 RoPE scaling; bundle
+//! `config.json` SHA-256
+//! `54acfad3cffe057640904ca8a1e83525e6551c70c7a04c641f5a9eda0bbf64bd`) stays
+//! within `7.6e-5` on both backends against an F32 bundle.
 
 #![cfg(feature = "flex")]
 
