@@ -61,10 +61,6 @@ use crate::models::{
     shared::{InputContract, InputNames, select_hidden, validate_input},
 };
 
-/// Dependency-free host planning of batched stateful blocks (Verus-verified).
-pub(crate) mod batch;
-/// Device-side packing of ragged stateful rows, shared with Muse-Glimmer.
-pub(crate) mod block;
 /// External compressed MLA caches and batched transactional prefill/decode execution.
 mod decode;
 /// Activation hooks and staged execution (`HookedModel`, `StagedModel`).

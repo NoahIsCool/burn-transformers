@@ -28,7 +28,8 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{Error, Result, architecture::bool_tensor_from_values, models::shared::StatefulRows};
 
-use super::super::plan::{StepPlanError, plan_step, signed_indices};
+use super::super::plan::{StepPlanError, plan_step};
+use crate::models::shared::plan::signed_indices;
 
 /// How the block is cut from the rectangular input.
 #[derive(Debug, Clone, PartialEq, Eq)]

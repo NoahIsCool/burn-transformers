@@ -16,7 +16,7 @@
 //!   so an out-of-range index would leave a layer unrotated.
 //! * [`unique_flag`] decides which single published namespace a checkpoint
 //!   uses; the checked `u64` extents of its contract, `checkpoint_extent`
-//!   and `projection_extent`, are re-exported from
+//!   and `projection_extent`, are the shared ones in
 //!   [`crate::models::shared::decoder_plan`].
 //!
 //! # Verified planning
@@ -30,11 +30,8 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
-// The checkpoint extents are shared with the Llama family and gpt-oss; the
-// counting vocabulary also underpins the schedule proof below.
-pub(crate) use crate::models::shared::decoder_plan::{
-    ExtentError, checkpoint_extent, projection_extent,
-};
+// The shared decoder plan's counting vocabulary underpins the schedule proof
+// below.
 #[cfg(verus_keep_ghost)]
 use crate::models::shared::decoder_plan::{count_equal, lemma_count_prefix_stable};
 

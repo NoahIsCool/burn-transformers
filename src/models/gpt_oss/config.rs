@@ -306,10 +306,12 @@ impl SerializedGptOssConfig {
                 .num_key_value_heads
                 .unwrap_or(Some(8))
                 .unwrap_or(num_attention_heads),
-            head_dim: self
-                .head_dim
-                .unwrap_or(Some(64))
-                .unwrap_or_else(|| super::plan::derived_head_dim(hidden_size, num_attention_heads)),
+            head_dim: self.head_dim.unwrap_or(Some(64)).unwrap_or_else(|| {
+                crate::models::shared::decoder_plan::derived_head_dim(
+                    hidden_size,
+                    num_attention_heads,
+                )
+            }),
             num_local_experts: self.num_local_experts.unwrap_or(128),
             num_experts_per_tok: self.num_experts_per_tok.unwrap_or(4),
             sliding_window: self.sliding_window.unwrap_or(Some(128)),

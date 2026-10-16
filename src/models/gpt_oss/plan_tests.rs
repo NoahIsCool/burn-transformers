@@ -1,5 +1,6 @@
-//! Planning: the default schedule, cache-group numbering, and interleaved
-//! expert offsets, with property tests over arbitrary inputs.
+//! Planning: the default schedule and interleaved expert offsets, with
+//! property tests over arbitrary inputs. The shared cache-group numbering and
+//! extents are tested in `models::shared::decoder_plan`.
 
 use proptest::prelude::*;
 
@@ -12,17 +13,6 @@ fn default_layer_slides_exactly_on_even_layers() {
         assert_eq!(default_layer_slides(layer), (layer + 1) % 2 != 0, "{layer}");
     }
     assert!(!default_layer_slides(usize::MAX));
-}
-
-/// Alternating layers number each group densely in model order.
-#[test]
-fn cache_slots_number_alternating_layers() {
-    let plan = cache_slots(&[true, false, true, false, true]);
-    assert_eq!(plan.slots, [0, 0, 1, 1, 2]);
-    assert_eq!((plan.full_layers, plan.ring_layers), (2, 3));
-    let empty = cache_slots(&[]);
-    assert!(empty.slots.is_empty());
-    assert_eq!((empty.full_layers, empty.ring_layers), (0, 0));
 }
 
 /// Gate outputs are even columns and up outputs odd columns of their row.
@@ -51,20 +41,6 @@ fn interleaved_offsets_select_even_gate_and_odd_up_columns() {
 }
 
 proptest! {
-    /// Slots count earlier layers of the same group, and the groups partition the layers.
-    #[test]
-    fn cache_slots_partition_any_schedule(ring in proptest::collection::vec(any::<bool>(), 0..40)) {
-        let plan = cache_slots(&ring);
-        prop_assert_eq!(plan.slots.len(), ring.len());
-        prop_assert_eq!(plan.full_layers + plan.ring_layers, ring.len());
-        for (layer, &in_ring) in ring.iter().enumerate() {
-            let earlier = ring[..layer].iter().filter(|&&flag| flag == in_ring).count();
-            prop_assert_eq!(plan.slots[layer], earlier);
-            let size = if in_ring { plan.ring_layers } else { plan.full_layers };
-            prop_assert!(plan.slots[layer] < size);
-        }
-    }
-
     /// Gate and up offsets of every output are distinct, in bounds, and cover each row.
     #[test]
     fn interleaved_offsets_tile_the_stacked_tensor(
@@ -113,15 +89,9 @@ fn ring_assignments_follow_the_window_and_capacity() {
     }
 }
 
-/// Group indices, the clean-tail rule, and the geometry bound.
+/// Fused expert element counts and stacked layouts are exact or report overflow.
 #[test]
-fn group_indices_tails_and_expert_bounds() {
-    let both = group_indices(1, 2);
-    assert_eq!((both.full, both.ring), (Some(0), Some(1)));
-    let ring_only = group_indices(0, 2);
-    assert_eq!((ring_only.full, ring_only.ring), (None, Some(0)));
-    assert!(truncation_leaves_bytes(&[4, 4], &[4, 3]));
-    assert!(!truncation_leaves_bytes(&[4, 4], &[0, 4]));
+fn expert_geometry_is_exact_or_reports_overflow() {
     assert_eq!(fused_expert_elements(3, 5, 7), Some(210));
     assert_eq!(fused_expert_elements(usize::MAX / 2 + 1, 1, 1), None);
     assert_eq!(fused_expert_elements(1, usize::MAX, 1), None);
@@ -147,22 +117,6 @@ fn expert_bytes_split_into_slabs_and_halves() {
 }
 
 proptest! {
-    /// Each group's slots are an order-preserving bijection onto `0..size`.
-    #[test]
-    fn cache_slots_biject_each_group_in_order(ring in proptest::collection::vec(any::<bool>(), 0..24)) {
-        let plan = cache_slots(&ring);
-        for flag in [false, true] {
-            let slots: Vec<usize> = ring
-                .iter()
-                .zip(&plan.slots)
-                .filter(|&(&in_ring, _)| in_ring == flag)
-                .map(|(_, &slot)| slot)
-                .collect();
-            let size = if flag { plan.ring_layers } else { plan.full_layers };
-            prop_assert_eq!(slots, (0..size).collect::<Vec<_>>());
-        }
-    }
-
     /// De-interleaving equals a direct strided copy for any geometry and scalar width.
     #[test]
     fn deinterleave_matches_a_strided_copy(
@@ -192,31 +146,4 @@ proptest! {
             );
         }
     }
-}
-
-/// Projection widths are exact checkpoint extents, or report usize overflow.
-#[test]
-fn projection_extents_are_exact_or_report_overflow() {
-    assert_eq!(projection_extent(8, 128), Ok(1024));
-    assert_eq!(projection_extent(0, usize::MAX), Ok(0));
-    assert_eq!(projection_extent(usize::MAX, 2), Err(ExtentError::Overflow));
-    assert_eq!(
-        checkpoint_extent(usize::MAX),
-        u64::try_from(usize::MAX).ok()
-    );
-    assert_eq!(checkpoint_extent(7), Some(7));
-}
-
-/// The derived head width divides, and is zero without heads.
-#[test]
-fn derived_head_dim_divides_or_is_zero() {
-    assert_eq!(derived_head_dim(2880, 64), 45);
-    assert_eq!(derived_head_dim(64, 0), 0);
-}
-
-/// The widest context is the maximum, or 1 without active rows.
-#[test]
-fn widest_context_is_the_maximum_or_one() {
-    assert_eq!(widest_context(&[]), 1);
-    assert_eq!(widest_context(&[5, 2, 5]), 5);
 }

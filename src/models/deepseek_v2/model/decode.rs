@@ -48,18 +48,16 @@ use crate::{
     },
     intervention::Layer,
     models::shared::{
-        EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
-        select_hidden_with_last_columns, validate_logits_selection,
+        EmptyRows, StatefulContract, StatefulRows,
+        block::BlockLayout,
+        block_plan::{first_uncacheable_context, rotary_contexts},
+        ensure_same_device, prepare_stateful_rows, select_hidden_with_last_columns,
+        validate_logits_selection,
     },
     position::{RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };
 
-use super::{
-    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE,
-    batch::{first_uncacheable_context, rotary_contexts},
-    block::BlockLayout,
-    router_diagnostics,
-};
+use super::{DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, router_diagnostics};
 use crate::models::deepseek_v2::plan::{LatentBytes, LatentFault, latent_cache_bytes};
 
 /// Owner named when an input tensor is on another device than the cache.

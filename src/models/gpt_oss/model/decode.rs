@@ -98,11 +98,11 @@ use crate::{
     position::RotaryAngles,
 };
 
-use super::super::{
-    GptOssArchitecture, GptOssConfig,
-    plan::{cache_slots, group_indices, ring_assignment, truncation_leaves_bytes, widest_context},
-};
+use super::super::{GptOssArchitecture, GptOssConfig, plan::ring_assignment};
 use super::{GptOssForCausalLm, INPUT_NAMES, LayerKeys};
+use crate::models::shared::decoder_plan::{
+    cache_slots, group_indices, truncation_leaves_bytes, widest_context,
+};
 
 /// Owner named when an input lives on another device than the cache.
 const DECODE_STATE: &str = "gpt-oss decode state";

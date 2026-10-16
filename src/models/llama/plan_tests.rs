@@ -8,17 +8,6 @@ use proptest::prelude::*;
 
 use super::*;
 
-/// Layers are numbered densely inside their own group.
-#[test]
-fn cache_slots_number_each_group_densely() {
-    let plan = cache_slots(&[false, true, true, false, true]);
-    assert_eq!(plan.slots, [0, 0, 1, 1, 2]);
-    assert_eq!((plan.full_layers, plan.ring_layers), (2, 3));
-    let empty = cache_slots(&[]);
-    assert!(empty.slots.is_empty());
-    assert_eq!((empty.full_layers, empty.ring_layers), (0, 0));
-}
-
 /// Slot positions continue the cache inside the run and fill elsewhere.
 #[test]
 fn slot_positions_continue_the_cache_and_fill_padding() {
@@ -65,18 +54,6 @@ fn sorted_columns(bound: usize) -> impl Strategy<Value = Vec<usize>> {
 }
 
 proptest! {
-    /// Cache slots equal per-group prefix counts.
-    #[test]
-    fn cache_slots_equal_prefix_counts(ring in prop::collection::vec(any::<bool>(), 0..24)) {
-        let plan = cache_slots(&ring);
-        for (layer, &in_ring) in ring.iter().enumerate() {
-            let earlier = ring[..layer].iter().filter(|&&other| other == in_ring).count();
-            prop_assert_eq!(plan.slots[layer], earlier);
-        }
-        prop_assert_eq!(plan.ring_layers, ring.iter().filter(|&&flag| flag).count());
-        prop_assert_eq!(plan.full_layers + plan.ring_layers, ring.len());
-    }
-
     /// Slot positions equal the module's definition slot by slot.
     #[test]
     fn slot_positions_match_the_definition(
@@ -180,14 +157,6 @@ fn first_set_finds_the_earliest_flag() {
     assert_eq!(first_set(&[]), None);
 }
 
-/// The derived head width divides, and is zero without heads.
-#[test]
-fn derived_head_dim_divides_or_is_zero() {
-    assert_eq!(derived_head_dim(4096, 32), 128);
-    assert_eq!(derived_head_dim(10, 3), 3);
-    assert_eq!(derived_head_dim(64, 0), 0);
-}
-
 proptest! {
     /// NoPE schedules match the reference formula and count `⌊L / k⌋` NoPE layers.
     #[test]
@@ -245,29 +214,6 @@ fn ring_plans_assign_narrow_windows_and_reject_conflicts() {
     );
 }
 
-/// Allocated groups are numbered densely, full storage first.
-#[test]
-fn group_indices_number_allocated_groups_densely() {
-    let both = group_indices(2, 3);
-    assert_eq!((both.full, both.ring), (Some(0), Some(1)));
-    let ring_only = group_indices(0, 3);
-    assert_eq!((ring_only.full, ring_only.ring), (None, Some(0)));
-    let full_only = group_indices(2, 0);
-    assert_eq!((full_only.full, full_only.ring), (Some(0), None));
-    let none = group_indices(0, 0);
-    assert_eq!((none.full, none.ring), (None, None));
-}
-
-/// Only a truncation to a shorter nonzero length leaves stale bytes.
-#[test]
-fn truncation_leaves_bytes_only_when_shortening_to_nonzero() {
-    assert!(truncation_leaves_bytes(&[5, 3], &[5, 2]));
-    assert!(!truncation_leaves_bytes(&[5, 3], &[0, 3]));
-    assert!(!truncation_leaves_bytes(&[5, 3], &[5, 4]));
-    assert!(!truncation_leaves_bytes(&[5], &[]));
-    assert!(truncation_leaves_bytes(&[5, 3], &[4]));
-}
-
 proptest! {
     /// Ring plans equal a direct statement of the rule.
     #[test]
@@ -300,21 +246,6 @@ proptest! {
         }
     }
 
-    /// Each group's slots are an order-preserving bijection onto `0..size`.
-    #[test]
-    fn cache_slots_biject_each_group_in_order(ring in prop::collection::vec(any::<bool>(), 0..24)) {
-        let plan = cache_slots(&ring);
-        for flag in [false, true] {
-            let slots: Vec<usize> = ring
-                .iter()
-                .zip(&plan.slots)
-                .filter(|&(&in_ring, _)| in_ring == flag)
-                .map(|(_, &slot)| slot)
-                .collect();
-            let size = if flag { plan.ring_layers } else { plan.full_layers };
-            prop_assert_eq!(slots, (0..size).collect::<Vec<_>>());
-        }
-    }
 }
 
 /// Runs are sliced from their narrowest common window; interior padding is gathered.
@@ -461,27 +392,6 @@ proptest! {
     }
 }
 
-/// Projection widths are exact checkpoint extents, or report usize overflow.
-#[test]
-fn projection_extents_are_exact_or_report_overflow() {
-    assert_eq!(projection_extent(8, 128), Ok(1024));
-    assert_eq!(projection_extent(0, usize::MAX), Ok(0));
-    assert_eq!(projection_extent(usize::MAX, 2), Err(ExtentError::Overflow));
-    assert_eq!(
-        checkpoint_extent(usize::MAX),
-        u64::try_from(usize::MAX).ok()
-    );
-    assert_eq!(checkpoint_extent(7), Some(7));
-}
-
-/// The widest context is the maximum, or 1 without active rows.
-#[test]
-fn widest_context_is_the_maximum_or_one() {
-    assert_eq!(widest_context(&[]), 1);
-    assert_eq!(widest_context(&[3, 9, 4]), 9);
-    assert_eq!(widest_context(&[0]), 0);
-}
-
 /// The tightest limit is the first used set with the smallest limit.
 #[test]
 fn tightest_limit_picks_the_first_used_minimum() {
@@ -515,13 +425,4 @@ proptest! {
             .map(|(set, _)| set);
         prop_assert_eq!(tightest_limit(&limits, &used), expected);
     }
-}
-
-/// Indices convert to `i64` exactly, and any index beyond `i64` rejects the batch.
-#[test]
-fn signed_indices_convert_exactly_or_reject() {
-    assert_eq!(signed_indices(&[0, 3, 7]), Some(vec![0, 3, 7]));
-    assert_eq!(signed_indices(&[]), Some(Vec::new()));
-    let beyond = usize::try_from(i64::MAX).unwrap() + 1;
-    assert_eq!(signed_indices(&[1, beyond]), None);
 }

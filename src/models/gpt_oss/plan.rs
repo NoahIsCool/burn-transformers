@@ -19,8 +19,8 @@
 //! `truncation_leaves_bytes`), the step context (`widest_context`), and the
 //! checkpoint extents (`checkpoint_extent`, `projection_extent`,
 //! `derived_head_dim`) are shared with the Llama family and Gemma and live in
-//! [`crate::models::shared::decoder_plan`]; this module re-exports them for
-//! the family's callers.
+//! [`crate::models::shared::decoder_plan`], from which the family's callers
+//! import them.
 //!
 //! # Interleaved expert projections
 //!
@@ -48,13 +48,8 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
-// The cache layout, step context, and checkpoint extents are shared with the
-// Llama family and Gemma; the counting vocabulary also underpins the default
+// The shared decoder plan's counting vocabulary underpins the default
 // schedule proof below.
-pub(crate) use crate::models::shared::decoder_plan::{
-    ExtentError, cache_slots, checkpoint_extent, derived_head_dim, group_indices,
-    projection_extent, truncation_leaves_bytes, widest_context,
-};
 #[cfg(verus_keep_ghost)]
 use crate::models::shared::decoder_plan::{count_equal, lemma_count_prefix_stable};
 

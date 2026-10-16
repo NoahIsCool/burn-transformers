@@ -69,7 +69,8 @@ use crate::models::config::ConfigError;
 
 use super::architecture::GemmaArchitecture;
 use super::config::GemmaConfig;
-use super::plan::{ExtentError, UniqueFlag, checkpoint_extent, projection_extent, unique_flag};
+use super::plan::{UniqueFlag, unique_flag};
+use crate::models::shared::decoder_plan::{ExtentError, checkpoint_extent, projection_extent};
 
 /// The published SafeTensors namespace a Gemma checkpoint uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

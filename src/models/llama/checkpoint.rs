@@ -47,8 +47,8 @@ use crate::models::config::ConfigError;
 
 use super::architecture::{LlamaArchitecture, SublayerNorm};
 use super::config::LlamaFamilyConfig;
-use super::plan::{ExtentError, checkpoint_extent, projection_extent};
 use crate::attention::QueryKeyNormScope;
+use crate::models::shared::decoder_plan::{ExtentError, checkpoint_extent, projection_extent};
 
 /// Reserved family-specific checkpoint policy.
 ///

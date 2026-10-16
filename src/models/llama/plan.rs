@@ -25,8 +25,8 @@
 //! checkpoint extents (`checkpoint_extent`, `projection_extent`,
 //! `derived_head_dim`) are shared with Gemma and gpt-oss and live in
 //! [`crate::models::shared::decoder_plan`]; `signed_indices` is
-//! [`crate::models::shared::plan::signed_indices`]. This module re-exports
-//! them for the family's callers.
+//! [`crate::models::shared::plan::signed_indices`]; the family's callers
+//! import them from there.
 //!
 //! A batched step places row `b`'s `n_b` new tokens in block slots
 //! `[c_b, c_b + n_b)`. Slot `t` in that run is the token at absolute cache
@@ -49,18 +49,10 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
-// The cache layout, step context, and checkpoint extents are shared with
-// Gemma and gpt-oss; the counting vocabulary also underpins this module's
+// The shared decoder plan's counting vocabulary underpins this module's
 // schedule proofs.
 #[cfg(verus_keep_ghost)]
 use crate::models::shared::decoder_plan::{count_equal, lemma_count_prefix_stable};
-pub(crate) use crate::models::shared::{
-    decoder_plan::{
-        ExtentError, cache_slots, checkpoint_extent, derived_head_dim, group_indices,
-        projection_extent, truncation_leaves_bytes, widest_context,
-    },
-    plan::signed_indices,
-};
 
 #[cfg(verus_keep_ghost)]
 verus! {

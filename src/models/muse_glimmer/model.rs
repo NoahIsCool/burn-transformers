@@ -86,8 +86,8 @@ use super::{
 use crate::models::{
     config::{PartialRotary, RopeContext},
     shared::{
-        InputContract, InputNames, ValidatedInput, ensure_same_device, select_hidden,
-        validate_input,
+        InputContract, InputNames, ValidatedInput, ensure_same_device, scaling::soft_cap,
+        select_hidden, validate_input,
     },
 };
 
@@ -1304,8 +1304,12 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                 tied_projection(hidden, self.model.embed_tokens.weight.val())?
             }
         };
-        let cap = self.config().final_logit_softcapping;
-        Ok(((raw * self.config().output_multiplier) / cap).tanh() * cap)
+        // The bounded map `T · tanh(m · z / T)`: the multiplier, then the
+        // shared soft cap's divide, `tanh`, multiply.
+        Ok(soft_cap(
+            raw * self.config().output_multiplier,
+            Some(self.config().final_logit_softcapping),
+        ))
     }
 }
 
