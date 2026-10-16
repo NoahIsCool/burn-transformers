@@ -46,6 +46,8 @@ class TokenizationGoldenTests(unittest.TestCase):
         calls: list[tuple[Any, dict[str, Any]]] = []
 
         def render(conversations: Any, **options: Any) -> str:
+            """Records one call and returns a placeholder rendering."""
+
             calls.append((conversations, options))
             return "rendered"
 

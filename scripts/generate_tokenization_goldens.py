@@ -126,6 +126,8 @@ def first_rendering(render_jinja_template: Callable[..., Any]) -> Callable[..., 
     """
 
     def render(conversations: list[list[dict[str, Any]]], **options: Any) -> str:
+        """Renders `conversations` and returns the first conversation's string."""
+
         renderings, _ = render_jinja_template(conversations, **options)
         return renderings[0]
 
