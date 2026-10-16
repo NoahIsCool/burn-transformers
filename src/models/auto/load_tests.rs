@@ -2403,3 +2403,91 @@ fn llama_family_aliases_load_through_one_registry_entry() {
         assert_eq!(logits.dims(), [1, 1, 96]);
     }
 }
+
+/// A malformed `generation_config.json` stops causal and encoder-decoder loads with its error.
+#[test]
+fn malformed_generation_artifacts_stop_causal_and_seq2seq_loads() {
+    for config in [
+        serde_json::to_value(packed_muse_config()).unwrap(),
+        serde_json::to_value(tiny_automatic_t5_config()).unwrap(),
+    ] {
+        let root = tempfile::tempdir().expect("temporary model root");
+        write_auto_metadata(root.path(), &config);
+        std::fs::write(root.path().join("generation_config.json"), b"{").unwrap();
+        let expected = normalize_generation_defaults(root.path(), None, None, 16, None)
+            .expect_err("the artifact itself is malformed");
+        let options = fixture_options("fixture/generation", "generation");
+        let error = if config["model_type"] == "t5" {
+            AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err()
+        } else {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&expected),
+            "{error}"
+        );
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+}
+
+/// A Muse checkpoint holding only the multimodal namespace plans the multimodal contract.
+///
+/// The wrapped embedding alone selects the multimodal source, whose mapping
+/// renames it to the text target `model.embed_tokens.weight`; the strict plan
+/// then reports that target's shape, proving the wrapped source was mapped.
+#[test]
+fn wrapped_muse_namespaces_plan_the_multimodal_contract() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &packed_muse_config());
+    let names = ["model.language_model.embed_tokens.weight"];
+    let expected_tensors = names
+        .iter()
+        .map(|name| ExpectedTensor::new(*name, vec![1]))
+        .collect::<Vec<_>>();
+    let mut mappings = MappingPlan::default();
+    for name in names {
+        mappings.map(name, name);
+    }
+    write_contract_checkpoint(root.path(), &expected_tensors, &mappings);
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("fixture/muse", "muse"),
+        &Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Checkpoint(reason)
+            if reason == "shape mismatch for `model.embed_tokens.weight`: mapped [1], expected [128, 64]"),
+        "{error}"
+    );
+}
+
+/// Without complete provenance, Nemotron-H discovers with the generic strict policy.
+#[test]
+fn nemotron_without_provenance_uses_generic_discovery() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &loadable_nemotron_config());
+    for options in [
+        AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        AutoLoadOptions {
+            load_tokenizer: false,
+            repository: Some("nvidia/fixture".into()),
+            ..AutoLoadOptions::default()
+        },
+    ] {
+        let error =
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err();
+        assert!(matches!(&error, Error::Checkpoint(_)), "{error}");
+    }
+}

@@ -487,3 +487,21 @@ fn scatter_benchmark() {
         println!("{label}: per-token {reference:?}, planned {planned:?}");
     }
 }
+
+/// The host view lists each row's valid columns, treating an absent mask as all valid.
+#[test]
+fn host_valid_indices_follow_the_mask() {
+    let masked = CausalLmInput {
+        token_ids: ints([[1, 2, 3], [4, 5, 6]]),
+        token_mask: Some(mask([[false, true, true], [true, false, true]])),
+        position_ids: None,
+    };
+    let host = HostInput::read(&masked, 2, 3, "s.input_ids").unwrap();
+    assert_eq!(host.valid_indices(2, 3), [vec![1, 2], vec![0, 2]]);
+    let dense = CausalLmInput {
+        token_mask: None,
+        ..masked
+    };
+    let host = HostInput::read(&dense, 2, 3, "s.input_ids").unwrap();
+    assert_eq!(host.valid_indices(2, 3), [vec![0, 1, 2], vec![0, 1, 2]]);
+}

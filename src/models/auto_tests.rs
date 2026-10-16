@@ -1468,3 +1468,97 @@ fn registry_entries_agree_with_family_schemas_and_views() {
         assert_eq!(model.config().model_type(), family.model_type());
     }
 }
+
+/// The dense Llama, Gemma, and gpt-oss families initialize from their committed configs.
+///
+/// Every Llama-family alias selects the shared Llama graph, and each config
+/// selects its own family and decode-state variant.
+#[test]
+fn dense_family_configs_initialize_through_the_registry() {
+    let device = Default::default();
+    for (json, family) in [
+        (
+            include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+            AutoCausalConfig::Llama,
+        ),
+        (
+            include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
+            AutoCausalConfig::Llama,
+        ),
+        (
+            include_str!("../../tests/fixtures/tiny_goldens/olmo2/config.json"),
+            AutoCausalConfig::Llama,
+        ),
+        (
+            include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
+            AutoCausalConfig::Gemma,
+        ),
+        (
+            include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
+            AutoCausalConfig::Gemma,
+        ),
+        (
+            include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
+            AutoCausalConfig::GptOss,
+        ),
+    ] {
+        let model = AutoCausalLm::<TestBackend>::from_config_json(json, &device).unwrap();
+        assert_eq!(model.config().family(), family);
+        let declared: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            model.config().model_type(),
+            family.model_type(),
+            "{declared}"
+        );
+        assert_eq!(
+            AutoCausalConfig::from_model_type(declared["model_type"].as_str().unwrap()),
+            Some(family)
+        );
+    }
+}
+
+/// The error a family without experiment support would raise names it and the supported ones.
+///
+/// Every registered family currently supports experiments, so this pins the
+/// contract a `pending` registry entry would inherit: the rejection names the
+/// model type, lists the supported families, and clears earlier captures.
+#[test]
+fn pending_experiment_rejections_name_the_family_and_clear_captures() {
+    let device = Default::default();
+    let model = AutoCausalLm::<TestBackend>::from_config_json(
+        include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+        &device,
+    )
+    .unwrap();
+    let error = model.experiments_unavailable();
+    match &error {
+        Error::BackendCapability(reason) => {
+            assert!(reason.contains("model_type `llama`"), "{reason}");
+            for family in AutoCausalConfig::ALL {
+                assert!(reason.contains(family.model_type()), "{reason}");
+            }
+        }
+        other => panic!("expected a capability error, found {other:?}"),
+    }
+    let mut hooks = Hooks::new();
+    let embedding = hooks.capture(crate::intervention::Stack::Decoder.embedding());
+    HookedModel::forward_with_hooks(
+        &model,
+        CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+            token_mask: None,
+            position_ids: None,
+        },
+        &ForwardOptions::default(),
+        &mut hooks,
+    )
+    .unwrap();
+    assert!(hooks.get(&embedding).is_ok());
+    let message = error.to_string();
+    let rejected: Result<()> = reject_hooks(&mut hooks, error);
+    assert_eq!(rejected.unwrap_err().to_string(), message);
+    assert!(
+        hooks.get(&embedding).is_err(),
+        "the rejection cleared old captures"
+    );
+}
