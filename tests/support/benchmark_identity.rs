@@ -235,17 +235,22 @@ mod tests {
     /// Holds the shared child-process lock while a test spawns metadata probes.
     ///
     /// On macOS a spawned child can hold another test's dropped socket open;
-    /// see `benchmark_metrics::CHILD_PROCESS_LOCK`.
+    /// see `benchmark_metrics::CHILD_PROCESS_LOCK`. The guard is an `Option` so
+    /// callers bind it the same way on every platform.
     #[cfg(target_os = "macos")]
-    fn spawning_children() -> std::sync::MutexGuard<'static, ()> {
-        crate::benchmark_metrics::CHILD_PROCESS_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn spawning_children() -> Option<std::sync::MutexGuard<'static, ()>> {
+        Some(
+            crate::benchmark_metrics::CHILD_PROCESS_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
-    /// The only socket test that needs the lock runs on macOS alone.
+    /// The only socket test that needs the lock runs on macOS alone, so no guard is held.
     #[cfg(not(target_os = "macos"))]
-    fn spawning_children() {}
+    fn spawning_children() -> Option<std::sync::MutexGuard<'static, ()>> {
+        None
+    }
 
     /// A compiled source is identified by the hash of the bytes in the binary,
     /// matched against the build tree, alongside toolchain, features and host.
