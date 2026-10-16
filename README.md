@@ -245,12 +245,12 @@ acceptance record for an exact checkpoint, backend, and dtype
 
 | Family | `model_type` | Validation status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; Metal replay on the current source pending. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
-| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 (re-run on later source) and Metal/F32 (replay pending). FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `ade8696`, acceptance record pending. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
+| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `ade8696`, acceptance record pending. FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
 | Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16. |
-| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex/F32 parity for SmolLM-135M, Qwen3-4B, and SmolLM3-3B. |
-| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex/F32 parity across its sliding window. |
-| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex/F32 parity with exact MXFP4 decoding. |
+| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference). |
+| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window. |
+| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex and Metal F32 parity with exact MXFP4 decoding. |
 | Qwen3-MoE | `qwen3_moe` | Experimental: strict real-weight loading and Metal smokes. |
 | DeepSeek-V2 | `deepseek_v2` | Experimental: strict real-weight loading and an internal Metal smoke; tiny goldens for V2 and V3-style routing. |
 | Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading and an internal Metal smoke. |
@@ -258,8 +258,9 @@ acceptance record for an exact checkpoint, backend, and dtype
 | Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
 
 The two supported profiles were qualified on the v0.1.0 source. Later work
-changed their execution paths, so their Metal gates must be replayed on the
-current source before the next release; see
+changed their execution paths; their gates passed again on source `ade8696`,
+and those replays must be recorded as acceptance measurements before the next
+release; see
 [v0.1 release qualification](ARCHITECTURE_COMPATIBILITY.md#v01-release-qualification)
 and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
 

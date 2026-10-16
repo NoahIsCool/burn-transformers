@@ -28,8 +28,11 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   experts, router hooks, and `gpt_oss_load_balancing_loss`.
 - All three are registered in `AutoCausalLm`; the Llama family and Gemma
   share one dense-decoder engine. Experimental validation: tiny Transformers 5.2.0 goldens for every
-  type and real-weight Flex/F32 gates (`tests/llama_family_artifacts.rs`,
-  `tests/gemma_artifacts.rs`, `tests/gpt_oss_artifacts.rs`); see the
+  type and real-weight gates (`tests/llama_family_artifacts.rs`,
+  `tests/gemma_artifacts.rs`, `tests/gpt_oss_artifacts.rs`) that passed on
+  Flex and Metal in F32 at `ade8696` for SmolLM-135M, Qwen3-4B, SmolLM3-3B,
+  Llama-3.1-8B, Qwen2-7B (against an F64 reference), gemma-3-4b-it, and
+  truncated gpt-oss-20b; see the
   [model status page](ARCHITECTURE_COMPATIBILITY.md). No new checkpoint is
   advertised as supported.
 - DeepSeek-V2 runs V3-style sigmoid `noaux_tc` routing with a correction bias

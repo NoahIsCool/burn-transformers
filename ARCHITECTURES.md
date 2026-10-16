@@ -49,6 +49,11 @@ annotated `v0.21.0` tag at `546cacb55fe00168854d19bdf0a5d79bd8060e03`.
 | Gemma 3 text | `google/gemma-3-4b-it` | `093f9f388b31de276ce2de164bdc2081324b9767` | Sandwich `(1 + w)` RMSNorm, `sqrt(d)` embedding, 5:1 local (window 1024) / global attention, per-layer-type RoPE, Q/K norm, GeGLU | Text tower through `text_config`; the vision tower is reported as intentionally ignored |
 | gpt-oss | `openai/gpt-oss-20b` | `6cee5e81ee83917806bbde320786a8fb61efebee` | 24 layers alternating 128-token sliding and full attention with learned sinks, YaRN, 32 experts with top-4 biased routing, clamped SwiGLU | Strict SafeTensors; MXFP4 experts decoded exactly at load |
 
+Llama-3.1-8B (`meta-llama`, Llama 3 RoPE scaling) has also passed the
+Llama-family gate on Flex and Metal in F32, but the repository records only its
+revision prefix `d04e592b`. It joins this table once its full revision is
+recorded; until then it is unpinned experimental evidence.
+
 ## Shared feature ownership
 
 Architecture modules translate checkpoint configuration, wire exact layer
