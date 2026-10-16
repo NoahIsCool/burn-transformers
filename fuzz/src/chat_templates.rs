@@ -70,8 +70,9 @@ const TOKENIZER_JSON: &str = r#"{"version":"1.0","truncation":null,"padding":nul
 /// loops, string and sequence growth, huge repetition and padding counts).
 /// Growth fragments use counts that exceed the renderer's limits: findings
 /// CHAT-1..3 (see the sibling tests) are fixed, so they must fail contextually
-/// and quickly. Shared-structure comparisons, which the renderer documents as
-/// unbounded, are deliberately absent.
+/// and quickly, as must the retained copies, slices, splats, and namespace
+/// floods of the follow-up review. Shared-structure comparisons, which the
+/// renderer documents as unbounded, are deliberately absent.
 const FRAGMENTS: &[&str] = &[
     "{{ ",
     " }}",
@@ -138,6 +139,13 @@ const FRAGMENTS: &[&str] = &[
     "{{ ns.text | indent(100000000) }}",
     "{{ ns.text | replace('', ns.text * 1000) }}",
     "{{ '%999999999s' | format(ns.text) }}",
+    "{% for i in range(300) %}{% set ns.l = [ns.l, ns.text | list, ns.text | reverse] %}{% endfor %}",
+    "{% for i in range(300) %}{% set ns.l = [ns.l, ns.text[1:], ns.text.split('a')] %}{% endfor %}",
+    "{{ ns.text[::-1] }}{{ messages[::-1] | list | length }}{{ messages[1:] | length }}",
+    "{{ dict(**{'a': 1}) }}{{ range(*[1, 3]) | list }}{{ '%s' | format(*ns.l) }}",
+    "{% for i in range(20000) %}{% set x = namespace(i=i) %}{% endfor %}",
+    "{% set ns.me = ns %}{% set ns.all = [ns, ns.l] %}",
+    "{{ 3 is divisibleby 0 }}{{ debug() }}",
     "{% macro m(x) %}{{ m(x) }}{% endmacro %}{{ m(1) }}",
     "{% macro m(x) %}<{{ x }}>{% endmacro %}{{ m(key=1 if true else 2) }}",
     "{{ f(key=a if c else b) }}",
