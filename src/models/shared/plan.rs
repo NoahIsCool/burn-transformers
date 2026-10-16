@@ -1448,6 +1448,8 @@ pub(crate) enum RowValueError {
             },
         },
 ))]
+// A separate solver keeps this proof independent of the other queries in the module.
+#[cfg_attr(verus_keep_ghost, verifier::spinoff_prover)]
 // Verus compiles verified bodies as Rust 2021, which has no `let` chains, and
 // proof blocks separate the nested conditions in Verus builds.
 #[allow(clippy::collapsible_if)]

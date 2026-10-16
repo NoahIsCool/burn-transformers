@@ -42,6 +42,65 @@ pub open spec fn same_token_set(tokens: Seq<u32>, ids: Seq<usize>, count: int) -
         ==> exists|i: int| 0 <= i < count && #[trigger] ids[i] == tokens[k] as usize
 }
 
+/// Inserting `token` between smaller and larger entries keeps the list strictly
+/// increasing and adds exactly `token` to its set of values.
+pub proof fn lemma_insert_between(before: Seq<u32>, position: int, token: u32)
+    requires
+        strictly_increasing(before),
+        0 <= position <= before.len(),
+        forall|k: int| 0 <= k < position ==> #[trigger] before[k] < token,
+        position < before.len() ==> token < before[position],
+    ensures
+        strictly_increasing(before.insert(position, token)),
+        forall|value: u32| #[trigger] before.insert(position, token).contains(value)
+            <==> (before.contains(value) || value == token),
+{
+    let after = before.insert(position, token);
+    assert(after.len() == before.len() + 1);
+    assert(after[position] == token);
+    assert forall|k: int| 0 <= k < position implies #[trigger] after[k] == before[k] by {}
+    assert forall|k: int| position < k < after.len()
+        implies #[trigger] after[k] == before[k - 1] by {}
+    assert forall|a: int, b: int| 0 <= a < b < after.len() implies after[a] < after[b] by {
+        if b < position {
+            assert(before[a] < before[b]);
+        } else if a > position {
+            assert(before[a - 1] < before[b - 1]);
+        } else if b > position {
+            if b - 1 > position {
+                assert(before[position] < before[b - 1]);
+            }
+            if a < position {
+                assert(before[a] < token);
+            }
+        } else {
+            assert(before[a] < token);
+        }
+    }
+    assert forall|value: u32| #[trigger] after.contains(value)
+        <==> (before.contains(value) || value == token) by {
+        if after.contains(value) {
+            let k = choose|k: int| 0 <= k < after.len() && after[k] == value;
+            if k < position {
+                assert(before[k] == value);
+            } else if k > position {
+                assert(before[k - 1] == value);
+            }
+        }
+        if before.contains(value) {
+            let k = choose|k: int| 0 <= k < before.len() && before[k] == value;
+            if k < position {
+                assert(after[k] == value);
+            } else {
+                assert(after[k + 1] == value);
+            }
+        }
+        if value == token {
+            assert(after[position] == value);
+        }
+    }
+}
+
 } // verus!
 
 /// Hugging Face's `top_k` when sampling without an explicit value (`_get_default_generation_params`).
@@ -144,54 +203,12 @@ fn insert_sorted_unique(tokens: &mut Vec<u32>, token: u32) {
     if position < tokens.len() && tokens[position] == token {
         return;
     }
-    #[cfg(verus_keep_ghost)]
-    proof_decl! {
-        let ghost before = tokens@;
-    }
-    tokens.insert(position, token);
+    // Every entry before `position` is below `token`, and the entry at it (if any) above.
     #[cfg(verus_keep_ghost)]
     proof! {
-        // Entries before `position` are smaller and entries after it larger than `token`.
-        assert forall|a: int, b: int| 0 <= a < b < tokens@.len()
-            implies tokens@[a] < tokens@[b] by {
-            if b < position {
-                assert(before[a] < before[b]);
-            } else if a < position && b == position {
-                assert(before[a] < token);
-            } else if a < position {
-                assert(before[a] < before[b - 1]);
-            } else if a == position {
-                assert(token <= before[b - 1]);
-                if b - 1 > position {
-                    assert(before[position as int] < before[b - 1]);
-                }
-            } else {
-                assert(before[a - 1] < before[b - 1]);
-            }
-        }
-        assert forall|value: u32| #[trigger] tokens@.contains(value)
-            <==> (before.contains(value) || value == token) by {
-            if tokens@.contains(value) {
-                let k = choose|k: int| 0 <= k < tokens@.len() && tokens@[k] == value;
-                if k < position {
-                    assert(before[k] == value);
-                } else if k > position {
-                    assert(before[k - 1] == value);
-                }
-            }
-            if before.contains(value) {
-                let k = choose|k: int| 0 <= k < before.len() && before[k] == value;
-                if k < position {
-                    assert(tokens@[k] == value);
-                } else {
-                    assert(tokens@[k + 1] == value);
-                }
-            }
-            if value == token {
-                assert(tokens@[position as int] == value);
-            }
-        }
+        lemma_insert_between(tokens@, position as int, token);
     }
+    tokens.insert(position, token);
 }
 
 /// Converts a token ID list into its canonical sorted, deduplicated `u32` form.
