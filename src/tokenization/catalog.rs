@@ -3,7 +3,8 @@
 //! A checkpoint can ship several named chat templates, for example a plain
 //! `default` and a `tool_use` variant (Hermes-2-Pro, Command-R). This module
 //! decides which templates a checkpoint has ([`load_chat_templates`]) and which
-//! one a render uses ([`select_template`]), exactly as `transformers` 5.2 does
+//! one a render uses (`select_template`, built with the `chat-templates`
+//! feature), exactly as `transformers` 5.2 does
 //! (`PreTrainedTokenizerBase._from_pretrained` and `get_chat_template` in
 //! `tokenization_utils_base.py`).
 //!
@@ -12,8 +13,8 @@
 //! 1. **Template files win.** `chat_template.jinja` is the template named
 //!    `default`, and each `additional_chat_templates/<name>.jinja` is the
 //!    template `<name>`; Hugging Face 5.x writes non-default templates there
-//!    when it saves a tokenizer. When any of these files exists, they are the
-//!    checkpoint's whole template set: a `chat_template` entry in
+//!    when it saves a tokenizer. When any of these files counts (below), they
+//!    are the checkpoint's whole template set: a `chat_template` entry in
 //!    `tokenizer_config.json` is ignored, even a malformed one.
 //! 2. **Otherwise `tokenizer_config.json`.** Its `chat_template` is a string
 //!    (the `default` template), a list of `{"name": ..., "template": ...}`
@@ -27,14 +28,23 @@
 //! as in Python; the renderer then lexes every source's line endings as `\n`,
 //! as Jinja2 does, so both render the same prompt.
 //!
-//! Template files are untrusted checkpoint data. Each must be a regular,
-//! UTF-8 file inside the canonical tokenizer root (symlinks are followed but
-//! may not escape it), and together they must fit
-//! [`TemplateFileLimits::CHECKPOINT`]. A dangling `chat_template.jinja`
-//! symlink counts as absent, like every optional artifact, while a dangling
-//! `additional_chat_templates/*.jinja` entry is an error, since Python lists
-//! it and then fails to open it. The directory listing is sorted so that the
-//! first error reported does not depend on the filesystem's order.
+//! Only paths that Hugging Face would read count, so both load the same
+//! templates from the same directory. A template path counts when it
+//! resolves, through any symlinks, to a regular file (Python's
+//! `os.path.isfile`), and `additional_chat_templates` is scanned when it
+//! resolves to a directory (Python's `Path.is_dir()`). Anything else at those
+//! names is skipped without being opened: nothing, a dangling or looping
+//! symlink, a directory or FIFO named like a template, or a regular file
+//! named like the directory. When nothing counts, `tokenizer_config.json`
+//! supplies the templates as above.
+//!
+//! Template files that count are untrusted checkpoint data. Each must be
+//! UTF-8 (Hugging Face also fails on other bytes wherever the locale is
+//! UTF-8) and resolve inside the canonical tokenizer root, and together they
+//! must fit
+//! [`TemplateFileLimits::CHECKPOINT`]. Entries are read in sorted file-name
+//! order, so the first error reported does not depend on the filesystem's
+//! order.
 //!
 //! # Selection
 //!
@@ -44,14 +54,25 @@
 //!
 //! # Deliberate differences from Hugging Face
 //!
-//! They matter only for artifacts and calls that Hugging Face rejects or
-//! resolves arbitrarily; the public list is in the
-//! [`tokenization`](super) module documentation.
+//! They matter only for calls that Hugging Face rejects or resolves
+//! arbitrarily and for artifacts this loader treats as malformed or unsafe;
+//! the public list is in the [`tokenization`](super) module documentation.
 //!
-//! - An empty or whitespace-only template, an empty template name, and a
-//!   duplicate name (in a config list, or `additional_chat_templates/default.jinja`
-//!   beside `chat_template.jinja`) are rejected; Hugging Face keeps the last
-//!   duplicate.
+//! - Template files that count are rejected, where Hugging Face loads them,
+//!   when they resolve outside the tokenizer root, exceed the size or count
+//!   limits, are empty or whitespace-only, or are named `.jinja` (the
+//!   template `''` in Python).
+//! - Duplicate names are rejected: a repeated name in a config list, and
+//!   `additional_chat_templates/default.jinja` beside `chat_template.jinja`.
+//!   Hugging Face keeps the last one.
+//! - A `.jinja` file whose name is not UTF-8 is rejected; Python names the
+//!   template with surrogate escapes, which no Rust `String` can hold.
+//! - Two rare I/O failures on `additional_chat_templates` take the other
+//!   branch. A directory that cannot be listed (permission denied) is an
+//!   error here, where Python's glob yields nothing. A `stat` failure on the
+//!   path other than a missing path or a symlink loop (such as permission
+//!   denied inside a symlink's target) means "no directory" here, as Rust's
+//!   `Path::is_dir` reads it, where Python's `Path.is_dir()` raises.
 //! - A name only selects a stored template: an unknown name is an error, and
 //!   a template stored without a name is `default`. Hugging Face looks names
 //!   up only among several named templates and otherwise renders its
@@ -62,15 +83,15 @@
 use std::{
     borrow::Cow,
     collections::BTreeMap,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
-    io::{ErrorKind, Read},
+    io::Read,
     path::{Path, PathBuf},
 };
 
 use serde_json::Value;
 
-use super::{MAX_METADATA_BYTES, contained_file, is_absent};
+use super::{MAX_METADATA_BYTES, contained_file};
 use crate::{Error, Result};
 
 /// Name of the template a scalar config entry or `chat_template.jinja` defines.
@@ -95,13 +116,14 @@ struct TemplateFileLimits {
     file_bytes: u64,
     /// Largest accepted combined size of every template file, in bytes.
     total_bytes: u64,
-    /// Most templates accepted from `additional_chat_templates/`.
+    /// Most `*.jinja` entries accepted in `additional_chat_templates/`,
+    /// including entries that are then skipped because they are not files.
     additional_templates: usize,
 }
 
 impl TemplateFileLimits {
     /// Limits for every loaded checkpoint: 16 MiB per file, 64 MiB in total,
-    /// and 64 additional templates.
+    /// and 64 `.jinja` entries in `additional_chat_templates/`.
     ///
     /// Published templates are tens of kilobytes and checkpoints ship at most
     /// a handful, so only adversarial artifacts reach these bounds.
@@ -131,87 +153,106 @@ pub(super) fn load_chat_templates(
 
 /// Reads `chat_template.jinja` as `default` and each additional `<name>.jinja` as `<name>`.
 ///
-/// Returns an empty map when neither source exists.
+/// Paths that Hugging Face skips are skipped (see [`template_file`]), and
+/// the entries are read in sorted file-name order, so the first error
+/// reported does not depend on the filesystem's order. Returns an empty map
+/// when no template file is read.
 fn read_template_files(
     root: &Path,
     limits: TemplateFileLimits,
 ) -> Result<BTreeMap<String, String>> {
     let mut templates = BTreeMap::new();
     let mut remaining_bytes = limits.total_bytes;
-    if let Some(path) = contained_file(root, DEFAULT_TEMPLATE_FILE, false, limits.file_bytes)? {
+    if let Some(path) = template_file(root, DEFAULT_TEMPLATE_FILE, limits.file_bytes)? {
         let source = read_template_file(&path, &mut remaining_bytes, limits.total_bytes)?;
         insert_template_file(&mut templates, DEFAULT_TEMPLATE, path, source)?;
     }
-    for name in additional_template_names(root, limits.additional_templates)? {
+    for file_name in additional_template_entries(root, limits.additional_templates)? {
+        let TemplateFileName::Template(name) = classify_file_name(&file_name) else {
+            // Listed entries all end in `.jinja`, so this name is not UTF-8.
+            // Python would name the template with surrogate escapes, which no
+            // `String` holds; like any entry, it matters only if it is a file.
+            let path = root.join(ADDITIONAL_TEMPLATE_DIRECTORY).join(&file_name);
+            if path.is_file() {
+                return Err(Error::Artifact {
+                    path,
+                    reason: "chat template file names must be UTF-8".into(),
+                });
+            }
+            continue;
+        };
         // `/` separates components on every supported platform, Windows included.
         let relative = format!("{ADDITIONAL_TEMPLATE_DIRECTORY}/{name}{TEMPLATE_FILE_EXTENSION}");
-        // `contained_file` reports an absent optional file as `None`; a name
-        // just listed is absent only when it is a dangling symlink (or was
-        // removed meanwhile), which Python's `open` would also fail on.
-        let Some(path) = contained_file(root, &relative, false, limits.file_bytes)? else {
-            return Err(Error::Artifact {
-                path: root.join(relative),
-                reason: "chat template file is a dangling symlink or was removed while loading"
-                    .into(),
-            });
+        let Some(path) = template_file(root, &relative, limits.file_bytes)? else {
+            continue;
         };
         let source = read_template_file(&path, &mut remaining_bytes, limits.total_bytes)?;
-        insert_template_file(&mut templates, &name, path, source)?;
+        insert_template_file(&mut templates, name, path, source)?;
     }
     Ok(templates)
 }
 
-/// Lists the template names in `additional_chat_templates/`, sorted.
+/// Resolves one template path, or returns `None` where Hugging Face skips it.
 ///
-/// An absent directory has no templates. The directory must resolve inside
-/// `root`, and at most `maximum` of its entries may be templates.
-fn additional_template_names(root: &Path, maximum: usize) -> Result<Vec<String>> {
+/// Hugging Face reads a template path only when Python's `os.path.isfile`
+/// holds: when it resolves, through any symlinks, to a regular file. So a
+/// missing path, a dangling or looping symlink, a directory, and a FIFO are
+/// all skipped, and nothing at them is opened. A file that is read must then
+/// pass this loader's own checks: it resolves inside `root` and has at most
+/// `maximum_bytes`.
+fn template_file(root: &Path, relative: &str, maximum_bytes: u64) -> Result<Option<PathBuf>> {
+    // Like `os.path.isfile`, `Path::is_file` follows symlinks and is false
+    // whenever `stat` fails.
+    if root.join(relative).is_file() {
+        contained_file(root, relative, true, maximum_bytes)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Lists the `*.jinja` entries of `additional_chat_templates/`, sorted by file name.
+///
+/// The path is scanned only when it resolves to a directory, which is
+/// Python's `Path.is_dir()` probe: a missing path, a dangling or looping
+/// symlink, and a regular file hold no templates, as in Hugging Face. A
+/// scanned directory must resolve inside `root`, and at most `maximum`
+/// entries may end in `.jinja`, counting entries later skipped, so that the
+/// number of paths probed stays bounded too.
+fn additional_template_entries(root: &Path, maximum: usize) -> Result<Vec<OsString>> {
     let candidate = root.join(ADDITIONAL_TEMPLATE_DIRECTORY);
-    if is_absent(&candidate) {
+    // Like `Path.is_dir()`, `Path::is_dir` follows symlinks and is false when
+    // `stat` fails.
+    if !candidate.is_dir() {
         return Ok(Vec::new());
     }
-    let directory = match candidate.canonicalize() {
-        Ok(path) => path,
-        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(Error::io(candidate, source)),
-    };
+    let directory = candidate
+        .canonicalize()
+        .map_err(|source| Error::io(&candidate, source))?;
     if !directory.starts_with(root) {
         return Err(Error::Artifact {
             path: candidate,
             reason: "artifact symlink escapes the canonical tokenizer root".into(),
         });
     }
-    if !directory.is_dir() {
-        return Err(Error::Artifact {
-            path: directory,
-            reason: "additional chat templates must be a directory of `.jinja` files".into(),
-        });
-    }
     let entries = fs::read_dir(&directory).map_err(|source| Error::io(&directory, source))?;
-    let mut names = Vec::new();
+    let mut file_names = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|source| Error::io(&directory, source))?;
-        let file_name = entry.file_name();
-        let name = match classify_file_name(&file_name) {
-            TemplateFileName::Template(name) => name,
-            TemplateFileName::Other => continue,
-            TemplateFileName::NotUtf8 => {
-                return Err(Error::Artifact {
-                    path: entry.path(),
-                    reason: "chat template file names must be UTF-8".into(),
-                });
-            }
-        };
-        if names.len() == maximum {
+        let file_name = entry
+            .map_err(|source| Error::io(&directory, source))?
+            .file_name();
+        if classify_file_name(&file_name) == TemplateFileName::Other {
+            continue;
+        }
+        if file_names.len() == maximum {
             return Err(Error::Artifact {
                 path: directory,
-                reason: format!("holds more than {maximum} chat templates"),
+                reason: format!("holds more than {maximum} `.jinja` entries"),
             });
         }
-        names.push(name.to_owned());
+        file_names.push(file_name);
     }
-    names.sort_unstable();
-    Ok(names)
+    file_names.sort_unstable();
+    Ok(file_names)
 }
 
 /// What one entry of `additional_chat_templates/` contributes.

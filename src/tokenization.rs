@@ -30,9 +30,12 @@
 //!
 //! Templates are found and chosen as in Hugging Face 5.2. `chat_template.jinja`
 //! (the `default` template) and `additional_chat_templates/<name>.jinja`
-//! replace any `chat_template` entry in `tokenizer_config.json`, and, as in
-//! Jinja2, every `\r\n` and `\r` line ending of a template's source renders
-//! as `\n`. A render without [`ChatTemplateOptions::template_name`] uses the
+//! replace any `chat_template` entry in `tokenizer_config.json`. As there, a
+//! template path counts only when it resolves to a regular file, and the
+//! directory only when it resolves to a directory, so dangling or looping
+//! symlinks and other non-files at those names are skipped. As in Jinja2,
+//! every `\r\n` and `\r` line ending of a template's source renders as `\n`.
+//! A render without [`ChatTemplateOptions::template_name`] uses the
 //! checkpoint's `tool_use` template when [`ChatTemplateOptions::tools`] is
 //! set, otherwise `default`, otherwise the only template.
 //!
@@ -59,8 +62,9 @@
 //!   limits scale with the conversation, so only adversarial templates reach
 //!   them; no published template does.
 //!
-//! Deliberate differences in naming and validating templates, which matter
-//! only for calls and artifacts Hugging Face rejects or resolves arbitrarily:
+//! Deliberate differences in naming, loading, and validating templates,
+//! which matter only for calls Hugging Face rejects or resolves arbitrarily
+//! and for artifacts this loader treats as unsafe or malformed:
 //!
 //! - **`template_name` only names a stored template.** Hugging Face's
 //!   `chat_template` argument is looked up only among several named
@@ -71,12 +75,20 @@
 //!   name is an error that lists the available names.
 //! - **A sole non-`default` template renders without a name**, where Hugging
 //!   Face raises "multiple chat templates with no default".
-//! - **Ambiguous or malformed template artifacts are rejected**: empty
-//!   templates or names, duplicate names (in a config list, or
+//! - **Unsafe, empty, or ambiguous template artifacts are rejected**, where
+//!   Hugging Face loads them: template files that resolve outside the model
+//!   directory or exceed the loader's limits (16 MiB per file, 64 MiB in
+//!   total, 64 `.jinja` entries in `additional_chat_templates`); empty or
+//!   whitespace-only templates and empty names (Python loads
+//!   `additional_chat_templates/.jinja` as the template `''`); `.jinja` file
+//!   names that are not UTF-8; and duplicate names (in a config list, or
 //!   `additional_chat_templates/default.jinja` beside `chat_template.jinja`),
-//!   template files that are not UTF-8, symlinks that leave the model
-//!   directory, and template files beyond the loader's size and count limits.
-//!   Hugging Face keeps the last duplicate and reads the rest.
+//!   of which Hugging Face keeps the last.
+//! - **Two rare I/O failures on `additional_chat_templates` differ.** A
+//!   directory that cannot be listed is an error here, where Python reads no
+//!   templates from it; a path whose `stat` fails for a reason other than a
+//!   missing target or a symlink loop holds no templates here, where Python
+//!   raises.
 //!
 //! Chat templates are data supplied by a checkpoint and therefore are treated
 //! as untrusted programs. The MiniJinja environment has no filesystem loader,
@@ -345,7 +357,9 @@ pub struct TokenizerMetadata {
     /// When the model directory holds `chat_template.jinja` (stored as
     /// `default`) or `additional_chat_templates/<name>.jinja` files, they are
     /// the whole set; otherwise the entries of `tokenizer_config.json`'s
-    /// `chat_template` are, with a scalar template stored as `default`.
+    /// `chat_template` are, with a scalar template stored as `default`. As in
+    /// Hugging Face, a template path that does not resolve to a regular file
+    /// is skipped.
     pub chat_templates: BTreeMap<String, String>,
 }
 
@@ -651,8 +665,9 @@ impl LocalTokenizer {
     /// The optional artifacts are `tokenizer_config.json`,
     /// `special_tokens_map.json`, and the chat-template files
     /// `chat_template.jinja` and `additional_chat_templates/*.jinja` (see
-    /// [`TokenizerMetadata::chat_templates`]). Every file must resolve inside
-    /// the canonical directory and stay within the loader's size limits.
+    /// [`TokenizerMetadata::chat_templates`]). Every file that is read must
+    /// resolve inside the canonical directory and stay within the loader's
+    /// size limits.
     pub fn from_directory(root: impl AsRef<Path>) -> Result<Self> {
         let supplied_root = root.as_ref();
         let root = supplied_root

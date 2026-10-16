@@ -1817,27 +1817,145 @@ fn template_files_are_validated_with_their_path() {
             "default.jinja",
             "duplicate chat template `default`",
         ),
-        (
-            &[("additional_chat_templates", &b"a file"[..])][..],
-            "additional_chat_templates",
-            "must be a directory",
-        ),
     ] {
         let (path, reason) = artifact_error(files);
         assert!(path.ends_with(file_name), "{}: {reason}", path.display());
         assert!(reason.contains(expected), "{file_name}: {reason}");
     }
-    let nested = template_file_fixture(
-        None,
-        &[("additional_chat_templates/nested.jinja/inner.jinja", b"T")],
-    );
-    assert!(matches!(
-        LocalTokenizer::from_directory(nested.path()).unwrap_err(),
-        Error::Artifact { path, reason } if path.ends_with("nested.jinja") && reason.contains("regular file")
-    ));
 }
 
-/// Template-file symlinks cannot escape the root, and dangling ones are errors.
+/// Template paths that Hugging Face skips are skipped, so the same templates load.
+///
+/// Transformers 5.2 reads a template file only when `os.path.isfile` holds
+/// for it and scans `additional_chat_templates` only when `Path.is_dir()`
+/// holds; anything else at those names is ignored, and when no template file
+/// remains the config template stays. Each expectation is the
+/// `tokenizer.chat_template` that Transformers 5.2.0 loads from the same
+/// layout (TOK-R1).
+#[cfg(unix)]
+#[test]
+fn template_paths_that_are_not_files_are_skipped_like_hugging_face() {
+    use std::os::unix::fs::symlink;
+
+    /// Makes `relative` a symlink to a missing path.
+    fn dangle(root: &Path, relative: &str) {
+        symlink(root.join("missing"), root.join(relative)).unwrap();
+    }
+    /// Makes `relative` a symlink to itself, which no lookup can resolve.
+    fn loop_back(root: &Path, relative: &str) {
+        symlink(root.join(relative), root.join(relative)).unwrap();
+    }
+    /// One layout and the templates Transformers 5.2.0 loads from it.
+    struct Case {
+        /// What the layout shows.
+        layout: &'static str,
+        /// Regular files to write, as `(path relative to the root, contents)`.
+        files: &'static [(&'static str, &'static [u8])],
+        /// Finishes the layout with what plain files cannot express.
+        arrange: fn(&Path),
+        /// The loaded templates, as `(name, source)` pairs.
+        expected: &'static [(&'static str, &'static str)],
+    }
+    /// The directory of named templates.
+    const ADDITIONAL: &str = "additional_chat_templates";
+    /// A valid named template that every skipped neighbour leaves loaded.
+    const RAG: (&str, &[u8]) = ("additional_chat_templates/rag.jinja", b"RAG");
+    /// A valid `default` template file that replaces the config's `CONFIG`.
+    const JINJA: (&str, &[u8]) = ("chat_template.jinja", b"JINJA");
+    let cases = [
+        Case {
+            layout: "dangling additional entry",
+            files: &[RAG],
+            arrange: |root| dangle(root, "additional_chat_templates/tool_use.jinja"),
+            expected: &[("rag", "RAG")],
+        },
+        Case {
+            layout: "looping additional entry",
+            files: &[RAG],
+            arrange: |root| loop_back(root, "additional_chat_templates/tool_use.jinja"),
+            expected: &[("rag", "RAG")],
+        },
+        Case {
+            layout: "directory named like a template",
+            files: &[
+                RAG,
+                (
+                    "additional_chat_templates/nested.jinja/inner.jinja",
+                    b"INNER",
+                ),
+            ],
+            arrange: |_| {},
+            expected: &[("rag", "RAG")],
+        },
+        Case {
+            layout: "only a dangling additional entry",
+            files: &[],
+            arrange: |root| {
+                fs::create_dir(root.join(ADDITIONAL)).unwrap();
+                dangle(root, "additional_chat_templates/tool_use.jinja");
+            },
+            expected: &[("default", "CONFIG")],
+        },
+        Case {
+            layout: "regular file named like the directory",
+            files: &[JINJA, (ADDITIONAL, b"not a directory")],
+            arrange: |_| {},
+            expected: &[("default", "JINJA")],
+        },
+        Case {
+            layout: "looping directory link",
+            files: &[JINJA],
+            arrange: |root| loop_back(root, ADDITIONAL),
+            expected: &[("default", "JINJA")],
+        },
+        Case {
+            layout: "dangling directory link",
+            files: &[JINJA],
+            arrange: |root| dangle(root, ADDITIONAL),
+            expected: &[("default", "JINJA")],
+        },
+        Case {
+            layout: "directory named chat_template.jinja",
+            files: &[("chat_template.jinja/inner.jinja", b"INNER")],
+            arrange: |_| {},
+            expected: &[("default", "CONFIG")],
+        },
+        Case {
+            layout: "dangling chat_template.jinja",
+            files: &[],
+            arrange: |root| dangle(root, "chat_template.jinja"),
+            expected: &[("default", "CONFIG")],
+        },
+        Case {
+            layout: "looping chat_template.jinja",
+            files: &[],
+            arrange: |root| loop_back(root, "chat_template.jinja"),
+            expected: &[("default", "CONFIG")],
+        },
+    ];
+    for Case {
+        layout,
+        files,
+        arrange,
+        expected,
+    } in cases
+    {
+        let directory = template_file_fixture(Some(Value::String("CONFIG".into())), files);
+        arrange(directory.path());
+        let tokenizer = LocalTokenizer::from_directory(directory.path())
+            .unwrap_or_else(|error| panic!("{layout}: {error}"));
+        assert_eq!(
+            tokenizer.metadata().chat_templates,
+            template_map(expected),
+            "{layout}"
+        );
+    }
+}
+
+/// Template-file symlinks are followed but cannot escape the root.
+///
+/// Only a path that resolves to a regular file is read, so a link that
+/// leaves the root for a directory is skipped like any directory.
 #[cfg(unix)]
 #[test]
 fn template_file_symlinks_are_contained() {
@@ -1865,18 +1983,19 @@ fn template_file_symlinks_are_contained() {
             Error::Artifact { reason, .. } if reason.contains("symlink escapes")
         ));
     }
-    let dangling = template_file_fixture(None, &[("additional_chat_templates/rag.jinja", b"R")]);
+    let outside_directory =
+        template_file_fixture(None, &[("additional_chat_templates/rag.jinja", b"R")]);
     symlink(
-        dangling.path().join("missing.jinja"),
-        dangling
+        outside.path().join("templates"),
+        outside_directory
             .path()
-            .join("additional_chat_templates/tool_use.jinja"),
+            .join("additional_chat_templates/elsewhere.jinja"),
     )
     .unwrap();
-    assert!(matches!(
-        LocalTokenizer::from_directory(dangling.path()).unwrap_err(),
-        Error::Artifact { path, reason } if path.ends_with("tool_use.jinja") && reason.contains("dangling")
-    ));
+    assert_eq!(
+        loaded_templates(&outside_directory),
+        template_map(&[("rag", "R")])
+    );
     // Symlinks that stay inside the root are followed, as in Hugging Face.
     let inside = template_file_fixture(None, &[("templates/tool_use.jinja", b"INSIDE")]);
     symlink(

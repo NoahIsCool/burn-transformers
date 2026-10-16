@@ -125,13 +125,13 @@ fn non_utf8_template_file_names_are_reported() {
     );
 }
 
-/// A dangling `additional_chat_templates` link holds no templates; a looping one is an error.
+/// An `additional_chat_templates` link that resolves to no directory holds no templates.
 ///
-/// Python's `Path.is_dir()` is false for a dangling link, so Hugging Face
-/// reads nothing from it either.
+/// Python's `Path.is_dir()` is false for a dangling or looping link, so
+/// Hugging Face reads nothing from either; neither does this loader.
 #[cfg(unix)]
 #[test]
-fn additional_directory_links_resolve_or_fail_with_their_path() {
+fn additional_directory_links_that_do_not_resolve_hold_no_templates() {
     use std::os::unix::fs::symlink;
 
     let (_directory, root) = template_root(&[]);
@@ -144,18 +144,17 @@ fn additional_directory_links_resolve_or_fail_with_their_path() {
     );
     fs::remove_file(&link).unwrap();
     symlink(&link, &link).unwrap();
-    match read_template_files(&root, TemplateFileLimits::CHECKPOINT) {
-        Err(Error::Io { path, source }) => {
-            assert!(path.ends_with(ADDITIONAL_TEMPLATE_DIRECTORY));
-            assert_ne!(source.kind(), ErrorKind::NotFound);
-        }
-        other => panic!("expected an I/O error, found {other:?}"),
-    }
+    assert!(
+        read_template_files(&root, TemplateFileLimits::CHECKPOINT)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A `.jinja` file whose name is not UTF-8 fails with its path, where the filesystem allows one.
 ///
-/// APFS (macOS) refuses such names outright, so there only the refusal is
+/// Such an entry is skipped like any other unless it is a regular file. APFS
+/// (macOS) refuses such names outright, so there only the refusal is
 /// observed; Linux filesystems accept them and the loader must reject them.
 #[cfg(unix)]
 #[test]
@@ -163,10 +162,15 @@ fn non_utf8_template_file_names_fail_with_their_path() {
     use std::os::unix::ffi::OsStrExt;
 
     let (_directory, root) = template_root(&[("additional_chat_templates/ok.jinja", b"T")]);
-    let name = OsStr::from_bytes(b"\xff.jinja");
-    if fs::write(root.join(ADDITIONAL_TEMPLATE_DIRECTORY).join(name), b"T").is_err() {
+    let additional = root.join(ADDITIONAL_TEMPLATE_DIRECTORY);
+    if fs::create_dir(additional.join(OsStr::from_bytes(b"\xfe.jinja"))).is_err() {
         return;
     }
+    assert_eq!(
+        read_template_files(&root, TemplateFileLimits::CHECKPOINT).unwrap(),
+        BTreeMap::from([("ok".into(), "T".into())])
+    );
+    fs::write(additional.join(OsStr::from_bytes(b"\xff.jinja")), b"T").unwrap();
     let (file, reason) =
         artifact_failure(read_template_files(&root, TemplateFileLimits::CHECKPOINT));
     assert_eq!(file, "\u{fffd}.jinja");
@@ -235,10 +239,12 @@ fn template_file_limits_hold_at_their_boundaries() {
         ("additional_chat_templates/ignored.txt", b"not counted"),
     ]);
     assert_eq!(read_template_files(&root, limits).unwrap().len(), 2);
-    fs::write(root.join("additional_chat_templates/c.jinja"), b"c").unwrap();
+    // Every `.jinja` entry counts, even one that is then skipped, so the
+    // number of entries probed stays bounded too.
+    fs::create_dir(root.join("additional_chat_templates/c.jinja")).unwrap();
     let (file, reason) = artifact_failure(read_template_files(&root, limits));
     assert_eq!(file, ADDITIONAL_TEMPLATE_DIRECTORY);
-    assert!(reason.contains("more than 2 chat templates"), "{reason}");
+    assert!(reason.contains("more than 2 `.jinja` entries"), "{reason}");
 }
 
 /// The checkpoint limits keep every published template and bound adversarial sets.
