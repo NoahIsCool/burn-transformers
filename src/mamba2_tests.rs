@@ -1500,7 +1500,9 @@ proptest::proptest! {
     ///
     /// Log decays are finite and non-positive, as `dt · A` is, and include
     /// exact `+0.0` and `-0.0` (padded steps), at widths 1, 2, a chunk width,
-    /// and the `chunks + 1` width of the carry matrix.
+    /// and the `chunks + 1` width of the carry matrix. Both operand layouts
+    /// (the flattened Flex rows and the broadcast square views used on other
+    /// backends) are checked.
     #[test]
     fn segment_transitions_match_the_mask_fill_formulation(
         width in proptest::sample::select(vec![1_usize, 2, 3, 8, 17]),
@@ -1521,9 +1523,11 @@ proptest::proptest! {
             TensorData::new(values, [batch, heads, chunks, width]),
             &Default::default(),
         );
-        let actual = SegmentMasks::new(width, &Default::default()).transitions(log_decay.clone());
-        let expected = legacy_transitions(log_decay);
-        proptest::prop_assert_eq!(bits(actual), bits(expected));
+        let masks = SegmentMasks::new(width, &Default::default());
+        let expected = bits(legacy_transitions(log_decay.clone()));
+        proptest::prop_assert_eq!(bits(masks.transitions(log_decay.clone())), expected.clone());
+        proptest::prop_assert_eq!(bits(masks.transitions_with(log_decay.clone(), true)), expected.clone());
+        proptest::prop_assert_eq!(bits(masks.transitions_with(log_decay, false)), expected);
     }
 }
 

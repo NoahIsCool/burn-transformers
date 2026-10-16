@@ -1556,11 +1556,14 @@ fn scan_block<B: Backend>(
 /// Triangular tables for stable segmented sums over one chunk width, built once per scan.
 ///
 /// Both tables are flattened `[1, 1, 1, w·w]` F32 rows indexed `u · w + s`
-/// for target (term) row `u` and source column `s`. A flattened row is a
-/// single row shared by every leading position, the broadcast that Burn Flex
-/// 0.21 evaluates with its SIMD kernels; the former Boolean `[1, 1, 1, w, w]`
-/// masks were expanded to the full `[b, h, c, w, w]` plane and copied byte by
-/// byte inside each of two `mask_fill` calls per block.
+/// for target (term) row `u` and source column `s`. On inference Flex the
+/// terms are multiplied in that flattened layout: a single row shared by
+/// every leading position is the broadcast Burn Flex 0.21 evaluates with its
+/// SIMD kernels, whereas the former Boolean `[1, 1, 1, w, w]` masks were
+/// expanded to the full `[b, h, c, w, w]` plane and copied byte by byte inside
+/// each of two `mask_fill` calls per block. Other backends broadcast the same
+/// tables as `[1, 1, 1, w, w]` views, which they read natively, so they do
+/// one elementwise pass per table exactly as the masks did.
 pub(crate) struct SegmentMasks<B: Backend> {
     /// `1.0` where `s < u` (the term `ld[u]` belongs to segment `(s, t]`), else `0.0`.
     inside: Tensor<B, 4>,
@@ -1608,6 +1611,18 @@ impl<B: Backend> SegmentMasks<B> {
     /// finite inputs (padding uses `dt = 0`); a non-finite `dt` already makes
     /// the scan output non-finite through `x · dt`, whichever form is used.
     pub(crate) fn transitions(&self, log_decay: Tensor<B, 4>) -> Tensor<B, 5> {
+        let flattened = operations::is_inference_flex::<B>(&log_decay.device());
+        self.transitions_with(log_decay, flattened)
+    }
+
+    /// [`Self::transitions`] with an explicit operand layout.
+    ///
+    /// `flattened` multiplies a repeated `[b, h, c, w·w]` term plane by the
+    /// flattened rows (the Flex layout); otherwise the `[b, h, c, w, 1]` terms
+    /// broadcast against `[1, 1, 1, w, w]` views of the same rows. Both
+    /// evaluate the same elementwise operations in the same order, so they
+    /// are bit-identical; tests compare them with the former masks.
+    fn transitions_with(&self, log_decay: Tensor<B, 4>, flattened: bool) -> Tensor<B, 5> {
         let [batch, heads, chunks, width] = log_decay.dims();
         debug_assert_eq!(width, self.width, "segment masks built for another width");
         let shape = [batch, heads, chunks, width, width];
@@ -1620,6 +1635,11 @@ impl<B: Backend> SegmentMasks<B> {
                 table.clone().cast(dtype)
             }
         };
+        if !flattened {
+            let square = [1, 1, 1, width, width];
+            let terms = log_decay.unsqueeze_dim::<5>(4) * table(&self.inside).reshape(square);
+            return (terms.cumsum(3) + table(&self.future_bias).reshape(square)).exp();
+        }
         let terms = log_decay
             .unsqueeze_dim::<5>(4)
             .repeat_dim(4, width)
