@@ -327,7 +327,43 @@ fn context_dependent_rope_extension_is_rejected_before_cache_mutation() {
         .expect_err("a context beyond the original LongRoPE window must fail");
 
     assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("Qwen cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to 3 beyond 2"),
+        "{error}"
+    );
     assert_eq!(state.lengths(), &[0]);
+
+    // In a batch, the first active row past the limit is reported: row 0
+    // stays within it (context 2), row 1 evaluates context 3.
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(2, 4).expect("cache config"), 2, &device)
+        .expect("batched decode state");
+    let error = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                    [[1, 2, 0], [1, 2, 3]],
+                    &device,
+                ),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_data(
+                    TensorData::new(vec![true, true, false, true, true, true], [2, 3]),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut batched,
+            &ForwardOptions::default(),
+        )
+        .expect_err("row 1 passes the original LongRoPE window");
+    assert!(
+        error
+            .to_string()
+            .contains("extend the evaluated context to 3 beyond 2"),
+        "{error}"
+    );
+    assert_eq!(batched.lengths(), &[0, 0]);
 }
 
 /// Dynamic NTK scales against `max_position_embeddings`, which bounds the cache.

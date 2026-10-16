@@ -59,6 +59,35 @@ fn gated_query_projection_has_twice_the_attention_width() {
     assert_eq!(config.query_projection_width(), 12_288);
 }
 
+/// A gated query width beyond `usize` fails validation and its accessor saturates.
+#[test]
+fn rejects_an_unrepresentable_gated_query_width() {
+    // `2^(bits - 9)` heads of width 256 need `2^(bits - 1)` query channels,
+    // which fits; the gate doubles that to `2^bits`, one past `usize::MAX`.
+    let heads = (usize::MAX >> 9) + 1;
+    let overflowing = Qwen3_5TextConfig {
+        num_attention_heads: heads,
+        head_dim: 256,
+        attn_output_gate: true,
+        ..Qwen3_5TextConfig::default()
+    };
+    assert_eq!(overflowing.query_projection_width(), usize::MAX);
+    let error = overflowing
+        .validate()
+        .expect_err("an overflowing gated width must not validate");
+    assert_eq!(error.field, "num_attention_heads");
+
+    // Without the gate the same heads are representable and exact.
+    let ungated = Qwen3_5TextConfig {
+        attn_output_gate: false,
+        ..overflowing
+    };
+    assert_eq!(ungated.query_projection_width(), heads * 256);
+    ungated
+        .validate()
+        .expect("a representable ungated width validates");
+}
+
 /// Serialized aliases for the implemented SiLU DeltaNet gate remain compatible.
 #[test]
 fn accepts_only_implemented_delta_gate_spellings() {

@@ -269,13 +269,17 @@ impl Qwen3_5TextConfig {
     ///
     /// Output-gated Qwen packs an equally sized gate beside Q, hence the factor of
     /// two. For Qwen3.8-27B this is `24 * 256 * 2 = 12_288` channels. The
-    /// product is [`plan::gated_query_width`], verified in `verus/qwen.rs`.
+    /// product is [`plan::gated_query_width`], verified in `verus/qwen.rs`:
+    /// it is exact for every configuration that passes validation, which
+    /// rejects an unrepresentable width; an unvalidated configuration whose
+    /// width overflows saturates at `usize::MAX` instead of wrapping.
     pub fn query_projection_width(&self) -> usize {
         plan::gated_query_width(
             self.num_attention_heads,
             self.head_dim,
             self.attn_output_gate,
         )
+        .unwrap_or(usize::MAX)
     }
 }
 
@@ -421,6 +425,20 @@ impl Validate for Qwen3_5TextConfig {
             self.eos_token_id.as_ref(),
             self.vocab_size,
         )?;
+        // Verified: `None` exactly when the gated query width overflows.
+        if plan::gated_query_width(
+            self.num_attention_heads,
+            self.head_dim,
+            self.attn_output_gate,
+        )
+        .is_none()
+        {
+            return Err(ConfigError::new(
+                FAMILY,
+                "num_attention_heads",
+                "num_attention_heads * head_dim, doubled by attn_output_gate, overflows usize",
+            ));
+        }
         Ok(())
     }
 }

@@ -5,9 +5,9 @@ use proptest::prelude::*;
 use super::{
     AppendFault, CycleFault, StagingFault, all_equal, append_end, cache_slots, call_rotary_context,
     columns_below, compact_row_plan, default_full_attention, derived_full_attention,
-    first_staging_overflow, first_token_at_or_above, gated_query_width, prefix_rows, row_counts,
-    shifted_mtp_length, shifted_mtp_lengths, signed_index, slot_positions, slot_validity,
-    speculative_cycle_plan, staging_requirement, strictly_increasing, widest,
+    first_context_above, first_staging_overflow, first_token_at_or_above, gated_query_width,
+    prefix_rows, row_counts, shifted_mtp_length, shifted_mtp_lengths, signed_index, slot_positions,
+    slot_validity, speculative_cycle_plan, staging_requirement, strictly_increasing, widest,
 };
 
 /// The overflow-free schedule rule equals `(i + 1) mod interval = 0` (interval zero acts as one).
@@ -165,8 +165,12 @@ fn small_bookkeeping_helpers_match_their_definitions() {
     assert_eq!(signed_index(17), 17);
     assert_eq!(signed_index(usize::MAX), i64::MAX);
     assert_eq!(shifted_mtp_lengths(&[0, 4, 4], &[5, 5, 1]), [0, 3, 1]);
-    assert_eq!(gated_query_width(24, 256, true), 12_288);
-    assert_eq!(gated_query_width(24, 256, false), 6_144);
+    assert_eq!(gated_query_width(24, 256, true), Some(12_288));
+    assert_eq!(gated_query_width(24, 256, false), Some(6_144));
+    assert_eq!(gated_query_width(1, usize::MAX, false), Some(usize::MAX));
+    assert_eq!(gated_query_width(1, usize::MAX, true), None);
+    assert_eq!(gated_query_width(usize::MAX, 2, false), None);
+    assert_eq!(gated_query_width(usize::MAX, 0, true), Some(0));
 }
 
 /// The staging preflight reports the first overflowing row and saturates.
@@ -236,6 +240,23 @@ fn call_rotary_context_skips_inactive_rows() {
     assert_eq!(first_token_at_or_above(&[1, 7], 8), None);
     assert_eq!(first_token_at_or_above(&[], 0), None);
     assert_eq!(first_token_at_or_above(&[0], 0), Some(0));
+}
+
+/// The cached-context preflight names the first active row beyond the limit.
+#[test]
+fn first_context_above_names_the_first_active_offender() {
+    // Row 0 is inactive, so its larger context is ignored; row 2 is first.
+    assert_eq!(
+        first_context_above(&[0, 1, 2, 1], &[90, 8, 12, 30], 10),
+        Some(12)
+    );
+    // A context equal to the limit is still cacheable.
+    assert_eq!(first_context_above(&[1, 1], &[10, 10], 10), None);
+    assert_eq!(first_context_above(&[0, 0], &[90, 91], 10), None);
+    assert_eq!(first_context_above(&[], &[], 0), None);
+    // Rows pair like `zip`: the unpaired count is ignored.
+    assert_eq!(first_context_above(&[1, 1], &[4], 3), Some(4));
+    assert_eq!(first_context_above(&[1], &[2, 99], 3), None);
 }
 
 proptest! {
@@ -320,6 +341,22 @@ proptest! {
             .max()
             .unwrap_or(1);
         prop_assert_eq!(call_rotary_context(&counts, &contexts), reference);
+    }
+
+    /// The cached-context preflight equals the per-row loop it replaced.
+    #[test]
+    fn first_context_above_matches_the_active_row_loop(
+        counts in proptest::collection::vec(0usize..3, 0..6),
+        contexts in proptest::collection::vec(0usize..50, 0..6),
+        limit in 0usize..50,
+    ) {
+        let reference = contexts
+            .iter()
+            .zip(&counts)
+            .filter(|(_, count)| **count > 0)
+            .map(|(&context, _)| context)
+            .find(|&context| context > limit);
+        prop_assert_eq!(first_context_above(&counts, &contexts, limit), reference);
     }
 
     /// Slots are exactly `0..size` within each family, in schedule order.

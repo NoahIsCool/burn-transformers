@@ -57,13 +57,15 @@ use crate::{
 
 use super::{
     INPUT_NAMES, Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5MtpPrediction, Qwen3_5TextModel,
-    batch::{CachedAttention, CompactBatch, ensure_cacheable_rotary_context},
+    batch::{
+        CachedAttention, CompactBatch, ensure_cacheable_rotary_context, uncacheable_rotary_context,
+    },
 };
 use crate::models::qwen3_5::{
     Qwen3_5LayerType, Qwen3_5TextConfig,
     plan::{
-        self, AppendFault, StagingFault, append_end, call_rotary_context, first_staging_overflow,
-        first_token_at_or_above, shifted_mtp_lengths, staging_requirement,
+        self, AppendFault, StagingFault, append_end, call_rotary_context, first_context_above,
+        first_staging_overflow, first_token_at_or_above, shifted_mtp_lengths, staging_requirement,
     },
 };
 
@@ -1308,8 +1310,13 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    for (_, context) in rows.active_contexts() {
-        ensure_cacheable_rotary_context(model.model.rope, context, "Qwen")?;
+    // Verified in `verus/qwen.rs`: the context of the first active row
+    // (in row order) that passes the cached-context limit.
+    if let Some(limit) = model.model.rope.scaling().cached_context_limit()
+        && let Some(context) =
+            first_context_above(&rows.token_counts, &rows.evaluated_contexts, limit)
+    {
+        return Err(uncacheable_rotary_context("Qwen", context, limit));
     }
     Ok(rows)
 }

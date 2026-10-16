@@ -26,8 +26,12 @@
 //!   capacity, and a cycle starts only from batch one with
 //!   `target = MTP + 1`, a matching history, and a suffix that fits, each
 //!   failure naming its first violated condition;
-//! * the call rotary context (the maximum active context, or one), the first
-//!   out-of-vocabulary host token, and the gated query projection width;
+//! * the call rotary context (the maximum active context, or one), the
+//!   context of the first active row beyond a cached-context limit (`None`
+//!   exactly when every active row stays within it), the first
+//!   out-of-vocabulary host token, and the gated query projection width
+//!   (exactly `heads * head_dim * (2 if gated)`, `None` exactly when that
+//!   exceeds `usize::MAX`);
 //! * the Qwen3-MoE sparse-layer predicate, `mlp_only_layers` membership, and
 //!   schedule existence (some block `i < L` is sparse).
 //!

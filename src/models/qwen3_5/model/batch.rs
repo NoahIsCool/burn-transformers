@@ -436,11 +436,20 @@ pub(crate) fn ensure_cacheable_rotary_context(
     family: &str,
 ) -> Result<()> {
     match rope.scaling().cached_context_limit() {
-        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
-            "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
-        ))),
+        Some(limit) if context > limit => Err(uncacheable_rotary_context(family, context, limit)),
         _ => Ok(()),
     }
+}
+
+/// Describes an evaluated rotary `context` beyond the cached-context `limit`.
+///
+/// Shared by [`ensure_cacheable_rotary_context`] and the batched preflights,
+/// which locate the first offending row with the verified
+/// [`first_context_above`](crate::models::qwen3_5::plan::first_context_above).
+pub(crate) fn uncacheable_rotary_context(family: &str, context: usize, limit: usize) -> Error {
+    Error::BackendCapability(format!(
+        "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
+    ))
 }
 
 #[cfg(test)]

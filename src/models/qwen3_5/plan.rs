@@ -36,9 +36,11 @@
 //! * [`append_end`] — the cache end of an MTP append and its capacity check;
 //! * [`staging_requirement`] and [`speculative_cycle_plan`] — the staging
 //!   capacity and cache-alignment preflights of a speculative cycle;
-//! * [`call_rotary_context`] and [`first_token_at_or_above`] — the rotary
-//!   context of a batched call and the host vocabulary check;
-//! * [`gated_query_width`] — the gated full-attention query width.
+//! * [`call_rotary_context`], [`first_context_above`], and
+//!   [`first_token_at_or_above`] — the rotary context of a batched call, the
+//!   first active row a context-dependent rotary policy cannot cache, and the
+//!   host vocabulary check;
+//! * [`gated_query_width`] — the checked gated full-attention query width.
 //!
 //! The proofs establish freedom from overflow and out-of-bounds indexing and
 //! the stated postconditions for all admissible inputs. Tensor programs
@@ -51,12 +53,18 @@ use vstd::prelude::*;
 verus! {
 
 /// `s` is strictly increasing and every entry lies below `bound`.
+///
+/// Twin of `increasing_below` in `src/models/deepseek_v2/model/batch.rs`
+/// (checked by `verus/deepseek_muse.rs`); keep the two definitions identical.
 pub open spec fn increasing_below(s: Seq<usize>, bound: int) -> bool {
     &&& forall|i: int, j: int| 0 <= i < j < s.len() ==> s[i] < s[j]
     &&& forall|i: int| 0 <= i < s.len() ==> s[i] < bound
 }
 
 /// Number of entries of `kinds` equal to `kind`.
+///
+/// Twin of `count_kind` in `src/models/muse_glimmer/schedule.rs` (checked by
+/// `verus/deepseek_muse.rs`); keep the two definitions identical.
 pub open spec fn count_kind(kinds: Seq<bool>, kind: bool) -> nat
     decreases kinds.len(),
 {
@@ -68,6 +76,8 @@ pub open spec fn count_kind(kinds: Seq<bool>, kind: bool) -> nat
 }
 
 /// Extending a prefix by one entry adds one exactly when the entry matches.
+///
+/// Twin of `lemma_count_extend` in `src/models/muse_glimmer/schedule.rs`.
 pub proof fn lemma_count_extend(kinds: Seq<bool>, end: int, kind: bool)
     requires
         0 <= end < kinds.len(),
@@ -79,6 +89,8 @@ pub proof fn lemma_count_extend(kinds: Seq<bool>, end: int, kind: bool)
 }
 
 /// Appending an entry adds one to its kind's count.
+///
+/// Twin of `lemma_count_push` in `src/models/muse_glimmer/schedule.rs`.
 pub proof fn lemma_count_push(kinds: Seq<bool>, entry: bool, kind: bool)
     ensures
         count_kind(kinds.push(entry), kind) == count_kind(kinds, kind)
@@ -175,13 +187,14 @@ pub open spec fn staged_request(committed: int, working: int, count: int) -> int
     }
 }
 
-/// The smaller of two integers.
+/// The smaller of two integers, `vstd::math::min`.
 pub open spec fn min_int(a: int, b: int) -> int {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    vstd::math::min(a, b)
+}
+
+/// Active row `b` (positive count) evaluates a context beyond `limit`.
+pub open spec fn context_above(counts: Seq<usize>, contexts: Seq<usize>, limit: int, b: int) -> bool {
+    counts[b] > 0 && contexts[b] > limit
 }
 
 } // verus!
@@ -1123,6 +1136,59 @@ pub(crate) fn call_rotary_context(counts: &[usize], contexts: &[usize]) -> usize
     if found { best } else { 1 }
 }
 
+/// Returns the evaluated context of the first active row whose context passes `limit`.
+///
+/// A context-dependent rotary policy changes its frequencies beyond its
+/// cached-context limit, and Qwen rotates every row of a call with one set of
+/// tables, so no active row may evaluate a larger context. Rows pair
+/// `contexts` with `counts` like `zip` and are visited in order; a row is
+/// active when its count is positive. Proved: `Some(context)` is the context
+/// of the first active row `b` with `contexts[b] > limit`, and `None` means
+/// every active row stays within the limit.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    ensures
+        ({
+            let rows = min_int(counts.len() as int, contexts.len() as int);
+            match found {
+                Some(context) => exists|b: int|
+                    0 <= b < rows && #[trigger] context_above(counts@, contexts@, limit as int, b)
+                    && contexts[b] == context
+                    && forall|r: int| 0 <= r < b ==> !#[trigger] context_above(
+                        counts@, contexts@, limit as int, r),
+                None => forall|b: int|
+                    0 <= b < rows ==> !#[trigger] context_above(counts@, contexts@, limit as int, b),
+            }
+        }),
+))]
+pub(crate) fn first_context_above(
+    counts: &[usize],
+    contexts: &[usize],
+    limit: usize,
+) -> Option<usize> {
+    let rows = counts.len().min(contexts.len());
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows as int == min_int(counts.len() as int, contexts.len() as int),
+            forall|r: int| 0 <= r < row ==> !#[trigger] context_above(
+                counts@, contexts@, limit as int, r),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        if counts[row] > 0 && contexts[row] > limit {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(context_above(counts@, contexts@, limit as int, row as int));
+            }
+            return Some(contexts[row]);
+        }
+        row += 1;
+    }
+    None
+}
+
 /// Returns the index of the first token at or above `bound`.
 ///
 /// Proved: `Some(i)` names the first such token; `None` means every token
@@ -1158,17 +1224,18 @@ pub(crate) fn first_token_at_or_above(tokens: &[u32], bound: usize) -> Option<us
 
 /// Returns the full-attention query projection width `heads * head_dim * (2 if gated)`.
 ///
-/// Output-gated Qwen packs an equally sized gate beside Q. Proved: the
-/// result is exactly that product whenever it is representable (the caller
-/// validates the configuration's widths).
+/// Output-gated Qwen packs an equally sized gate beside Q. Proved: `Some`
+/// holds exactly that product when it is representable, and `None` means the
+/// exact product exceeds `usize::MAX` (configuration validation rejects it).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(width =>
-    requires
-        heads * head_dim * (if gated { 2int } else { 1int }) <= usize::MAX,
     ensures
-        width == heads * head_dim * (if gated { 2int } else { 1int }),
+        match width {
+            Some(width) => width == heads * head_dim * (if gated { 2int } else { 1int }),
+            None => heads * head_dim * (if gated { 2int } else { 1int }) > usize::MAX,
+        },
 ))]
-pub(crate) fn gated_query_width(heads: usize, head_dim: usize, gated: bool) -> usize {
+pub(crate) fn gated_query_width(heads: usize, head_dim: usize, gated: bool) -> Option<usize> {
     let gate_factor: usize = if gated { 2 } else { 1 };
     #[cfg(verus_keep_ghost)]
     proof! {
@@ -1178,7 +1245,10 @@ pub(crate) fn gated_query_width(heads: usize, head_dim: usize, gated: bool) -> u
                 heads >= 0,
                 head_dim >= 0;
     }
-    heads * head_dim * gate_factor
+    match heads.checked_mul(head_dim) {
+        Some(ungated) => ungated.checked_mul(gate_factor),
+        None => None,
+    }
 }
 
 #[cfg(test)]

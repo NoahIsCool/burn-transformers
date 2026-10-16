@@ -33,8 +33,8 @@ use crate::{
     intervention::Layer,
     models::{
         qwen3_5::{
-            model::batch::{CachedAttention, CompactBatch, ensure_cacheable_rotary_context},
-            plan::call_rotary_context,
+            model::batch::{CachedAttention, CompactBatch, uncacheable_rotary_context},
+            plan::{call_rotary_context, first_context_above},
         },
         shared::{
             EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
@@ -527,8 +527,13 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    for (_, context) in rows.active_contexts() {
-        ensure_cacheable_rotary_context(model.model.rope, context, "Qwen3 MoE")?;
+    // Verified in `verus/qwen.rs`: the context of the first active row
+    // (in row order) that passes the cached-context limit.
+    if let Some(limit) = model.model.rope.scaling().cached_context_limit()
+        && let Some(context) =
+            first_context_above(&rows.token_counts, &rows.evaluated_contexts, limit)
+    {
+        return Err(uncacheable_rotary_context("Qwen3 MoE", context, limit));
     }
     Ok(rows)
 }
