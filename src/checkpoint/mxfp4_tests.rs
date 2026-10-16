@@ -480,6 +480,32 @@ fn unit_coordinates_place_each_unit_in_its_output_slice() {
     }
 }
 
+/// Each block byte's two values land in distinct in-unit slots, covering the unit once.
+#[test]
+fn unit_value_bytes_cover_each_unit_slot_once() {
+    for rows in [1_usize, 2, 5] {
+        for width in [2_usize, 4, 8] {
+            let mut written = vec![0_u8; BLOCK_VALUES * rows * width];
+            for row in 0..rows {
+                for byte_index in 0..BLOCK_BYTES {
+                    let (even, odd) = unit_value_bytes(rows, row, byte_index, width);
+                    assert_eq!(even, (row + 2 * byte_index * rows) * width);
+                    assert_eq!(odd, even + rows * width);
+                    for slot in [even, odd] {
+                        for byte in &mut written[slot..slot + width] {
+                            *byte += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                written.iter().all(|&count| count == 1),
+                "{rows} rows, {width} bytes"
+            );
+        }
+    }
+}
+
 /// Every rejected shape names exactly the first rule it violates.
 #[test]
 fn geometry_errors_name_the_first_violated_rule() {

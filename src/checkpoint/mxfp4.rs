@@ -52,6 +52,7 @@
 //! scale, and value counts, block and scale offsets, the transposed output
 //! offset, the decode table's index bijection, the thread partition of the
 //! decode into whole units, each unit's coordinates and output slice, the
+//! in-bounds and non-overlapping byte slots of every decoded value, the
 //! nibble split, and the exact binary64 encoding of a decoded value) has
 //! no crate or Burn dependencies and is verified in place by Verus through
 //! `verus/gpt_oss.rs`. The byte copies of the table-lookup kernel and the
@@ -859,8 +860,94 @@ pub(crate) fn unit_coordinates(geometry: Mxfp4Geometry, unit: usize) -> (usize, 
     (expert, group)
 }
 
+/// Returns the byte offsets, within its unit, of the two values packed in block byte `byte_index`.
+///
+/// Byte `b` of a row's block holds decoded columns `2 b` (low nibble) and
+/// `2 b + 1` (high nibble); inside the unit, column `j` of row `r` is element
+/// `j · R + r`, stored in `width` bytes.
+///
+/// Verified: the offsets are exactly `(2 b · R + r) · W` and
+/// `((2 b + 1) · R + r) · W`, both values fit inside the unit's `32 · R · W`
+/// bytes without overlapping, and (with [`lemma_value_slots_injective`]) no two
+/// `(column, row)` pairs share an element, so each unit element is written once.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(offsets =>
+    requires
+        row < rows,
+        byte_index < BLOCK_BYTES,
+        width >= 1,
+        BLOCK_VALUES * rows * width <= usize::MAX,
+    ensures
+        offsets.0 == (2 * byte_index * rows + row) * width,
+        offsets.1 == ((2 * byte_index + 1) * rows + row) * width,
+        offsets.0 + width <= offsets.1,
+        offsets.1 + width <= BLOCK_VALUES * rows * width,
+))]
+pub(crate) fn unit_value_bytes(
+    rows: usize,
+    row: usize,
+    byte_index: usize,
+    width: usize,
+) -> (usize, usize) {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(2 * byte_index * rows <= 30 * rows) by (nonlinear_arith)
+            requires byte_index < 16;
+        assert(32 * rows <= 32 * rows * width) by (nonlinear_arith)
+            requires width >= 1;
+        assert(row + 2 * byte_index * rows + rows <= 32 * rows) by (nonlinear_arith)
+            requires byte_index < 16, row < rows;
+        assert((row + 2 * byte_index * rows) * width <= 32 * rows * width) by (nonlinear_arith)
+            requires row + 2 * byte_index * rows <= 32 * rows, width >= 1;
+        assert(rows * width <= 32 * rows * width) by (nonlinear_arith)
+            requires width >= 1;
+        assert((row + 2 * byte_index * rows) * width + rows * width
+            == (row + 2 * byte_index * rows + rows) * width) by (nonlinear_arith);
+        assert((row + 2 * byte_index * rows + rows) * width <= 32 * rows * width)
+            by (nonlinear_arith)
+            requires row + 2 * byte_index * rows + rows <= 32 * rows, width >= 1;
+        assert((2 * byte_index + 1) * rows + row < 32 * rows) by (nonlinear_arith)
+            requires byte_index < 16, row < rows;
+        assert(((2 * byte_index + 1) * rows + row + 1) * width <= 32 * rows * width)
+            by (nonlinear_arith)
+            requires (2 * byte_index + 1) * rows + row < 32 * rows, width >= 1;
+        assert((2 * byte_index * rows + row) * width + width <= ((2 * byte_index + 1) * rows
+            + row) * width) by (nonlinear_arith)
+            requires rows >= 1, width >= 1;
+        assert(((2 * byte_index + 1) * rows + row) * width
+            == (2 * byte_index * rows + row) * width + rows * width) by (nonlinear_arith);
+        assert(((2 * byte_index + 1) * rows + row) * width + width
+            == ((2 * byte_index + 1) * rows + row + 1) * width) by (nonlinear_arith);
+        assert((row + 2 * byte_index * rows) * width == (2 * byte_index * rows + row) * width);
+    }
+    let even = (row + 2 * byte_index * rows) * width;
+    let odd = even + rows * width;
+    (even, odd)
+}
+
 #[cfg(verus_keep_ghost)]
 verus! {
+
+/// Distinct `(column, row)` pairs of a unit occupy distinct elements `column · R + row`.
+pub proof fn lemma_value_slots_injective(rows: int, first: (int, int), second: (int, int))
+    requires
+        rows >= 1,
+        0 <= first.1 < rows,
+        0 <= second.1 < rows,
+        0 <= first.0,
+        0 <= second.0,
+        first.0 * rows + first.1 == second.0 * rows + second.1,
+    ensures
+        first == second,
+{
+    if first.0 < second.0 {
+        assert(first.0 * rows + first.1 < second.0 * rows + second.1) by (nonlinear_arith)
+            requires first.0 < second.0, first.1 < rows, second.1 >= 0, rows >= 1;
+    } else if second.0 < first.0 {
+        assert(second.0 * rows + second.1 < first.0 * rows + first.1) by (nonlinear_arith)
+            requires second.0 < first.0, second.1 < rows, first.1 >= 0, rows >= 1;
+    }
+}
 
 /// Specification: element `u · 32 R + j · R + r` of the transposed output.
 pub open spec fn unit_element(rows: int, unit: int, j: int, r: int) -> int {
@@ -1033,8 +1120,8 @@ fn decode_unit<const W: usize>(
         let base = transposed_offset(geometry, expert, first_column, row) - unit_start;
         for (byte_index, &byte) in blocks[start..start + BLOCK_BYTES].iter().enumerate() {
             let (low, high) = fp4_codes(byte);
-            let even = (base + 2 * byte_index * rows) * W;
-            let odd = even + rows * W;
+            // Verified in-bounds, non-overlapping slots of columns `2 b` and `2 b + 1`.
+            let (even, odd) = unit_value_bytes(rows, base, byte_index, W);
             output[even..even + W].copy_from_slice(&table.get(scale, low));
             output[odd..odd + W].copy_from_slice(&table.get(scale, high));
         }
