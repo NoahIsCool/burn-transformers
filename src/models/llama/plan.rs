@@ -7,7 +7,8 @@
 //!   whole-model schedules built from them (`interval_rotary_flags`,
 //!   `listed_rotary_flags`, `suffix_sliding_flags`, `nope_sliding_flags`,
 //!   and `first_set` for the first sliding layer without a window);
-//! * `derived_head_dim`, the head width of a config that omits it;
+//! * `derived_head_dim`, the head width of a config that omits it, and
+//!   `used_rotary_sets`, the rotary parameter sets some layer rotates with;
 //! * the cache layout: `plan_ring`, which assigns sliding layers below the
 //!   capacity to one ring group of one window, `cache_slots`, which numbers
 //!   layers inside their KV cache group (full storage or sliding ring),
@@ -1045,6 +1046,68 @@ pub(crate) fn restore_slots(
         }
     }
     slots
+}
+
+// Rotary sets.
+
+/// Returns, for each of `set_count` rotary sets, whether some layer rotates with it.
+///
+/// `layers[l]` is the set layer `l` rotates with, or `None` for a NoPE
+/// layer. Proved: set `s` is used exactly when some layer names it, so a
+/// call builds the tables of exactly the sets it needs; out-of-range set
+/// indices mark nothing.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(used =>
+    ensures
+        used.len() == set_count,
+        forall|s: int| 0 <= s < set_count ==> #[trigger] used@[s]
+            == exists|l: int| 0 <= l < layers.len() && #[trigger] layers@[l] == Some(s as usize),
+))]
+pub(crate) fn used_rotary_sets(set_count: usize, layers: &[Option<usize>]) -> Vec<bool> {
+    let mut used: Vec<bool> = Vec::with_capacity(set_count);
+    let mut set: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            set <= set_count,
+            used.len() == set,
+            forall|s: int| 0 <= s < set ==> !#[trigger] used@[s],
+        decreases set_count - set,
+    ))]
+    while set < set_count {
+        used.push(false);
+        set += 1;
+    }
+    let mut layer: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            layer <= layers.len(),
+            used.len() == set_count,
+            forall|s: int| 0 <= s < set_count ==> #[trigger] used@[s]
+                == exists|l: int| 0 <= l < layer && #[trigger] layers@[l] == Some(s as usize),
+        decreases layers.len() - layer,
+    ))]
+    while layer < layers.len() {
+        if let Some(named) = layers[layer] {
+            if named < set_count {
+                used[named] = true;
+            }
+        }
+        // Only the named set gains a witness; every other set keeps its own.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|s: int| 0 <= s < set_count implies #[trigger] used@[s]
+                == exists|l: int| 0 <= l < layer + 1 && #[trigger] layers@[l] == Some(s as usize) by {
+                if layers@[layer as int] == Some(s as usize) {
+                    assert(0 <= layer < layer + 1);
+                } else if used@[s] {
+                    let l = choose|l: int| 0 <= l < layer && layers@[l] == Some(s as usize);
+                    assert(0 <= l < layer + 1);
+                }
+            }
+        }
+        layer += 1;
+    }
+    used
 }
 
 // The whole step.

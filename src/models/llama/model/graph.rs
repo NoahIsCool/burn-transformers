@@ -57,7 +57,7 @@ use crate::{
     },
 };
 
-use super::super::RotaryPrecision;
+use super::super::{RotaryPrecision, plan::used_rotary_sets};
 
 // Family identity.
 
@@ -115,14 +115,11 @@ pub(crate) struct RotarySchedule {
 
 impl RotarySchedule {
     /// Returns, per set, whether at least one layer rotates with it.
+    ///
+    /// The Verus-verified `used_rotary_sets` marks exactly the sets some
+    /// layer names, so a call evaluates no unused set's tables.
     fn used_sets(&self) -> Vec<bool> {
-        let mut used = vec![false; self.sets.len()];
-        for set in self.layers.iter().flatten() {
-            if let Some(flag) = used.get_mut(*set) {
-                *flag = true;
-            }
-        }
-        used
+        used_rotary_sets(self.sets.len(), &self.layers)
     }
 
     /// Returns the tightest original context of a used context-dependent set.

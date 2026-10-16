@@ -411,3 +411,29 @@ proptest! {
         }
     }
 }
+
+/// A set is used exactly when some layer names it; NoPE and out-of-range layers mark nothing.
+#[test]
+fn used_rotary_sets_mark_exactly_the_named_sets() {
+    assert_eq!(
+        used_rotary_sets(3, &[Some(0), None, Some(2), Some(0)]),
+        [true, false, true]
+    );
+    assert_eq!(used_rotary_sets(2, &[None, Some(5)]), [false, false]);
+    assert!(used_rotary_sets(0, &[Some(0)]).is_empty());
+}
+
+proptest! {
+    /// Used sets equal a direct membership test.
+    #[test]
+    fn used_rotary_sets_match_membership(
+        count in 0usize..5,
+        layers in prop::collection::vec(prop::option::of(0usize..6), 0..10),
+    ) {
+        let used = used_rotary_sets(count, &layers);
+        prop_assert_eq!(used.len(), count);
+        for (set, &flag) in used.iter().enumerate() {
+            prop_assert_eq!(flag, layers.contains(&Some(set)));
+        }
+    }
+}
