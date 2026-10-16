@@ -57,7 +57,12 @@
 //!   away, exactly half only with an even quotient), or `None` exactly when
 //!   that multiple lies outside `i128`;
 //! - `increment_decimal_digits` adds exactly one to the number its ASCII
-//!   digits spell, growing by a digit only when every digit was `9`.
+//!   digits spell, growing by a digit only when every digit was `9`;
+//! - `round_digits_to_tens` (Python's `round(float, -k)` on a float's exact
+//!   decimal expansion) returns the digits of the quotient by `10^k` plus
+//!   round-half-even's carry, a fraction breaking ties upward; its
+//!   comparison of the dropped digits with `50...0` orders twice their value
+//!   against the unit exactly.
 //!
 //! and to `src/tokenization/chat_template/scan.rs`, the tag scanner shared by
 //! the chat-template source rewrites:

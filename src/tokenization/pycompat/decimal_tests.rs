@@ -90,7 +90,39 @@ fn decimal_increments_carry() {
     }
 }
 
+/// Rounds `digits` to tens and returns the kept quotient as text.
+fn rounded(digits: &str, places: usize, fractional: bool) -> String {
+    String::from_utf8(round_digits_to_tens(digits.as_bytes(), places, fractional)).unwrap()
+}
+
+/// Digit strings round half to even, with a fraction breaking ties upward.
+#[test]
+fn digit_strings_round_half_to_even() {
+    assert_eq!(rounded("1234", 2, false), "12");
+    assert_eq!(rounded("1250", 2, false), "12");
+    assert_eq!(rounded("1250", 2, true), "13");
+    assert_eq!(rounded("1350", 2, false), "14");
+    assert_eq!(rounded("1251", 2, false), "13");
+    assert_eq!(rounded("9950", 2, false), "100");
+    assert_eq!(rounded("5", 1, false), "0");
+    assert_eq!(rounded("5", 1, true), "1");
+    assert_eq!(rounded("15", 1, false), "2");
+    assert_eq!(rounded("49", 3, true), "0");
+    assert_eq!(rounded("0", 4, false), "0");
+    assert_eq!(rounded("999", 1, false), "100");
+}
+
 proptest! {
+    /// Digit rounding agrees with integer arithmetic.
+    #[test]
+    fn digit_rounding_matches_integers(value in any::<u64>(), places in 1_usize..22, fractional in any::<bool>()) {
+        let unit = 10_u128.pow(u32::try_from(places).unwrap());
+        let (quotient, remainder) = (u128::from(value) / unit, u128::from(value) % unit);
+        let up = 2 * remainder > unit || (2 * remainder == unit && (fractional || quotient % 2 == 1));
+        let expected = (quotient + u128::from(up)).to_string();
+        prop_assert_eq!(rounded(&value.to_string(), places, fractional), expected);
+    }
+
     /// Integer rounding agrees with the reference on the whole `i128` range.
     #[test]
     fn integer_rounding_matches_reference(value in any::<i128>(), places in 0_u32..42) {

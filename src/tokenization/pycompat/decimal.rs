@@ -3,8 +3,9 @@
 //! Jinja2's `round` filter is Python's built-in `round`: an integer rounded to
 //! a negative number of places becomes the nearest multiple of `10^places`,
 //! ties going to the even multiple (`round(25, -1) == 20`, `round(35, -1) ==
-//! 40`). Rounding a float to tens works on its exact decimal expansion and
-//! needs a decimal increment when it rounds away from zero. Both are pure
+//! 40`). Rounding a float to tens works on its exact decimal expansion: the
+//! dropped digits are compared with half a unit, and the kept digits are
+//! incremented when the value rounds away from zero. Both are pure
 //! integer logic and live here, free of MiniJinja values and floats.
 //!
 //! # Verified behavior
@@ -19,7 +20,10 @@
 //!   exactly when that multiple lies outside `i128`;
 //! - [`increment_decimal_digits`] adds one to the number its ASCII digits
 //!   spell, keeping them ASCII digits and growing by one digit only when
-//!   every digit was `9`.
+//!   every digit was `9`;
+//! - [`round_digits_to_tens`] returns the digits of `q + up`, where `q` is
+//!   the quotient of the spelled number by `10^places` and `up` is
+//!   round-half-even's decision for the remainder plus an optional fraction.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -547,6 +551,339 @@ pub(crate) proof fn lemma_increment_at(original: Seq<u8>, before: Seq<u8>, after
 }
 
 } // verus!
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Round-half-even of `(quotient * unit + remainder + fraction) / unit` rounds up.
+///
+/// `fractional` says whether a fraction in `(0, 1)` follows the integer;
+/// with `0 <= remainder < unit`, the value is above half a unit when
+/// `2 * remainder > unit`, or when it equals half and a fraction remains;
+/// exactly half rounds to the even quotient.
+pub(crate) open spec fn rounds_up(remainder: int, unit: int, fractional: bool, quotient: int) -> bool {
+    2 * remainder > unit || (2 * remainder == unit && (fractional || quotient % 2 == 1))
+}
+
+/// Digit strings are bounded by their length: `0 <= value < 10^len`.
+pub(crate) proof fn lemma_decimal_value_bound(digits: Seq<u8>)
+    requires
+        all_ascii_digits(digits),
+    ensures
+        0 <= decimal_value(digits) < decimal_unit(digits.len()),
+    decreases digits.len(),
+{
+    if digits.len() > 0 {
+        let shorter = digits.drop_last();
+        assert(all_ascii_digits(shorter)) by {
+            assert forall|i: int| 0 <= i < shorter.len() implies 48 <= #[trigger] shorter[i] <= 57 by {
+                assert(shorter[i] == digits[i]);
+            }
+        }
+        lemma_decimal_value_bound(shorter);
+        assert(48 <= digits.last() <= 57) by {
+            assert(digits.last() == digits[digits.len() - 1]);
+        }
+        let head = decimal_value(shorter);
+        let scale = decimal_unit(shorter.len());
+        assert(head * 10 + 9 < scale * 10) by (nonlinear_arith)
+            requires
+                0 <= head < scale,
+        ;
+        assert(head * 10 >= 0) by (nonlinear_arith)
+            requires
+                0 <= head,
+        ;
+    }
+}
+
+/// A digit string spells zero exactly when every digit is `0`.
+pub(crate) proof fn lemma_decimal_value_zero(digits: Seq<u8>)
+    requires
+        all_ascii_digits(digits),
+    ensures
+        (decimal_value(digits) == 0) == all_equal(digits, 48),
+    decreases digits.len(),
+{
+    lemma_decimal_value_runs(digits);
+    if digits.len() > 0 {
+        let shorter = digits.drop_last();
+        assert(all_ascii_digits(shorter)) by {
+            assert forall|i: int| 0 <= i < shorter.len() implies 48 <= #[trigger] shorter[i] <= 57 by {
+                assert(shorter[i] == digits[i]);
+            }
+        }
+        lemma_decimal_value_zero(shorter);
+        lemma_decimal_value_bound(shorter);
+        assert(digits.last() == digits[digits.len() - 1]);
+        if decimal_value(digits) == 0 {
+            assert(decimal_value(shorter) == 0);
+            assert forall|i: int| 0 <= i < digits.len() implies #[trigger] digits[i] == 48 by {
+                if i < digits.len() - 1 {
+                    assert(digits[i] == shorter[i]);
+                }
+            }
+        }
+    }
+}
+
+/// Splitting a digit string at `split` splits its value.
+pub(crate) proof fn lemma_decimal_value_split(digits: Seq<u8>, split: int)
+    requires
+        0 <= split <= digits.len(),
+    ensures
+        decimal_value(digits) == decimal_value(digits.subrange(0, split)) * decimal_unit(
+            (digits.len() - split) as nat,
+        ) + decimal_value(digits.subrange(split, digits.len() as int)),
+{
+    assert(digits =~= digits.subrange(0, split) + digits.subrange(split, digits.len() as int));
+    lemma_decimal_value_concat(digits.subrange(0, split), digits.subrange(split, digits.len() as int));
+}
+
+/// Subranges of ASCII digit strings are ASCII digit strings.
+pub(crate) proof fn lemma_digits_subrange(digits: Seq<u8>, from: int, to: int)
+    requires
+        all_ascii_digits(digits),
+        0 <= from <= to <= digits.len(),
+    ensures
+        all_ascii_digits(digits.subrange(from, to)),
+{
+    assert forall|i: int| 0 <= i < to - from implies 48 <= #[trigger] digits.subrange(from, to)[i] <= 57 by {
+        assert(digits.subrange(from, to)[i] == digits[from + i]);
+    }
+}
+
+} // verus!
+
+/// Compares the last `places` digits of `digits` (left-padded with zeros) with half a unit, `50...0`.
+///
+/// `split` is where the dropped digits start: `digits.len() - places`, or
+/// zero when there are fewer digits than places. Verified: with `r` the
+/// value of the dropped digits and `u = 10^places`, the result orders `2r`
+/// against `u`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(order =>
+    requires
+        all_ascii_digits(digits@),
+        1 <= places,
+        split == if digits.len() >= places { digits.len() - places } else { 0 },
+    ensures
+        ({
+            let dropped = decimal_value(digits@.subrange(split as int, digits.len() as int));
+            let unit = decimal_unit(places as nat);
+            &&& (order == core::cmp::Ordering::Less) == (2 * dropped < unit)
+            &&& (order == core::cmp::Ordering::Equal) == (2 * dropped == unit)
+            &&& (order == core::cmp::Ordering::Greater) == (2 * dropped > unit)
+        }),
+))]
+fn compare_dropped_with_half(digits: &[u8], split: usize, places: usize) -> core::cmp::Ordering {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        lemma_digits_subrange(digits@, split as int, digits.len() as int);
+        lemma_decimal_value_bound(digits@.subrange(split as int, digits.len() as int));
+        lemma_decimal_unit_positive((places - 1) as nat);
+        assert(decimal_unit(places as nat) == 10 * decimal_unit((places - 1) as nat));
+    }
+    if digits.len() - split < places {
+        // A leading padding zero: the dropped value is below `10^(places - 1)`.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_decimal_unit_grows((digits.len() - split) as nat, (places - 1) as nat);
+        }
+        return core::cmp::Ordering::Less;
+    }
+    let first = digits[split];
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let dropped = digits@.subrange(split as int, digits.len() as int);
+        lemma_decimal_value_split(dropped, 1);
+        assert(dropped.subrange(0, 1) =~= seq![first]);
+        assert(seq![first].drop_last() =~= Seq::<u8>::empty());
+        assert(decimal_value(Seq::<u8>::empty()) == 0);
+        assert(decimal_value(seq![first]) == decimal_value(seq![first].drop_last()) * 10 + (first - 48));
+        lemma_digits_subrange(dropped, 1, dropped.len() as int);
+        lemma_decimal_value_bound(dropped.subrange(1, dropped.len() as int));
+        let rest = decimal_value(dropped.subrange(1, dropped.len() as int));
+        let tenth = decimal_unit((places - 1) as nat);
+        assert(dropped.subrange(1, dropped.len() as int)
+            =~= digits@.subrange(split + 1, digits.len() as int));
+        assert(dropped.len() - 1 == places - 1);
+        assert((first - 48) * tenth + rest == decimal_value(dropped));
+        if first < 53 {
+            assert(2 * ((first - 48) * tenth + rest) < 10 * tenth) by (nonlinear_arith)
+                requires
+                    0 <= first - 48 <= 4,
+                    0 <= rest < tenth,
+            ;
+        } else if first > 53 {
+            assert(2 * ((first - 48) * tenth + rest) > 10 * tenth) by (nonlinear_arith)
+                requires
+                    6 <= first - 48 <= 9,
+                    0 <= rest < tenth,
+                    tenth >= 1,
+            ;
+        } else {
+            assert(2 * ((first - 48) * tenth + rest) == 10 * tenth + 2 * rest) by (nonlinear_arith)
+                requires
+                    first - 48 == 5,
+            ;
+            lemma_decimal_value_zero(dropped.subrange(1, dropped.len() as int));
+        }
+    }
+    if first < b'5' {
+        return core::cmp::Ordering::Less;
+    }
+    if first > b'5' {
+        return core::cmp::Ordering::Greater;
+    }
+    let mut index = split + 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            split + 1 <= index <= digits.len(),
+            digits.len() - split == places,
+            all_equal(digits@.subrange(split + 1, index as int), 48),
+            2 * decimal_value(digits@.subrange(split as int, digits.len() as int)) == decimal_unit(
+                places as nat,
+            ) + 2 * decimal_value(digits@.subrange(split + 1, digits.len() as int)),
+            (decimal_value(digits@.subrange(split + 1, digits.len() as int)) == 0) == all_equal(
+                digits@.subrange(split + 1, digits.len() as int),
+                48,
+            ),
+            decimal_value(digits@.subrange(split + 1, digits.len() as int)) >= 0,
+        decreases digits.len() - index,
+    ))]
+    while index < digits.len() {
+        if digits[index] != b'0' {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let rest = digits@.subrange(split + 1, digits.len() as int);
+                assert(rest[index - split - 1] == digits@[index as int]);
+                assert(!all_equal(rest, 48));
+            }
+            return core::cmp::Ordering::Greater;
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|i: int| 0 <= i < index + 1 - split - 1 implies
+                #[trigger] digits@.subrange(split + 1, index + 1)[i] == 48 by {
+                if i < index - split - 1 {
+                    assert(digits@.subrange(split + 1, index + 1)[i]
+                        == digits@.subrange(split + 1, index as int)[i]);
+                }
+            }
+        }
+        index += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(digits@.subrange(split + 1, index as int)
+            =~= digits@.subrange(split as int, digits.len() as int).subrange(1, (digits.len() - split) as int));
+    }
+    core::cmp::Ordering::Equal
+}
+
+/// Rounds the integer that ASCII `digits` spell to a multiple of `10^places`, ties to even.
+///
+/// Returns the digits of the rounded quotient (`"0"` when nothing is kept).
+/// `fractional` says whether a fraction in `(0, 1)` follows the integer, as
+/// for the magnitude of a non-integral float: it breaks a tie upward. This
+/// is the digit arithmetic of Python's `round(x, -places)` on a float's exact
+/// decimal expansion. Verified: the result spells `q + up`, where `q` and
+/// `r` are the quotient and remainder of the value by `10^places` and `up`
+/// is [`rounds_up`] (the value with its fraction is above half a unit, or
+/// exactly half with an odd quotient).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(kept =>
+    requires
+        all_ascii_digits(digits@),
+        1 <= places,
+    ensures
+        all_ascii_digits(kept@),
+        kept.len() >= 1,
+        ({
+            let value = decimal_value(digits@);
+            let unit = decimal_unit(places as nat);
+            let quotient = value / unit;
+            decimal_value(kept@) == quotient + if rounds_up(value % unit, unit, fractional, quotient) {
+                1int
+            } else {
+                0
+            }
+        }),
+))]
+pub(crate) fn round_digits_to_tens(digits: &[u8], places: usize, fractional: bool) -> Vec<u8> {
+    let split = digits.len().saturating_sub(places);
+    let round_up = match compare_dropped_with_half(digits, split, places) {
+        core::cmp::Ordering::Less => false,
+        core::cmp::Ordering::Greater => true,
+        core::cmp::Ordering::Equal => fractional || (split > 0 && digits[split - 1] % 2 == 1),
+    };
+    let mut kept: Vec<u8> = Vec::with_capacity(split.max(1) + 1);
+    if split == 0 {
+        kept.push(b'0');
+    }
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= split,
+            split <= digits.len(),
+            split > 0 ==> kept@ == digits@.subrange(0, index as int),
+            split == 0 ==> kept@ == seq![48u8],
+        decreases split - index,
+    ))]
+    while index < split {
+        kept.push(digits[index]);
+        index += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let value = decimal_value(digits@);
+        let unit = decimal_unit(places as nat);
+        lemma_decimal_unit_positive(places as nat);
+        lemma_decimal_value_split(digits@, split as int);
+        lemma_digits_subrange(digits@, 0, split as int);
+        lemma_digits_subrange(digits@, split as int, digits.len() as int);
+        let head = digits@.subrange(0, split as int);
+        let tail = digits@.subrange(split as int, digits.len() as int);
+        lemma_decimal_value_bound(tail);
+        lemma_decimal_value_bound(head);
+        if split == 0 {
+            assert(head =~= Seq::<u8>::empty());
+            assert(decimal_value(head) == 0);
+            assert(tail =~= digits@);
+            lemma_decimal_unit_grows(digits.len() as nat, places as nat);
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(value, unit, 0, value);
+            assert(seq![48u8].drop_last() =~= Seq::<u8>::empty());
+            assert(decimal_value(seq![48u8]) == decimal_value(seq![48u8].drop_last()) * 10 + 0);
+        } else {
+            assert(tail.len() == places);
+            assert(kept@ =~= head);
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+                value,
+                unit,
+                decimal_value(head),
+                decimal_value(tail),
+            );
+            // The quotient's parity is its last digit's.
+            assert(head.drop_last() =~= digits@.subrange(0, split - 1));
+            assert(head.last() == digits@[split - 1]);
+            assert(decimal_value(head) == decimal_value(head.drop_last()) * 10 + (head.last() - 48));
+            assert((decimal_value(head) % 2 == 1) == (digits@[split - 1] % 2 == 1)) by (nonlinear_arith)
+                requires
+                    decimal_value(head) == decimal_value(head.drop_last()) * 10 + (digits@[split - 1] - 48),
+            ;
+        }
+        assert(all_ascii_digits(kept@)) by {
+            if split == 0 {
+                assert forall|i: int| 0 <= i < kept.len() implies 48 <= #[trigger] kept@[i] <= 57 by {}
+            }
+        }
+    }
+    if round_up {
+        increment_decimal_digits(&mut kept);
+    }
+    kept
+}
 
 #[cfg(test)]
 #[path = "decimal_tests.rs"]
