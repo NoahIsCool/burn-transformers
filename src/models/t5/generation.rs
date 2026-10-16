@@ -33,13 +33,16 @@ pub struct T5BeamSearchOptions {
     pub num_return_sequences: usize,
     /// Exponent used to normalize cumulative log probability by output length.
     pub length_penalty: f64,
-    /// Transformers' boolean `early_stopping`: `true` stops a source row once
-    /// it has `num_beams` finished hypotheses ([`EarlyStopping::Eager`]);
-    /// `false`, the default, applies Transformers' length heuristic
-    /// ([`EarlyStopping::Heuristic`]). For `early_stopping="never"` build a
-    /// [`BeamSearchConfig`] with [`EarlyStopping::Never`] and call
-    /// [`generate_seq2seq_beam_search`].
-    pub early_stopping: bool,
+    /// When a source row stops searching, as Transformers' `early_stopping`.
+    ///
+    /// The default is [`EarlyStopping::Heuristic`], Transformers' `false` and
+    /// the rule FLAN-T5's generation configuration selects.
+    /// [`EarlyStopping::Eager`] (`true`) stops once a row has `num_beams`
+    /// finished hypotheses, and [`EarlyStopping::Never`] (`"never"`) gives the
+    /// result of searching every row to the length bound. Serialized as
+    /// `true`, `false`, or `"never"`, so options saved with the former Boolean
+    /// field still load.
+    pub early_stopping: EarlyStopping,
 }
 
 impl Default for T5BeamSearchOptions {
@@ -50,7 +53,7 @@ impl Default for T5BeamSearchOptions {
             num_beams: 4,
             num_return_sequences: 1,
             length_penalty: 1.0,
-            early_stopping: false,
+            early_stopping: EarlyStopping::Heuristic,
         }
     }
 }
@@ -92,7 +95,7 @@ pub fn generate_t5_beam_search<B: Backend>(
         num_beams: options.num_beams,
         num_return_sequences: options.num_return_sequences,
         length_penalty: options.length_penalty,
-        early_stopping: EarlyStopping::from(options.early_stopping),
+        early_stopping: options.early_stopping,
         eos_token_ids,
         pad_token_id,
     };
