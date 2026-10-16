@@ -140,3 +140,8 @@ impl<B: Backend> NormLayout<B> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "norm_tests.rs"]
+/// Normalization construction contracts.
+mod tests;

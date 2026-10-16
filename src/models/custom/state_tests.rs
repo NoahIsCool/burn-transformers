@@ -455,3 +455,146 @@ fn batched_history_writes_versus_per_row_appends() {
         old / new
     );
 }
+
+/// Unwraps a shape error into `(tensor, expected, actual)`.
+fn shape_parts(error: Error) -> (String, String, String) {
+    match error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    }
+}
+
+/// Malformed decode steps fail with the offending tensor's name and commit nothing.
+#[test]
+fn malformed_decode_steps_are_rejected_without_commit() {
+    let device = Default::default();
+    let model = ModularCausalLm::<B>::init(spec(), &device).expect("tiny causal model");
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    let ints = |values: Vec<i64>, shape: [usize; 2]| {
+        Tensor::<B, 2, Int>::from_data(TensorData::new(values, shape), &device)
+    };
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: ints(vec![1, 2, 3, 0], [2, 2]),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let step = |token_ids, token_mask, position_ids| crate::DecodeInput {
+        token_ids,
+        token_mask,
+        position_ids,
+    };
+    let cases = [
+        (
+            step(ints(vec![1], [1, 1]), None, None),
+            (
+                "custom.decode.token_ids",
+                "[2, step>0]".to_owned(),
+                "[1, 1]".to_owned(),
+            ),
+        ),
+        (
+            step(ints(Vec::new(), [2, 0]), None, None),
+            (
+                "custom.decode.token_ids",
+                "[2, step>0]".to_owned(),
+                "[2, 0]".to_owned(),
+            ),
+        ),
+        (
+            step(
+                ints(vec![1, 2], [2, 1]),
+                Some(TokenMask::new(
+                    crate::architecture::bool_tensor_from_values(vec![true; 4], [2, 2], &device),
+                )),
+                None,
+            ),
+            (
+                "custom.decode.token_mask",
+                "[2, 1]".to_owned(),
+                "[2, 2]".to_owned(),
+            ),
+        ),
+        (
+            step(ints(vec![1, 2], [2, 1]), None, Some(ints(vec![2], [1, 1]))),
+            (
+                "custom.decode.position_ids",
+                "[2, 1]".to_owned(),
+                "[1, 1]".to_owned(),
+            ),
+        ),
+        (
+            step(ints(vec![1, 4], [2, 1]), None, None),
+            (
+                "custom.decode.token_ids",
+                "token values in 0..4".to_owned(),
+                "observed range 1..=4".to_owned(),
+            ),
+        ),
+    ];
+    for (input, (tensor, expected, actual)) in cases {
+        let error = model
+            .decode(input, &mut state, &ForwardOptions::default())
+            .unwrap_err();
+        assert_eq!(shape_parts(error), (tensor.to_owned(), expected, actual));
+        assert_eq!(state.lengths(), [2, 2], "a rejected step commits nothing");
+    }
+}
+
+/// An encoder-decoder decode step with a foreign batch fails before the decoder runs.
+#[test]
+fn malformed_seq2seq_steps_are_rejected_without_commit() {
+    let device = Default::default();
+    let model = ModularSeq2SeqLm::<B>::init(
+        Seq2SeqSpec {
+            encoder: spec(),
+            decoder: spec(),
+            cross_attention_heads: 1,
+            cross_attention_head_dim: 2,
+            cross_attention_options: AttentionOptions::default(),
+        },
+        &device,
+    )
+    .expect("tiny encoder-decoder model");
+    let source = CausalLmInput {
+        token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2], [3, 1]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let encoded = model.encode(source, &ForwardOptions::default()).unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoded,
+            CausalLmInput {
+                token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        shape_parts(error),
+        (
+            "custom.decode.token_ids".to_owned(),
+            "[2, step>0]".to_owned(),
+            "[1, 3]".to_owned()
+        )
+    );
+    assert_eq!(state.lengths(), [0, 0]);
+}

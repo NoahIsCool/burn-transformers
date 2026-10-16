@@ -1031,3 +1031,8 @@ fn validate_encoder_layout<B: Backend>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "seq2seq_tests.rs"]
+/// Hook propagation through both stacks, staged-state checks, and encoder-output contracts.
+mod tests;
