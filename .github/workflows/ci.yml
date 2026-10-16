@@ -95,6 +95,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --locked --all-targets ${{ matrix.features }} -- -D warnings
+      # --all-targets builds examples as plain binaries, so it never sees their
+      # #[cfg(test)] modules; the test profile lints those too.
+      - name: Clippy on example tests
+        run: cargo clippy --locked --examples --profile test ${{ matrix.features }} -- -D warnings
       - name: Minimal feature sets
         if: runner.os == 'Linux'
         run: |
