@@ -1205,6 +1205,12 @@ fn heads_from_groups<B: Backend>(grouped: Tensor<B, 3>, heads: usize) -> Tensor<
 ///
 /// Decode is one token, so the group-to-head expansion of `B` and `C` costs
 /// one `[b, h, n]` copy per token and keeps the reference contraction layout.
+/// The dominant non-GEMM cost is the `[b, h, p, n]` update itself: as a
+/// broadcast product of `[b, h, 1, n]` by `[b, h, p, 1]`, Burn Flex 0.21 first
+/// copies the stride-zero left operand with a scalar strided walk, about 18%
+/// of a Nemotron-H decode step. On inference Flex the update is therefore
+/// formed as a batched outer product with a single summand
+/// ([`input_update`]), which rounds identically and is 16–19x faster there.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn recurrent_scan<B: Backend>(
     x: Tensor<B, 4>,
@@ -1215,6 +1221,26 @@ pub(crate) fn recurrent_scan<B: Backend>(
     d: Tensor<B, 1>,
     state: Tensor<B, 4>,
     collect: bool,
+) -> Result<(Tensor<B, 4>, Tensor<B, 4>, Option<Tensor<B, 5>>)> {
+    let outer_product_as_matmul = operations::is_inference_flex::<B>(&x.device());
+    recurrent_scan_with(x, b, c, dt, a, d, state, collect, outer_product_as_matmul)
+}
+
+/// [`recurrent_scan`] with an explicit choice of [`input_update`] form.
+///
+/// Both forms round identically; tests and the timing benchmark call this to
+/// compare them on one backend.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn recurrent_scan_with<B: Backend>(
+    x: Tensor<B, 4>,
+    b: Tensor<B, 4>,
+    c: Tensor<B, 4>,
+    dt: Tensor<B, 3>,
+    a: Tensor<B, 1>,
+    d: Tensor<B, 1>,
+    state: Tensor<B, 4>,
+    collect: bool,
+    outer_product_as_matmul: bool,
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>, Option<Tensor<B, 5>>)> {
     let [batch, sequence, heads, head_dim] = x.dims();
     let state_size = b.dims()[3];
@@ -1233,8 +1259,7 @@ pub(crate) fn recurrent_scan<B: Backend>(
         let decay = (dt_t.clone().cast(DType::F32) * a.clone())
             .exp()
             .reshape([batch, heads, 1, 1]);
-        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.unsqueeze_dim::<4>(2);
-        let update = discretized_b * x_t.clone().unsqueeze_dim::<4>(3);
+        let update = input_update(dt_t, b_t, x_t.clone(), outer_product_as_matmul);
         let next_state = state * decay + update.cast(DType::F32);
 
         let state_for_output =
@@ -1269,6 +1294,45 @@ pub(crate) fn recurrent_scan<B: Backend>(
         state.cast(state_dtype),
         collect.then(|| Tensor::cat(snapshots, 1)),
     ))
+}
+
+/// Forms one token's input-dependent state update `(dt · B) ⊗ x`, shaped `[b, h, p, n]`.
+///
+/// `dt_t` is `[b, h]`, `b_t` the head-expanded `[b, h, n]`, and `x_t` is
+/// `[b, h, p]`, all in the activation dtype. The reference rounds twice:
+/// `dB = dt · B`, then `dB · x` (`modeling_mamba2.py`, `dB = dt * B` and
+/// `dBx = dB * x`). Both forms keep exactly those roundings:
+///
+/// - the broadcast form multiplies `[b, h, 1, n]` by `[b, h, p, 1]`;
+/// - the matmul form multiplies `x` as `[b·h, p, 1]` by `dB` as `[b·h, 1, n]`.
+///   A product over a single summand is one correctly rounded product per
+///   element (`x_i · dB_j`, and multiplication commutes exactly); half
+///   precision GEMMs on Flex form that product in F32, where an F16 or BF16
+///   product is exact, and round it once, like the elementwise kernels.
+///
+/// The matmul form avoids Burn Flex 0.21's scalar strided copy of the
+/// stride-zero broadcast operand, so [`recurrent_scan`] selects it on
+/// inference Flex (`outer_product_as_matmul`) and keeps the fused elementwise
+/// product on CubeCL and autodiff backends. `mamba2_tests.rs` checks that the
+/// two forms agree bit for bit in F32, F16, and BF16.
+fn input_update<B: Backend>(
+    dt_t: Tensor<B, 2>,
+    b_t: Tensor<B, 3>,
+    x_t: Tensor<B, 3>,
+    outer_product_as_matmul: bool,
+) -> Tensor<B, 4> {
+    let [batch, heads, head_dim] = x_t.dims();
+    let state_size = b_t.dims()[2];
+    if outer_product_as_matmul {
+        let discretized_b =
+            (dt_t.reshape([batch, heads, 1]) * b_t).reshape([batch * heads, 1, state_size]);
+        x_t.reshape([batch * heads, head_dim, 1])
+            .matmul(discretized_b)
+            .reshape([batch, heads, head_dim, state_size])
+    } else {
+        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.unsqueeze_dim::<4>(2);
+        discretized_b * x_t.unsqueeze_dim::<4>(3)
+    }
 }
 
 /// Score-plane element budget that bounds the number of chunks in one vectorized block.
