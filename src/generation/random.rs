@@ -26,15 +26,23 @@
 //!
 //! # Verified properties
 //!
-//! [`splitmix64`] and [`SplitMix64::next_u64`] are checked in place by Verus
-//! through `verus/generation.rs` (see `verus/README.md`). The proofs show that
-//! [`splitmix64`] computes exactly `mix(seed + gamma * (index + 1) mod 2^64)`,
-//! that this map is injective in `index` for every seed (so the `2^64` draws
-//! of a stream are pairwise distinct, and disjoint counter blocks never repeat
-//! a raw draw), and that advancing the counter adds `gamma` to the Weyl state,
-//! which is the classic sequential generator. [`SplitMix64::next_u64`] returns
-//! the draw at its position and advances the position by exactly one. The
-//! float conversions are not covered; the Rust tests check them.
+//! [`splitmix64`], the stream constructor, [`SplitMix64::position`], and
+//! [`SplitMix64::next_u64`] are checked in place by Verus through
+//! `verus/generation.rs` (see `verus/README.md`). The proofs show that:
+//!
+//! - [`splitmix64`] computes exactly `mix(seed + gamma * (index + 1) mod 2^64)`;
+//! - this map is injective in `index` for every seed, so the `2^64` draws of a
+//!   stream are pairwise distinct and disjoint counter blocks never repeat a
+//!   raw draw;
+//! - advancing the counter adds `gamma` to the Weyl state, which is the classic
+//!   sequential generator;
+//! - [`SplitMix64::new`] starts at position zero with the given seed,
+//!   [`SplitMix64::position`] reports that counter, and
+//!   [`SplitMix64::next_u64`] returns the draw at its position and advances the
+//!   position by exactly one. Composed, the `k`-th draw of
+//!   `SplitMix64::new(seed)` is `splitmix64(seed, k)`.
+//!
+//! The float conversions are not covered; the Rust tests check them.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -278,14 +286,42 @@ impl SplitMix64 {
 
 } // verus!
 
+/// Builds the stream selected by `seed`, positioned at its first draw.
+///
+/// [`SplitMix64::new`] delegates here because Verus cannot attach a contract
+/// to an associated function without a `self` receiver. The proof shows the
+/// stream's seed is `seed` and its position is zero, so together with the
+/// [`SplitMix64::next_u64`] contract the `k`-th draw of `SplitMix64::new(seed)`
+/// (counting from zero, `k < 2^64`) is exactly `splitmix64(seed, k)`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(stream =>
+    ensures
+        stream.stream_seed() == seed,
+        stream.stream_position() == 0,
+))]
+const fn stream_start(seed: u64) -> SplitMix64 {
+    SplitMix64 { seed, position: 0 }
+}
+
 impl SplitMix64 {
     /// Starts the stream selected by `seed` at its first draw.
+    ///
+    /// The verified [`stream_start`] builds the value: seed `seed`, position
+    /// zero.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
-        Self { seed, position: 0 }
+        stream_start(seed)
     }
 
     /// Returns the number of draws taken so far, modulo `2^64`.
+    ///
+    /// The proof shows the value is the stream's position, the counter that
+    /// [`Self::next_u64`] reads and advances.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(position =>
+        ensures
+            position == self.stream_position(),
+    ))]
     #[must_use]
     pub const fn position(&self) -> u64 {
         self.position
