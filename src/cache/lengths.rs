@@ -266,6 +266,115 @@ pub open spec fn bracketed(low: Seq<usize>, high: Seq<usize>, capacity: usize) -
     &&& within_capacity(high, capacity)
 }
 
+/// `violation` is the exact first reason advancing `lengths` by `counts` fails.
+///
+/// Either the vectors disagree in length, or the named row is the first whose
+/// sum overflows or exceeds `capacity`, reported with its exact operands.
+pub(crate) open spec fn advance_violation_exact(
+    lengths: Seq<usize>,
+    counts: Seq<usize>,
+    capacity: usize,
+    violation: LengthViolation,
+) -> bool {
+    match violation {
+        LengthViolation::CountMismatch { expected, actual } =>
+            counts.len() != lengths.len() && expected == lengths.len() && actual == counts.len(),
+        LengthViolation::Overflow { sequence, length, additional } => {
+            &&& counts.len() == lengths.len()
+            &&& sequence < lengths.len()
+            &&& length == lengths[sequence as int]
+            &&& additional == counts[sequence as int]
+            &&& length + additional > usize::MAX
+            &&& forall|i: int| 0 <= i < sequence ==> (#[trigger] lengths[i]) + counts[i] <= capacity
+        },
+        LengthViolation::CapacityExceeded { sequence, requested, capacity: limit } => {
+            &&& counts.len() == lengths.len()
+            &&& sequence < lengths.len()
+            &&& requested == lengths[sequence as int] + counts[sequence as int]
+            &&& requested > capacity
+            &&& limit == capacity
+            &&& forall|i: int| 0 <= i < sequence ==> (#[trigger] lengths[i]) + counts[i] <= capacity
+        },
+        _ => false,
+    }
+}
+
+/// `violation` is the exact first reason rewinding `current` to `requested` fails.
+///
+/// Either the vectors disagree in length, or the named row is the first that
+/// would grow, reported with both lengths.
+pub(crate) open spec fn rewind_violation_exact(
+    current: Seq<usize>,
+    requested: Seq<usize>,
+    violation: LengthViolation,
+) -> bool {
+    match violation {
+        LengthViolation::CountMismatch { expected, actual } =>
+            requested.len() != current.len() && expected == current.len()
+                && actual == requested.len(),
+        LengthViolation::Extension { sequence, current: from, requested: to } => {
+            &&& requested.len() == current.len()
+            &&& sequence < current.len()
+            &&& from == current[sequence as int]
+            &&& to == requested[sequence as int]
+            &&& to > from
+            &&& forall|i: int| 0 <= i < sequence ==> #[trigger] requested[i] <= current[i]
+        },
+        _ => false,
+    }
+}
+
+/// `violation` is the exact first reason committing `accepted` prefixes fails.
+///
+/// Either the vectors disagree in length, or the named row is the first that
+/// accepts more than its proposal `working - baseline`.
+pub(crate) open spec fn prefix_violation_exact(
+    baseline: Seq<usize>,
+    working: Seq<usize>,
+    accepted: Seq<usize>,
+    violation: LengthViolation,
+) -> bool {
+    match violation {
+        LengthViolation::CountMismatch { expected, actual } =>
+            accepted.len() != baseline.len() && expected == baseline.len()
+                && actual == accepted.len(),
+        LengthViolation::PrefixExceedsProposal { sequence, accepted: taken, proposed } => {
+            &&& accepted.len() == baseline.len()
+            &&& sequence < baseline.len()
+            &&& taken == accepted[sequence as int]
+            &&& proposed == working[sequence as int] - baseline[sequence as int]
+            &&& taken > proposed
+            &&& forall|i: int| 0 <= i < sequence ==>
+                #[trigger] accepted[i] <= working[i] - baseline[i]
+        },
+        _ => false,
+    }
+}
+
+/// `violation` is the exact first reason gathering `lengths` by `indices` fails.
+///
+/// Either the vectors disagree in length, or the named output row is the
+/// first whose source lies outside the batch.
+pub(crate) open spec fn reorder_violation_exact(
+    lengths: Seq<usize>,
+    indices: Seq<usize>,
+    violation: LengthViolation,
+) -> bool {
+    match violation {
+        LengthViolation::CountMismatch { expected, actual } =>
+            indices.len() != lengths.len() && expected == lengths.len() && actual == indices.len(),
+        LengthViolation::SourceOutOfBounds { sequence, source, sequence_count } => {
+            &&& indices.len() == lengths.len()
+            &&& sequence < indices.len()
+            &&& source == indices[sequence as int]
+            &&& source >= lengths.len()
+            &&& sequence_count == lengths.len()
+            &&& forall|i: int| 0 <= i < sequence ==> #[trigger] indices[i] < lengths.len()
+        },
+        _ => false,
+    }
+}
+
 } // verus!
 
 /// Copies a length vector element by element.
@@ -335,30 +444,8 @@ fn zero_lengths(count: usize) -> Vec<usize> {
                 #[trigger] next[i] == lengths[i] + counts[i]
             &&& within_capacity(next@, capacity)
         },
-        result matches Err(violation) ==> match violation {
-            LengthViolation::CountMismatch { expected, actual } =>
-                counts.len() != lengths.len() && expected == lengths.len()
-                    && actual == counts.len(),
-            LengthViolation::Overflow { sequence, length, additional } => {
-                &&& counts.len() == lengths.len()
-                &&& sequence < lengths.len()
-                &&& length == lengths[sequence as int]
-                &&& additional == counts[sequence as int]
-                &&& length + additional > usize::MAX
-                &&& forall|i: int| 0 <= i < sequence ==>
-                    (#[trigger] lengths[i]) + counts[i] <= capacity
-            },
-            LengthViolation::CapacityExceeded { sequence, requested, capacity: limit } => {
-                &&& counts.len() == lengths.len()
-                &&& sequence < lengths.len()
-                &&& requested == lengths[sequence as int] + counts[sequence as int]
-                &&& requested > capacity
-                &&& limit == capacity
-                &&& forall|i: int| 0 <= i < sequence ==>
-                    (#[trigger] lengths[i]) + counts[i] <= capacity
-            },
-            _ => false,
-        },
+        result matches Err(violation) ==>
+            advance_violation_exact(lengths@, counts@, capacity, violation),
 ))]
 pub(crate) fn advanced_lengths(
     lengths: &[usize],
@@ -420,20 +507,8 @@ pub(crate) fn advanced_lengths(
         result.is_ok() == (requested.len() == current.len()
             && forall|i: int| 0 <= i < current.len() ==>
                 #[trigger] requested[i] <= current[i]),
-        result matches Err(violation) ==> match violation {
-            LengthViolation::CountMismatch { expected, actual } =>
-                requested.len() != current.len() && expected == current.len()
-                    && actual == requested.len(),
-            LengthViolation::Extension { sequence, current: from, requested: to } => {
-                &&& requested.len() == current.len()
-                &&& sequence < current.len()
-                &&& from == current[sequence as int]
-                &&& to == requested[sequence as int]
-                &&& to > from
-                &&& forall|i: int| 0 <= i < sequence ==> #[trigger] requested[i] <= current[i]
-            },
-            _ => false,
-        },
+        result matches Err(violation) ==>
+            rewind_violation_exact(current@, requested@, violation),
 ))]
 pub(crate) fn validate_rewind(
     current: &[usize],
@@ -522,21 +597,8 @@ pub(crate) fn proposal_lengths(baseline: &[usize], working: &[usize]) -> Vec<usi
                 &&& baseline[i] <= committed[i] <= working[i]
             }
         },
-        result matches Err(violation) ==> match violation {
-            LengthViolation::CountMismatch { expected, actual } =>
-                accepted.len() != baseline.len() && expected == baseline.len()
-                    && actual == accepted.len(),
-            LengthViolation::PrefixExceedsProposal { sequence, accepted: taken, proposed } => {
-                &&& accepted.len() == baseline.len()
-                &&& sequence < baseline.len()
-                &&& taken == accepted[sequence as int]
-                &&& proposed == working[sequence as int] - baseline[sequence as int]
-                &&& taken > proposed
-                &&& forall|i: int| 0 <= i < sequence ==>
-                    #[trigger] accepted[i] <= working[i] - baseline[i]
-            },
-            _ => false,
-        },
+        result matches Err(violation) ==>
+            prefix_violation_exact(baseline@, working@, accepted@, violation),
 ))]
 pub(crate) fn committed_prefix_lengths(
     baseline: &[usize],
@@ -595,20 +657,8 @@ pub(crate) fn committed_prefix_lengths(
             &&& forall|i: int| 0 <= i < indices.len() ==>
                 #[trigger] reordered[i] == lengths[indices[i] as int]
         },
-        result matches Err(violation) ==> match violation {
-            LengthViolation::CountMismatch { expected, actual } =>
-                indices.len() != lengths.len() && expected == lengths.len()
-                    && actual == indices.len(),
-            LengthViolation::SourceOutOfBounds { sequence, source, sequence_count } => {
-                &&& indices.len() == lengths.len()
-                &&& sequence < indices.len()
-                &&& source == indices[sequence as int]
-                &&& source >= lengths.len()
-                &&& sequence_count == lengths.len()
-                &&& forall|i: int| 0 <= i < sequence ==> #[trigger] indices[i] < lengths.len()
-            },
-            _ => false,
-        },
+        result matches Err(violation) ==>
+            reorder_violation_exact(lengths@, indices@, violation),
 ))]
 pub(crate) fn reordered_lengths(
     lengths: &[usize],
@@ -792,6 +842,9 @@ impl LengthLedger {
 
     /// Advances the active cursor: the working cursor during a transaction,
     /// otherwise the committed lengths.
+    ///
+    /// Verified: the cursor advances exactly when every row fits, and a
+    /// rejection carries the same first-row diagnostic as `advanced_lengths`.
     #[cfg_attr(verus_keep_ghost, verus_verify)]
     #[cfg_attr(verus_keep_ghost, verus_spec(result =>
         requires
@@ -809,6 +862,8 @@ impl LengthLedger {
                     #[trigger] next.cursor_view()[i] == self.cursor_view()[i] + counts[i]
                 &&& self.active() ==> next.committed_view() == self.committed_view()
             },
+            result matches Err(violation) ==> advance_violation_exact(self.cursor_view(), counts@,
+                self.capacity_view(), violation),
     ))]
     pub(crate) fn advanced(&self, counts: &[usize]) -> Result<Self, LengthViolation> {
         match &self.working {
@@ -860,6 +915,10 @@ impl LengthLedger {
     }
 
     /// Commits an accepted prefix per row and ends the transaction.
+    ///
+    /// Verified: outside a transaction the error is `TransactionInactive`;
+    /// inside one a rejection names the first row accepting more than it
+    /// proposed, exactly as `committed_prefix_lengths` does.
     #[cfg_attr(verus_keep_ghost, verus_verify)]
     #[cfg_attr(verus_keep_ghost, verus_spec(result =>
         requires
@@ -871,6 +930,8 @@ impl LengthLedger {
                     #[trigger] accepted[i] <= self.cursor_view()[i] - self.committed_view()[i]),
             !self.active() ==> result == Err::<Self, LengthViolation>(
                 LengthViolation::TransactionInactive),
+            result matches Err(violation) ==> (self.active() ==> prefix_violation_exact(
+                self.committed_view(), self.cursor_view(), accepted@, violation)),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -924,6 +985,10 @@ impl LengthLedger {
     }
 
     /// Shortens committed rows outside a transaction.
+    ///
+    /// Verified: during a transaction the error is `TransactionActive`;
+    /// otherwise a rejection names the first row that would grow, exactly as
+    /// `validate_rewind` does.
     #[cfg_attr(verus_keep_ghost, verus_verify)]
     #[cfg_attr(verus_keep_ghost, verus_spec(result =>
         requires
@@ -935,6 +1000,8 @@ impl LengthLedger {
                     #[trigger] requested[i] <= self.committed_view()[i]),
             self.active() ==> result == Err::<Self, LengthViolation>(
                 LengthViolation::TransactionActive),
+            result matches Err(violation) ==> (!self.active() ==> rewind_violation_exact(
+                self.committed_view(), requested@, violation)),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
@@ -955,6 +1022,10 @@ impl LengthLedger {
     }
 
     /// Gathers committed rows by source index outside a transaction.
+    ///
+    /// Verified: during a transaction the error is `TransactionActive`;
+    /// otherwise a rejection names the first out-of-batch source, exactly as
+    /// `reordered_lengths` does.
     #[cfg_attr(verus_keep_ghost, verus_verify)]
     #[cfg_attr(verus_keep_ghost, verus_spec(result =>
         requires
@@ -966,6 +1037,8 @@ impl LengthLedger {
                     #[trigger] indices[i] < self.committed_view().len()),
             self.active() ==> result == Err::<Self, LengthViolation>(
                 LengthViolation::TransactionActive),
+            result matches Err(violation) ==> (!self.active() ==> reorder_violation_exact(
+                self.committed_view(), indices@, violation)),
             result matches Ok(next) ==> {
                 &&& next.well_formed()
                 &&& !next.active()
