@@ -36,6 +36,7 @@ use transformers::{
     AutoLoadOptions, AutoSeq2SeqLm, CausalLmInput, DecodeInput, DecodeState, EncodeOptions,
     FinishReason, ForwardOptions, LocalTokenizer, LogitsSelection, Padding, Seq2SeqInput,
     cache::CacheConfig,
+    generation::EarlyStopping,
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
@@ -1003,7 +1004,9 @@ fn run_reference_gate<B: Backend>(device: &B::Device, backend: &str) {
                 num_beams: 4,
                 num_return_sequences: 1,
                 length_penalty: 1.0,
-                early_stopping: false,
+                // The reference called Transformers' generate with
+                // early_stopping=False, which is its heuristic stop.
+                early_stopping: EarlyStopping::Heuristic,
             },
         ),
         #[allow(unreachable_patterns)]

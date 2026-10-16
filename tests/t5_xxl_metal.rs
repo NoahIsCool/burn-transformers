@@ -58,6 +58,7 @@ use transformers::{
         CheckpointEquivalenceRecord, DTypePolicy, ExecutionStats, LoadOptions, LoadReport,
         ResolvedIndexTensorAlias,
     },
+    generation::EarlyStopping,
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
@@ -1460,7 +1461,7 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
             length_penalty: 1.0,
             // Both implementations use the conventional eager rule: finish
             // once the beam-width EOS pool is complete for the source row.
-            early_stopping: true,
+            early_stopping: EarlyStopping::Eager,
         },
     )
     .expect("run exact four-beam FLAN generation");
