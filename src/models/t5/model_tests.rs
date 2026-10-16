@@ -1080,6 +1080,12 @@ fn removing_the_shared_bias_owner_is_reported() {
 }
 
 /// One-head attention receives exclusion planes of exactly the score shape.
+///
+/// With one head the `[batch, 1, query, key]` source and logical-target
+/// exclusion planes already equal the score shape. The padded pair (a padded
+/// source row and an interior-padded target row) must therefore reproduce,
+/// at every valid target column, the logits of each row run alone without
+/// padding; padded target columns are exact zeros.
 #[test]
 fn single_head_exclusion_planes_need_no_broadcast() {
     let device = Default::default();
@@ -1092,16 +1098,54 @@ fn single_head_exclusion_planes_need_no_broadcast() {
         &device,
     )
     .unwrap();
-    let output = model
-        .forward(
-            padded_pair(),
-            &ForwardOptions {
-                logits: LogitsSelection::All,
-                ..ForwardOptions::default()
-            },
-        )
-        .unwrap();
-    assert_eq!(output.decoder.logits.dims(), [2, 3, 16]);
-    let values = output.decoder.logits.into_data().to_vec::<f32>().unwrap();
-    assert!(values.iter().all(|value| value.is_finite()));
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let batched = model
+        .forward(padded_pair(), &options)
+        .unwrap()
+        .decoder
+        .logits;
+    assert_eq!(batched.dims(), [2, 3, 16]);
+    // Each row's unpadded source and target, and its valid target columns.
+    let rows: [(&[i64], &[i64], &[usize]); 2] = [
+        (&[1, 2, 3], &[0, 6, 7], &[0, 1, 2]),
+        (&[4, 5], &[0, 9], &[0, 2]),
+    ];
+    for (row, (source, target, valid)) in rows.into_iter().enumerate() {
+        let alone = model
+            .forward(
+                Seq2SeqInput {
+                    encoder: masked_input(&[source], None),
+                    decoder: masked_input(&[target], None),
+                },
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits;
+        for (slot, &column) in valid.iter().enumerate() {
+            batched
+                .clone()
+                .slice([row..row + 1, column..column + 1, 0..16])
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &alone
+                        .clone()
+                        .slice([0..1, slot..slot + 1, 0..16])
+                        .into_data(),
+                    Tolerance::absolute(1e-5),
+                );
+        }
+        for column in (0..3).filter(|column| !valid.contains(column)) {
+            let padded = batched
+                .clone()
+                .slice([row..row + 1, column..column + 1, 0..16])
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            assert!(padded.iter().all(|&value| value == 0.0), "{padded:?}");
+        }
+    }
 }

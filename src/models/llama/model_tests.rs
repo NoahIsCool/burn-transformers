@@ -597,7 +597,13 @@ fn hooked_passes_reject_diagnostics_and_empty_grids() {
     let error = model
         .forward_with_hooks(empty, &ForwardOptions::default(), &mut hooks)
         .unwrap_err();
-    assert!(matches!(&error, Error::Shape { .. }), "{error:?}");
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "llama.input_ids"
+                && expected == "non-empty [batch, sequence]"
+                && actual == "[1, 0]"),
+        "{error:?}"
+    );
     assert!(
         hooks.get(&embedding).is_err(),
         "no successful run left a capture"
@@ -634,5 +640,11 @@ fn staged_states_reject_dtypes_sources_and_misshapen_policies() {
         AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 2, 2], &Default::default())),
     );
     let error = StagedModel::run_layers(&model, biased, 0..3).unwrap_err();
-    assert!(matches!(&error, Error::Shape { .. }), "{error:?}");
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "attention.bias"
+                && expected == "broadcastable to [1, 4, 3, 3]"
+                && actual == "[1, 1, 2, 2]"),
+        "{error:?}"
+    );
 }

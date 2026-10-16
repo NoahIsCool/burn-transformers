@@ -282,15 +282,54 @@ fn staged_states_reject_foreign_widths_overrides_and_source_positions() {
 }
 
 /// Staged embedding of either stack validates token IDs against that stack's vocabulary.
+///
+/// The decoder vocabulary is shrunk to 16 while the encoder keeps 32, so ID
+/// 20 is valid only for the source stack: the encoder embeds it, the decoder
+/// rejects it with its own `0..16` limit, and an ID past both vocabularies is
+/// reported against the encoder's `0..32` limit.
 #[test]
 fn staged_embedding_validates_token_ids() {
     let device = Default::default();
-    let model = model(&device);
-    let mut bad = source(&device);
-    bad.token_ids = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 40], [4, 5, 0]], &device);
-    let error = model.embed_encoder(bad).unwrap_err();
-    assert!(
-        matches!(&error, Error::Shape { tensor, .. } if tensor == "custom.seq2seq.embed.token_ids"),
-        "{error:?}"
+    let mut spec = seq2seq_spec();
+    spec.decoder.vocabulary_size = 16;
+    let model = ModularSeq2SeqLm::<TestBackend>::init(spec, &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    let token_error = |error: &Error, limit: &str, observed: &str| {
+        matches!(error, Error::Shape { tensor, expected, actual }
+            if tensor == "custom.seq2seq.embed.token_ids"
+                && *expected == format!("token values in 0..{limit}")
+                && *actual == format!("observed range {observed}"))
+    };
+
+    let mut beyond_both = source(&device);
+    beyond_both.token_ids =
+        Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 40], [4, 5, 0]], &device);
+    let error = model.embed_encoder(beyond_both).unwrap_err();
+    assert!(token_error(&error, "32", "0..=40"), "{error:?}");
+
+    let mut shared = source(&device);
+    shared.token_ids = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 20], [4, 5, 0]], &device);
+    assert_eq!(
+        model.embed_encoder(shared).unwrap().hidden.dims(),
+        [2, 3, 8]
+    );
+
+    let context = model
+        .encoder_stages()
+        .run_stack(source(&device))
+        .unwrap()
+        .into_encoder_context()
+        .unwrap();
+    let mut beyond_decoder = target(&device);
+    beyond_decoder.token_ids = Tensor::<TestBackend, 2, Int>::from_ints([[6, 20], [8, 9]], &device);
+    let error = model
+        .embed_decoder(beyond_decoder, context.clone())
+        .unwrap_err();
+    assert!(token_error(&error, "16", "6..=20"), "{error:?}");
+    let staged = model.decoder_stages(context);
+    assert_eq!(
+        staged.embed(target(&device)).unwrap().hidden.dims(),
+        [2, 2, 8]
     );
 }

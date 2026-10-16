@@ -690,7 +690,13 @@ fn hooked_and_staged_inputs_are_validated() {
         &mut Hooks::new(),
     )
     .unwrap_err();
-    assert!(matches!(&error, crate::Error::Shape { .. }), "{error:?}");
+    assert!(
+        matches!(&error, crate::Error::Shape { tensor, expected, actual }
+            if tensor == "gpt_oss.input_ids"
+                && expected == "non-empty [batch, sequence]"
+                && actual == "[1, 0]"),
+        "{error:?}"
+    );
     let error = model
         .forward(
             input(ints([[1, 2, 3]]), None, None),
@@ -709,5 +715,11 @@ fn hooked_and_staged_inputs_are_validated() {
         AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 2, 2], &Default::default())),
     );
     let error = StagedModel::run_layers(&model, state, 0..1).unwrap_err();
-    assert!(matches!(&error, crate::Error::Shape { .. }), "{error:?}");
+    assert!(
+        matches!(&error, crate::Error::Shape { tensor, expected, actual }
+            if tensor == "attention.bias"
+                && expected == "broadcastable to [1, 4, 3, 3]"
+                && actual == "[1, 1, 2, 2]"),
+        "{error:?}"
+    );
 }
