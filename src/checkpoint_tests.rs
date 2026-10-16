@@ -751,6 +751,24 @@ fn pinned_policy_rejections_fail_discovery_and_planning_revalidation() {
         ),
         Err(CheckpointError::MisalignedTensorStorage { .. })
     ));
+
+    // A tampered shape whose element count overflows is an arithmetic error,
+    // never a wrapped count that could match a small recorded byte length.
+    let huge = vec![u64::MAX, 2];
+    let mut huge_policy = policy.clone();
+    huge_policy.excluded_tensors = vec![PinnedAccountingTensor::new(
+        excluded,
+        TensorDType::BF16,
+        huge.clone(),
+    )];
+    let mut huge_manifest = manifest.clone();
+    huge_manifest.tensors.get_mut(excluded).unwrap().shape = huge;
+    assert!(matches!(
+        super::artifact::validate_manifest_index_total_size_policy(&huge_manifest, &huge_policy),
+        Err(CheckpointError::ArithmeticOverflow {
+            context: "computing pinned accounting tensor elements"
+        })
+    ));
 }
 
 #[test]
