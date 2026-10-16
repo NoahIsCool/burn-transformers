@@ -50,7 +50,9 @@ fn final_scale(hidden: Tensor<B, 3>) -> Tensor<B, 3> {
 }
 
 impl HookedModel<B> for TinyStack<B> {
+    /// Token IDs `[batch, sequence]`; the stand-in ignores the mask and embeds every position.
     type Input = CausalLmInput<B>;
+    /// Final-normalized hidden states, `[batch, sequence, hidden]`.
     type Output = Tensor<B, 3>;
 
     /// Embedding, every block's residual and branch points, then the final norm.

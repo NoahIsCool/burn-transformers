@@ -105,7 +105,8 @@ pub(crate) const MAX_CHAIN: usize = 1024;
 pub(crate) struct GuardError {
     /// Byte offset of the tag in the source the guard received.
     pub(crate) offset: usize,
-    /// The tag text, shortened to at most 80 bytes for messages.
+    /// The tag text for messages; a tag over 80 bytes is cut to an 80-byte
+    /// prefix on a character boundary followed by `...` (see `shorten`).
     pub(crate) tag: String,
     /// Why the tag was refused.
     pub(crate) reason: String,
@@ -145,8 +146,10 @@ fn newline_count(text: &str) -> usize {
     text.bytes().filter(|&byte| byte == b'\n').count()
 }
 
-/// Shortens a tag to at most 80 bytes on a character boundary for an error message.
+/// Shortens a tag for an error message: tags over 80 bytes keep their longest
+/// prefix of at most 80 bytes that ends on a character boundary, followed by `...`.
 fn shorten(tag: &str) -> String {
+    /// Largest retained byte length; longer tags keep a prefix and gain a `...` suffix.
     const LIMIT: usize = 80;
     if tag.len() <= LIMIT {
         return tag.to_owned();
@@ -372,9 +375,15 @@ struct Parser<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Refusal {
     /// Syntax this parser does not read; refused only if the tag has a guarded operator.
-    Syntax(String),
+    Syntax(
+        /// Human-readable description of the unsupported construct.
+        String,
+    ),
     /// Nesting or a chain past the limits; always refused, to protect MiniJinja's stack.
-    Limit(String),
+    Limit(
+        /// Human-readable description naming the exceeded limit.
+        String,
+    ),
 }
 
 impl From<String> for Refusal {
@@ -640,13 +649,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Skips an assignment target: names (dotted for `set`), commas, and parenthesized groups.
+    ///
+    /// Elements are separated by commas; a trailing comma before `)`, `in`, or
+    /// the end of the tag is accepted, as in a one-element tuple `(a,)`.
     fn assignment_target(&mut self, dotted: bool) -> Parse<()> {
-        let mut first = true;
         loop {
-            if !first && !self.eat_symbol(",") {
-                return Ok(());
-            }
-            first = false;
             if self.at_symbol(")") || self.at_end() || self.at_name("in") {
                 return Ok(());
             }
@@ -659,7 +666,7 @@ impl<'a> Parser<'a> {
                     self.expect_name()?;
                 }
             }
-            if !self.at_symbol(",") {
+            if !self.eat_symbol(",") {
                 return Ok(());
             }
         }

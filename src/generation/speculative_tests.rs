@@ -191,6 +191,36 @@ fn invalid_distributions_are_rejected() {
     assert!(argmax(&[]).is_err());
 }
 
+/// Non-finite weights, an overflowing total, and a zero total are each rejected by name.
+#[test]
+fn inverse_cdf_rejects_non_finite_weights_and_overflowing_totals() {
+    let message = |weights: &[f64]| match sample_weights(weights, 0.5) {
+        Err(crate::Error::Generation(reason)) => reason,
+        other => panic!("expected a generation error for {weights:?}, got {other:?}"),
+    };
+    for weights in [[1.0, f64::INFINITY], [f64::NAN, 1.0], [-0.5, 1.0]] {
+        assert_eq!(
+            message(&weights),
+            "sampling weights must be finite and non-negative"
+        );
+    }
+    // Each weight is finite, but their sum is not.
+    assert_eq!(
+        message(&[f64::MAX, f64::MAX]),
+        "sampling weights sum overflows f64"
+    );
+    // Zero mass, including negative zero, has nothing to sample.
+    for weights in [[0.0, 0.0], [-0.0, 0.0]] {
+        assert_eq!(
+            message(&weights),
+            "sampling weights have no positive probability mass"
+        );
+    }
+    // The largest finite weight alone still samples, and never a zero-weight token.
+    assert_eq!(sample_weights(&[f64::MAX, 0.0], 0.5).unwrap(), 0);
+    assert_eq!(sample_weights(&[0.0, f64::MAX], 0.0).unwrap(), 1);
+}
+
 /// Argmax resolves ties to the first index, like backend argmax.
 #[test]
 fn argmax_prefers_the_first_maximum() {

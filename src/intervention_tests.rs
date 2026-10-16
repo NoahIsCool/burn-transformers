@@ -758,3 +758,39 @@ fn sink_probability_matches_the_sink_softmax_share() {
         );
     }
 }
+
+/// Batch-row and arbitrary-axis helpers on points and selections slice declared semantic axes.
+///
+/// The `[batch, token, channel] = [2, 3, 2]` activation holds `0..12` in row-major
+/// order, so each capture's values identify exactly which elements it selected.
+#[test]
+fn batch_and_axis_helpers_select_by_semantic_axis() {
+    let point = Point::custom("rows.tokens", [Axis::Batch, Axis::Token, Axis::Channel]);
+    let mut hooks = Hooks::<B>::default();
+    let second_row = hooks.capture(point.batch(1));
+    let first_token = hooks.capture(point.slice(Axis::Token, 0..1));
+    let selection = super::Selection::from(&point).batch(0).channels(1..2);
+    let borrowed = hooks.capture(&selection);
+    let input = Tensor::<B, 3>::from_data(
+        burn::tensor::TensorData::new((0..12).map(|value| value as f32).collect(), [2, 3, 2]),
+        &Default::default(),
+    );
+    let output = hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply(point.clone(), input)
+        })
+        .unwrap();
+    assert_eq!(
+        values(output),
+        (0..12).map(|value| value as f32).collect::<Vec<_>>()
+    );
+    let second_row = hooks.get(&second_row).unwrap();
+    assert_eq!(second_row.dims(), [1, 3, 2]);
+    assert_eq!(values(second_row), [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
+    let first_token = hooks.get(&first_token).unwrap();
+    assert_eq!(first_token.dims(), [2, 1, 2]);
+    assert_eq!(values(first_token), [0.0, 1.0, 6.0, 7.0]);
+    let borrowed = hooks.get(&borrowed).unwrap();
+    assert_eq!(borrowed.dims(), [1, 3, 1]);
+    assert_eq!(values(borrowed), [1.0, 3.0, 5.0]);
+}

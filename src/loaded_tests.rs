@@ -1132,3 +1132,23 @@ fn named_parts_expose_every_component_by_name() {
     assert!(parts.execution_stats.is_none());
     assert_eq!(parts.unsupported_generation_settings, settings);
 }
+
+/// Execution accounting rejects an incomplete equivalence plan on its own.
+///
+/// `LoadedModel` construction checks the same equality first, so this calls
+/// the accounting validator directly: it must stay sound for any caller.
+#[test]
+fn execution_accounting_rejects_unverified_planned_equivalences() {
+    let report = LoadReport {
+        equivalence_planned: vec![CheckpointEquivalenceRecord::new("copy", "owner")],
+        ..LoadReport::default()
+    };
+    let error = super::validate_execution_stats(&report, &ExecutionStats::default()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        crate::Error::Checkpoint(
+            "checkpoint execution verified 0 of 1 planned tensor equivalences".into()
+        )
+        .to_string()
+    );
+}

@@ -61,6 +61,33 @@ fn loss_contract_rejects_invalid_axes_labels_shapes_and_dtypes() {
     assert!(kl_divergence(input.clone(), input.cast(burn::tensor::FloatDType::F64)).is_err());
 }
 
+/// Logits with an empty axis are rejected before any reduction, naming the loss argument.
+#[test]
+fn empty_logit_axes_are_rejected_by_every_loss() {
+    let device = Default::default();
+    let empty = Tensor::<Cpu, 2>::zeros([2, 0], &device);
+    let full = Tensor::<Cpu, 2>::zeros([2, 3], &device);
+    let message = |error: Error| error.to_string();
+    assert_eq!(
+        message(log_softmax(empty.clone(), 1).unwrap_err()),
+        "invalid configuration at training.logits: all dimensions must be nonempty"
+    );
+    assert_eq!(
+        message(
+            cross_entropy(
+                Tensor::zeros([0, 3], &device),
+                Tensor::<Cpu, 1, Int>::zeros([0], &device),
+            )
+            .unwrap_err()
+        ),
+        "invalid configuration at training.logits: all dimensions must be nonempty"
+    );
+    assert_eq!(
+        message(kl_divergence(full, empty).unwrap_err()),
+        "invalid configuration at training.teacher_logits: all dimensions must be nonempty"
+    );
+}
+
 /// KL matches a teacher-to-student scalar reference averaged over examples and vanishes for identical logits.
 #[test]
 fn kl_uses_teacher_to_student_direction_and_example_mean() {
@@ -729,6 +756,37 @@ mod autodiff {
                 [input_width, output_width]
             );
         }
+    }
+
+    /// A bare parameter is a module with one owner at the root path and passes preflight.
+    #[test]
+    fn a_root_parameter_has_a_single_owner() {
+        let parameter = Param::from_tensor(Tensor::<Ad, 1>::ones([3], &Default::default()));
+        validate_trainable_module(&parameter).unwrap();
+    }
+
+    /// Unique neighbours of a duplicated identity stay out of the trainability inspection.
+    ///
+    /// The two projections share only their weight; their biases are distinct
+    /// owners. The error therefore names exactly the shared weight paths.
+    #[test]
+    fn preflight_reports_only_the_duplicated_identity_beside_unique_parameters() {
+        let device = Default::default();
+        let first = LinearConfig::new(2, 2).init::<Ad>(&device);
+        let mut second = LinearConfig::new(2, 2).init::<Ad>(&device);
+        second.weight = first.weight.clone();
+        assert_ne!(
+            first.bias.as_ref().unwrap().id,
+            second.bias.as_ref().unwrap().id
+        );
+        let message = validate_trainable_module(&DuplicateOwners { first, second })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("duplicate parameter identifier at first.weight, second.weight includes a trainable owner"),
+            "{message}"
+        );
+        assert!(!message.contains("bias"), "{message}");
     }
 }
 

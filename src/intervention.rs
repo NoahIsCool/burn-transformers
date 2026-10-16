@@ -110,6 +110,7 @@ impl PointInfo {
 }
 
 impl<const D: usize> TryFrom<PointInfo> for Point<D> {
+    /// A configuration error naming the point when its catalog rank differs from `D`.
     type Error = Error;
 
     /// Recovers a typed point from a discovered catalog entry of rank `D`.

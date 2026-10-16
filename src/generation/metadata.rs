@@ -14,9 +14,7 @@
 //! `bookkeeping` and `layout`; this module adds tensor readback and error
 //! context.
 
-use burn::tensor::{
-    Bool, DType, Element, ElementConversion, Int, Tensor, TensorData, backend::Backend,
-};
+use burn::tensor::{Bool, DType, Element, Int, Tensor, TensorData, backend::Backend};
 use burn::tensor::{bf16, f16};
 
 use crate::{
@@ -50,26 +48,21 @@ pub(super) fn rectangle_size(batch: usize, sequence: usize, label: &str) -> Resu
         .ok_or_else(|| Error::Generation(format!("{label} element count overflows usize")))
 }
 
-/// Copies a small integer tensor to the host as `i64` values.
+/// Copies a small integer tensor to the host as `i64` values, whatever its integer dtype.
+///
+/// The storage need not be the backend's default `IntElem`: an explicit
+/// `cast` or a device whose default integer dtype was changed keeps, say, I64
+/// on an I32-default backend. Every Burn integer dtype widens to `i64`
+/// exactly except `u64` values above `i64::MAX`, which no token ID or
+/// position can reach.
 pub(super) fn tensor_i64_values<B: Backend, const D: usize>(
     tensor: Tensor<B, D, Int>,
     label: &str,
 ) -> Result<Vec<i64>> {
-    tensor
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })?
-        .to_vec::<B::IntElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<i64>())
-                .collect()
-        })
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })
+    let data = tensor.try_into_data().map_err(|error| {
+        Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+    })?;
+    Ok(data.iter::<i64>().collect())
 }
 
 /// Copies a small float tensor to the host as `f64`, whatever its runtime dtype.

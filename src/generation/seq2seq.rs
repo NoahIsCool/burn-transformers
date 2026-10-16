@@ -176,9 +176,15 @@ impl<'de> Deserialize<'de> for EarlyStopping {
         #[serde(untagged)]
         enum Representation {
             /// `true` or `false`.
-            Flag(bool),
+            Flag(
+                /// `true` selects [`EarlyStopping::Eager`], `false` the heuristic rule.
+                bool,
+            ),
             /// The only accepted string, `"never"`.
-            Text(String),
+            Text(
+                /// Raw string value; anything other than `"never"` is rejected.
+                String,
+            ),
         }
         match Representation::deserialize(deserializer)? {
             Representation::Flag(eager) => Ok(eager.into()),
@@ -834,7 +840,10 @@ fn empty_completed(batch: usize) -> Result<Vec<Vec<BeamHypothesis>>> {
 /// `candidate_order` ranks better candidates first (`Less`), so a max-heap of
 /// this wrapper exposes the candidate that the next better one should evict.
 #[derive(Clone, Copy, Debug)]
-struct WorstFirst(Candidate);
+struct WorstFirst(
+    /// Wrapped expansion ranked by cumulative log probability, then parent slot, then token ID.
+    Candidate,
+);
 
 impl PartialEq for WorstFirst {
     /// Candidates are equal only when the total order ties, i.e. never for distinct pairs.
@@ -1206,6 +1215,16 @@ fn validate_encoder_batch<B: Backend>(encoder: &EncoderOutput<B>, batch: usize) 
 /// cannot reach the host ranking. F16/BF16 logits are promoted to F32 before
 /// the log-sum-exp, as Hugging Face does, so near-tied beams are not ranked
 /// by half-precision rounding; F64 stays F64.
+///
+/// A row whose every logit is `-inf` (every token excluded) has no
+/// distribution: `log_softmax` would compute `-inf - (-inf) = NaN` for it.
+/// Such rows stay `-inf` instead, so candidate selection skips them like
+/// masked tokens: a fully excluded parent beam contributes no candidates while
+/// its siblings expand, as `-inf` scores rank last in Hugging Face, and a
+/// source whose every live parent is fully excluded reports that it has no
+/// finite candidate rather than a spurious numerical failure. A row containing
+/// any NaN logit is not fully excluded and still yields NaN, which candidate
+/// selection rejects as non-finite. Every other row is unchanged.
 fn host_log_probabilities<B: Backend>(
     logits: Tensor<B, 2>,
     active: &[bool],
@@ -1221,8 +1240,13 @@ fn host_log_probabilities<B: Backend>(
     let active_mask =
         bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
     let dtype = probability_accumulation_dtype(logits.dtype());
-    let log_probabilities =
-        log_softmax(logits.cast(dtype).mask_fill(active_mask.bool_not(), 0.0), 1);
+    let logits = logits.cast(dtype).mask_fill(active_mask.bool_not(), 0.0);
+    let fully_excluded = logits
+        .clone()
+        .equal_elem(f64::NEG_INFINITY)
+        .all_dim(1)
+        .expand([batch, vocabulary]);
+    let log_probabilities = log_softmax(logits, 1).mask_fill(fully_excluded, f64::NEG_INFINITY);
     metadata::tensor_f64_values(log_probabilities, "beam-search log probabilities")
 }
 

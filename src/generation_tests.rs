@@ -2167,3 +2167,36 @@ proptest::proptest! {
         assert_finite_or_excluded(&processor, processed);
     }
 }
+
+/// Nucleus mass above one is rejected with the offending value.
+#[test]
+fn top_p_above_one_is_rejected() {
+    let config = GenerationConfig {
+        top_p: Some(1.5),
+        ..Default::default()
+    };
+    assert!(matches!(
+        config.validate(4),
+        Err(crate::Error::Generation(reason))
+            if reason == "top_p must be finite and in (0, 1], found 1.5"
+    ));
+}
+
+/// `top_p = 1` keeps the whole vocabulary, so sampling sees every token unfiltered.
+#[test]
+fn top_p_of_one_keeps_every_token() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        strategy: SamplingStrategy::Sample,
+        top_p: Some(1.0),
+        ..Default::default()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config, 3, &device).unwrap();
+    let output = processor
+        .process(Tensor::from_floats([[2.0, 1.0, -30.0]], &device), None)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(output, [2.0, 1.0, -30.0]);
+}

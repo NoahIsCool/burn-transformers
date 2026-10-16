@@ -108,3 +108,25 @@ proptest! {
         prop_assert!(body[previous..].bytes().all(|byte| byte.is_ascii_whitespace()));
     }
 }
+
+/// Byte classes equal their standard-library counterparts for every byte.
+#[test]
+fn byte_classes_match_the_standard_library() {
+    for byte in 0..=u8::MAX {
+        assert_eq!(is_space(byte), byte.is_ascii_whitespace(), "{byte:#x}");
+        assert_eq!(
+            is_name_byte(byte),
+            byte.is_ascii_alphanumeric() || byte == b'_',
+            "{byte:#x}"
+        );
+    }
+}
+
+/// A two-byte symbol needs both bytes inside the body.
+#[test]
+fn double_symbols_need_two_bytes_in_bounds() {
+    assert!(is_double_symbol(b"//", 0));
+    assert!(!is_double_symbol(b"//", 1));
+    assert!(!is_double_symbol(b"//", 2));
+    assert!(!is_double_symbol(b"/", 0));
+}

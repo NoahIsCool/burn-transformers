@@ -2277,3 +2277,182 @@ fn default_group_preserving_reorder_validates_groups_atomically() {
     state.reorder_within_groups(&[3, 2, 1, 0], 4).unwrap();
     assert_eq!(state.lengths(), [3, 4, 2, 2]);
 }
+
+/// Builds a scripted five-token model with no faults.
+fn scripted_model(device: &TestDevice) -> ScriptedModel<TestBackend> {
+    ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size: 5,
+            emit_nonfinite: false,
+        },
+        device,
+    )
+}
+
+/// A source batch with no rows is rejected before the encoder runs.
+#[test]
+fn an_empty_source_batch_is_rejected_before_encoding() {
+    let device = Default::default();
+    let model = scripted_model(&device);
+    let mut request = request(&device, search(2, 2));
+    request.source.token_ids = Tensor::<TestBackend, 2, Int>::zeros([0, 2], &device);
+    let error = generate_seq2seq_beam_search(&model, request).unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, actual, .. }
+            if tensor == "beam_search.source" && actual == "[0, 2]"),
+        "{error}"
+    );
+    assert!(model.trace.lock().unwrap().boundaries.is_empty());
+}
+
+/// A length bound whose cache requirement overflows `usize` fails before any model call.
+#[test]
+fn an_overflowing_cache_requirement_is_rejected_before_encoding() {
+    let device = Default::default();
+    let model = scripted_model(&device);
+    let mut request = request(&device, search(2, 2));
+    request.search.max_new_tokens = usize::MAX;
+    request.decoder_prompt.token_ids = Tensor::<TestBackend, 2, Int>::zeros([1, 2], &device);
+    let error = generate_seq2seq_beam_search(&model, request).unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "beam-search cache capacity overflows usize"),
+        "{error}"
+    );
+    assert!(model.trace.lock().unwrap().boundaries.is_empty());
+}
+
+/// A source whose every token is excluded reports that it has no finite candidate.
+///
+/// All-`-inf` logits are a valid model output (every token masked), not a
+/// numerical failure, so the diagnostic names the empty candidate set rather
+/// than the `NaN` that a log-softmax of such a row would otherwise produce.
+#[test]
+fn a_fully_excluded_source_row_has_no_finite_candidate() {
+    let device = Default::default();
+    let mut model = scripted_model(&device);
+    model.vocabulary_mask = Some(vec![false; 5]);
+    let error = generate_seq2seq_beam_search(&model, request(&device, search(2, 2))).unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "beam-search source row 0 has no finite candidate"),
+        "{error}"
+    );
+}
+
+/// A fully excluded parent beam contributes no candidates while its sibling expands.
+///
+/// After the first step the two live beams end in tokens 1 and 2. Every
+/// continuation of token 1 is excluded (`-inf`), so its row has no
+/// distribution, but the source as a whole still has finite candidates: the
+/// step succeeds and every returned hypothesis descends from token 2, as
+/// Hugging Face's ranking puts `-inf` scores last.
+#[test]
+fn a_fully_excluded_parent_is_skipped_while_its_sibling_expands() {
+    let inf = f32::NEG_INFINITY;
+    let table = MarkovTable {
+        first: vec![vec![inf, 1.0, 0.0, inf]],
+        next: vec![
+            vec![0.0; 4],
+            vec![inf; 4],
+            vec![0.0, 0.0, 0.0, 1.0],
+            vec![0.0; 4],
+        ],
+    };
+    let (model, request) = markov_fixture(table, search(2, 2));
+    let output = generate_seq2seq_beam_search(&model, request).unwrap();
+    let hypotheses = &output.sequences[0];
+    assert_eq!(
+        hypotheses
+            .iter()
+            .map(|hypothesis| hypothesis.token_ids.clone())
+            .collect::<Vec<_>>(),
+        [vec![2, 3], vec![2, 0]]
+    );
+    // log(e + 1) normalizes the first step; log(e + 3) the second.
+    let first = -(1.0_f64.exp() + 1.0).ln();
+    let second = -(1.0_f64.exp() + 3.0).ln();
+    for (hypothesis, last) in hypotheses.iter().zip([1.0 + second, second]) {
+        assert_eq!(hypothesis.finish_reason, FinishReason::Length);
+        assert_eq!(hypothesis.log_probabilities.len(), 2);
+        for (actual, expected) in hypothesis.log_probabilities.iter().zip([first, last]) {
+            assert!((actual - expected).abs() < 1e-6, "{hypotheses:?}");
+        }
+    }
+    // Both decoded parents were live: the excluded one was skipped, not dropped early.
+    assert_eq!(model.trace.lock().unwrap().decode_tokens, [vec![1, 2]]);
+}
+
+/// Zero beams can never form a final finished pool, and cannot be expanded.
+#[test]
+fn zero_beam_pools_are_never_final_and_cannot_expand() {
+    assert!(!super::finished_pool_is_final(&[], 0, -1.0, 1, 2, 1.0));
+    assert!(!super::heuristic_pool_is_final(&[], 0, -1.0, 1, 1.0));
+    let error = super::beam_expansion_indices(2, 0).unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if reason == "beam expansion requires at least one beam"),
+        "{error}"
+    );
+    assert_eq!(
+        super::beam_expansion_indices(2, 3).unwrap(),
+        [0, 0, 0, 1, 1, 1]
+    );
+}
+
+/// The frontier wrapper's equality agrees with the candidate total order.
+#[test]
+fn worst_first_equality_follows_the_candidate_order() {
+    let candidate = |parent_slot, token_id, cumulative_log_probability| super::Candidate {
+        parent_global: parent_slot,
+        parent_slot,
+        token_id,
+        log_probability: cumulative_log_probability,
+        cumulative_log_probability,
+    };
+    let first = super::WorstFirst(candidate(0, 1, -0.5));
+    assert!(first == super::WorstFirst(candidate(0, 1, -0.5)));
+    assert!(first != super::WorstFirst(candidate(0, 2, -0.5)));
+    assert!(first != super::WorstFirst(candidate(1, 1, -0.5)));
+    assert!(first != super::WorstFirst(candidate(0, 1, -0.25)));
+}
+
+/// Only rows whose every logit is `-inf` stay `-inf`; NaN still poisons its row.
+#[test]
+fn fully_excluded_rows_stay_negative_infinity_while_nan_rows_stay_nan() {
+    let device = Default::default();
+    let inf = f32::NEG_INFINITY;
+    let logits = Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(
+            vec![
+                inf,
+                inf,
+                inf,
+                f32::NAN,
+                inf,
+                inf,
+                0.0,
+                0.0,
+                inf,
+                7.0,
+                7.0,
+                7.0,
+            ],
+            [4, 3],
+        ),
+        &device,
+    );
+    let values = super::host_log_probabilities(logits, &[true, true, true, false], 4, 3).unwrap();
+    assert_eq!(&values[0..3], [f64::NEG_INFINITY; 3]);
+    assert!(values[3].is_nan(), "{values:?}");
+    let half = (0.5_f32).ln();
+    assert_eq!(
+        &values[6..9],
+        [f64::from(half), f64::from(half), f64::NEG_INFINITY]
+    );
+    // The inactive row is zeroed before normalization: a uniform distribution.
+    let third = f64::from((1.0_f32 / 3.0).ln());
+    for value in &values[9..12] {
+        assert!((value - third).abs() < 1e-6, "{values:?}");
+    }
+}

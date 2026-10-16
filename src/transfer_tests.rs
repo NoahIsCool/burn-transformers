@@ -989,9 +989,14 @@ proptest::proptest! {
     }
 }
 
-/// Fan-out copies used as separate layers receive separate optimizer updates.
 #[cfg(feature = "autodiff")]
 mod fan_out_training {
+    //! Fan-out copies used as separate layers receive separate optimizer updates.
+    //!
+    //! Copying one source parameter into two target layers must give each copy
+    //! its own parameter identity: one SGD step on the Autodiff backend then
+    //! moves each copy by its own gradient, so the copies diverge.
+
     use burn::{
         backend::Autodiff,
         optim::{GradientsParams, Optimizer, SgdConfig},
@@ -1103,4 +1108,271 @@ fn packed_targets_accept_transfers_into_their_dense_parameters_only() {
     assert!(message.contains("`weight` -> `weight`"), "{message}");
     assert!(message.contains("dequantize explicitly"), "{message}");
     assert_eq!(target.weight.val().into_data(), original_packed);
+}
+
+/// Hand-written module whose `visit` and `map` traversals can deliberately disagree.
+///
+/// Burn's derive keeps both traversals consistent; a hand-written module can
+/// break that contract. Transfer must then fail closed rather than install a
+/// replacement at the wrong rank or silently skip a planned parameter.
+#[derive(Clone, Debug)]
+struct Inconsistent<B: Backend> {
+    /// The `[2, 2]` parameter that `visit` reports at path `w`.
+    matrix: Param<Tensor<B, 2>>,
+    /// The `[4]` parameter that `map` offers at path `w` under [`Defect::RankShift`].
+    flat: Param<Tensor<B, 1>>,
+    /// Which traversal contract, if any, this fixture breaks.
+    defect: Defect,
+}
+
+/// Traversal contracts a hand-written module can honor or break.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Defect {
+    /// `visit` and `map` both traverse `w` once at rank 2.
+    Consistent,
+    /// `visit` reports `w` three times, so parameter paths collide.
+    DuplicatePath,
+    /// `map` offers a rank-1 parameter where `visit` reported a rank-2 one.
+    RankShift,
+    /// `map` never offers `w` although `visit` reported it.
+    SkippedParameter,
+}
+
+impl<B: Backend> Module<B> for Inconsistent<B> {
+    /// Stateless record: the fixture is never serialized.
+    type Record = ();
+
+    /// Reports no devices; the fixture is never moved.
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    /// Returns the fixture unchanged; it is never forked.
+    fn fork(self, _: &B::Device) -> Self {
+        self
+    }
+
+    /// Returns the fixture unchanged; it is never moved.
+    fn to_device(self, _: &B::Device) -> Self {
+        self
+    }
+
+    /// Reports `w` at rank 2, three times under [`Defect::DuplicatePath`].
+    fn visit<V: burn::module::ModuleVisitor<B>>(&self, visitor: &mut V) {
+        let repeats = if self.defect == Defect::DuplicatePath {
+            3
+        } else {
+            1
+        };
+        for _ in 0..repeats {
+            visitor.enter_module("w", "Inconsistent");
+            visitor.visit_float(&self.matrix);
+            visitor.exit_module("w", "Inconsistent");
+        }
+    }
+
+    /// Offers `w` at rank 2, at rank 1, or not at all, according to the defect.
+    fn map<M: burn::module::ModuleMapper<B>>(mut self, mapper: &mut M) -> Self {
+        match self.defect {
+            Defect::Consistent | Defect::DuplicatePath => {
+                mapper.enter_module("w", "Inconsistent");
+                self.matrix = mapper.map_float(self.matrix);
+                mapper.exit_module("w", "Inconsistent");
+            }
+            Defect::RankShift => {
+                mapper.enter_module("w", "Inconsistent");
+                self.flat = mapper.map_float(self.flat);
+                mapper.exit_module("w", "Inconsistent");
+            }
+            Defect::SkippedParameter => {}
+        }
+        self
+    }
+
+    /// Ignores the empty record.
+    fn load_record(self, _: Self::Record) -> Self {
+        self
+    }
+
+    /// Produces the empty record.
+    fn into_record(self) -> Self::Record {}
+}
+
+/// Builds an [`Inconsistent`] fixture whose parameters hold `value`.
+fn inconsistent(defect: Defect, value: f32) -> Inconsistent<B> {
+    let device = Default::default();
+    Inconsistent {
+        matrix: Param::from_tensor(Tensor::full([2, 2], value, &device)),
+        flat: Param::from_tensor(Tensor::full([4], value, &device)),
+        defect,
+    }
+}
+
+/// Colliding parameter paths are rejected on either side before any value is staged.
+#[test]
+fn duplicate_module_parameter_paths_are_rejected_in_sources_and_targets() {
+    let honest = inconsistent(Defect::Consistent, 2.0);
+    let duplicated = inconsistent(Defect::DuplicatePath, 7.0);
+    for (source, target) in [(&duplicated, &honest), (&honest, &duplicated)] {
+        let error = TransferPlan::new()
+            .copy("w", "w")
+            .apply(source, target)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "w" && reason == "duplicate module parameter path"),
+            "{error}"
+        );
+    }
+}
+
+/// A target whose `map` disagrees with its `visit` fails instead of returning a partial transfer.
+///
+/// Validation plans against `visit`; installation runs through `map`. When
+/// `map` offers the planned parameter at another rank, the error names that
+/// parameter; when it never offers it, the error names the target module.
+/// Either way `apply` returns only the error, never the staged clone.
+#[test]
+fn inconsistent_target_traversals_fail_closed() {
+    let source = inconsistent(Defect::Consistent, 7.0);
+    for (defect, expected_field, expected_reason) in [
+        (
+            Defect::RankShift,
+            "w",
+            "module mapper rank changed after transfer validation",
+        ),
+        (
+            Defect::SkippedParameter,
+            "transfer.target",
+            "module mapper did not visit all planned parameters",
+        ),
+    ] {
+        let target = inconsistent(defect, 2.0);
+        let error = TransferPlan::new()
+            .copy("w", "w")
+            .apply(&source, &target)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == expected_field && reason == expected_reason),
+            "{defect:?}: {error}"
+        );
+    }
+    let (copied, report) = TransferPlan::new()
+        .copy("w", "w")
+        .apply(&source, &inconsistent(Defect::Consistent, 2.0))
+        .unwrap();
+    assert_eq!(values(copied.matrix.val()), vec![7.0; 4]);
+    assert_eq!(report.reused.len(), 1);
+}
+
+/// A bare parameter is its own module root and is addressed by the path `$`.
+#[test]
+fn a_root_parameter_is_addressed_as_dollar() {
+    let device = Default::default();
+    let source = Param::from_tensor(Tensor::<B, 1>::full([3], 7.0, &device));
+    let target = Param::from_tensor(Tensor::<B, 1>::full([3], 2.0, &device));
+    let (copied, report) = TransferPlan::new()
+        .copy("$", "$")
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(copied.val()), vec![7.0; 3]);
+    assert_eq!(report.reused.len(), 1);
+    let error = TransferPlan::new()
+        .copy("weight", "$")
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(error.to_string().contains("`weight` -> `$`"), "{error}");
+}
+
+/// Exact and prefix rules name missing or empty paths before any transfer work.
+#[test]
+fn mapping_rules_require_existing_nonempty_paths_on_both_sides() {
+    let source = experiment(&[2], 7.0);
+    let target = experiment(&[2], 2.0);
+    let error = TransferPlan::new()
+        .copy("head.weight", "head.missing")
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "exact mapping `head.weight` -> `head.missing` requires both parameter paths to exist"
+        ),
+        "{error}"
+    );
+    for (from, to) in [("", "encoder"), ("encoder", ""), ("encoder", "missing")] {
+        let error = TransferPlan::new()
+            .copy_prefix(from, to)
+            .apply(&source, &target)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires nonempty existing module paths"),
+            "{from:?} -> {to:?}: {error}"
+        );
+    }
+}
+
+/// A prefix equal to a complete parameter path selects exactly that parameter.
+#[test]
+fn a_prefix_naming_a_whole_parameter_copies_only_that_parameter() {
+    let source = experiment(&[2], 7.0);
+    let target = experiment(&[2], 2.0);
+    let (copied, report) = TransferPlan::new()
+        .copy_prefix("encoder.0.weight", "encoder.0.weight")
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(copied.encoder[0].weight.val()), vec![7.0; 4]);
+    assert_eq!(values(copied.encoder[0].bias.val()), vec![2.0; 2]);
+    assert_eq!(report.reused.len(), 1);
+    assert_eq!(report.reused[0].target, "encoder.0.weight");
+}
+
+/// `copy_matching` leaves target-only paths initialized and reports them as unselected.
+#[test]
+fn copy_matching_retains_target_only_parameters() {
+    let source = experiment(&[2], 7.0);
+    let target = experiment(&[2, 3], 2.0);
+    let (copied, report) = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(copied.encoder[0].weight.val()), vec![7.0; 4]);
+    assert_eq!(values(copied.encoder[1].weight.val()), vec![2.0; 6]);
+    let retained = report
+        .newly_initialized
+        .iter()
+        .map(|disposition| disposition.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(retained, ["encoder.1.bias", "encoder.1.weight"]);
+}
+
+/// A transform to a rank-zero output is rejected before its callback runs.
+#[test]
+fn rank_zero_transform_outputs_are_rejected_before_the_callback() {
+    let source = experiment(&[2], 7.0);
+    let target = experiment(&[2], 2.0);
+    let called = std::cell::Cell::new(false);
+    let error = TransferPlan::new()
+        .transform(
+            "head.bias",
+            "head.bias",
+            "collapse",
+            |_: Tensor<B, 1>| -> Result<Tensor<B, 0>> {
+                called.set(true);
+                Err(Error::configuration("test", "the callback must not run"))
+            },
+        )
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(
+                "collapse: invalid configuration at transfer.transform: parameter ranks must be positive"
+            ),
+        "{error}"
+    );
+    assert!(!called.get());
 }

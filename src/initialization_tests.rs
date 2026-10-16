@@ -302,6 +302,53 @@ fn tied_fields_share_one_replacement() {
     );
 }
 
+/// When the first owner of a tied identity is kept, every alias keeps the same tensor too.
+///
+/// The decision is taken at the first field visited and reused by its aliases,
+/// even when an alias's own path would resolve to a different initializer.
+#[test]
+fn tied_fields_inherit_a_kept_first_owner() {
+    /// Two fields holding the same parameter identity.
+    #[derive(Module, Debug)]
+    struct Tied<B: Backend> {
+        /// First registered owner, kept by an explicit override.
+        first: Param<Tensor<B, 2>>,
+        /// Alias of `first`, whose own path would be resampled.
+        second: Param<Tensor<B, 2>>,
+    }
+    let device = Default::default();
+    let shared = Param::from_tensor(Tensor::<B, 2>::ones([4, 4], &device));
+    let tied = Tied {
+        first: shared.clone(),
+        second: shared,
+    };
+    let policy = InitPolicy {
+        other: ParameterInit::Normal { std: 1.0 },
+        ..InitPolicy::keep()
+    }
+    .with_override("first", ParameterInit::Keep);
+    let (tied, report) = policy.apply(tied).unwrap();
+    assert_eq!(tied.first.id, tied.second.id);
+    assert_eq!(values(tied.first.val()), vec![1.0; 16]);
+    assert_eq!(values(tied.second.val()), vec![1.0; 16]);
+    assert!(
+        report
+            .parameters
+            .iter()
+            .all(|parameter| parameter.init == ParameterInit::Keep)
+    );
+    assert_eq!(report.parameters.len(), 2);
+}
+
+/// Residual depth scaling is `1/sqrt(2L)`; without it the multiplier is exactly one.
+#[test]
+fn residual_scaling_factors_follow_the_depth_formula() {
+    assert_eq!(ResidualScaling::None.factor(), 1.0);
+    assert_eq!(ResidualScaling::default(), ResidualScaling::None);
+    assert_eq!(ResidualScaling::DepthScaled { layers: 8 }.factor(), 0.25);
+    assert_eq!(ResidualScaling::DepthScaled { layers: 2 }.factor(), 0.5);
+}
+
 /// Packed quantized weights are always kept; their dense neighbors are still initialized.
 #[test]
 fn packed_parameters_are_kept() {

@@ -288,6 +288,11 @@ fn keyword_rewrite_is_minimal_and_skips_text_comments_and_strings() {
             "{{ f('k=v if c else d', k=x == y) }}{{ a if b else c }}",
         ),
         ("{{ é(k=v if c else 'é') }}", "{{ é(k=(v if c else 'é')) }}"),
+        // Underscore identifiers are keywords; a number may end the tag body.
+        (
+            "{{ f(_k=v if c else 2, m=1) if d else 42}}",
+            "{{ f(_k=(v if c else 2), m=1) if d else 42}}",
+        ),
         ("{{ f(k=v if c else d", "{{ f(k=v if c else d"),
         (
             "plain text without conditionals",
@@ -487,38 +492,125 @@ fn render_unguarded(source: &str, context: &serde_json::Value) -> Result<String,
     environment.render_str(&source, Value::from_serialize(context))
 }
 
+/// One scalar expression written twice: with literal operands, and with the
+/// same operand values bound to context variables.
+///
+/// The bound form gives MiniJinja nothing to constant-fold, so every operator
+/// runs at render time; the literal form exercises the guard's lexing of
+/// numbers, strings, and keywords as operands.
+#[derive(Clone, Debug)]
+struct ScalarExpression {
+    /// Expression whose leaves are literals such as `2.5`, `'ab'`, or `none`.
+    literal: String,
+    /// The same expression with each literal leaf replaced by a context name.
+    bound: String,
+}
+
+/// Context binding every variable leaf of [`scalar_expression`].
+///
+/// `n0`..`n5` hold `0`..`5`, `f` holds `2.5`, `m` holds `-1`, `ab` and `e`
+/// hold `'ab'` and `''`, `t` holds `true`, and `nil` holds `none`; `x` and `s`
+/// are leaves in both forms, and `missing` stays undefined.
+fn scalar_context() -> serde_json::Value {
+    json!({
+        "x": 3, "s": "q",
+        "n0": 0, "n1": 1, "n2": 2, "n3": 3, "n4": 4, "n5": 5,
+        "f": 2.5, "m": -1, "ab": "ab", "e": "", "t": true, "nil": null,
+    })
+}
+
+/// A leaf whose literal and bound spellings may differ.
+fn scalar_leaf(literal: &str, bound: &str) -> ScalarExpression {
+    ScalarExpression {
+        literal: literal.to_owned(),
+        bound: bound.to_owned(),
+    }
+}
+
+/// Spells one compound expression in both forms from its parts' spellings.
+fn scalar_compound(
+    parts: &[&ScalarExpression],
+    spell: impl Fn(&[&str]) -> String,
+) -> ScalarExpression {
+    let literal = parts
+        .iter()
+        .map(|part| part.literal.as_str())
+        .collect::<Vec<_>>();
+    let bound = parts
+        .iter()
+        .map(|part| part.bound.as_str())
+        .collect::<Vec<_>>();
+    ScalarExpression {
+        literal: spell(&literal),
+        bound: spell(&bound),
+    }
+}
+
 /// Strategy for scalar expressions over numbers, strings, and context names.
-fn scalar_expression() -> impl Strategy<Value = String> {
+fn scalar_expression() -> impl Strategy<Value = ScalarExpression> {
     let leaf = prop_oneof![
-        (0_i64..6).prop_map(|value| value.to_string()),
-        Just("2.5".to_owned()),
-        Just("-1".to_owned()),
-        Just("'ab'".to_owned()),
-        Just("''".to_owned()),
-        Just("true".to_owned()),
-        Just("none".to_owned()),
-        Just("x".to_owned()),
-        Just("s".to_owned()),
-        Just("missing".to_owned()),
+        (0_i64..6).prop_map(|value| scalar_leaf(&value.to_string(), &format!("n{value}"))),
+        Just(scalar_leaf("2.5", "f")),
+        Just(scalar_leaf("-1", "m")),
+        Just(scalar_leaf("'ab'", "ab")),
+        Just(scalar_leaf("''", "e")),
+        Just(scalar_leaf("true", "t")),
+        Just(scalar_leaf("none", "nil")),
+        Just(scalar_leaf("x", "x")),
+        Just(scalar_leaf("s", "s")),
+        Just(scalar_leaf("missing", "missing")),
     ];
     leaf.prop_recursive(4, 32, 2, |inner| {
         let binary = prop::sample::select(vec![
             "+", "-", "*", "~", "/", "//", "%", "**", "==", "<", "and", "or", "in",
         ]);
-        prop_oneof![
-            (inner.clone(), binary, inner.clone())
-                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}")),
-            inner.clone().prop_map(|operand| format!("({operand})")),
-            inner.clone().prop_map(|operand| format!("-{operand}")),
-            inner.clone().prop_map(|operand| format!("not {operand}")),
+        let unary = |spell: fn(&str) -> String| {
             inner
                 .clone()
-                .prop_map(|operand| format!("{operand} | string")),
-            inner.clone().prop_map(|operand| format!("{operand} | abs")),
-            (inner.clone(), inner.clone(), inner)
-                .prop_map(|(yes, test, no)| format!("{yes} if {test} else {no}")),
+                .prop_map(move |operand| scalar_compound(&[&operand], |parts| spell(parts[0])))
+        };
+        prop_oneof![
+            (inner.clone(), binary, inner.clone()).prop_map(|(left, operator, right)| {
+                scalar_compound(&[&left, &right], |parts| {
+                    format!("{} {operator} {}", parts[0], parts[1])
+                })
+            }),
+            unary(|operand| format!("({operand})")),
+            unary(|operand| format!("-{operand}")),
+            unary(|operand| format!("not {operand}")),
+            unary(|operand| format!("{operand} | string")),
+            unary(|operand| format!("{operand} | abs")),
+            (inner.clone(), inner.clone(), inner).prop_map(|(yes, test, no)| {
+                scalar_compound(&[&yes, &test, &no], |parts| {
+                    format!("{} if {} else {}", parts[0], parts[1], parts[2])
+                })
+            }),
         ]
     })
+}
+
+/// Requires the guarded and unguarded renders of `expression` to agree.
+///
+/// The expression is both printed and assigned. Results and failures must
+/// agree: the rewrite preserves precedence, associativity, and evaluation
+/// order. The only exception is the guard's documented refusal of a variable
+/// named `not` used as an operand (MiniJinja reads `not` after a binary
+/// operator as a variable, which the guard cannot rewrite faithfully); such
+/// cases are rejected rather than compared.
+fn assert_guarded_matches_plain(expression: &str) -> Result<(), TestCaseError> {
+    let source = format!("{{{{ {expression} }}}}|{{% set y = {expression} %}}{{{{ y }}}}");
+    let context = scalar_context();
+    let guarded = render_template(&source, &context, Some(0));
+    let plain = render_unguarded(&source, &context);
+    prop_assume!(
+        !matches!(&guarded, Err(error) if error.to_string().contains("variable named `not`"))
+    );
+    match (&guarded, &plain) {
+        (Ok(guarded), Ok(plain)) => prop_assert_eq!(guarded, plain, "{}", source),
+        (Err(_), Err(_)) => {}
+        _ => prop_assert!(false, "{source}: guarded {guarded:?}, plain {plain:?}"),
+    }
+    Ok(())
 }
 
 proptest! {
@@ -526,25 +618,83 @@ proptest! {
 
     /// Guarded expressions render exactly as MiniJinja's own operators do.
     ///
-    /// For scalar operands (where the bounded operators delegate to, or
-    /// replicate, the engine) results and failures must agree: the rewrite
-    /// preserves precedence, associativity, and evaluation order. The only
-    /// exception is the guard's documented refusal of a variable named `not`
-    /// used as an operand.
+    /// For scalar operands, the bounded operators delegate to, or replicate,
+    /// the engine. The bound form is compared unconditionally: with no
+    /// constants, MiniJinja evaluates every operator at render time.
+    ///
+    /// The literal form is compared only when it contains no `and`. MiniJinja
+    /// folds all-constant subexpressions at compile time, and its fold of a
+    /// falsy `and` yields `false` where its own runtime (and Jinja2) yields
+    /// the falsy operand. A guarded operator becomes a call, so an `and` over
+    /// it is no longer constant and is evaluated at runtime: the guarded
+    /// `0 * 0 and 0` renders Jinja2's `0`, while the unguarded oracle folds it
+    /// to `False`. Every other fold equals runtime evaluation (a failing fold
+    /// falls back to it), so the literal comparison is exact without `and`.
     #[test]
     fn guarded_expressions_match_minijinja(expression in scalar_expression()) {
-        let source = format!("{{{{ {expression} }}}}|{{% set y = {expression} %}}{{{{ y }}}}");
-        let context = json!({"x": 3, "s": "q"});
-        let guarded = render_template(&source, &context, Some(0));
-        let plain = render_unguarded(&source, &context);
-        // The one documented refusal: MiniJinja reads `not` after a binary
-        // operator as a variable, which the guard cannot rewrite faithfully.
-        prop_assume!(!matches!(&guarded, Err(error) if error.to_string().contains("variable named `not`")));
-        match (&guarded, &plain) {
-            (Ok(guarded), Ok(plain)) => prop_assert_eq!(guarded, plain, "{}", source),
-            (Err(_), Err(_)) => {}
-            _ => prop_assert!(false, "{source}: guarded {guarded:?}, plain {plain:?}"),
+        assert_guarded_matches_plain(&expression.bound)?;
+        if !expression.literal.contains(" and ") {
+            assert_guarded_matches_plain(&expression.literal)?;
         }
+    }
+}
+
+/// A guarded operand makes an enclosing `and` evaluate at runtime, as in Jinja2.
+///
+/// Regression for a failure of `guarded_expressions_match_minijinja`, shrunk
+/// to `-0 if none else 0 * 0 and 0`: the unguarded oracle folded the
+/// all-constant `0 * 0 and 0` to `False`, while the guarded render returned
+/// the falsy left operand `0`, which is what Jinja2 and MiniJinja's runtime
+/// return. A purely constant `and` is not rewritten, so it keeps MiniJinja's
+/// folded `False`: a known divergence from Jinja2, which renders `0`.
+#[test]
+fn guarded_operands_give_and_its_runtime_result() {
+    for source in ["{{ 0 * 0 and 0 }}", "{{ -0 if none else 0 * 0 and 0 }}"] {
+        assert_eq!(rendered(source, json!({})), "0", "{source}");
+        assert_eq!(
+            render_unguarded(source, &json!({})).unwrap(),
+            "False",
+            "{source}"
+        );
+    }
+    // Runtime evaluation returns the deciding operand of `and` and `or`.
+    assert_eq!(rendered("{{ zero and 1 }}", json!({"zero": 0})), "0");
+    assert_eq!(rendered("{{ one and 0 }}", json!({"one": 1})), "0");
+    assert_eq!(rendered("{{ zero or '' }}", json!({"zero": 0})), "");
+    // Known divergence: MiniJinja's constant fold of a falsy `and`.
+    assert_eq!(rendered("{{ 0 and 1 }}", json!({})), "False");
+    assert_eq!(rendered("{{ 1 and 0 }}", json!({})), "False");
+}
+
+/// Rarely generated guarded shapes render as in Jinja2 and as MiniJinja's own operators.
+///
+/// The expression property tests reach these shapes only for some seeds: a
+/// tuple with a trailing comma; splatted arguments, where a non-unary operand
+/// such as `x or [1, 3]` is parenthesized before the bounded splat applies
+/// while a rewritten sum is already a filter call; a conditional without
+/// `else`, which is undefined (printed empty) when its test is falsy; and
+/// `not in` after a guarded operand. Expected strings are Jinja2 3.1.5 renders.
+#[test]
+fn rare_guarded_shapes_match_jinja2_and_minijinja() {
+    for (source, context, expected) in [
+        ("{{ (1 + 1, 2,) | sum }}", json!({}), "4"),
+        ("{{ range(*[1] + [3]) | list }}", json!({}), "[1, 2]"),
+        ("{{ range(*x or [1, 3]) | list }}", json!({}), "[1, 2]"),
+        ("{{ 'a' if x + 1 }}|", json!({"x": 0}), "a|"),
+        ("{{ 'a' if x + 1 }}|", json!({"x": -1}), "|"),
+        ("{{ x + 1 not in [2] }}", json!({"x": 0}), "True"),
+        ("{{ x + 1 not in [2] }}", json!({"x": 1}), "False"),
+    ] {
+        assert!(
+            matches!(guard::guard_operators(source), Ok(Cow::Owned(_))),
+            "{source} was not rewritten"
+        );
+        assert_eq!(rendered(source, context.clone()), expected, "{source}");
+        assert_eq!(
+            render_unguarded(source, &context).unwrap(),
+            expected,
+            "{source}"
+        );
     }
 }
 

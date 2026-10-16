@@ -386,9 +386,15 @@ pub(crate) fn parenthesize_conditional_keyword_arguments(source: &str) -> Cow<'_
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lexeme<'a> {
     /// Identifier or keyword, such as `name` or `if`.
-    Word(&'a str),
+    Word(
+        /// The identifier's text, borrowed from the tag body.
+        &'a str,
+    ),
     /// One punctuation character such as `(` or `,`.
-    Punct(u8),
+    Punct(
+        /// The punctuation character's ASCII byte.
+        u8,
+    ),
     /// Two-character operator such as `==` or `<=`, distinct from `=`.
     Operator,
     /// String literal or number; opaque here.
