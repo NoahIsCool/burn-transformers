@@ -493,7 +493,9 @@ fn batched_timing() {
         let prompt_input = masked_input(&mask, 3, &device);
         let decode_input = |step: i64| masked_input(&vec![vec![true]; batch], step, &device);
         /// Batched or per-row cached execution under comparison: applies one
-        /// stateful prefill or decode call and returns its `[batch, sequence, vocabulary]` logits.
+        /// stateful prefill or decode call under default options, whose
+        /// `LogitsSelection::Last` returns `[batch, 1, vocabulary]` logits for
+        /// each row's last valid position.
         type Runner<'a> = dyn Fn(
                 CausalLmInput<TestBackend>,
                 &mut Qwen3_5DecodeState<TestBackend>,

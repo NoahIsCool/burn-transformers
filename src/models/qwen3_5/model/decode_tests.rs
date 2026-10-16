@@ -2425,6 +2425,11 @@ fn single_token_mtp_prefill_has_no_shifted_pair() {
 }
 
 /// Shifted MTP prompt tokens are range-checked, and a failure leaves the auxiliary cache empty.
+///
+/// The prompt `[1, 32]` shifts to the single MTP token 32, one past the
+/// 32-token vocabulary, so the deferred range check reports a shape error at
+/// `qwen.input_ids` naming the bound `0..32` and the observed value 32. The
+/// target cache keeps its committed prompt and the MTP cache stays fresh.
 #[test]
 fn mtp_prefill_rejects_out_of_vocabulary_shifted_tokens() {
     let device = Default::default();
@@ -2452,7 +2457,19 @@ fn mtp_prefill_rejects_out_of_vocabulary_shifted_tokens() {
             &mut state,
         )
         .unwrap_err();
-    assert!(error.to_string().contains("token"), "{error}");
+    match &error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => {
+            assert_eq!(tensor, "qwen.input_ids", "{error}");
+            assert_eq!(expected, "token values in 0..32", "{error}");
+            assert_eq!(actual, "observed range 32..=32", "{error}");
+        }
+        other => panic!("expected an out-of-vocabulary shape error, got {other:?}"),
+    }
+    assert_eq!(state.lengths(), &[2]);
     assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
 }
 

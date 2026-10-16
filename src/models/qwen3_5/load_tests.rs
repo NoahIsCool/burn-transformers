@@ -568,7 +568,26 @@ fn headless_backbone_installs_its_base_contract() {
     assert!(hidden.into_data().iter::<f32>().all(|value| value == 0.0));
 }
 
-/// Biased full attention installs all four projection biases.
+/// Distinct marker for a full-attention projection bias target, `None` otherwise.
+///
+/// The marker is `kind + 10 * owner`, with `kind` 1..=4 for the q, k, v, and
+/// o projections and `owner` 1 for the MTP graph (0 for the base backbone),
+/// so a bias installed into the wrong projection or graph is visible.
+fn projection_bias_marker(name: &str) -> Option<f32> {
+    let kind = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        .iter()
+        .position(|projection| name.ends_with(&format!("self_attn.{projection}.bias")))?;
+    let owner = if name.starts_with("mtp.") { 10.0 } else { 0.0 };
+    Some(kind as f32 + 1.0 + owner)
+}
+
+/// Biased full attention installs each of the four projection biases into its own field.
+///
+/// Every bias target carries a distinct constant from
+/// [`projection_bias_marker`]. In Qwen3.5 `k_proj.bias` and `v_proj.bias`
+/// share the `[kv_heads * head_dim]` shape, so only distinct payloads can
+/// show that the dispatcher neither swaps them nor routes an MTP bias into
+/// the base block. Reading every Burn bias back proves each landed intact.
 #[test]
 fn biased_attention_projections_install_their_biases() {
     let config = Qwen3_5TextConfig {
@@ -593,13 +612,61 @@ fn biased_attention_projections_install_their_biases() {
             .iter()
             .map(|dimension| usize::try_from(*dimension).unwrap())
             .collect::<Vec<_>>();
-        biases += usize::from(expected.name.ends_with("_proj.bias"));
+        let data = match projection_bias_marker(&expected.name) {
+            Some(marker) => {
+                biases += 1;
+                TensorData::full(shape, marker)
+            }
+            None => TensorData::zeros::<f32, _>(shape),
+        };
         model
-            .write_tensor(&expected.name, TensorData::zeros::<f32, _>(shape))
+            .write_tensor(&expected.name, data)
             .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
     }
     // One full-attention base block and one MTP block, four biases each.
     assert_eq!(biases, 8);
+
+    let base = model
+        .model
+        .layers
+        .iter()
+        .filter_map(|layer| layer.self_attn.as_ref())
+        .map(|attention| (0.0, attention));
+    let mtp = model
+        .mtp
+        .as_ref()
+        .expect("the contract includes the MTP graph")
+        .layers
+        .iter()
+        .filter_map(|layer| layer.self_attn.as_ref())
+        .map(|attention| (10.0, attention));
+    let mut checked = 0;
+    for (owner, attention) in base.chain(mtp) {
+        let projections = [
+            &attention.q_proj,
+            &attention.k_proj,
+            &attention.v_proj,
+            &attention.o_proj,
+        ];
+        for (kind, projection) in projections.into_iter().enumerate() {
+            let expected = kind as f32 + 1.0 + owner;
+            let values = projection
+                .bias
+                .as_ref()
+                .expect("a biased projection owns a bias")
+                .val()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            assert!(!values.is_empty());
+            assert!(
+                values.iter().all(|&value| value == expected),
+                "projection {kind} of owner {owner} holds {values:?}, expected {expected}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, biases);
 }
 
 /// A tied configuration whose model nevertheless owns an independent head rejects the alias.

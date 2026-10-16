@@ -346,6 +346,15 @@ fn each_topology_rule_names_its_field_and_reason() {
 }
 
 /// Three multimodal sections whose doubled sum is the rotary width validate as text RoPE.
+///
+/// Two checks govern `mrope_section`: the shared `RopeParameters::validate_for`
+/// requires `2 * sum(sections)` to equal the rotary width (`256 * 0.25 = 64`
+/// channels here), and the family requires exactly three (temporal, height,
+/// width) sections. The released `[11, 11, 10]` layout satisfies both, while
+/// three sections with the wrong sum, `[1, 1, 1]`, fail the width relation.
+/// Text tokens repeat one position across all three axes, so the split does
+/// not change the 64-channel partial rotation. Token IDs at the last
+/// vocabulary index also validate.
 #[test]
 fn three_rotary_sections_and_in_vocabulary_tokens_validate() {
     let config = Qwen3_5TextConfig {
@@ -361,4 +370,23 @@ fn three_rotary_sections_and_in_vocabulary_tokens_validate() {
     };
     config.validate().expect("boundary values validate");
     assert_eq!(config.rope_config().unwrap().rotary_dimension(), 64);
+
+    let short_sum = Qwen3_5TextConfig {
+        rope_parameters: Some(RopeParameters {
+            mrope_section: Some(vec![1, 1, 1]),
+            ..RopeParameters::default()
+        }),
+        ..config
+    };
+    let error = short_sum
+        .validate()
+        .expect_err("2 * (1 + 1 + 1) is not the 64-channel rotary width");
+    assert_eq!(error.architecture, "qwen3_5");
+    assert_eq!(
+        (error.field, error.reason.as_str()),
+        (
+            "mrope_section",
+            "twice the complex-pair section sum must equal the rotary width"
+        )
+    );
 }
