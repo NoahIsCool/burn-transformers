@@ -1036,3 +1036,42 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
             .any(|name| name == "lm_head.weight")
     );
 }
+
+/// `load_checkpoint_with` applies explicit provenance; the 0.1.0 name forwards to it unchanged.
+///
+/// Provenance that names no reviewed NVIDIA artifact selects the generic
+/// strict policy, so all three entry points produce the same audited report.
+#[test]
+#[allow(deprecated)]
+fn load_checkpoint_with_is_the_options_entry_point_and_the_former_name_forwards() {
+    use crate::models::nemotron_h::NemotronHCheckpointProvenance;
+
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let explicit = NemotronHCheckpointOptions::default().with_provenance(
+        NemotronHCheckpointProvenance::new("example/tiny-nemotron", "fixture-revision"),
+    );
+    let load = |entry: usize| {
+        let mut model = NemotronHForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+        match entry {
+            0 => model.load_checkpoint(temp.path(), &LoadOptions::default()),
+            1 => model.load_checkpoint_with(temp.path(), &LoadOptions::default(), explicit.clone()),
+            _ => model.load_checkpoint_with_architecture_options(
+                temp.path(),
+                &LoadOptions::default(),
+                explicit.clone(),
+            ),
+        }
+        .unwrap()
+        .report
+    };
+    let default = load(0);
+    assert!(default.is_strictly_valid());
+    assert_eq!(load(1), default);
+    assert_eq!(load(2), default);
+}

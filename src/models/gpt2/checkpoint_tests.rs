@@ -79,7 +79,7 @@ fn namespace_detection_requires_exactly_one_embedding_owner() {
             None => assert!(
                 matches!(
                     &detected,
-                    Err(Gpt2LoadError::Target(reason))
+                    Err(Gpt2CheckpointLoadError::Namespace(reason))
                         if reason == "expected exactly one GPT-2 token-embedding namespace"
                 ),
                 "{names:?}: {detected:?}"
@@ -132,37 +132,30 @@ fn contract_inventory_names_runtime_targets_and_fused_splits() {
     }
 }
 
-/// Integer tensors cannot enter the floating GPT-2 graph even when shapes match.
-#[test]
-fn integer_storage_is_rejected_after_shape_preflight() {
-    let config = tiny();
-    let contract = Gpt2CheckpointContract::new(&config, Gpt2CheckpointLayout::Backbone).unwrap();
-    let root = tempfile::tempdir().unwrap();
+/// Lists every physical checkpoint source of `contract` with its serialized shape.
+///
+/// Fused Conv1D projections are stored once, three times as wide as each
+/// split target; the tied head is an alias without its own source.
+fn contract_sources(contract: &Gpt2CheckpointContract) -> Vec<(String, Vec<usize>)> {
+    let shape_of = |target: &str| {
+        contract
+            .expected_tensors()
+            .iter()
+            .find(|tensor| tensor.name == target)
+            .unwrap()
+            .shape
+            .clone()
+    };
     let mut tensors = Vec::new();
     for operation in contract.mappings().operations() {
         let (source, shape) = match operation {
-            TensorOperation::Map { source, target, .. } => {
-                let shape = contract
-                    .expected_tensors()
-                    .iter()
-                    .find(|tensor| tensor.name == *target)
-                    .unwrap()
-                    .shape
-                    .clone();
-                (source.clone(), shape)
-            }
+            TensorOperation::Map { source, target, .. } => (source.clone(), shape_of(target)),
             TensorOperation::Split {
                 source,
                 axis,
                 targets,
             } => {
-                let mut shape = contract
-                    .expected_tensors()
-                    .iter()
-                    .find(|tensor| tensor.name == targets[0].0)
-                    .unwrap()
-                    .shape
-                    .clone();
+                let mut shape = shape_of(&targets[0].0);
                 shape[*axis] *= 3;
                 (source.clone(), shape)
             }
@@ -173,6 +166,16 @@ fn integer_storage_is_rejected_after_shape_preflight() {
             shape.iter().map(|&size| size as usize).collect::<Vec<_>>(),
         ));
     }
+    tensors
+}
+
+/// Integer tensors cannot enter the floating GPT-2 graph even when shapes match.
+#[test]
+fn integer_storage_is_rejected_after_shape_preflight() {
+    let config = tiny();
+    let contract = Gpt2CheckpointContract::new(&config, Gpt2CheckpointLayout::Backbone).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tensors = contract_sources(&contract);
     let borrowed = tensors
         .iter()
         .map(|(name, shape)| (name.as_str(), shape.clone()))
@@ -193,10 +196,20 @@ fn integer_storage_is_rejected_after_shape_preflight() {
         }
     }
     manifest.tensors.get_mut("ln_f.weight").unwrap().dtype = TensorDType::I32;
-    assert!(matches!(
-        contract.build_load_plan(&manifest, &options),
-        Err(Gpt2LoadError::Target(reason)) if reason == "GPT-2 parameters must be floating point"
-    ));
+    let error = contract.build_load_plan(&manifest, &options).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Gpt2CheckpointLoadError::NonFloatParameter { target, dtype: TensorDType::I32 }
+                if target == "final_norm.gamma"
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "GPT-2 parameters must be floating point; `final_norm.gamma` is I32"
+    );
+    assert!(error.execution_failure().is_none());
 }
 
 /// Malformed targets, unknown fields, and absent biases are contextual target errors.
@@ -271,4 +284,71 @@ fn tied_readout_alias_requires_the_exact_initialized_owner() {
     invalid(&mut model, "lm_head.weight", "position_embedding.weight");
     model.config.tie_word_embeddings = false;
     invalid(&mut model, "lm_head.weight", "token_embedding.weight");
+}
+
+/// Whole-load failures are typed by stage; only pass two carries a partial report.
+///
+/// A checkpoint with both embedding namespaces fails detection, an edited
+/// configuration fails before planning, and a block removed after
+/// initialization fails in pass two with the per-tensor [`Gpt2LoadError`]
+/// inside the execution failure.
+#[test]
+fn load_checkpoint_errors_are_typed_by_stage() {
+    let config = tiny();
+    let contract = Gpt2CheckpointContract::new(&config, Gpt2CheckpointLayout::Backbone).unwrap();
+    let sources = contract_sources(&contract);
+    let mut borrowed = sources
+        .iter()
+        .map(|(name, shape)| (name.as_str(), shape.clone()))
+        .collect::<Vec<_>>();
+    let complete = tempfile::tempdir().unwrap();
+    write(complete.path(), &borrowed);
+    let device = Default::default();
+
+    let mut model = Gpt2ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let outcome = model
+        .load_checkpoint(complete.path(), &LoadOptions::default())
+        .unwrap();
+    assert!(outcome.report.is_strictly_valid());
+
+    borrowed.push(("transformer.wte.weight", vec![7, 4]));
+    let ambiguous = tempfile::tempdir().unwrap();
+    write(ambiguous.path(), &borrowed);
+    let mut model = Gpt2ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let error = model
+        .load_checkpoint(ambiguous.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Gpt2CheckpointLoadError::Namespace(_)),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none());
+
+    let mut model = Gpt2ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    model.model.config.n_head = 3;
+    let error = model
+        .load_checkpoint(complete.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Gpt2CheckpointLoadError::Configuration(_)),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none());
+
+    let mut model = Gpt2ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    model.model.layers.clear();
+    let error = model
+        .load_checkpoint(complete.path(), &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("pass two reached the sink");
+    assert!(
+        matches!(
+            &failure.cause,
+            crate::checkpoint::ExecutionFailureCause::Sink(Gpt2LoadError::Target(target))
+                if target.starts_with("layers.0.")
+        ),
+        "{error}"
+    );
 }

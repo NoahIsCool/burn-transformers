@@ -697,3 +697,327 @@ fn tied_alias_rejects_a_model_that_owns_a_head() {
         })
     );
 }
+
+/// Deterministic, name-seeded F32 values for one checkpoint tensor.
+fn seeded_values(name: &str, elements: usize) -> Vec<f32> {
+    let seed = name.bytes().fold(0_usize, |state, byte| {
+        state.wrapping_mul(31).wrapping_add(byte as usize)
+    });
+    (0..elements)
+        .map(|index| (((index * 7 + seed) % 23) as f32 - 11.0) * 0.01)
+        .collect()
+}
+
+/// Writes every physical source of `options`' contract as one seeded F32 SafeTensors file.
+///
+/// Alias operations have no payload; every other operation must be an
+/// identity map, which the Qwen contract uses for all physical tensors.
+fn write_seeded_checkpoint(
+    root: &std::path::Path,
+    config: &Qwen3_5TextConfig,
+    options: Qwen3_5CheckpointOptions,
+) {
+    use std::io::Write;
+
+    use crate::checkpoint::{TensorOperation, TensorTransform};
+
+    let contract = config.checkpoint_contract(options).unwrap();
+    let mut header = serde_json::Map::new();
+    let mut payload = Vec::new();
+    for operation in contract.mappings().operations() {
+        let (source, target) = match operation {
+            TensorOperation::Map {
+                source,
+                target,
+                transform: TensorTransform::Identity,
+            } => (source, target),
+            TensorOperation::Alias { .. } => continue,
+            other => panic!("unexpected Qwen fixture operation {other:?}"),
+        };
+        let shape = contract
+            .expected_tensors()
+            .iter()
+            .find(|expected| &expected.name == target)
+            .unwrap()
+            .shape
+            .clone();
+        let elements = shape.iter().product::<u64>() as usize;
+        let start = payload.len();
+        for value in seeded_values(target, elements) {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        header.insert(
+            source.clone(),
+            serde_json::json!({"dtype": "F32", "shape": shape, "data_offsets": [start, payload.len()]}),
+        );
+    }
+    let header = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+    let mut file = std::fs::File::create(root.join("model.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(&header).unwrap();
+    file.write_all(&payload).unwrap();
+}
+
+/// Returns the F32 logits of the tiny fixture prompt `[[1, 2, 3]]`.
+fn prompt_logits(model: &Qwen3_5ForCausalLm<TestBackend>) -> Vec<f32> {
+    let input = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &Default::default()),
+        token_mask: None,
+        position_ids: None,
+    };
+    model
+        .forward(input, &ForwardOptions::default())
+        .unwrap()
+        .logits
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()
+}
+
+/// `load_checkpoint` detects text-only and multimodal layouts and installs the same weights.
+///
+/// Both layouts carry the same seeded values under their own namespace, with
+/// the fixture's MTP layer, which the MTP-owning model expects. Each load is
+/// strictly valid and the two models compute identical logits, equal to a
+/// model whose tensors were written into the sink directly.
+#[test]
+fn load_checkpoint_detects_text_only_and_multimodal_namespaces() {
+    let config = fixture_config();
+    let device = Default::default();
+    let mut direct = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::TextOnly,
+            include_mtp: true,
+        })
+        .unwrap();
+    for expected in contract.expected_tensors() {
+        if expected.name == "lm_head.weight" {
+            continue;
+        }
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&dimension| dimension as usize)
+            .collect::<Vec<_>>();
+        let values = seeded_values(&expected.name, shape.iter().product());
+        direct
+            .write_tensor(&expected.name, TensorData::new(values, shape))
+            .unwrap();
+    }
+    direct
+        .alias_tensor("lm_head.weight", "model.embed_tokens.weight")
+        .unwrap();
+    let reference = prompt_logits(&direct);
+
+    for source in [
+        Qwen3_5CheckpointSource::TextOnly,
+        Qwen3_5CheckpointSource::Multimodal,
+    ] {
+        let root = tempfile::TempDir::new().unwrap();
+        write_seeded_checkpoint(
+            root.path(),
+            &config,
+            Qwen3_5CheckpointOptions {
+                source,
+                include_mtp: true,
+            },
+        );
+        let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+        let outcome = model
+            .load_checkpoint(root.path(), &crate::checkpoint::LoadOptions::default())
+            .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert!(outcome.report.is_strictly_valid(), "{source:?}");
+        assert_eq!(
+            outcome.report.applied.len(),
+            contract.expected_tensors().len(),
+            "{source:?}"
+        );
+        assert_eq!(outcome.report.aliased.len(), 1, "{source:?}");
+        assert_eq!(prompt_logits(&model), reference, "{source:?}");
+    }
+}
+
+/// MTP tensors are expected exactly when the model owns an MTP graph.
+///
+/// An MTP-owning model fails strict planning on a base-only checkpoint; a
+/// model initialized without MTP loads a checkpoint that has MTP tensors and
+/// reports them as intentionally ignored; and an explicit MTP request that
+/// disagrees with the model's graph is refused before planning, since it
+/// would leave an MTP graph randomly initialized or have nowhere to install.
+#[test]
+fn load_checkpoint_expects_mtp_tensors_exactly_when_the_model_owns_mtp() {
+    let config = fixture_config();
+    let device = Default::default();
+    let options = crate::checkpoint::LoadOptions::default();
+
+    let base_only = tempfile::TempDir::new().unwrap();
+    write_seeded_checkpoint(
+        base_only.path(),
+        &config,
+        Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::TextOnly,
+            include_mtp: false,
+        },
+    );
+    let mut with_mtp = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let error = with_mtp
+        .load_checkpoint(base_only.path(), &options)
+        .unwrap_err();
+    assert!(
+        matches!(error, Qwen3_5CheckpointLoadError::Checkpoint(_)),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none());
+
+    let complete = tempfile::TempDir::new().unwrap();
+    write_seeded_checkpoint(
+        complete.path(),
+        &config,
+        Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::TextOnly,
+            include_mtp: true,
+        },
+    );
+    let mut base = Qwen3_5ForCausalLm::<TestBackend>::init(
+        Qwen3_5TextConfig {
+            mtp_num_hidden_layers: 0,
+            ..config.clone()
+        },
+        &device,
+    )
+    .unwrap();
+    let outcome = base.load_checkpoint(complete.path(), &options).unwrap();
+    assert!(outcome.report.is_strictly_valid());
+    assert!(
+        outcome
+            .report
+            .allowlisted_ignored
+            .iter()
+            .any(|name| name.starts_with("mtp.")),
+        "{:?}",
+        outcome.report.allowlisted_ignored
+    );
+
+    let mut with_mtp = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let error = with_mtp
+        .load_checkpoint_with(
+            complete.path(),
+            &options,
+            Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: false,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Qwen3_5CheckpointLoadError::UnloadedMtpGraph
+    ));
+    assert!(error.execution_failure().is_none());
+    assert!(error.to_string().contains("include_mtp"), "{error}");
+    let outcome = with_mtp
+        .load_checkpoint_with(
+            complete.path(),
+            &options,
+            Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: true,
+            },
+        )
+        .unwrap();
+    assert!(outcome.report.is_strictly_valid());
+    assert!(
+        outcome
+            .report
+            .applied
+            .iter()
+            .any(|name| name == "mtp.fc.weight")
+    );
+
+    let error = base
+        .load_checkpoint_with(
+            complete.path(),
+            &options,
+            Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: true,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Qwen3_5CheckpointLoadError::MissingMtpGraph));
+    assert!(error.execution_failure().is_none());
+    assert!(
+        error.to_string().contains("mtp_num_hidden_layers"),
+        "{error}"
+    );
+}
+
+/// Namespace, configuration, and pass-two failures are distinct typed errors.
+#[test]
+fn load_checkpoint_errors_distinguish_namespace_config_and_execution() {
+    use std::io::Write;
+
+    let device = Default::default();
+    let options = crate::checkpoint::LoadOptions::default();
+
+    // A checkpoint with neither language namespace fails before any contract is built.
+    let root = tempfile::TempDir::new().unwrap();
+    let header = br#"{"lm_head.weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+    let mut file = std::fs::File::create(root.path().join("model.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header).unwrap();
+    file.write_all(&[0; 4]).unwrap();
+    let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(fixture_config(), &device).unwrap();
+    let error = model.load_checkpoint(root.path(), &options).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Qwen3_5CheckpointLoadError::Checkpoint(CheckpointError::LanguageNamespaceNotFound {
+                family: "Qwen"
+            })
+        ),
+        "{error}"
+    );
+
+    // A configuration edited after initialization cannot describe a checkpoint.
+    let complete = tempfile::TempDir::new().unwrap();
+    write_seeded_checkpoint(
+        complete.path(),
+        &fixture_config(),
+        Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::Multimodal,
+            include_mtp: true,
+        },
+    );
+    let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(fixture_config(), &device).unwrap();
+    model.model.config.hidden_size = 0;
+    let error = model
+        .load_checkpoint(complete.path(), &options)
+        .unwrap_err();
+    assert!(
+        matches!(error, Qwen3_5CheckpointLoadError::Config(_)),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none());
+
+    // A graph whose last block was removed after planning fails in pass two with progress.
+    let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(fixture_config(), &device).unwrap();
+    model.model.layers.pop();
+    let error = model
+        .load_checkpoint(complete.path(), &options)
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("pass two reached the sink");
+    assert!(
+        failure
+            .failed_target
+            .as_deref()
+            .is_some_and(|target| target.starts_with("model.layers.1.")),
+        "{:?}",
+        failure.failed_target
+    );
+}

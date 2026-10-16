@@ -199,3 +199,21 @@ fn sink_failures_after_planning_keep_the_partial_report() {
     ));
     assert!(!failure.report.applied.is_empty());
 }
+
+/// `load_checkpoint_with` under the (empty) family options equals `load_checkpoint`.
+#[test]
+fn load_checkpoint_with_default_options_matches_load_checkpoint() {
+    let root = fixture("qwen3");
+    let detected = graph(&root)
+        .load_checkpoint(&root, &LoadOptions::default())
+        .unwrap();
+    let explicit = graph(&root)
+        .load_checkpoint_with(
+            &root,
+            &LoadOptions::default(),
+            crate::models::llama::LlamaCheckpointOptions::default(),
+        )
+        .unwrap();
+    assert!(explicit.report.is_strictly_valid());
+    assert_eq!(explicit.report, detected.report);
+}

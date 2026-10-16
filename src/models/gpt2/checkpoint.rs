@@ -25,7 +25,7 @@ use crate::{
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, ExpectedTensor,
         IndexTensorAlias, KeyMatcher, LoadOptions, LoadPlan, MappingPlan, ParameterInstallError,
-        TensorSink, build_load_plan, discover_checkpoint, execute_local_load_plan,
+        TensorDType, TensorSink, build_load_plan, discover_checkpoint, execute_local_load_plan,
         install_float_parameter,
     },
 };
@@ -53,13 +53,18 @@ impl Gpt2CheckpointLayout {
     }
 
     /// Selects only an unambiguous storage owner; mixed namespaces are rejected.
-    pub fn detect(manifest: &CheckpointManifest) -> Result<Self, Gpt2LoadError> {
+    ///
+    /// # Errors
+    ///
+    /// `Gpt2CheckpointLoadError::Namespace` unless exactly one of `wte.weight`
+    /// and `transformer.wte.weight` is present.
+    pub fn detect(manifest: &CheckpointManifest) -> Result<Self, Gpt2CheckpointLoadError> {
         let backbone = manifest.tensors.contains_key("wte.weight");
         let lm = manifest.tensors.contains_key("transformer.wte.weight");
         match (backbone, lm) {
             (true, false) => Ok(Self::Backbone),
             (false, true) => Ok(Self::LanguageModel),
-            _ => Err(Gpt2LoadError::Target(
+            _ => Err(Gpt2CheckpointLoadError::Namespace(
                 "expected exactly one GPT-2 token-embedding namespace".into(),
             )),
         }
@@ -81,7 +86,10 @@ pub struct Gpt2CheckpointContract {
 
 impl Gpt2CheckpointContract {
     /// Derives shapes from a validated graph, including the tied readout alias.
-    pub fn new(config: &Gpt2Config, layout: Gpt2CheckpointLayout) -> Result<Self, Gpt2LoadError> {
+    pub fn new(
+        config: &Gpt2Config,
+        layout: Gpt2CheckpointLayout,
+    ) -> Result<Self, Gpt2CheckpointLoadError> {
         config.validate()?;
         let mut contract = Self {
             expected: Vec::new(),
@@ -216,40 +224,31 @@ impl Gpt2CheckpointContract {
         &self,
         manifest: &CheckpointManifest,
         options: &LoadOptions,
-    ) -> Result<LoadPlan, Gpt2LoadError> {
+    ) -> Result<LoadPlan, Gpt2CheckpointLoadError> {
         let mut options = options.clone();
         self.configure_load_options(&mut options);
         let plan = build_load_plan(manifest, &self.expected, &self.mappings, &options)?;
-        if plan.tensors.iter().any(|tensor| !tensor.dtype.is_float()) {
-            return Err(Gpt2LoadError::Target(
-                "GPT-2 parameters must be floating point".into(),
-            ));
+        if let Some(tensor) = plan.tensors.iter().find(|tensor| !tensor.dtype.is_float()) {
+            return Err(Gpt2CheckpointLoadError::NonFloatParameter {
+                target: tensor.target.clone(),
+                dtype: tensor.dtype,
+            });
         }
         Ok(plan)
     }
 }
 
-/// Contextual configuration, discovery, mapping, or parameter-installation error.
-#[derive(Debug, thiserror::Error)]
+/// Contextual failure while installing one planned GPT-2 parameter.
+///
+/// This is the [`TensorSink`] error of [`Gpt2Model`] and [`Gpt2ForCausalLm`];
+/// a complete load reports it inside `Gpt2CheckpointLoadError::Execution`.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Gpt2LoadError {
-    /// The declared graph is invalid.
-    #[error(transparent)]
-    Configuration(
-        /// Invalid graph configuration or dimension contract.
-        #[from]
-        Error,
-    ),
-    /// Bounded local discovery or mapping failed.
-    #[error(transparent)]
-    Checkpoint(
-        /// Local artifact discovery or strict metadata failure.
-        #[from]
-        CheckpointError,
-    ),
     /// The target did not name a parameter in this exact graph.
     #[error("invalid GPT-2 checkpoint target: {0}")]
     Target(
-        /// Rejected parameter target or namespace diagnostic.
+        /// Rejected parameter target, absent bias, or alias diagnostic.
         String,
     ),
     /// Rank, layout, dtype, device storage, or payload disagreed with a parameter.
@@ -261,7 +260,46 @@ pub enum Gpt2LoadError {
         #[source]
         source: ParameterInstallError,
     },
-    /// Streaming failed after zero or more writes; includes the partial report.
+}
+
+/// Failure from configuration, namespace detection, strict planning, or streamed execution.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+#[expect(
+    unnameable_types,
+    reason = "public load methods return this type, so src/models/gpt2.rs must re-export it; \
+              delete this expectation in the change that adds that re-export"
+)]
+pub enum Gpt2CheckpointLoadError {
+    /// The declared graph is invalid.
+    #[error(transparent)]
+    Configuration(
+        /// Invalid graph configuration or dimension contract.
+        #[from]
+        Error,
+    ),
+    /// Bounded local discovery or strict metadata validation failed.
+    #[error(transparent)]
+    Checkpoint(
+        /// Local artifact discovery or strict metadata failure.
+        #[from]
+        CheckpointError,
+    ),
+    /// The checkpoint holds no single supported GPT-2 namespace.
+    #[error("invalid GPT-2 checkpoint namespace: {0}")]
+    Namespace(
+        /// Detection diagnostic naming the expected token-embedding owners.
+        String,
+    ),
+    /// A planned parameter is stored in a non-floating dtype.
+    #[error("GPT-2 parameters must be floating point; `{target}` is {dtype}")]
+    NonFloatParameter {
+        /// Runtime target of the first non-floating planned tensor.
+        target: String,
+        /// Its planned dtype.
+        dtype: TensorDType,
+    },
+    /// Streaming failed after zero or more writes; discard the partially loaded model.
     #[error(transparent)]
     Execution(
         /// Partial execution report and underlying parameter failure.
@@ -270,17 +308,35 @@ pub enum Gpt2LoadError {
     ),
 }
 
+impl Gpt2CheckpointLoadError {
+    /// Returns the exact partial report if loading reached execution.
+    #[must_use]
+    pub fn execution_failure(&self) -> Option<&ExecutionFailure<Gpt2LoadError>> {
+        match self {
+            Self::Execution(failure) => Some(failure),
+            Self::Configuration(_)
+            | Self::Checkpoint(_)
+            | Self::Namespace(_)
+            | Self::NonFloatParameter { .. } => None,
+        }
+    }
+}
+
 impl<B: Backend> Gpt2Model<B> {
     /// Loads a local checkpoint after complete metadata preflight.
     ///
     /// Only the embedding owner determines the supported namespace. Legacy mask
     /// buffers are ignored explicitly; redundant LM-head bytes must equal the
     /// tied embedding. Discard the model after a streaming execution failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Gpt2CheckpointLoadError` naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
-    ) -> Result<ExecutionOutcome, Gpt2LoadError> {
+    ) -> Result<ExecutionOutcome, Gpt2CheckpointLoadError> {
         let root = root.as_ref();
         // An index can omit a physical tied head. Try each explicit namespace
         // with its alias policy in place before discovery; never allow one
@@ -296,7 +352,7 @@ impl<B: Backend> Gpt2Model<B> {
             let manifest = match discover_checkpoint(root, &configured) {
                 Ok(manifest) => manifest,
                 Err(error) => {
-                    failure = Some(Gpt2LoadError::Checkpoint(error));
+                    failure = Some(Gpt2CheckpointLoadError::Checkpoint(error));
                     continue;
                 }
             };
@@ -307,18 +363,25 @@ impl<B: Backend> Gpt2Model<B> {
             return Ok(execute_local_load_plan(&manifest, &plan, self)?);
         }
         Err(failure.unwrap_or_else(|| {
-            Gpt2LoadError::Target("no supported GPT-2 checkpoint namespace".into())
+            Gpt2CheckpointLoadError::Namespace("no supported GPT-2 checkpoint namespace".into())
         }))
     }
 }
 
 impl<B: Backend> Gpt2ForCausalLm<B> {
     /// Strictly loads the public backbone and verifies any tied vocabulary alias.
+    ///
+    /// Detects the backbone (`wte.weight`) or language-model
+    /// (`transformer.wte.weight`) namespace as [`Gpt2Model::load_checkpoint`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Gpt2CheckpointLoadError` naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
-    ) -> Result<ExecutionOutcome, Gpt2LoadError> {
+    ) -> Result<ExecutionOutcome, Gpt2CheckpointLoadError> {
         self.model.load_checkpoint(root, options)
     }
 }

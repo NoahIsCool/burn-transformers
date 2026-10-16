@@ -6,6 +6,15 @@
 //! bridge between the two: it recognizes only names emitted by the Qwen
 //! checkpoint contract and installs each tensor through Burn's ordinary record
 //! mapper so column-layout projections retain their checkpoint transpose.
+//!
+//! [`Qwen3_5ForCausalLm::load_checkpoint`] is the concrete-family entry point:
+//! it detects the multimodal or text-only namespace with the crate's shared
+//! classifier (the one automatic loading uses), expects the optional MTP
+//! tensors exactly when the model owns an MTP graph, and streams the strict
+//! plan into this sink. [`Qwen3_5ForCausalLm::load_checkpoint_with`] takes
+//! both choices explicitly.
+
+use std::path::Path;
 
 use burn::{
     module::Param,
@@ -15,11 +24,18 @@ use burn::{
 use thiserror::Error;
 
 use crate::{
-    checkpoint::{PackedLayoutPolicy, ParameterInstallError, TensorSink, install_packed_parameter},
+    checkpoint::{
+        CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, KeyMatcher,
+        LanguageNamespace, LoadOptions, PackedLayoutPolicy, ParameterInstallError, TensorSink,
+        execute_local_load_plan, install_packed_parameter,
+    },
     normalization::RmsNorm,
 };
 
-use super::{Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5Mtp, Qwen3_5TextModel};
+use super::{
+    ConfigError, Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5DecoderLayer,
+    Qwen3_5ForCausalLm, Qwen3_5Mtp, Qwen3_5TextModel,
+};
 
 /// Architecture-specific failure while applying a validated Qwen load plan.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -66,6 +82,153 @@ pub enum Qwen3_5LoadError {
         /// Human-readable contract violation.
         reason: String,
     },
+}
+
+/// Failure from topology validation, namespace detection, strict planning, or streamed execution.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+#[expect(
+    unnameable_types,
+    reason = "public load methods return this type, so src/models/qwen3_5.rs must re-export it; \
+              delete this expectation in the change that adds that re-export"
+)]
+pub enum Qwen3_5CheckpointLoadError {
+    /// The model topology cannot describe a valid Qwen3.5-family checkpoint.
+    #[error(transparent)]
+    Config(
+        /// Invalid configuration and its field-level diagnostic.
+        #[from]
+        ConfigError,
+    ),
+    /// Artifact discovery, namespace detection, or complete expected/observed validation failed.
+    #[error(transparent)]
+    Checkpoint(
+        /// Discovery, [`CheckpointError::LanguageNamespaceNotFound`] or
+        /// [`CheckpointError::AmbiguousLanguageNamespace`], or load-plan failure.
+        #[from]
+        CheckpointError,
+    ),
+    /// The model owns an MTP graph that a base-only load would leave uninitialized.
+    #[error(
+        "the Qwen model owns a multi-token-prediction graph that a base-only load would leave \
+         uninitialized; set `include_mtp` or initialize with `mtp_num_hidden_layers = 0`"
+    )]
+    UnloadedMtpGraph,
+    /// MTP tensors were requested for a model initialized without an MTP graph.
+    #[error(
+        "MTP tensors were requested, but the Qwen model has no multi-token-prediction graph; \
+         initialize it with `mtp_num_hidden_layers > 0`"
+    )]
+    MissingMtpGraph,
+    /// Pass two failed after zero or more audited sink writes.
+    #[error(transparent)]
+    Execution(
+        /// Sink failure together with the writes and diagnostics completed so far.
+        #[from]
+        Box<ExecutionFailure<Qwen3_5LoadError>>,
+    ),
+}
+
+impl Qwen3_5CheckpointLoadError {
+    /// Returns partial pass-two diagnostics when execution reached the sink.
+    #[must_use]
+    pub fn execution_failure(&self) -> Option<&ExecutionFailure<Qwen3_5LoadError>> {
+        match self {
+            Self::Execution(failure) => Some(failure),
+            Self::Config(_)
+            | Self::Checkpoint(_)
+            | Self::UnloadedMtpGraph
+            | Self::MissingMtpGraph => None,
+        }
+    }
+}
+
+impl<B: Backend> Qwen3_5ForCausalLm<B> {
+    /// Strictly discovers, validates, and streams a local Qwen3.5-family checkpoint.
+    ///
+    /// The language namespace is detected from the tensor names: an official
+    /// multimodal repository (`model.language_model.*`, whose vision tower is
+    /// reported as intentionally ignored) or a standalone text checkpoint. The
+    /// optional multi-token-prediction tensors are expected exactly when this
+    /// model owns an MTP graph, that is, when it was initialized with
+    /// `mtp_num_hidden_layers > 0`. A base-only model (initialized with
+    /// `mtp_num_hidden_layers = 0`) reports any `mtp.*` tensors as
+    /// intentionally ignored, as automatic loading without
+    /// `AutoLoadOptions::qwen_mtp` does. No network access is performed. A missing,
+    /// unexpected, misshapen, or disallowed-dtype tensor fails before the first
+    /// payload read. After an execution failure the partially initialized
+    /// model must be discarded.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Qwen3_5CheckpointLoadError` naming the failing stage.
+    pub fn load_checkpoint(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+    ) -> Result<ExecutionOutcome, Qwen3_5CheckpointLoadError> {
+        let manifest = CheckpointManifest::discover(root, options)?;
+        let source = match LanguageNamespace::of_manifest(&manifest, "Qwen")? {
+            LanguageNamespace::Wrapped => Qwen3_5CheckpointSource::Multimodal,
+            LanguageNamespace::TextOnly => Qwen3_5CheckpointSource::TextOnly,
+        };
+        let family_options = Qwen3_5CheckpointOptions {
+            source,
+            include_mtp: self.mtp.is_some(),
+        };
+        self.load_discovered(&manifest, options, family_options)
+    }
+
+    /// Loads a local checkpoint with an explicit namespace and MTP policy.
+    ///
+    /// Use this to force the `source` layout or to request MTP tensors
+    /// explicitly; [`Self::load_checkpoint`] detects both.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`]; additionally, before any planning,
+    /// `Qwen3_5CheckpointLoadError::UnloadedMtpGraph` when `include_mtp` is
+    /// false but the model owns an MTP graph, which would stay randomly
+    /// initialized and reachable through the speculative API, and
+    /// `Qwen3_5CheckpointLoadError::MissingMtpGraph` when `include_mtp` is
+    /// true but the model has no MTP graph to receive the tensors.
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: Qwen3_5CheckpointOptions,
+    ) -> Result<ExecutionOutcome, Qwen3_5CheckpointLoadError> {
+        let manifest = CheckpointManifest::discover(root, options)?;
+        self.load_discovered(&manifest, options, family_options)
+    }
+
+    /// Plans a discovered checkpoint under `family_options` and streams it into this model.
+    fn load_discovered(
+        &mut self,
+        manifest: &CheckpointManifest,
+        options: &LoadOptions,
+        family_options: Qwen3_5CheckpointOptions,
+    ) -> Result<ExecutionOutcome, Qwen3_5CheckpointLoadError> {
+        match (self.mtp.is_some(), family_options.include_mtp) {
+            (true, false) => return Err(Qwen3_5CheckpointLoadError::UnloadedMtpGraph),
+            (false, true) => return Err(Qwen3_5CheckpointLoadError::MissingMtpGraph),
+            _ => {}
+        }
+        let mut options = options.clone();
+        if self.mtp.is_none() {
+            // A base-only graph ignores the optional MTP subsystem exactly as
+            // the contract's own exemption does for a configuration that
+            // declares MTP layers: `mtp.*` is reported as intentionally
+            // ignored, never as unexpected and never half-loaded.
+            let mtp = KeyMatcher::prefix("mtp.");
+            if !options.allow_unexpected.contains(&mtp) {
+                options.allow_unexpected.push(mtp);
+            }
+        }
+        let contract = self.config().checkpoint_contract(family_options)?;
+        let plan = contract.build_load_plan(manifest, &options)?;
+        Ok(execute_local_load_plan(manifest, &plan, self)?)
+    }
 }
 
 impl<B: Backend> TensorSink for Qwen3_5TextModel<B> {

@@ -128,10 +128,27 @@ impl<B: Backend> LlamaForCausalLm<B> {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, LlamaCheckpointLoadError> {
+        self.load_checkpoint_with(root, options, LlamaCheckpointOptions::default())
+    }
+
+    /// Loads a local checkpoint under explicit family checkpoint options.
+    ///
+    /// [`LlamaCheckpointOptions`] has no fields yet, so this equals
+    /// [`Self::load_checkpoint`]. It exists so every family offers the same
+    /// `load_checkpoint` / `load_checkpoint_with` pair; see
+    /// [concrete-family loading](crate::checkpoint#loading-a-concrete-family).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`].
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: LlamaCheckpointOptions,
+    ) -> Result<ExecutionOutcome, LlamaCheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
-        let contract = self
-            .config()
-            .checkpoint_contract(LlamaCheckpointOptions::default())?;
+        let contract = self.config().checkpoint_contract(family_options)?;
         let plan = contract.build_load_plan(&manifest, options)?;
         Ok(execute_local_load_plan(&manifest, &plan, self)?)
     }

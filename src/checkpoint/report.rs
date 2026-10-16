@@ -86,14 +86,31 @@ pub struct DTypeConversion {
     pub target_dtype: TensorDType,
 }
 
-/// Records runtime quantization applied while streaming a parameter.
+/// Records one parameter carried in a packed quantized artifact form.
+///
+/// Two producers write these records: the Burnpack quantizer, for each payload
+/// it stages into a sidecar, and a packed load, for each sidecar payload that
+/// the architecture sink accepted. Either way the record describes the
+/// artifact, not the model's in-memory storage. A packed load may install a
+/// weight as its exact dequantized float values instead (see
+/// [`install_packed_parameter`](super::install_packed_parameter) and
+/// [`PackedInstall::Dequantized`](super::PackedInstall::Dequantized)); the
+/// certified packed families do so wherever
+/// [`packed_layout_is_exact`](super::packed_layout_is_exact) is `false`, as on
+/// Burn Flex 0.21.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationRecord {
     /// Target model parameter.
     pub target: String,
-    /// Stable scheme name, such as `symmetric-q4-g64-axis0`.
+    /// Stable scheme name of the packed artifact form, such as
+    /// `symmetric-q4-g64-axis0`.
     pub scheme: String,
-    /// Quantized byte count written to the target store.
+    /// Packed payload bytes (quantized values plus scales) of the artifact form.
+    ///
+    /// The records of a successful packed load sum to the Burnpack's decoded
+    /// payload counters, which [`crate::loaded`] cross-checks. This is not a
+    /// model memory figure: a weight installed as exact dequantized float
+    /// values occupies its float size instead.
     pub bytes: u64,
 }
 
@@ -143,7 +160,12 @@ pub struct LoadReport {
     pub equivalence_verified: Vec<CheckpointEquivalenceRecord>,
     /// Dtype conversions planned or performed.
     pub dtype_converted: Vec<DTypeConversion>,
-    /// Weight-only quantization performed by the runtime loader.
+    /// Parameters carried in a packed quantized artifact form: staged into a
+    /// Burnpack sidecar, or read from one and accepted by the sink.
+    ///
+    /// Each record names the artifact's scheme and payload size; the installed
+    /// storage may instead be exact dequantized float values (see
+    /// [`QuantizationRecord`]).
     pub quantized: Vec<QuantizationRecord>,
     /// Unexpected source tensors accepted by an explicit allowlist.
     pub allowlisted_ignored: Vec<String>,

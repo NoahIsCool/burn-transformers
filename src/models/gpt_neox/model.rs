@@ -33,6 +33,20 @@
 //! index `i` for `i < L`, crate index `L` is block `L - 1`'s raw output (the
 //! residual a final-layer lens needs), and crate index `L + 1` equals HF
 //! index `L`.
+//!
+//! # Diagnostics
+//!
+//! Requests in [`ForwardOptions`] behave as in every other dense family, so a
+//! family-generic experiment runs unchanged on Pythia:
+//!
+//! - `attentions` is rejected before any work with [`Error::BackendCapability`],
+//!   exactly as GPT-2 rejects it: probabilities are not returned in
+//!   [`CausalLmOutput::attentions`] but are captured through the
+//!   `self_attention().pattern()` hook points of the default eager precision
+//!   mode;
+//! - `router_logits` and `auxiliary_losses` succeed with empty
+//!   [`CausalLmOutput::routers`] and no load-balancing loss, because every
+//!   block is dense and there is nothing to route.
 
 use burn::{
     module::{Initializer, Module},
@@ -262,11 +276,14 @@ pub struct GptNeoXForCausalLm<B: Backend> {
     pub(super) config: GptNeoXConfig,
 }
 
-/// Former name of [`GptNeoXForCausalLm`], kept so existing code compiles unchanged.
+/// Pre-release name of [`GptNeoXForCausalLm`], scheduled for removal; use that name instead.
 ///
-/// The model owns its vocabulary head, so the `ForCausalLm` name matches
-/// Hugging Face and [`crate::models::gpt2::Gpt2ForCausalLm`]; prefer it in new
-/// code.
+/// GPT-NeoX was never part of a release, so no released code depends on this
+/// alias, and it breaks the crate's naming convention: elsewhere `…Model`
+/// (such as [`crate::models::gpt2::Gpt2Model`] or
+/// [`crate::models::llama::LlamaModel`]) names a headless backbone, while this
+/// type owns its vocabulary head. It is not `#[deprecated]` only because the
+/// family module re-exports it; both lines go away together before release.
 pub type GptNeoXModel<B> = GptNeoXForCausalLm<B>;
 
 impl<B: Backend> GptNeoXForCausalLm<B> {
@@ -381,6 +398,10 @@ impl<B: Backend> GptNeoXForCausalLm<B> {
     }
 
     /// Validates diagnostic requests and scopes hooks around backbone execution and selected readout.
+    ///
+    /// See the module's "Diagnostics" section: `options.attentions` fails with
+    /// [`Error::BackendCapability`] before any work, while `router_logits` and
+    /// `auxiliary_losses` succeed with empty dense diagnostics.
     fn forward_direction(
         &self,
         input: CausalLmInput<B>,
@@ -389,11 +410,17 @@ impl<B: Backend> GptNeoXForCausalLm<B> {
         hooks: &mut Hooks<'_, B>,
     ) -> Result<CausalLmOutput<B>> {
         hooks.run(self.activation_points(), |hooks| {
-            if options.attentions || options.router_logits || options.auxiliary_losses {
-                return Err(Error::configuration("gpt_neox.forward_options", "use attention pattern hooks for probabilities; this dense model has no router diagnostics"));
+            if options.attentions {
+                return Err(Error::BackendCapability(
+                    "GPT-NeoX attention probabilities are available through \
+                     self_attention().pattern() hooks"
+                        .into(),
+                ));
             }
-            let (hidden, hidden_states) = self.backbone(&input, options.hidden_states, causal, hooks)?;
-            let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
+            let (hidden, hidden_states) =
+                self.backbone(&input, options.hidden_states, causal, hooks)?;
+            let selected =
+                select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
             let mut output = CausalLmOutput::from_logits(self.readout(selected)?);
             output.final_hidden_state = options.hidden_states.then_some(hidden);
             output.hidden_states = hidden_states;

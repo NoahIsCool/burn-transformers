@@ -794,3 +794,183 @@ fn batch_and_axis_helpers_select_by_semantic_axis() {
     assert_eq!(borrowed.dims(), [1, 3, 1]);
     assert_eq!(values(borrowed), [1.0, 3.0, 5.0]);
 }
+
+/// MoE constructors on [`Layer`] name `<stack>.layers.<i>.mlp.<suffix>` with the families' axes.
+///
+/// Router scores and weights end in the expert and expert-slot axes; routed
+/// and shared expert outputs are ordinary hidden states. The router points
+/// equal the Qwen3-MoE constructors that gpt-oss also emits.
+#[test]
+fn moe_layer_points_have_documented_names_and_axes() {
+    use super::PointInfo;
+
+    let layer = Layer::decoder(3);
+    let info = |name: &str, last: Axis| PointInfo {
+        name: name.into(),
+        axes: vec![Axis::Batch, Axis::Token, last],
+    };
+    assert_eq!(Axis::EXPERT, Axis::Other("expert"));
+    assert_eq!(Axis::EXPERT_SLOT, Axis::Other("expert_slot"));
+    assert_eq!(
+        layer.router_logits().info(),
+        info("decoder.layers.3.mlp.router_logits", Axis::EXPERT)
+    );
+    assert_eq!(
+        layer.router_weights().info(),
+        info("decoder.layers.3.mlp.router_weights", Axis::EXPERT_SLOT)
+    );
+    assert_eq!(
+        layer.routed_output().info(),
+        info("decoder.layers.3.mlp.routed_output", Axis::Channel)
+    );
+    assert_eq!(
+        layer.shared_output().info(),
+        info("decoder.layers.3.mlp.shared_output", Axis::Channel)
+    );
+    assert_eq!(
+        Layer::encoder(0).router_logits().info().name,
+        "encoder.layers.0.mlp.router_logits"
+    );
+    assert_eq!(
+        layer.router_logits(),
+        crate::models::qwen3_moe::router_logits_point(layer)
+    );
+    assert_eq!(
+        layer.router_weights(),
+        crate::models::qwen3_moe::router_weights_point(layer)
+    );
+}
+
+/// Captures every MoE point a sparse model lists through the [`Layer`] constructors.
+///
+/// Each constructor whose point the catalog lists for `layer` is captured in
+/// full, and the router logits also through an [`Axis::EXPERT`] slice of one
+/// expert. Returns how many constructors the catalog listed, after checking
+/// the captured `[batch, token, last]` extents against `last_extents` (router
+/// logits, router weights, routed output, shared output).
+fn capture_moe_points<M>(
+    model: &M,
+    input: crate::CausalLmInput<B>,
+    layer: Layer,
+    last_extents: [usize; 4],
+) -> usize
+where
+    M: crate::architecture::HookedModel<
+            B,
+            Input = crate::CausalLmInput<B>,
+            Output = crate::CausalLmOutput<B>,
+        >,
+{
+    let catalog = model.activation_points().unwrap();
+    let tokens = input.token_ids.dims()[1];
+    let mut hooks = Hooks::<B>::new();
+    let points = [
+        layer.router_logits(),
+        layer.router_weights(),
+        layer.routed_output(),
+        layer.shared_output(),
+    ];
+    let captures = points
+        .iter()
+        .zip(last_extents)
+        .filter(|(point, _)| catalog.contains(&point.info()))
+        .map(|(point, extent)| (hooks.capture(point), extent))
+        .collect::<Vec<_>>();
+    let one_expert = hooks.capture(layer.router_logits().slice(Axis::EXPERT, 1..2));
+    model
+        .forward_with_hooks(input, &crate::ForwardOptions::default(), &mut hooks)
+        .unwrap();
+    for (capture, extent) in &captures {
+        assert_eq!(hooks.get(capture).unwrap().dims(), [1, tokens, *extent]);
+    }
+    assert_eq!(hooks.get(&one_expert).unwrap().dims(), [1, tokens, 1]);
+    captures.len()
+}
+
+/// Qwen3-MoE, gpt-oss, and DeepSeek emit their MoE points under the shared [`Layer`] constructors.
+///
+/// Qwen3-MoE and gpt-oss emit router logits and weights in every sparse
+/// layer; DeepSeek emits router logits, the routed sum, and the shared expert
+/// in its sparse layer 1 and none of them in its dense layer 0.
+#[test]
+fn moe_layer_points_capture_from_every_sparse_family() {
+    use crate::models::{
+        deepseek_v2::{DeepseekV2ForCausalLm, model::tests_support::tiny_config as deepseek},
+        gpt_oss::{GptOssConfig, GptOssForCausalLm},
+        qwen3_moe::{Qwen3MoeConfig, Qwen3MoeForCausalLm},
+    };
+
+    let device = Default::default();
+    let input = || crate::CausalLmInput {
+        token_ids: Tensor::<B, 2, burn::tensor::Int>::from_ints([[1, 4, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+
+    let qwen = Qwen3MoeForCausalLm::<B>::init(
+        Qwen3MoeConfig {
+            vocab_size: 16,
+            hidden_size: 4,
+            intermediate_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 2,
+            max_position_embeddings: 16,
+            max_window_layers: 1,
+            decoder_sparse_step: 1,
+            moe_intermediate_size: 3,
+            num_experts: 3,
+            num_experts_per_tok: 2,
+            norm_topk_prob: true,
+            ..Qwen3MoeConfig::default()
+        },
+        &device,
+    )
+    .unwrap();
+    assert_eq!(
+        capture_moe_points(&qwen, input(), Layer::decoder(0), [3, 2, 4, 4]),
+        2
+    );
+
+    let gpt_oss = GptOssForCausalLm::<B>::init(
+        GptOssConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            intermediate_size: 6,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            num_local_experts: 4,
+            num_experts_per_tok: 2,
+            sliding_window: Some(2),
+            layer_types: GptOssConfig::default_layer_types(2),
+            max_position_embeddings: 16,
+            ..GptOssConfig::default()
+        },
+        &device,
+    )
+    .unwrap();
+    for layer in [Layer::decoder(0), Layer::decoder(1)] {
+        assert_eq!(
+            capture_moe_points(&gpt_oss, input(), layer, [4, 2, 8, 8]),
+            2
+        );
+    }
+
+    let deepseek = DeepseekV2ForCausalLm::<B>::init(deepseek(), &device).unwrap();
+    assert_eq!(
+        capture_moe_points(&deepseek, input(), Layer::decoder(1), [4, 2, 8, 8]),
+        3
+    );
+    let catalog = crate::architecture::HookedModel::activation_points(&deepseek).unwrap();
+    let dense = Layer::decoder(0);
+    for point in [
+        dense.router_logits(),
+        dense.routed_output(),
+        dense.shared_output(),
+    ] {
+        assert!(!catalog.contains(&point.info()), "{:?}", point.info());
+    }
+}

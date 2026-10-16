@@ -910,3 +910,478 @@ fn tied_alias_rejects_a_model_that_owns_a_head() {
         })
     );
 }
+
+/// Deterministic `[rows, columns]` payload whose row magnitudes grow by `1 + 0.37 * row`.
+///
+/// Every `[1, G]` quantization block of such a matrix has its own scale, so a
+/// backend that requantizes the transposed buffer over runs of the *input*
+/// axis (Burn Flex 0.21) cannot reproduce the artifact's blocks.
+fn row_scaled_values(name: &str, shape: &[usize]) -> Vec<f32> {
+    let columns = shape.last().copied().unwrap_or(1).max(1);
+    let elements = shape.iter().product::<usize>();
+    let seed = name
+        .bytes()
+        .fold(0_usize, |state, byte| state.wrapping_add(byte as usize));
+    (0..elements)
+        .map(|index| {
+            let row = index / columns;
+            (((index * 7 + seed) % 31) as f32 - 15.0) * 0.002 * (1.0 + 0.37 * row as f32)
+        })
+        .collect()
+}
+
+/// Asserts a column-layout `[in, out]` linear weight holds exactly the dequantized `[out, in]` artifact.
+///
+/// The installed weight must be packed QFloat exactly when the backend keeps
+/// the artifact's blocks through the transpose, and plain float otherwise.
+fn assert_exact_artifact(target: &str, weight: Tensor<TestBackend, 2>, artifact: &TensorData) {
+    let packed = matches!(weight.dtype(), burn::tensor::DType::QFloat(_));
+    let exact_layout = crate::checkpoint::packed_layout_is_exact::<TestBackend>(&weight.device());
+    let installed = if packed { weight.dequantize() } else { weight };
+    let [inputs, outputs] = installed.dims();
+    assert_eq!(artifact.shape.to_vec(), vec![outputs, inputs], "{target}");
+    let values = installed.into_data().to_vec::<f32>().unwrap();
+    let expected = artifact.to_vec::<f32>().unwrap();
+    let mismatches = (0..inputs * outputs)
+        .filter(|&flat| {
+            let (input, output) = (flat / outputs, flat % outputs);
+            values[flat].to_bits() != expected[output * inputs + input].to_bits()
+        })
+        .count();
+    assert_eq!(
+        mismatches, 0,
+        "{target}: installed weight differs from the artifact at {mismatches} entries"
+    );
+    assert_eq!(
+        packed, exact_layout,
+        "{target}: packed storage must be kept exactly when the backend's layout is exact"
+    );
+}
+
+/// Packed sidecar weights install exactly the artifact, never a requantized approximation.
+///
+/// Every quantization-eligible projection (attention, both experts, LM head) is
+/// written as Q8 `[1, 32]`-block QFloat data, the form the Burnpack sidecar
+/// streams into the sink. On a backend whose quantized transpose requantizes
+/// (Burn Flex 0.21), the column-layout weights must hold the exact dequantized
+/// artifact in float storage; where the transpose is exact they stay packed.
+/// The fully packed graph must still execute.
+#[test]
+fn packed_projections_install_the_artifact_exactly() {
+    use crate::checkpoint::quantization::{
+        QuantizationEligibility, QuantizationGroupSize, WeightQuantizationConfig,
+        classify_weight_for_quantization, quantize_tensor_data,
+    };
+
+    let config = Qwen3MoeConfig {
+        vocab_size: 64,
+        hidden_size: 64,
+        intermediate_size: 64,
+        num_hidden_layers: 1,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 16,
+        max_position_embeddings: 16,
+        max_window_layers: 1,
+        decoder_sparse_step: 1,
+        moe_intermediate_size: 64,
+        num_experts: 2,
+        num_experts_per_tok: 1,
+        norm_topk_prob: true,
+        tie_word_embeddings: false,
+        ..Default::default()
+    };
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .unwrap();
+    let device = Default::default();
+    let mut model = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let quantization = WeightQuantizationConfig {
+        group_size: QuantizationGroupSize::new(32).unwrap(),
+        ..WeightQuantizationConfig::default()
+    };
+    let mut artifacts = std::collections::BTreeMap::new();
+    for expected in contract.expected_tensors() {
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&dimension| dimension as usize)
+            .collect::<Vec<_>>();
+        let source = TensorData::new(row_scaled_values(&expected.name, &shape), shape.clone());
+        let data = match classify_weight_for_quantization(&expected.name, &shape) {
+            QuantizationEligibility::Eligible => {
+                let quantized = quantize_tensor_data(&source, quantization).unwrap();
+                artifacts.insert(expected.name.clone(), quantized.dequantize_f32().unwrap());
+                quantized.into_burn_qfloat_data().unwrap()
+            }
+            QuantizationEligibility::Excluded(_) => source,
+        };
+        model
+            .write_tensor(&expected.name, data)
+            .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
+    }
+    // Four attention projections, three projections for each of two experts, and the head.
+    assert_eq!(artifacts.len(), 11);
+
+    let layer = &model.model.layers[0];
+    let moe = layer.sparse_mlp.as_ref().unwrap();
+    for (target, weight) in [
+        (
+            "lm_head.weight",
+            model.lm_head.as_ref().unwrap().weight.val(),
+        ),
+        (
+            "model.layers.0.self_attn.q_proj.weight",
+            layer.self_attn.q_proj.weight.val(),
+        ),
+        (
+            "model.layers.0.self_attn.o_proj.weight",
+            layer.self_attn.o_proj.weight.val(),
+        ),
+        (
+            "model.layers.0.sparse_mlp.routed.0.gate_proj.weight",
+            moe.routed[0].gate_proj.weight.val(),
+        ),
+        (
+            "model.layers.0.sparse_mlp.routed.1.down_proj.weight",
+            moe.routed[1].down_proj.weight.val(),
+        ),
+    ] {
+        assert_exact_artifact(target, weight, &artifacts[target]);
+    }
+    // Excluded tensors (embedding, norms, router) keep their float source.
+    assert_eq!(
+        model.model.embed_tokens.weight.val().dtype(),
+        burn::tensor::DType::F32
+    );
+    assert_eq!(moe.router.weight.val().dtype(), burn::tensor::DType::F32);
+
+    let output = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        output
+            .logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+}
+
+/// `load_checkpoint_with` under the (empty) family options equals `load_checkpoint`.
+#[test]
+fn load_checkpoint_with_default_options_matches_load_checkpoint() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let detected = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .unwrap()
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap();
+    let explicit = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device)
+        .unwrap()
+        .load_checkpoint_with(
+            temp.path(),
+            &LoadOptions::default(),
+            Qwen3MoeCheckpointOptions::default(),
+        )
+        .unwrap();
+    assert!(explicit.report.is_strictly_valid());
+    assert_eq!(explicit.report, detected.report);
+}
+
+/// Reports Flex install time, forward time, and projection bytes of exact
+/// versus requantized packed installs.
+///
+/// Run with `cargo test --locked --release --lib packed_install_cost_report --
+/// --ignored --nocapture`. Every eligible projection receives the same Q8
+/// `[1, 32]`-block payload, installed three ways:
+///
+/// - exact: [`install_packed_parameter`] under
+///   [`PackedLayoutPolicy::DequantizeWhenInexact`], the sink's current install;
+/// - former: [`install_float_parameter`], the sink's install before packed
+///   weights were made exact, which on Flex keeps QFloat storage but
+///   requantizes it through the transposing load mapper;
+/// - probe + former: [`install_packed_parameter`] under
+///   [`PackedLayoutPolicy::BackendDefault`], which stores the same blocks as
+///   the former install after running the mapper probe, so its difference
+///   from the former install is the probe's cost.
+///
+/// The report prints the time to install every packed projection each way; the
+/// projection storage bytes and the largest logit error relative to the
+/// full-precision source graph's largest logit, for the exact graph and the
+/// former (requantized) graph; and per-call times of both graphs for a
+/// 64-token prefill and a 1-token step.
+///
+/// Every timing is paired so that varying host load affects all variants
+/// alike: each of `ROUNDS` rounds times every variant back to back, rotating
+/// which goes first. The report prints the median and range of the per-round
+/// times and the median per-round ratio to the exact variant, which stays
+/// meaningful when the host's speed drifts between rounds.
+#[test]
+#[ignore = "timing report, not a correctness check"]
+fn packed_install_cost_report() {
+    use std::time::Instant;
+
+    use crate::checkpoint::{
+        PackedLayoutPolicy, install_float_parameter, install_packed_parameter,
+        quantization::{
+            QuantizationEligibility, QuantizationGroupSize, WeightQuantizationConfig,
+            classify_weight_for_quantization, quantize_tensor_data,
+        },
+    };
+
+    /// Timing rounds per measurement; each round times every variant once.
+    const ROUNDS: usize = 9;
+    /// One way of installing a packed payload into a projection weight.
+    type Install = fn(&mut Param<Tensor<TestBackend, 2>>, TensorData);
+
+    let config = Qwen3MoeConfig {
+        vocab_size: 4096,
+        hidden_size: 512,
+        intermediate_size: 1024,
+        num_hidden_layers: 2,
+        num_attention_heads: 8,
+        num_key_value_heads: 4,
+        head_dim: 64,
+        max_position_embeddings: 128,
+        max_window_layers: 2,
+        decoder_sparse_step: 1,
+        moe_intermediate_size: 512,
+        num_experts: 8,
+        num_experts_per_tok: 2,
+        norm_topk_prob: true,
+        tie_word_embeddings: false,
+        ..Default::default()
+    };
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .unwrap();
+    let device = Default::default();
+    let quantization = WeightQuantizationConfig {
+        group_size: QuantizationGroupSize::new(32).unwrap(),
+        ..WeightQuantizationConfig::default()
+    };
+    let template = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let mut source = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let mut exact = Qwen3MoeForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let mut requantized = Qwen3MoeForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let mut packed_payloads = Vec::new();
+    for expected in contract.expected_tensors() {
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&dimension| dimension as usize)
+            .collect::<Vec<_>>();
+        let float = TensorData::new(row_scaled_values(&expected.name, &shape), shape.clone());
+        source.write_tensor(&expected.name, float.clone()).unwrap();
+        match classify_weight_for_quantization(&expected.name, &shape) {
+            QuantizationEligibility::Eligible => {
+                let packed = quantize_tensor_data(&float, quantization)
+                    .unwrap()
+                    .into_burn_qfloat_data()
+                    .unwrap();
+                exact.write_tensor(&expected.name, packed.clone()).unwrap();
+                let target = packed_linear_weight(&mut requantized, &expected.name);
+                install_float_parameter(target, packed.clone()).unwrap();
+                packed_payloads.push((expected.name.clone(), packed));
+            }
+            QuantizationEligibility::Excluded(_) => {
+                exact.write_tensor(&expected.name, float.clone()).unwrap();
+                requantized.write_tensor(&expected.name, float).unwrap();
+            }
+        }
+    }
+
+    let installs: [(&str, Install); 3] = [
+        ("exact (DequantizeWhenInexact)", |target, data| {
+            install_packed_parameter(target, data, PackedLayoutPolicy::DequantizeWhenInexact)
+                .unwrap();
+        }),
+        ("former (install_float_parameter)", |target, data| {
+            install_float_parameter(target, data).unwrap();
+        }),
+        ("probe + former (BackendDefault)", |target, data| {
+            install_packed_parameter(target, data, PackedLayoutPolicy::BackendDefault).unwrap();
+        }),
+    ];
+    let mut install_ms = [Vec::new(), Vec::new(), Vec::new()];
+    for round in 0..ROUNDS {
+        for offset in 0..installs.len() {
+            let variant = (round + offset) % installs.len();
+            let mut model = template.clone();
+            let payloads = packed_payloads.clone();
+            let started = Instant::now();
+            for (name, data) in payloads {
+                (installs[variant].1)(packed_linear_weight(&mut model, &name), data);
+            }
+            install_ms[variant].push(started.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    println!("install all {} packed projections:", packed_payloads.len());
+    for (variant, (label, _)) in installs.iter().enumerate() {
+        println!(
+            "  {label}: {}",
+            paired_timing_summary(&install_ms[variant], &install_ms[0])
+        );
+    }
+
+    let tokens = |count: usize| CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(
+                (0..count).map(|index| (index * 37 % 4096) as i32).collect(),
+                [1, count],
+            ),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let logits = |model: &Qwen3MoeForCausalLm<TestBackend>| {
+        model
+            .forward(tokens(64), &ForwardOptions::default())
+            .unwrap()
+            .logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+    };
+    let reference = logits(&source);
+    let graphs = [("exact", &exact), ("former (requantized)", &requantized)];
+    for (label, model) in graphs {
+        let projection_bytes = model
+            .lm_head
+            .iter()
+            .chain(model.model.layers.iter().flat_map(|layer| {
+                let moe = layer.sparse_mlp.as_ref().unwrap();
+                [
+                    &layer.self_attn.q_proj,
+                    &layer.self_attn.k_proj,
+                    &layer.self_attn.v_proj,
+                    &layer.self_attn.o_proj,
+                ]
+                .into_iter()
+                .chain(
+                    moe.routed
+                        .iter()
+                        .flat_map(|expert| [&expert.gate_proj, &expert.up_proj, &expert.down_proj]),
+                )
+            }))
+            .map(|linear| linear.weight.val().into_data().bytes.len())
+            .sum::<usize>();
+        // Largest logit error relative to the largest source logit magnitude.
+        let scale = reference
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f32, f32::max);
+        let gap = logits(model)
+            .iter()
+            .zip(&reference)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max)
+            / scale;
+        println!(
+            "{label}: projection bytes {projection_bytes}, max |logit - source| / max |source| \
+             {gap:.3e}"
+        );
+    }
+    for (workload, count, iterations) in [("prefill64", 64, 5_u32), ("step1", 1, 25)] {
+        for (_, model) in graphs {
+            let _ = model.forward(tokens(count), &ForwardOptions::default());
+        }
+        let mut per_call_ms = [Vec::new(), Vec::new()];
+        for round in 0..ROUNDS {
+            for offset in 0..graphs.len() {
+                let graph = (round + offset) % graphs.len();
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    let output = graphs[graph]
+                        .1
+                        .forward(tokens(count), &ForwardOptions::default())
+                        .unwrap();
+                    let _ = output.logits.into_data();
+                }
+                per_call_ms[graph]
+                    .push(started.elapsed().as_secs_f64() * 1e3 / f64::from(iterations));
+            }
+        }
+        for (graph, (label, _)) in graphs.iter().enumerate() {
+            println!(
+                "{workload} {label}: {}",
+                paired_timing_summary(&per_call_ms[graph], &per_call_ms[0])
+            );
+        }
+    }
+}
+
+/// Returns the median of a non-empty sample; for an even count, the upper median.
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
+/// Summarizes paired per-round timings in milliseconds.
+///
+/// `samples[i]` and `baseline[i]` were measured back to back in round `i`, so
+/// their ratio cancels host-speed drift between rounds. Returns the median and
+/// range of `samples` and the median of the ratios `samples[i] / baseline[i]`.
+fn paired_timing_summary(samples: &[f64], baseline: &[f64]) -> String {
+    let ratios = samples
+        .iter()
+        .zip(baseline)
+        .map(|(sample, base)| sample / base)
+        .collect::<Vec<_>>();
+    let low = samples.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    format!(
+        "median {:.3} ms (range {low:.3}-{high:.3}), median ratio to exact {:.3}",
+        median(samples),
+        median(&ratios)
+    )
+}
+
+/// Returns the linear weight parameter a quantization-eligible Qwen3-MoE target names.
+fn packed_linear_weight<'a>(
+    model: &'a mut Qwen3MoeForCausalLm<TestBackend>,
+    target: &str,
+) -> &'a mut Param<Tensor<TestBackend, 2>> {
+    if target == "lm_head.weight" {
+        return &mut model.lm_head.as_mut().unwrap().weight;
+    }
+    let rest = target.strip_prefix("model.layers.").unwrap();
+    let (index, suffix) = rest.split_once('.').unwrap();
+    let layer = &mut model.model.layers[index.parse::<usize>().unwrap()];
+    let linear = match suffix {
+        "self_attn.q_proj.weight" => &mut layer.self_attn.q_proj,
+        "self_attn.k_proj.weight" => &mut layer.self_attn.k_proj,
+        "self_attn.v_proj.weight" => &mut layer.self_attn.v_proj,
+        "self_attn.o_proj.weight" => &mut layer.self_attn.o_proj,
+        expert => {
+            let rest = expert.strip_prefix("sparse_mlp.routed.").unwrap();
+            let (expert, projection) = rest.split_once('.').unwrap();
+            let mlp =
+                &mut layer.sparse_mlp.as_mut().unwrap().routed[expert.parse::<usize>().unwrap()];
+            match projection {
+                "gate_proj.weight" => &mut mlp.gate_proj,
+                "up_proj.weight" => &mut mlp.up_proj,
+                "down_proj.weight" => &mut mlp.down_proj,
+                other => panic!("unexpected expert projection {other}"),
+            }
+        }
+    };
+    &mut linear.weight
+}

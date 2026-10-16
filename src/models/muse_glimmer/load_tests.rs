@@ -142,11 +142,7 @@ fn local_loader_streams_tied_and_untied_text_checkpoints() {
         write_checkpoint(temp.path(), &contract, |_| {});
         let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
         let outcome = model
-            .load_checkpoint_with_family_options(
-                temp.path(),
-                &LoadOptions::default(),
-                family_options,
-            )
+            .load_checkpoint_with(temp.path(), &LoadOptions::default(), family_options)
             .unwrap();
         assert_eq!(
             outcome.report.applied.len(),
@@ -174,11 +170,7 @@ fn malformed_inventory_fails_before_parameter_initialization() {
     });
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(
-            missing.path(),
-            &LoadOptions::default(),
-            family_options,
-        )
+        .load_checkpoint_with(missing.path(), &LoadOptions::default(), family_options)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -192,11 +184,7 @@ fn malformed_inventory_fails_before_parameter_initialization() {
     });
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(
-            unexpected.path(),
-            &LoadOptions::default(),
-            family_options,
-        )
+        .load_checkpoint_with(unexpected.path(), &LoadOptions::default(), family_options)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -217,7 +205,7 @@ fn malformed_inventory_fails_before_parameter_initialization() {
     });
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(wrong.path(), &LoadOptions::default(), family_options)
+        .load_checkpoint_with(wrong.path(), &LoadOptions::default(), family_options)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -522,7 +510,7 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     model.model.config.hidden_activation = "gelu".into();
     let error = model
-        .load_checkpoint_with_family_options(temp.path(), &LoadOptions::default(), options)
+        .load_checkpoint_with(temp.path(), &LoadOptions::default(), options)
         .unwrap_err();
     assert!(
         matches!(&error, MuseGlimmerCheckpointLoadError::Config(config)
@@ -532,11 +520,7 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
 
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
     let error = model
-        .load_checkpoint_with_family_options(
-            temp.path().join("absent"),
-            &LoadOptions::default(),
-            options,
-        )
+        .load_checkpoint_with(temp.path().join("absent"), &LoadOptions::default(), options)
         .unwrap_err();
     assert!(
         matches!(&error, MuseGlimmerCheckpointLoadError::Checkpoint(CheckpointError::Io {
@@ -550,7 +534,7 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
     let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
     model.lm_head = None;
     let error = model
-        .load_checkpoint_with_family_options(temp.path(), &LoadOptions::default(), options)
+        .load_checkpoint_with(temp.path(), &LoadOptions::default(), options)
         .unwrap_err();
     let failure = error
         .execution_failure()
@@ -564,4 +548,294 @@ fn checkpoint_load_errors_distinguish_configuration_planning_and_execution() {
         })
     ));
     assert!(error.to_string().contains("lm_head.weight"), "{error}");
+}
+
+/// Deterministic `[rows, columns]` payload whose row magnitudes grow by `1 + 0.37 * row`.
+///
+/// Every `[1, G]` quantization block of such a matrix has its own scale, so a
+/// backend that requantizes the transposed buffer over runs of the *input*
+/// axis (Burn Flex 0.21) cannot reproduce the artifact's blocks.
+fn row_scaled_values(name: &str, shape: &[usize]) -> Vec<f32> {
+    let columns = shape.last().copied().unwrap_or(1).max(1);
+    let elements = shape.iter().product::<usize>();
+    let seed = name
+        .bytes()
+        .fold(0_usize, |state, byte| state.wrapping_add(byte as usize));
+    (0..elements)
+        .map(|index| {
+            let row = index / columns;
+            (((index * 7 + seed) % 31) as f32 - 15.0) * 0.002 * (1.0 + 0.37 * row as f32)
+        })
+        .collect()
+}
+
+/// Asserts a column-layout `[in, out]` linear weight holds exactly the dequantized `[out, in]` artifact.
+///
+/// The installed weight must be packed QFloat exactly when the backend keeps
+/// the artifact's blocks through the transpose, and plain float otherwise.
+fn assert_exact_artifact(target: &str, weight: Tensor<TestBackend, 2>, artifact: &TensorData) {
+    let packed = matches!(weight.dtype(), burn::tensor::DType::QFloat(_));
+    let exact_layout = crate::checkpoint::packed_layout_is_exact::<TestBackend>(&weight.device());
+    let installed = if packed { weight.dequantize() } else { weight };
+    let [inputs, outputs] = installed.dims();
+    assert_eq!(artifact.shape.to_vec(), vec![outputs, inputs], "{target}");
+    let values = installed.into_data().to_vec::<f32>().unwrap();
+    let expected = artifact.to_vec::<f32>().unwrap();
+    let mismatches = (0..inputs * outputs)
+        .filter(|&flat| {
+            let (input, output) = (flat / outputs, flat % outputs);
+            values[flat].to_bits() != expected[output * inputs + input].to_bits()
+        })
+        .count();
+    assert_eq!(
+        mismatches, 0,
+        "{target}: installed weight differs from the artifact at {mismatches} entries"
+    );
+    assert_eq!(
+        packed, exact_layout,
+        "{target}: packed storage must be kept exactly when the backend's layout is exact"
+    );
+}
+
+/// Packed sidecar weights install exactly the artifact, never a requantized approximation.
+///
+/// Every quantization-eligible projection (five attention and three FFN
+/// matrices per layer, plus the LM head) is written as Q8 `[1, 32]`-block QFloat
+/// data, the form the Burnpack sidecar streams into the sink. On a backend
+/// whose quantized transpose requantizes (Burn Flex 0.21), the column-layout
+/// weights must hold the exact dequantized artifact in float storage; where the
+/// transpose is exact they stay packed. The fully packed graph must still execute.
+#[test]
+fn packed_projections_install_the_artifact_exactly() {
+    use crate::checkpoint::quantization::{
+        QuantizationEligibility, QuantizationGroupSize, WeightQuantizationConfig,
+        classify_weight_for_quantization, quantize_tensor_data,
+    };
+
+    let config = MuseGlimmerTextConfig {
+        vocab_size: 64,
+        hidden_size: 64,
+        intermediate_size: 64,
+        num_hidden_layers: 1,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 16,
+        max_position_embeddings: 16,
+        sliding_window: Some(4),
+        layer_types: vec![super::super::MuseGlimmerLayerType::FullAttention],
+        layer_rope_theta: vec![0.0],
+        bos_token_id: None,
+        eos_token_id: None,
+        tie_word_embeddings: false,
+        attention_bias: true,
+        ..Default::default()
+    };
+    let contract = config
+        .checkpoint_contract(MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        })
+        .unwrap();
+    let device = Default::default();
+    let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let quantization = WeightQuantizationConfig {
+        group_size: QuantizationGroupSize::new(32).unwrap(),
+        ..WeightQuantizationConfig::default()
+    };
+    let mut artifacts = std::collections::BTreeMap::new();
+    for expected in contract.expected_tensors() {
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&dimension| dimension as usize)
+            .collect::<Vec<_>>();
+        let source = TensorData::new(row_scaled_values(&expected.name, &shape), shape.clone());
+        let data = match classify_weight_for_quantization(&expected.name, &shape) {
+            QuantizationEligibility::Eligible => {
+                let quantized = quantize_tensor_data(&source, quantization).unwrap();
+                artifacts.insert(expected.name.clone(), quantized.dequantize_f32().unwrap());
+                quantized.into_burn_qfloat_data().unwrap()
+            }
+            QuantizationEligibility::Excluded(_) => source,
+        };
+        model
+            .write_tensor(&expected.name, data)
+            .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
+    }
+    // Five attention and three FFN projections in the layer, plus the head.
+    assert_eq!(artifacts.len(), 9);
+
+    let layer = &model.model.layers[0];
+    for (target, weight) in [
+        (
+            "lm_head.weight",
+            model.lm_head.as_ref().unwrap().weight.val(),
+        ),
+        (
+            "model.layers.0.self_attn.q_proj.weight",
+            layer.self_attn.q_proj.weight.val(),
+        ),
+        (
+            "model.layers.0.self_attn.gate_proj.weight",
+            layer.self_attn.gate_proj.weight.val(),
+        ),
+        (
+            "model.layers.0.self_attn.o_proj.weight",
+            layer.self_attn.o_proj.weight.val(),
+        ),
+        (
+            "model.layers.0.mlp.down_proj.weight",
+            layer.mlp.down_proj.weight.val(),
+        ),
+    ] {
+        assert_exact_artifact(target, weight, &artifacts[target]);
+    }
+    // Excluded tensors (embedding, norms, biases) keep their float source.
+    assert_eq!(
+        model.model.embed_tokens.weight.val().dtype(),
+        burn::tensor::DType::F32
+    );
+    assert_eq!(
+        layer.self_attn.q_proj.bias.as_ref().unwrap().val().dtype(),
+        burn::tensor::DType::F32
+    );
+
+    let output = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        output
+            .logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+}
+
+/// The default loader detects a text-only checkpoint, as automatic loading does.
+///
+/// Before namespace detection, `load_checkpoint` assumed the multimodal layout
+/// and rejected every standalone text checkpoint as missing and unexpected
+/// tensors.
+#[test]
+fn default_loader_detects_a_text_only_checkpoint() {
+    let device = Default::default();
+    for tied in [false, true] {
+        let config = tiny_config(tied);
+        let contract = config
+            .checkpoint_contract(MuseGlimmerCheckpointOptions {
+                source: MuseGlimmerCheckpointSource::TextOnly,
+            })
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        write_checkpoint(temp.path(), &contract, |tensors| {
+            assert!(
+                tensors
+                    .iter()
+                    .any(|(name, _)| name == "model.embed_tokens.weight")
+            );
+        });
+        let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
+        let outcome = model
+            .load_checkpoint(temp.path(), &LoadOptions::default())
+            .unwrap();
+        assert!(outcome.report.is_strictly_valid());
+        assert_eq!(
+            outcome.report.applied.len(),
+            contract.expected_tensors().len()
+        );
+        assert!(outcome.report.allowlisted_ignored.is_empty());
+    }
+}
+
+/// Neither or both language namespaces fail detection with a typed, family-named error.
+#[test]
+fn default_loader_rejects_missing_and_ambiguous_namespaces() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let contract = config
+        .checkpoint_contract(MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        })
+        .unwrap();
+
+    let ambiguous = TempDir::new().unwrap();
+    write_checkpoint(ambiguous.path(), &contract, |tensors| {
+        tensors.push(("model.language_model.norm.weight".into(), vec![4]));
+    });
+    let mut model = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let error = model
+        .load_checkpoint(ambiguous.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MuseGlimmerCheckpointLoadError::Checkpoint(
+                CheckpointError::AmbiguousLanguageNamespace { family: "Muse" }
+            )
+        ),
+        "{error}"
+    );
+    assert!(!model.model.embed_tokens.weight.is_initialized());
+
+    let neither = TempDir::new().unwrap();
+    write_checkpoint(neither.path(), &contract, |tensors| {
+        tensors.retain(|(name, _)| name == "lm_head.weight");
+    });
+    let error = model
+        .load_checkpoint(neither.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MuseGlimmerCheckpointLoadError::Checkpoint(
+                CheckpointError::LanguageNamespaceNotFound { family: "Muse" }
+            )
+        ),
+        "{error}"
+    );
+    assert!(error.execution_failure().is_none());
+}
+
+/// The 0.1.0 options method forwards unchanged to `load_checkpoint_with`.
+#[test]
+#[allow(deprecated)]
+fn deprecated_family_options_method_forwards_to_load_checkpoint_with() {
+    let device = Default::default();
+    let config = tiny_config(false);
+    let options = MuseGlimmerCheckpointOptions {
+        source: MuseGlimmerCheckpointSource::TextOnly,
+    };
+    let contract = config.checkpoint_contract(options).unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let mut current = MuseGlimmerForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    let mut former = MuseGlimmerForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let expected = current
+        .load_checkpoint_with(temp.path(), &LoadOptions::default(), options)
+        .unwrap();
+    let actual = former
+        .load_checkpoint_with_family_options(temp.path(), &LoadOptions::default(), options)
+        .unwrap();
+    assert_eq!(actual.report, expected.report);
+    // Forcing the other namespace through either name is a strict planning error.
+    let error = former
+        .load_checkpoint_with_family_options(
+            temp.path(),
+            &LoadOptions::default(),
+            MuseGlimmerCheckpointOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        MuseGlimmerCheckpointLoadError::Checkpoint(_)
+    ));
 }

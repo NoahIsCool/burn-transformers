@@ -3626,3 +3626,101 @@ fn grouped_installation_rejects_inconsistent_dispositions() {
     assert!(sink.events.is_empty());
     assert_eq!(stats.source_reads, 0);
 }
+
+/// Installs a dtype-generic `weight` and a contract-pinned `router` into F32-backend parameters.
+struct DTypePolicySink {
+    /// Rank-two parameter whose contract leaves the dtype to [`DTypePolicy`].
+    weight: Param<Tensor<Flex<f32, i32>, 2>>,
+    /// Rank-one parameter whose contract pins F32.
+    router: Param<Tensor<Flex<f32, i32>, 1>>,
+}
+
+impl TensorSink for DTypePolicySink {
+    /// Rejection of an unknown target, an alias, or a failed parameter install.
+    type Error = SinkError;
+
+    /// Installs through [`install_float_parameter`], as every family sink does.
+    fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
+        let installed = match target {
+            "weight" => install_float_parameter(&mut self.weight, data),
+            "router" => install_float_parameter(&mut self.router, data),
+            _ => return Err(SinkError(target.into())),
+        };
+        installed.map_err(|error| SinkError(format!("{target}: {error}")))
+    }
+
+    /// Rejects aliases because this fixture owns two independent parameters.
+    fn alias_tensor(&mut self, target: &str, _source_target: &str) -> Result<(), Self::Error> {
+        Err(SinkError(target.into()))
+    }
+}
+
+/// `Auto` keeps a BF16 checkpoint's dtype on `Flex<f32, _>`; `Cast(F32)` executes in F32.
+///
+/// "Expected" in [`DTypePolicy::Auto`] is the contract's per-tensor dtype, not
+/// the backend's float element: the contract-pinned F32 `router` converts to
+/// F32 under every policy that permits conversion, while the dtype-generic
+/// `weight` keeps BF16 under `Auto` and becomes F32 only under `Cast(F32)`.
+/// `Preserve` refuses to convert the pinned tensor at planning time.
+#[test]
+fn auto_dtype_policy_keeps_checkpoint_floats_whatever_the_backend_float_element() {
+    let weight = FixtureTensor::new(
+        "weight",
+        TensorDType::BF16,
+        [2, 2],
+        u16_bytes(&[0x3F80, 0x4000, 0x4040, 0x4080]),
+    );
+    let router = FixtureTensor::new(
+        "router",
+        TensorDType::BF16,
+        [2],
+        u16_bytes(&[0xBF80, 0x3F00]),
+    );
+    let tensors = [weight, router];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [
+        ExpectedTensor::new("weight", [2, 2]),
+        ExpectedTensor::new("router", [2]).with_dtype(TensorDType::F32),
+    ];
+    let device = Default::default();
+    let load = |dtype_policy| {
+        let options = LoadOptions {
+            dtype_policy,
+            ..LoadOptions::default()
+        };
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &options,
+        )?;
+        let mut sink = DTypePolicySink {
+            weight: Param::from_tensor(Tensor::zeros([2, 2], &device)),
+            router: Param::from_tensor(Tensor::zeros([2], &device)),
+        };
+        execute_local_load_plan(&manifest, &plan, &mut sink).unwrap();
+        Ok::<_, CheckpointError>((sink.weight.val(), sink.router.val()))
+    };
+
+    let (weight, router) = load(DTypePolicy::Auto).unwrap();
+    assert_eq!(weight.dtype(), DType::BF16);
+    assert_eq!(router.dtype(), DType::F32);
+    assert_eq!(
+        weight.cast(DType::F32).into_data().to_vec::<f32>().unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+    assert_eq!(router.into_data().to_vec::<f32>().unwrap(), [-1.0, 0.5]);
+
+    let (weight, router) = load(DTypePolicy::Cast(TensorDType::F32)).unwrap();
+    assert_eq!(weight.dtype(), DType::F32);
+    assert_eq!(router.dtype(), DType::F32);
+    assert_eq!(
+        weight.into_data().to_vec::<f32>().unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+
+    assert!(matches!(
+        load(DTypePolicy::Preserve),
+        Err(CheckpointError::DTypeMismatch { tensor, .. }) if tensor == "router"
+    ));
+}

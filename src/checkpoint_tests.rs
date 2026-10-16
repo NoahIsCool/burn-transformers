@@ -1689,32 +1689,119 @@ fn header_entry_errors_name_their_shard_and_tensor() {
     }
 }
 
+/// Discovers a one-shard checkpoint and returns its `InvalidDataOffsets` tensor and reason.
+fn invalid_data_offsets(header: &[u8], data_bytes: usize) -> (String, String) {
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(temp.path(), "model.safetensors", header, data_bytes);
+    match discover_checkpoint(temp.path(), &LoadOptions::default()) {
+        Err(CheckpointError::InvalidDataOffsets {
+            tensor,
+            shard,
+            reason,
+        }) => {
+            assert_eq!(shard, "model.safetensors");
+            (tensor, reason)
+        }
+        other => panic!("expected InvalidDataOffsets, found {other:?}"),
+    }
+}
+
 #[test]
 /// Reversed payload ranges and ranges outside the file produce distinct diagnostics.
 fn reversed_and_out_of_file_ranges_are_distinguished() {
-    let temp = TempDir::new().unwrap();
-    write_raw_shard(
-        temp.path(),
-        "model.safetensors",
-        br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[2,0]}}"#,
-        2,
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[2,0]}}"#,
+            2,
+        ),
+        ("a".to_owned(), "end 0 precedes start 2".to_owned())
     );
-    assert!(matches!(
-        discover_checkpoint(temp.path(), &LoadOptions::default()),
-        Err(CheckpointError::InvalidDataOffsets { .. })
-    ));
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
+            2,
+        ),
+        (
+            "a".to_owned(),
+            "end 4 exceeds data section size 2".to_owned()
+        )
+    );
+}
 
+#[test]
+/// An out-of-section range is reported at the first violation in byte-offset order, not name order.
+///
+/// `a` sorts first by name but lies after `b` in the data section, and both
+/// end past its two bytes. The verified tiling walks ranges in offset order,
+/// so `b`, which the walk reaches first, is the reported tensor.
+fn out_of_section_ranges_report_the_first_violation_in_offset_order() {
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[4,6]},"b":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
+            2,
+        ),
+        ("b".to_owned(), "end 4 exceeds data section size 2".to_owned())
+    );
+}
+
+#[test]
+/// A gap between consecutive ranges and an uncovered data tail are rejected with their own reasons.
+fn gaps_and_uncovered_data_tails_are_rejected() {
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]},"b":{"dtype":"F16","shape":[1],"data_offsets":[4,6]}}"#,
+            6,
+        ),
+        (
+            "b".to_owned(),
+            "range starts at 4, next contiguous byte is 2".to_owned()
+        )
+    );
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#,
+            6,
+        ),
+        (
+            "<end-of-data>".to_owned(),
+            "tensor ranges cover 2 bytes, data section has 6".to_owned()
+        )
+    );
+}
+
+#[test]
+/// Every per-entry header error is reported before any cross-tensor layout error.
+///
+/// `a` has a self-consistent range that ends past the data section, while `b`
+/// declares a range whose length disagrees with its shape. The per-entry byte
+/// length check covers every entry before the tiling sees any range, so `b`'s
+/// length mismatch wins even though `a` sorts first by name and by offset.
+fn header_entry_errors_precede_layout_errors() {
     let temp = TempDir::new().unwrap();
     write_raw_shard(
         temp.path(),
         "model.safetensors",
-        br#"{"a":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
-        2,
+        br#"{"a":{"dtype":"F16","shape":[4],"data_offsets":[0,8]},"b":{"dtype":"F16","shape":[1],"data_offsets":[8,12]}}"#,
+        4,
     );
-    assert!(matches!(
-        discover_checkpoint(temp.path(), &LoadOptions::default()),
-        Err(CheckpointError::InvalidDataOffsets { .. })
-    ));
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            CheckpointError::InvalidTensorHeader { shard, tensor, source }
+                if shard == "model.safetensors"
+                    && tensor == "b"
+                    && matches!(
+                        source.as_ref(),
+                        CheckpointError::TensorByteLengthMismatch {
+                            expected: 2,
+                            actual: 4,
+                            ..
+                        }
+                    )
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]

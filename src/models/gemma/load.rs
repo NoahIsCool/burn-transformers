@@ -141,11 +141,37 @@ impl<B: Backend> GemmaForCausalLm<B> {
         let manifest = CheckpointManifest::discover(root, options)?;
         let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))
             .map_err(GemmaCheckpointLoadError::Namespace)?;
-        let contract = self
-            .config()
-            .checkpoint_contract(GemmaCheckpointOptions { source })?;
-        let plan = contract.build_load_plan(&manifest, options)?;
-        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+        self.load_discovered(&manifest, options, GemmaCheckpointOptions { source })
+    }
+
+    /// Loads a local checkpoint with an explicit parameter namespace.
+    ///
+    /// Use this to force the `source` layout; [`Self::load_checkpoint`]
+    /// detects it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`], without the namespace-detection error.
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: GemmaCheckpointOptions,
+    ) -> Result<ExecutionOutcome, GemmaCheckpointLoadError> {
+        let manifest = CheckpointManifest::discover(root, options)?;
+        self.load_discovered(&manifest, options, family_options)
+    }
+
+    /// Plans a discovered checkpoint under `family_options` and streams it into this model.
+    fn load_discovered(
+        &mut self,
+        manifest: &CheckpointManifest,
+        options: &LoadOptions,
+        family_options: GemmaCheckpointOptions,
+    ) -> Result<ExecutionOutcome, GemmaCheckpointLoadError> {
+        let contract = self.config().checkpoint_contract(family_options)?;
+        let plan = contract.build_load_plan(manifest, options)?;
+        Ok(execute_local_load_plan(manifest, &plan, self)?)
     }
 }
 
