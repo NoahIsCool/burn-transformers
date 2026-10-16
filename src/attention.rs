@@ -594,8 +594,16 @@ impl<B: Backend> GroupedQueryAttention<B> {
     /// `O(chunk * (chunk + window))` score elements. Additive bias and hooks
     /// need the full plane and are not supported here; use [`Self::attend`] or
     /// [`Self::attend_with_hooks`]. The backend is synchronized between chunks
-    /// so dropped workspaces can be reclaimed; multi-chunk execution is
-    /// rejected on autodiff backends, whose tape would retain every chunk.
+    /// so dropped workspaces can be reclaimed. Autodiff backends, whose tape
+    /// would retain every chunk anyway, evaluate one unbounded call with the
+    /// same values ([`AttentionExecutionPolicy::effective_on`]), exactly as the
+    /// Muse and MLA attention paths do; size training memory accordingly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for an invalid `policy` (checked on every
+    /// backend), and the projection, mask, and chunk-limit errors of the
+    /// unbounded path.
     pub fn attend_bounded(
         &self,
         projection: AttentionProjection<B>,
@@ -609,6 +617,8 @@ impl<B: Backend> GroupedQueryAttention<B> {
         let [batch, _, query_sequence, _] = projection.query.dims();
         let key_sequence = projection.key.dims()[2];
         let device = projection.query.device();
+        policy.validate()?;
+        let policy = policy.effective_on::<B>(&device);
         let exclusions = ExclusionPlan::new(
             connectivity,
             causal,
@@ -637,13 +647,9 @@ impl<B: Backend> GroupedQueryAttention<B> {
             )
         });
         let plan = policy.plan(batch, self.query_heads, query_sequence, key_bound)?;
+        // `effective_on` made the policy unbounded on autodiff backends, so a
+        // multi-chunk plan here is always an inference plan.
         let chunked = plan.chunk_count() > 1;
-        if chunked && B::ad_enabled(&device) {
-            return Err(Error::BackendCapability(
-                "multi-chunk bounded attention is inference-only because an autodiff tape retains every chunk workspace; use AttentionExecutionPolicy::Unbounded for provisioned training"
-                    .into(),
-            ));
-        }
         let AttentionProjection {
             query,
             key,
