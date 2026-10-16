@@ -2588,3 +2588,75 @@ fn cached_steps_reject_mismatched_schedules_and_slots() {
     );
     assert_eq!(state.lengths(), &[0]);
 }
+
+/// Group-count corruption is detected in the main bank and in the auxiliary MTP bank.
+///
+/// Each case keeps every recorded geometry and only adds a group, so only
+/// the count comparisons can reject it: an extra recurrent group in the main
+/// bank, and an extra native or recurrent group beside the MTP layer's.
+#[test]
+fn stateful_calls_reject_extra_cache_groups() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let fresh = || {
+        model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap()
+    };
+
+    let mut recurrent = fresh();
+    let spec = recurrent.layout.recurrent.unwrap();
+    recurrent.tensors.main_mut().add_recurrent(spec).unwrap();
+    let error = prefill_once(&model, &mut recurrent).expect_err("extra recurrent group");
+    assert!(error.to_string().contains("cache-group count"), "{error}");
+
+    let base = tiny_model(&device);
+    let mtp_spec = fresh().layout.mtp_native_kv.unwrap();
+    let recurrent_spec = fresh().layout.recurrent.unwrap();
+    for extra_recurrent in [false, true] {
+        let mut donor = base
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let bank = donor.tensors.enable_mtp().unwrap();
+        bank.add_native_kv(mtp_spec).unwrap();
+        if extra_recurrent {
+            bank.add_recurrent(recurrent_spec).unwrap();
+        } else {
+            bank.add_native_kv(mtp_spec).unwrap();
+        }
+        let mut state = fresh();
+        state.tensors = donor.tensors;
+        let error = prefill_once(&model, &mut state).expect_err("extra MTP group");
+        assert!(error.to_string().contains("MTP cache geometry"), "{error}");
+        assert_eq!(state.lengths(), &[0]);
+    }
+}
+
+/// MTP prefill requires one non-empty prompt row whose hidden states match it.
+#[test]
+fn mtp_prefill_rejects_batched_or_empty_prompts() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    for (tokens, hidden) in [
+        (
+            Tensor::<TestBackend, 2, Int>::from_ints([[1], [2]], &device),
+            Tensor::<TestBackend, 3>::zeros([2, 1, 8], &device),
+        ),
+        (
+            Tensor::<TestBackend, 2, Int>::zeros([1, 0], &device),
+            Tensor::<TestBackend, 3>::zeros([1, 0, 8], &device),
+        ),
+    ] {
+        let error = model
+            .prefill_mtp_cache(tokens, hidden, &mut state)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.prefill"),
+            "{error}"
+        );
+    }
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
