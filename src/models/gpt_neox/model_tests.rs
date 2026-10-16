@@ -700,6 +700,8 @@ fn dense_families_answer_router_requests_identically() {
             final_norm: rms,
             tie_word_embeddings: false,
             max_position_embeddings: 16,
+            embedding_scale: None,
+            final_logit_softcap: None,
         },
         &device,
     )

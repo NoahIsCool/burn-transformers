@@ -343,6 +343,8 @@ fn tiny_modular() -> crate::architecture::DecoderSpec {
         final_norm: norm,
         tie_word_embeddings: false,
         max_position_embeddings: 32,
+        embedding_scale: None,
+        final_logit_softcap: None,
     }
 }
 
