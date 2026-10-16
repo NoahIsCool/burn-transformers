@@ -87,7 +87,15 @@ impl Qwen3MoeConfig {
             .into_iter()
             .filter(|&sparse| sparse)
             .count();
-        // The Verus-verified total is exact or `None` on overflow.
+        self.inventory(sparse_layers)
+    }
+
+    /// Returns the contract length for `sparse_layers` sparse blocks, or `None` on overflow.
+    ///
+    /// The formula of [`Self::checkpoint_tensor_count`], for a caller that
+    /// already counted the sparse blocks; the Verus-verified total is exact
+    /// or `None` exactly when it overflows `usize`.
+    pub(super) fn inventory(&self, sparse_layers: usize) -> Option<usize> {
         moe_inventory(MoeInventory {
             fixed: 3,
             layers: self.num_hidden_layers,

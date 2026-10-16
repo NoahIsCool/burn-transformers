@@ -18,13 +18,18 @@
 //! matmuls used packed execution without whole-weight dequantization. It is not a
 //! claim that the model has passed every release gate.
 
-use std::collections::HashSet;
-
 use serde::{Deserialize, Serialize};
 
 mod checkpoint;
 mod load;
 pub mod model;
+// `plan::any_sparse_layer` stays the Verus-verified, test-only reference for
+// the schedule check in `validate`, which marks the overrides once instead of
+// scanning them per block (`O(L + M)` rather than `O(L · M)`).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "any_sparse_layer is a verified test oracle")
+)]
 mod plan;
 
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
@@ -180,8 +185,7 @@ impl Qwen3MoeConfig {
     /// applies the same verified predicate. Indices at or beyond `L` (which
     /// validation rejects) are ignored.
     pub(crate) fn moe_layer_flags(&self) -> Vec<bool> {
-        let layers = self.num_hidden_layers;
-        let mut dense = vec![false; layers];
+        let mut dense = vec![false; self.num_hidden_layers];
         for &index in &self.mlp_only_layers {
             if let Some(flag) = dense.get_mut(index) {
                 *flag = true;
@@ -190,10 +194,34 @@ impl Qwen3MoeConfig {
         dense
             .into_iter()
             .enumerate()
-            .map(|(index, dense)| {
-                plan::sparse_layer(index, self.decoder_sparse_step, self.num_experts, dense)
-            })
+            .map(|(index, dense)| self.sparse_layer(index, dense))
             .collect()
+    }
+
+    /// Applies the verified sparsity predicate to block `index` with its `mlp_only_layers` membership.
+    fn sparse_layer(&self, index: usize, dense_override: bool) -> bool {
+        plan::sparse_layer(
+            index,
+            self.decoder_sparse_step,
+            self.num_experts,
+            dense_override,
+        )
+    }
+
+    /// Marks the `mlp_only_layers` overrides, one flag per block, in `O(L + M)` time.
+    ///
+    /// Returns `None` when an index repeats or is not below
+    /// `num_hidden_layers`, the two override errors validation reports.
+    fn dense_overrides(&self) -> Option<Vec<bool>> {
+        let mut dense = vec![false; self.num_hidden_layers];
+        for &index in &self.mlp_only_layers {
+            let flag = dense.get_mut(index)?;
+            if *flag {
+                return None;
+            }
+            *flag = true;
+        }
+        Some(dense)
     }
 
     /// Translates the serialized RoPE metadata into the executable rotary configuration.
@@ -293,23 +321,23 @@ impl Validate for Qwen3MoeConfig {
             }
         }
 
-        let mut seen = HashSet::new();
-        for index in &self.mlp_only_layers {
-            if *index >= self.num_hidden_layers || !seen.insert(*index) {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "mlp_only_layers",
-                    "indices must be unique and less than num_hidden_layers",
-                ));
-            }
-        }
-        // Verified: true exactly when some block satisfies `is_moe_layer`.
-        if !plan::any_sparse_layer(
-            self.num_hidden_layers,
-            self.decoder_sparse_step,
-            self.num_experts,
-            &self.mlp_only_layers,
-        ) {
+        // One pass marks the overrides and one applies the verified per-block
+        // predicate, so a long override list costs `O(L + M)`, not a scan of
+        // the list per block (`O(L · M)`, minutes for a large valid config).
+        let dense = self.dense_overrides().ok_or_else(|| {
+            ConfigError::new(
+                FAMILY,
+                "mlp_only_layers",
+                "indices must be unique and less than num_hidden_layers",
+            )
+        })?;
+        let sparse_layers = dense
+            .into_iter()
+            .enumerate()
+            .filter(|&(index, dense)| self.sparse_layer(index, dense))
+            .count();
+        // Equal to the verified `plan::any_sparse_layer` (tested against it).
+        if sparse_layers == 0 {
             return Err(ConfigError::new(
                 FAMILY,
                 "decoder_sparse_step",
@@ -318,7 +346,7 @@ impl Validate for Qwen3MoeConfig {
         }
         // The contract and the graph hold one tensor set per routed expert of
         // every MoE block, so their product is bounded as a whole.
-        checkpoint_tensor_count(FAMILY, "num_experts", self.checkpoint_tensor_count())?;
+        checkpoint_tensor_count(FAMILY, "num_experts", self.inventory(sparse_layers))?;
 
         self.rope_parameters
             .clone()
