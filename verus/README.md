@@ -140,9 +140,8 @@ and what remains covered only by Rust tests.
 
 The 25 harnesses include 88 distinct source files, which are exactly the
 files under `src/` that contain Verus-only code (`verus_keep_ghost`). The
-counts are the "verified" totals Verus reported for each harness on the
-source of the commit that last changed this table, with the release recorded
-below: **2,035 verified, 0 errors**.
+counts are the "verified" totals Verus reported for each harness on source
+revision `f79c5d1` with the release recorded below: **2,035 verified, 0 errors**.
 `scripts/check_release.py --gate verus` fails when a harness reports a
 different count, so update this table with the proofs.
 

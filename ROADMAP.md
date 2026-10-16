@@ -348,8 +348,8 @@ milestones above or the advertised checkpoint support:
   `architecture::spec` "Not expressible" table).
 - **Batched cached execution.** Every family decodes ragged batches in one
   pass per step through atomic cache step writes.
-- **Verification.** 25 Verus harnesses (2,035 verified, 0 errors), checked
-  in CI on every source change, and twelve fuzz targets.
+- **Verification.** 25 Verus harnesses (2,035 verified, 0 errors at
+  `f79c5d1`), checked in CI on every source change, and twelve fuzz targets.
 
 Open work carried forward: cached-state interventions, T5 staged views on the
 full encoder-decoder model, registering GPT-2 and GPT-NeoX in `AutoCausalLm`
