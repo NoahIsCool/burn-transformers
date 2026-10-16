@@ -177,18 +177,25 @@ fn capability_gaps_are_reported_at_construction() {
         check_causal(&stack_of(vec![gated]), true, &TOKENS),
         Outcome::Unsupported
     );
-    let mamba = block(
-        MixerSpec::Mamba2(Mamba2Spec {
-            heads: 2,
-            head_dim: 2,
-            state_dim: 2,
-            convolution_kernel: 2,
-            group_size: 1,
-        }),
-        FeedForwardSpec::None,
+    let mamba = |convolution_kernel| {
+        block(
+            MixerSpec::Mamba2(Mamba2Spec {
+                heads: 2,
+                head_dim: 2,
+                state_dim: 2,
+                convolution_kernel,
+                group_size: 1,
+            }),
+            FeedForwardSpec::None,
+        )
+    };
+    // Mamba-2 mixers execute; only a width-one convolution is refused.
+    assert_eq!(
+        check_causal(&stack_of(vec![mamba(2)]), true, &TOKENS),
+        Outcome::Executed
     );
     assert_eq!(
-        check_causal(&stack_of(vec![mamba]), true, &TOKENS),
+        check_causal(&stack_of(vec![mamba(1)]), true, &TOKENS),
         Outcome::Unsupported
     );
     let mut far = stack_of(vec![block(

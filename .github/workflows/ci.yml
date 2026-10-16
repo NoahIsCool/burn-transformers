@@ -343,16 +343,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # Oracles that predate wave-3 behavior and fail at this source: top-k
-      # now keeps every score tied with the k-th, as Hugging Face does
-      # (fuzz/src/logits_processing.rs:413-416), and modular specs now run
-      # Mamba-2 (fuzz/src/modular_specs.rs:461-463). Remove each name here
-      # together with its oracle fix.
-      STALE_ORACLE_TESTS: >-
-        logits_processing::tests::campaign_top_p_near_ties_may_split
-        logits_processing::tests::pseudo_random_inputs_agree_with_the_oracles
-        modular_specs::tests::capability_gaps_are_reported_at_construction
-        modular_specs::tests::pseudo_random_specs_validate_construct_and_run
+      # Oracle tests known to fail at this source, skipped by "Harness tests"
+      # and required to keep failing by "Skipped oracle tests still fail".
+      # Remove a name together with its oracle fix; empty means none.
+      STALE_ORACLE_TESTS: ""
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust

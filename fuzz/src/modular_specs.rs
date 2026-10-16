@@ -458,9 +458,14 @@ fn stack(draw: &mut Draw<'_, '_>, hidden_size: usize) -> DecoderSpec {
     }
 }
 
-/// Whether the modular models can execute a layer (no gated residual, no Mamba2).
+/// Whether the modular models can execute a layer.
+///
+/// Gated residuals are not executable. Mamba-2 mixers execute through the
+/// shared `transformers::mamba2` kernel, except with a width-one causal
+/// convolution, which construction rejects with a configuration error.
 fn layer_is_executable(layer: &DecoderLayerSpec) -> bool {
-    layer.residual != ResidualTopology::Gated && !matches!(layer.mixer, MixerSpec::Mamba2(_))
+    layer.residual != ResidualTopology::Gated
+        && !matches!(&layer.mixer, MixerSpec::Mamba2(mamba) if mamba.convolution_kernel < 2)
 }
 
 /// Whether a layer uses routed experts, whose top-k may flip on rounding noise.
