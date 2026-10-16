@@ -185,3 +185,36 @@ proptest::proptest! {
         QuantizedWeight::from_parts(metadata, packed, scales).unwrap();
     }
 }
+
+/// `from_parts` accepts a carried digest only when it describes the exact payload.
+///
+/// The digest covers packed codes followed by little-endian scales. A correct
+/// v2 digest round-trips unchanged; a digest of any other payload is refused
+/// even though every structural check passes.
+#[test]
+fn from_parts_verifies_a_carried_payload_digest() {
+    let source = TensorData::new(weights(64), [2, 32]);
+    let weight = quantize_tensor_data(&source, config(SymmetricQuantization::Q4, 32)).unwrap();
+    let (mut metadata, packed, scales) = weight.into_parts();
+    let digest = super::super::provenance::quantized_payload_sha256(&packed, &scales);
+
+    metadata.payload_sha256 = Some(digest.clone());
+    let verified =
+        QuantizedWeight::from_parts(metadata.clone(), packed.clone(), scales.clone()).unwrap();
+    assert_eq!(
+        verified.metadata().payload_sha256.as_deref(),
+        Some(digest.as_str())
+    );
+    assert_eq!(verified.packed_values(), packed);
+    assert_eq!(verified.scales(), scales);
+
+    let mut flipped = scales.clone();
+    flipped[0] = -flipped[0];
+    let wrong = super::super::provenance::quantized_payload_sha256(&packed, &flipped);
+    metadata.payload_sha256 = Some(wrong.clone());
+    assert!(matches!(
+        QuantizedWeight::from_parts(metadata, packed, scales),
+        Err(QuantizationError::PackedPayloadDigestMismatch { name, expected, actual })
+            if name == "<in-memory packed weight>" && expected == wrong && actual == digest
+    ));
+}

@@ -79,6 +79,15 @@ impl QuantizationGroupSize {
     pub const fn get(self) -> usize {
         self.0
     }
+
+    /// Returns the group size in the `u64` domain of the wire-count arithmetic.
+    ///
+    /// A validated size is at most [`Self::MAX`], so this widening is exact on
+    /// every host and needs no fallible conversion.
+    #[must_use]
+    pub(crate) const fn get_u64(self) -> u64 {
+        self.0 as u64
+    }
 }
 
 impl Default for QuantizationGroupSize {
