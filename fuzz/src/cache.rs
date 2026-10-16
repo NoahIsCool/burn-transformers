@@ -269,7 +269,12 @@ enum Finish {
     /// Drop the step; its tokens stay in slots beyond the lengths.
     Abandon,
     /// Run a lifecycle operation first; publication must be refused as stale.
-    Interfere(u8),
+    Interfere(
+        /// Selector for the interfering operation, read as `choice % 3`:
+        /// 0 begins and 1 resets outside a transaction (both roll back inside
+        /// one), and 2 publishes an empty step.
+        u8,
+    ),
 }
 
 /// Reference model: committed histories and the active proposal suffixes.

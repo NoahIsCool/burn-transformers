@@ -925,6 +925,7 @@ fn steps_cannot_be_published_into_another_state() {
 /// Every operation that can move a bank's cursors or tensors invalidates its outstanding steps.
 #[test]
 fn lifecycle_operations_invalidate_outstanding_steps() {
+    /// A named lifecycle mutation that must bump the bank's step version.
     type Operation = fn(&mut TensorDecodeState<TestBackend>);
     let operations: [(&str, Operation); 8] = [
         ("advance", |state| {

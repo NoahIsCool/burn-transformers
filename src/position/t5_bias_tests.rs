@@ -335,6 +335,7 @@ proptest::proptest! {
 #[cfg(feature = "autodiff")]
 #[test]
 fn bias_table_receives_gradients_per_used_bucket() {
+    /// Reverse-mode wrapper of Flex used to read the bias table's gradient.
     type Autodiff = burn::backend::Autodiff<Flex>;
     let device = Default::default();
     let bias = T5RelativePositionBiasConfig::new(1, 8, 32, false)

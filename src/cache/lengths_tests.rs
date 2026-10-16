@@ -186,17 +186,32 @@ fn ledger_topology_transitions_outside_a_transaction() {
 #[derive(Debug, Clone)]
 enum Operation {
     /// Advance the active cursor by per-row counts.
-    Advance(Vec<usize>),
+    Advance(
+        /// Tokens appended to each row; the length must equal the row count.
+        Vec<usize>,
+    ),
     /// Begin a transaction.
     Begin,
     /// Commit per-row accepted prefixes.
-    Commit(Vec<usize>),
+    Commit(
+        /// Accepted proposal tokens per row, each at most that row's staged
+        /// `working - committed` suffix.
+        Vec<usize>,
+    ),
     /// Discard the transaction.
     Rollback,
     /// Rewind committed rows.
-    Truncate(Vec<usize>),
+    Truncate(
+        /// Requested committed length per row; each must not exceed the
+        /// current committed length.
+        Vec<usize>,
+    ),
     /// Gather committed rows by source index.
-    Reorder(Vec<usize>),
+    Reorder(
+        /// Source row for each destination row; duplicates are allowed and
+        /// every index must be below the row count.
+        Vec<usize>,
+    ),
     /// Return every row to zero.
     Reset,
 }

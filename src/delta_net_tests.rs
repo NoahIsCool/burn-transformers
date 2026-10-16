@@ -1102,6 +1102,7 @@ fn query_key_and_output_norm_epsilons_are_independent() {
 #[test]
 fn chunked_rule_and_mixer_are_differentiable() {
     use burn::backend::Autodiff;
+    /// Reverse-mode wrapper of the Flex test backend that records the graph.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let base = long_fixture(9);
