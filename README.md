@@ -19,7 +19,8 @@ real-checkpoint gates.
   feed-forwards with configurable routing. Families are thin wiring over them.
 - **Efficient inference.** Genuinely batched cached prefill and decoding for
   ragged batches, native-KV-head attention, sliding-window ring caches,
-  score-bounded attention for long contexts, and packed Q4/Q8 matmuls on Metal.
+  score-bounded long-context attention (Muse Glimmer, DeepSeek-V2, and custom
+  code), and packed Q4/Q8 matmuls on Metal.
 - **Verified where it matters.** More than 2,500 tests, reference goldens generated
   with Hugging Face Transformers, property tests, twelve fuzz targets, and 25
   Verus harnesses that prove the cache, planning, decoding, and checkpoint
@@ -292,9 +293,12 @@ mechanism's equations, reference, and implementation.
   [changelog](CHANGELOG.md#performance) lists each measurement.
 - Cached decoding attends over the stored grouped-query KV heads directly,
   never repeating keys and values per query head.
-- Sliding layers keep only their window in ring caches; long attention runs
-  in query chunks whose score planes stay below a configurable bound;
-  `prefill_chunk_size` bounds long causal prompts.
+- Sliding layers keep only their window in ring caches.
+- Muse Glimmer and DeepSeek-V2 (MLA) run long attention in query chunks whose
+  score planes stay below a configurable `AttentionExecutionPolicy` bound, and
+  `GroupedQueryAttention::attend_bounded` offers the same to custom code. The
+  other families evaluate each call's full score plane, so for them
+  `prefill_chunk_size` is what bounds long causal prompts.
 - Input validation and generation bookkeeping read back to the host once per
   step, and speculative drafts are verified in one target pass.
 - Flex runs with SIMD kernels and rayon-parallel matrix products.
