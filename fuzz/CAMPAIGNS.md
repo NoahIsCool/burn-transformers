@@ -386,3 +386,35 @@ namespace flood is 20 000 `namespace()` calls, and each retention loop runs
 re-rendered with every mutation. Its peak RSS was 110 MiB, against 673 MiB in
 round 3 with the earlier fragment table. Source changes after `4657536` are
 documentation, tests, and these records only.
+
+## 2026-10-16: TOPP-TIE-1 fixed (top-p ranks by logit)
+
+The generation-dispatch fix package changed `filter_top_p`
+(`src/generation.rs`) to sort the logits and take the softmax and cumulative
+mass over the sorted row, as Hugging Face's `TopPLogitsWarper` does, so a logit
+one ulp above a kept one is never dropped. Its follow-up removed the
+tolerances the finding needed: `check_warpers` requires a strict top set (no
+slack for dropped values), `top_p_ranks_by_logit_like_hugging_face` is an
+ordinary test, and `tests/generation_properties.rs` requires an exact mode
+(`NEAR_TIE` removed; 200,000 cases of `warpers_keep_a_most_likely_token` pass
+in a release build).
+
+One bounded campaign checked the strict harness. Source: `src/` tree
+`4de396eda955c33ee432191b46345617b218a109`, `fuzz/src` tree
+`3d8ef59041eddbb8a5c342c1cb31ef439400e871`, `fuzz/fuzz_targets` tree
+`b3a14771236773708930adc9bedd059a6d96b3ef`, the unchanged lockfile (SHA-256
+`f974aac22ee2e71f3115ff6b2e29cc914f1ec5bc17019f47c06743687d6a3637`), and the
+toolchain and flags of the wave-3 rounds (`cargo-fuzz 0.13.2`,
+`rustc 1.94.0-nightly (4f14395c3 2025-12-22)`, no sanitizer,
+`RAYON_NUM_THREADS=1`, `-max_len=4096 -timeout=10 -rss_limit_mb=2048
+-print_final_stats=1`). It used a fresh writable corpus and read the committed
+seeds and the wave-3 round-2 corpus (505 inputs) as read-only corpora. The host
+was shared with other builds (load average about 50), so the rate is a
+concurrent rate.
+
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logits_processing` | 301 | 945,649 | 3,141 | 2826 | 7699 | 453 | 50 MiB |
+
+It exited with status 0 and wrote no crash, timeout, or out-of-memory
+artifact.

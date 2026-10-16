@@ -41,13 +41,11 @@ pass once fixed; run them with `cargo test --manifest-path fuzz/Cargo.toml --lib
 | ID | Test | Behavior |
 |---|---|---|
 | CHAT-4 | `chat_templates::tests::tools_select_the_tool_use_template` | With `tools` and no template name, a checkpoint's named `tool_use` template is ignored and `default` renders; Hugging Face 5.2 selects `tool_use` |
-| TOPP-TIE-1 | `logits_processing::tests::top_p_ranks_by_logit_like_hugging_face` | Top-p ranks rounded `f32` probabilities, so it can drop a logit one ulp above a kept one; Hugging Face ranks by logit |
 
-The harnesses tolerate exactly these two: the selection check also accepts
-`default` where CHAT-4 should select `tool_use`, and the top-set check lets
-top-p split near-ties (TOPP-TIE-1, also in the `tests/generation_properties.rs`
-mode property). Otherwise they require the absence of panics and every
-documented invariant. Remove each tolerance when its finding is fixed.
+The harnesses tolerate exactly this one: the selection check also accepts
+`default` where CHAT-4 should select `tool_use`. Otherwise they require the
+absence of panics and every documented invariant. Remove the tolerance when the
+finding is fixed.
 
 One further difference is pinned rather than ignored: `render_chat` rejects an
 unknown template name, while Hugging Face renders the name itself as template
@@ -72,6 +70,7 @@ test, and a focused regression test in the owning library module.
 | CHAT-5 | `namespace_cycles_do_not_outlive_the_render` (in the library's chat-template sandbox tests) | Found while investigating a campaign's peak RSS: a template could leak memory across renders through namespace reference cycles (`{% set ns.me = ns %}`); every namespace's reference-holding attributes are now cleared when the render ends, grouped by name so the clearing costs only what the render built (`namespace_cleanup_costs_only_what_the_render_built`; the first version cleared every name on every namespace, which a review showed could take seconds and gigabytes) |
 | CHAT-6 | `limits_follow_the_context_size` (same module) | Also from that investigation: the 16 MiB prompt floor let a template make `encode_chat` use about 2 GB (the tokenizer keeps over 100 bytes of state per prompt byte); the floor is now 1 MiB plus four times the context |
 | CHAT-7 | `divisibleby_never_panics` (same module) | Found by the library's typed differential property, not by a campaign: MiniJinja's `divisibleby` test computes `a % 0` unchecked and panics; a checked replacement reports Jinja2's `ZeroDivisionError` |
+| TOPP-TIE-1 | `logits_processing::tests::{top_p_ranks_by_logit_like_hugging_face, campaign_top_p_near_ties_may_split}` | `filter_top_p` sorts the logits and takes softmax and cumulative mass over the sorted row, as Hugging Face's `TopPLogitsWarper` does, so a logit one ulp above a kept one is never dropped (library regression `generation::tests::top_p_ranks_near_tied_logits_by_logit`); the top-set check and the `tests/generation_properties.rs` mode property no longer allow near-tie slack |
 
 The fixes removed the corresponding tolerances: the `f32` and frequency
 envelopes, the `|mscale_all_dim| <= 1e100` bound, and the small growth counts of

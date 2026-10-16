@@ -23,9 +23,9 @@
 //!    token.
 //! 4. **Warpers.** Sampling output keeps each surviving value bit-for-bit (the
 //!    greedy value divided by the `f32` temperature) and sets the rest to `-inf`.
-//!    Survivors form a top set of the scaled values (up to near-ties, which
-//!    top-p's rounded probabilities may split: open finding TOPP-TIE-1, since
-//!    Hugging Face ranks by logit and never splits them) whose size equals the
+//!    Survivors form a top set of the scaled values (no dropped value exceeds
+//!    a kept one, even one ulp apart: top-p ranks by logit as Hugging Face
+//!    does, finding TOPP-TIE-1, fixed) whose size equals the
 //!    count of top-k (every value at least the `k`-th greatest, so ties with
 //!    the boundary survive), then top-p (sorted mass *before* an item below
 //!    `p`), then min-p (`z >= max + ln(min_p)`); counts within `1e-5` of a
@@ -389,20 +389,15 @@ fn check_warpers(config: &GenerationConfig, vocabulary: usize, greedy: &[f32], s
         .map(|&value| f64::from(value))
         .collect();
     finite.sort_by(|left, right| right.total_cmp(left));
-    // Survivors form a top set: nothing outside beats anything inside. Top-p
-    // ranks rounded `f32` probabilities, so logits a few ulps apart can tie and
-    // split either way (campaign regression `crash-cfb301be`: 0.8 dropped while
-    // 0.79999995 survived). Hugging Face ranks by logit and never splits them,
-    // so this slack tolerates open finding TOPP-TIE-1 (ignored reproducer
-    // `top_p_ranks_by_logit_like_hugging_face`); remove it once that is fixed.
+    // Survivors form a top set: nothing outside beats anything inside, with no
+    // slack. Top-k and min-p are thresholds on the values, and top-p ranks by
+    // logit as Hugging Face's `TopPLogitsWarper` does, so even logits one ulp
+    // apart never split (finding TOPP-TIE-1, fixed; campaign regression
+    // `crash-cfb301be` once dropped 0.8 while 0.79999995 survived).
     if let Some(weakest) = survivors.iter().copied().reduce(f32::min) {
         for (&kept, &value) in sampled.iter().zip(&scaled) {
             if kept == f32::NEG_INFINITY && value.is_finite() {
-                let slack = BOUNDARY_SLACK as f32 * weakest.abs().max(1.0);
-                assert!(
-                    value <= weakest + slack,
-                    "{value} dropped while {weakest} survived"
-                );
+                assert!(value <= weakest, "{value} dropped while {weakest} survived");
             }
         }
     }

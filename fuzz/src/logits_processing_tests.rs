@@ -302,9 +302,12 @@ fn positive_temperature_never_produces_nan() {
     assert_eq!(values[3], 2.0 / f32::MIN_POSITIVE);
 }
 
-/// Campaign regression `crash-cfb301be` (minimized): top-p may split logits one
-/// `f32` ulp apart because their rounded probabilities tie (open finding
-/// TOPP-TIE-1; the harness tolerates it until fixed).
+/// Campaign regression `crash-cfb301be` (minimized): logits one `f32` ulp apart
+/// whose rounded probabilities tie.
+///
+/// Top-p used to split them (finding TOPP-TIE-1); it now ranks by logit, and
+/// the harness checks the top set without slack. The name is kept because the
+/// campaign records cite it.
 #[test]
 fn campaign_top_p_near_ties_may_split() {
     exercise(&[
@@ -314,20 +317,17 @@ fn campaign_top_p_near_ties_may_split() {
     ]);
 }
 
-/// TOPP-TIE-1: top-p must never drop a larger logit while keeping a smaller one.
+/// TOPP-TIE-1 (fixed): top-p never drops a larger logit while keeping a smaller one.
 ///
 /// Hugging Face 5.2 `TopPLogitsWarper` sorts the *logits* (`torch.sort(scores)`)
 /// and only then takes the softmax and cumulative sum of the sorted values,
 /// so a strictly larger logit always ranks ahead of a smaller one. The
-/// library's `filter_top_p` (`src/generation.rs`) sorts rounded `f32`
-/// *probabilities*: logits one ulp apart, such as `0.1` and `0.10000001`,
-/// get the same probability, the sort keeps their original order, and the
-/// larger logit is dropped (campaign crash `crash-cfb301be`). Fix: sort the
-/// logits descending and compute softmax and cumulative mass over the sorted
-/// logits, as Hugging Face does; then remove the near-tie slack in
-/// `check_warpers` and the property suite.
+/// library's `filter_top_p` (`src/generation.rs`) once sorted rounded `f32`
+/// *probabilities*: logits one ulp apart, such as `0.1` and `0.10000001`, got
+/// the same probability, the sort kept their original order, and the larger
+/// logit was dropped (campaign crash `crash-cfb301be`). It now sorts the
+/// logits and takes softmax and cumulative mass over the sorted row.
 #[test]
-#[ignore = "TOPP-TIE-1: open follow-up in src/generation.rs (top-p ranks rounded probabilities)"]
 fn top_p_ranks_by_logit_like_hugging_face() {
     for (smaller, larger) in [(0.1_f32, 0.100_000_01_f32), (-0.166_666_67, -0.166_666_66)] {
         assert!(smaller < larger);
