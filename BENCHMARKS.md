@@ -254,7 +254,7 @@ medians before drawing conclusions.
 | Burn | 0.21.0, lockfile unchanged; release profile |
 | Features | FLAN/Qwen Metal: `std,metal,tokenizers,chat-templates`; Flex: `std,flex,tokenizers,chat-templates` |
 | Protocol | The unchanged harnesses: three warmups and ten measured repetitions per shape, 128 forced cached decode steps, `Backend::sync` at every boundary |
-| Raw reports | `/Volumes/bag of holding/cargo-targets/tfm-polish-w4-performance-reports/` on the measurement host, outside the repository; each file's SHA-256 is listed in the integration report |
+| Raw reports | `/Volumes/bag of holding/cargo-targets/tfm-polish-w4-performance-reports/` (reports, logs, profiles) and `/Volumes/bag of holding/cargo-targets/tfm-polish-w4-performance-bins/` (the timed executables) on the measurement host, outside the repository; every file is identified by its full SHA-256 in the raw evidence manifest at the end of this section |
 
 ### Projection weight storage order
 
@@ -428,6 +428,94 @@ cold first token 0.973 s and 0.362 s. Whole-process maximum RSS was about
 2,641,700,000 bytes and peak footprint about 4,366,300,000 bytes in both runs,
 above the September 2,907,412,480-byte footprint; that increase is unexplained
 and recorded as a follow-up.
+
+### Raw evidence manifest (2026-10-15)
+
+The files below are the complete raw evidence behind this section, hashed with
+`shasum -a 256` after the runs. They live outside the repository on the
+measurement host, so this table is what authenticates a copy: an archived file
+whose SHA-256 differs is not the evidence summarized here. Archiving them under
+`acceptance/measurements/` is left to the integrator.
+
+Reports, logs and profiles, relative to
+`/Volumes/bag of holding/cargo-targets/tfm-polish-w4-performance-reports/`:
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `flan-flex-e4011b9/benchmark.json` | 51,677 | `3f718c83b123099c4a452811af9f3622faa29d1008d7c09b066a794879e14a1f` |
+| `flan-flex-e4011b9/command.txt` | 830 | `e243ec6fa4933ce4c1bc698a17b6ad71da888732503f9a3326f675db5b38ad22` |
+| `flan-flex-e4011b9/environment.json` | 1,533 | `20b863740ea5f25f5f0af8da34733d8ef39a9ced701208603fad07b41d776417` |
+| `flan-flex-e4011b9/stderr.log` | 777 | `3961f1daa85ca3977757c37ccf4b3967fae47fbf8fb4da320f91520ce37cdb13` |
+| `flan-flex-e4011b9/stdout.log` | 158 | `50c960430c18a312de4bcadd39507ac4eeece18b06b2c359c3dc9349b96f2aa0` |
+| `flan-flex-e4011b9/uptime-after.txt` | 68 | `98c46ecf47b4110d703f8780fe8c0ec7e66694275696b47a36741e3c51435bac` |
+| `flan-flex-e4011b9/uptime-before.txt` | 68 | `d7347dfa1e763da3253816ed6533b3031be3ad97398cd79d505333f0fee1d5d5` |
+| `flan-metal-e4011b9/benchmark.json` | 51,827 | `955b0b555a8696052c014e77efd60414cf6fed1bb7f65eebfd574c06d295c139` |
+| `flan-metal-e4011b9/command.txt` | 834 | `504533103b04fcb7d8d8453c1cd27d9d64126ebe680146d13cf8073368704657` |
+| `flan-metal-e4011b9/environment.json` | 1,672 | `0418a63a01e349f64f34f64c86a0f4e6f2e4124aadd6601c3ab016147e81fc5d` |
+| `flan-metal-e4011b9/stderr.log` | 777 | `cf1ea448babf7a910c669efda90a7cf531927e23177ae884b561f96c295a58f9` |
+| `flan-metal-e4011b9/stdout.log` | 158 | `ed5d0762c1fdce3be99abcb3e356cf29ed5bf533ee5c39cb6665049c242027d4` |
+| `flan-metal-e4011b9/uptime-after.txt` | 68 | `d4d61cbd4f7749b995aadb38a112953091b474acb1b9a7ba922daaee4ee11efa` |
+| `flan-metal-e4011b9/uptime-before.txt` | 68 | `07f089511969c1b64bd9551d65db98cf5141e0fe3510dbfb88fea4809ccc94ed` |
+| `layout/flex-e4011b9.jsonl` | 18,401 | `3931ff7da9280ac42bf01bed5713781ca69806bf112a23de17620d98ffbec362` |
+| `layout/metal-e4011b9.jsonl` | 19,887 | `2a37dd396bb45ac18bc0eccf829d8f9bfeb1791e6efb6aa70beba925035a4f0b` |
+| `profiles/flan-flex-decode-512-sample.txt` | 561,625 | `fc6e9c261df4156ff0f2eb7ec93044e4e785355b18168730bf2b84a76bca1baa` |
+| `profiles/qwen35-metal-decode-sample.txt` | 1,701,525 | `00ddb090e19d6f138646da418a4a22994f82df912821e19d05ba0721b277e555` |
+| `profiles/smollm-flex-decode-sample-base-33f620f.txt` | 1,027,327 | `2b3708f107001c43b4e405b7fbae7871f798aae51dcac88de2e30d6c3b174458` |
+| `profiles/smollm-flex-decode-sample-d72707d.txt` | 1,132,096 | `87b0ec587ee8f3c521264467aca8990ec888eb0d58d46e331520275f950fdad1` |
+| `qwen-metal-e4011b9-r2/benchmark.json` | 119,907 | `b90ff1d33fd8405dddef3db39a1ecfc36967f3b4ea9341b9263a15050c7542a7` |
+| `qwen-metal-e4011b9-r2/command.txt` | 778 | `f28315e0f8c871ce074304e3bfdc213b4016f963f4130b2954b5aa597bffbb08` |
+| `qwen-metal-e4011b9-r2/environment.json` | 1,616 | `41d39cca0c7cbef8681764310704f5761189d0658b90bd1b21e7cb0de0fc0901` |
+| `qwen-metal-e4011b9-r2/stderr.log` | 777 | `d3f5ee4c0a269308c59d57cc56b3e75f3e7877826129f094423177eba9f68a9e` |
+| `qwen-metal-e4011b9-r2/stdout.log` | 165 | `f78ab6ef9319b86e83cdb1e7312d74f70e23711e608217b9a84507cdd0024881` |
+| `qwen-metal-e4011b9-r2/uptime-after.txt` | 68 | `e0740f4eeca56f0e20459a35f0159764fb8ec1911a5dbfa1a6793ebf99a39ed5` |
+| `qwen-metal-e4011b9-r2/uptime-before.txt` | 68 | `dab7adb4051e8831fd350d25d2522f6bcf49952f56f7a6f9459b74d434d61f42` |
+| `qwen-metal-e4011b9/benchmark.json` | 119,800 | `fcbc267bae41d2015d076c7e35b8c675302233edbf904c381d6e3b07dc429a2a` |
+| `qwen-metal-e4011b9/command.txt` | 772 | `4454e6d909973f4a86af289581ade39c1e75c781cb13faf6e723ced10225a849` |
+| `qwen-metal-e4011b9/environment.json` | 1,610 | `2e8aa9fa72c88b1e4fd1062ea9056519274d08481748be90ca9b060175d97823` |
+| `qwen-metal-e4011b9/stderr.log` | 777 | `3e2934788470b932e8b9c27758e8b1833c603a26075c103d91df463be2d88f23` |
+| `qwen-metal-e4011b9/stdout.log` | 165 | `2c01775e31aae97e6f1f63a1b1065940911695f1fd1acc9de7ed3a672ef95f4e` |
+| `qwen-metal-e4011b9/uptime-after.txt` | 68 | `c5acd3a8e32f804bb947e41294f96338d2d52914da3ff8898ea2e4e9e01c4116` |
+| `qwen-metal-e4011b9/uptime-before.txt` | 68 | `4453d9ac5842791d54bfe990077e6c44fb301dc244a76c103d5669a4810e2d1c` |
+| `smollm-flex/base-33f620f-r1.json` | 4,439 | `67fe69dd370b09682dfe5ec906274da93ea047a11d9171c3293ea72478245c3f` |
+| `smollm-flex/base-33f620f-r1.time` | 777 | `61583d5b1539d2d16c296bbc3847d673834fa38590bc7f18652ec473e595ace1` |
+| `smollm-flex/e4011b9-r1.json` | 4,412 | `73aaf4964f65937b3a17994f826eba52a28e566ab8744519a19421e1d89f53dd` |
+| `smollm-flex/e4011b9-r1.time` | 777 | `b078fa3c74732dd8ccf595a0fc976343985c72728a6ec0c0ebb54f79de8d2aa3` |
+| `smollm-flex/e4011b9-r2.json` | 4,392 | `17204bba079691365da0811737f3bbb1e94d3a5c9847eb244118a8c532873336` |
+| `smollm-flex/e4011b9-r2.time` | 777 | `3d11a251a9670ad6baeef475a6b0e9479f45c0269ca5979a7a36b3dfcc2f85fc` |
+| `smollm-flex/log.txt` | 514 | `890ccaed89786285e0ac801fc08d68166224461c2f17ff5ddf329977067dd282` |
+
+Timed executables, in `/Volumes/bag of holding/cargo-targets/tfm-polish-w4-performance-bins/`:
+
+| Executable | Bytes | SHA-256 | Built from | Backs |
+| --- | ---: | --- | --- | --- |
+| `small_model_benchmarks-e4011b9-stable-flex` | 15,418,928 | `b80c2629d3934a3f52db791bb83b714dcca7ba61b9f4ec5e8bc2f319c1b41c57` | `e4011b9`, `cargo +stable`, `std,flex,tokenizers,chat-templates` | FLAN Flex series (its `benchmark_executable_sha256`); SmolLM `e4011b9` runs 1 and 2, the Flex layout runs and the FLAN Flex profile (by file name and run log) |
+| `small_model_benchmarks-base-33f620f-stable-flex` | 15,307,872 | `395bcd6fe0d3626c92c96444043154f14defe882b891cd6265b5a0525e657aa9` | `33f620f` library with the `d72707d` (= `e4011b9`) benchmark sources, `cargo +stable`, `std,flex,tokenizers,chat-templates` | SmolLM `33f620f` run (by file name and run log) |
+| `small_model_benchmarks-e4011b9-stable-metal` | 35,319,424 | `c1cff0ca514b749612e7fbb486baaec0b25a46507e47a409113f75854e3c69d5` | `e4011b9`, `cargo +stable`, `std,metal,tokenizers,chat-templates` | FLAN Metal series (its `benchmark_executable_sha256`); Metal layout runs (by file name) |
+| `qwen35_benchmarks-e4011b9-stable-metal` | 39,596,656 | `98dd9771ca2e1c0c8e0eeddbb1195e44858d5e4a7684eb67011a269d7ce38140` | `e4011b9`, `cargo +stable`, `std,metal,tokenizers,chat-templates` | both Qwen3.5 Metal runs (their `benchmark_executable_sha256`) and the Qwen profile |
+| `small_model_benchmarks-base-33f620f-flex` | 11,828,688 | `a8e5a7cfadcc33e2ed31bfd7d0a571979dd121f930abf710d2bad00c47a7c823` | `33f620f` library with the benchmark sources, worktree nightly toolchain | SmolLM base profile only |
+| `small_model_benchmarks-d72707d-flex` | 11,886,800 | `0ab2f78fbd8161aa52dad6bc055e6bac8e82e67f861bfa1b794ff2a534121914` | `d72707d`, worktree nightly | SmolLM profile after both changes only |
+
+How each file is tied to its source:
+
+- The FLAN and Qwen `benchmark.json` reports embed their provenance: the
+  benchmark source hash, `crate_commit` (`e4011b9c6ea3837e43fda93d749e6576a7eae27d`
+  in all four), the build tree's `git status`, the toolchain and the executable's
+  SHA-256, which matches the table above. The second Qwen run reused the first
+  run's executable (identical executable hash) after uncommitted edits for
+  `c80e9aa` had been made in the build tree, which is why its recorded
+  `crate_worktree_status` lists four modified files. Those edits were not in
+  the binary: three touch only checkpoint loading and the fourth is this file.
+  The first Qwen run and both FLAN runs record a clean tree.
+- The SmolLM JSON reports and the layout JSONL files predate the provenance
+  fields that `tests/support/benchmark_identity.rs` now adds to those
+  harnesses. Their executable is identified only by file name, the run log
+  (`smollm-flex/log.txt`, with load averages at each boundary) and the
+  `/usr/bin/time -l` records; they do not authenticate themselves.
+- The earlier micro-benchmark runs that widen the projection ratio ranges
+  above (four Flex runs at `0472ac1` and `affbb08`, and the first Metal run of a
+  nightly `33f620f` build) were not archived. Only the ranges quoted in the text
+  remain of them.
+- Profiles name their sampled executable in their first line.
 
 ## Current smoke evidence
 
