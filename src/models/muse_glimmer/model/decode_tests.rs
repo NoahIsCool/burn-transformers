@@ -1669,24 +1669,72 @@ fn decode_state_accessors_report_allocation_geometry() {
     assert_eq!(narrow.sliding_window(), Some(2));
 }
 
-/// A state allocated for another schedule is rejected as incompatible before any work.
+/// Returns the window-3 miniature's weights under another sliding window.
 ///
-/// Regression: a full-attention-only state (no ring window) used with a
-/// hybrid model used to surface the internal planning error
+/// Every tensor is identical to [`tiny_model`]'s, so the twin's decode states
+/// differ from the miniature's only in their ring width.
+fn window_twin(
+    window: usize,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> MuseGlimmerForCausalLm<TestBackend> {
+    initialized_model(
+        MuseGlimmerTextConfig {
+            sliding_window: Some(window),
+            ..tiny_config()
+        },
+        device,
+    )
+}
+
+/// A state allocated for another schedule or ring window is rejected before any work.
+///
+/// Regressions: a full-attention-only state (no ring window) used with a
+/// hybrid model surfaced the internal planning error
 /// `muse_glimmer.decode_state.window: is required by the sliding cache group`
-/// instead of the incompatibility diagnostic.
+/// instead of the incompatibility diagnostic; and a state from a twin that
+/// differs only in `sliding_window` was accepted, because the model's layout
+/// was re-planned with the state's own window, so cached decoding silently
+/// masked with the twin's window. Each foreign state first commits two of its
+/// owner's tokens, so both prefill and decode refusals are shown to leave the
+/// lengths and every cached key/value byte untouched.
 #[test]
 fn foreign_decode_state_is_rejected_before_work() {
     let (hybrid, device) = tiny_model();
     let full_only = initialized_model::<TestBackend>(full_only_config(), &device);
-    for (model, owner) in [(&hybrid, &full_only), (&full_only, &hybrid)] {
+    let narrower = window_twin(2, &device);
+    let wider = window_twin(5, &device);
+    let tokens = |ids: &[i32]| CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(ids.to_vec(), [1, ids.len()]), &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    for (model, owner) in [
+        (&hybrid, &full_only),
+        (&full_only, &hybrid),
+        (&hybrid, &narrower),
+        (&hybrid, &wider),
+        (&narrower, &hybrid),
+        (&wider, &hybrid),
+    ] {
         let mut foreign = owner
             .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
             .unwrap();
-        let error = model
+        owner
+            .prefill(tokens(&[1, 2]), &mut foreign, &ForwardOptions::default())
+            .unwrap();
+        let snapshot = contract_cache_snapshot(&foreign);
+        // The six-token suffix is longer than every ring width under test.
+        let prefill = model
             .prefill(
-                CausalLmInput {
-                    token_ids: Tensor::from_ints([[1, 2]], &device),
+                tokens(&[3, 4, 5, 6, 7, 8]),
+                &mut foreign,
+                &ForwardOptions::default(),
+            )
+            .unwrap_err();
+        let decode = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[3]], &device),
                     token_mask: None,
                     position_ids: None,
                 },
@@ -1694,12 +1742,56 @@ fn foreign_decode_state_is_rejected_before_work() {
                 &ForwardOptions::default(),
             )
             .unwrap_err();
-        assert!(
-            matches!(&error, Error::Cache(reason)
-                if reason == "Muse-Glimmer decode state is incompatible with the model"),
-            "{error}"
+        for error in [prefill, decode] {
+            assert!(
+                matches!(&error, Error::Cache(reason)
+                    if reason == "Muse-Glimmer decode state is incompatible with the model"),
+                "{error}"
+            );
+        }
+        assert_eq!(foreign.lengths(), &[2]);
+        assert_eq!(contract_cache_snapshot(&foreign), snapshot);
+    }
+}
+
+/// Twins whose windows both clamp to the same capacity share an interchangeable state.
+///
+/// A ring is never wider than the logical capacity, so at capacity 2 the
+/// window-3 miniature and its window-2 and window-5 twins all allocate the
+/// same two-slot ring and attend over identical spans. Such a state is
+/// accepted and decodes bit-identically to one the model allocated itself.
+#[test]
+fn states_with_the_same_capacity_clamped_window_are_interchangeable() {
+    let (model, device) = tiny_model();
+    let prompt = || CausalLmInput {
+        token_ids: Tensor::from_ints([[4, 9]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut own = model
+        .new_decode_state(CacheConfig::new(1, 2).unwrap(), 1, &device)
+        .unwrap();
+    let expected = model
+        .prefill(prompt(), &mut own, &ForwardOptions::default())
+        .unwrap()
+        .logits
+        .into_data();
+    for window in [2, 5] {
+        let mut borrowed = window_twin(window, &device)
+            .new_decode_state(CacheConfig::new(1, 2).unwrap(), 1, &device)
+            .unwrap();
+        assert_eq!(borrowed.sliding_window(), Some(2));
+        let actual = model
+            .prefill(prompt(), &mut borrowed, &ForwardOptions::default())
+            .unwrap()
+            .logits
+            .into_data();
+        assert_eq!(actual, expected, "window {window}");
+        assert_eq!(borrowed.lengths(), &[2]);
+        assert_eq!(
+            contract_cache_snapshot(&borrowed),
+            contract_cache_snapshot(&own)
         );
-        assert_eq!(foreign.lengths(), &[0]);
     }
 }
 
