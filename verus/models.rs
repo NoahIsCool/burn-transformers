@@ -27,7 +27,14 @@
 //!   `plan_appends`: padding detection, signed index conversion, implicit
 //!   cached positions `baseline + k`, the rotary extent `max + 1`, attained
 //!   value ranges over valid columns, and per-row cache appends against a
-//!   capacity are exact and overflow-free.
+//!   capacity are exact and overflow-free;
+//! - `active_row_contexts`: the active rows of a stateful call are listed
+//!   exactly once each, in order, with their rotary extents.
+//!
+//! It also verifies `src/models/shared/load_audit.rs`: `payload_totals`
+//! returns the exact sum (or reports `u64` overflow) and the attained maximum
+//! of quantized payload byte counts, and `equivalence_reads` is exactly `2 n`
+//! or reports overflow, as `LoadedModel` audits require.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
@@ -46,3 +53,6 @@
 
 #[path = "../src/models/shared/plan.rs"]
 pub mod plan;
+
+#[path = "../src/models/shared/load_audit.rs"]
+pub mod load_audit;

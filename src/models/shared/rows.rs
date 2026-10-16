@@ -107,13 +107,11 @@ impl StatefulRows {
     }
 
     /// Iterates `(row, evaluated_context)` over rows that append at least one token.
+    ///
+    /// The verified [`plan::active_row_contexts`] lists exactly the active rows,
+    /// in order.
     pub(crate) fn active_contexts(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
-        self.evaluated_contexts
-            .iter()
-            .zip(&self.token_counts)
-            .enumerate()
-            .filter(|(_, (_, count))| **count > 0)
-            .map(|(row, (&context, _))| (row, context))
+        plan::active_row_contexts(&self.evaluated_contexts, &self.token_counts).into_iter()
     }
 
     /// Returns each row's last valid column for [`LogitsSelection::Last`].

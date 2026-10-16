@@ -343,6 +343,17 @@ fn readback_splits_into_registered_segments() {
     );
 }
 
+/// Active rows are listed once each, in order, with their contexts.
+#[test]
+fn active_row_contexts_list_appending_rows_in_order() {
+    assert_eq!(
+        active_row_contexts(&[2, 4, 2], &[1, 0, 2]),
+        vec![(0, 2), (2, 2)]
+    );
+    assert_eq!(active_row_contexts(&[5, 6], &[0, 0]), Vec::new());
+    assert_eq!(active_row_contexts(&[], &[]), Vec::new());
+}
+
 /// Row grids list valid and last columns per row, treating no mask as dense.
 #[test]
 fn row_grids_list_valid_and_last_columns() {

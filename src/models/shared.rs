@@ -16,7 +16,9 @@
 //! * [`checks`] batches every validation statistic into one device-to-host
 //!   readback;
 //! * [`plan`] holds the dependency-free index planning, verified in place by
-//!   Verus through `verus/models.rs`.
+//!   Verus through `verus/models.rs`;
+//! * [`load_audit`] holds the verified counter arithmetic that
+//!   [`LoadedModel`](crate::LoadedModel) audits use for every loaded family.
 //!
 //! # Error convention
 //!
@@ -33,6 +35,7 @@
 
 pub(crate) mod checks;
 pub(crate) mod input;
+pub(crate) mod load_audit;
 pub(crate) mod logits;
 pub(crate) mod plan;
 pub(crate) mod rows;

@@ -1306,6 +1306,68 @@ pub(crate) fn row_last_columns(mask: Option<&[bool]>, batch: usize, sequence: us
     columns
 }
 
+/// Lists `(row, context)` for every row that appends at least one token, in row order.
+///
+/// The result contains exactly the rows with `counts[row] > 0`, each once and
+/// in increasing order, paired with `contexts[row]`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(active =>
+    requires
+        contexts.len() == counts.len(),
+    ensures
+        forall|k: int| 0 <= k < active.len() ==> {
+            &&& #[trigger] active@[k].0 < counts.len()
+            &&& counts[active@[k].0 as int] > 0
+            &&& active@[k].1 == contexts[active@[k].0 as int]
+        },
+        forall|a: int, b: int| 0 <= a < b < active.len()
+            ==> #[trigger] active@[a].0 < #[trigger] active@[b].0,
+        forall|r: int| 0 <= r < counts.len() && #[trigger] counts[r] > 0
+            ==> exists|k: int| 0 <= k < active.len() && active@[k].0 == r,
+))]
+pub(crate) fn active_row_contexts(contexts: &[usize], counts: &[usize]) -> Vec<(usize, usize)> {
+    let mut active: Vec<(usize, usize)> = Vec::new();
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= counts.len(),
+            contexts.len() == counts.len(),
+            forall|k: int| 0 <= k < active.len() ==> {
+                &&& #[trigger] active@[k].0 < row
+                &&& counts[active@[k].0 as int] > 0
+                &&& active@[k].1 == contexts[active@[k].0 as int]
+            },
+            forall|a: int, b: int| 0 <= a < b < active.len()
+                ==> #[trigger] active@[a].0 < #[trigger] active@[b].0,
+            forall|r: int| 0 <= r < row && #[trigger] counts[r] > 0
+                ==> exists|k: int| 0 <= k < active.len() && active@[k].0 == r,
+        decreases counts.len() - row,
+    ))]
+    while row < counts.len() {
+        if counts[row] > 0 {
+            #[cfg(verus_keep_ghost)]
+            proof_decl! {
+                let ghost before = active@;
+            }
+            active.push((row, contexts[row]));
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert forall|r: int| 0 <= r < row + 1 && #[trigger] counts[r] > 0
+                    implies exists|k: int| 0 <= k < active.len() && active@[k].0 == r by {
+                    if r < row {
+                        let k = choose|k: int| 0 <= k < before.len() && before[k].0 == r;
+                        assert(active@[k] == before[k]);
+                    } else {
+                        assert(active@[active.len() - 1].0 == r);
+                    }
+                }
+            }
+        }
+        row += 1;
+    }
+    active
+}
+
 /// Why a row's valid token or position values are rejected.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

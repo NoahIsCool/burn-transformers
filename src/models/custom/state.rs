@@ -386,11 +386,8 @@ impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
     /// Indices are validated before selection; repeated indices duplicate the
     /// same history without changing token or position semantics.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
-        let selection = indices
-            .iter()
-            .map(|&index| i64::try_from(index))
-            .collect::<core::result::Result<Vec<_>, _>>()
-            .map_err(|_| Error::Cache("custom reorder index does not fit i64".into()))?;
+        let selection = plan::signed_indices(indices)
+            .ok_or_else(|| Error::Cache("custom reorder index does not fit i64".into()))?;
         self.metadata
             .reorder(indices)
             .map_err(|error| Error::Cache(error.to_string()))?;
