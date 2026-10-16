@@ -285,9 +285,9 @@ impl RingWritePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingReadSegment {
     /// Absolute token positions represented by this slice.
-    absolute: Range<usize>,
+    pub(crate) absolute: Range<usize>,
     /// Equally sized interval inside physical ring storage.
-    physical: Range<usize>,
+    pub(crate) physical: Range<usize>,
 }
 
 impl RingReadSegment {
@@ -309,9 +309,9 @@ impl RingReadSegment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingReadPlan {
     /// Absolute suffix still visible under the retention policy.
-    retained_positions: Range<usize>,
+    pub(crate) retained_positions: Range<usize>,
     /// Physical slices ordered from oldest to newest retained token.
-    segments: Vec<RingReadSegment>,
+    pub(crate) segments: Vec<RingReadSegment>,
 }
 
 impl RingReadPlan {
@@ -610,7 +610,7 @@ pub fn plan_ring_read(
             },
         }
 ))]
-fn ring_read_slots(
+pub(crate) fn ring_read_slots(
     sequence_length: usize,
     window: usize,
     capacity: usize,

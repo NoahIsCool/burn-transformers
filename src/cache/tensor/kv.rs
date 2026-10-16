@@ -26,7 +26,7 @@ use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::identity::IdentityToken;
 use crate::cache::retention::first_unsafe_ring_rewind;
-use crate::cache::{CacheConfig, DecodeStateError, plan_ring_read};
+use crate::cache::{CacheConfig, DecodeStateError};
 
 use super::plan::{
     check_staged_commit, checked_product, first_index_out_of_range, next_version, portable_indices,
@@ -44,8 +44,8 @@ pub(crate) use batch::{PreparedNativeKvBatchWrite, left_padded_columns, token_se
 pub use plan::KvCacheStorage;
 
 use plan::{
-    DirectSegment, DirectWriteViolation, TimeExtent, TimeSlotViolation, commit_write_segments,
-    direct_write_segments, mirrored_window_slots, staged_read_ranges, visible_count,
+    DirectSegment, SegmentViolation, TimeExtent, TimeSlotViolation, commit_write_segments,
+    committed_read_segments, direct_write_segments, staged_read_ranges, visible_count,
     working_window,
 };
 pub(crate) use plan::{WriteAheadViolation, write_ahead_allowed};
@@ -962,45 +962,32 @@ impl<B: Backend> NativeKvCache<B> {
         length: usize,
         keep: usize,
     ) -> TensorCacheResult<Vec<KvCacheReadSegment<B>>> {
-        let start = length - keep;
-        let Some(keep) = NonZeroUsize::new(keep) else {
-            return Ok(Vec::new());
-        };
-        Ok(match self.spec.storage() {
-            KvCacheStorage::Full => vec![read_segment(
-                layer,
-                sequence,
-                start..length,
-                start..length,
-                self.spec,
-            )],
-            KvCacheStorage::SlidingRing => plan_ring_read(length, keep, self.window()?)?
-                .segments()
-                .iter()
-                .map(|segment| {
-                    read_segment(
-                        layer,
-                        sequence,
-                        segment.absolute(),
-                        segment.physical(),
-                        self.spec,
+        let storage = self.spec.storage();
+        // The Verus-verified planner partitions `[length - keep, length)` into
+        // chronological slices, each read from the slots that hold it.
+        let segments =
+            committed_read_segments(storage, length, keep, self.window.map(NonZeroUsize::get))
+                .map_err(|violation| {
+                    segment_error(
+                        storage,
+                        length - keep,
+                        keep,
+                        self.config.capacity(),
+                        violation,
                     )
-                })
-                .collect(),
-            KvCacheStorage::MirroredSlidingRing => {
-                // Slot `s` is duplicated at `s + W`, so any run of at most `W`
-                // positions starting at slot `start mod W` is contiguous; the
-                // verified `mirrored_window_slots` computes that run.
-                let slots = mirrored_window_slots(start, keep.get(), self.window()?.get());
-                vec![read_segment(
+                })?;
+        Ok(segments
+            .into_iter()
+            .map(|segment| {
+                read_segment(
                     layer,
                     sequence,
-                    start..length,
-                    slots,
+                    segment.absolute,
+                    segment.physical,
                     self.spec,
-                )]
-            }
-        })
+                )
+            })
+            .collect())
     }
 
     /// Appends one sequence's proposal values to preallocated staging storage.
@@ -1200,9 +1187,7 @@ impl<B: Backend> NativeKvCache<B> {
             // mirrored extent (rings), and plans exactly the accepted prefix.
             let segments =
                 commit_write_segments(storage, start, proposed[sequence], count, window, capacity)
-                    .map_err(|violation| {
-                        direct_write_error(storage, start, count, capacity, violation)
-                    })?
+                    .map_err(|violation| segment_error(storage, start, count, capacity, violation))?
                     .into_iter()
                     .map(KvCommitSegment::from)
                     .collect();
@@ -1301,13 +1286,6 @@ impl<B: Backend> NativeKvCache<B> {
             })
     }
 
-    /// Returns the resolved ring width required by either ring representation.
-    fn window(&self) -> TensorCacheResult<NonZeroUsize> {
-        self.window.ok_or(TensorCacheError::SlidingWindowRequired {
-            storage: self.spec.storage().as_str(),
-        })
-    }
-
     /// Converts a key/value input pair into planes, rejecting latent groups.
     pub(crate) fn pair_planes(
         &self,
@@ -1384,7 +1362,7 @@ impl<B: Backend> NativeKvCache<B> {
             self.window.map(NonZeroUsize::get),
         )
         .map_err(|violation| {
-            direct_write_error(
+            segment_error(
                 storage,
                 start,
                 token_count,
@@ -1435,22 +1413,25 @@ impl<B: Backend> NativeKvCache<B> {
     }
 }
 
-/// Names a verified committed-write violation of `tokens` at `start` in a `storage` group.
-fn direct_write_error(
+/// Names a verified segment-planning violation of `tokens` at `start` in a `storage` group.
+///
+/// Only staged-prefix commits report `WriteEnd`; reads and direct appends
+/// never do, so their `start`, `tokens`, and `capacity` only label the error.
+fn segment_error(
     storage: KvCacheStorage,
     start: usize,
     tokens: usize,
     capacity: usize,
-    violation: DirectWriteViolation,
+    violation: SegmentViolation,
 ) -> TensorCacheError {
     match violation {
-        DirectWriteViolation::WindowRequired => TensorCacheError::SlidingWindowRequired {
+        SegmentViolation::WindowRequired => TensorCacheError::SlidingWindowRequired {
             storage: storage.as_str(),
         },
-        DirectWriteViolation::WriteEnd(violation) => {
+        SegmentViolation::WriteEnd(violation) => {
             TensorCacheError::write_end(start, tokens, capacity, violation)
         }
-        DirectWriteViolation::Ring(error) => TensorCacheError::Ring(error),
+        SegmentViolation::Ring(error) => TensorCacheError::Ring(error),
     }
 }
 

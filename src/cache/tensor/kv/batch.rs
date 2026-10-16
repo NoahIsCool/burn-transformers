@@ -72,8 +72,7 @@ use crate::cache::tensor::plan::{first_index_above, portable_indices};
 use super::plan::{committed_read_rows, plan_direct_run, working_read_rows};
 use super::{
     NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError, TensorCacheResult,
-    direct_write_error, validate_plane_count, validate_sequence, validate_tensor,
-    validate_write_end,
+    segment_error, validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
 };
 
 mod layout;
@@ -660,7 +659,7 @@ impl<B: Backend> NativeKvCache<B> {
             self.window.map(NonZeroUsize::get),
         )
         .map_err(|violation| {
-            direct_write_error(
+            segment_error(
                 storage,
                 run.start,
                 run.count,

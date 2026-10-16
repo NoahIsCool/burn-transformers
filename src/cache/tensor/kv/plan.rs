@@ -18,6 +18,10 @@
 //!   committed and a staged part (the verified `ring_working_window`).
 //! * **Mirrored slices.** The newest `k <= W` positions before `L` start at
 //!   physical slot `(L - k) mod W` and stay below `2W`.
+//! * **Committed reads.** The newest `k` positions before `L` are sliced in
+//!   chronological order from the slots that hold them: slot `p` under full
+//!   storage, `p mod W` in a ring (at most two slices), and one contiguous
+//!   mirrored run.
 //! * **Committed writes.** A direct append of `n` tokens at `s`, read from
 //!   input columns `[c, c + n)`, writes slots `[s, s + n)` under full
 //!   storage; a ring of width `W` keeps the newest `min(n, W)` tokens and
@@ -37,7 +41,9 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use crate::cache::retention::working_window_correct;
 use crate::cache::retention::{WorkingWindow, ring_working_window};
-use crate::cache::ring::{RingPlanError, mirrored_write_slots, plan_ring_write_slots};
+use crate::cache::ring::{
+    RingPlanError, mirrored_write_slots, plan_ring_write_slots, ring_read_slots,
+};
 #[cfg(verus_keep_ghost)]
 use crate::cache::ring::{ring_slot, write_plan_correct};
 use crate::cache::rows::RowRun;
@@ -619,16 +625,17 @@ pub(crate) struct DirectSegment {
     pub(crate) mirror: Option<Range<usize>>,
 }
 
-/// Integer reason a committed KV write cannot be planned.
+/// Integer reason a committed KV read or write cannot be planned.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DirectWriteViolation {
+pub(crate) enum SegmentViolation {
     /// Ring storage has no resolved width.
     WindowRequired,
     /// A full-storage commit leaves the logical capacity.
     WriteEnd(WriteEndViolation),
-    /// Ring planning rejected the write: an unrepresentable end, a doubled
-    /// mirrored extent, or a commit beyond the staged proposals.
+    /// Ring planning rejected the request: an unrepresentable end, a doubled
+    /// mirrored extent, a commit beyond the staged proposals, or a read wider
+    /// than the ring.
     Ring(RingPlanError),
 }
 
@@ -747,17 +754,17 @@ pub(crate) open spec fn direct_violation_exact(
     start: usize,
     count: usize,
     window: Option<usize>,
-    violation: DirectWriteViolation,
+    violation: SegmentViolation,
 ) -> bool {
     &&& count > 0
     &&& if storage != KvCacheStorage::Full && window is None {
-        violation == DirectWriteViolation::WindowRequired
+        violation == SegmentViolation::WindowRequired
     } else if storage == KvCacheStorage::MirroredSlidingRing && 2 * window->0 > usize::MAX {
-        violation == DirectWriteViolation::Ring(
+        violation == SegmentViolation::Ring(
             RingPlanError::DoubledCapacityOverflow { capacity: window->0 })
     } else {
         &&& start + count > usize::MAX
-        &&& violation == DirectWriteViolation::Ring(
+        &&& violation == SegmentViolation::Ring(
             RingPlanError::PositionOverflow { start_position: start, token_count: count })
     }
 }
@@ -793,26 +800,26 @@ pub(crate) open spec fn commit_violation_exact(
     accepted: usize,
     window: Option<usize>,
     capacity: usize,
-    violation: DirectWriteViolation,
+    violation: SegmentViolation,
 ) -> bool {
     if baseline + proposed > usize::MAX {
-        violation == DirectWriteViolation::Ring(
+        violation == SegmentViolation::Ring(
             RingPlanError::PositionOverflow { start_position: baseline, token_count: proposed })
     } else if storage == KvCacheStorage::Full {
         match violation {
-            DirectWriteViolation::WriteEnd(end) =>
+            SegmentViolation::WriteEnd(end) =>
                 write_end_violation_exact(baseline, accepted, capacity, end),
             _ => false,
         }
     } else if window is None {
-        violation == DirectWriteViolation::WindowRequired
+        violation == SegmentViolation::WindowRequired
     } else if accepted > proposed {
-        violation == DirectWriteViolation::Ring(
+        violation == SegmentViolation::Ring(
             RingPlanError::CommitPrefixExceedsStaged { accepted, staged: proposed })
     } else {
         &&& storage == KvCacheStorage::MirroredSlidingRing
         &&& 2 * window->0 > usize::MAX
-        &&& violation == DirectWriteViolation::Ring(
+        &&& violation == SegmentViolation::Ring(
             RingPlanError::DoubledCapacityOverflow { capacity: window->0 })
     }
 }
@@ -993,7 +1000,7 @@ pub(crate) fn direct_write_segments(
     count: usize,
     column: usize,
     window: Option<usize>,
-) -> Result<Vec<DirectSegment>, DirectWriteViolation> {
+) -> Result<Vec<DirectSegment>, SegmentViolation> {
     let mut segments: Vec<DirectSegment> = Vec::new();
     if count == 0 {
         return Ok(segments);
@@ -1001,12 +1008,10 @@ pub(crate) fn direct_write_segments(
     match storage {
         KvCacheStorage::Full => {
             let Some(end) = start.checked_add(count) else {
-                return Err(DirectWriteViolation::Ring(
-                    RingPlanError::PositionOverflow {
-                        start_position: start,
-                        token_count: count,
-                    },
-                ));
+                return Err(SegmentViolation::Ring(RingPlanError::PositionOverflow {
+                    start_position: start,
+                    token_count: count,
+                }));
             };
             segments.push(DirectSegment {
                 input: column..column + count,
@@ -1017,20 +1022,20 @@ pub(crate) fn direct_write_segments(
         }
         KvCacheStorage::SlidingRing => {
             let Some(width) = window else {
-                return Err(DirectWriteViolation::WindowRequired);
+                return Err(SegmentViolation::WindowRequired);
             };
             match ring_direct_segments(start, count, column, width) {
                 Ok(segments) => Ok(segments),
-                Err(error) => Err(DirectWriteViolation::Ring(error)),
+                Err(error) => Err(SegmentViolation::Ring(error)),
             }
         }
         KvCacheStorage::MirroredSlidingRing => {
             let Some(width) = window else {
-                return Err(DirectWriteViolation::WindowRequired);
+                return Err(SegmentViolation::WindowRequired);
             };
             match mirrored_direct_segments(start, count, column, width) {
                 Ok(segments) => Ok(segments),
-                Err(error) => Err(DirectWriteViolation::Ring(error)),
+                Err(error) => Err(SegmentViolation::Ring(error)),
             }
         }
     }
@@ -1073,7 +1078,7 @@ pub(crate) fn plan_direct_run(
     source_offset: usize,
     storage: KvCacheStorage,
     window: Option<usize>,
-) -> Result<DirectRun, DirectWriteViolation> {
+) -> Result<DirectRun, SegmentViolation> {
     let segments = direct_write_segments(storage, run.start, run.count, run.column, window)?;
     Ok(DirectRun {
         rows: run.first_row..run.end_row,
@@ -1112,20 +1117,18 @@ pub(crate) fn commit_write_segments(
     accepted: usize,
     window: Option<usize>,
     capacity: usize,
-) -> Result<Vec<DirectSegment>, DirectWriteViolation> {
+) -> Result<Vec<DirectSegment>, SegmentViolation> {
     if baseline.checked_add(proposed).is_none() {
-        return Err(DirectWriteViolation::Ring(
-            RingPlanError::PositionOverflow {
-                start_position: baseline,
-                token_count: proposed,
-            },
-        ));
+        return Err(SegmentViolation::Ring(RingPlanError::PositionOverflow {
+            start_position: baseline,
+            token_count: proposed,
+        }));
     }
     let width = match storage {
         KvCacheStorage::Full => {
             let end = match write_end(baseline, accepted, capacity) {
                 Ok(end) => end,
-                Err(violation) => return Err(DirectWriteViolation::WriteEnd(violation)),
+                Err(violation) => return Err(SegmentViolation::WriteEnd(violation)),
             };
             let mut segments: Vec<DirectSegment> = Vec::new();
             if accepted > 0 {
@@ -1139,11 +1142,11 @@ pub(crate) fn commit_write_segments(
         }
         KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => match window {
             Some(width) => width,
-            None => return Err(DirectWriteViolation::WindowRequired),
+            None => return Err(SegmentViolation::WindowRequired),
         },
     };
     if accepted > proposed {
-        return Err(DirectWriteViolation::Ring(
+        return Err(SegmentViolation::Ring(
             RingPlanError::CommitPrefixExceedsStaged {
                 accepted,
                 staged: proposed,
@@ -1160,7 +1163,223 @@ pub(crate) fn commit_write_segments(
     };
     match planned {
         Ok(segments) => Ok(segments),
-        Err(error) => Err(DirectWriteViolation::Ring(error)),
+        Err(error) => Err(SegmentViolation::Ring(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Committed reads: the newest positions of one row
+// ---------------------------------------------------------------------------
+
+/// One chronological slice of a committed KV read.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadSegment {
+    /// Absolute positions read.
+    pub(crate) absolute: Range<usize>,
+    /// Committed time slots holding them, in the same order.
+    pub(crate) physical: Range<usize>,
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Committed time slot `slot` holds absolute position `position` under `storage`.
+///
+/// Full storage keeps position `p` at slot `p`; a ring of width `W` at
+/// `p mod W`; a mirrored ring at either copy `q < 2W` with `q mod W = p mod W`.
+pub(crate) open spec fn slot_holds(
+    storage: KvCacheStorage,
+    window: Option<usize>,
+    slot: int,
+    position: int,
+) -> bool {
+    match storage {
+        KvCacheStorage::Full => slot == position,
+        KvCacheStorage::SlidingRing => window is Some && slot == position % (window->0 as int),
+        KvCacheStorage::MirroredSlidingRing => {
+            &&& window is Some
+            &&& 0 <= slot < 2 * window->0
+            &&& slot % (window->0 as int) == position % (window->0 as int)
+        },
+    }
+}
+
+/// `segments` reads exactly the newest `keep` positions before `length`, in order.
+///
+/// The slices are non-empty, partition `[length - keep, length)` in
+/// chronological order, number at most two for a standard ring and one
+/// otherwise, and each reads every position from a slot that holds it.
+pub(crate) open spec fn read_segments_correct(
+    segments: Seq<ReadSegment>,
+    storage: KvCacheStorage,
+    length: usize,
+    keep: usize,
+    window: Option<usize>,
+) -> bool {
+    &&& (segments.len() == 0) == (keep == 0)
+    &&& segments.len() <= if storage == KvCacheStorage::SlidingRing { 2int } else { 1int }
+    &&& segments.len() >= 1 ==> segments[0].absolute.start == length - keep
+    &&& segments.len() >= 1 ==> segments[segments.len() - 1].absolute.end == length
+    &&& segments.len() == 2 ==> segments[1].absolute.start == segments[0].absolute.end
+    &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
+        &&& segments[i].absolute.start < segments[i].absolute.end
+        &&& segments[i].absolute.end - segments[i].absolute.start
+            == segments[i].physical.end - segments[i].physical.start
+        &&& forall|p: int| segments[i].absolute.start <= p < segments[i].absolute.end ==>
+            #[trigger] slot_holds(storage, window,
+                segments[i].physical.start + (p - segments[i].absolute.start), p)
+    }
+}
+
+} // verus!
+
+/// Slices the newest `keep` committed positions before `length` in chronological order.
+///
+/// The caller guarantees `keep <= length` (a read never sees more than it
+/// holds) and, for a mirrored ring, `keep <= W` with `2W` representable,
+/// which the verified window planners and `committed_time_slots` establish.
+/// An empty read checks nothing, matching the runtime's early return,
+/// because Burn backends do not uniformly support zero-length slices.
+///
+/// Proved: a non-empty read is planned exactly when full storage, a ring
+/// with a width, and, for a standard ring, `keep <= W` hold; the slices then
+/// satisfy `read_segments_correct`. A rejection is the missing width, then a
+/// read wider than the ring.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        keep <= length,
+        storage == KvCacheStorage::MirroredSlidingRing && window is Some ==>
+            keep <= window->0 && 2 * window->0 <= usize::MAX,
+        window matches Some(width) ==> width > 0,
+    ensures
+        result is Ok <==> (keep == 0 || match storage {
+            KvCacheStorage::Full => true,
+            KvCacheStorage::SlidingRing => window is Some && keep <= window->0,
+            KvCacheStorage::MirroredSlidingRing => window is Some,
+        }),
+        result matches Ok(segments) ==>
+            read_segments_correct(segments@, storage, length, keep, window),
+        result matches Err(violation) ==> {
+            &&& keep > 0
+            &&& storage != KvCacheStorage::Full
+            &&& if window is None {
+                violation == SegmentViolation::WindowRequired
+            } else {
+                &&& storage == KvCacheStorage::SlidingRing
+                &&& keep > window->0
+                &&& violation == SegmentViolation::Ring(RingPlanError::WindowExceedsCapacity {
+                    window: keep,
+                    capacity: window->0,
+                })
+            }
+        },
+))]
+pub(crate) fn committed_read_segments(
+    storage: KvCacheStorage,
+    length: usize,
+    keep: usize,
+    window: Option<usize>,
+) -> Result<Vec<ReadSegment>, SegmentViolation> {
+    let start = length - keep;
+    let mut segments: Vec<ReadSegment> = Vec::new();
+    if keep == 0 {
+        return Ok(segments);
+    }
+    match storage {
+        KvCacheStorage::Full => {
+            segments.push(ReadSegment {
+                absolute: start..length,
+                physical: start..length,
+            });
+            Ok(segments)
+        }
+        KvCacheStorage::SlidingRing => {
+            let Some(width) = window else {
+                return Err(SegmentViolation::WindowRequired);
+            };
+            let plan = match ring_read_slots(length, keep, width) {
+                Ok(plan) => plan,
+                Err(error) => return Err(SegmentViolation::Ring(error)),
+            };
+            // A read window of `keep <= length` starts at `length - keep`.
+            let mut index = 0;
+            #[cfg_attr(verus_keep_ghost, verus_spec(
+                invariant
+                    index <= plan.segments.len(),
+                    width > 0,
+                    keep <= length,
+                    start == length - keep,
+                    segments.len() == index,
+                    plan.retained_positions.start == start,
+                    plan.retained_positions.end == length,
+                    plan.segments.len() <= 2,
+                    (plan.segments.len() == 0) == (start == length),
+                    plan.segments.len() >= 1 ==> plan.segments[0].absolute.start == start,
+                    plan.segments.len() >= 1 ==>
+                        plan.segments[plan.segments.len() - 1].absolute.end == length,
+                    plan.segments.len() == 2 ==>
+                        plan.segments[1].absolute.start == plan.segments[0].absolute.end,
+                    forall|i: int| #![auto] 0 <= i < plan.segments.len() ==> {
+                        &&& plan.segments[i].absolute.start < plan.segments[i].absolute.end
+                        &&& plan.segments[i].physical.end <= width
+                        &&& plan.segments[i].absolute.end - plan.segments[i].absolute.start
+                            == plan.segments[i].physical.end - plan.segments[i].physical.start
+                        &&& forall|p: int| plan.segments[i].absolute.start <= p
+                            < plan.segments[i].absolute.end ==> #[trigger] ring_slot(p, 0,
+                            width as int) == plan.segments[i].physical.start + (p
+                            - plan.segments[i].absolute.start)
+                    },
+                    forall|i: int| #![auto] 0 <= i < index ==> {
+                        &&& segments[i].absolute == plan.segments[i].absolute
+                        &&& segments[i].physical == plan.segments[i].physical
+                    },
+                decreases plan.segments.len() - index,
+            ))]
+            while index < plan.segments.len() {
+                let segment = &plan.segments[index];
+                segments.push(ReadSegment {
+                    absolute: segment.absolute.start..segment.absolute.end,
+                    physical: segment.physical.start..segment.physical.end,
+                });
+                index += 1;
+            }
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert forall|i: int, p: int| 0 <= i < segments.len()
+                    && segments[i].absolute.start <= p < segments[i].absolute.end
+                    implies #[trigger] slot_holds(storage, window,
+                    segments[i].physical.start + (p - segments[i].absolute.start), p)
+                by {
+                    assert(ring_slot(p, 0, width as int) == plan.segments[i].physical.start
+                        + (p - plan.segments[i].absolute.start));
+                }
+            }
+            Ok(segments)
+        }
+        KvCacheStorage::MirroredSlidingRing => {
+            let Some(width) = window else {
+                return Err(SegmentViolation::WindowRequired);
+            };
+            // Slot `s` is duplicated at `s + W`, so the run of `keep <= W`
+            // positions starting at slot `start mod W` is contiguous.
+            let slots = mirrored_window_slots(start, keep, width);
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert forall|p: int| start <= p < length implies #[trigger] slot_holds(storage,
+                    window, slots.start + (p - start), p)
+                by {
+                    let j = p - start;
+                    assert(((slots.start + j) % (width as int)) == (start + j) % (width as int));
+                }
+            }
+            segments.push(ReadSegment {
+                absolute: start..length,
+                physical: slots,
+            });
+            Ok(segments)
+        }
     }
 }
 

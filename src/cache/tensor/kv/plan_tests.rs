@@ -241,10 +241,10 @@ fn direct_writes_reject_the_first_failed_check() {
     for ring in [SlidingRing, MirroredSlidingRing] {
         assert_eq!(
             direct_write_segments(ring, 0, 1, 0, None),
-            Err(DirectWriteViolation::WindowRequired)
+            Err(SegmentViolation::WindowRequired)
         );
     }
-    let overflow = DirectWriteViolation::Ring(RingPlanError::PositionOverflow {
+    let overflow = SegmentViolation::Ring(RingPlanError::PositionOverflow {
         start_position: usize::MAX,
         token_count: 1,
     });
@@ -259,7 +259,7 @@ fn direct_writes_reject_the_first_failed_check() {
     let huge = usize::MAX / 2 + 1;
     assert_eq!(
         direct_write_segments(MirroredSlidingRing, usize::MAX, 1, 0, Some(huge)),
-        Err(DirectWriteViolation::Ring(
+        Err(SegmentViolation::Ring(
             RingPlanError::DoubledCapacityOverflow { capacity: huge }
         ))
     );
@@ -281,7 +281,7 @@ fn direct_runs_shift_source_rows() {
     assert_eq!(plan.segments, [segment(1..3, 7..9, None)]);
     assert_eq!(
         plan_direct_run(run, 0, KvCacheStorage::SlidingRing, None),
-        Err(DirectWriteViolation::WindowRequired)
+        Err(SegmentViolation::WindowRequired)
     );
 }
 
@@ -300,27 +300,25 @@ fn commit_writes_reject_the_first_failed_check() {
     );
     assert_eq!(
         commit_write_segments(Full, usize::MAX, 1, 0, None, 16),
-        Err(DirectWriteViolation::Ring(
-            RingPlanError::PositionOverflow {
-                start_position: usize::MAX,
-                token_count: 1,
-            }
-        ))
+        Err(SegmentViolation::Ring(RingPlanError::PositionOverflow {
+            start_position: usize::MAX,
+            token_count: 1,
+        }))
     );
     assert_eq!(
         commit_write_segments(Full, 15, 3, 2, None, 16),
-        Err(DirectWriteViolation::WriteEnd(
+        Err(SegmentViolation::WriteEnd(
             WriteEndViolation::ExceedsCapacity { end: 17 }
         ))
     );
     // Ring storage checks the width before the accepted prefix.
     assert_eq!(
         commit_write_segments(SlidingRing, 0, 1, 2, None, 16),
-        Err(DirectWriteViolation::WindowRequired)
+        Err(SegmentViolation::WindowRequired)
     );
     assert_eq!(
         commit_write_segments(MirroredSlidingRing, 0, 1, 2, Some(4), 16),
-        Err(DirectWriteViolation::Ring(
+        Err(SegmentViolation::Ring(
             RingPlanError::CommitPrefixExceedsStaged {
                 accepted: 2,
                 staged: 1,
@@ -330,7 +328,7 @@ fn commit_writes_reject_the_first_failed_check() {
     let huge = usize::MAX / 2 + 1;
     assert_eq!(
         commit_write_segments(MirroredSlidingRing, 0, 1, 0, Some(huge), 16),
-        Err(DirectWriteViolation::Ring(
+        Err(SegmentViolation::Ring(
             RingPlanError::DoubledCapacityOverflow { capacity: huge }
         ))
     );
@@ -415,6 +413,78 @@ proptest! {
                     .collect()
             }
         });
-        prop_assert_eq!(planned, expected.map_err(DirectWriteViolation::Ring));
+        prop_assert_eq!(planned, expected.map_err(SegmentViolation::Ring));
+    }
+}
+
+/// Builds a read segment for expectations.
+fn read(absolute: Range<usize>, physical: Range<usize>) -> ReadSegment {
+    ReadSegment { absolute, physical }
+}
+
+/// Committed reads slice the newest positions from each storage mode.
+#[test]
+fn committed_reads_slice_each_storage_mode() {
+    use KvCacheStorage::{Full, MirroredSlidingRing, SlidingRing};
+    assert_eq!(
+        committed_read_segments(Full, 9, 3, None),
+        Ok(vec![read(6..9, 6..9)])
+    );
+    // Positions 6..10 of a ring of 4 wrap after slot 3.
+    assert_eq!(
+        committed_read_segments(SlidingRing, 10, 4, Some(4)),
+        Ok(vec![read(6..8, 2..4), read(8..10, 0..2)])
+    );
+    assert_eq!(
+        committed_read_segments(MirroredSlidingRing, 10, 4, Some(4)),
+        Ok(vec![read(6..10, 2..6)])
+    );
+    // An empty read checks nothing, even a missing width.
+    assert_eq!(committed_read_segments(SlidingRing, 5, 0, None), Ok(vec![]));
+    assert_eq!(
+        committed_read_segments(MirroredSlidingRing, 5, 1, None),
+        Err(SegmentViolation::WindowRequired)
+    );
+    assert_eq!(
+        committed_read_segments(SlidingRing, 9, 5, Some(4)),
+        Err(SegmentViolation::Ring(
+            RingPlanError::WindowExceedsCapacity {
+                window: 5,
+                capacity: 4,
+            }
+        ))
+    );
+}
+
+proptest! {
+    /// Reading the visible window after writing every position finds each position in its slot.
+    #[test]
+    fn committed_reads_find_every_written_position(
+        length in 0_usize..30,
+        width in 1_usize..7,
+        mode in 0_usize..3,
+    ) {
+        let (storage, window, slots) = match mode {
+            0 => (KvCacheStorage::Full, None, 32),
+            1 => (KvCacheStorage::SlidingRing, Some(width), width),
+            _ => (KvCacheStorage::MirroredSlidingRing, Some(width), 2 * width),
+        };
+        // Column `j` of a write starting at position zero is position `j`.
+        let written = apply_segments(
+            &direct_write_segments(storage, 0, length, 0, window).expect("representable"),
+            slots,
+        );
+        let keep = visible_count(length, window);
+        let segments = committed_read_segments(storage, length, keep, window)
+            .expect("visible window fits");
+        let mut positions = Vec::new();
+        for segment in segments {
+            prop_assert_eq!(segment.absolute.len(), segment.physical.len());
+            for (position, slot) in segment.absolute.zip(segment.physical) {
+                prop_assert_eq!(written[slot], Some(position));
+                positions.push(position);
+            }
+        }
+        prop_assert_eq!(positions, (length - keep..length).collect::<Vec<_>>());
     }
 }

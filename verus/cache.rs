@@ -47,7 +47,9 @@
 //!   rule. Committed reads keep `min(L, W)` positions; working reads check
 //!   every end and split each window exactly as the verified working window
 //!   does; mirrored runs read the slot of each matching position below `2W`;
-//!   a working read's staged ranges align offset `j` with position `C + j`.
+//!   committed reads partition the newest `k` positions in order and read
+//!   each from a slot that holds it; a working read's staged ranges align
+//!   offset `j` with position `C + j`.
 //!   Committed writes (direct appends, batched runs, and staged-prefix
 //!   commits) write input column `c + j` to slot `s + j` under full storage
 //!   and to slot `(s + j) mod W` (plus `W` for the mirror) in a ring, keep
