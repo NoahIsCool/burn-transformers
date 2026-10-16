@@ -21,6 +21,7 @@
 //! | every shared RoPE scaling rule (linear, dynamic NTK, YaRN, Llama 3, LongRoPE, proportional) | [`RopeScaling`] |
 //! | ungated MLP, clamped SwiGLU, attention-only blocks | [`FeedForwardSpec::Ungated`], [`FeedForwardSpec::ClampedSwiGlu`], [`FeedForwardSpec::None`] |
 //! | router policy, shared-expert gate, expert biases | [`MixtureOfExpertsSpec`] |
+//! | clamped SwiGLU routed and shared experts (gpt-oss) | [`FeedForwardSpec::ClampedMixtureOfExperts`] |
 //! | cross-attention scale, soft cap, sinks, biases | [`Seq2SeqSpec::cross_attention_options`], [`CrossAttentionSpec`] |
 //!
 //! # Roles of the stack types
@@ -1295,10 +1296,15 @@ impl ClampedSwiGluSpec {
     /// The shared clamped gated unit this spec describes.
     #[must_use]
     pub fn glu(&self) -> ClampedSwiGlu {
-        ClampedSwiGlu::new(self.limit)
-            .with_alpha(self.alpha)
-            .with_up_offset(self.up_offset)
+        clamped_glu(self.limit, self.alpha, self.up_offset)
     }
+}
+
+/// The shared clamped gated unit with upper gate clamp `limit`, sharpness `alpha`, and `up_offset`.
+fn clamped_glu(limit: f64, alpha: f64, up_offset: f64) -> ClampedSwiGlu {
+    ClampedSwiGlu::new(limit)
+        .with_alpha(alpha)
+        .with_up_offset(up_offset)
 }
 
 /// Sparse routed mixture-of-experts topology.
@@ -1349,6 +1355,40 @@ impl MixtureOfExpertsSpec {
         config.expert_bias = self.expert_bias;
         config
     }
+
+    /// Validates cardinalities, the routed scale, and the shared config at `hidden_size`.
+    ///
+    /// Errors name fields below `field`, such as `field.experts_per_token`.
+    fn validate_in_block(&self, field: &str, hidden_size: usize) -> Result<()> {
+        match expert_counts(
+            self.routed_experts,
+            self.experts_per_token,
+            self.expert_intermediate_size,
+        ) {
+            ExpertCheck::Empty => {
+                return Err(Error::configuration(
+                    field,
+                    "routed_experts and expert_intermediate_size must be non-zero",
+                ));
+            }
+            ExpertCheck::SelectionOutOfRange => {
+                return Err(Error::configuration(
+                    format!("{field}.experts_per_token"),
+                    "must be in 1..=routed_experts",
+                ));
+            }
+            ExpertCheck::Valid => {}
+        }
+        if !self.routed_scale.is_finite() || self.routed_scale <= 0.0 {
+            return Err(Error::configuration(
+                format!("{field}.routed_scale"),
+                "must be finite and greater than zero",
+            ));
+        }
+        self.sparse_config(hidden_size)
+            .validate()
+            .map_err(|error| nested(field, error))
+    }
 }
 
 /// Feed-forward operation attached to a transformer block.
@@ -1379,6 +1419,28 @@ pub enum FeedForwardSpec {
     ///
     /// The layer's `feed_forward_norm` is still validated but allocates no parameters.
     None,
+    /// Sparse experts whose every routed and shared expert is a clamped SwiGLU (gpt-oss).
+    ///
+    /// The sparse counterpart of [`Self::ClampedSwiGlu`]: the router, widths,
+    /// biases, and routing policy are those of `experts`, and with
+    /// `g = min(gate x, limit)` each expert computes
+    /// `down((clamp(up x, -limit, limit) + up_offset) * g * sigmoid(alpha * g))`.
+    /// gpt-oss uses `limit = 7`, `alpha = 1.702`, `up_offset = 1`. The unit
+    /// replaces the expert activation, so `experts.activation` must be
+    /// [`Activation::Silu`] (the unit's `alpha = 1` form); any other value
+    /// would be ignored and is rejected.
+    ClampedMixtureOfExperts {
+        /// Router selection and per-expert widths, biases, and routing policy.
+        experts: MixtureOfExpertsSpec,
+        /// Upper clamp of every expert's gate and symmetric clamp of its up projection.
+        limit: f64,
+        /// Sigmoid sharpness; one gives SiLU.
+        #[serde(default = "default_alpha")]
+        alpha: f64,
+        /// Constant added to every expert's clamped up projection.
+        #[serde(default)]
+        up_offset: f64,
+    },
 }
 
 impl FeedForwardSpec {
@@ -1413,37 +1475,45 @@ impl FeedForwardSpec {
                     .validate()
                     .map_err(|error| nested(field, error))
             }
-            Self::MixtureOfExperts(spec) => {
-                match expert_counts(
-                    spec.routed_experts,
-                    spec.experts_per_token,
-                    spec.expert_intermediate_size,
-                ) {
-                    ExpertCheck::Empty => {
-                        return Err(Error::configuration(
-                            field,
-                            "routed_experts and expert_intermediate_size must be non-zero",
-                        ));
-                    }
-                    ExpertCheck::SelectionOutOfRange => {
-                        return Err(Error::configuration(
-                            format!("{field}.experts_per_token"),
-                            "must be in 1..=routed_experts",
-                        ));
-                    }
-                    ExpertCheck::Valid => {}
-                }
-                if !spec.routed_scale.is_finite() || spec.routed_scale <= 0.0 {
+            Self::MixtureOfExperts(spec) => spec.validate_in_block(field, hidden_size),
+            Self::ClampedMixtureOfExperts { experts, .. } => {
+                experts.validate_in_block(&format!("{field}.experts"), hidden_size)?;
+                if experts.activation != Activation::Silu {
                     return Err(Error::configuration(
-                        format!("{field}.routed_scale"),
-                        "must be finite and greater than zero",
+                        format!("{field}.experts.activation"),
+                        "the clamped unit replaces the expert activation; use silu",
                     ));
                 }
-                spec.sparse_config(hidden_size)
-                    .validate()
-                    .map_err(|error| nested(field, error))
+                self.expert_glu()
+                    .map_or(Ok(()), |glu| glu.validate())
+                    .map_err(|error| Error::configuration(format!("{field}.glu"), reason_of(error)))
             }
             Self::None => Ok(()),
+        }
+    }
+
+    /// The sparse experts of either expert variant, or `None` for dense and absent branches.
+    #[must_use]
+    pub const fn experts(&self) -> Option<&MixtureOfExpertsSpec> {
+        match self {
+            Self::MixtureOfExperts(experts) | Self::ClampedMixtureOfExperts { experts, .. } => {
+                Some(experts)
+            }
+            Self::Dense(_) | Self::Ungated(_) | Self::ClampedSwiGlu(_) | Self::None => None,
+        }
+    }
+
+    /// The clamped unit of [`Self::ClampedMixtureOfExperts`] experts, or `None` for other branches.
+    #[must_use]
+    pub fn expert_glu(&self) -> Option<ClampedSwiGlu> {
+        match self {
+            Self::ClampedMixtureOfExperts {
+                limit,
+                alpha,
+                up_offset,
+                ..
+            } => Some(clamped_glu(*limit, *alpha, *up_offset)),
+            _ => None,
         }
     }
 }

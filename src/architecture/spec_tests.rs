@@ -1555,6 +1555,136 @@ fn feed_forward_variants_report_each_invalid_field() {
     assert_eq!((defaults.alpha, defaults.up_offset), (1.0, 0.0));
 }
 
+/// gpt-oss-shaped experts: four routed experts, two per token, biased router and projections.
+fn gpt_oss_experts() -> MixtureOfExpertsSpec {
+    MixtureOfExpertsSpec {
+        routed_experts: 4,
+        experts_per_token: 2,
+        shared_experts: 0,
+        expert_intermediate_size: 16,
+        activation: Activation::Silu,
+        renormalize_selected: false,
+        routed_scale: 1.0,
+        routing: RoutingPolicy {
+            router_bias: true,
+            ..RoutingPolicy::default()
+        },
+        shared_expert_gate: false,
+        expert_bias: true,
+    }
+}
+
+/// Clamped experts validate their expert bank below `experts`, require SiLU, and check the unit.
+///
+/// Expert-bank errors keep the plain variant's field names one level deeper,
+/// an activation the unit would ignore names `experts.activation`, and an
+/// invalid clamp names `glu`, as the dense clamped variant does.
+#[test]
+fn clamped_experts_report_each_invalid_field() {
+    let clamped = |experts: MixtureOfExpertsSpec, limit: f64, alpha: f64| {
+        FeedForwardSpec::ClampedMixtureOfExperts {
+            experts,
+            limit,
+            alpha,
+            up_offset: 1.0,
+        }
+    };
+    let valid = clamped(gpt_oss_experts(), 7.0, 1.702);
+    valid.validate("ffn").unwrap();
+    assert_eq!(valid.experts(), Some(&gpt_oss_experts()));
+    assert_eq!(
+        valid.expert_glu(),
+        Some(
+            ClampedSwiGlu::new(7.0)
+                .with_alpha(1.702)
+                .with_up_offset(1.0)
+        )
+    );
+    let too_many = MixtureOfExpertsSpec {
+        experts_per_token: 5,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(too_many, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.experts_per_token",
+    );
+    let empty = MixtureOfExpertsSpec {
+        routed_experts: 0,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(clamped(empty, 7.0, 1.702).validate("ffn"), "ffn.experts");
+    let unscaled = MixtureOfExpertsSpec {
+        routed_scale: 0.0,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(unscaled, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.routed_scale",
+    );
+    let gelu = MixtureOfExpertsSpec {
+        activation: Activation::Gelu,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(gelu, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.activation",
+    );
+    assert_configuration_field(
+        clamped(gpt_oss_experts(), 0.0, 1.702).validate("ffn"),
+        "ffn.glu",
+    );
+    assert_configuration_field(
+        clamped(gpt_oss_experts(), 7.0, f64::INFINITY).validate("ffn"),
+        "ffn.glu",
+    );
+    // Shared-config checks (here a gate without shared experts) are nested too.
+    let ungated_gate = MixtureOfExpertsSpec {
+        shared_expert_gate: true,
+        ..gpt_oss_experts()
+    };
+    assert_configuration_field(
+        clamped(ungated_gate, 7.0, 1.702).validate("ffn"),
+        "ffn.experts.moe.shared_expert_gate",
+    );
+    // Dense and absent branches have neither experts nor an expert unit.
+    for other in [FeedForwardSpec::None, dense_layer().feed_forward] {
+        assert!(other.experts().is_none() && other.expert_glu().is_none());
+    }
+    let plain = FeedForwardSpec::MixtureOfExperts(gpt_oss_experts());
+    assert_eq!(plain.experts(), Some(&gpt_oss_experts()));
+    assert!(plain.expert_glu().is_none());
+}
+
+/// Clamped experts round-trip through JSON, and `alpha` and `up_offset` default to SiLU, no offset.
+#[test]
+fn clamped_experts_round_trip_and_default_their_unit() {
+    let mut spec = decoder();
+    spec.layers[0].feed_forward = FeedForwardSpec::ClampedMixtureOfExperts {
+        experts: gpt_oss_experts(),
+        limit: 7.0,
+        alpha: 1.702,
+        up_offset: 1.0,
+    };
+    spec.validate().unwrap();
+    let json = serde_json::to_string(&spec).unwrap();
+    assert!(
+        json.contains(r#""kind":"clamped_mixture_of_experts""#),
+        "{json}"
+    );
+    assert_eq!(serde_json::from_str::<DecoderSpec>(&json).unwrap(), spec);
+    let minimal: FeedForwardSpec = serde_json::from_str(
+        r#"{"kind": "clamped_mixture_of_experts", "limit": 7.0, "experts": {
+            "routed_experts": 4, "experts_per_token": 2, "shared_experts": 0,
+            "expert_intermediate_size": 16, "activation": "silu",
+            "renormalize_selected": false, "routed_scale": 1.0}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        minimal.expert_glu(),
+        Some(ClampedSwiGlu::new(7.0).with_alpha(1.0).with_up_offset(0.0))
+    );
+}
+
 /// Cross-attention options must keep global connectivity and name their own fields.
 #[test]
 fn cross_attention_options_are_validated() {

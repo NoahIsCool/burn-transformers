@@ -10,7 +10,7 @@ use burn::tensor::{Bool, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
-    architecture::{DecoderSpec, FeedForwardSpec, RouterDiagnostics, TokenMask},
+    architecture::{DecoderSpec, RouterDiagnostics, TokenMask},
     attention::AttentionConnectivity,
     experiment::{EncoderContext, ExecutionContext, HiddenState, read_int_scalars},
     intervention::Stack,
@@ -243,11 +243,11 @@ pub(super) fn validate_forward_options(options: &ForwardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Returns whether a stack contains sparse experts.
+/// Returns whether a stack contains sparse experts, plain or clamped.
 pub(super) fn has_moe(spec: &DecoderSpec) -> bool {
     spec.layers
         .iter()
-        .any(|layer| matches!(&layer.feed_forward, FeedForwardSpec::MixtureOfExperts(_)))
+        .any(|layer| layer.feed_forward.experts().is_some())
 }
 
 /// Applies an ordinary tied vocabulary projection with a `[vocabulary, hidden]` embedding table.

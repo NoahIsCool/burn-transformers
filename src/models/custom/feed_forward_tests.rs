@@ -160,3 +160,227 @@ fn absent_branch_contributes_exact_zeros() {
         .into_data()
         .assert_eq(&TensorData::zeros::<f32, _>([2, 3, 8]), true);
 }
+
+/// Four gpt-oss-style experts with a biased router, one gated shared expert, and expert biases.
+fn clamped_experts_spec() -> FeedForwardSpec {
+    FeedForwardSpec::ClampedMixtureOfExperts {
+        experts: MixtureOfExpertsSpec {
+            routed_experts: 4,
+            experts_per_token: 2,
+            shared_experts: 1,
+            expert_intermediate_size: 5,
+            activation: Activation::Silu,
+            renormalize_selected: false,
+            routed_scale: 1.0,
+            routing: RoutingPolicy {
+                router_bias: true,
+                ..RoutingPolicy::default()
+            },
+            shared_expert_gate: true,
+            expert_bias: true,
+        },
+        limit: 0.5,
+        alpha: 1.702,
+        up_offset: 1.0,
+    }
+}
+
+/// Clamped experts mix `forward_clamped` outputs with the routed weights and gated shared sum.
+///
+/// The oracle evaluates every expert densely on every token and weights the
+/// selected ones with the reported routes, so it checks the sparse dispatch
+/// (gathers, scatter-adds, and weighting) and the clamped unit independently
+/// of the dispatcher. The fixture's inputs reach the clamp limit, so a
+/// branch that ignored the unit would differ.
+#[test]
+fn clamped_experts_mix_the_clamped_unit_with_routed_and_shared_weights() {
+    let device = Default::default();
+    let spec = clamped_experts_spec();
+    let branch = branch(&spec, &device);
+    assert!(branch.activation_points(Layer::decoder(0)).is_empty());
+    let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &branch else {
+        panic!("expected clamped experts");
+    };
+    assert_eq!(Some(clamped.glu), spec.expert_glu());
+    let (output, routing) = branch
+        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
+        .unwrap();
+    let routing = routing.expect("experts report their routing");
+    assert_eq!(routing.selected_experts.dims(), [2, 3, 2]);
+    assert_eq!(routing.expert_token_counts.iter().sum::<usize>(), 12);
+
+    let moe = &clamped.experts;
+    let flat = input(&device).reshape([6, 8]);
+    let selected = routing
+        .selected_experts
+        .reshape([6, 2])
+        .into_data()
+        .to_vec::<i32>()
+        .unwrap();
+    let weights = routing
+        .selected_weights
+        .reshape([6, 2])
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let experts = moe
+        .routed
+        .iter()
+        .map(|expert| {
+            expert
+                .forward_clamped(flat.clone(), &clamped.glu)
+                .unwrap()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let shared = moe.shared[0]
+        .forward_clamped(flat.clone(), &clamped.glu)
+        .unwrap()
+        * sigmoid(operations::linear(flat, moe.shared_expert_gate.as_ref().unwrap()).unwrap());
+    let shared = shared.into_data().to_vec::<f32>().unwrap();
+    let expected = (0..6 * 8)
+        .map(|index| {
+            let (token, channel) = (index / 8, index % 8);
+            shared[index]
+                + (0..2)
+                    .map(|slot| {
+                        let expert = selected[token * 2 + slot] as usize;
+                        weights[token * 2 + slot] * experts[expert][token * 8 + channel]
+                    })
+                    .sum::<f32>()
+        })
+        .collect::<Vec<_>>();
+    output.into_data().assert_approx_eq::<f32>(
+        &TensorData::new(expected, [2, 3, 8]),
+        Tolerance::absolute(1e-5),
+    );
+
+    // The same parameters evaluated as plain SiLU experts give a different branch.
+    let plain = moe
+        .forward(input(&device))
+        .unwrap()
+        .hidden_state
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let clamped_output = branch
+        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
+        .unwrap()
+        .0
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let gap = plain
+        .iter()
+        .zip(&clamped_output)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0, f32::max);
+    assert!(
+        gap > 1e-2,
+        "the clamped unit must change the branch: {gap:e}"
+    );
+}
+
+/// Clamped experts without shared experts add nothing beyond the routed mixture.
+#[test]
+fn clamped_experts_without_shared_experts_return_the_routed_mixture() {
+    let device = Default::default();
+    let FeedForwardSpec::ClampedMixtureOfExperts {
+        mut experts,
+        limit,
+        alpha,
+        up_offset,
+    } = clamped_experts_spec()
+    else {
+        unreachable!("the fixture is a clamped expert branch");
+    };
+    experts.shared_experts = 0;
+    experts.shared_expert_gate = false;
+    experts.routing = RoutingPolicy::default();
+    let spec = FeedForwardSpec::ClampedMixtureOfExperts {
+        experts,
+        limit,
+        alpha,
+        up_offset,
+    };
+    let branch = branch(&spec, &device);
+    let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &branch else {
+        panic!("expected clamped experts");
+    };
+    assert!(clamped.experts.shared.is_empty());
+    assert!(
+        clamped
+            .shared_output(input(&device).reshape([6, 8]))
+            .unwrap()
+            .is_none()
+    );
+    let (output, routing) = branch
+        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
+        .unwrap();
+    assert_eq!(output.dims(), [2, 3, 8]);
+    assert!(routing.is_some());
+}
+
+/// FP32-weighted clamped experts round each weighted contribution, matching the plain dispatch path.
+///
+/// With F32 activations both weighting precisions agree exactly; the test
+/// pins that the `Fp32ThenResidual` arm builds and evaluates.
+#[test]
+fn clamped_experts_honor_the_layer_weighting_precision() {
+    let device = Default::default();
+    let mut branch = branch(&clamped_experts_spec(), &device);
+    let expected = branch
+        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
+        .unwrap()
+        .0;
+    let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &mut branch else {
+        panic!("expected clamped experts");
+    };
+    clamped.experts.weighting_precision = RoutedWeightingPrecision::Fp32ThenResidual;
+    let actual = branch
+        .forward(input(&device), Layer::decoder(0), &mut Hooks::new())
+        .unwrap()
+        .0;
+    actual
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+}
+
+/// Gradients reach the router, a routed expert's projections, and the shared expert gate.
+#[cfg(feature = "autodiff")]
+#[test]
+fn clamped_experts_are_differentiable() {
+    use burn::backend::Autodiff;
+
+    /// Reverse-mode CPU backend.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let branch =
+        ModularFeedForward::<AdBackend>::init(&clamped_experts_spec(), 8, &device).unwrap();
+    let input = Tensor::<AdBackend, 3>::from_data(input(&device).into_data(), &device);
+    let (output, _) = branch
+        .forward(input, Layer::decoder(0), &mut Hooks::new())
+        .unwrap();
+    let gradients = output.sum().backward();
+    let ModularFeedForward::ClampedMixtureOfExperts(clamped) = &branch else {
+        panic!("expected clamped experts");
+    };
+    let moe = &clamped.experts;
+    assert!(moe.router.weight.grad(&gradients).is_some());
+    assert!(moe.shared[0].down_proj.weight.grad(&gradients).is_some());
+    assert!(
+        moe.shared_expert_gate
+            .as_ref()
+            .unwrap()
+            .weight
+            .grad(&gradients)
+            .is_some()
+    );
+    assert!(
+        moe.routed
+            .iter()
+            .any(|expert| expert.gate_proj.weight.grad(&gradients).is_some())
+    );
+}

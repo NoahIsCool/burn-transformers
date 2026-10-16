@@ -9,8 +9,10 @@
 //! mechanisms the families ship: per-head Q/K norms and RoPE (Qwen3-MoE),
 //! routed and shared experts, multi-head latent attention with its decoupled
 //! rotary sub-head (DeepSeek-V2), zero-centered norms, sigmoid-gated
-//! attention, and Gated DeltaNet (Qwen3.5), and T5's unscaled attention,
-//! learned relative buckets, ungated ReLU MLP, and unscaled cross-attention.
+//! attention, and Gated DeltaNet (Qwen3.5), T5's unscaled attention,
+//! learned relative buckets, ungated ReLU MLP, and unscaled cross-attention,
+//! and gpt-oss's learned sinks, biased projections and router,
+//! top-k-then-softmax routing, and clamped SwiGLU experts.
 //!
 //! The comparison tolerance is `1e-5` absolute on logits of magnitude below
 //! about two: both graphs evaluate the same F32 operations, differing only in
@@ -34,15 +36,18 @@ use crate::{
     architecture::{
         AttentionOptions, CrossAttentionSpec, DecoderLayerSpec, DenseFeedForwardSpec, Seq2SeqSpec,
     },
+    attention::ProjectionBias,
     models::{
         config::{RopeParameters, RopeType},
         deepseek_v2::{
             DeepseekScoringFunction, DeepseekTopKMethod, DeepseekV2Config, DeepseekV2ForCausalLm,
         },
+        gpt_oss::{GptOssConfig, GptOssForCausalLm},
         qwen3_5::{Qwen3_5ForCausalLm, Qwen3_5LayerType, Qwen3_5TextConfig},
         qwen3_moe::{Qwen3MoeConfig, Qwen3MoeForCausalLm},
         t5::{T5Config, T5FeedForwardProjection, T5ForConditionalGeneration},
     },
+    moe::ScoringOrder,
     transfer::TransferPlan,
 };
 
@@ -1030,4 +1035,201 @@ fn qwen3_5_hybrid_blocks_match_the_family() {
         ]),
     );
     assert_causal_parity(&family, &custom, &device);
+}
+
+/// Rotary base of the gpt-oss fixture, far below the checkpoint's `150000`.
+///
+/// With four-channel heads the second rotary pair turns at `theta^(-1/2)`,
+/// which the fixture's positions only exercise for a small base.
+const GPT_OSS_THETA: f64 = 100.0;
+
+/// How the modular gpt-oss twin evaluates its experts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GptOssExperts {
+    /// The family's clamped SwiGLU unit (`limit = 7`, `alpha = 1.702`, `up_offset = 1`).
+    Clamped,
+    /// Ordinary SiLU experts over the same parameters: a deliberately wrong twin.
+    Plain,
+}
+
+/// Builds a three-block gpt-oss model (sliding, global, sliding) and its modular twin.
+///
+/// The family stores its routed experts in Burn's row layout and the shared
+/// sparse layer in the column layout, but both expose the same logical
+/// `[d_input, d_output]` parameter shape, so every tensor (sinks, biases,
+/// and expert matrices included) is copied unchanged by path.
+fn gpt_oss_pair(
+    experts: GptOssExperts,
+) -> (GptOssForCausalLm<TestBackend>, ModularCausalLm<TestBackend>) {
+    let device = Default::default();
+    let config = GptOssConfig {
+        vocab_size: 32,
+        hidden_size: 8,
+        intermediate_size: 6,
+        num_hidden_layers: 3,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 4,
+        num_local_experts: 4,
+        num_experts_per_tok: 2,
+        sliding_window: Some(3),
+        layer_types: GptOssConfig::default_layer_types(3),
+        max_position_embeddings: 64,
+        rope_theta: Some(GPT_OSS_THETA),
+        rope_parameters: RopeParameters {
+            factor: Some(4.0),
+            original_max_position_embeddings: Some(16),
+            ..GptOssConfig::default_rope_parameters()
+        },
+        rms_norm_eps: 1e-6,
+        ..GptOssConfig::default()
+    };
+    let family = GptOssForCausalLm::<TestBackend>::init(config, &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    let connectivity = [
+        AttentionConnectivity::SlidingWindow { window: 3 },
+        AttentionConnectivity::Global,
+        AttentionConnectivity::SlidingWindow { window: 3 },
+    ];
+    assert_eq!(family.model.architecture.layers, connectivity);
+    let moe = MixtureOfExpertsSpec {
+        routed_experts: 4,
+        experts_per_token: 2,
+        shared_experts: 0,
+        expert_intermediate_size: 6,
+        activation: Activation::Silu,
+        renormalize_selected: false,
+        routed_scale: 1.0,
+        routing: RoutingPolicy {
+            order: ScoringOrder::TopKThenScore,
+            router_bias: true,
+            ..RoutingPolicy::default()
+        },
+        shared_expert_gate: false,
+        expert_bias: true,
+    };
+    let (feed_forward, expert_path) = match experts {
+        GptOssExperts::Clamped => (
+            FeedForwardSpec::ClampedMixtureOfExperts {
+                experts: moe,
+                limit: 7.0,
+                alpha: 1.702,
+                up_offset: 1.0,
+            },
+            "ClampedMixtureOfExperts.experts",
+        ),
+        GptOssExperts::Plain => (FeedForwardSpec::MixtureOfExperts(moe), "MixtureOfExperts"),
+    };
+    if experts == GptOssExperts::Clamped {
+        assert_eq!(
+            feed_forward.expert_glu(),
+            Some(family.model.architecture.glu)
+        );
+    }
+    let norm = rms_with(1e-6);
+    let layers = connectivity
+        .iter()
+        .map(|&connectivity| {
+            pre_norm_block(
+                MixerSpec::AttentionWithOptions {
+                    attention: AttentionSpec {
+                        query_heads: 4,
+                        key_value_heads: 2,
+                        head_dim: 4,
+                        query_key_norm: false,
+                        output_gate: false,
+                        position: PositionEncodingSpec::Rope {
+                            theta: GPT_OSS_THETA,
+                            rotary_dim: 4,
+                            scaling: RopeScaling::Yarn {
+                                factor: 4.0,
+                                original_max_positions: 16,
+                                attention_factor: None,
+                                beta_slow: 1.0,
+                                beta_fast: 32.0,
+                                truncate: false,
+                            },
+                        },
+                    },
+                    options: AttentionOptions {
+                        connectivity,
+                        score_scale: ScoreScale::InverseSqrtHeadDim,
+                        attention_sinks: true,
+                        projection_bias: ProjectionBias::uniform(true),
+                        ..AttentionOptions::default()
+                    },
+                },
+                feed_forward.clone(),
+                norm,
+            )
+        })
+        .collect();
+    let spec = DecoderSpec {
+        vocabulary_size: 32,
+        hidden_size: 8,
+        layers,
+        final_norm: norm,
+        tie_word_embeddings: false,
+        max_position_embeddings: 64,
+    };
+    let mut pairs = vec![
+        ("model.embed_tokens".to_owned(), "embed_tokens".to_owned()),
+        ("model.norm".to_owned(), "final_norm.Rms".to_owned()),
+        ("lm_head".to_owned(), "lm_head".to_owned()),
+    ];
+    for layer in 0..3 {
+        let family_layer = format!("model.layers.{layer}");
+        let modular_layer = format!("layers.{layer}");
+        pairs.extend([
+            (
+                format!("{family_layer}.input_layernorm"),
+                format!("{modular_layer}.mixer_norm.before.Rms"),
+            ),
+            (
+                format!("{family_layer}.post_attention_layernorm"),
+                format!("{modular_layer}.feed_forward_norm.before.Rms"),
+            ),
+            (
+                format!("{family_layer}.self_attn"),
+                format!("{modular_layer}.mixer.Attention.attention"),
+            ),
+            (
+                format!("{family_layer}.mlp.router"),
+                format!("{modular_layer}.feed_forward.{expert_path}.router"),
+            ),
+            (
+                format!("{family_layer}.mlp.experts"),
+                format!("{modular_layer}.feed_forward.{expert_path}.routed"),
+            ),
+        ]);
+    }
+    let custom = transferred(
+        &family,
+        &ModularCausalLm::<TestBackend>::init(spec, &device).unwrap(),
+        &pairs,
+    );
+    (family, custom)
+}
+
+/// gpt-oss: sinks, biased attention and router, sliding/global layers, YaRN, and clamped experts.
+#[test]
+fn gpt_oss_clamped_experts_match_the_family() {
+    let (family, custom) = gpt_oss_pair(GptOssExperts::Clamped);
+    assert_causal_parity(&family, &custom, &Default::default());
+}
+
+/// Negative control: evaluating gpt-oss experts with plain SiLU is far outside the tolerance.
+///
+/// The twin keeps every transferred tensor and differs only in the expert
+/// unit, so [`gpt_oss_clamped_experts_match_the_family`] can detect a
+/// translation that drops the clamped unit.
+#[test]
+fn gpt_oss_parity_detects_plain_experts() {
+    let (family, custom) = gpt_oss_pair(GptOssExperts::Plain);
+    assert_detectable(
+        &family,
+        &custom,
+        "plain SiLU experts instead of clamped SwiGLU",
+    );
 }
