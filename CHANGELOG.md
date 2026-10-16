@@ -319,7 +319,11 @@ code written against unreleased sources.
 - Packaging: the source archive now includes `verus/*.rs` and
   `verus/README.md`, which `tests/verus_harness.rs` reads, so `cargo test`
   passes from the extracted archive (all three Verus structure tests failed
-  there before). The package gate now runs the archive's test suite.
+  there before). The package gate now runs the archive's test suite. Its
+  listing check had rejected the committed tiny-golden `.safetensors`
+  fixtures as weights since they were added, so the gate failed before
+  packaging; it now admits them (regular files of at most 1 MiB under
+  `tests/fixtures/tiny_goldens/<case>/`) and still rejects any other weight.
 
 ### Performance
 

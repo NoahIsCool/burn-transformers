@@ -1088,6 +1088,47 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             GATES.validate_package_listing("Cargo.toml\n")
 
+    def test_package_listing_accepts_only_small_tiny_golden_fixtures(self):
+        """Tiny random-weight goldens may ship; other or oversized weights may not."""
+
+        base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
+        fixture = "tests/fixtures/tiny_goldens/llama3/model.safetensors"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / fixture).parent.mkdir(parents=True)
+            (root / fixture).write_bytes(b"\0" * 1024)
+            self.assertEqual(GATES.validate_package_listing(base + fixture + "\n", root), 5)
+            for entry in ("tests/fixtures/tiny_goldens/qwen2/model.safetensors",  # absent
+                          "tests/fixtures/model.safetensors",
+                          "tests/fixtures/tiny_goldens/llama3/nested/model.safetensors",
+                          "tests/fixtures/tiny_goldens/llama3/model.bin",
+                          "tests/fixtures/tiny_goldens/llama3/model.bpk"):
+                (root / entry).parent.mkdir(parents=True, exist_ok=True)
+                if "qwen2" not in entry:
+                    (root / entry).write_bytes(b"\0" * 1024)
+                with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, "runtime artifact"):
+                    GATES.validate_package_listing(base + entry + "\n", root)
+            large = "tests/fixtures/tiny_goldens/gpt-oss/model.safetensors"
+            (root / large).parent.mkdir(parents=True)
+            with (root / large).open("wb") as handle:
+                handle.truncate(GATES.TINY_GOLDEN_MAX_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "runtime artifact"):
+                GATES.validate_package_listing(base + large + "\n", root)
+            linked = "tests/fixtures/tiny_goldens/olmo2/model.safetensors"
+            (root / linked).parent.mkdir(parents=True)
+            (root / linked).symlink_to(root / fixture)
+            with self.assertRaisesRegex(ValueError, "runtime artifact"):
+                GATES.validate_package_listing(base + linked + "\n", root)
+
+    def test_package_listing_accepts_the_repository_tiny_goldens(self):
+        """The committed goldens that the packaged tests read pass the listing check."""
+
+        fixtures = sorted(path.relative_to(GATES.CRATE).as_posix()
+                          for path in (GATES.CRATE / GATES.TINY_GOLDEN_FIXTURES).glob("*/*.safetensors"))
+        self.assertTrue(fixtures)
+        listing = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n" + "".join(f"{entry}\n" for entry in fixtures)
+        self.assertEqual(GATES.validate_package_listing(listing), 4 + len(fixtures))
+
 
 if __name__ == "__main__":
     unittest.main()

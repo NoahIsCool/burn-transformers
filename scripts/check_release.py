@@ -623,12 +623,35 @@ def require_msrv(toolchain: str) -> None:
         raise ValueError(f"MSRV alias {toolchain!r} resolves to {' '.join(version)}, not rustc 1.92.0")
 
 
-def validate_package_listing(listing: str) -> int:
+# Committed tiny random-weight goldens that the packaged tests read. They are
+# reference fixtures, not checkpoints: one directory per case, each file a
+# regular file no larger than the cap, so real weights still fail the listing.
+TINY_GOLDEN_FIXTURES = Path("tests/fixtures/tiny_goldens")
+TINY_GOLDEN_MAX_BYTES = 1024 * 1024
+
+
+def is_tiny_golden_fixture(path: Path, root: Path) -> bool:
+    """Whether a listed weight file is a committed tiny golden the archive's tests read.
+
+    Only ``tests/fixtures/tiny_goldens/<case>/<name>.safetensors`` qualifies,
+    and only as a regular file (not a symlink) of at most
+    ``TINY_GOLDEN_MAX_BYTES`` below ``root``.
+    """
+
+    candidate = root / path
+    return (path.suffix == ".safetensors" and path.parent.parent == TINY_GOLDEN_FIXTURES
+            and not candidate.is_symlink() and candidate.is_file()
+            and candidate.stat().st_size <= TINY_GOLDEN_MAX_BYTES)
+
+
+def validate_package_listing(listing: str, root: Path = CRATE) -> int:
     """Fail before packaging if Cargo follows an artifact path or includes weights.
 
     Cargo's slash-free include patterns match at any depth, even below a local
     symlink. Check its actual listing instead of assuming `.gitignore` prevails
     over an explicit package include. Compiler metadata warnings are not paths.
+    Weight files are rejected except the tiny golden fixtures under ``root``
+    that the packaged tests read (see ``is_tiny_golden_fixture``).
     """
 
     allowed_files = {"Cargo.toml", "Cargo.toml.orig", "Cargo.lock", "deny.toml",
@@ -645,7 +668,8 @@ def validate_package_listing(listing: str) -> int:
             raise ValueError(f"repository-only standalone audit tool in runtime package: {raw}")
         if path.parts[0] == "verus" and (len(path.parts) != 2 or not (path.suffix == ".rs" or path.name == "README.md")):
             raise ValueError(f"unexpected entry below verus/: {raw}")
-        if path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}:
+        if (path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}
+                and not is_tiny_golden_fixture(path, root)):
             raise ValueError(f"runtime artifact in source package: {raw}")
         root_doc = len(path.parts) == 1 and path.suffix == ".md"
         if raw not in allowed_files and not root_doc and path.parts[0] not in allowed_roots:
