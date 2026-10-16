@@ -167,6 +167,49 @@ fn routed_experts_construct_and_run() {
     assert_eq!(check_causal(&spec, true, &TOKENS), Outcome::Executed);
 }
 
+/// Clamped SwiGLU experts (gpt-oss) construct and run, and skip cache parity like routed experts.
+#[test]
+fn clamped_routed_experts_construct_and_run() {
+    let experts = FeedForwardSpec::ClampedMixtureOfExperts {
+        experts: MixtureOfExpertsSpec {
+            routed_experts: 4,
+            experts_per_token: 2,
+            shared_experts: 1,
+            expert_intermediate_size: 4,
+            activation: Activation::Silu,
+            renormalize_selected: true,
+            routed_scale: 1.0,
+            routing: RoutingPolicy::default(),
+            shared_expert_gate: false,
+            expert_bias: true,
+        },
+        limit: 7.0,
+        alpha: 1.702,
+        up_offset: 1.0,
+    };
+    let spec = stack_of(vec![block(
+        rope_attention(AttentionOptions::default()),
+        experts,
+    )]);
+    assert!(has_routed_experts(&spec));
+    assert_eq!(check_causal(&spec, true, &TOKENS), Outcome::Executed);
+}
+
+/// A scaled embedding and a final logit cap execute and keep cache parity.
+#[test]
+fn embedding_scale_and_logit_cap_execute_with_cache_parity() {
+    let mut spec = stack_of(vec![block(
+        rope_attention(AttentionOptions::default()),
+        FeedForwardSpec::None,
+    )]);
+    spec.embedding_scale = Some(8.0_f64.sqrt());
+    spec.final_logit_softcap = Some(30.0);
+    assert!(!has_routed_experts(&spec));
+    assert_eq!(check_causal(&spec, true, &TOKENS), Outcome::Executed);
+    spec.final_logit_softcap = Some(0.0);
+    assert_eq!(check_causal(&spec, false, &TOKENS), Outcome::Invalid);
+}
+
 /// Capability gaps fail at construction, after validation succeeds.
 #[test]
 fn capability_gaps_are_reported_at_construction() {
