@@ -592,6 +592,7 @@ fn uncommon_statement_shapes_rewrite_their_expressions() {
         ),
         ("{{ f(a + 1,) }}", "{{ f(a|__bounded_add(1),) }}"),
         ("{{ [a + 1,] }}", "{{ [a|__bounded_add(1),] }}"),
+        ("{{ () + a }}", "{{ ()|__bounded_add(a) }}"),
     ];
     for (source, expected) in cases {
         assert_eq!(guarded(source), expected, "{source}");
@@ -606,6 +607,7 @@ fn malformed_statements_with_guarded_operators_are_refused() {
         "{% for x of a + b %}",
         "{% include 'a' ~ b ignore x %}",
         "{% include 'a' ~ b with x %}",
+        "{% include 'a' ~ b with 1 %}",
         "{% import 'a' ~ b %}",
         "{% from 'a' ~ b %}",
         "{% filter a.('x' ~ y) %}",

@@ -156,10 +156,13 @@ pub(crate) fn python_formatter(
 ///
 /// Strings are returned raw, undefined values are empty (Jinja2's lenient
 /// `Undefined.__str__`), and every other primitive or container uses Python
-/// `repr`: `True`, `None`, `1.0`, `['a', 1]`, `{'k': None}`. Values with no
-/// Python counterpart, such as macros, keep MiniJinja's spelling. Printing
-/// stops with a resource-limit error as soon as the text would exceed the
-/// render's allowance; the result is charged to `budget` as `operation`.
+/// `repr`: `True`, `None`, `1.0`, `['a', 1]`, `{'k': None}`. Map-like
+/// engine objects (macros, `loop`, namespaces) print as the `dict` repr of
+/// their attributes, and values with no Python counterpart, such as
+/// functions, keep MiniJinja's spelling (`function`); Jinja2 would print a
+/// Python object repr for both. Printing stops with a resource-limit error as
+/// soon as the text would exceed the render's allowance; the result is
+/// charged to `budget` as `operation`.
 pub(crate) fn python_str(
     value: &Value,
     budget: &RenderBudget,

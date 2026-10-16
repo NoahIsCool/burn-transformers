@@ -85,6 +85,20 @@ fn identifiers_are_ascii_names() {
     for name in ["", "1a", "a b", "é", "a-b", "a.b"] {
         assert!(!is_identifier(name.as_bytes()), "{name}");
     }
+    // Bytes just past `z`, `Z`, and `9`, and between the ASCII classes, end a name.
+    for name in ["a{", "a[", "a:", "a@", "a`", "a~", "a/"] {
+        assert!(!is_identifier(name.as_bytes()), "{name}");
+    }
+}
+
+/// A pattern matches only at an index inside the text; the empty pattern matches at its end.
+#[test]
+fn patterns_match_only_inside_the_text() {
+    assert!(starts_with_at(b"ab", 1, b"b"));
+    assert!(starts_with_at(b"ab", 2, b""));
+    assert!(!starts_with_at(b"ab", 3, b""));
+    assert!(!starts_with_at(b"ab", 1, b"bc"));
+    assert!(!starts_with_at(b"ab", 0, b"b"));
 }
 
 /// Shortening never splits a character.

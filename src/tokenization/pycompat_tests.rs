@@ -483,10 +483,10 @@ fn reprs_escape_invisible_characters_and_non_finite_numbers() {
 fn tojson_accepts_boolean_indents_explicit_nones_and_boolean_keys() {
     assert_eq!(
         rendered(
-            "{{ v | tojson(false, true) }}|{{ v | tojson(indent=false) }}|{{ v | tojson(indent=none, separators=none) }}|{{ {false: 2, true: 1} | tojson }}|{{ s | tojson }}",
+            "{{ v | tojson(false, true) }}|{{ v | tojson(indent=false) }}|{{ v | tojson(false, none) }}|{{ v | tojson(indent=none, separators=none) }}|{{ {false: 2, true: 1} | tojson }}|{{ s | tojson }}",
             json!({"v": {"a": [1]}, "s": "a\u{8}b\u{c}c"}),
         ),
-        "{\n \"a\": [\n  1\n ]\n}|{\n\"a\": [\n1\n]\n}|{\"a\": [1]}|{\"false\": 2, \"true\": 1}|\"a\\bb\\fc\""
+        "{\n \"a\": [\n  1\n ]\n}|{\n\"a\": [\n1\n]\n}|{\"a\": [1]}|{\"a\": [1]}|{\"false\": 2, \"true\": 1}|\"a\\bb\\fc\""
     );
     // An unserializable member fails the whole value, as `json.dumps` raises.
     let error = render("{{ {'a': missing} | tojson }}", json!({})).unwrap_err();
@@ -524,13 +524,19 @@ fn uncased_and_whitespace_only_strings_follow_cpython() {
     );
 }
 
-/// Values without a Python repr keep MiniJinja's spelling, within the printing limit.
+/// Functions keep MiniJinja's spelling; map-like objects print their attributes as a `dict`.
+///
+/// Neither matches Jinja2, which prints Python object reprs such as
+/// `<function range>`; templates do not print these values in practice.
 #[test]
 fn foreign_values_print_with_minijinja_spelling_within_the_limit() {
-    let printed = rendered("{% macro m() %}{% endmacro %}{{ [m] }}", json!({}));
-    assert!(
-        printed.starts_with('[') && printed.ends_with(']') && printed.contains('m'),
-        "{printed}"
+    assert_eq!(
+        rendered("{{ range }}|{{ [range] }}", json!({})),
+        "function|[function]"
+    );
+    assert_eq!(
+        rendered("{% macro m() %}{% endmacro %}{{ [m] }}", json!({})),
+        "[{'name': 'm', 'arguments': [], 'caller': False}]"
     );
     let mut out = String::new();
     let error = display_into(&Value::from("abcdef"), &mut out, 3).unwrap_err();
