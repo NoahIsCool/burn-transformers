@@ -724,6 +724,22 @@ fn assert_causal_dispatch_contract<M>(
         );
         assert_eq!(state.lengths(), [3, 3]);
     }
+    // Group-preserving reorders reach the concrete state's own validation and
+    // update path: a zero or non-dividing group, or an index leaving its group.
+    for (indices, group_size) in [(&[1, 0][..], 0), (&[1, 0][..], 3), (&[1, 0][..], 1)] {
+        assert_registry_error(
+            state
+                .reorder_within_groups(indices, group_size)
+                .unwrap_err(),
+            direct
+                .reorder_within_groups(indices, group_size)
+                .unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+    // Swapping back inside one group of two restores the prompt order.
+    state.reorder_within_groups(&[1, 0], 2).unwrap();
+    direct.reorder_within_groups(&[1, 0], 2).unwrap();
     let continuation = automatic
         .decode(registry_decode([[9], [10]], device), &mut state, &options)
         .unwrap()
@@ -739,7 +755,7 @@ fn assert_causal_dispatch_contract<M>(
         continuation,
         concrete
             .forward(
-                registry_tokens([[3, 4, 6, 9], [1, 2, 5, 10]], device),
+                registry_tokens([[1, 2, 5, 9], [3, 4, 6, 10]], device),
                 &options,
             )
             .unwrap()
@@ -763,7 +779,7 @@ fn assert_causal_dispatch_contract<M>(
         duplicated,
         concrete
             .forward(
-                registry_tokens([[1, 2, 5, 10, 11], [1, 2, 5, 10, 12]], device),
+                registry_tokens([[3, 4, 6, 10, 11], [3, 4, 6, 10, 12]], device),
                 &options,
             )
             .unwrap()
@@ -780,7 +796,7 @@ fn assert_causal_dispatch_contract<M>(
                 .unwrap()
                 .logits,
             concrete
-                .forward(registry_tokens([[1, 2, 7], [1, 2, 8]], device), &options)
+                .forward(registry_tokens([[3, 4, 7], [3, 4, 8]], device), &options)
                 .unwrap()
                 .logits,
         );
@@ -1214,6 +1230,155 @@ fn seq2seq_auto_trait_dispatch_and_state_lifecycle() {
             .decoder
             .logits,
     );
+}
+
+/// Group-preserving reorders reach T5's in-place path through the automatic state.
+///
+/// T5 moves only decoder self-attention history on
+/// [`DecodeState::reorder_within_groups`] and leaves each group's bound encoder
+/// output and cross-attention keys and values in place, because beam search
+/// promises that the rows of one group share a source. Two *different* sources
+/// in one group make the path observable: after swapping the rows, the next
+/// step attends to the unmoved binding. The automatic state must give the
+/// concrete state's logits and errors; the trait default (a full `reorder`,
+/// which also moves the binding) gives visibly different logits.
+#[test]
+fn seq2seq_auto_state_forwards_group_preserving_reorder() {
+    let device = Default::default();
+    let concrete = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    materialize_registry_parameters(&concrete);
+    let automatic = AutoSeq2SeqLm::from(concrete.clone());
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let encoder = concrete
+        .encode(
+            registry_tokens([[8, 9, 10], [11, 12, 13]], &device),
+            &options,
+        )
+        .unwrap();
+    let cache = CacheConfig::new(2, 8).unwrap();
+    let mut state = automatic.new_decode_state(cache, 2, &device).unwrap();
+    let mut grouped = Seq2SeqLanguageModel::new_decode_state(&concrete, cache, 2, &device).unwrap();
+    let mut full = Seq2SeqLanguageModel::new_decode_state(&concrete, cache, 2, &device).unwrap();
+    let decoder = registry_tokens([[0, 4], [0, 5]], &device);
+    automatic
+        .prefill_decoder(&encoder, decoder.clone(), &mut state, &options)
+        .unwrap();
+    for direct in [&mut grouped, &mut full] {
+        Seq2SeqLanguageModel::prefill_decoder(
+            &concrete,
+            &encoder,
+            decoder.clone(),
+            direct,
+            &options,
+        )
+        .unwrap();
+    }
+
+    for (indices, group_size) in [(&[1, 0][..], 0), (&[1, 0][..], 3), (&[1, 0][..], 1)] {
+        assert_registry_error(
+            state
+                .reorder_within_groups(indices, group_size)
+                .unwrap_err(),
+            DecodeState::reorder_within_groups(&mut grouped, indices, group_size).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [2, 2]);
+    }
+
+    state.reorder_within_groups(&[1, 0], 2).unwrap();
+    DecodeState::reorder_within_groups(&mut grouped, &[1, 0], 2).unwrap();
+    DecodeState::reorder(&mut full, &[1, 0]).unwrap();
+    let step = || registry_decode([[6], [7]], &device);
+    let actual = automatic
+        .decode(&encoder, step(), &mut state, &options)
+        .unwrap()
+        .decoder
+        .logits;
+    let in_place =
+        Seq2SeqLanguageModel::decode(&concrete, &encoder, step(), &mut grouped, &options)
+            .unwrap()
+            .decoder
+            .logits;
+    let moved = Seq2SeqLanguageModel::decode(&concrete, &encoder, step(), &mut full, &options)
+        .unwrap()
+        .decoder
+        .logits;
+    assert_eq!(state.lengths(), [3, 3]);
+    let separation = (in_place.clone() - moved).abs().max().into_scalar();
+    assert!(
+        separation > 1.0e-3,
+        "distinct sources must make the in-place and full reorders differ, max |diff| {separation}"
+    );
+    assert_registry_logits(actual, in_place);
+}
+
+/// Names of the `fn` items declared directly inside the block opened by `header`.
+///
+/// A brace-depth scan over the source text: `fn` lines count only at depth one,
+/// so default method bodies and nested items are ignored. Format strings in the
+/// scanned blocks hold balanced `{}` pairs, which keep the depth exact.
+fn block_function_names(source: &str, header: &str) -> Vec<String> {
+    let start = source
+        .find(header)
+        .unwrap_or_else(|| panic!("source lacks `{header}`"));
+    let mut depth = 1_usize;
+    let mut names = Vec::new();
+    for line in source[start + header.len()..].lines().skip(1) {
+        let trimmed = line.trim_start();
+        if depth == 1
+            && let Some(signature) = trimmed.strip_prefix("fn ")
+        {
+            let name = signature.split(['(', '<']).next().unwrap_or_default();
+            names.push(name.to_owned());
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        for character in line.chars() {
+            match character {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            names.sort();
+            return names;
+        }
+    }
+    panic!("block opened by `{header}` is not closed");
+}
+
+/// Both automatic decode states forward every [`DecodeState`] method, provided ones included.
+///
+/// A provided method that an enum does not forward silently runs the trait
+/// default on the enum instead of the family's override, as
+/// `reorder_within_groups` once did for T5. This structural check compares the
+/// trait's method list with each dispatch implementation, so adding a trait
+/// method fails here until both enums forward it.
+#[test]
+fn automatic_decode_states_forward_every_trait_method() {
+    let trait_methods = block_function_names(
+        include_str!("../architecture/traits.rs"),
+        "pub trait DecodeState<B: Backend>: Send + core::fmt::Debug {",
+    );
+    assert!(
+        trait_methods.contains(&"reorder_within_groups".to_owned()),
+        "{trait_methods:?}"
+    );
+    let registry = include_str!("auto.rs");
+    for state in ["AutoCausalDecodeState", "AutoSeq2SeqDecodeState"] {
+        let forwarded = block_function_names(
+            registry,
+            &format!("impl<B: Backend> DecodeState<B> for {state}<B> {{"),
+        );
+        assert_eq!(
+            forwarded, trait_methods,
+            "{state} must forward every method"
+        );
+    }
 }
 
 /// Registry configuration traits enumerate every executable discriminator explicitly.

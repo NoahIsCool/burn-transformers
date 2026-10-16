@@ -19,7 +19,9 @@
 //! one source start as identical copies of its encoder output, so the encoder
 //! output is expanded once and never re-gathered; a model may likewise keep
 //! per-source state such as projected cross-attention keys and values in
-//! place (T5 does). Finished source rows remain
+//! place (T5 does, directly or through
+//! [`crate::models::AutoSeq2SeqDecodeState`], which forwards the call).
+//! Finished source rows remain
 //! in the rectangle as false-masked PAD no-ops, preserving other rows'
 //! progress without mutating their cache lengths.
 //!
