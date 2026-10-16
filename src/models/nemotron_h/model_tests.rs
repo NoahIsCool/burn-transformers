@@ -1432,3 +1432,86 @@ fn serialized_sliding_window_never_changes_outputs() {
         Some(2)
     );
 }
+
+/// The opted-in experiment window keeps cached MTP attention equal to the windowed stateless head.
+///
+/// Since NUM-1 made the serialized `sliding_window` inert,
+/// `mtp_tests::windowed_cached_mtp_matches_the_stateless_head` (which still
+/// sets that field) compares two unwindowed heads. Here
+/// [`NemotronHConfig::attention_window`] drives both paths, and the windowed
+/// stateless head must differ from the unwindowed one on the same weights,
+/// so the comparison cannot pass vacuously.
+#[test]
+fn attention_window_keeps_cached_mtp_equal_to_the_stateless_head() {
+    use crate::{CausalLanguageModel, cache::CacheConfig};
+
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(
+        NemotronHConfig {
+            attention_window: Some(2),
+            ..tiny_config(true)
+        },
+        &device,
+    )
+    .unwrap();
+    assert_eq!(
+        model.next_token_head.as_ref().unwrap().sliding_window,
+        Some(2)
+    );
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let target = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    let shifted = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3, 4, 5]], &device);
+    let hidden = target.narrow(1, 0, 4);
+    let stateless = model
+        .predict_next_token_logits(shifted.clone(), hidden.clone())
+        .unwrap();
+    let mut unwindowed = model.clone();
+    unwindowed.next_token_head.as_mut().unwrap().sliding_window = None;
+    let full = unwindowed
+        .predict_next_token_logits(shifted.clone(), hidden.clone())
+        .unwrap();
+    assert_ne!(
+        full.into_data().to_vec::<f32>().unwrap(),
+        stateless.clone().into_data().to_vec::<f32>().unwrap(),
+        "a two-token window must change the MTP logits of four pairs"
+    );
+    // Three pairs at once (window active at the step's end), then one more.
+    let chunk = model
+        .forward_mtp_cached(
+            shifted.clone().narrow(1, 0, 3),
+            hidden.clone().narrow(1, 0, 3),
+            None,
+            &mut state,
+        )
+        .unwrap();
+    let last = model
+        .forward_mtp_cached(
+            shifted.narrow(1, 3, 1),
+            hidden.narrow(1, 3, 1),
+            None,
+            &mut state,
+        )
+        .unwrap();
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([4].as_slice()));
+    Tensor::cat(vec![chunk.logits, last.logits], 1)
+        .into_data()
+        .assert_approx_eq::<f32>(&stateless.into_data(), Tolerance::absolute(3e-5));
+}
