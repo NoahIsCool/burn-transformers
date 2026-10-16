@@ -29,9 +29,9 @@
 //!   matching entry.
 //! - `src/architecture/constraints.rs`: the integer rules of specification
 //!   validation. Head layouts are classified in precedence order (zero
-//!   dimension, then indivisible groups), and a valid layout has
-//!   `size * groups == heads`, maps every head to an in-range group, and keeps
-//!   every group's block of `size` heads inside the head range; Mamba2 group
+//!   dimension, then indivisible groups), and a valid layout leaves no head
+//!   over (`size * groups == heads`) and maps every head to an in-range
+//!   group; Mamba2 group
 //!   sizes, routed-expert selection counts, MLA query-key width overflow (and
 //!   its saturating builder width), cross-attention projection sizes, and
 //!   stack dimensions are decided exactly. Group-preserving decode-state

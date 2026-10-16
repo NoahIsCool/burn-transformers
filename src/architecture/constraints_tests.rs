@@ -121,11 +121,11 @@ proptest::proptest! {
         proptest::prop_assert_eq!(delta_net_heads(groups, heads, width, 1, 1), expected);
         if expected == HeadCheck::Valid {
             let size = heads / groups;
+            proptest::prop_assert_eq!(size * groups, heads);
             proptest::prop_assert!((0..heads).all(|head| head / size < groups));
             for group in 0..groups {
                 let members = (0..heads).filter(|head| head / size == group).count();
                 proptest::prop_assert_eq!(members, size);
-                proptest::prop_assert!(group * size + size <= heads);
             }
         }
     }

@@ -12,11 +12,10 @@
 //!
 //! - [`attention_heads`] and [`delta_net_heads`] classify a head layout as
 //!   having a zero dimension, indivisible groups, or valid groups, in that
-//!   precedence. A valid layout has groups of exactly `heads / groups` heads:
-//!   `group_size * groups == heads`, head `h` maps to the in-range group
-//!   `h / group_size`, and every group's block
-//!   `g * group_size..(g + 1) * group_size` lies inside `0..heads`. Under
-//!   Euclidean division those blocks are exactly the groups' members.
+//!   precedence. A valid layout leaves no head over: `group_size * groups ==
+//!   heads` and head `h` maps to the in-range group `h / group_size`, which
+//!   both fail for indivisible counts. Euclidean division then makes each
+//!   group exactly `group_size` consecutive heads.
 //! - [`mamba2_dimensions`] accepts exactly nonzero dimensions whose group size
 //!   divides the head count.
 //! - [`expert_counts`] accepts exactly a nonzero expert count and width with
@@ -418,11 +417,13 @@ verus! {
 
 /// `heads` split into `groups` equal groups: head `h` belongs to group `h / (heads / groups)`.
 ///
-/// The group size is positive and exact (`size * groups == heads`), every head
-/// maps to an in-range group, and every group's block
-/// `g * size..(g + 1) * size` lies inside `0..heads`. Under Euclidean division
-/// the heads mapping to group `g` are exactly that block, so every group has
-/// exactly `size` members and no head is left over.
+/// The group size is positive, no head is left over (`size * groups ==
+/// heads`), and every head's group index `h / size` is below `groups`, so a
+/// grouped lookup never leaves the group table. Both facts need divisibility:
+/// with floor division alone, `5` heads over `2` groups would leave head `4`
+/// in group `2`. Euclidean division then makes group `g` exactly the heads
+/// `g * size..(g + 1) * size`; that part holds for any positive size and is
+/// not restated here.
 pub(crate) open spec fn heads_grouped(heads: int, groups: int) -> bool {
     let size = heads / groups;
     &&& heads > 0
@@ -430,13 +431,6 @@ pub(crate) open spec fn heads_grouped(heads: int, groups: int) -> bool {
     &&& size >= 1
     &&& size * groups == heads
     &&& forall|head: int| 0 <= head < heads ==> 0 <= #[trigger] (head / size) < groups
-    &&& forall|group: int| 0 <= group < groups
-        ==> 0 <= #[trigger] group_start(group, size) && group_start(group, size) + size <= heads
-}
-
-/// First head of group `group` when groups hold `size` consecutive heads.
-pub(crate) open spec fn group_start(group: int, size: int) -> int {
-    group * size
 }
 
 /// Divisible positive head counts form equal groups that every head maps into.
@@ -467,13 +461,6 @@ pub(crate) proof fn lemma_heads_grouped(heads: int, groups: int)
                 head < heads,
                 size * groups == heads,
                 size >= 1;
-    }
-    assert forall|group: int| 0 <= group < groups implies 0 <= #[trigger] group_start(group, size)
-        && group_start(group, size) + size <= heads by {
-        assert(0 <= group * size) by (nonlinear_arith)
-            requires group >= 0, size >= 1;
-        assert(group * size + size <= heads) by (nonlinear_arith)
-            requires group < groups, size >= 1, size * groups == heads;
     }
 }
 
