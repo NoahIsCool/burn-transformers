@@ -2355,8 +2355,10 @@ fn crossed_path_summary(
             .count(),
         hidden: cached
             .hidden
-            .chunks_exact(HIDDEN_WIDTH)
-            .zip(teacher_hidden.chunks_exact(HIDDEN_WIDTH))
+            .as_chunks::<HIDDEN_WIDTH>()
+            .0
+            .iter()
+            .zip(teacher_hidden.as_chunks::<HIDDEN_WIDTH>().0)
             .map(|(cached, teacher)| cosine_similarity(cached, teacher))
             .collect(),
     }
