@@ -29,8 +29,8 @@ use crate::cache::retention::first_unsafe_ring_rewind;
 use crate::cache::{CacheConfig, DecodeStateError, plan_ring_read};
 
 use super::plan::{
-    check_staged_commit, first_index_out_of_range, next_version, portable_indices,
-    repeated_elements, rows_cleared_by_truncate, write_end,
+    check_staged_commit, checked_product, first_index_out_of_range, next_version, portable_indices,
+    rows_cleared_by_truncate, write_end,
 };
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
@@ -625,12 +625,13 @@ impl<B: Backend> NativeKvCache<B> {
         ];
         let committed_elements =
             validate_tensor_shape("committed KV tensor", &committed_shape, spec.dtype())?;
-        // One-byte elements make the verified count reject exactly `layers *
-        // planes` overflow, reported as a shape overflow of the plane set.
-        let plane_layers =
-            repeated_elements(spec.layers(), spec.plane_count(), 1).map_err(|violation| {
-                TensorCacheError::allocation("committed KV planes", violation, 1)
-            })?;
+        // Every layer allocates `plane_count` tensors of each shape; the
+        // verified product rejects exactly an unrepresentable tensor count.
+        let plane_layers = checked_product(spec.layers(), spec.plane_count()).ok_or(
+            TensorCacheError::TensorShapeOverflow {
+                tensor: "committed KV planes",
+            },
+        )?;
         validate_repeated_allocation(
             "committed KV planes",
             committed_elements,

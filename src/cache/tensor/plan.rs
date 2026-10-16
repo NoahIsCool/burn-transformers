@@ -241,6 +241,22 @@ pub(crate) fn repeated_elements(
     Ok(elements)
 }
 
+/// Returns the product `a * b`, or `None` when it overflows `usize`.
+///
+/// Used for counts and reshape extents that are not allocations themselves,
+/// such as the number of plane tensors or a flattened `batch * proposal`
+/// axis. Proved: `Some` exactly when the product is representable, and then
+/// exactly the product.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(product =>
+    ensures
+        product is Some <==> a * b <= usize::MAX,
+        product matches Some(value) ==> value == a * b,
+))]
+pub(crate) fn checked_product(a: usize, b: usize) -> Option<usize> {
+    a.checked_mul(b)
+}
+
 /// Integer reason an absolute append is rejected.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

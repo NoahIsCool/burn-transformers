@@ -67,11 +67,11 @@ use crate::cache::tensor::kv::{
 };
 use crate::cache::tensor::kv::{PreparedNativeKvBatchWrite, PreparedNativeKvWrite};
 use crate::cache::tensor::plan::{checked_ends, first_index_above, portable_indices};
-use crate::cache::tensor::recurrent::first_nonuniform_offset;
 use crate::cache::tensor::recurrent::{
     PreparedRecurrentBatchWrite, PreparedRecurrentStage, PreparedRecurrentStateWrite,
     RecurrentStateRead,
 };
+use crate::cache::tensor::recurrent::{first_nonuniform_offset, last_snapshot};
 
 use super::{
     KvCacheStorage, TensorCacheBank, TensorCacheError, TensorCacheResult, TensorDecodeState,
@@ -1305,7 +1305,17 @@ fn prepare_recurrent<B: Backend>(
                 // Only the state after the row's last token is committed.
                 let [_, tokens, heads, rows, columns] = matrices.dims();
                 let [_, _, channels, width] = convolutions.dims();
-                let last = tokens - 1;
+                // Coverage proved the row active with exactly `tokens` new
+                // tokens; the verified selector still rejects an empty row.
+                let Some(last) = last_snapshot(tokens) else {
+                    return Err(coverage_error(
+                        "recurrent",
+                        group,
+                        layer,
+                        row,
+                        "row has no tokens",
+                    ));
+                };
                 let write = cache.prepare_sequence_state(
                     layer,
                     row,

@@ -10,52 +10,60 @@
 //!   overflow or bound condition holds.
 //! * `src/cache/lengths.rs`: the length ledger behind every decode state and
 //!   speculative transaction. Each transition (advance, begin, commit,
-//!   rollback, truncate, reorder, reset) preserves `committed <= working <=
-//!   capacity`, computes its documented formula without overflow, and is
-//!   rejected exactly when its rule is violated, naming the first offending
-//!   row or the blocking transaction state. Proposal lengths, remaining
-//!   capacities, per-row transitions, and appended ranges are exact.
+//!   rollback, truncate, reorder, reset) preserves
+//!   `committed <= working <= capacity`, computes its documented formula
+//!   without overflow, and is rejected exactly when its rule is violated.
+//!   Every rejection, from a free validator or a ledger transition, names the
+//!   first offending row with its exact operands or the blocking transaction
+//!   state. Proposal lengths, remaining capacities, per-row transitions, and
+//!   appended ranges are exact.
 //! * `src/cache/retention.rs`: ring and recurrent rewind predicates, proved
 //!   sound and complete against the ring eviction model (row scans name the
-//!   lowest offending row), the working window
-//!   that splits a speculative read into committed and staged parts, and the
-//!   absolute position held by each ring slot in a batched slot-order read.
+//!   lowest offending row); the working window that splits a speculative read
+//!   into committed and staged parts; and the absolute position held by each
+//!   ring slot in a batched slot-order read.
 //! * `src/cache/rows.rs`: grouping of batch rows into runs that share one
 //!   tensor assignment; runs are ordered, disjoint, carry their rows'
 //!   parameters, and cover exactly the rows with new tokens.
 //! * `src/cache/tensor/plan.rs`: integer planning shared by the tensor
 //!   caches. Allocation scalar counts are exact running products checked
 //!   against overflow, the portable `i32` element limit, and byte size;
-//!   append ends (and checked row ends) are exact and within capacity; the
-//!   staged-commit scan
-//!   accepts exactly fully staged, in-proposal prefixes and names the first
-//!   failure; truncation clears exactly the rows reset from history; beam
-//!   sources, read lengths, and host index vectors are checked and converted
-//!   exactly;
-//!   staging lengths stay within the staging capacity; version successors
-//!   always differ from their predecessor.
+//!   plain checked products are exact. Append ends (and checked row ends) are
+//!   exact and within capacity, and each write-end violation is exact. The
+//!   staged-commit scan accepts exactly fully staged, in-proposal prefixes
+//!   and names the first failure. Truncation clears exactly the rows reset
+//!   from history; beam sources, read lengths, and host index vectors are
+//!   checked and converted exactly; staging lengths stay within the staging
+//!   capacity; version successors always differ from their predecessor.
 //! * `src/cache/tensor/recurrent/plan.rs`: recurrent snapshot indexing. The
 //!   working and committed snapshot of `n` tokens is `n - 1`, a uniform batch
 //!   shares one snapshot exactly when every row staged the same positive
 //!   count, and each flat gather index `b * P + max(s_b, 1) - 1` decodes to
 //!   row `b` and its own snapshot, failing exactly beyond `i32::MAX`.
-//! * `src/cache/tensor/kv/plan.rs`: native KV planning. The committed time
-//!   extent is exactly the capacity, `W`, or `2W` and every inconsistent
-//!   storage/window configuration is rejected with its first rule; committed
-//!   reads keep `min(L, W)` positions; working reads check every end and
-//!   split each window exactly as the verified working window does; mirrored
-//!   runs read the slot of each matching position below `2W`; a working
-//!   read's staged ranges align offset `j` with position `C + j`; write-ahead
-//!   is admitted exactly for full storage, in place inside a transaction.
+//! * `src/cache/tensor/kv/plan.rs`: native KV planning. The effective ring
+//!   width is the group's window, else the bank's; the committed time extent
+//!   is exactly the capacity, `W`, or `2W` for that same width, and every
+//!   inconsistent storage/window configuration is rejected with its first
+//!   rule. Committed reads keep `min(L, W)` positions; working reads check
+//!   every end and split each window exactly as the verified working window
+//!   does; mirrored runs read the slot of each matching position below `2W`;
+//!   a working read's staged ranges align offset `j` with position `C + j`.
+//!   Committed writes (direct appends, batched runs, and staged-prefix
+//!   commits) write input column `c + j` to slot `s + j` under full storage
+//!   and to slot `(s + j) mod W` (plus `W` for the mirror) in a ring, keep
+//!   exactly the newest `min(n, W)` tokens, shift run source rows exactly,
+//!   and report the first failed check. Write-ahead is admitted exactly for
+//!   full storage, in place inside a transaction.
 //! * `src/cache/tensor/kv/batch/layout.rs`: batched write layouts. Append
 //!   layouts are accepted exactly when every row fits its block and the
-//!   position space; left padding and ends are exact; a staging write is
+//!   position space; left padding and ends are exact. A staging write is
 //!   accepted exactly when every active row passes its cursor, staging, and
-//!   capacity checks and then updates exactly the active rows; linear
-//!   staging runs partition the active rows and address each row's own
-//!   columns and proposal offsets; single-row stages use exactly one-hot
-//!   counts starting at each row's proposal cursor; a step's token table
-//!   marks exactly each row's columns with their absolute positions.
+//!   capacity checks and then updates exactly the active rows; a rejection
+//!   names the first failing check of the first failing row with exact
+//!   operands. Linear staging runs partition the active rows and address
+//!   each row's own columns and proposal offsets; single-row stages use
+//!   exactly one-hot counts starting at each row's proposal cursor; a step's
+//!   token table marks exactly each row's columns with their positions.
 //! * `src/cache/tensor/kv/batch/slots.rs`: batched read slot tables. Full
 //!   storage marks exactly each row's visible window; each written ring slot
 //!   reports the newest position with its residue and is valid exactly when

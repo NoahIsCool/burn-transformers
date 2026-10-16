@@ -16,15 +16,15 @@ use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
 
 use super::kv::validate_batch;
-use super::plan::{check_staged_commit, repeated_elements, rows_cleared_by_truncate, staging_end};
+use super::plan::{check_staged_commit, checked_product, rows_cleared_by_truncate, staging_end};
 use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
 
 mod plan;
 
-pub(crate) use self::plan::first_nonuniform_offset;
-use self::plan::{flat_snapshot_indices, last_snapshot, uniform_snapshot};
+pub(crate) use self::plan::{first_nonuniform_offset, last_snapshot};
+use self::plan::{flat_snapshot_indices, uniform_snapshot};
 
 /// Validated geometry for DeltaNet/Mamba2-style recurrent layer state.
 ///
@@ -822,12 +822,15 @@ impl<B: Backend> RecurrentStateCache<B> {
             })?;
         let selector =
             Tensor::<B, 1, Int>::from_ints(TensorData::new(flat_rows, [batch_size]), &self.device);
-        // Allocation validated `batch * proposal` as a factor of the staged
-        // shape; the verified product reports any overflow instead of wrapping.
-        let flat =
-            repeated_elements(batch_size, spec.staging_capacity(), 1).map_err(|violation| {
-                TensorCacheError::allocation("staged recurrent snapshots", violation, 1)
-            })?;
+        // The staged snapshots are reshaped to `[batch * proposal, ...]`.
+        // Allocation already validated that product as a factor of the staged
+        // shape; the verified product reports an unrepresentable reshape
+        // extent as a shape overflow instead of wrapping.
+        let flat = checked_product(batch_size, spec.staging_capacity()).ok_or(
+            TensorCacheError::TensorShapeOverflow {
+                tensor: "staged recurrent snapshots",
+            },
+        )?;
         let mut matrix = staged_matrix
             .clone()
             .reshape([

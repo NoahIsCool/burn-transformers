@@ -50,6 +50,15 @@ fn repeated_elements_distinguishes_count_and_byte_overflow() {
     );
 }
 
+/// Checked products are exact and reject exactly an overflowing product.
+#[test]
+fn checked_product_rejects_only_overflow() {
+    assert_eq!(checked_product(6, 7), Some(42));
+    assert_eq!(checked_product(usize::MAX, 0), Some(0));
+    assert_eq!(checked_product(usize::MAX, 1), Some(usize::MAX));
+    assert_eq!(checked_product(usize::MAX / 2 + 1, 2), None);
+}
+
 /// Write ends are exact, and overflow is reported before the capacity check.
 #[test]
 fn write_end_checks_overflow_then_capacity() {
