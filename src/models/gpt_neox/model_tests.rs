@@ -637,6 +637,13 @@ fn edited_parameter_shapes_are_reported_by_label() {
         assert_eq!(tensor, format!("gpt_neox.layers.1.{label}"));
         assert_eq!(shape, expected);
     }
+    let mut model = two_layer(true);
+    model.embed_out = wrong_linear(8, 12);
+    let (tensor, shape, actual) = shape_parts(model.validate_parameters().unwrap_err());
+    assert_eq!(
+        (tensor.as_str(), shape.as_str(), actual.as_str()),
+        ("gpt_neox.embed_out", "[8, 13]", "[8, 12]")
+    );
     for norm in ["input_layernorm", "post_attention_layernorm"] {
         let mut model = two_layer(true);
         let replacement = LayerNormConfig::new(7).init(&device);
