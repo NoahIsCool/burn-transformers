@@ -2456,3 +2456,107 @@ fn fully_excluded_rows_stay_negative_infinity_while_nan_rows_stay_nan() {
         assert!((value - third).abs() < 1e-6, "{values:?}");
     }
 }
+
+/// Beam log probabilities: active rows are `log_softmax` bit for bit; inactive rows are uniform.
+///
+/// The all-active shortcut must not change any value, and a mixed batch must
+/// match the former device-side negation of the broadcast mask (PERF-3).
+#[test]
+fn host_log_probabilities_zero_only_inactive_rows() {
+    let device = Default::default();
+    let logits = Tensor::<TestBackend, 2>::from_floats(
+        [[0.5, -1.0, 2.0], [f32::NAN, 3.0, 1.0], [-0.25, 0.0, 4.0]],
+        &device,
+    );
+    let former = |active: &[bool]| {
+        let valid = crate::architecture::bool_tensor_from_values(active.to_vec(), [3, 1], &device)
+            .expand([3, 3]);
+        let zeroed = logits.clone().mask_fill(valid.bool_not(), 0.0);
+        metadata::tensor_f64_values(
+            burn::tensor::activation::log_softmax(zeroed, 1),
+            "reference log probabilities",
+        )
+        .unwrap()
+    };
+    let all_active =
+        super::host_log_probabilities(logits.clone(), &[true, true, true], 3, 3).unwrap();
+    assert_eq!(
+        all_active
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        former(&[true, true, true])
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert!(all_active[3..6].iter().all(|value| value.is_nan()));
+    let mixed = super::host_log_probabilities(logits.clone(), &[true, false, true], 3, 3).unwrap();
+    assert_eq!(
+        mixed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        former(&[true, false, true])
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        mixed[3..6]
+            .iter()
+            .all(|value| (value + 3.0_f64.ln()).abs() < 1e-6)
+    );
+}
+
+/// Release timing of one beam step's log probabilities against the former negation (PERF-3).
+///
+/// Reproduce with
+/// `cargo test --release --lib -- --ignored --nocapture beam_log_probability_timings`.
+#[test]
+#[ignore = "release-mode timing; run explicitly"]
+fn beam_log_probability_timings() {
+    let device = Default::default();
+    let median_ms = |run: &mut dyn FnMut()| {
+        run();
+        let mut samples = (0..31)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                run();
+                start.elapsed().as_secs_f64() * 1e3
+            })
+            .collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    for (batch, vocabulary) in [(4, 32_128), (8, 248_320)] {
+        let logits = Tensor::<TestBackend, 2>::random(
+            [batch, vocabulary],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let active = vec![true; batch];
+        let mut former = || {
+            let valid =
+                crate::architecture::bool_tensor_from_values(active.clone(), [batch, 1], &device)
+                    .expand([batch, vocabulary]);
+            let zeroed = logits.clone().mask_fill(valid.bool_not(), 0.0);
+            let values = metadata::tensor_f64_values(
+                burn::tensor::activation::log_softmax(zeroed, 1),
+                "former log probabilities",
+            )
+            .unwrap();
+            drop(values);
+        };
+        let mut current = || {
+            let values =
+                super::host_log_probabilities(logits.clone(), &active, batch, vocabulary).unwrap();
+            drop(values);
+        };
+        println!(
+            "PERF-3 beam log probabilities [{batch}, {vocabulary}] all active: former {:.3} ms, current {:.3} ms",
+            median_ms(&mut former),
+            median_ms(&mut current),
+        );
+    }
+}

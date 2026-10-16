@@ -47,9 +47,12 @@
 //! Top-k keeps every token whose score is at least the `k`-th greatest score
 //! `z_(k)`: `z_i >= z_(k)`. Tokens tied with the boundary score all survive, so
 //! more than `k` may remain, exactly as Hugging Face's `TopKLogitsWarper`
-//! (`scores < topk(scores, k)[..., -1]` is removed). Nucleus (top-p) keeps the
-//! shortest sorted prefix whose probability mass reaches `p`; equivalently, a
-//! sorted item survives when the mass *before* it is below `p`. Min-p keeps
+//! (`scores < topk(scores, k)[..., -1]` is removed). Nucleus (top-p) sorts the
+//! row by score and keeps the shortest prefix whose probability mass reaches
+//! `p`; equivalently, a sorted item survives when the mass *before* it is below
+//! `p`. Like Hugging Face's `TopPLogitsWarper` it ranks scores, not rounded
+//! probabilities, so a larger score never loses to a smaller one whose
+//! probability rounds to the same value. Min-p keeps
 //! `p_i >= min_p * max_j p_j`, evaluated as `z_i >= max_j z_j + ln(min_p)`
 //! without a sort. Rejected scores become negative infinity.
 //!
@@ -146,7 +149,7 @@ use burn::tensor::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, TokenMask};
+use crate::{Error, Result, TokenMask, architecture::bool_tensor_from_values};
 
 use bookkeeping::{StopDecision, stop_decision};
 use history::CountView;
@@ -1152,6 +1155,29 @@ fn sample_with_uniforms<B: Backend>(logits: Tensor<B, 2>, uniforms: Vec<f32>) ->
         .squeeze_dim::<1>(1)
 }
 
+/// Sets every score of each row whose `active` flag is false to zero.
+///
+/// `active` holds one flag per row of the `[batch, vocabulary]` scores. When
+/// every row is active, the common decode step, the scores are returned
+/// untouched: filling through an all-false mask would only copy them.
+/// Otherwise the flags are negated on the host and only a `[batch, 1]` column
+/// is uploaded and broadcast; negating the broadcast `[batch, vocabulary]`
+/// view on the device would instead materialize all of its elements, every
+/// step.
+fn zero_inactive_rows<B: Backend>(scores: Tensor<B, 2>, active: &[bool]) -> Tensor<B, 2> {
+    if active.iter().all(|&row| row) {
+        return scores;
+    }
+    let [batch, vocabulary] = scores.dims();
+    let inactive = bool_tensor_from_values(
+        active.iter().map(|&row| !row).collect(),
+        [batch, 1],
+        &scores.device(),
+    )
+    .expand([batch, vocabulary]);
+    scores.mask_fill(inactive, 0.0)
+}
+
 /// Keeps every score at least the `k`-th greatest of its row, ties included.
 ///
 /// With row scores sorted descending `z_(1) >= ... >= z_(V)`, a token survives
@@ -1172,16 +1198,24 @@ fn filter_top_k<B: Backend>(logits: Tensor<B, 2>, top_k: usize) -> Tensor<B, 2> 
     logits.mask_fill(below, f64::NEG_INFINITY)
 }
 
-/// Keeps the minimal descending-probability prefix whose mass reaches `top_p`.
+/// Keeps the shortest descending-logit prefix whose probability mass reaches `top_p`.
+///
+/// The row is ranked by its *logits*, then the softmax and running sum are
+/// taken over the sorted row, exactly as Hugging Face's `TopPLogitsWarper`
+/// does. Softmax is monotone, so this is the probability order, except that a
+/// strictly larger logit always ranks ahead of a smaller one even when the two
+/// round to the same probability; ranking rounded probabilities would fall
+/// back to index order and could drop the larger logit while keeping the
+/// smaller (TOPP-TIE-1). A sorted token survives when the mass *before* it is
+/// below `top_p`, so the token that crosses `top_p` and the most likely token
+/// are always kept. One sort per row, in at least F32.
 fn filter_top_p<B: Backend>(logits: Tensor<B, 2>, top_p: f64) -> Tensor<B, 2> {
     let [batch, vocabulary] = logits.dims();
-    let probabilities = softmax(
-        logits
-            .clone()
-            .cast(probability_accumulation_dtype(logits.dtype())),
-        1,
-    );
-    let (sorted, indices) = probabilities.sort_descending_with_indices(1);
+    let (sorted_logits, indices) = logits
+        .clone()
+        .cast(probability_accumulation_dtype(logits.dtype()))
+        .sort_descending_with_indices(1);
+    let sorted = softmax(sorted_logits, 1);
     let mass_before = sorted.clone().cumsum(1) - sorted;
     let keep_sorted = mass_before.lower_elem(top_p);
     let keep = scatter_mask(indices, keep_sorted, batch, vocabulary);

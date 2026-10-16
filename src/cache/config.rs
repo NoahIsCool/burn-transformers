@@ -1,18 +1,34 @@
 //! Validated logical capacity and physical retention dimensions.
 //!
 //! A session tracks `batch > 0` sequences and permits absolute lengths in
-//! `0..=capacity`. A sliding layer retains at most `window <= capacity` tokens;
+//! `0..=capacity`. A sliding ring retains at most `window <= capacity` tokens;
 //! eviction changes physical storage, never absolute position numbering. These
 //! integer-only checks precede tensor allocation and are independent of dtype.
+//!
+//! Model families size every layer's retention from their own architecture
+//! configuration (a Mistral or Gemma sliding window, for example), so the
+//! optional window here never changes what a model remembers; it is the
+//! default ring width of raw cache banks built directly from a
+//! [`CacheConfig`]. Every family ignores it except DeepSeek-V2, which rejects
+//! a windowed configuration, so family-generic code should leave it unset.
 
 use core::fmt;
 use core::num::NonZeroUsize;
 
 /// Validated dimensions and retention policy for a decode cache.
 ///
-/// `capacity` is the maximum *logical* length of every sequence. A sliding
-/// window, when present, controls how many recent tokens a local-attention
-/// layer retains physically; it does not change absolute token positions.
+/// `capacity` is the maximum *logical* length of every sequence. The optional
+/// sliding window is the ring width of raw [`TensorCacheBank`] and
+/// [`NativeKvCache`] sliding-ring groups that carry no window of their own; it
+/// never changes absolute token positions. Model decode states take each
+/// layer's window from the architecture instead, so the field never changes
+/// what a model retains: every family ignores it except DeepSeek-V2, which
+/// fails allocation with [`Error::BackendCapability`] when it is set. Leave the
+/// window unset in configurations shared across model families.
+///
+/// [`TensorCacheBank`]: super::TensorCacheBank
+/// [`NativeKvCache`]: super::NativeKvCache
+/// [`Error::BackendCapability`]: crate::Error::BackendCapability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheConfig {
     /// Number of independently tracked sequences, always nonzero.
@@ -42,7 +58,12 @@ impl CacheConfig {
         })
     }
 
-    /// Enables a non-zero physical sliding window.
+    /// Sets the default ring width of raw sliding-ring cache groups.
+    ///
+    /// Groups with their own window keep it, full-storage groups ignore it,
+    /// and model families size retention from their architecture, so this
+    /// does not make a model forget older tokens. DeepSeek-V2 rejects a
+    /// configuration that sets it; every other family ignores it.
     ///
     /// # Errors
     ///
@@ -74,7 +95,7 @@ impl CacheConfig {
         self.capacity.get()
     }
 
-    /// Returns the local-attention retention window, when configured.
+    /// Returns the default ring width for raw sliding-ring groups, when configured.
     #[must_use]
     pub const fn sliding_window(self) -> Option<NonZeroUsize> {
         self.sliding_window

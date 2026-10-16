@@ -122,12 +122,25 @@ pub trait CausalLanguageModel<B: Backend>: Module<B> {
     ) -> Result<CausalLmOutput<B>>;
 
     /// Allocates external decode state for a known batch and capacity policy.
+    ///
+    /// `batch_size` must equal `config.sequence_count()`; every implementation
+    /// rejects a mismatch with an error before allocating anything. Prefer
+    /// [`Self::new_decode_state_for`], which takes the batch from `config`.
     fn new_decode_state(
         &self,
         config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self::State>;
+
+    /// Allocates external decode state for `config.sequence_count()` sequences.
+    ///
+    /// The batch comes from the cache geometry itself, so it cannot disagree
+    /// with it: `model.new_decode_state_for(CacheConfig::new(batch, capacity)?, &device)`.
+    /// Equivalent to [`Self::new_decode_state`] with that batch.
+    fn new_decode_state_for(&self, config: CacheConfig, device: &B::Device) -> Result<Self::State> {
+        self.new_decode_state(config, config.sequence_count(), device)
+    }
 
     /// Processes a prompt and initializes or extends its decode state.
     fn prefill(
@@ -165,12 +178,24 @@ pub trait Seq2SeqLanguageModel<B: Backend>: Module<B> {
     -> Result<Seq2SeqOutput<B>>;
 
     /// Allocates decoder state for a known batch and target capacity.
+    ///
+    /// `batch_size` must equal `config.sequence_count()`; every implementation
+    /// rejects a mismatch with an error before allocating anything. Prefer
+    /// [`Self::new_decode_state_for`], which takes the batch from `config`.
     fn new_decode_state(
         &self,
         config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self::State>;
+
+    /// Allocates decoder state for `config.sequence_count()` target sequences.
+    ///
+    /// The batch comes from the cache geometry itself, so it cannot disagree
+    /// with it. Equivalent to [`Self::new_decode_state`] with that batch.
+    fn new_decode_state_for(&self, config: CacheConfig, device: &B::Device) -> Result<Self::State> {
+        self.new_decode_state(config, config.sequence_count(), device)
+    }
 
     /// Projects encoder output and processes an initial decoder prompt.
     fn prefill_decoder(

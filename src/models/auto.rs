@@ -412,6 +412,17 @@ macro_rules! causal_registry {
                 }
             }
 
+            /// Forwards a group-preserving reorder to the concrete state.
+            ///
+            /// Relying on the trait default here would turn every call into a
+            /// full [`DecodeState::reorder`] and silently discard any cheaper
+            /// path a family provides for state shared within a group.
+            fn reorder_within_groups(&mut self, indices: &[usize], group_size: usize) -> Result<()> {
+                match self {
+                    $(Self::$variant(state) => state.reorder_within_groups(indices, group_size),)+
+                }
+            }
+
             /// Delegates truncation to the architecture; unsupported recurrent rewinds remain errors.
             fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
                 match self {
@@ -959,6 +970,18 @@ impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         match self {
             Self::T5(state) => DecodeState::reorder(state, indices),
+        }
+    }
+
+    /// Forwards a group-preserving reorder to the concrete state.
+    ///
+    /// T5 then gathers only decoder self-attention history and leaves each
+    /// group's encoder output and projected cross-attention keys and values in
+    /// place, so a beam step's reorder cost does not grow with source length.
+    /// The trait default would instead run the full [`DecodeState::reorder`].
+    fn reorder_within_groups(&mut self, indices: &[usize], group_size: usize) -> Result<()> {
+        match self {
+            Self::T5(state) => DecodeState::reorder_within_groups(state, indices, group_size),
         }
     }
 

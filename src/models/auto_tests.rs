@@ -194,6 +194,7 @@ fn assert_bounded_prefill_contract<M>(
     family: &str,
     model: &M,
     cache: CacheConfig,
+    vocabulary_size: usize,
     device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
 ) where
     M: CausalLanguageModel<TestBackend>,
@@ -256,7 +257,7 @@ fn assert_bounded_prefill_contract<M>(
             ..Default::default()
         },
         prefill_chunk_size,
-        vocabulary_size: 32,
+        vocabulary_size,
     };
     let one_shot = generate_causal(model, generation(None))
         .unwrap_or_else(|error| panic!("{family} one-shot generation: {error}"));
@@ -292,54 +293,474 @@ fn assert_bounded_prefill_contract<M>(
     }
 }
 
-/// Every concrete causal family supports the bounded-prefill coordinator contract.
+/// Tiny modular decoder: RoPE attention followed by Gated DeltaNet.
+fn tiny_modular() -> crate::architecture::DecoderSpec {
+    use crate::architecture::{
+        Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+        FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+        ResidualTopology, RopeScaling,
+    };
+    let norm = NormalizationSpec::Rms {
+        epsilon: 1e-6,
+        zero_centered: false,
+    };
+    let layer = |mixer| DecoderLayerSpec {
+        mixer,
+        feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+            intermediate_size: 12,
+            activation: Activation::Silu,
+            bias: false,
+        }),
+        mixer_norm: norm,
+        feed_forward_norm: norm,
+        norm_placement: NormPlacement::Pre,
+        residual: ResidualTopology::Add,
+    };
+    DecoderSpec {
+        vocabulary_size: 32,
+        hidden_size: 8,
+        layers: vec![
+            layer(MixerSpec::Attention(AttentionSpec {
+                query_heads: 2,
+                key_value_heads: 1,
+                head_dim: 4,
+                query_key_norm: true,
+                output_gate: false,
+                position: PositionEncodingSpec::Rope {
+                    theta: 10_000.0,
+                    rotary_dim: 4,
+                    scaling: RopeScaling::None,
+                },
+            })),
+            layer(MixerSpec::DeltaNet {
+                key_heads: 1,
+                value_heads: 2,
+                key_head_dim: 4,
+                value_head_dim: 4,
+                convolution_kernel: 2,
+            }),
+        ],
+        final_norm: norm,
+        tie_word_embeddings: false,
+        max_position_embeddings: 32,
+    }
+}
+
+/// Every causal language model supports the bounded-prefill coordinator contract.
+///
+/// The staggered prompt's first chunk reaches `decode` while row zero has
+/// never started, which every implementation must accept as a no-op. The test
+/// covers every registered family (each Llama-family alias included) and the
+/// modular reference model, and fails if a registered family is left out.
 #[test]
 fn every_causal_family_matches_bounded_and_one_shot_prefill() {
     let device = Default::default();
+    let cache = CacheConfig::new(2, 8).unwrap();
+    let mut covered = Vec::new();
 
     TestBackend::seed(&device, 10_001);
     let qwen = Qwen3_5ForCausalLm::init(tiny_qwen(), &device).expect("tiny Qwen");
-    assert_bounded_prefill_contract("Qwen3.5", &qwen, CacheConfig::new(2, 8).unwrap(), &device);
+    assert_bounded_prefill_contract("Qwen3.5", &qwen, cache, 32, &device);
+    covered.push(AutoCausalConfig::Qwen3_5);
 
     TestBackend::seed(&device, 10_002);
     let qwen_moe = Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).expect("tiny Qwen MoE");
-    assert_bounded_prefill_contract(
-        "Qwen3-MoE",
-        &qwen_moe,
-        CacheConfig::new(2, 8).unwrap(),
-        &device,
-    );
+    assert_bounded_prefill_contract("Qwen3-MoE", &qwen_moe, cache, 32, &device);
+    covered.push(AutoCausalConfig::Qwen3Moe);
 
     let deepseek = crate::models::deepseek_v2::model::tests_support::initialized_model(
         crate::models::deepseek_v2::model::tests_support::tiny_config(),
         &device,
     );
-    assert_bounded_prefill_contract(
-        "DeepSeek-V2",
-        &deepseek,
-        CacheConfig::new(2, 8).unwrap(),
-        &device,
-    );
+    assert_bounded_prefill_contract("DeepSeek-V2", &deepseek, cache, 32, &device);
+    covered.push(AutoCausalConfig::DeepseekV2);
 
     TestBackend::seed(&device, 10_003);
     let muse = MuseGlimmerForCausalLm::init(tiny_muse(), &device).expect("tiny Muse");
     assert_bounded_prefill_contract(
         "Muse Glimmer",
         &muse,
-        CacheConfig::new(2, 8)
-            .unwrap()
-            .with_sliding_window(3)
-            .unwrap(),
+        cache.with_sliding_window(3).unwrap(),
+        32,
         &device,
     );
+    covered.push(AutoCausalConfig::MuseGlimmer);
 
     TestBackend::seed(&device, 10_004);
     let nemotron = NemotronHForCausalLm::init(tiny_nemotron(), &device).expect("tiny Nemotron-H");
-    assert_bounded_prefill_contract(
+    assert_bounded_prefill_contract("Nemotron-H", &nemotron, cache, 32, &device);
+    covered.push(AutoCausalConfig::NemotronH);
+
+    for (name, json) in [
+        (
+            "Llama 3",
+            include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+        ),
+        (
+            "Llama with bias and tied embeddings",
+            include_str!("../../tests/fixtures/tiny_goldens/llama-bias-tied/config.json"),
+        ),
+        (
+            "Mistral sliding",
+            include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
+        ),
+        (
+            "OLMo 2",
+            include_str!("../../tests/fixtures/tiny_goldens/olmo2/config.json"),
+        ),
+        (
+            "Qwen2",
+            include_str!("../../tests/fixtures/tiny_goldens/qwen2/config.json"),
+        ),
+        (
+            "Qwen3",
+            include_str!("../../tests/fixtures/tiny_goldens/qwen3/config.json"),
+        ),
+        (
+            "SmolLM3",
+            include_str!("../../tests/fixtures/tiny_goldens/smollm3/config.json"),
+        ),
+        (
+            "Gemma 2",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
+        ),
+        (
+            "Gemma 3 text",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
+        ),
+        (
+            "gpt-oss",
+            include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
+        ),
+    ] {
+        TestBackend::seed(&device, 10_006);
+        let model = AutoCausalLm::<TestBackend>::from_config_json(json, &device).unwrap();
+        let vocabulary = model.config().vocabulary_size();
+        covered.push(model.family());
+        // Unwrap to the concrete family so its own implementation is checked.
+        match model {
+            AutoCausalLm::Llama(model) => {
+                assert_bounded_prefill_contract(name, &model, cache, vocabulary, &device);
+            }
+            AutoCausalLm::Gemma(model) => {
+                assert_bounded_prefill_contract(name, &model, cache, vocabulary, &device);
+            }
+            AutoCausalLm::GptOss(model) => {
+                assert_bounded_prefill_contract(name, &model, cache, vocabulary, &device);
+            }
+            other => panic!("{name} selected the {:?} family", other.family()),
+        }
+    }
+
+    TestBackend::seed(&device, 10_007);
+    let modular =
+        crate::models::custom::ModularCausalLm::<TestBackend>::init(tiny_modular(), &device)
+            .expect("tiny modular decoder");
+    assert_bounded_prefill_contract("ModularCausalLm", &modular, cache, 32, &device);
+
+    for family in AutoCausalConfig::ALL {
+        assert!(
+            covered.contains(family),
+            "registered family {family:?} lacks a bounded-prefill check"
+        );
+    }
+}
+
+/// Every registered causal family as a tiny automatic model, each Llama-family alias included.
+///
+/// Parameters are seeded per family; the vocabularies are 32 for the hand-built
+/// configurations and 96 for the committed tiny-golden ones.
+fn tiny_auto_causal_models(
+    device: &RegistryDevice,
+) -> Vec<(&'static str, AutoCausalLm<TestBackend>)> {
+    let mut models = Vec::new();
+    TestBackend::seed(device, 10_101);
+    models.push((
+        "Qwen3.5",
+        AutoCausalLm::from(Qwen3_5ForCausalLm::init(tiny_qwen(), device).unwrap()),
+    ));
+    models.push((
+        "Qwen3-MoE",
+        AutoCausalLm::from(Qwen3MoeForCausalLm::init(tiny_qwen_moe(), device).unwrap()),
+    ));
+    models.push((
+        "DeepSeek-V2",
+        AutoCausalLm::from(
+            crate::models::deepseek_v2::model::tests_support::initialized_model(
+                crate::models::deepseek_v2::model::tests_support::tiny_config(),
+                device,
+            ),
+        ),
+    ));
+    models.push((
+        "Muse Glimmer",
+        AutoCausalLm::from(MuseGlimmerForCausalLm::init(tiny_muse(), device).unwrap()),
+    ));
+    models.push((
         "Nemotron-H",
-        &nemotron,
-        CacheConfig::new(2, 8).unwrap(),
+        AutoCausalLm::from(NemotronHForCausalLm::init(tiny_nemotron(), device).unwrap()),
+    ));
+    for (name, json) in [
+        (
+            "Llama 3",
+            include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+        ),
+        (
+            "Mistral sliding",
+            include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
+        ),
+        (
+            "SmolLM3",
+            include_str!("../../tests/fixtures/tiny_goldens/smollm3/config.json"),
+        ),
+        (
+            "Gemma 2",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
+        ),
+        (
+            "Gemma 3 text",
+            include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
+        ),
+        (
+            "gpt-oss",
+            include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
+        ),
+    ] {
+        models.push((
+            name,
+            AutoCausalLm::<TestBackend>::from_config_json(json, device).unwrap(),
+        ));
+    }
+    for family in AutoCausalConfig::ALL {
+        assert!(
+            models.iter().any(|(_, model)| model.family() == *family),
+            "tiny registry fixtures lack {family:?}"
+        );
+    }
+    models
+}
+
+/// Every model rejects a batch that disagrees with its cache before allocating.
+///
+/// `new_decode_state` takes the batch twice, once in `CacheConfig` and once as
+/// an argument; `new_decode_state_for` takes it from the configuration, so it
+/// cannot disagree. Covers every registered causal family, T5, and the
+/// modular causal and seq2seq models.
+#[test]
+fn decode_state_batch_must_match_the_cache_sequence_count() {
+    use crate::{
+        cache::TensorCacheError,
+        models::custom::{ModularCausalLm, ModularSeq2SeqLm},
+    };
+    let device = Default::default();
+    let cache = CacheConfig::new(2, 8).unwrap();
+    /// Family tensor caches report the typed mismatch; the modular reference
+    /// state reports the same two counts as a cache error.
+    #[track_caller]
+    fn assert_mismatch<S: core::fmt::Debug>(name: &str, result: Result<S>, requested: usize) {
+        let error = result.expect_err(name);
+        let typed = matches!(
+            error,
+            Error::TensorCache(TensorCacheError::BatchSizeMismatch { configured: 2, requested: found })
+                if found == requested
+        );
+        let modular = matches!(
+            &error,
+            Error::Cache(reason)
+                if *reason == format!("custom decode state expected 2 sequences, received batch size {requested}")
+        );
+        assert!(
+            typed || (modular && name.starts_with("Modular")),
+            "{name}: {error:?}"
+        );
+    }
+    for (name, model) in tiny_auto_causal_models(&device) {
+        for batch in [1, 3] {
+            assert_mismatch(
+                name,
+                CausalLanguageModel::new_decode_state(&model, cache, batch, &device),
+                batch,
+            );
+        }
+        let state = model.new_decode_state_for(cache, &device).unwrap();
+        assert_eq!(
+            (state.batch_size(), state.lengths()),
+            (2, &[0, 0][..]),
+            "{name}"
+        );
+    }
+    let t5 = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    let automatic_t5 = AutoSeq2SeqLm::from(t5.clone());
+    assert_mismatch(
+        "T5",
+        Seq2SeqLanguageModel::new_decode_state(&t5, cache, 1, &device),
+        1,
+    );
+    assert_mismatch(
+        "AutoSeq2SeqLm<T5>",
+        Seq2SeqLanguageModel::new_decode_state(&automatic_t5, cache, 3, &device),
+        3,
+    );
+    assert_eq!(
+        t5.new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+    assert_eq!(
+        automatic_t5
+            .new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+    let modular = ModularCausalLm::<TestBackend>::init(tiny_modular(), &device).unwrap();
+    assert_mismatch(
+        "ModularCausalLm",
+        CausalLanguageModel::new_decode_state(&modular, cache, 1, &device),
+        1,
+    );
+    assert_eq!(
+        modular
+            .new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+    // Bidirectional encoders cannot hold the causal DeltaNet scan; keep attention only.
+    let mut attention_only = tiny_modular();
+    attention_only.layers.truncate(1);
+    let modular_seq2seq = ModularSeq2SeqLm::<TestBackend>::init(
+        crate::architecture::Seq2SeqSpec {
+            encoder: attention_only.clone(),
+            decoder: attention_only,
+            cross_attention_heads: 2,
+            cross_attention_head_dim: 4,
+            cross_attention_options: crate::architecture::AttentionOptions::default(),
+        },
         &device,
+    )
+    .unwrap();
+    assert_mismatch(
+        "ModularSeq2SeqLm",
+        Seq2SeqLanguageModel::new_decode_state(&modular_seq2seq, cache, 3, &device),
+        3,
+    );
+    assert_eq!(
+        modular_seq2seq
+            .new_decode_state_for(cache, &device)
+            .unwrap()
+            .batch_size(),
+        2
+    );
+}
+
+/// Families that reject a `CacheConfig` sliding window until the follow-up to SI-3 lands.
+///
+/// DeepSeek-V2 still fails allocation with `Error::BackendCapability` (its
+/// decode-state constructor checks the field); every other family ignores it.
+const WINDOW_REJECTED: &[&str] = &["DeepSeek-V2"];
+
+/// A `CacheConfig` sliding window never changes a model family's retention.
+///
+/// Families derive per-layer windows from their architecture; the cache-level
+/// window only sizes raw cache-bank rings that have no window of their own.
+/// Allocating with a window of two and decoding past it must therefore give
+/// exactly the logits of the same cache without a window, for T5, the modular
+/// model and every registered causal family except those in
+/// [`WINDOW_REJECTED`], which must refuse the windowed configuration with
+/// `Error::BackendCapability` instead of allocating.
+#[test]
+fn cache_sliding_window_never_changes_model_family_retention() {
+    let device = Default::default();
+    let plain = CacheConfig::new(2, 8).unwrap();
+    let windowed = plain.with_sliding_window(2).unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let bits = |logits: Tensor<TestBackend, 3>| {
+        logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    };
+    /// Prefills five tokens per row and decodes one more under `cache`.
+    fn run_causal<M: CausalLanguageModel<TestBackend>>(
+        model: &M,
+        cache: CacheConfig,
+        options: &ForwardOptions,
+        device: &RegistryDevice,
+    ) -> Result<Tensor<TestBackend, 3>> {
+        let mut state = model.new_decode_state_for(cache, device)?;
+        model.prefill(
+            registry_tokens([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]], device),
+            &mut state,
+            options,
+        )?;
+        Ok(model
+            .decode(registry_decode([[11], [12]], device), &mut state, options)?
+            .logits)
+    }
+    for (name, model) in tiny_auto_causal_models(&device) {
+        materialize_registry_parameters(&model);
+        let expected = run_causal(&model, plain, &options, &device).unwrap();
+        let windowed_run = run_causal(&model, windowed, &options, &device);
+        if WINDOW_REJECTED.contains(&name) {
+            assert!(
+                matches!(windowed_run, Err(Error::BackendCapability(_))),
+                "{name}: {windowed_run:?}"
+            );
+        } else {
+            assert_eq!(
+                bits(windowed_run.unwrap()),
+                bits(expected),
+                "{name} must ignore the cache window"
+            );
+        }
+    }
+    let modular =
+        crate::models::custom::ModularCausalLm::<TestBackend>::init(tiny_modular(), &device)
+            .unwrap();
+    assert_eq!(
+        bits(run_causal(&modular, windowed, &options, &device).unwrap()),
+        bits(run_causal(&modular, plain, &options, &device).unwrap()),
+        "the modular model must ignore the cache window"
+    );
+    let t5 = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    let encoder = t5
+        .encode(
+            registry_tokens([[8, 9, 10], [11, 12, 13]], &device),
+            &options,
+        )
+        .unwrap();
+    let run_t5 = |cache| {
+        let mut state = t5.new_decode_state_for(cache, &device).unwrap();
+        t5.prefill_decoder(
+            &encoder,
+            registry_tokens([[0, 4, 5, 6], [0, 7, 8, 9]], &device),
+            &mut state,
+            &options,
+        )
+        .unwrap();
+        Seq2SeqLanguageModel::decode(
+            &t5,
+            &encoder,
+            registry_decode([[10], [11]], &device),
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits
+    };
+    assert_eq!(
+        bits(run_t5(windowed)),
+        bits(run_t5(plain)),
+        "T5 must ignore the cache window"
     );
 }
 
@@ -355,6 +776,7 @@ fn auto_causal_dispatch_matches_bounded_and_one_shot_prefill() {
         "AutoCausalLm<Qwen3-MoE>",
         &model,
         CacheConfig::new(2, 8).unwrap(),
+        32,
         &device,
     );
 }
@@ -724,6 +1146,22 @@ fn assert_causal_dispatch_contract<M>(
         );
         assert_eq!(state.lengths(), [3, 3]);
     }
+    // Group-preserving reorders reach the concrete state's own validation and
+    // update path: a zero or non-dividing group, or an index leaving its group.
+    for (indices, group_size) in [(&[1, 0][..], 0), (&[1, 0][..], 3), (&[1, 0][..], 1)] {
+        assert_registry_error(
+            state
+                .reorder_within_groups(indices, group_size)
+                .unwrap_err(),
+            direct
+                .reorder_within_groups(indices, group_size)
+                .unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+    // Swapping back inside one group of two restores the prompt order.
+    state.reorder_within_groups(&[1, 0], 2).unwrap();
+    direct.reorder_within_groups(&[1, 0], 2).unwrap();
     let continuation = automatic
         .decode(registry_decode([[9], [10]], device), &mut state, &options)
         .unwrap()
@@ -739,7 +1177,7 @@ fn assert_causal_dispatch_contract<M>(
         continuation,
         concrete
             .forward(
-                registry_tokens([[3, 4, 6, 9], [1, 2, 5, 10]], device),
+                registry_tokens([[1, 2, 5, 9], [3, 4, 6, 10]], device),
                 &options,
             )
             .unwrap()
@@ -763,7 +1201,7 @@ fn assert_causal_dispatch_contract<M>(
         duplicated,
         concrete
             .forward(
-                registry_tokens([[1, 2, 5, 10, 11], [1, 2, 5, 10, 12]], device),
+                registry_tokens([[3, 4, 6, 10, 11], [3, 4, 6, 10, 12]], device),
                 &options,
             )
             .unwrap()
@@ -780,7 +1218,7 @@ fn assert_causal_dispatch_contract<M>(
                 .unwrap()
                 .logits,
             concrete
-                .forward(registry_tokens([[1, 2, 7], [1, 2, 8]], device), &options)
+                .forward(registry_tokens([[3, 4, 7], [3, 4, 8]], device), &options)
                 .unwrap()
                 .logits,
         );
@@ -1214,6 +1652,266 @@ fn seq2seq_auto_trait_dispatch_and_state_lifecycle() {
             .decoder
             .logits,
     );
+}
+
+/// Group-preserving reorders reach T5's in-place path through the automatic state.
+///
+/// T5 moves only decoder self-attention history on
+/// [`DecodeState::reorder_within_groups`] and leaves each group's bound encoder
+/// output and cross-attention keys and values in place, because beam search
+/// promises that the rows of one group share a source. Two *different* sources
+/// in one group make the path observable: after swapping the rows, the next
+/// step attends to the unmoved binding. The automatic state must give the
+/// concrete state's logits and errors; the trait default (a full `reorder`,
+/// which also moves the binding) gives visibly different logits.
+#[test]
+fn seq2seq_auto_state_forwards_group_preserving_reorder() {
+    let device = Default::default();
+    let concrete = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    materialize_registry_parameters(&concrete);
+    let automatic = AutoSeq2SeqLm::from(concrete.clone());
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let encoder = concrete
+        .encode(
+            registry_tokens([[8, 9, 10], [11, 12, 13]], &device),
+            &options,
+        )
+        .unwrap();
+    let cache = CacheConfig::new(2, 8).unwrap();
+    let mut state = automatic.new_decode_state(cache, 2, &device).unwrap();
+    let mut grouped = Seq2SeqLanguageModel::new_decode_state(&concrete, cache, 2, &device).unwrap();
+    let mut full = Seq2SeqLanguageModel::new_decode_state(&concrete, cache, 2, &device).unwrap();
+    let decoder = registry_tokens([[0, 4], [0, 5]], &device);
+    automatic
+        .prefill_decoder(&encoder, decoder.clone(), &mut state, &options)
+        .unwrap();
+    for direct in [&mut grouped, &mut full] {
+        Seq2SeqLanguageModel::prefill_decoder(
+            &concrete,
+            &encoder,
+            decoder.clone(),
+            direct,
+            &options,
+        )
+        .unwrap();
+    }
+
+    for (indices, group_size) in [(&[1, 0][..], 0), (&[1, 0][..], 3), (&[1, 0][..], 1)] {
+        assert_registry_error(
+            state
+                .reorder_within_groups(indices, group_size)
+                .unwrap_err(),
+            DecodeState::reorder_within_groups(&mut grouped, indices, group_size).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [2, 2]);
+    }
+
+    state.reorder_within_groups(&[1, 0], 2).unwrap();
+    DecodeState::reorder_within_groups(&mut grouped, &[1, 0], 2).unwrap();
+    DecodeState::reorder(&mut full, &[1, 0]).unwrap();
+    let step = || registry_decode([[6], [7]], &device);
+    let actual = automatic
+        .decode(&encoder, step(), &mut state, &options)
+        .unwrap()
+        .decoder
+        .logits;
+    let in_place =
+        Seq2SeqLanguageModel::decode(&concrete, &encoder, step(), &mut grouped, &options)
+            .unwrap()
+            .decoder
+            .logits;
+    let moved = Seq2SeqLanguageModel::decode(&concrete, &encoder, step(), &mut full, &options)
+        .unwrap()
+        .decoder
+        .logits;
+    assert_eq!(state.lengths(), [3, 3]);
+    let separation = (in_place.clone() - moved).abs().max().into_scalar();
+    assert!(
+        separation > 1.0e-3,
+        "distinct sources must make the in-place and full reorders differ, max |diff| {separation}"
+    );
+    assert_registry_logits(actual, in_place);
+}
+
+/// Release timings of one beam step's reorder through the automatic T5 state (SI-1).
+///
+/// FLAN-T5-small decoder geometry (8 layers, 6 heads, `d_kv` 64) with one
+/// source expanded to four beams over 512 source tokens. Before the
+/// automatic state forwarded `reorder_within_groups`, the trait default ran
+/// the full `reorder`, which also re-gathers the bound encoder output and
+/// every layer's projected cross-attention keys and values; that former path
+/// is timed directly. Reproduce with
+/// `cargo test --release --lib -- --ignored --nocapture t5_beam_reorder_timings`.
+#[test]
+#[ignore = "release-mode timing; run explicitly"]
+fn t5_beam_reorder_timings() {
+    /// Beams per source, as in the README's FLAN-T5 example.
+    const BEAMS: usize = 4;
+    /// Source tokens, enough for cross-attention gathers to dominate a full reorder.
+    const SOURCE: usize = 512;
+    let device = Default::default();
+    let concrete = T5ForConditionalGeneration::<TestBackend>::init(
+        T5Config {
+            vocab_size: 32_128,
+            d_model: 512,
+            d_kv: 64,
+            d_ff: 1_024,
+            num_layers: 8,
+            num_decoder_layers: Some(8),
+            num_heads: 6,
+            relative_attention_num_buckets: 32,
+            relative_attention_max_distance: 128,
+            dropout_rate: 0.0,
+            feed_forward_proj: T5FeedForwardProjection::GatedGelu,
+            ..T5Config::default()
+        },
+        &device,
+    )
+    .unwrap();
+    materialize_registry_parameters(&concrete);
+    let automatic = AutoSeq2SeqLm::from(concrete.clone());
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let source = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(
+                (0..SOURCE as i32)
+                    .map(|id| 3 + id % 1_000)
+                    .collect::<Vec<_>>(),
+                [1, SOURCE],
+            ),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut encoder = concrete.encode(source, &options).unwrap();
+    encoder.hidden_state = encoder
+        .hidden_state
+        .select(0, Tensor::<TestBackend, 1, Int>::zeros([BEAMS], &device));
+    let cache = CacheConfig::new(BEAMS, 16).unwrap();
+    let start = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::zeros([BEAMS, 1], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut state = automatic.new_decode_state(cache, BEAMS, &device).unwrap();
+    automatic
+        .prefill_decoder(&encoder, start(), &mut state, &options)
+        .unwrap();
+    let mut direct =
+        Seq2SeqLanguageModel::new_decode_state(&concrete, cache, BEAMS, &device).unwrap();
+    Seq2SeqLanguageModel::prefill_decoder(&concrete, &encoder, start(), &mut direct, &options)
+        .unwrap();
+    let median_ms = |run: &mut dyn FnMut()| {
+        run();
+        let mut samples = (0..21)
+            .map(|_| {
+                let begin = std::time::Instant::now();
+                run();
+                TestBackend::sync(&device).unwrap();
+                begin.elapsed().as_secs_f64() * 1e3
+            })
+            .collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let parents = [1, 0, 3, 2];
+    let former = median_ms(&mut || DecodeState::reorder(&mut state, &parents).unwrap());
+    let automatic_grouped =
+        median_ms(&mut || state.reorder_within_groups(&parents, BEAMS).unwrap());
+    let concrete_grouped = median_ms(&mut || {
+        DecodeState::reorder_within_groups(&mut direct, &parents, BEAMS).unwrap();
+    });
+    let step = median_ms(&mut || {
+        let next = DecodeInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::ones([BEAMS, 1], &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        Seq2SeqLanguageModel::decode(&concrete, &encoder, next, &mut direct, &options)
+            .unwrap()
+            .decoder
+            .logits
+            .into_data();
+        DecodeState::truncate(&mut direct, &[1; BEAMS]).unwrap();
+    });
+    println!(
+        "SI-1 T5 beam reorder ({BEAMS} beams, {SOURCE} source tokens): former automatic {former:.3} ms, \
+         automatic {automatic_grouped:.3} ms, concrete {concrete_grouped:.3} ms; one decode step {step:.3} ms"
+    );
+}
+
+/// Names of the `fn` items declared directly inside the block opened by `header`.
+///
+/// A brace-depth scan over the source text: `fn` lines count only at depth one,
+/// so default method bodies and nested items are ignored. Format strings in the
+/// scanned blocks hold balanced `{}` pairs, which keep the depth exact.
+fn block_function_names(source: &str, header: &str) -> Vec<String> {
+    let start = source
+        .find(header)
+        .unwrap_or_else(|| panic!("source lacks `{header}`"));
+    let mut depth = 1_usize;
+    let mut names = Vec::new();
+    for line in source[start + header.len()..].lines().skip(1) {
+        let trimmed = line.trim_start();
+        if depth == 1
+            && let Some(signature) = trimmed.strip_prefix("fn ")
+        {
+            let name = signature.split(['(', '<']).next().unwrap_or_default();
+            names.push(name.to_owned());
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        for character in line.chars() {
+            match character {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            names.sort();
+            return names;
+        }
+    }
+    panic!("block opened by `{header}` is not closed");
+}
+
+/// Both automatic decode states forward every [`DecodeState`] method, provided ones included.
+///
+/// A provided method that an enum does not forward silently runs the trait
+/// default on the enum instead of the family's override, as
+/// `reorder_within_groups` once did for T5. This structural check compares the
+/// trait's method list with each dispatch implementation, so adding a trait
+/// method fails here until both enums forward it.
+#[test]
+fn automatic_decode_states_forward_every_trait_method() {
+    let trait_methods = block_function_names(
+        include_str!("../architecture/traits.rs"),
+        "pub trait DecodeState<B: Backend>: Send + core::fmt::Debug {",
+    );
+    assert!(
+        trait_methods.contains(&"reorder_within_groups".to_owned()),
+        "{trait_methods:?}"
+    );
+    let registry = include_str!("auto.rs");
+    for state in ["AutoCausalDecodeState", "AutoSeq2SeqDecodeState"] {
+        let forwarded = block_function_names(
+            registry,
+            &format!("impl<B: Backend> DecodeState<B> for {state}<B> {{"),
+        );
+        assert_eq!(
+            forwarded, trait_methods,
+            "{state} must forward every method"
+        );
+    }
 }
 
 /// Registry configuration traits enumerate every executable discriminator explicitly.

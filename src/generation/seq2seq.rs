@@ -19,7 +19,9 @@
 //! one source start as identical copies of its encoder output, so the encoder
 //! output is expanded once and never re-gathered; a model may likewise keep
 //! per-source state such as projected cross-attention keys and values in
-//! place (T5 does). Finished source rows remain
+//! place (T5 does, directly or through
+//! [`crate::models::AutoSeq2SeqDecodeState`], which forwards the call).
+//! Finished source rows remain
 //! in the rectangle as false-masked PAD no-ops, preserving other rows'
 //! progress without mutating their cache lengths.
 //!
@@ -1236,11 +1238,8 @@ fn host_log_probabilities<B: Backend>(
             "beam-search active metadata does not match model logits".into(),
         ));
     }
-    let device = logits.device();
-    let active_mask =
-        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
     let dtype = probability_accumulation_dtype(logits.dtype());
-    let logits = logits.cast(dtype).mask_fill(active_mask.bool_not(), 0.0);
+    let logits = super::zero_inactive_rows(logits.cast(dtype), active);
     let fully_excluded = logits
         .clone()
         .equal_elem(f64::NEG_INFINITY)

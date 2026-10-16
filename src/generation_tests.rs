@@ -543,6 +543,42 @@ fn top_p_keeps_crossing_token() {
     assert!(output[2].is_infinite());
 }
 
+/// Top-p never drops a strictly larger logit while keeping a smaller one (TOPP-TIE-1).
+///
+/// Logits one `f32` ulp apart round to the same probability. Hugging Face's
+/// `TopPLogitsWarper` ranks by the logits themselves, so the larger one always
+/// comes first and survives; ranking by the rounded probabilities instead
+/// falls back to index order and drops it.
+#[test]
+fn top_p_ranks_near_tied_logits_by_logit() {
+    let device = Default::default();
+    for (smaller, larger) in [(0.1_f32, 0.100_000_01_f32), (-0.166_666_67, -0.166_666_66)] {
+        assert!(smaller < larger);
+        for top_p in [0.3, 0.5] {
+            let processor = LogitsProcessor::<TestBackend>::new(
+                GenerationConfig {
+                    strategy: SamplingStrategy::Sample,
+                    top_p: Some(top_p),
+                    ..Default::default()
+                },
+                2,
+                &device,
+            )
+            .unwrap();
+            let output = host_values(
+                processor
+                    .process(Tensor::from_floats([[smaller, larger]], &device), None)
+                    .unwrap(),
+            );
+            assert_eq!(
+                output,
+                [f64::NEG_INFINITY, f64::from(larger)],
+                "top_p {top_p} must keep exactly the larger of {smaller} and {larger}"
+            );
+        }
+    }
+}
+
 /// Repetition is sign-aware and presence applies only to observed IDs.
 #[test]
 fn token_penalties_match_standard_logit_rules() {

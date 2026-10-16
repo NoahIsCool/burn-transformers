@@ -11,6 +11,7 @@ use super::{T5BeamSearchOptions, generate_t5_beam_search, one_token, token_to_u3
 use crate::{
     CausalLmInput, Error, FinishReason,
     checkpoint::LoadOptions,
+    generation::EarlyStopping,
     models::{
         config::{ModelConfig, TokenIds},
         t5::{T5Config, T5FeedForwardProjection, T5ForConditionalGeneration},
@@ -85,7 +86,11 @@ fn family_helper_sizes_the_cache_exactly_for_every_length() {
     let model = T5ForConditionalGeneration::<TestBackend>::init(tiny_config(), &device)
         .expect("tiny T5 model");
     for max_new_tokens in 1..=4 {
-        for early_stopping in [false, true] {
+        for early_stopping in [
+            EarlyStopping::Eager,
+            EarlyStopping::Heuristic,
+            EarlyStopping::Never,
+        ] {
             let output = generate_t5_beam_search(
                 &model,
                 CausalLmInput {
@@ -115,6 +120,47 @@ fn family_helper_sizes_the_cache_exactly_for_every_length() {
             );
         }
     }
+}
+
+/// The default stopping rule is Transformers' heuristic, as FLAN-T5's generation config selects.
+#[test]
+fn default_options_use_the_transformers_heuristic() {
+    assert_eq!(
+        T5BeamSearchOptions::default().early_stopping,
+        EarlyStopping::Heuristic
+    );
+}
+
+/// Options keep Transformers' `early_stopping` encoding, so former Boolean options still load.
+#[test]
+fn early_stopping_serializes_like_transformers() {
+    for (json, rule) in [
+        ("true", EarlyStopping::Eager),
+        ("false", EarlyStopping::Heuristic),
+        ("\"never\"", EarlyStopping::Never),
+    ] {
+        let options: T5BeamSearchOptions =
+            serde_json::from_str(&format!("{{\"early_stopping\": {json}}}")).unwrap();
+        assert_eq!(
+            options,
+            T5BeamSearchOptions {
+                early_stopping: rule,
+                ..T5BeamSearchOptions::default()
+            }
+        );
+        let written = serde_json::to_value(&options).unwrap();
+        assert_eq!(
+            written["early_stopping"],
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+    }
+    let error = serde_json::from_str::<T5BeamSearchOptions>(r#"{"early_stopping": "sometimes"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("early_stopping must be true, false, or \"never\""),
+        "{error}"
+    );
 }
 
 /// PAD is intentionally singular because inactive beam rows need one ID.
@@ -158,7 +204,7 @@ fn missing_or_empty_generation_tokens_are_rejected() {
         num_beams: 2,
         num_return_sequences: 1,
         length_penalty: 1.0,
-        early_stopping: false,
+        early_stopping: EarlyStopping::Heuristic,
     };
     let mut model =
         T5ForConditionalGeneration::<TestBackend>::init(tiny_config(), &device).unwrap();
@@ -220,7 +266,7 @@ fn pinned_flan_small_beam_search_matches_reference_tokens() {
             num_beams: 4,
             num_return_sequences: 1,
             length_penalty: 1.0,
-            early_stopping: false,
+            early_stopping: EarlyStopping::Heuristic,
         },
     )
     .expect("run cached FLAN beam search");

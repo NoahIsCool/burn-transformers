@@ -892,6 +892,114 @@ fn neutralization_is_row_local_and_checks_batch_metadata() {
     assert!(error.to_string().contains("active-row count 1"));
 }
 
+/// The former neutralization: negate the host flags *after* broadcasting them on the device.
+///
+/// Kept as the bitwise and timing baseline for `neutralize_inactive_logits`
+/// (PERF-3): Flex materializes the negated stride-zero view element by element.
+fn broadcast_negation_reference(
+    logits: Tensor<TestBackend, 2>,
+    active: &[bool],
+) -> Tensor<TestBackend, 2> {
+    let [batch, vocabulary] = logits.dims();
+    let valid =
+        crate::architecture::bool_tensor_from_values(active.to_vec(), [batch, 1], &logits.device())
+            .expand([batch, vocabulary]);
+    logits.mask_fill(valid.bool_not(), 0.0)
+}
+
+/// Neutralization is bitwise the former rule: untouched active rows, exact zeros elsewhere.
+///
+/// With every row active the logits come back unchanged bit for bit, NaN,
+/// infinities, and signed zero included; with a mixed batch exactly the
+/// inactive rows become `+0.0`.
+#[test]
+fn neutralization_matches_the_broadcast_rule_bit_for_bit() {
+    let device = Default::default();
+    let logits = Tensor::<TestBackend, 2>::from_floats(
+        [
+            [f32::NAN, f32::NEG_INFINITY, -0.0],
+            [f32::INFINITY, 1.5, -2.25],
+            [0.5, f32::NAN, f32::NEG_INFINITY],
+        ],
+        &device,
+    );
+    let bits = |tensor: Tensor<TestBackend, 2>| {
+        tensor
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    };
+    for active in [
+        [true, true, true],
+        [false, true, true],
+        [true, false, false],
+        [false, false, false],
+    ] {
+        let actual = super::neutralize_inactive_logits(logits.clone(), &active).unwrap();
+        let expected = broadcast_negation_reference(logits.clone(), &active);
+        assert_eq!(bits(actual.clone()), bits(expected), "{active:?}");
+        for (row, chunk) in bits(actual).chunks(3).enumerate() {
+            if !active[row] {
+                assert_eq!(chunk, [0_u32; 3], "inactive row {row}");
+            }
+        }
+    }
+    let untouched = super::neutralize_inactive_logits(logits.clone(), &[true; 3]).unwrap();
+    assert_eq!(bits(untouched), bits(logits));
+}
+
+/// Release timings of per-step neutralization against the former broadcast negation (PERF-3).
+///
+/// Reproduce with
+/// `cargo test --release --lib -- --ignored --nocapture neutralization_timings`.
+#[test]
+#[ignore = "release-mode timing; run explicitly"]
+fn neutralization_timings() {
+    let device = Default::default();
+    let median_ms = |run: &mut dyn FnMut()| {
+        run();
+        let mut samples = (0..31)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                run();
+                start.elapsed().as_secs_f64() * 1e3
+            })
+            .collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    for (batch, vocabulary) in [(8, 248_320), (1, 248_320), (8, 49_152)] {
+        let logits = Tensor::<TestBackend, 2>::random(
+            [batch, vocabulary],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let all_active = vec![true; batch];
+        let mut one_inactive = all_active.clone();
+        one_inactive[0] = false;
+        for (label, active) in [("all active", &all_active), ("one inactive", &one_inactive)] {
+            let mut former = || {
+                let output = broadcast_negation_reference(logits.clone(), active);
+                TestBackend::sync(&device).unwrap();
+                drop(output);
+            };
+            let mut current = || {
+                let output = super::neutralize_inactive_logits(logits.clone(), active).unwrap();
+                TestBackend::sync(&device).unwrap();
+                drop(output);
+            };
+            println!(
+                "PERF-3 neutralize [{batch}, {vocabulary}] {label}: former {:.3} ms, current {:.3} ms",
+                median_ms(&mut former),
+                median_ms(&mut current),
+            );
+        }
+    }
+}
+
 /// With history-dependent penalties, out-of-vocabulary prompt IDs fail before any model call.
 #[test]
 fn penalized_prompts_reject_out_of_vocabulary_ids() {
@@ -1682,8 +1790,8 @@ fn release_v2_overlapping_stops_stream_at_the_exact_cache_boundary() {
 /// Prefill chunks made entirely of padding are skipped instead of sent to `decode`.
 ///
 /// Right-padded fixed-width prompts end in chunks with no valid token. Such a
-/// chunk cannot change any row's cache or logits, and architectures such as
-/// the custom stack reject an entirely inactive decode step.
+/// chunk cannot change any row's cache or logits, so the coordinator spends no
+/// model call on it, although every architecture accepts it as a no-op.
 #[test]
 fn all_padding_prefill_chunks_are_skipped() {
     let (inner, device) = tiny_model();

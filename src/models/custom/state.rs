@@ -18,10 +18,22 @@
 //!    rewritten with a gather and a masked select, from the same verified plan, so the number of
 //!    kernels is independent of the batch size and of each row's padding layout;
 //! 4. the model evaluates the shortest rectangular history prefix in one stateless pass, with
-//!    each row's committed length as its validity mask;
+//!    each row's evaluated length as its validity mask;
 //! 5. one gather returns the appended slots in the caller's `[batch, step]` layout.
 //!
 //! Nothing is committed until the outputs exist, so a failing step leaves the state unchanged.
+//!
+//! # Inactive rows
+//!
+//! The state follows the stateful contract every family shares: prefill rejects a row without
+//! a valid token, while decode accepts it as a no-op whose step outputs are exact zeros. A
+//! row that appends nothing is evaluated over only its first history slot: its outputs are
+//! masked to zero anyway, the stateless pass needs at least one valid key per row (a row that
+//! has never started, such as a left-padded prompt's first chunk, has none), and a finished
+//! row's long history then does not widen the evaluated prefix. That slot holds zeros after
+//! allocation or reset and otherwise a token and position validated when they were written.
+//! It is never committed: the row keeps its committed length, possibly zero. A step in which
+//! no row is active therefore evaluates one slot per row and commits nothing.
 
 use burn::tensor::{Element, Int, Tensor, TensorData, backend::Backend};
 
@@ -210,15 +222,26 @@ impl<B: Backend> ModularDecodeState<B> {
         let host = HostInput::read(&input, batch, step, "custom decode input")?;
         validate_decode_token_ids(&host.tokens, vocabulary_size)?;
         let validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
+        let committed = self.metadata.lengths();
+        // Prefill requires every row to append, so only decode can shorten rows.
+        let planned_from = if require_each_row {
+            committed.to_vec()
+        } else {
+            inactive_rows_shortened(committed, &validity, step)
+        };
         // The verified planner checks one validity cell per row and column itself.
-        let (plan, writes) = plan_history(
+        let planned = match plan_history(
             &validity,
             step,
-            self.metadata.lengths(),
+            &planned_from,
             self.capacity(),
             require_each_row,
-        )
-        .map_err(|error| self.append_error(error))?;
+        ) {
+            Ok(planned) => Some(planned),
+            // Decode accepts a step without any valid token as a no-op.
+            Err(HistoryAppendError::EmptyStep) if !require_each_row => None,
+            Err(error) => return Err(self.append_error(error)),
+        };
         if let Some(positions) = &host.positions {
             validate_explicit_positions(
                 positions,
@@ -228,6 +251,18 @@ impl<B: Backend> ModularDecodeState<B> {
                 self.model_spec.max_position_embeddings,
             )?;
         }
+        let Some((plan, writes)) = planned else {
+            // Nothing is written; every row is evaluated over its first slot.
+            return Ok(PreparedAppend {
+                tokens: self.tokens.clone(),
+                positions: self.positions.clone(),
+                absolute_indices: vec![0; batch * step],
+                evaluated_lengths: planned_from,
+                counts: vec![0; batch],
+                input_validity: validity,
+                step,
+            });
+        };
         let window = writes.start..writes.end;
         let width = window.len();
         let sources = Tensor::<B, 2, Int>::from_data(
@@ -262,7 +297,7 @@ impl<B: Backend> ModularDecodeState<B> {
             tokens,
             positions,
             absolute_indices: to_indices(&plan.slots)?,
-            new_lengths: plan.lengths,
+            evaluated_lengths: plan.lengths,
             counts: plan.counts,
             input_validity: validity,
             step,
@@ -281,11 +316,6 @@ impl<B: Backend> ModularDecodeState<B> {
                 "at least one valid token in every prompt row",
                 "a fully masked row",
             ),
-            HistoryAppendError::EmptyStep => Error::shape(
-                "custom.decode.token_mask",
-                "at least one active token across the batch",
-                "an entirely inactive decode step",
-            ),
             HistoryAppendError::Capacity {
                 row,
                 requested: None,
@@ -297,9 +327,13 @@ impl<B: Backend> ModularDecodeState<B> {
                 "custom sequence {row} requested length {requested} exceeds capacity {}",
                 self.capacity()
             )),
-            HistoryAppendError::NeverStarted { .. } => Error::BackendCapability(
-                "reference batched decoding cannot evaluate a never-started inactive row".into(),
-            ),
+            // Prefill rejects an empty row first, and decode answers an empty step itself and
+            // plans every non-advancing row from one slot, so neither failure can reach here.
+            HistoryAppendError::EmptyStep | HistoryAppendError::NeverStarted { .. } => {
+                Error::Cache(
+                    "custom history planner rejected a step the decode contract admits".into(),
+                )
+            }
         }
     }
 
@@ -347,11 +381,22 @@ impl<B: Backend> ModularDecodeState<B> {
     }
 
     /// Publishes a fully evaluated append and advances checked logical metadata.
+    ///
+    /// Rows that appended nothing keep their committed length, even when they were evaluated
+    /// over a placeholder slot.
     fn commit(&mut self, append: PreparedAppend<B>) -> Result<()> {
         self.metadata
             .advance_all(&append.counts)
             .map_err(|error| Error::Cache(error.to_string()))?;
-        debug_assert_eq!(self.metadata.lengths(), append.new_lengths);
+        // An advancing row ends exactly at the prefix length it was evaluated over.
+        debug_assert!(
+            self.metadata
+                .lengths()
+                .iter()
+                .zip(&append.counts)
+                .zip(&append.evaluated_lengths)
+                .all(|((&length, &count), &evaluated)| count == 0 || length == evaluated)
+        );
         self.tokens = append.tokens;
         self.positions = append.positions;
         Ok(())
@@ -426,8 +471,11 @@ struct PreparedAppend<B: Backend> {
     tokens: Tensor<B, 2, Int>,
     /// Prospective position history aligned with the compacted token storage.
     positions: Tensor<B, 2, Int>,
-    /// Per-row committed lengths if this append succeeds.
-    new_lengths: Vec<usize>,
+    /// Per-row history prefix evaluated by the stateless pass.
+    ///
+    /// An advancing row's prefix is its committed length after this append; a row that
+    /// appends nothing is evaluated over one slot (see the module documentation).
+    evaluated_lengths: Vec<usize>,
     /// Number of valid newly supplied tokens to commit in each row.
     counts: Vec<usize>,
     /// Row-major `[batch, step]` mask restored on newly gathered outputs.
@@ -441,9 +489,9 @@ struct PreparedAppend<B: Backend> {
 impl<B: Backend> PreparedAppend<B> {
     /// Materializes the shortest rectangular prefix containing every compact row.
     fn history_input(&self, device: &B::Device) -> Result<CausalLmInput<B>> {
-        let batch = self.new_lengths.len();
+        let batch = self.evaluated_lengths.len();
         // Verified: width `max L_r`, and cell `(r, c)` is valid exactly when `c < L_r`.
-        let (sequence, validity) = prefix_validity(&self.new_lengths)
+        let (sequence, validity) = prefix_validity(&self.evaluated_lengths)
             .ok_or_else(|| Error::Cache("custom prepared append lost its batch".into()))?;
         Ok(CausalLmInput {
             token_ids: self.tokens.clone().slice([0..batch, 0..sequence]),
@@ -533,7 +581,7 @@ impl<B: Backend> PreparedAppend<B> {
         if !options.router_logits && !options.auxiliary_losses {
             return Ok(Vec::new());
         }
-        let batch = self.new_lengths.len();
+        let batch = self.evaluated_lengths.len();
         let base = Tensor::<B, 2, Int>::from_data(
             TensorData::new(self.absolute_indices.clone(), [batch, self.step]),
             device,
@@ -557,6 +605,25 @@ impl<B: Backend> PreparedAppend<B> {
             })
             .collect()
     }
+}
+
+/// Returns `committed` with every row that has no valid cell in this step shortened to one slot.
+///
+/// `validity` is the row-major `[committed.len(), step]` mask and `step > 0`. Such a row
+/// appends nothing and its outputs are masked to zero, so planning it from one slot gives the
+/// stateless pass a valid key even for a row that has never started, without evaluating a
+/// finished row's whole history. The planner writes nothing for these rows, and commit keeps
+/// their true lengths.
+fn inactive_rows_shortened(committed: &[usize], validity: &[bool], step: usize) -> Vec<usize> {
+    committed
+        .iter()
+        .zip(validity.chunks(step))
+        .map(
+            |(&length, cells)| {
+                if cells.contains(&true) { length } else { 1 }
+            },
+        )
+        .collect()
 }
 
 /// Rejects out-of-range decode IDs before they enter preallocated history.
