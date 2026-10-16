@@ -479,6 +479,9 @@ fn staged_execution_rejects_foreign_dtypes_and_cross_attention() {
 ///
 /// The bias moves the block onto the custom-connectivity graph; adding zero
 /// to every score must not change the result beyond reduction rounding.
+/// Every valid query is compared: all four positions of the unpadded row and
+/// positions 1..3 of the row whose first token is padding, where the custom
+/// graph must also exclude the padded key exactly as the default mask does.
 #[test]
 fn zero_bias_causal_policy_matches_the_default_block() {
     let model = model();
@@ -488,14 +491,18 @@ fn zero_bias_causal_policy_matches_the_default_block() {
     biased.context.attention =
         Some(AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &Default::default())));
     let biased = model.run_layers(biased, 0..2).unwrap().hidden;
-    // Padded query rows have no valid key on either path; compare valid rows.
-    biased
-        .slice([0..1, 0..4])
-        .into_data()
-        .assert_approx_eq::<f32>(
-            &plain.slice([0..1, 0..4]).into_data(),
-            Tolerance::rel_abs(1e-5, 1e-6),
-        );
+    // The padded query (row 1, position 0) has no valid key on either path,
+    // so its output is unspecified; every other query must agree.
+    for (row, positions) in [(0..1, 0..4), (1..2, 1..4)] {
+        biased
+            .clone()
+            .slice([row.clone(), positions.clone()])
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &plain.clone().slice([row, positions]).into_data(),
+                Tolerance::rel_abs(1e-5, 1e-6),
+            );
+    }
 }
 
 /// The generic hooked trait delegates to the family's hooked forward.
@@ -519,12 +526,42 @@ fn hooked_trait_forward_matches_the_family_method() {
 }
 
 /// The reference fixture builder honors a tied head by aliasing instead of writing it.
+///
+/// The tied model owns no `lm_head`, and every `[batch, position]` logit row
+/// equals the final normalized hidden state times the transposed embedding
+/// table, `logits = h W_e^T`, the same oracle as
+/// `tied_readout_matches_reshaping_linear_oracle`. The fixture's embedding is
+/// nonzero, so agreement shows the readout really is the embedding.
 #[test]
 fn tied_reference_fixture_shares_the_embedding_readout() {
     let mut config = tests_support::reference_v3_config();
     config.tie_word_embeddings = true;
     let model = tests_support::reference_model::<TestBackend>(config, &Default::default());
     assert!(model.lm_head.is_none());
-    let logits = model.forward(input(), &all_logits()).unwrap().logits;
+    let output = model
+        .forward(
+            input(),
+            &ForwardOptions {
+                hidden_states: true,
+                ..all_logits()
+            },
+        )
+        .unwrap();
+    let logits = output.logits;
     assert_eq!(logits.dims()[..2], [2, 4]);
+    let embedding = model.model.embed_tokens.weight.val();
+    assert!(
+        embedding
+            .clone()
+            .into_data()
+            .iter::<f32>()
+            .any(|value| value != 0.0)
+    );
+    let final_hidden = output
+        .final_hidden_state
+        .expect("hidden states were requested");
+    let oracle = burn::tensor::module::linear(final_hidden, embedding.transpose(), None);
+    logits
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle.into_data(), Tolerance::rel_abs(1e-5, 1e-6));
 }

@@ -433,10 +433,32 @@ fn alias_requires_the_tied_installed_embedding_owner() {
     );
 }
 
-/// Biased low-rank-query attention installs every bias target and runs.
+/// Projections that carry a bias under `attention_bias`, in marker order.
+const MLA_BIASED_PROJECTIONS: [&str; 3] = ["q_a_proj", "kv_a_proj_with_mqa", "o_proj"];
+
+/// Distinct marker for an MLA projection bias target, `None` otherwise.
+///
+/// For `model.layers.{l}.self_attn.{projection}.bias` the marker is
+/// `kind + 10 * l`, with `kind` 1..=3 in [`MLA_BIASED_PROJECTIONS`] order, so
+/// a bias installed into another projection or another layer is visible.
+fn mla_bias_marker(name: &str) -> Option<f32> {
+    let rest = name.strip_prefix("model.layers.")?;
+    let (layer, suffix) = rest.split_once('.')?;
+    let projection = suffix.strip_prefix("self_attn.")?.strip_suffix(".bias")?;
+    let kind = MLA_BIASED_PROJECTIONS
+        .iter()
+        .position(|candidate| *candidate == projection)?;
+    Some(kind as f32 + 1.0 + 10.0 * layer.parse::<f32>().ok()?)
+}
+
+/// Biased low-rank-query attention installs each bias target into its own field and runs.
 ///
 /// The contract adds `q_a_proj.bias`, `kv_a_proj_with_mqa.bias`, and
-/// `o_proj.bias` to each layer; each dispatches to its configured Burn bias.
+/// `o_proj.bias` to each layer. Each carries a distinct constant from
+/// [`mla_bias_marker`], and reading every Burn bias back proves the
+/// dispatcher routes it to its own projection in its own layer rather than
+/// a same-shaped neighbor. The all-zero vocabulary projection makes the
+/// forward logits exactly zero whatever the biases contribute upstream.
 #[test]
 fn biased_low_rank_query_targets_install_and_run() {
     let device = Default::default();
@@ -452,12 +474,49 @@ fn biased_low_rank_query_targets_install_and_run() {
             .iter()
             .map(|&value| value as usize)
             .collect::<Vec<_>>();
-        biases += usize::from(expected.name.ends_with(".bias"));
+        let data = match mla_bias_marker(&expected.name) {
+            Some(marker) => {
+                biases += 1;
+                TensorData::full(shape, marker)
+            }
+            None => {
+                assert!(!expected.name.ends_with(".bias"), "{}", expected.name);
+                TensorData::zeros::<f32, _>(shape)
+            }
+        };
         model
-            .write_tensor(&expected.name, TensorData::zeros::<f32, _>(shape))
+            .write_tensor(&expected.name, data)
             .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
     }
     assert_eq!(biases, 3 * 2);
+    for (index, layer) in model.model.layers.iter().enumerate() {
+        let attention = &layer.self_attn;
+        let projections = [
+            attention
+                .q_a_proj
+                .as_ref()
+                .expect("a low-rank query owns a down-projection"),
+            &attention.kv_a_proj_with_mqa,
+            &attention.o_proj,
+        ];
+        for (kind, projection) in projections.into_iter().enumerate() {
+            let expected = kind as f32 + 1.0 + 10.0 * index as f32;
+            let values = projection
+                .bias
+                .as_ref()
+                .expect("a biased projection owns a bias")
+                .val()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            assert!(!values.is_empty());
+            assert!(
+                values.iter().all(|&value| value == expected),
+                "layer {index} {} holds {values:?}, expected {expected}",
+                MLA_BIASED_PROJECTIONS[kind]
+            );
+        }
+    }
     let output = model
         .forward(
             CausalLmInput {

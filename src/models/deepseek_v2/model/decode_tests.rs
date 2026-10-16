@@ -1779,12 +1779,25 @@ fn decode_state_rejects_foreign_rotary_width_and_dtype() {
                 &ForwardOptions::default(),
             )
             .expect_err("the state belongs to a different geometry or dtype");
-        assert!(error.to_string().contains("incompatible"), "{error}");
+        assert!(
+            matches!(
+                &error,
+                Error::Cache(message)
+                    if message == "DeepSeek decode state is incompatible with the model"
+            ),
+            "{error:?}"
+        );
         assert_eq!(state.lengths(), &[0]);
     }
 }
 
 /// A finished-only step that requests only the auxiliary loss still returns router diagnostics.
+///
+/// The sparse layer reports no logits and a `[1]` load-balancing loss of
+/// exactly zero: the fully masked row contributes no selections or
+/// probability mass, and the clamped token and active-row denominators turn
+/// `0 / 0` into `0 / 1`, so finished rows can neither add loss nor produce
+/// NaN. The committed length is unchanged.
 #[test]
 fn all_inactive_decode_reports_auxiliary_losses_without_router_logits() {
     let (model, device) = tiny_model();
@@ -1817,5 +1830,11 @@ fn all_inactive_decode_reports_auxiliary_losses_without_router_logits() {
         .unwrap();
     assert_eq!(output.routers.len(), 1);
     assert!(output.routers[0].logits.is_none());
-    assert!(output.routers[0].load_balancing_loss.is_some());
+    let loss = output.routers[0]
+        .load_balancing_loss
+        .clone()
+        .expect("the auxiliary loss was requested");
+    assert_eq!(loss.dims(), [1]);
+    assert_eq!(loss.into_data().to_vec::<f32>().unwrap(), [0.0]);
+    assert_eq!(state.lengths(), &[2]);
 }
