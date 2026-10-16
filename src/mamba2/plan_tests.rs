@@ -1,4 +1,5 @@
-//! Mamba-2 planning: widths, geometry, row bookkeeping, mode partitions, and scan blocks.
+//! Mamba-2 planning: widths, channel slices, geometry, row bookkeeping, mode partitions, and
+//! scan blocks.
 
 use super::*;
 
@@ -44,6 +45,31 @@ fn widths_are_exact_or_name_the_first_overflow() {
         projection_width(usize::MAX / 2, 1, 1, 1),
         Err(WidthOverflow::Projection)
     );
+}
+
+/// Projection and convolution slices tile the fused layouts end to end.
+#[test]
+fn channel_slices_tile_the_fused_layouts() {
+    let channels = convolution_width(128, 64, 8, 128).expect("small widths");
+    let projection = projection_width(128, 64, 8, 128).expect("small widths");
+    let slices = projection_slices(128, 64, channels);
+    assert_eq!(
+        slices,
+        ProjectionSlices {
+            intermediate: 128 * 64,
+            dt_start: 128 * 64 + channels,
+        }
+    );
+    assert_eq!(slices.dt_start + 128, projection);
+    let inner = convolution_slices(slices.intermediate, 8, 128);
+    assert_eq!(
+        inner,
+        ConvolutionSlices {
+            group_state_width: 8 * 128,
+            c_start: 128 * 64 + 8 * 128,
+        }
+    );
+    assert_eq!(inner.c_start + inner.group_state_width, channels);
 }
 
 /// Zero widths and short kernels are reported before uneven groups.
@@ -217,6 +243,26 @@ proptest::proptest! {
             first_chunk += count;
         }
         proptest::prop_assert_eq!(scan_blocks(sequence, chunk_size, block_chunks), expected);
+    }
+
+    /// Slices end exactly at the verified projection and convolution widths.
+    #[test]
+    fn channel_slices_match_the_widths(
+        heads in 1usize..17,
+        head_dim in 1usize..17,
+        groups in 1usize..5,
+        state_size in 1usize..17,
+    ) {
+        let channels = convolution_width(heads, head_dim, groups, state_size).expect("small widths");
+        let projection = projection_width(heads, head_dim, groups, state_size).expect("small widths");
+        let outer = projection_slices(heads, head_dim, channels);
+        proptest::prop_assert_eq!(outer.intermediate, heads * head_dim);
+        proptest::prop_assert_eq!(outer.dt_start, outer.intermediate + channels);
+        proptest::prop_assert_eq!(outer.dt_start + heads, projection);
+        let inner = convolution_slices(outer.intermediate, groups, state_size);
+        proptest::prop_assert_eq!(inner.group_state_width, groups * state_size);
+        proptest::prop_assert_eq!(inner.c_start, outer.intermediate + inner.group_state_width);
+        proptest::prop_assert_eq!(inner.c_start + inner.group_state_width, channels);
     }
 
     /// Flags and gather indices match their direct definitions.

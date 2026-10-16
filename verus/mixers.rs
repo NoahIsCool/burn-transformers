@@ -17,10 +17,12 @@
 //!   comparison and is monotone.
 //! - `src/mamba2/plan.rs`: Mamba-2 bookkeeping. Projection and convolution
 //!   widths are exact or name the first overflowing step in validation
-//!   order; geometry and row-count checks accept exactly the admissible
-//!   inputs; right-padding flags, row-end history columns, per-token window
-//!   columns, and batch-row selectors follow their closed forms or are
-//!   rejected exactly when an index exceeds `i64`; the mode grouping holds
+//!   order, and the `[z | xBC | dt]` projection and `[x | B | C]`
+//!   convolution slices tile their layouts exactly; geometry and row-count
+//!   checks accept exactly the admissible inputs; right-padding flags,
+//!   row-end history columns, per-token window columns, and batch-row
+//!   selectors follow their closed forms or are rejected exactly when an
+//!   index exceeds `i64`; the mode grouping holds
 //!   every row once, in ascending order, by effective mode (inactive rows
 //!   take the first active row's mode), with a restore permutation that is a
 //!   two-sided inverse of the grouped order; and the SSD scan blocks hold

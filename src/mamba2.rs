@@ -83,11 +83,12 @@
 //!
 //! # Verified planning
 //!
-//! The integer bookkeeping (projection widths, geometry and row-count checks,
-//! validity flags, convolution-history and window gather indices, the
-//! mode grouping of batched rows with its restore permutation, and the SSD
-//! scan's chunk blocks) lives in the dependency-free `plan` submodule, whose
-//! functions Verus proves exact through `verus/mixers.rs`.
+//! The integer bookkeeping (projection widths and the channel slices of the
+//! fused projection and convolution, geometry and row-count checks, validity
+//! flags, convolution-history and window gather indices, the mode grouping of
+//! batched rows with its restore permutation, and the SSD scan's chunk
+//! blocks) lives in the dependency-free `plan` submodule, whose functions
+//! Verus proves exact through `verus/mixers.rs`.
 
 use burn::{
     module::{Module, Param},
@@ -110,9 +111,10 @@ use crate::{
 mod plan;
 
 use plan::{
-    Mamba2GeometryViolation, ModePartition, ScanBlock, WidthOverflow, check_mamba2_geometry,
-    partition_modes, right_padded_flags, row_counts_fit, row_end_columns, rows_full,
-    scan_block_chunks, scan_blocks, signed_rows, window_columns,
+    ConvolutionSlices, Mamba2GeometryViolation, ModePartition, ProjectionSlices, ScanBlock,
+    WidthOverflow, check_mamba2_geometry, convolution_slices, partition_modes, projection_slices,
+    right_padded_flags, row_counts_fit, row_end_columns, rows_full, scan_block_chunks, scan_blocks,
+    signed_rows, window_columns,
 };
 pub use plan::{Mamba2Mode, Mamba2Row};
 
@@ -810,13 +812,18 @@ impl<B: Backend> Mamba2<B> {
         let invalid = valid.as_ref().map(|valid| valid.clone().bool_not());
         let masked = zero_invalid(hidden, invalid.as_ref());
         let projected = operations::linear(masked, &self.in_proj)?;
-        let intermediate = self.num_heads * self.head_dim;
+        // Verified tiling of `[z | xBC | dt]`: `0..I`, `I..I + channels`, then
+        // `heads` steps; a validated configuration's projection width fits.
+        let ProjectionSlices {
+            intermediate,
+            dt_start,
+        } = projection_slices(self.num_heads, self.head_dim, self.convolution_channels);
         let gate = projected.clone().narrow(2, 0, intermediate);
         let xbc = projected
             .clone()
             .narrow(2, intermediate, self.convolution_channels)
             .swap_dims(1, 2);
-        let dt = projected.narrow(2, intermediate + self.convolution_channels, self.num_heads);
+        let dt = projected.narrow(2, dt_start, self.num_heads);
 
         // `joined` is `[batch, channels, (K - 1) + sequence]`: history, then inputs.
         let history = state.convolution.clone().cast(xbc.dtype());
@@ -831,7 +838,11 @@ impl<B: Backend> Mamba2<B> {
             activation::silu(convolved).swap_dims(1, 2),
             invalid.as_ref(),
         );
-        let group_state_width = self.groups * self.state_size;
+        // Verified tiling of `[x | B | C]`: `0..I`, then two `G * N` slices.
+        let ConvolutionSlices {
+            group_state_width,
+            c_start,
+        } = convolution_slices(intermediate, self.groups, self.state_size);
         let x = convolved.clone().narrow(2, 0, intermediate).reshape([
             batch,
             sequence,
@@ -842,9 +853,12 @@ impl<B: Backend> Mamba2<B> {
             .clone()
             .narrow(2, intermediate, group_state_width)
             .reshape([batch, sequence, self.groups, self.state_size]);
-        let c = convolved
-            .narrow(2, intermediate + group_state_width, group_state_width)
-            .reshape([batch, sequence, self.groups, self.state_size]);
+        let c = convolved.narrow(2, c_start, group_state_width).reshape([
+            batch,
+            sequence,
+            self.groups,
+            self.state_size,
+        ]);
 
         let dt = zero_invalid(
             discretization_steps(dt, self.dt_bias.val(), self.time_step_clamp.for_mode(mode)),
@@ -1014,10 +1028,9 @@ fn convolution_windows<B: Backend>(
     let [batch, channels, _] = joined.dims();
     // Token `t` reads joined columns `t + 1 .. t + 1 + width`.
     let columns = window_columns(sequence, width).ok_or_else(index_range_error)?;
-    let index = Tensor::<B, 1, Int>::from_data(
-        TensorData::new(columns, [sequence * width]),
-        &joined.device(),
-    );
+    // The verified columns number exactly `sequence * width`.
+    let count = columns.len();
+    let index = Tensor::<B, 1, Int>::from_data(TensorData::new(columns, [count]), &joined.device());
     Ok(joined
         .select(2, index)
         .reshape([batch, channels, sequence, width])
@@ -1335,8 +1348,9 @@ pub(crate) fn chunked_scan_with_budget<B: Backend>(
         };
         let x_block = operands.x.clone();
         let (output, next) = scan_block(operands, a.clone(), state, &masks)?;
+        // `width + padding == count * chunk_size`, the block's padded length.
         let output = (output + x_block * d.clone().unsqueeze_dim::<5>(4))
-            .reshape([batch, heads, count * chunk_size, head_dim])
+            .reshape([batch, heads, width + padding, head_dim])
             .narrow(2, 0, width);
         outputs.push(output);
         state = next;

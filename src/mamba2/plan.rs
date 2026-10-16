@@ -15,10 +15,11 @@
 //! Every function here is checked in place by Verus through
 //! `verus/mixers.rs`. The proofs establish, for every admissible input, that
 //! no arithmetic overflows and that each result is exact: widths equal their
-//! formulas or name the first overflowing step; geometry and row-count checks
-//! accept exactly the admissible inputs; validity flags and gather indices
-//! follow their closed forms or are rejected exactly when an index exceeds
-//! `i64`; the mode grouping partitions the rows by effective mode, in
+//! formulas or name the first overflowing step, and the `[z | xBC | dt]` and
+//! `[x | B | C]` channel slices tile their layouts; geometry and row-count
+//! checks accept exactly the admissible inputs; validity flags and gather
+//! indices follow their closed forms or are rejected exactly when an index
+//! exceeds `i64`; the mode grouping partitions the rows by effective mode, in
 //! ascending order, and its restore permutation is a two-sided inverse; and
 //! the scan blocks tile the tokens in chunk-aligned blocks that respect the
 //! plane budget, with only the last block padded, by less than one chunk.
@@ -211,6 +212,93 @@ pub(super) fn projection_width(
             None => Err(WidthOverflow::Projection),
         },
         None => Err(WidthOverflow::Projection),
+    }
+}
+
+/// Channel offsets of the fused projection `[z | xBC | dt]`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ProjectionSlices {
+    /// Gate channels `0..I` and, after them, the convolution input starting at `I = heads * head_dim`.
+    pub(super) intermediate: usize,
+    /// First time-step channel, `I + convolution_channels`; `dt` spans `heads` channels.
+    pub(super) dt_start: usize,
+}
+
+/// Splits a mixer's fused projection into its gate, convolution-input, and time-step slices.
+///
+/// The proof shows the slices `0..I`, `I..I + channels`, and
+/// `I + channels..I + channels + heads` (with `I = heads * head_dim`) are
+/// consecutive and end exactly at the projection width, so they tile the
+/// projection with no gap or overlap. With the convolution width of
+/// [`convolution_width`] that end is the width [`projection_width`] accepted,
+/// so a mixer built from a validated configuration meets the precondition;
+/// the arithmetic is the mixer's own, so behavior is unchanged.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(slices =>
+    requires
+        heads * head_dim + convolution_channels + heads <= usize::MAX,
+    ensures
+        slices.intermediate == heads * head_dim,
+        slices.dt_start == slices.intermediate + convolution_channels,
+        slices.dt_start + heads == heads * head_dim + convolution_channels + heads,
+))]
+pub(super) fn projection_slices(
+    heads: usize,
+    head_dim: usize,
+    convolution_channels: usize,
+) -> ProjectionSlices {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(heads * head_dim >= 0) by (nonlinear_arith);
+    }
+    let intermediate = heads * head_dim;
+    ProjectionSlices {
+        intermediate,
+        dt_start: intermediate + convolution_channels,
+    }
+}
+
+/// Channel offsets of the convolved `[x | B | C]` activations.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ConvolutionSlices {
+    /// Width `G * N` of each of the group-shared `B` and `C` slices.
+    pub(super) group_state_width: usize,
+    /// First `C` channel, `I + G * N`; `B` spans `I..I + G * N`.
+    pub(super) c_start: usize,
+}
+
+/// Splits a mixer's convolved activations into its `x`, `B`, and `C` slices.
+///
+/// The proof shows the slices `0..I`, `I..I + G * N`, and
+/// `I + G * N..I + 2 * G * N` are consecutive and end exactly at the
+/// convolution width `I + 2 * G * N` of [`convolution_width`], so they tile
+/// the convolution output. A mixer built from a validated configuration meets
+/// the precondition; the arithmetic is the mixer's own, so behavior is
+/// unchanged.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(slices =>
+    requires
+        intermediate + groups * state_size * 2 <= usize::MAX,
+    ensures
+        slices.group_state_width == groups * state_size,
+        slices.c_start == intermediate + slices.group_state_width,
+        slices.c_start + slices.group_state_width == intermediate + groups * state_size * 2,
+))]
+pub(super) fn convolution_slices(
+    intermediate: usize,
+    groups: usize,
+    state_size: usize,
+) -> ConvolutionSlices {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(groups * state_size >= 0) by (nonlinear_arith);
+    }
+    let group_state_width = groups * state_size;
+    ConvolutionSlices {
+        group_state_width,
+        c_start: intermediate + group_state_width,
     }
 }
 
