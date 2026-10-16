@@ -203,9 +203,10 @@ pub enum LocalRule {
         // A surviving rule excludes something: the oldest key from the newest query.
         rule != LocalRule::Unrestricted ==> local_excluded(rule, span - 1, 0),
         local_rule_fits(rule, span as int),
+        // Exactly the runtime oracle `window_excludes` on every local pair.
         forall|query: int, key: int|
             0 <= query < span && 0 <= key < span ==> #[trigger] local_excluded(rule, query, key)
-                == window_excluded(query, key, window as int),
+                == (window == 0 || window_excluded(query, key, window as int)),
         forall|start: int, query: int, key: int|
             0 <= start && 0 <= query < span && 0 <= key < span ==> #[trigger]
                 absolute_window_excluded(start, query, key, window as int) == local_excluded(
