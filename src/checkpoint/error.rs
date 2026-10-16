@@ -82,9 +82,13 @@ pub enum CheckpointError {
     /// Every layer of every family owns at least one checkpoint tensor, so a
     /// configuration's depth (or, for one-to-one contracts, its exact
     /// inventory) bounds the tensors any loadable checkpoint must contain.
-    /// Automatic loading checks that bound against the discovered tensors and
-    /// index aliases before it builds the per-tensor contract, whose cost grows
-    /// with the declared depth and expert count. It is not checked when
+    /// Automatic loading and direct T5 planning
+    /// ([`crate::models::t5::T5Config::plan_checkpoint`] and
+    /// [`crate::models::t5::T5ForConditionalGeneration::load_checkpoint`],
+    /// bounded by `num_layers` plus the decoder depth) check that bound
+    /// against the discovered tensors and index aliases before they build the
+    /// per-tensor contract, whose cost grows with the declared depth and
+    /// expert count. It is not checked when
     /// [`super::LoadOptions::allow_missing`] can excuse missing tensors.
     #[error(
         "the configuration needs at least {required} checkpoint tensors, but the checkpoint \

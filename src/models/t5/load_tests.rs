@@ -365,6 +365,57 @@ fn planning_failures_precede_all_model_parameter_writes() {
     assert!(!wrong_shape_model.shared.weight.is_initialized());
 }
 
+/// Direct planning and loading reject a checkpoint with fewer tensors than blocks before the contract.
+///
+/// The tiny configuration has two encoder and one decoder block, so a
+/// one-tensor checkpoint fails the tensor budget with its exact bound in both
+/// [`T5Config::plan_checkpoint`] and `load_checkpoint`, before any write. A
+/// missing-tensor allowlist voids the bound, so strict planning reports the
+/// missing tensors instead.
+#[test]
+fn too_few_tensors_fail_direct_planning_before_the_contract() {
+    let device = Default::default();
+    let config = tiny(T5FeedForwardProjection::GatedGelu, false);
+    let contract = config.checkpoint_contract().unwrap();
+    let root = TempDir::new().unwrap();
+    write_checkpoint(root.path(), &contract, |tensors| {
+        tensors.retain(|(name, _)| name == "shared.weight");
+    });
+    let budget = |error: &T5CheckpointLoadError| {
+        matches!(
+            error,
+            T5CheckpointLoadError::Checkpoint(CheckpointError::TooFewTensors {
+                required: 3,
+                available: 1,
+            })
+        )
+    };
+
+    let planned = config
+        .plan_checkpoint(root.path(), &LoadOptions::default())
+        .expect_err("one tensor cannot hold three blocks");
+    assert!(budget(&planned), "{planned}");
+    let mut model =
+        T5ForConditionalGeneration::<TestBackend>::init(config.clone(), &device).unwrap();
+    let loaded = model
+        .load_checkpoint(root.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(budget(&loaded), "{loaded}");
+    assert!(!model.shared.weight.is_initialized());
+
+    let lenient = LoadOptions {
+        allow_missing: vec![crate::checkpoint::KeyMatcher::Prefix("encoder.".into())],
+        ..LoadOptions::default()
+    };
+    let strict = config
+        .plan_checkpoint(root.path(), &lenient)
+        .expect_err("the decoder blocks are still missing");
+    assert!(
+        matches!(&strict, T5CheckpointLoadError::Checkpoint(error) if !matches!(error, CheckpointError::TooFewTensors { .. })),
+        "{strict}"
+    );
+}
+
 /// A corrupted topology yields a sink error with the failed target and partial application report.
 #[test]
 fn execution_failure_preserves_partial_report_and_sink_cause() {

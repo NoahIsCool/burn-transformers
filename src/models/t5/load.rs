@@ -125,12 +125,20 @@ impl T5CheckpointLoadError {
 impl<B: Backend> T5ForConditionalGeneration<B> {
     /// Strictly plans and streams a local SafeTensors checkpoint into this model.
     ///
-    /// Pass one reads only bounded metadata and rejects missing, unexpected, or
-    /// shape-incompatible tensors before pass two initializes any model parameter.
-    /// Pass two holds at most one source payload and one output buffer at a time.
-    /// On an execution failure the returned error retains the exact partial
-    /// [`crate::checkpoint::LoadReport`]; callers should discard the partially
-    /// initialized model rather than continue inference.
+    /// Pass one is [`super::T5Config::plan_checkpoint`]: it reports
+    /// configuration errors, discovers the checkpoint, rejects one holding
+    /// fewer tensors than encoder plus decoder blocks with
+    /// [`CheckpointError::TooFewTensors`] before the per-parameter contract is
+    /// built, and reads only bounded metadata to reject missing, unexpected, or
+    /// shape-incompatible tensors before pass two initializes any model
+    /// parameter. Pass two holds at most one source payload and one output
+    /// buffer at a time. On an execution failure the returned error retains the
+    /// exact partial [`crate::checkpoint::LoadReport`]; callers should discard
+    /// the partially initialized model rather than continue inference.
+    ///
+    /// # Errors
+    ///
+    /// A [`T5CheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,

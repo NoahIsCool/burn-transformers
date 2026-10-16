@@ -470,7 +470,7 @@ fn official_reduced_flan_and_ul2_configs_generate_complete_contracts() {
     );
 }
 
-/// Overflowing attention dimensions fail before checkpoint inventory allocation.
+/// Overflowing attention dimensions fail before checkpoint inventory allocation and discovery.
 #[test]
 fn dimension_overflow_is_reported_before_inventory_allocation() {
     let config = T5Config {
@@ -487,4 +487,14 @@ fn dimension_overflow_is_reported_before_inventory_allocation() {
     };
     let error = config.checkpoint_contract().unwrap_err();
     assert!(error.reason.contains("overflows"));
+
+    // Planning reports the same configuration error before it looks for files.
+    let parent = tempfile::tempdir().unwrap();
+    let planned = config
+        .plan_checkpoint(parent.path().join("absent"), &LoadOptions::default())
+        .expect_err("an unrepresentable width cannot be planned");
+    assert!(
+        matches!(&planned, crate::models::t5::T5CheckpointLoadError::Config(error) if error.reason.contains("overflows")),
+        "{planned}"
+    );
 }
