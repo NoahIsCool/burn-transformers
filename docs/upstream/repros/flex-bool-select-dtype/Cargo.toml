@@ -1,0 +1,11 @@
+[package]
+name = "flex-bool-select-dtype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+burn = { version = "=0.21.0", features = ["flex"] }
+
+# Standalone: never join an enclosing workspace.
+[workspace]

@@ -1,0 +1,14 @@
+[package]
+name = "cubecl-flash-attention-causal-alignment"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Burn's default features enable autotuning for the GPU backends.
+burn = { version = "=0.21.0", features = ["metal", "flex"] }
+# Direct handle on the flash strategies, to run each kernel explicitly.
+burn-cubecl = "=0.21.0"
+
+# Standalone: never join an enclosing workspace.
+[workspace]
