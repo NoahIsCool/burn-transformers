@@ -1,0 +1,25 @@
+== source 55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c dirty=1
+== uncommitted NEMOTRON_H_ACCEPTANCE.md sha256 ffb727bff34d4490071bde472366d96cbd77424dd21ee40d4b34ff7387c6caf3
+== uncommitted scripts/generate_causal_lm_reference.py sha256 e31c7ff373a3612fa53e76ab98e164e41f91db49d77fd02618d8e7b523b6fe37
+== uncommitted tests/gpt_oss_artifacts.rs sha256 6f021efe7c87c86d037ed023e179a46224351f90bdb9e8f00f2f89427400260b
+== uncommitted tests/muse_glimmer_artifacts.rs sha256 0eeec69f0ae00790e70619e9f994a022c4e122bcacfdfddcbf150d965973279f
+== uncommitted tests/nemotron_h_artifacts.rs sha256 ccb5c8348b48cbc20db823133dab16ddf88ddc1fbd1e8f4ae14359856412bb66
+== uncommitted tests/support/nemotron_h_parity.rs sha256 7789edf7cd67e96632d30c1ddb4b9fee33f711e2a7f28f5f70ddcd7ce5728e79
+== gpt-oss-20b official BF16 bundle against the official F32 bundle (Transformers 5.2.0 evaluations; reads no checkpoint and runs no Burn model; debug test binary, default+metal,tokenizers)
+== command CARGO_TARGET_DIR="/Volumes/bag of holding/cargo-targets/fix-replay-b" TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR="/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle" TRANSFORMERS_GPT_OSS_F32_REFERENCE_DIR="/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle" cargo test --locked --features metal,tokenizers --test gpt_oss_artifacts -- --ignored --exact transformers_bf16_reference_stays_within_the_half_precision_bounds --nocapture --test-threads 1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/gpt_oss_artifacts.rs (/Volumes/bag of holding/cargo-targets/fix-replay-b/debug/deps/gpt_oss_artifacts-2bdfc7b809086c6f)
+
+running 1 test
+test transformers_bf16_reference_stays_within_the_half_precision_bounds ... /Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle: reference.json SHA-256 9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac
+/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle: reference.json SHA-256 17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e
+prompt 0: 5 tokens, max |Δ| = 2.6646376e0 at position 3, token 17352, mean |Δ| = 1.0828520369061805e-1
+prompt 1: 13 tokens, max |Δ| = 1.2402163e0 at position 0, token 38339, mean |Δ| = 4.602463441235242e-2
+prompt 2: 8 tokens, max |Δ| = 7.0220375e-1 at position 5, token 189150, mean |Δ| = 2.8996130636696447e-2
+prompt 3: 183 tokens, max |Δ| = 1.6551118e0 at position 11, token 193734, mean |Δ| = 5.786204305934656e-2
+greedy step 0: token 12650 margin 3.0625e0 (BF16), token 12650 margin 3.0868406e0 (F32)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.85s
+
+== exit=0 wall=3s

@@ -9,8 +9,10 @@
 //! * a **full** F32 reference of gpt-oss-20b, the release gate. The F32 model
 //!   does not fit a 96 GiB host, so `--bf16-resident` keeps the decoded BF16
 //!   weights resident and widens each block to F32 only while it runs, which
-//!   computes exactly what the F32 model computes (a four-block bundle made
-//!   this way is byte-identical to a plain F32 one); it needs about 47 GB:
+//!   computes exactly what the F32 model computes, because BF16 widens to F32
+//!   exactly (`scripts/tests/test_generate_causal_lm_reference.py` checks
+//!   bitwise equality with a permanently widened model on the tiny gpt-oss
+//!   fixture); it needs about 47 GB:
 //!
 //!   ```text
 //!   python3 scripts/generate_causal_lm_reference.py --dtype float32 --bf16-resident \
@@ -104,10 +106,31 @@
 //! | crate Flex BF16 | `2.19`, `1.26`, `0.57`, `1.67` | at most `0.112` |
 //! | crate Metal F16 | `0.018`, `0.18`, `0.53`, `1.15` | at most `0.025` |
 //!
-//! The half-precision defaults are therefore calibrated on the official
-//! implementation itself: a run must be at least as close to the F32
-//! reference as Transformers' own BF16 evaluation of the full model (largest
-//! deviation `2.665`, at prompt 0 position 3; largest mean `0.108`).
+//! The maximum bound, [`HALF_TOLERANCE`], is therefore calibrated on the
+//! official implementation itself: Transformers' own BF16 evaluation of the
+//! full model deviates from the F32 reference by at most `2.665` (prompt 0,
+//! position 3), rounded up to `2.7`. The mean bound, [`HALF_MEAN_TOLERANCE`],
+//! is not calibrated that way. Its `0.15` is kept from the earlier four-block
+//! calibration as a separator from architectural errors. It lies above both
+//! Transformers' largest BF16 mean (`0.108`) and the crate's Flex/BF16 one
+//! (`0.112`), so on the mean the crate's Flex/BF16 run is slightly less close
+//! to F32 than the official BF16 evaluation.
+//!
+//! The Transformers BF16 row needs no checkpoint to reproduce:
+//! `transformers_bf16_reference_stays_within_the_half_precision_bounds`
+//! compares the two full bundles and asserts that row against both bounds:
+//!
+//! ```text
+//! TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR=/path/to/gpt-oss-20b-6cee5e81-bf16-reference.bundle \
+//! TRANSFORMERS_GPT_OSS_F32_REFERENCE_DIR=/path/to/gpt-oss-20b-6cee5e81-f32-reference.bundle \
+//! cargo test --test gpt_oss_artifacts -- --ignored --exact \
+//!   transformers_bf16_reference_stays_within_the_half_precision_bounds --nocapture
+//! ```
+//!
+//! Its output is recorded as run `gpt-oss-20b-transformers-bf16-vs-f32-bundles`
+//! of `acceptance/measurements/reference-precision-followups-20261016.json`.
+//! That run measures the official reference against itself and evaluates no
+//! Burn model, so it is not a pass of any gate.
 //!
 //! Independently of the reference, cached and batched passes must agree with
 //! this crate's own stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for
@@ -136,12 +159,13 @@
 //! `acceptance/measurements/reference-precision-followups-20261016.json`):
 //! against the F32 bundle, Metal/F16 and Flex/BF16 deviate as tabulated
 //! above, their batched rows by at most `0.53` and `0.68`, and the cached
-//! long-prompt decode by `0.94` and `1.59`. Against the BF16 bundle, a
-//! half-precision comparison of two roundings, Metal/F16 reached `2.66` at
-//! prompt 0, the BF16 bundle's own distance from F32 there. The F32
-//! reference's first greedy margin is `3.09`, below twice
-//! [`HALF_TOLERANCE`], so a half-precision greedy check compares no tokens and
-//! needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`, as with the truncated bundles.
+//! long-prompt decode by `0.94` and `1.59`. Against the BF16 bundle Metal/F16
+//! reached `2.66` at prompt 0, about the BF16 bundle's own distance from F32
+//! there. That comparison of two half-precision roundings is informational,
+//! not a gate pass. The F32 reference's first greedy margin is `3.09`, below
+//! twice [`HALF_TOLERANCE`], so a half-precision greedy check compares no
+//! tokens and needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`, as with the truncated
+//! bundles.
 
 #![cfg(feature = "flex")]
 
@@ -173,16 +197,23 @@ const F32_MEAN_TOLERANCE: f32 = 1e-4;
 /// Default absolute logit tolerance when the run or the bundle is half precision.
 ///
 /// Transformers' own BF16 evaluation of the full model deviates from the full
-/// F32 reference by at most `2.665` (see the module documentation); a
-/// half-precision run must be at least that faithful.
+/// F32 reference by at most `2.665` (see the module documentation). This
+/// bound is that figure rounded up, so a half-precision run may deviate about
+/// as far as the official implementation's own BF16 evaluation. The figure is
+/// reproduced by
+/// `transformers_bf16_reference_stays_within_the_half_precision_bounds` and
+/// recorded as run `gpt-oss-20b-transformers-bf16-vs-f32-bundles` of
+/// `acceptance/measurements/reference-precision-followups-20261016.json`.
 const HALF_TOLERANCE: f32 = 2.7;
 
 /// Default bound on one prompt's mean absolute logit deviation in half precision.
 ///
-/// Transformers' own BF16 evaluation of the full model stays at or below
-/// `0.108` per prompt; an architectural error moves most logits of most
-/// positions, so the mean separates it from rounding noise far better than
-/// the maximum.
+/// Not calibrated to the official BF16 mean: `0.15` is kept from the earlier
+/// four-block calibration. Against the full F32 reference, Transformers' own
+/// BF16 evaluation reaches `0.108` per prompt, the crate's Flex/BF16 run
+/// `0.112` (slightly above the official figure), and Metal/F16 `0.025`. An
+/// architectural error moves most logits of most positions, so the mean
+/// separates it from rounding noise far better than the maximum.
 const HALF_MEAN_TOLERANCE: f32 = 0.15;
 
 /// Absolute agreement of cached/batched passes with this crate's stateless pass, per dtype.
@@ -471,6 +502,31 @@ fn gap(actual: &[f32], expected: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
+/// Returns the flat index and value of the largest absolute difference, the first on ties.
+fn largest_gap(actual: &[f32], expected: &[f32]) -> (usize, f32) {
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(a, e)| (a - e).abs())
+        .enumerate()
+        .fold(
+            (0, 0.0),
+            |best, (index, value)| {
+                if value > best.1 { (index, value) } else { best }
+            },
+        )
+}
+
+/// Returns the mean absolute difference, accumulated in F64 over `actual`'s length.
+fn mean_gap(actual: &[f32], expected: &[f32]) -> f64 {
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(a, e)| f64::from((a - e).abs()))
+        .sum::<f64>()
+        / actual.len() as f64
+}
+
 /// Returns the argmax, preferring the lowest index on ties.
 fn argmax(logits: &[f32]) -> usize {
     (0..logits.len())
@@ -504,12 +560,7 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
         };
         let logits = host(model.forward(input, &options).unwrap().logits);
         let largest = gap(&logits, &prompt.logits);
-        let mean = logits
-            .iter()
-            .zip(&prompt.logits)
-            .map(|(a, e)| f64::from((a - e).abs()))
-            .sum::<f64>()
-            / logits.len() as f64;
+        let mean = mean_gap(&logits, &prompt.logits);
         eprintln!(
             "prompt {index}: {} tokens, max |Δ| = {largest:e}, mean |Δ| = {mean:e}",
             prompt.tokens.len()
@@ -743,6 +794,90 @@ fn tolerance_defaults_follow_the_bundle_and_run_dtypes() {
     // Transformers' own full-model BF16 deviation from F32.
     const { assert!(HALF_MEAN_TOLERANCE < HALF_TOLERANCE / 10.0) };
     const { assert!(HALF_TOLERANCE > 2.665 && HALF_MEAN_TOLERANCE > 0.108) };
+}
+
+/// The deviation helpers report the first largest gap and the F64 mean.
+#[test]
+fn deviation_helpers_locate_the_largest_gap_and_average_over_every_logit() {
+    let expected = [0.0, 1.0, 2.0, 3.0];
+    let actual = [0.5, 1.0, 0.0, 5.0];
+    assert_eq!(largest_gap(&actual, &expected), (2, 2.0));
+    assert_eq!(gap(&actual, &expected), 2.0);
+    assert_eq!(mean_gap(&actual, &expected), 4.5 / 4.0);
+    assert_eq!(largest_gap(&expected, &expected), (0, 0.0));
+    assert_eq!(mean_gap(&expected, &expected), 0.0);
+}
+
+/// Transformers' own full-model BF16 evaluation stays within the half-precision bounds of its F32 one.
+///
+/// This reproduces the calibration of [`HALF_TOLERANCE`] without a
+/// checkpoint. It reads the official BF16 and F32 bundles of the full model,
+/// checks that both come from the same configuration and prompts, and prints
+/// each manifest's SHA-256, each prompt's largest deviation (with its
+/// position and vocabulary entry) and mean deviation, and both bundles' first
+/// greedy margin. No Burn model runs, so a pass qualifies no Burn run.
+#[test]
+#[ignore = "needs TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR and _F32_REFERENCE_DIR (full bundles)"]
+fn transformers_bf16_reference_stays_within_the_half_precision_bounds() {
+    let bundles = [
+        directory("TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR"),
+        directory("TRANSFORMERS_GPT_OSS_F32_REFERENCE_DIR"),
+    ];
+    for bundle in &bundles {
+        let manifest = std::fs::read(bundle.join("reference.json")).unwrap();
+        eprintln!(
+            "{}: reference.json SHA-256 {}",
+            bundle.display(),
+            hex(&Sha256::digest(&manifest))
+        );
+    }
+    let [half, full] = bundles.map(|bundle| Reference::read(&bundle));
+    assert_eq!(bundle_dtype(&half.dtype), TensorDType::BF16, "first bundle");
+    assert_eq!(bundle_dtype(&full.dtype), TensorDType::F32, "second bundle");
+    assert_eq!(
+        (half.layers, full.layers),
+        (None, None),
+        "both bundles must evaluate the full model"
+    );
+    assert_eq!(
+        half.config_sha256, full.config_sha256,
+        "the bundles were generated from different config.json files"
+    );
+    assert_eq!(half.vocabulary, full.vocabulary);
+    assert_eq!(half.prompts.len(), full.prompts.len());
+    for (index, (rounded, exact)) in half.prompts.iter().zip(&full.prompts).enumerate() {
+        assert_eq!(rounded.tokens, exact.tokens, "prompt {index}: token IDs");
+        assert!(
+            rounded
+                .logits
+                .iter()
+                .chain(&exact.logits)
+                .all(|logit| logit.is_finite()),
+            "prompt {index}: non-finite logit"
+        );
+        let (at, largest) = largest_gap(&rounded.logits, &exact.logits);
+        let mean = mean_gap(&rounded.logits, &exact.logits);
+        eprintln!(
+            "prompt {index}: {} tokens, max |Δ| = {largest:e} at position {}, token {}, mean |Δ| = {mean:e}",
+            exact.tokens.len(),
+            at / full.vocabulary,
+            at % full.vocabulary
+        );
+        assert!(
+            largest <= HALF_TOLERANCE,
+            "prompt {index}: max |Δ| = {largest:e}"
+        );
+        assert!(
+            mean <= f64::from(HALF_MEAN_TOLERANCE),
+            "prompt {index}: mean |Δ| = {mean:e}"
+        );
+    }
+    if let (Some(rounded), Some(exact)) = (half.greedy.first(), full.greedy.first()) {
+        eprintln!(
+            "greedy step 0: token {} margin {:e} (BF16), token {} margin {:e} (F32)",
+            rounded.0, rounded.1, exact.0, exact.1
+        );
+    }
 }
 
 /// Flex: every prompt position's logits.

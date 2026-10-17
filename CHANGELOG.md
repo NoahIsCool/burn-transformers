@@ -410,7 +410,8 @@ code written against unreleased sources.
   failing shard within a fixed buffer budget; element counts multiply left to
   right like SafeTensors; packed installs validate before probing.
 - Checkpoint loads install execution groups of at least 1 GiB (vocabulary
-  matrices) before the source-ordered schedule. Installing them last had raised
+  matrices, and at F32 some per-layer tensors such as gpt-oss's decoded expert
+  weights) before the source-ordered schedule. Installing them last had raised
   Metal's footprint: the Qwen3.8-27B F16 smoke peaked at 68.2 GB, and now
   peaks at 60.6 GB with bitwise-identical logits. Checkpoints without such a
   tensor keep the same schedule; Muse's conversion and F16 load open three
@@ -423,6 +424,10 @@ code written against unreleased sources.
   earlier captures).
 - The reference generator keeps quantized references in the requested dtype
   and rotary tables in F32.
+- The reference generator's `--bf16-resident` mode refuses a model whose
+  buffers differ from a true F32 build. Gemma 3 builds its `embed_scale` in
+  the load dtype, so widening only the blocks would not reproduce F32; the
+  pinned gpt-oss-20b, the one family whose F32 bundle uses the mode, passes.
 - Keep fully excluded eager-attention rows finite and zero, including rows
   excluded through additive negative-infinity bias.
 - Restore autodiff linear parameters as leaves after checkpoint-layout
@@ -576,6 +581,11 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   long-context bundle), and gpt-oss, and artifact-gated tokenizer and
   chat-template parity tests for the pinned FLAN-T5-small, Qwen3.5, Nemotron-H,
   and Muse Glimmer tokenizers.
+- An ignored gpt-oss test reproduces the half-precision bound's calibration
+  from the official BF16 and F32 bundles alone (Transformers' own BF16
+  deviation, at most `2.665`, mean at most `0.108`); it evaluates no Burn
+  model and passes no gate
+  ([record](acceptance/measurements/reference-precision-followups-20261016.json)).
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

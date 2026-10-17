@@ -24,6 +24,12 @@
   {
    "commit": "8d552027dd5e4dc3080f5da6d6f87123b8443823",
    "description": "adds --bf16-resident to scripts/generate_causal_lm_reference.py; the full gpt-oss F32 reference and its first gate runs ran from this clean tree"
+  },
+  {
+   "commit": "55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c",
+   "dirty": true,
+   "log": "reference-precision-followups-20261016/gpt-oss-bf16-vs-f32-bundles.log",
+   "description": "the Transformers BF16-against-F32 bundle comparison ran from a working tree at this commit with uncommitted edits, among them the comparison test itself; its log names every uncommitted file by SHA-256 (tests/gpt_oss_artifacts.rs 6f021efe7c87c86d037ed023e179a46224351f90bdb9e8f00f2f89427400260b)"
   }
  ],
  "cargo_lock_sha256": "119caecd2cf4ab40dcfb542314984045f3b2f0740d75e00494ecdec99c16dbc9",
@@ -47,7 +53,7 @@
  "notes": [
   "Experimental validation only: no checkpoint below is advertised as supported by this record.",
   "Timings come from a shared host. The Qwen3.8 rounds were taken under the lock and only once the 1-minute load average was below 4; each label records the load averages at its start.",
-  "Nemotron-H, Qwen3-30B-A3B, FLAN-T5-XXL and DeepSeek-V2-Lite have no checkpoint tensor of at least 1 GiB at their load dtypes (header scan of every local checkpoint), so c15f24e leaves their load schedules unchanged; their earlier gates stand without a rerun."
+  "Nemotron-H, Qwen3-30B-A3B, FLAN-T5-XXL and DeepSeek-V2-Lite have no checkpoint tensor of at least 1 GiB at their load dtypes (header scan of every local checkpoint), so c15f24e leaves their load schedules unchanged; their earlier gates stand without a rerun. Other pinned checkpoints do reach 1 GiB at the dtypes their gates load: gpt-oss-20b's embedding and head (1.16 GB each at F16/BF16, 2.32 GB at F32) and, at F32, each loaded block's decoded expert gate_up_proj [32, 2880, 5760] (2.12 GB); and, at F32, the vocabulary matrices of gemma-3-4b-it (tied, 2.69 GB), Qwen3-4B (tied, 1.56 GB), Llama-3.1-8B (2.10 GB each) and Qwen2-7B (2.18 GB each). Only the full gpt-oss gates were rerun at c15f24e (see not_run)."
  ],
  "log": "reference-precision-followups-20261016/gates.log",
  "log_sha256": "60334039aaa1a9a8fee60301beff6f4694515ad7a5d78c19c53ddf5f0b172443",
@@ -468,7 +474,9 @@
    ],
    "log_label": "Qwen3.8-27B Metal/F16 official reference (std,metal,tokenizers,chat-templates; binary built at c15f24e)",
    "reference": {
-    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2/qwen3.8-27b-1d4bf0f2-reference.bundle"
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2/qwen3.8-27b-1d4bf0f2-reference.bundle",
+    "reference_json_sha256": "1d4f7d3c02a996c72a1d767d672f933ce83792dea116c4964b794003ac345ce2",
+    "pinned_in": "acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json (official_f16_reference_acceptance.reference_bundle.json, qwen3.8-27b-1d4bf0f2-reference.json)"
    },
    "passed": 1,
    "failed": 0,
@@ -715,7 +723,7 @@
     "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
     "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
    },
-   "tolerances": "calibrated half-precision defaults: 2.7 max, 0.15 mean per prompt. The bound is Transformers' own full-model BF16 deviation from the full F32 reference (2.665, mean at most 0.108), rounded up; comparing two half-precision evaluations sums their roundings, so this bundle cannot support a tighter bound.",
+   "tolerances": "calibrated half-precision defaults: 2.7 max, 0.15 mean per prompt. The maximum is Transformers' own full-model BF16 deviation from the full F32 reference (2.6646, run gpt-oss-20b-transformers-bf16-vs-f32-bundles), rounded up; the mean bound is the earlier 0.15, above that run's largest mean (0.108). Comparing two half-precision evaluations sums their roundings, which neither bound describes.",
    "passed": 3,
    "failed": 0,
    "measurements": [
@@ -736,7 +744,8 @@
     "metal::metal_prompt_logits_match_the_reference": 49171813272,
     "metal::metal_cached_long_prompt_matches_the_reference": 48509080928,
     "metal::metal_batched_prefill_matches_the_reference": 48562804088
-   }
+   },
+   "gate_role": "informational half-precision-against-half-precision comparison, not a gate pass; half-precision runs are qualified against the F32 bundle"
   },
   {
    "name": "gpt-oss-20b-full-bf16-metal-f16-greedy",
@@ -764,7 +773,51 @@
    ],
    "peak_memory_footprint_bytes": {
     "metal::metal_cached_greedy_matches_the_reference": 48509244792
-   }
+   },
+   "gate_role": "informational half-precision-against-half-precision comparison, not a gate pass; half-precision runs are qualified against the F32 bundle"
+  },
+  {
+   "name": "gpt-oss-20b-transformers-bf16-vs-f32-bundles",
+   "kind": "reference_comparison",
+   "burn_gate": false,
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c",
+   "source_note": "dirty working tree at 55aeb6a: the comparison test was not yet committed, and other edits were in progress; the log lists every uncommitted file with its SHA-256",
+   "date_utc": "2026-10-17",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; debug test profile; reads no checkpoint and builds no Burn model",
+   "tests": [
+    "transformers_bf16_reference_stays_within_the_half_precision_bounds"
+   ],
+   "log": "reference-precision-followups-20261016/gpt-oss-bf16-vs-f32-bundles.log",
+   "log_sha256": "87a6920c22117b169b6a67b7f6ce440e9eea3a925d764921dae32dbe01d1242a",
+   "log_label": "gpt-oss-20b official BF16 bundle against the official F32 bundle (Transformers 5.2.0 evaluations; reads no checkpoint and runs no Burn model; debug test binary, default+metal,tokenizers)",
+   "command": "CARGO_TARGET_DIR=\"/Volumes/bag of holding/cargo-targets/fix-replay-b\" TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR=\"/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle\" TRANSFORMERS_GPT_OSS_F32_REFERENCE_DIR=\"/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle\" cargo test --locked --features metal,tokenizers --test gpt_oss_artifacts -- --ignored --exact transformers_bf16_reference_stays_within_the_half_precision_bounds --nocapture --test-threads 1",
+   "references": {
+    "bfloat16": {
+     "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+     "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+    },
+    "float32": {
+     "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+     "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+    }
+   },
+   "result": "Transformers' own full-model BF16 evaluation against its F32 evaluation, both official bundles on the same four prompts: largest deviation 2.6646 (prompt 0, position 3, token 17352), then 1.2402, 0.7022 and 1.6551; per-prompt means at most 0.10829. This is the calibration basis of the gpt-oss half-precision maximum bound (2.7, rounded up); the mean bound (0.15) is not derived from it. Both first greedy steps choose token 12650, with margins 3.0625 (BF16) and 3.0868 (F32).",
+   "gate_note": "Not a pass of any Burn gate: the test compares two Transformers bundles and evaluates no Burn model. It only checks that the official BF16 deviation lies within HALF_TOLERANCE and HALF_MEAN_TOLERANCE.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test transformers_bf16_reference_stays_within_the_half_precision_bounds ... /Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle: reference.json SHA-256 9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac",
+    "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle: reference.json SHA-256 17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e",
+    "prompt 0: 5 tokens, max |\u0394| = 2.6646376e0 at position 3, token 17352, mean |\u0394| = 1.0828520369061805e-1",
+    "prompt 1: 13 tokens, max |\u0394| = 1.2402163e0 at position 0, token 38339, mean |\u0394| = 4.602463441235242e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 7.0220375e-1 at position 5, token 189150, mean |\u0394| = 2.8996130636696447e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.6551118e0 at position 11, token 193734, mean |\u0394| = 5.786204305934656e-2",
+    "greedy step 0: token 12650 margin 3.0625e0 (BF16), token 12650 margin 3.0868406e0 (F32)",
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.85s"
+   ]
   }
  ],
  "binaries": [
@@ -830,6 +883,13 @@
    "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
    "sha256": "7276ec2d5b1cd8166bcef06d65cba4e41c9ebf2688d149ffa56cb789891ffe91",
    "used_by": "gpt-oss F32 and BF16 bundle gates at c15f24e"
+  },
+  {
+   "path": "gpt_oss_artifacts-2bdfc7b809086c6f",
+   "features": "default (std,flex) + metal,tokenizers (debug test profile)",
+   "source_commit": "55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c",
+   "sha256": "292ce408dd44533f1d6893e2fc766385248b12bab26dd7a7ee37066fda050cf3",
+   "used_by": "the Transformers BF16-against-F32 bundle comparison, built from the dirty working tree its log describes"
   }
  ],
  "not_run": [
@@ -844,6 +904,10 @@
   {
    "gates": "Nemotron-H, Qwen3-30B-A3B, FLAN-T5-XXL and DeepSeek-V2-Lite gates at c15f24e",
    "reason": "A header scan of every local checkpoint finds no tensor of 1 GiB or more at their load dtypes, so their schedules are identical to 69f8232; the Nemotron gate above ran at 9a9c730."
+  },
+  {
+   "gates": "f4c56c4 Flex and Metal F32 gates of Qwen3-4B, Qwen2-7B, Llama-3.1-8B, gemma-3-4b-it and the truncated (one- and four-block) gpt-oss-20b bundles, at c15f24e",
+   "reason": "These gates cast every weight to F32 (real-checkpoint-replay-20261016.json), where their vocabulary matrices reach 1 GiB (Qwen3-4B 1.56 GB, Qwen2-7B 2.18 GB, Llama-3.1-8B 2.10 GB, gemma-3-4b-it 2.69 GB, gpt-oss-20b 2.32 GB) and so does each loaded gpt-oss block's decoded gate_up_proj (2.12 GB), so c15f24e installs those groups first and the f4c56c4 runs used the previous order. They were not re-executed, and their footprints were not re-measured. Where this record compares results across the change, the new order altered none: the Qwen3.8 smoke's logit digest and every gpt-oss deviation line are identical before and after c15f24e. SmolLM-135M (0.11 GB at F32) and SmolLM3-3B (1.05 GB at F32, just below the threshold) have no such group."
   }
  ],
  "created_bundles": [
@@ -887,7 +951,7 @@
   "timing_finding": "No stateless regression: base 1.703 and 1.178 s, current 0.990 and 2.125 s at load averages near 2; the replay's 10.3 s came from a busy host. The stateless pass is the first Metal forward and varies with host activity (1.2 to 9.3 s across the bisection's runs).",
   "memory_finding": "Current really is higher than base (68.2 against 66.5 GB, twice), but most of the recorded 63.3 to 68.3 GB rise is not code: the base source itself measures 66.5 GB on this host today. The 63.3 GB came from the original record at 0953040, a commit outside this history whose logit digest matches the base.",
   "cause": "Bisection (sampled peak above 67.35 GB is bad) finds ad992d7, 'stream checkpoints in source order'. Installing in physical source order allocates the two 2.37 GiB vocabulary matrices (embed_tokens in shard 3, lm_head in shard 18) in CubeCL's sliced memory pages after the per-layer tensors had been packed; the measurements are consistent with first-fit packing stranding the partially used pages. The intermediate commits peak at about 74.3 GB; later commits recovered most of it, leaving 68.2 GB at 69f8232. A post-load probe isolates the load: Qwen3.8 settles at 62.35 GB in source order and 54.59 GB in the old target-name order; Muse at 64.78 against 59.40 GB; Qwen3-30B-A3B, Nemotron and FLAN-T5-XXL, which have no tensor of 1 GiB or more, are unchanged within 0.7 GB.",
-  "muse_audit_finding": "Muse-Glimmer-30B, the other pinned checkpoint with tensors of at least 1 GiB, alternated its strict F16 streaming audit between the pre-fix binary (8a4404a) and c15f24e: 68.89 and 68.87 GB pre-fix against 66.19 and 66.18 GB fixed. The same 8a4404a binary measured 63.45 GB in the large-checkpoint replay a day earlier, so only same-session comparisons are meaningful on this host.",
+  "muse_audit_finding": "Muse-Glimmer-30B, the other memory-measured checkpoint with tensors of at least 1 GiB (gpt-oss-20b and the F32 Llama-family and Gemma loads also have such groups; see notes and not_run), alternated its strict F16 streaming audit between the pre-fix binary (8a4404a) and c15f24e: 68.89 and 68.87 GB pre-fix against 66.19 and 66.18 GB fixed. The same 8a4404a binary measured 63.45 GB in the large-checkpoint replay a day earlier, so only same-session comparisons are meaningful on this host.",
   "fix": "c15f24e installs execution groups whose outputs total at least 1 GiB first, in plan order, and keeps the physical schedule for everything else, so streaming stays sequential per shard. The probe with that order settles Qwen3.8 at 54.92 GB (peak 57.13) and Muse at 59.40 GB (peak 60.55). Muse's conversion and F16 audit now open three shards instead of two.",
   "rounds": [
    {

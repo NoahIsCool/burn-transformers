@@ -486,9 +486,14 @@ impl<E: Error + 'static> Error for ExecutionFailure<E> {
 ///
 /// The complete mutable plan is preflighted before the first source read or sink
 /// call. Primary operations are then scheduled by source shard and byte offset,
-/// independently of the target-name order retained by [`LoadPlan`]. Consequently,
-/// a local source opens each shard once for the usual unary and fused-split model
-/// mappings even when architecture target names are interleaved across shards.
+/// independently of the target-name order retained by [`LoadPlan`], except that
+/// execution groups whose outputs total at least 1 GiB (vocabulary-sized
+/// matrices, and at F32 some per-layer tensors) are installed first, in plan
+/// order, so that first-fit device memory pools stay packed. When no such group
+/// exists, a local source therefore opens each shard once for the usual unary and
+/// fused-split model mappings, even when architecture target names are
+/// interleaved across shards; each hoisted group can cost at most one extra shard
+/// open (Muse-Glimmer-30B's F16 load opens three shard handles for two shards).
 /// Physical alias/owner pairs are first compared as exact raw payloads, before
 /// `TensorSink` receives any call. Targets slicing the same fused source are grouped at that source's physical
 /// position: the payload remains resident while each output is materialized and
@@ -1168,9 +1173,14 @@ fn execution_groups(tensors: &[PlannedTensor]) -> Vec<Vec<usize>> {
 
 /// Total output bytes from which an execution group is installed before physical order.
 ///
-/// The threshold separates vocabulary-sized matrices (2.5 to 2.8 GB in the
-/// measured Qwen3.8 and Muse checkpoints) from per-layer tensors, none of
-/// which reached 1 GB in any measured checkpoint (see [`execution_groups`]).
+/// The threshold targets vocabulary-sized matrices: 2.54 and 2.69 GB at F16
+/// in the measured Qwen3.8 and Muse checkpoints, and 1.09 to 1.34 GB at half
+/// precision in gpt-oss-20b, Qwen2-7B, and gemma-3-4b-it. At half precision
+/// no per-layer tensor of the pinned checkpoints reaches it; the largest,
+/// gpt-oss-20b's MXFP4-decoded expert `gate_up_proj`, is 1.06 GB. An F32 load
+/// doubles every size, so it also hoists smaller vocabularies (Qwen3-4B and
+/// Llama-3.1-8B, for example) and some per-layer tensors: gpt-oss-20b's
+/// decoded `gate_up_proj` is 2.12 GB in each block (see [`execution_groups`]).
 pub(crate) const LARGE_GROUP_BYTES: u64 = 1 << 30;
 
 /// Total target storage of one execution group, saturating on overflow.
