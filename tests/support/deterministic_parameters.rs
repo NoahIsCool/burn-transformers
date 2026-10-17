@@ -29,14 +29,22 @@ use burn::{
 /// (`1 / sqrt(fan_in)` for Burn's `[d_in, d_out]` linear weights, and `1` for
 /// a non-constant vector), from a SplitMix64 stream keyed by `seed`, the
 /// parameter's position in visit order, and the element index. Constant
-/// parameters (unit norm weights, zero biases) are kept: their values never
-/// depend on the generator. A parameter shared between modules (a tied
-/// embedding) receives one value. Shapes, dtypes, devices, and trainability
-/// are preserved. Reading each parameter materializes Burn's own lazy draw
+/// parameters are kept (see [`is_constant`]): several equal elements (unit
+/// norm weights, zero biases), or a single element exactly `0` or `1`. Their
+/// values never depend on the generator. Any other single element is
+/// replaced, because one value cannot show whether Burn drew it (a one-head
+/// decay is drawn). A parameter shared between modules (a tied embedding)
+/// receives one value. Shapes, dtypes, devices, and trainability are
+/// preserved. Reading each parameter materializes Burn's own lazy draw
 /// first; that value is discarded, so it does not matter which generator
 /// state it came from. The distribution is a test fixture, not a model
 /// initialization: its only purpose is that the same `seed` gives the same
 /// weights however tests are scheduled.
+///
+/// This copies the construction of the library's
+/// `models::shared::test_support::deterministic_parameters`. Seeds on both
+/// sides are chosen by measured margins, so the two constructions, and the
+/// values both test suites pin, must change together.
 pub(crate) fn deterministic_parameters<B: Backend, M: Module<B>>(module: M, seed: u64) -> M {
     module.map(&mut DeterministicParameters {
         seed,
@@ -73,7 +81,7 @@ impl<B: Backend> ModuleMapper<B> for DeterministicParameters {
             .convert::<f32>()
             .to_vec::<f32>()
             .expect("F32 parameter values");
-        let replacement = if host.iter().all(|&element| element == host[0]) {
+        let replacement = if is_constant(&host) {
             value
         } else {
             let position = self.next;
@@ -97,6 +105,22 @@ impl<B: Backend> ModuleMapper<B> for DeterministicParameters {
         };
         self.drawn.insert(id, Box::new(replacement.clone()));
         Param::from_mapped_value(id, replacement, mapper)
+    }
+}
+
+/// Whether a parameter's host values are a constant fill that Burn's generator did not draw.
+///
+/// More than one element, all equal, is a fill: unit norm scales, zero
+/// biases, unit skip weights. A single element cannot show whether it was
+/// drawn, so it counts as constant only when it is exactly `0` or `1`, the
+/// fills of a one-element bias, gate, or scale; any other single value (a
+/// one-head decay `A_log`, drawn at random) is replaced. An empty parameter
+/// has nothing to replace.
+fn is_constant(host: &[f32]) -> bool {
+    match host {
+        [] => true,
+        [single] => *single == 0.0 || *single == 1.0,
+        [first, rest @ ..] => rest.iter().all(|element| element == first),
     }
 }
 
@@ -206,10 +230,47 @@ mod tests {
         assert!(!mapped.first.val().is_require_grad());
     }
 
-    /// The stream is pinned: these values are the library helper's for the same seed and shape.
+    /// A module of one-element vectors, as per-head parameters of a one-head layer are.
+    #[derive(Module, Debug)]
+    struct Scalars<B: Backend> {
+        /// A zero fill, such as a bias.
+        zero: Param<Tensor<B, 1>>,
+        /// A unit fill, such as a norm scale or skip weight.
+        one: Param<Tensor<B, 1>>,
+        /// Any other value, which Burn may have drawn.
+        other: Param<Tensor<B, 1>>,
+    }
+
+    /// A single element is kept only when it is exactly zero or one; any other is replaced.
+    #[test]
+    fn single_elements_are_replaced_unless_zero_or_one() {
+        let device = Default::default();
+        let scalars = |other: f32| {
+            let vector =
+                |value: f32| Param::from_tensor(Tensor::<Cpu, 1>::from_floats([value], &device));
+            deterministic_parameters(
+                Scalars {
+                    zero: vector(0.0),
+                    one: vector(1.0),
+                    other: vector(other),
+                },
+                7,
+            )
+        };
+        let (first, second) = (scalars(0.25), scalars(2.5));
+        assert_eq!(host(&first.zero), [0.0]);
+        assert_eq!(host(&first.one), [1.0]);
+        // Whatever value it started from, the replacement comes from the seed alone.
+        assert_eq!(host(&first.other), host(&second.other));
+        assert!(host(&first.other)[0] != 0.25 && host(&first.other)[0].abs() <= 1.0);
+    }
+
+    /// The stream is pinned: these values must equal the library helper's for the same seed and shape.
     ///
     /// Integration and example tests choose seeds by measured margins, so a
     /// change to the construction would silently move every chosen weight.
+    /// The library's `models::shared::test_support` tests pin the same values
+    /// for its construction; the two pins must change together.
     #[test]
     fn the_stream_is_pinned() {
         let device = Default::default();
@@ -222,7 +283,7 @@ mod tests {
         assert_eq!(host(&mapped.weight), PINNED);
     }
 
-    /// Values of a `[2, 2]` weight for seed 7, recorded from the library helper.
+    /// Values of a `[2, 2]` weight for seed 7, identical to the library helper's pin.
     ///
     /// Each literal is the shortest decimal that round-trips to the recorded
     /// F32, so the comparison is exact.

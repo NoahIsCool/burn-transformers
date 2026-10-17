@@ -8,8 +8,11 @@ use burn::{
 
 use super::*;
 use crate::models::{
-    muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType, qwen3_5::Qwen3_5LayerType,
-    shared::test_support::deterministic_parameters, t5::T5FeedForwardProjection,
+    muse_glimmer::MuseGlimmerLayerType,
+    nemotron_h::NemotronHBlockType,
+    qwen3_5::Qwen3_5LayerType,
+    shared::test_support::{assert_weights_ignore_burn_seed, deterministic_parameters},
+    t5::T5FeedForwardProjection,
 };
 use crate::{
     CausalGenerationRequest, GenerationConfig, LogitsSelection, TokenMask, generate_causal,
@@ -364,6 +367,53 @@ fn tiny_modular() -> crate::architecture::DecoderSpec {
 /// every family above `0.01` and none above `0.02`.
 const PREFILL_SEED: u64 = 147;
 
+/// Committed tiny-golden configurations of [`every_causal_family_matches_bounded_and_one_shot_prefill`].
+///
+/// Each selects the Llama, Gemma, or gpt-oss family through
+/// [`AutoCausalLm::from_config_json`], covering every Llama-family alias.
+const PREFILL_GOLDENS: [(&str, &str); 10] = [
+    (
+        "Llama 3",
+        include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
+    ),
+    (
+        "Llama with bias and tied embeddings",
+        include_str!("../../tests/fixtures/tiny_goldens/llama-bias-tied/config.json"),
+    ),
+    (
+        "Mistral sliding",
+        include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
+    ),
+    (
+        "OLMo 2",
+        include_str!("../../tests/fixtures/tiny_goldens/olmo2/config.json"),
+    ),
+    (
+        "Qwen2",
+        include_str!("../../tests/fixtures/tiny_goldens/qwen2/config.json"),
+    ),
+    (
+        "Qwen3",
+        include_str!("../../tests/fixtures/tiny_goldens/qwen3/config.json"),
+    ),
+    (
+        "SmolLM3",
+        include_str!("../../tests/fixtures/tiny_goldens/smollm3/config.json"),
+    ),
+    (
+        "Gemma 2",
+        include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
+    ),
+    (
+        "Gemma 3 text",
+        include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
+    ),
+    (
+        "gpt-oss",
+        include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
+    ),
+];
+
 /// Every causal language model supports the bounded-prefill coordinator contract.
 ///
 /// The staggered prompt's first chunk reaches `decode` while row zero has
@@ -424,48 +474,7 @@ fn every_causal_family_matches_bounded_and_one_shot_prefill() {
     assert_bounded_prefill_contract("Nemotron-H", &nemotron, cache, 32, &device);
     covered.push(AutoCausalConfig::NemotronH);
 
-    for (name, json) in [
-        (
-            "Llama 3",
-            include_str!("../../tests/fixtures/tiny_goldens/llama3/config.json"),
-        ),
-        (
-            "Llama with bias and tied embeddings",
-            include_str!("../../tests/fixtures/tiny_goldens/llama-bias-tied/config.json"),
-        ),
-        (
-            "Mistral sliding",
-            include_str!("../../tests/fixtures/tiny_goldens/mistral-sliding/config.json"),
-        ),
-        (
-            "OLMo 2",
-            include_str!("../../tests/fixtures/tiny_goldens/olmo2/config.json"),
-        ),
-        (
-            "Qwen2",
-            include_str!("../../tests/fixtures/tiny_goldens/qwen2/config.json"),
-        ),
-        (
-            "Qwen3",
-            include_str!("../../tests/fixtures/tiny_goldens/qwen3/config.json"),
-        ),
-        (
-            "SmolLM3",
-            include_str!("../../tests/fixtures/tiny_goldens/smollm3/config.json"),
-        ),
-        (
-            "Gemma 2",
-            include_str!("../../tests/fixtures/tiny_goldens/gemma2/config.json"),
-        ),
-        (
-            "Gemma 3 text",
-            include_str!("../../tests/fixtures/tiny_goldens/gemma3-text/config.json"),
-        ),
-        (
-            "gpt-oss",
-            include_str!("../../tests/fixtures/tiny_goldens/gpt-oss/config.json"),
-        ),
-    ] {
+    for (name, json) in PREFILL_GOLDENS {
         let model = AutoCausalLm::<TestBackend>::from_config_json(json, &device).unwrap();
         let vocabulary = model.config().vocabulary_size();
         covered.push(model.family());
@@ -500,6 +509,72 @@ fn every_causal_family_matches_bounded_and_one_shot_prefill() {
             "registered family {family:?} lacks a bounded-prefill check"
         );
     }
+}
+
+/// Every bounded-prefill fixture's weights come from [`PREFILL_SEED`] alone.
+///
+/// The margins recorded at [`PREFILL_SEED`] were measured on these exact
+/// weights, so no parameter may keep a draw of Burn's process-wide
+/// generator. A one-head modular decoder is checked as well: its Gated
+/// DeltaNet decay `A_log` is a single drawn element, which the mapping must
+/// replace although one value cannot show that it was drawn.
+#[test]
+fn bounded_prefill_fixture_weights_ignore_burn_seed() {
+    let device = Default::default();
+    assert_weights_ignore_burn_seed(
+        "Qwen3.5",
+        || Qwen3_5ForCausalLm::init(tiny_qwen(), &device).unwrap(),
+        PREFILL_SEED,
+    );
+    assert_weights_ignore_burn_seed(
+        "Qwen3-MoE",
+        || Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).unwrap(),
+        PREFILL_SEED,
+    );
+    assert_weights_ignore_burn_seed(
+        "DeepSeek-V2",
+        || {
+            DeepseekV2ForCausalLm::init(
+                crate::models::deepseek_v2::model::tests_support::tiny_config(),
+                &device,
+            )
+            .unwrap()
+        },
+        PREFILL_SEED,
+    );
+    assert_weights_ignore_burn_seed(
+        "Muse Glimmer",
+        || MuseGlimmerForCausalLm::init(tiny_muse(), &device).unwrap(),
+        PREFILL_SEED,
+    );
+    assert_weights_ignore_burn_seed(
+        "Nemotron-H",
+        || NemotronHForCausalLm::init(tiny_nemotron(), &device).unwrap(),
+        PREFILL_SEED,
+    );
+    for (name, json) in PREFILL_GOLDENS {
+        assert_weights_ignore_burn_seed(
+            name,
+            || AutoCausalLm::<TestBackend>::from_config_json(json, &device).unwrap(),
+            PREFILL_SEED,
+        );
+    }
+    let modular = |spec: crate::architecture::DecoderSpec| {
+        move || {
+            crate::models::custom::ModularCausalLm::<TestBackend>::init(spec.clone(), &device)
+                .unwrap()
+        }
+    };
+    assert_weights_ignore_burn_seed("ModularCausalLm", modular(tiny_modular()), PREFILL_SEED);
+    let mut one_head = tiny_modular();
+    one_head.layers[1].mixer = crate::architecture::MixerSpec::DeltaNet {
+        key_heads: 1,
+        value_heads: 1,
+        key_head_dim: 4,
+        value_head_dim: 4,
+        convolution_kernel: 2,
+    };
+    assert_weights_ignore_burn_seed("one-head ModularCausalLm", modular(one_head), PREFILL_SEED);
 }
 
 /// Every registered causal family as a tiny automatic model, each Llama-family alias included.
