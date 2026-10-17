@@ -2660,12 +2660,13 @@ mod cpu {
     //! ignored for their run time: the backend compiles every kernel shape
     //! with LLVM when it is first launched, and on an Apple M3 Max (debug
     //! build, one test thread, other jobs running) the nine passing cases took
-    //! 420 s, 290 s of it the four hybrid families, and the CubeCL CPU modules
-    //! of the three tiny-golden suites another 73 s, far beyond a two-minute
-    //! budget for ordinary tests. Parallel test threads gave no speed-up (441 s
-    //! for the parity cases), since every test's CubeCL CPU runtime occupies
-    //! all cores, and a release build saved little (313 s on parallel
-    //! threads). Run every passing case, without the known failures:
+    //! 405 to 420 s over two runs, 277 to 290 s of it the four hybrid
+    //! families, and the CubeCL CPU modules of the three tiny-golden suites
+    //! another 73 s, far beyond a two-minute budget for ordinary tests.
+    //! Parallel test threads gave no speed-up (441 s for the parity cases),
+    //! since every test's CubeCL CPU runtime occupies all cores, and a release
+    //! build saved little (313 s on parallel threads). Run every passing case,
+    //! without the known failures:
     //!
     //! ```text
     //! cargo test --locked --features cpu --test backend_parity cpu:: -- --include-ignored \

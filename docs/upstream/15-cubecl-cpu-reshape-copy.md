@@ -9,7 +9,7 @@
 | Related upstream issues | cubecl#1670 / #1671 |
 | Repro | [`repros/cubecl-cpu-reshape-copy`](repros/cubecl-cpu-reshape-copy) |
 | Patch | [`patches/15-cubecl-cpu-reshape-copy.patch`](patches/15-cubecl-cpu-reshape-copy.patch) (`crates/cubecl-std/src/tensor/contiguous/launch.rs`, relative to the cubecl repository root; the same guard as cubecl#1671) |
-| Patch verified | Yes, on an Apple M3 Max: the repro's 5 of 7 wrong cases → 0 of 7; through this crate, the CubeCL CPU parity cases for Nemotron-H and both modular causal decoders pass `F32_BOUND` (largest deviations `1.8e-7` and `2.8e-7`) instead of deviating by up to `5.8e-1` |
+| Patch verified | Yes, on an Apple M3 Max: the repro's 5 of 7 wrong cases → 0 of 7; through this crate, the CubeCL CPU parity cases for Nemotron-H and both modular causal decoders pass `F32_BOUND` (largest deviations `1.8e-7` and `2.8e-7`) instead of deviating by `3.2e-1` and `5.8e-1` |
 | Workarounds an upstream fix removes | None in the crate (deliberately; see "Notes for this crate"). A Burn upgrade re-enables the ignored tests `cpu::cpu_nemotron_h_matches_flex`, `cpu::cpu_modular_causal_matches_flex`, and the reproducer `cpu::cpu_reshaped_strided_views_match_flex` in `tests/backend_parity.rs` |
 
 ## Issue draft (not to be filed: fixed in v0.22.0)
@@ -119,10 +119,13 @@ burn 0.21.0 (feature `cpu`; tracel-llvm 20.1.4-7), cubecl-std 0.10.0, Rust 1.94 
 - Found while extending `tests/backend_parity.rs` to the CubeCL CPU backend. Three
   executable paths meet the defect: Nemotron-H's group-limited router flattens an expanded
   `[tokens, groups, 1]` group mask (`prune_groups` in `src/moe/router.rs`), so the wrong
-  experts become eligible; multi-head latent attention de-interleaves rotary pairs with
-  `position::interleaved_to_split_half` (rotary widths of 4 or more; DeepSeek-V2's tiny
-  case uses 2, a unit axis that needs no copy); and the modular gated DeltaNet with grouped
-  key heads and a padding mask copies a strided view. With the patched cubecl-std every
+  experts become eligible (logits off by `0.32`); multi-head latent attention
+  de-interleaves rotary pairs with `position::interleaved_to_split_half` (with that reshape
+  replaced by an index `select`, the modular decoders' MLA passes at `1.2e-7`;
+  DeepSeek-V2's tiny configuration of the same module happens to pass); and a gated
+  DeltaNet whose key heads are repeated to more value heads (one for two, or two for four)
+  goes wrong under a padding mask, while equal head counts pass. The modular causal
+  decoders, which contain both, are off by up to `0.58`. With the patched cubecl-std every
   CubeCL CPU parity case passes.
 - Not worked around in the crate. The defect is a generic `reshape` on one backend that
   the crate does not support (SUPPORT.md), fixed upstream; reshaping a permuted or

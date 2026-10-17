@@ -398,6 +398,11 @@ code written against unreleased sources.
 - DeepSeek: F16/BF16 decoding with an inactive row no longer panics; inactive
   rows keep F32 router logits; the balance loss scale.
 - Embedding lookups never see padding sentinels (Llama family, DeepSeek, Muse).
+- MoE routing on Metal, CUDA, ROCm, and the CubeCL CPU backend: a token whose
+  remaining scores were all `-inf` or NaN received an out-of-range expert ID,
+  and dispatch rejected it, because Burn 0.21's CubeCL maximum of a row of
+  `-inf` is `f32::MIN`; the deterministic top-k now decides such rows
+  explicitly and stays total on every backend.
 - Qwen: a speculative cycle whose commit fails rolls back; oversized
   transactional calls fail before model work; new recipe parameters take the
   checkpoint dtype.
@@ -592,6 +597,14 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   and a unit test pins Burn 0.21's reshape decisions behind the workaround.
   Its deviation measure, which the real-checkpoint gates now share, fails
   NaN and infinite values instead of ignoring them.
+- The CubeCL CPU backend (`--features cpu`) now runs every family of the
+  parity suite and the three tiny-golden suites, held to the F32 bounds after
+  a matrix-precision probe; the family and golden cases are ignored for their
+  run time, and CI runs them on `ubuntu-latest`. Every case passes except
+  Nemotron-H and the modular causal decoders, which meet a Burn 0.21 CubeCL
+  CPU copy defect (fixed in Burn 0.22) and stay ignored with an upstream
+  report and a reproducer; this backend is validated for testing, not
+  supported for inference ([SUPPORT.md](SUPPORT.md#cubecl-cpu-backend-validation)).
 - Twelve fuzz targets (new: logits processing, chat templates, RoPE
   parameters, SafeTensors headers, attention connectivity, modular specs, and
   the MTP bank of cache transactions) and property suites for generation,

@@ -82,13 +82,16 @@ them on its clean runner; the source and package gates run all of them.
 **Tiny reference goldens** run inside `cargo test`:
 `tiny_goldens_llama` (seven Llama-family cases), `tiny_goldens_gemma`, and
 `tiny_goldens_gpt_oss`, each against Transformers 5.2.0 / PyTorch 2.10.0 at an
-F32 tolerance of `1e-5`. The same checks run, ignored, on Metal and CUDA:
+F32 tolerance of `1e-5`. The same checks run, ignored, on Metal, CUDA, and
+Burn's CubeCL CPU backend ("CubeCL CPU parity" below):
 
 ```sh
 cargo test --locked --features metal --test tiny_goldens_llama --test tiny_goldens_gemma \
   --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
 cargo test --locked --features cuda --test tiny_goldens_llama --test tiny_goldens_gemma \
   --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+cargo test --locked --features cpu --test tiny_goldens_llama --test tiny_goldens_gemma \
+  --test tiny_goldens_gpt_oss cpu:: -- --ignored --nocapture --test-threads 1
 ```
 
 An accelerator that multiplies F32 matrices in F32 (Metal, CUDA below
@@ -136,15 +139,46 @@ Burn 0.21 rounds F32 matrix inputs to TF32, so those runs are held to
 `1e-2 + 1e-2 · scale` (derived in `tests/support/backend_numerics.rs`) and
 qualify execution rather than F32 numerics. No CUDA run has been recorded
 yet. The suite found two DeltaNet defects on CubeCL backends that every CPU
-test missed (see the changelog). Burn's CubeCL CPU backend shares those
-backends' reshape and reproduces the defect, so on a host where the `cpu`
-feature builds (see SUPPORT.md), its delta-rule case runs without a GPU and
-fails if `trailing_unit_axis` is reverted; a lib unit test also pins the
-upstream reshape decisions the workaround rests on:
+test missed (see the changelog).
+
+**CubeCL CPU parity.** Burn's CubeCL CPU backend (the `cpu` feature; see
+SUPPORT.md for its host requirement) compiles the same `burn-cubecl` kernels
+to host code, so `tests/backend_parity.rs` and the three tiny-golden suites
+run their Metal checks on it too, each after asserting with the matrix probe
+that it multiplies in F32. Its delta-rule case is part of
+`cargo test --features cpu` and fails if `trailing_unit_axis` is reverted; a
+lib unit test pins the upstream reshape decisions that workaround rests on,
+and two router unit tests check the top-k on CubeCL's reduction. The family
+and golden cases are ignored because they take minutes (the backend compiles
+every kernel shape with LLVM at first launch: on the Apple M3 Max, debug, one
+test thread, the parity cases took 405 to 420 s over two runs, the golden
+modules 73 s, and the delta-rule guard alone about 70 s). CI runs every passing
+case on `ubuntu-latest`:
 
 ```sh
-cargo test --locked --features cpu --test backend_parity cpu::
+cargo test --locked --no-default-features --features std,flex,cpu \
+  --lib --test backend_parity --test tiny_goldens_llama --test tiny_goldens_gemma \
+  --test tiny_goldens_gpt_oss cpu -- --include-ignored --test-threads 1 \
+  --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex \
+  --skip cpu_reshaped_strided_views_match_flex
 ```
+
+The parity cases stay within the F32 bound: largest deviation `6.7e-6`
+(SmolLM3 and Gemma 3 text, logit scales `37.5` and `37.9`), `5.7e-6` for
+Gemma 2 and the tied Llama, `1.0e-6` for OLMo 2, `9.5e-7` for T5, at most
+`4.8e-7` elsewhere, largest relative `9.2e-7`, and `6e-8` for the delta-rule
+kernels. The goldens stay within `1e-5 + 1e-5 · magnitude`: logits `2.3e-6`
+(`gemma2`), hidden states `5.7e-6` (`gemma2`, magnitude `7.9`), gpt-oss's
+load-balancing loss `2.4e-7`, and all six greedy steps of every case decisive.
+The three skipped tests fail on Burn 0.21: the CubeCL CPU backend copies a
+reshape of a transposed or expanded view at the wrong coordinates, which
+moves Nemotron-H's and the modular causal decoders' logits by up to `0.58`;
+cubecl-std 0.11 (Burn 0.22) fixes it, and with that fix applied both pass at
+`2.8e-7` ([docs/upstream/15](docs/upstream/15-cubecl-cpu-reshape-copy.md)).
+`cpu_reshaped_strided_views_match_flex` is the reproducer. These numbers are
+from the Mac at `93cef3c` (two runs, identical deviations); the step has not
+run on GitHub's runners yet, so the first CI run records Linux's deviations and
+run time.
 
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
 with a larger budget:

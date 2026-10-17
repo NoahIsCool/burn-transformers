@@ -38,15 +38,54 @@ compiles, with loader errors such as `` version `GLIBC_2.34' not found `` and
 `MLIR_SYS_200_PREFIX` and `TABLEGEN_200_PREFIX` itself before reading them,
 so pointing those variables at another LLVM has no effect.
 
-No crate code depends on `cpu`: only three test reports record whether it is
-enabled (`cfg!(feature = "cpu")` in `tests/muse_glimmer_artifacts.rs`,
-`tests/qwen35_benchmarks.rs`, and `tests/support/benchmark_identity.rs`). On such a
-host, omit the feature: lint with
+No library code depends on `cpu`; it gates tests only: the CubeCL CPU
+validation below (`cpu` modules in `tests/backend_parity.rs`, the three
+`tests/tiny_goldens_*.rs` suites, and `src/moe/router_tests.rs`), and three
+test reports that record whether it is enabled (`cfg!(feature = "cpu")` in
+`tests/muse_glimmer_artifacts.rs`, `tests/qwen35_benchmarks.rs`, and
+`tests/support/benchmark_identity.rs`). On such a host, omit the feature:
+lint with
 `--no-default-features --features std,flex,cuda,rocm,tokenizers,chat-templates,autodiff,train`,
 which compiles the same crate code, or build inside a container with a newer
 userland (Singularity or Apptainer with an Ubuntu 22.04 image, for example).
 The `cpu` build itself is then checked only where the requirement holds, such
 as CI's `ubuntu-latest` job.
+
+### CubeCL CPU backend validation
+
+The `cpu` feature is a test backend, not a supported inference backend: no
+acceptance record names it, and no real checkpoint, reduced precision,
+quantized format, or performance figure has been measured on it. It earns its
+place in the test suite because it compiles the same `burn-cubecl` kernels as
+Metal, CUDA, and ROCm to host code, so their layouts, reshapes, fused
+attention, cache writes, and reductions can be checked without a GPU.
+
+What was validated, on an Apple M3 Max (macOS 27, Burn 0.21.0, tracel-llvm
+`20.1.4-7`, debug build), with the commands in
+[RELEASE_GATES.md](RELEASE_GATES.md#checks-added-since-v01) ("CubeCL CPU parity"):
+
+- every executable family of `tests/backend_parity.rs` except Nemotron-H and
+  the two modular causal decoders matches Flex/F32 with identical weights in
+  stateless, ragged left-padded, and cached prefill-plus-decode logits within
+  the F32 bound `2e-5 + 2e-5 · scale` (largest deviation `6.7e-6` at logit
+  scale `37.9`, largest relative `9.2e-7`), and the gated delta rule's
+  kernels within `6e-8`;
+- the tiny Transformers 5.2.0 goldens of the Llama family (seven cases),
+  Gemma 2 and Gemma 3 text, and gpt-oss match within `1e-5 + 1e-5 ·
+  magnitude` (largest deviations `2.3e-6` for logits and `5.7e-6` for hidden
+  states), and every case's six greedy steps are decisive and match;
+- the MoE router's top-k returns in-range, distinct expert IDs for NaN and
+  `-inf` scores on this backend, which shares Metal's reduction kernels.
+
+Not validated: Burn 0.21's CubeCL CPU backend copies a reshape of a transposed
+or expanded view at the wrong coordinates (fixed in Burn 0.22;
+[docs/upstream/15](docs/upstream/15-cubecl-cpu-reshape-copy.md)). Nemotron-H's
+group-limited router, the rotary de-interleave of multi-head latent attention,
+and a masked gated DeltaNet whose key heads are shared by several value heads
+meet it, and those cases deviate from Flex by up to `0.58`; any other graph
+that reshapes such a view can return wrong values on this backend. The crate
+does not work around it. CI runs the passing cases on `ubuntu-latest`; until a CI run has
+completed, the measurements above are this Mac's only.
 
 ## Checkpoint support
 
