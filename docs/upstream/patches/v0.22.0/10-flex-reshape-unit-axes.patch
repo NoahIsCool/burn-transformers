@@ -1,0 +1,64 @@
+diff --git a/crates/burn-flex/src/layout.rs b/crates/burn-flex/src/layout.rs
+index 11d5df5..39fa306 100644
+--- a/crates/burn-flex/src/layout.rs
++++ b/crates/burn-flex/src/layout.rs
+@@ -313,7 +313,7 @@ impl Layout {
+     /// Returns None if not contiguous (would require data copy).
+     pub fn reshape(&self, new_shape: Shape) -> Option<Self> {
+         if !self.is_contiguous() {
+-            return None;
++            return self.reshape_unit_axes(new_shape);
+         }
+         debug_assert_eq!(
+             self.num_elements(),
+@@ -325,6 +325,50 @@ impl Layout {
+         Some(layout)
+     }
+ 
++    /// Reshape a strided layout by only inserting or removing size-1 axes.
++    ///
++    /// The non-unit axes keep their order, sizes and strides, so every element
++    /// keeps its address and the result is a view (for example a transposed
++    /// `[d_in, d_out]` weight viewed as `[1, d_in, d_out]` for a batched
++    /// matmul). A unit axis gets the positive stride of a contiguous axis just
++    /// outside its inner neighbour; it is never multiplied by a non-zero index.
++    /// Returns `None` for any other reshape, which must copy.
++    fn reshape_unit_axes(&self, new_shape: Shape) -> Option<Self> {
++        let mut kept = (0..self.shape.num_dims())
++            .filter(|&axis| self.shape[axis] != 1)
++            .map(|axis| (self.shape[axis], self.strides[axis]));
++        let rank = new_shape.num_dims();
++        let mut strides = vec![0isize; rank];
++        for (axis, stride) in strides.iter_mut().enumerate() {
++            if new_shape[axis] != 1 {
++                let (size, old_stride) = kept.next()?;
++                if size != new_shape[axis] {
++                    return None;
++                }
++                *stride = old_stride;
++            }
++        }
++        if kept.next().is_some() {
++            return None;
++        }
++        let mut outer = 1isize;
++        for axis in (0..rank).rev() {
++            if new_shape[axis] == 1 {
++                strides[axis] = outer;
++            } else {
++                outer = strides[axis]
++                    .unsigned_abs()
++                    .checked_mul(new_shape[axis])
++                    .and_then(|stride| isize::try_from(stride).ok())?;
++            }
++        }
++        Some(Self {
++            shape: new_shape,
++            strides,
++            start_offset: self.start_offset,
++        })
++    }
++
+     /// Compute linear index from multi-dimensional indices.
+     pub fn index(&self, indices: &[usize]) -> usize {
+         debug_assert_eq!(indices.len(), self.num_dims());

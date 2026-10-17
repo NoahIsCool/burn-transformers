@@ -315,7 +315,9 @@ mechanism's equations, reference, and implementation.
   step, and speculative drafts are verified in one target pass.
 - Flex runs with SIMD kernels and rayon-parallel matrix products.
 - On Metal, packed Q4/Q8 Burnpack weights execute through Burn's quantized
-  matmul without whole-weight dequantization.
+  matmul without whole-weight dequantization. Burn 0.21's multi-row Q4
+  kernels are wrong with F32 activations, so those products run one row at a
+  time (one packed matmul per row); F16 activations keep a single matmul.
 
 Measurement protocols and recorded results are in [BENCHMARKS.md](BENCHMARKS.md).
 

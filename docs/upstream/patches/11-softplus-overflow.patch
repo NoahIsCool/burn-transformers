@@ -1,0 +1,29 @@
+diff --git a/crates/burn-tensor/src/tensor/activation/base.rs b/crates/burn-tensor/src/tensor/activation/base.rs
+index 0e878d3..9144347 100644
+--- a/crates/burn-tensor/src/tensor/activation/base.rs
++++ b/crates/burn-tensor/src/tensor/activation/base.rs
+@@ -216,9 +216,22 @@ $$
+ #[cfg_attr(not(doc), doc = "`softplus(x_i) = log(1 + exp(beta * x_i)) / beta`")]
+ ///
+ /// The SoftPlus function is a smooth approximation of the ReLU function.
++///
++/// Like PyTorch, the function is linear where `beta * x > 20` (the two agree
++/// to within float precision there), which keeps the value and its gradient
++/// finite for every finite input instead of overflowing `exp`; elsewhere it
++/// uses `log1p`, which stays accurate where `exp(beta * x) + 1` rounds to 1.
+ pub fn softplus<const D: usize, B: Backend>(tensor: Tensor<B, D>, beta: f64) -> Tensor<B, D> {
+-    let tensor = (tensor.mul_scalar(beta).exp() + 1).log();
+-    tensor.div_scalar(beta)
++    const THRESHOLD: f64 = 20.0;
++    let scaled = tensor.clone().mul_scalar(beta);
++    let linear = scaled.clone().greater_elem(THRESHOLD);
++    // Clamping before `exp` keeps the unselected branch (and its gradient) finite.
++    scaled
++        .clamp_max(THRESHOLD)
++        .exp()
++        .log1p()
++        .div_scalar(beta)
++        .mask_where(linear, tensor)
+ }
+ 
+ /// Applies the "quiet softmax" function on the input tensor along the given dimension.

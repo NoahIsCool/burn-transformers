@@ -29,6 +29,36 @@
 //! suffix. The autodiff path rejects packed values contextually; callers needing
 //! input gradients must explicitly dequantize before constructing the float graph.
 //!
+//! # Multi-row products with sub-byte packed weights
+//!
+//! On CubeCL backends Burn 0.21 hands a packed right-hand side to cubek-matmul
+//! 0.2, whose kernels decode sub-byte values (fewer than eight bits per value)
+//! wrongly in several configurations. Without autotuning, `Strategy::Auto`
+//! tries the cooperative-matrix routine and otherwise falls back to the unit
+//! routine. Measured on an Apple M3 Max against the independently dequantized
+//! weight, in both packed layouts:
+//!
+//! - Q4 with F32 activations is wrong (relative error up to 1.0) for most
+//!   products with more than one row, for example every `x[m, 1024] ·
+//!   W[1024, 1024]` with `2 ≤ m ≤ 32` and `x[m, 1024] · W[1024, 16]` with
+//!   `m ≥ 32`; which shapes fail depends on whether the cooperative-matrix
+//!   routine accepts them, so no row threshold is safe. Every single-row
+//!   product is correct.
+//! - Q4 with F16 activations is correct for every tested row count and shape.
+//! - Q2 is wrong even for single rows (with F16 activations, and with F32 for
+//!   narrow outputs), so no evaluation order makes it reliable.
+//!
+//! [`linear`] therefore multiplies a 4-bit packed `W` on a CubeCL backend one
+//! row at a time, `Y[r, :] = X[r:r+1, :] · W`, and concatenates the rows,
+//! except for F16 activations on Metal, the measured-correct combination. Each
+//! row is the single-row kernel reading the same packed storage, so the weight
+//! is never dequantized; the cost is one kernel launch per row, which makes a
+//! long prefill through such a weight as expensive as that many single-row
+//! products. It rejects 2-bit packed weights on CubeCL backends with
+//! [`Error::BackendCapability`]. Q8 weights, Flex, and single-row inputs keep
+//! one ordinary matmul. Remove both rules once the pinned Burn includes fixed
+//! cubek-matmul kernels (see `docs/upstream/07-cubecl-packed-quantized-matmul.md`).
+//!
 //! # Storage order of initialized and cached tensors
 //!
 //! Transposes, axis swaps and head splits are metadata-only views on every Burn
@@ -472,6 +502,24 @@ pub(crate) fn depthwise_conv1d<B: Backend>(
 /// tensors is not generally implemented by Burn 0.21. Floating weights and bias
 /// must match the activation dtype, and all operands must share a device.
 ///
+/// A 4-bit packed weight (Q4) on a CubeCL backend is multiplied one activation
+/// row at a time, except for F16 activations on Metal, because Burn 0.21's
+/// multi-row kernels return wrong values for it; a `T`-row input then costs `T`
+/// single-row packed products instead of one matmul. A 2-bit packed weight is
+/// rejected on CubeCL backends, where Burn 0.21 computes wrong values even for
+/// single rows. See "Multi-row products with sub-byte packed weights" in the
+/// module documentation.
+///
+/// # Errors
+///
+/// Returns [`Error::Shape`] for a rank-zero or empty input, a weight whose first
+/// axis differs from the input width or whose second axis is empty, or a bias of
+/// the wrong width; [`Error::BackendCapability`] for quantized activations,
+/// packed weights under autodiff, mismatched float dtypes, 2-bit packed weights
+/// on CubeCL backends, and (on Metal builds with CubeCL autotuning compiled in)
+/// any packed weight; and [`Error::Configuration`] when the operands live on
+/// different devices.
+///
 /// Packed weights are inference-only in Burn 0.21: its autodiff backend cannot
 /// differentiate even the activation input of a frozen packed projection. This
 /// boundary rejects such execution before backend dispatch. To train an adapter
@@ -524,11 +572,18 @@ pub fn linear<B: Backend, const D: usize>(
             input.dtype()
         )));
     }
+    let backend_name = B::name(&weight.device());
+    if packed_value_is_unreliable_on_cubecl(weight.dtype(), &backend_name) {
+        return Err(Error::BackendCapability(
+            "2-bit packed linear weights are unsupported on CubeCL backends: Burn 0.21's quantized matmul kernels compute wrong values for them even for single rows; dequantize the weight or use Q4/Q8"
+                .into(),
+        ));
+    }
     #[cfg(all(
         feature = "metal",
         any(feature = "rocm", feature = "attention-kernel-tracing")
     ))]
-    if packed_metal_autotune_is_unavailable(weight.dtype(), &B::name(&weight.device())) {
+    if packed_metal_autotune_is_unavailable(weight.dtype(), &backend_name) {
         return Err(Error::BackendCapability(
             "packed Q4/Q8 Metal matmul is unavailable when CubeCL autotuning is enabled (the `rocm` or `attention-kernel-tracing` crate feature): Burn 0.21 feature unification enables a CubeCL autotuner with quantized-unsafe candidates; build the Metal runtime with `--no-default-features --features std,metal` (plus optional tokenizer features)"
                 .into(),
@@ -569,7 +624,18 @@ pub fn linear<B: Backend, const D: usize>(
     let rows = leading_rows("linear.input", &output_shape)?;
     output_shape[D - 1] = weight_output;
 
-    let mut output = input.reshape([rows, input_width]).matmul(weight);
+    let flattened = input.reshape([rows, input_width]);
+    let single_rows = packed_rows_need_single_row_products(
+        weight.dtype(),
+        flattened.dtype(),
+        &backend_name,
+        rows,
+    );
+    let mut output = if single_rows {
+        matmul_row_by_row(flattened, weight)
+    } else {
+        flattened.matmul(weight)
+    };
     if let Some(bias) = &projection.bias {
         output = output + bias.val().unsqueeze();
     }
@@ -673,6 +739,60 @@ pub(crate) fn leading_rows(tensor: &str, shape: &[usize]) -> Result<usize> {
             product.checked_mul(*dimension)
         })
         .ok_or_else(|| Error::shape(tensor, "representable leading axes", "overflow"))
+}
+
+/// Returns whether a `rows`-row product with this weight must run one row at a time.
+///
+/// True exactly for a 4-bit packed `QFloat` weight (Q4 or E2M1), more than one
+/// activation row, and a CubeCL backend (`backend_name` as reported by
+/// [`Backend::name`], for example `fusion<cubecl<wgpu<msl>>>`), unless the
+/// activations are F16 on Metal (`wgpu<msl>`), where Burn 0.21's multi-row
+/// kernels were measured correct. Burn 0.21's cubek-matmul kernels decode
+/// 4-bit weights correctly for a single left-hand row but not, in general, for
+/// several; see the module documentation. Eight-bit packed values, float
+/// weights, single rows, and non-CubeCL backends (Flex dequantizes packed
+/// matmuls itself) return `false`. 2-bit values are rejected earlier by
+/// [`packed_value_is_unreliable_on_cubecl`].
+fn packed_rows_need_single_row_products(
+    weight: DType,
+    activation: DType,
+    backend_name: &str,
+    rows: usize,
+) -> bool {
+    rows > 1
+        && matches!(weight, DType::QFloat(scheme) if scheme.value.size_bits() == 4)
+        && backend_name.contains("cubecl")
+        && !(activation == DType::F16 && backend_name.contains("wgpu<msl>"))
+}
+
+/// Returns whether Burn 0.21 CubeCL computes wrong products for every use of this weight.
+///
+/// True for a packed `QFloat` weight with fewer than four bits per value (Q2)
+/// on a CubeCL backend, which cubek-matmul 0.2 decodes wrongly even for a single
+/// left-hand row (measured on Metal with F16 activations, and with F32 for
+/// narrow outputs). Splitting rows cannot repair that, so [`linear`] rejects it.
+fn packed_value_is_unreliable_on_cubecl(weight: DType, backend_name: &str) -> bool {
+    matches!(weight, DType::QFloat(scheme) if scheme.value.size_bits() < 4)
+        && backend_name.contains("cubecl")
+}
+
+/// Evaluates `input · weight` as one single-row product per input row.
+///
+/// For `input` `[R, I]` and `weight` `[I, O]` this returns the `[R, O]` matrix
+/// whose row `r` is `input[r:r+1, :] · weight`, concatenated along axis zero.
+/// Every row's product is exactly the one the backend computes for a one-row
+/// input, so the result equals `input.matmul(weight)` whenever the backend's
+/// multi-row and single-row kernels agree, and it remains correct where only
+/// the single-row kernel is (sub-byte packed weights on Burn 0.21 CubeCL). The
+/// weight is shared, never copied or dequantized; the cost is `R` kernel
+/// launches and one concatenation of the `[1, O]` row results.
+fn matmul_row_by_row<B: Backend>(input: Tensor<B, 2>, weight: Tensor<B, 2>) -> Tensor<B, 2> {
+    let rows = input
+        .split(1, 0)
+        .into_iter()
+        .map(|row| row.matmul(weight.clone()))
+        .collect::<Vec<_>>();
+    Tensor::cat(rows, 0)
 }
 
 /// Detects Burn 0.21's known packed Metal/autotune feature-unification hazard.

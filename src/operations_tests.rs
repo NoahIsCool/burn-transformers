@@ -417,11 +417,16 @@ fn packed_metal_autotune_guard_is_narrow() {
     ));
 }
 
-/// Metal accepts a Q4 RHS through CubeCL's quantized matmul binding.
+/// Metal multiplies every row count through a packed Q4 weight correctly.
 ///
 /// Burn 0.21's CubeCL `q_matmul` passes packed values and their scale handle
-/// as an `InputBinding::quantized`; this test protects the public call path
-/// and verifies that no API-level conversion changes the parameter dtype.
+/// as an `InputBinding::quantized`. With F32 activations its multi-row kernels
+/// decode Q4 wrongly (relative error up to 1.0 for 2 to 32 rows), so [`linear`]
+/// splits such products into single rows. Each row count, including the boundaries on
+/// either side of the cooperative-matrix threshold, is compared with the host
+/// product of distinct per-row activations and the independently dequantized
+/// weight; identical rows would hide a kernel that repeats or drops rows. The
+/// test also verifies that no API-level conversion changes the parameter dtype.
 #[cfg(all(
     feature = "metal",
     not(any(feature = "rocm", feature = "attention-kernel-tracing"))
@@ -448,10 +453,6 @@ fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
         .expect("reference dequantization")
         .to_vec::<f32>()
         .expect("f32 reference data");
-    let expected = dequantized
-        .chunks_exact(64)
-        .map(|row| row.iter().sum::<f32>())
-        .collect::<Vec<_>>();
     let packed = Tensor::<Metal, 2>::from_data(
         quantized
             .into_burn_qfloat_data()
@@ -465,20 +466,62 @@ fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
     };
     assert!(matches!(projection.weight.val().dtype(), DType::QFloat(_)));
 
-    let actual = linear(Tensor::<Metal, 2>::ones([1, 64], &device), &projection)
+    for rows in [1, 2, 3, 8, 32, 33, 64] {
+        let input = distinct_rows(rows, 64);
+        let expected = host_projection(&input, &dequantized, rows, 64, 64);
+        let actual = linear(
+            Tensor::<Metal, 2>::from_data(TensorData::new(input, [rows, 64]), &device),
+            &projection,
+        )
         .expect("Metal packed projection")
         .into_data()
         .to_vec::<f32>()
         .expect("Metal output should be readable as f32");
-
+        let error = max_relative_error(&actual, &expected);
+        assert!(
+            error <= 1e-4,
+            "{rows}-row Q4 Metal projection deviates from the dequantized reference by {error:.3e}"
+        );
+    }
     assert!(matches!(projection.weight.val().dtype(), DType::QFloat(_)));
-    TensorData::new(actual, [1, 64]).assert_approx_eq::<f32>(
-        &TensorData::new(expected, [1, 64]),
-        burn::tensor::Tolerance::relative(2e-2),
-    );
 }
 
-/// Q4 Metal dispatch remains finite for every distinct Qwen3.5 projection shape.
+/// Metal rejects a 2-bit packed weight instead of returning wrong products.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+#[test]
+#[ignore = "requires a Metal-capable macOS host"]
+fn metal_two_bit_packed_projection_is_rejected() {
+    use burn::backend::Metal;
+    use burn::tensor::quantization::{
+        QuantLevel, QuantMode, QuantParam, QuantScheme, QuantStore, QuantValue,
+    };
+
+    let device = Default::default();
+    let scheme = QuantScheme::default()
+        .with_value(QuantValue::Q2S)
+        .with_param(QuantParam::F32)
+        .with_store(QuantStore::PackedU32(0))
+        .with_level(QuantLevel::block([1, 32]))
+        .with_mode(QuantMode::Symmetric);
+    let weight = Tensor::<Metal, 2>::ones([64, 64], &device).quantize_dynamic(&scheme);
+    let projection = Linear {
+        weight: Param::from_tensor(weight),
+        bias: None,
+    };
+    let error = linear(Tensor::<Metal, 2>::ones([1, 64], &device), &projection)
+        .expect_err("2-bit packed Metal projection must be rejected");
+    assert!(error.to_string().contains("2-bit packed linear weights"));
+}
+
+/// Q4 Metal dispatch is finite and correct for every distinct Qwen3.5 projection shape.
+///
+/// One-row (decode) and 3- and 17-row (short prefill) F16 activations are compared
+/// with the host product against the dequantized weight. The tolerance is 1% of
+/// the largest reference magnitude, which bounds F16 activation and output
+/// rounding while rejecting a wrong kernel (errors of order 10% to 100%).
 #[cfg(all(
     feature = "metal",
     not(any(feature = "rocm", feature = "attention-kernel-tracing"))
@@ -511,6 +554,11 @@ fn metal_qfloat_projection_covers_qwen35_shapes() {
             },
         )
         .expect("reference quantization");
+        let dequantized = quantized
+            .dequantize_f32()
+            .expect("reference dequantization")
+            .to_vec::<f32>()
+            .expect("f32 reference data");
         let packed = Tensor::<Metal, 2>::from_data(
             quantized
                 .into_burn_qfloat_data()
@@ -522,19 +570,166 @@ fn metal_qfloat_projection_covers_qwen35_shapes() {
             weight: Param::from_tensor(packed),
             bias: None,
         };
-        let actual = linear(
-            Tensor::<Metal, 2>::ones([1, input_width], &device).cast(DType::F16),
-            &projection,
-        )
-        .expect("Metal packed projection")
-        .cast(DType::F32)
-        .into_data()
-        .to_vec::<f32>()
-        .expect("Metal output should be readable as f32");
-        assert!(
-            actual.iter().all(|value| value.is_finite()),
-            "Q4 projection [{input_width}, {output_width}] produced non-finite output"
-        );
+        for rows in [1, 3, 17] {
+            let input = distinct_rows(rows, input_width);
+            let expected = host_projection(&input, &dequantized, rows, input_width, output_width);
+            let actual = linear(
+                Tensor::<Metal, 2>::from_data(TensorData::new(input, [rows, input_width]), &device)
+                    .cast(DType::F16),
+                &projection,
+            )
+            .expect("Metal packed projection")
+            .cast(DType::F32)
+            .into_data()
+            .to_vec::<f32>()
+            .expect("Metal output should be readable as f32");
+            assert!(
+                actual.iter().all(|value| value.is_finite()),
+                "Q4 projection [{input_width}, {output_width}] produced non-finite output"
+            );
+            let error = max_relative_error(&actual, &expected);
+            assert!(
+                error <= 1e-2,
+                "{rows}-row Q4 projection [{input_width}, {output_width}] deviates by {error:.3e}"
+            );
+        }
+    }
+}
+
+/// Distinct, F16-exact activations `x[r, i] = ((7r + 3i) mod 13 - 6) / 8`.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+fn distinct_rows(rows: usize, width: usize) -> Vec<f32> {
+    (0..rows * width)
+        .map(|index| (((index / width) * 7 + (index % width) * 3) % 13) as f32 / 8.0 - 0.75)
+        .collect()
+}
+
+/// Host F64 product `y[r, o] = Σ_i x[r, i] · w[o, i]` for a stored `[output, input]` weight.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+fn host_projection(
+    input: &[f32],
+    weight: &[f32],
+    rows: usize,
+    input_width: usize,
+    output_width: usize,
+) -> Vec<f64> {
+    let mut output = vec![0.0_f64; rows * output_width];
+    for row in 0..rows {
+        for column in 0..output_width {
+            output[row * output_width + column] = (0..input_width)
+                .map(|inner| {
+                    f64::from(input[row * input_width + inner])
+                        * f64::from(weight[column * input_width + inner])
+                })
+                .sum();
+        }
+    }
+    output
+}
+
+/// Largest absolute deviation divided by the largest reference magnitude.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+fn max_relative_error(actual: &[f32], expected: &[f64]) -> f64 {
+    assert_eq!(actual.len(), expected.len(), "output length");
+    let scale = expected
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    actual
+        .iter()
+        .zip(expected)
+        .fold(0.0_f64, |max, (actual, expected)| {
+            max.max((f64::from(*actual) - expected).abs())
+        })
+        / scale.max(f64::MIN_POSITIVE)
+}
+
+/// Only 4-bit packed weights on CubeCL with several rows take single-row products.
+///
+/// F16 activations on Metal are the measured-correct exception; F16 on another
+/// CubeCL runtime, F32 everywhere, and E2M1 (also 4-bit) split. Eight-bit and
+/// float weights, one row, and Flex never split.
+#[test]
+fn single_row_products_are_limited_to_four_bit_cubecl_multi_row_weights() {
+    use super::packed_rows_need_single_row_products as splits;
+    use burn::tensor::quantization::{QuantScheme, QuantValue};
+
+    let q4 = packed_dtype(SymmetricQuantization::Q4);
+    let q8 = packed_dtype(SymmetricQuantization::Q8);
+    let e2m1 = DType::QFloat(QuantScheme::default().with_value(QuantValue::E2M1));
+    let metal = "fusion<cubecl<wgpu<msl>>>";
+    let cuda = "fusion<cubecl<cuda>>";
+
+    for weight in [q4, e2m1] {
+        assert!(splits(weight, DType::F32, metal, 2));
+        assert!(splits(weight, DType::F32, "cubecl<wgpu<msl>>", 64));
+        assert!(splits(weight, DType::F16, cuda, 2));
+        assert!(splits(weight, DType::BF16, cuda, 3));
+        assert!(!splits(weight, DType::F16, metal, 64));
+        assert!(!splits(weight, DType::F32, metal, 1));
+        assert!(!splits(weight, DType::F32, "flex", 2));
+    }
+    for weight in [q8, DType::F32, DType::F16] {
+        assert!(!splits(weight, DType::F32, metal, 64));
+        assert!(!splits(weight, DType::F32, cuda, 64));
+    }
+}
+
+/// Only sub-4-bit packed weights on CubeCL are rejected outright.
+#[test]
+fn two_bit_packed_weights_are_rejected_only_on_cubecl() {
+    use super::packed_value_is_unreliable_on_cubecl as rejected;
+    use burn::tensor::quantization::{QuantScheme, QuantValue};
+
+    for value in [QuantValue::Q2S, QuantValue::Q2F] {
+        let q2 = DType::QFloat(QuantScheme::default().with_value(value));
+        assert!(rejected(q2, "fusion<cubecl<wgpu<msl>>>"));
+        assert!(rejected(q2, "cubecl<cuda>"));
+        assert!(!rejected(q2, "flex"));
+    }
+    for weight in [
+        packed_dtype(SymmetricQuantization::Q4),
+        packed_dtype(SymmetricQuantization::Q8),
+        DType::F32,
+    ] {
+        assert!(!rejected(weight, "fusion<cubecl<wgpu<msl>>>"));
+    }
+}
+
+/// The packed `QFloat` dtype this crate's quantizer produces for `scheme`.
+fn packed_dtype(scheme: SymmetricQuantization) -> DType {
+    quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 64], [1, 64]),
+        WeightQuantizationConfig {
+            scheme,
+            group_size: QuantizationGroupSize::new(32).expect("supported group"),
+        },
+    )
+    .expect("reference quantization")
+    .into_burn_qfloat_data()
+    .expect("Burn-compatible packed data")
+    .dtype
+}
+
+/// Row-by-row products equal one matmul, row for row, including a single row.
+#[test]
+fn row_by_row_matmul_matches_one_matmul_exactly() {
+    let device = Default::default();
+    let weight = Tensor::<Flex, 2>::from_data(small_integers(4, 3, 1), &device);
+    for rows in [1, 2, 5] {
+        let input = Tensor::<Flex, 2>::from_data(small_integers(rows, 4, rows), &device);
+        let expected = input.clone().matmul(weight.clone()).into_data();
+        let actual = super::matmul_row_by_row(input, weight.clone());
+        assert_eq!(actual.dims(), [rows, 3]);
+        assert_eq!(actual.into_data(), expected);
     }
 }
 

@@ -1,0 +1,18 @@
+[package]
+name = "cubecl-packed-quantized-matmul"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+burn = { version = "=0.21.0", default-features = false, features = ["std", "metal", "flex"] }
+# Direct handles on the matmul strategies, to run each kernel explicitly.
+burn-cubecl = { version = "=0.21.0", default-features = false, features = ["std"] }
+cubek = { version = "=0.2.0", default-features = false, features = ["std", "matmul"] }
+
+[features]
+# Burn's default features turn this on for the GPU backends.
+autotune = ["burn/autotune"]
+
+# Standalone: never join an enclosing workspace.
+[workspace]

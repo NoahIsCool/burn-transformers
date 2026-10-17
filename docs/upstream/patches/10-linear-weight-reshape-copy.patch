@@ -1,0 +1,134 @@
+diff --git a/crates/burn-backend/src/backend/ops/modules/linear.rs b/crates/burn-backend/src/backend/ops/modules/linear.rs
+index 9292fe2..a519b91 100644
+--- a/crates/burn-backend/src/backend/ops/modules/linear.rs
++++ b/crates/burn-backend/src/backend/ops/modules/linear.rs
+@@ -8,83 +8,82 @@ use burn_std::Shape;
+ ///
+ /// Computes `y = x @ weight [+ bias]`.
+ ///
+-/// Weight `[d_input, d_output]` and bias `[d_output]` are broadcast to match x's rank
+-/// before the matmul.
++/// The activation's leading axes are flattened, `[rows, d_input] @ [d_input, d_output]`,
++/// and restored afterwards. The weight is never reshaped: a weight stored as a
++/// strided view (for example the transpose of an `[d_output, d_input]` checkpoint
++/// matrix or of a tied embedding table) cannot be reshaped to `[1, .., d_input,
++/// d_output]` as a view on every backend, and copying it on every call costs a
++/// full pass over the weight.
+ pub(crate) fn linear<B: Backend>(
+     x: FloatTensor<B>,
+     weight: FloatTensor<B>,
+     bias: Option<FloatTensor<B>>,
+ ) -> FloatTensor<B> {
+-    let x_ndims = x.shape().num_dims();
+-
+-    // Reshape weight [d_input, d_output] -> [1, ..., 1, d_input, d_output] for batch matmul.
+-    let weight = unsqueeze_leading::<B>(weight, x_ndims);
+-    let output = B::float_matmul(x, weight);
+-
+-    match bias {
+-        Some(bias) => {
+-            // Reshape bias [d_output] -> [1, ..., 1, d_output] to match output rank.
+-            let bias = unsqueeze_leading::<B>(bias, x_ndims);
+-            B::float_add(output, bias)
+-        }
++    let x_shape = x.shape();
++    let d_output = weight.shape()[1];
++    let output = B::float_matmul(flatten_rows::<B>(x), weight);
++    let output = match bias {
++        Some(bias) => B::float_add(output, B::float_reshape(bias, Shape::new([1, d_output]))),
+         None => output,
+-    }
++    };
++    restore_rows::<B>(output, &x_shape, d_output)
+ }
+ 
+-/// Reshape a tensor by prepending size-1 dimensions until it has `target_ndims` dimensions.
+-fn unsqueeze_leading<B: Backend>(tensor: FloatTensor<B>, target_ndims: usize) -> FloatTensor<B> {
++/// Reshapes `[.., d]` to `[rows, d]`, the product of the leading axes being `rows`.
++fn flatten_rows<B: Backend>(tensor: FloatTensor<B>) -> FloatTensor<B> {
+     let shape = tensor.shape();
+     let ndims = shape.num_dims();
+-    if ndims >= target_ndims {
++    if ndims == 2 {
++        return tensor;
++    }
++    let width = shape[ndims - 1];
++    let rows = (0..ndims - 1).map(|dim| shape[dim]).product::<usize>();
++    B::float_reshape(tensor, Shape::new([rows, width]))
++}
++
++/// Reshapes `[rows, width]` back to the leading axes of `leading` followed by `width`.
++fn restore_rows<B: Backend>(
++    tensor: FloatTensor<B>,
++    leading: &Shape,
++    width: usize,
++) -> FloatTensor<B> {
++    let ndims = leading.num_dims();
++    if ndims == 2 {
+         return tensor;
+     }
+-    let mut new_dims = vec![1usize; target_ndims - ndims];
+-    for i in 0..ndims {
+-        new_dims.push(shape[i]);
++    let mut dims = vec![0usize; ndims];
++    for (dim, size) in dims.iter_mut().enumerate().take(ndims - 1) {
++        *size = leading[dim];
+     }
+-    B::float_reshape(tensor, Shape::from(new_dims))
++    dims[ndims - 1] = width;
++    B::float_reshape(tensor, Shape::from(dims))
+ }
+ 
+ /// Default [linear_x_backward](crate::ops::ModuleOps::linear_x_backward) implementation.
+ ///
+-/// Computes `dx = output_grad @ weight^T`.
++/// Computes `dx = output_grad @ weight^T` on the flattened `[rows, d_output]` gradient.
+ pub(crate) fn linear_x_backward<B: Backend>(
+     weight: FloatTensor<B>,
+     output_grad: FloatTensor<B>,
+ ) -> FloatTensor<B> {
+-    // weight is [d_input, d_output], transpose to [d_output, d_input]
++    let grad_shape = output_grad.shape();
++    let d_input = weight.shape()[0];
++    // weight is [d_input, d_output]; its transpose is a view, never reshaped.
+     let weight = B::float_swap_dims(weight, 0, 1);
+-    // Unsqueeze to match output_grad rank for batch matmul
+-    let grad_ndims = output_grad.shape().num_dims();
+-    let weight = unsqueeze_leading::<B>(weight, grad_ndims);
+-    B::float_matmul(output_grad, weight)
++    let grad = B::float_matmul(flatten_rows::<B>(output_grad), weight);
++    restore_rows::<B>(grad, &grad_shape, d_input)
+ }
+ 
+ /// Default [linear_weight_backward](crate::ops::ModuleOps::linear_weight_backward) implementation.
+ ///
+-/// Computes `dW = x^T @ output_grad`, summed over batch dimensions.
++/// Computes `dW = x^T @ output_grad` over the flattened rows, which sums the
++/// contributions of every batch position in one product.
+ pub(crate) fn linear_weight_backward<B: Backend>(
+     x: FloatTensor<B>,
+     output_grad: FloatTensor<B>,
+ ) -> FloatTensor<B> {
+-    let ndims = x.shape().num_dims();
+-    let x = B::float_swap_dims(x, ndims - 2, ndims - 1);
+-    let mut grad = B::float_matmul(x, output_grad);
+-
+-    // Sum over all batch dimensions (all dims except the last two).
+-    // float_sum_dim preserves rank (keepdim), so sum each batch dim at its index.
+-    let ndims = grad.shape().num_dims();
+-    if ndims > 2 {
+-        for dim in 0..ndims - 2 {
+-            grad = B::float_sum_dim(grad, dim);
+-        }
+-        let shape = grad.shape();
+-        let d0 = shape[ndims - 2];
+-        let d1 = shape[ndims - 1];
+-        B::float_reshape(grad, Shape::new([d0, d1]))
+-    } else {
+-        grad
+-    }
++    let x = B::float_swap_dims(flatten_rows::<B>(x), 0, 1);
++    B::float_matmul(x, flatten_rows::<B>(output_grad))
+ }
+ 
+ /// Default [linear_bias_backward](crate::ops::ModuleOps::linear_bias_backward) implementation.

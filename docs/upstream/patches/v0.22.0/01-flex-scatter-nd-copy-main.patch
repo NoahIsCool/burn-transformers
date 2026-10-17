@@ -1,0 +1,40 @@
+diff --git a/crates/burn-flex/src/ops/gather_scatter.rs b/crates/burn-flex/src/ops/gather_scatter.rs
+index 0fdab3c..6988a57 100644
+--- a/crates/burn-flex/src/ops/gather_scatter.rs
++++ b/crates/burn-flex/src/ops/gather_scatter.rs
+@@ -1224,7 +1224,10 @@ pub fn scatter_nd<
+     values: FlexTensor,
+     reduction: IndexingUpdateOp,
+ ) -> FlexTensor {
+-    let data = data.to_contiguous();
++    // Take the destination by value: a uniquely owned, whole-buffer contiguous
++    // tensor comes back unchanged and is updated in place below (`storage_mut`
++    // copies only a buffer that another tensor still shares).
++    let mut data = data.into_contiguous();
+     let indices = indices.to_contiguous();
+     let values = values.to_contiguous();
+ 
+@@ -1236,11 +1239,10 @@ pub fn scatter_nd<
+     let num_indices: usize = idx_shape[..m - 1].iter().product();
+     let slice_size: usize = data_shape[k..].iter().product();
+ 
+-    let data_data: &[E] = data.storage();
+     let idx_data = read_indices(&indices);
+     let val_data: &[E] = values.storage();
+ 
+-    let mut result: Vec<E> = data_data.to_vec();
++    let result: &mut [E] = data.storage_mut();
+ 
+     let strides = compute_strides(&data_shape);
+ 
+@@ -1286,9 +1288,7 @@ pub fn scatter_nd<
+         }
+     }
+ 
+-    let shape = Shape::from(data_shape);
+-    let bytes = Bytes::from_elems(result);
+-    FlexTensor::new(bytes, Layout::contiguous(shape), E::dtype())
++    data
+ }
+ 
+ /// Multi-dimensional gather: collect slices from `data` at locations specified by N-dimensional

@@ -1,0 +1,88 @@
+diff --git a/crates/burn-backend/src/data/tensor.rs b/crates/burn-backend/src/data/tensor.rs
+index bc3f8ba..3d829b9 100644
+--- a/crates/burn-backend/src/data/tensor.rs
++++ b/crates/burn-backend/src/data/tensor.rs
+@@ -220,6 +220,8 @@ impl TensorData {
+             DType::Bool(BoolStore::U32) => {
+                 matches!(target_dtype, DType::U32 | DType::Bool(BoolStore::U32))
+             }
++            // Flex32 is stored as f32.
++            DType::Flex32 => matches!(target_dtype, DType::F32 | DType::Flex32),
+             dtype => dtype == target_dtype,
+         }
+     }
+diff --git a/crates/burn-flex/src/ops/float.rs b/crates/burn-flex/src/ops/float.rs
+index fb28d97..0947db8 100644
+--- a/crates/burn-flex/src/ops/float.rs
++++ b/crates/burn-flex/src/ops/float.rs
+@@ -21,7 +21,11 @@ use crate::ops::unary;
+ use crate::{Flex, FlexTensor};
+ 
+ impl FloatTensorOps<Flex> for Flex {
+-    fn float_from_data(data: TensorData, _device: &Device<Flex>) -> FloatTensor<Flex> {
++    fn float_from_data(mut data: TensorData, _device: &Device<Flex>) -> FloatTensor<Flex> {
++        // Flex32 data is plain f32 storage; Flex computes it as F32.
++        if data.dtype == DType::Flex32 {
++            data.dtype = DType::F32;
++        }
+         FlexTensor::from_data(data)
+     }
+ 
+@@ -130,7 +134,7 @@ impl FloatTensorOps<Flex> for Flex {
+     }
+ 
+     fn float_empty(shape: Shape, _device: &Device<Flex>, dtype: FloatDType) -> FloatTensor<Flex> {
+-        FlexTensor::empty(shape, dtype.into())
++        FlexTensor::empty(shape, storage_dtype(dtype))
+     }
+ 
+     fn float_add(lhs: FloatTensor<Flex>, rhs: FloatTensor<Flex>) -> FloatTensor<Flex> {
+@@ -739,7 +743,7 @@ impl FloatTensorOps<Flex> for Flex {
+         use burn_std::{Bytes, bf16, f16};
+ 
+         let src_dtype = tensor.dtype();
+-        let target_dtype = DType::from(dtype);
++        let target_dtype = storage_dtype(dtype);
+ 
+         // No-op if already the same dtype
+         if src_dtype == target_dtype {
+@@ -960,11 +964,11 @@ impl FloatTensorOps<Flex> for Flex {
+     }
+ 
+     fn float_zeros(shape: Shape, _device: &Device<Flex>, dtype: FloatDType) -> FloatTensor<Flex> {
+-        FlexTensor::zeros(shape, dtype.into())
++        FlexTensor::zeros(shape, storage_dtype(dtype))
+     }
+ 
+     fn float_ones(shape: Shape, _device: &Device<Flex>, dtype: FloatDType) -> FloatTensor<Flex> {
+-        let dt: burn_backend::DType = dtype.into();
++        let dt = storage_dtype(dtype);
+         match dt {
+             DType::F32 => FlexTensor::filled_typed(shape, dt, 1.0f32),
+             DType::F64 => FlexTensor::filled_typed(shape, dt, 1.0f64),
+@@ -980,7 +984,7 @@ impl FloatTensorOps<Flex> for Flex {
+         _device: &Device<Flex>,
+         dtype: FloatDType,
+     ) -> FloatTensor<Flex> {
+-        let dt: burn_backend::DType = dtype.into();
++        let dt = storage_dtype(dtype);
+         match dt {
+             DType::F32 => FlexTensor::filled_typed(shape, dt, fill_value.to_f32().unwrap()),
+             DType::F64 => FlexTensor::filled_typed(shape, dt, fill_value.to_f64().unwrap()),
+@@ -1087,6 +1091,16 @@ impl FloatTensorOps<Flex> for Flex {
+     }
+ }
+ 
++/// The dtype Flex stores a float tensor of `dtype` in. `Flex32` is f32
++/// storage computed at F32 precision on the CPU, so Flex stores it as `F32`
++/// (as `float_random` already does); every Flex kernel dispatches on `F32`.
++fn storage_dtype(dtype: FloatDType) -> DType {
++    match dtype {
++        FloatDType::Flex32 => DType::F32,
++        other => other.into(),
++    }
++}
++
+ // Tests kept here exercise flex-specific behavior: direct `Flex::`
+ // backend-op calls with explicit IntDType/FloatDType to pin dtype storage
+ // selection (U8/I32/I64, F16/F64). Plain arithmetic, math, cast, cross,

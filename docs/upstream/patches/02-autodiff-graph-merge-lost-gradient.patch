@@ -1,0 +1,19 @@
+diff --git a/crates/burn-autodiff/src/runtime/graph.rs b/crates/burn-autodiff/src/runtime/graph.rs
+index a20da69..4c8cc84 100644
+--- a/crates/burn-autodiff/src/runtime/graph.rs
++++ b/crates/burn-autodiff/src/runtime/graph.rs
+@@ -303,8 +303,13 @@ impl GraphLocator {
+         core::mem::swap(&mut state_old, &mut locked);
+         main_state.server.extend(state_old.server);
+ 
+-        // Re-map merged origin to the main graph
++        // Re-map merged origin to the main graph, and record it as one of the
++        // main graph's keys: if the main graph is itself merged later, every
++        // key is re-mapped again, and the merged origin must follow. Otherwise
++        // it keeps pointing at this emptied graph, a later operation on that
++        // tensor registers its step there, and backward silently skips it.
+         self.graphs.insert(merged.origin, main.clone());
++        self.register_key(main.origin, merged.origin);
+ 
+         // Move all keys (node IDs) from the merged graph to the main graph
+         if let Some(locator_keys) = self.keys.remove(&merged.origin) {

@@ -1,0 +1,111 @@
+diff --git a/crates/burn-flex/src/ops/gather_scatter.rs b/crates/burn-flex/src/ops/gather_scatter.rs
+index 8fef585..57b745b 100644
+--- a/crates/burn-flex/src/ops/gather_scatter.rs
++++ b/crates/burn-flex/src/ops/gather_scatter.rs
+@@ -368,7 +368,13 @@ pub fn scatter_add<E: Element + Pod + Default + Copy + core::ops::AddAssign + Se
+     indices: FlexTensor,
+     value: FlexTensor,
+ ) -> FlexTensor {
+-    let tensor = tensor.to_contiguous();
++    // Release the caller's handle so a uniquely owned destination is updated
++    // in place below (`storage_mut` copies only a shared buffer).
++    let mut tensor = {
++        let contiguous = tensor.to_contiguous();
++        drop(tensor);
++        contiguous
++    };
+     let indices = indices.to_contiguous();
+     let value = value.to_contiguous();
+ 
+@@ -401,11 +407,10 @@ pub fn scatter_add<E: Element + Pod + Default + Copy + core::ops::AddAssign + Se
+         }
+     }
+ 
+-    let tensor_data: &[E] = tensor.storage();
+     let indices_data = read_indices(&indices);
+     let value_data: &[E] = value.storage();
+ 
+-    let mut result: Vec<E> = tensor_data.to_vec();
++    let result: &mut [E] = tensor.storage_mut();
+ 
+     let tensor_strides: Vec<usize> = compute_strides(&tensor_shape);
+     let indices_strides: Vec<usize> = compute_strides(indices_shape);
+@@ -415,7 +420,7 @@ pub fn scatter_add<E: Element + Pod + Default + Copy + core::ops::AddAssign + Se
+     // Use specialized 2D implementation
+     if ndims == 2 {
+         scatter_add_2d(
+-            &mut result,
++            result,
+             &indices_data,
+             value_data,
+             tensor_shape[0],
+@@ -443,8 +448,7 @@ pub fn scatter_add<E: Element + Pod + Default + Copy + core::ops::AddAssign + Se
+         }
+     }
+ 
+-    let bytes = Bytes::from_elems(result);
+-    FlexTensor::new(bytes, Layout::contiguous(tensor_shape), E::dtype())
++    tensor
+ }
+ 
+ /// Optimized 2D scatter_add implementation.
+@@ -890,7 +894,13 @@ pub fn scatter_nd<
+ ) -> FlexTensor {
+     use burn_backend::tensor::IndexingUpdateOp;
+ 
+-    let data = data.to_contiguous();
++    // Release the caller's handle so a uniquely owned destination is updated
++    // in place below (`storage_mut` copies only a shared buffer).
++    let mut data = {
++        let contiguous = data.to_contiguous();
++        drop(data);
++        contiguous
++    };
+     let indices = indices.to_contiguous();
+     let values = values.to_contiguous();
+ 
+@@ -902,11 +912,10 @@ pub fn scatter_nd<
+     let num_indices: usize = idx_shape[..m - 1].iter().product();
+     let slice_size: usize = data_shape[k..].iter().product();
+ 
+-    let data_data: &[E] = data.storage();
+     let idx_data = read_indices(&indices);
+     let val_data: &[E] = values.storage();
+ 
+-    let mut result: Vec<E> = data_data.to_vec();
++    let result: &mut [E] = data.storage_mut();
+ 
+     let strides = compute_strides(&data_shape);
+ 
+@@ -952,9 +961,7 @@ pub fn scatter_nd<
+         }
+     }
+ 
+-    let shape = Shape::from(data_shape);
+-    let bytes = Bytes::from_elems(result);
+-    FlexTensor::new(bytes, Layout::contiguous(shape), E::dtype())
++    data
+ }
+ 
+ /// Multi-dimensional gather: collect slices from `data` at locations specified by N-dimensional
+diff --git a/crates/burn-flex/src/ops/slice.rs b/crates/burn-flex/src/ops/slice.rs
+index 4844b89..d1d4780 100644
+--- a/crates/burn-flex/src/ops/slice.rs
++++ b/crates/burn-flex/src/ops/slice.rs
+@@ -233,7 +233,15 @@ fn slice_write_impl<E: Element + bytemuck::Pod>(
+     slices: &[Slice],
+     source: WriteSource<'_, E>,
+ ) -> FlexTensor {
+-    let mut tensor = tensor.to_contiguous();
++    // `to_contiguous` returns a handle that shares the buffer when the tensor is
++    // already contiguous. Release the caller's handle before taking mutable
++    // storage, so `storage_mut` writes a uniquely owned destination in place
++    // instead of copying the whole buffer; a shared buffer is still copied.
++    let mut tensor = {
++        let contiguous = tensor.to_contiguous();
++        drop(tensor);
++        contiguous
++    };
+     let dst_layout = tensor.layout().clone();
+     let ndims = dst_layout.num_dims();
+ 
