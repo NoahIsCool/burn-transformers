@@ -1,0 +1,54 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 952e2dd210fde1b8461835132a77257e7e1b85eb3621af1fac63d20fe61e3ffb
+== Metal/F16 metal::metal_long_context_logits_cross_the_sliding_window
+== env TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=f16
+== env TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 metal::metal_long_context_logits_cross_the_sliding_window
+== start 2026-10-17T08:50:58+00:00 load 6.74 13.97 16.18
+
+running 1 test
+test metal::metal_long_context_logits_cross_the_sliding_window ... F16 bounds of prompt 0: max 9.686213636398316e0, mean 7.939982029344071e-2 (1.2 × official BF16 8.071844696998596e0, 6.61665169112006e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16)
+load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 0e0
+windowed: positions 1016..1024: max |Δ| = 0e0
+windowed: positions 1024..1032: max |Δ| = 0e0
+windowed: positions 1032..1088: max |Δ| = 0e0
+windowed: positions 1088..1237: max |Δ| = 0e0
+long prompt (1237 tokens, window 1024): max |Δ| = 0e0 before the window, 0e0 at or beyond it
+
+thread 'metal::metal_long_context_logits_cross_the_sliding_window' (35046089) panicked at tests/support/half_precision_calibration.rs:660:9:
+long prompt: the compared logits hold a non-finite value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    metal::metal_long_context_logits_cross_the_sliding_window
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 15.04s
+
+       15.10 real        11.23 user         2.47 sys
+         10443669504  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1053942  page reclaims
+                  16  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               28020  involuntary context switches
+        194099707275  instructions retired
+         50931197533  cycles elapsed
+         22036897280  peak memory footprint
+== exit=101 wall=15.2s min_free_pct=83 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0

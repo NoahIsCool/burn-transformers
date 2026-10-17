@@ -988,6 +988,15 @@ activation to SiLU.
 [`feed_forward.rs`](src/feed_forward.rs), configuration translation in
 [`t5.rs`](src/models/t5.rs). **Reference:** the pinned FLAN configs above.
 
+**Precision:** Gemma's GeGLU gate is Transformers' `gelu_pytorch_tanh`,
+PyTorch's fused `gelu(approximate="tanh")`, which evaluates F16 and BF16
+inputs in F32 and rounds once; the crate's tanh GELU does the same
+(`apply_activation`). Composing Burn's tanh-GELU operations in BF16 would
+round after each of them and round both constants to BF16. T5 and GPT-2's
+`gelu_new` is a different reference graph: Transformers composes it per
+operation in the activation dtype with unrounded constants, so its
+half-precision rounding is not reproduced bit for bit; the two agree in F32.
+
 <a id="innovation-relu-squared"></a>
 ### ReLU² feed-forward
 

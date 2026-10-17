@@ -1,0 +1,50 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:41:33Z load { 1.85 2.96 5.05 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/official_variants.py /Volumes/T9/models/HuggingFaceTB/SmolLM3-3B /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28 /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-official cpu-float32-eager cpu-bfloat16-eager cpu-bfloat16-sdpa mps-bfloat16-eager mps-bfloat16-sdpa cpu-bfloat16-eager-burnsilu cpu-bfloat16-sdpa-burnsilu mps-bfloat16-eager-burnsilu mps-bfloat16-sdpa-burnsilu
+cpu-float32-eager prompt 0: 5 tokens, max |d| = 0.000000e+00 at position 0 token 0, mean |d| = 0.000000e+00
+cpu-float32-eager prompt 1: 13 tokens, max |d| = 0.000000e+00 at position 0 token 0, mean |d| = 0.000000e+00
+cpu-float32-eager prompt 2: 8 tokens, max |d| = 0.000000e+00 at position 0 token 0, mean |d| = 0.000000e+00
+cpu-bfloat16-eager prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.564337e-01; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 7.887653e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.768915e-01; identical to the official BF16 bundle: True
+cpu-bfloat16-sdpa prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.575333e-01
+cpu-bfloat16-sdpa prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 8.099056e-02
+cpu-bfloat16-sdpa prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.716780e-01
+mps-bfloat16-eager prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.773630e-01
+mps-bfloat16-eager prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 8.655553e-02
+mps-bfloat16-eager prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.534018e-01
+mps-bfloat16-sdpa prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.542793e-01
+mps-bfloat16-sdpa prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 9.710517e-02
+mps-bfloat16-sdpa prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 2.050163e-01
+cpu-bfloat16-eager-burnsilu prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.986719e-01
+cpu-bfloat16-eager-burnsilu prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 1.005010e-01
+cpu-bfloat16-eager-burnsilu prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.727333e-01
+cpu-bfloat16-sdpa-burnsilu prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.670378e-01
+cpu-bfloat16-sdpa-burnsilu prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 8.656611e-02
+cpu-bfloat16-sdpa-burnsilu prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.764182e-01
+mps-bfloat16-eager-burnsilu prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.471167e-01
+mps-bfloat16-eager-burnsilu prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 8.256481e-02
+mps-bfloat16-eager-burnsilu prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.922404e-01
+mps-bfloat16-sdpa-burnsilu prompt 0: 5 tokens, max |d| = 6.281063e+00 at position 0 token 9125, mean |d| = 1.792551e-01
+mps-bfloat16-sdpa-burnsilu prompt 1: 13 tokens, max |d| = 6.671215e+00 at position 0 token 9125, mean |d| = 9.244376e-02
+mps-bfloat16-sdpa-burnsilu prompt 2: 8 tokens, max |d| = 5.328104e+00 at position 0 token 9125, mean |d| = 1.825776e-01
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16 bfloat16
+       28.62 real        24.42 user        17.09 sys
+         18833850368  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2304548  page reclaims
+              375424  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 207  voluntary context switches
+              404821  involuntary context switches
+        443487179486  instructions retired
+        145367538391  cycles elapsed
+         12657993856  peak memory footprint
+== exit=0 wall=28s

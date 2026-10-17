@@ -1,0 +1,164 @@
+== source 896b4ec5ae8e18b0b9ca07760eb284d52088c1d8 dirty=0
+== 2026-10-17T05:57:42Z python 3.11.9 torch 2.10.0 transformers 5.2.0
+== SmolLM-135M-1d461723-bf16: official BF16 twin of /Volumes/T9/transformers-references/SmolLM-135M-1d461723 (reference.json SHA-256 3d3235dc28250bf45284bcf16cb8525db6b1f800f7ec700286909e4afea05010); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 --output /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16 --repository HuggingFaceTB/SmolLM-135M --revision 1d461723eec654e65efdc40cf49301c89c0c92f4 --dtype bfloat16 --greedy-tokens 32 --prompt The capital of France is --prompt "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\u2026" --prompt Rotary position embeddings encode relative distance because
+{"bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16", "prompts": 3}
+        4.11 real         3.18 user         2.75 sys
+          1143488512  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               71210  page reclaims
+               32855  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  27  voluntary context switches
+              269578  involuntary context switches
+         45869110800  instructions retired
+         20073243882  cycles elapsed
+           562726424  peak memory footprint
+== exit=0 wall=4.1s
+== /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16: reference.json SHA-256 5f7bfb10d8a164ec94b13669fbd3829d84b2d049ec55b691c26c1f980f9c348c; token IDs identical to the twin: True; dtype bfloat16
+== Qwen3-4B-531c80e2-bf16: official BF16 twin of /Volumes/T9/transformers-references/Qwen3-4B-531c80e2 (reference.json SHA-256 70fc11946cb9adc97af7a173d419438a9ca2350940b8519ddb33497172985b3a); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/T9/models/Qwen/Qwen3-4B --output /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16 --repository Qwen/Qwen3-4B --revision 531c80e289d6cff3a7cd8c0db8110231d23a6f7a --dtype bfloat16 --greedy-tokens 32 --prompt The capital of France is --prompt "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\u2026" --prompt Rotary position embeddings encode relative distance because
+{"bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16", "prompts": 3}
+       27.91 real        33.00 user        14.05 sys
+          8607744000  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               74304  page reclaims
+              491026  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  35  voluntary context switches
+             1019586  involuntary context switches
+        355710642293  instructions retired
+        160632549068  cycles elapsed
+           428448704  peak memory footprint
+== exit=0 wall=27.9s
+== /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16: reference.json SHA-256 4722fa1374d6e45b2b41f5cc9b6dc882333ea141cd08a14afa2f92865035a804; token IDs identical to the twin: True; dtype bfloat16
+== SmolLM3-3B-1fa6fa28-bf16: official BF16 twin of /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28 (reference.json SHA-256 cf399f62351665297f181c12c68f89d163315cf87001b78a62c0c0335dbd40d7); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/T9/models/HuggingFaceTB/SmolLM3-3B --output /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16 --repository HuggingFaceTB/SmolLM3-3B --revision 1fa6fa281b5c635c89171a2b53769609cc1199c6 --dtype bfloat16 --greedy-tokens 32 --prompt The capital of France is --prompt "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\u2026" --prompt Rotary position embeddings encode relative distance because
+{"bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16", "prompts": 3}
+       26.21 real        25.70 user        11.24 sys
+          6705758208  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               80668  page reclaims
+              375381  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  28  voluntary context switches
+              690331  involuntary context switches
+        280475758392  instructions retired
+        127036665074  cycles elapsed
+           431735792  peak memory footprint
+== exit=0 wall=26.2s
+== /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16: reference.json SHA-256 47cf6ca772af221541fd436d1f565b063034fa2ff16073470c82fd4dd03711ac; token IDs identical to the twin: True; dtype bfloat16
+== gemma-3-4b-it-093f9f38-bf16: official BF16 twin of /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38 (reference.json SHA-256 a3e0fd391940cb5789160c5f08ea4a60fa6eab75075eac3cdb4737afe5c86c86); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/T9/models/google/gemma-3-4b-it --output /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 --repository google/gemma-3-4b-it --revision 093f9f388b31de276ce2de164bdc2081324b9767 --dtype bfloat16 --greedy-tokens 32 --prompt The capital of France is --prompt "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\u2026" --prompt Rotary position embeddings encode relative distance because
+{"bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16", "prompts": 3}
+       29.74 real        35.03 user        10.70 sys
+          8807137280  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              123394  page reclaims
+              473882  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  48  voluntary context switches
+              597351  involuntary context switches
+        394533324146  instructions retired
+        158523565104  cycles elapsed
+           581354840  peak memory footprint
+== exit=0 wall=29.7s
+== /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16: reference.json SHA-256 013c286287024e3d304a1c0293425ef80d5886ef66a671ff41a11b487d32902b; token IDs identical to the twin: True; dtype bfloat16
+== Qwen2-7B-453ed157-f64-bf16: official BF16 twin of /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64 (reference.json SHA-256 a1272a0a6d5b44e733ed3a1b7845e3849cfb20237918d9926ba0ca1939ed8687); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/T9/models/Qwen/Qwen2-7B --output /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16 --repository Qwen/Qwen2-7B --revision 453ed1575b739b5b03ce3758b23befdb0967f40e --dtype bfloat16 --greedy-tokens 32 --prompt The capital of France is --prompt "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\u2026" --prompt Rotary position embeddings encode relative distance because
+{"bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16", "prompts": 3}
+       47.11 real        55.46 user        17.87 sys
+         14732427264  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               72332  page reclaims
+              863182  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  26  voluntary context switches
+              984491  involuntary context switches
+        570395896161  instructions retired
+        254625705668  cycles elapsed
+           442691128  peak memory footprint
+== exit=0 wall=47.1s
+== /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16: reference.json SHA-256 b570f1c8d33d1a634f82e1064690b8de44f6efb3f9daf81f8930a8c43a170941; token IDs identical to the twin: True; dtype bfloat16
+== Llama-3.1-8B-d04e592b-bf16: official BF16 twin of /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b (reference.json SHA-256 3b6b5196d7a864c6d219b29a3366e357057d6e38b1dad00129d1310f0f801edf); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/T9/models/meta-llama/Llama-3.1-8B --output /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 --repository meta-llama/Llama-3.1-8B --revision d04e592bb4f6aa9cfee91e2e20afa771667e1d4b --dtype bfloat16 --greedy-tokens 32 --prompt The capital of France is --prompt "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\u2026" --prompt Rotary position embeddings encode relative distance because
+{"bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16", "prompts": 3}
+       59.34 real        61.34 user        24.39 sys
+         15575711744  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               75762  page reclaims
+              916206  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  32  voluntary context switches
+             1316036  involuntary context switches
+        647977444514  instructions retired
+        295501447469  cycles elapsed
+           436667400  peak memory footprint
+== exit=0 wall=59.3s
+== /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16: reference.json SHA-256 2d909999f5e7d418dd5d25a4cb3d62f4d5fe111aaa3428781f2ece1c06f023c3; token IDs identical to the twin: True; dtype bfloat16
+== gemma-3-4b-it-093f9f38-long-bf16: official BF16 twin of /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long (reference.json SHA-256 b73b85f0f503524a16eba289ed633bdd73139fbfa3008640732ef5d39b774cf4); 383 GiB free on /Volumes/T9/transformers-references
+== command /usr/bin/time -l python3 -I scripts/generate_causal_lm_reference.py --model-dir /Volumes/T9/models/google/gemma-3-4b-it --output /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16 --repository google/gemma-3-4b-it --revision 093f9f388b31de276ce2de164bdc2081324b9767 --dtype bfloat16 --greedy-tokens 8 --prompt "Field notes.\nEntry 1: the blue heron walked to the old mill \u2026"
+{"bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16", "prompts": 1}
+      184.45 real       671.34 user        10.08 sys
+         11763335168  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              897052  page reclaims
+                  44  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                1242  voluntary context switches
+              196347  involuntary context switches
+      10975383272487  instructions retired
+       2443753777885  cycles elapsed
+          3140675208  peak memory footprint
+== exit=0 wall=184.5s
+== /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16: reference.json SHA-256 7b9ed384edd3e8e6a6605093b18ede05ee6aa83c35edc47b5c89baa56536113c; token IDs identical to the twin: True; dtype bfloat16
+== driver exit=0

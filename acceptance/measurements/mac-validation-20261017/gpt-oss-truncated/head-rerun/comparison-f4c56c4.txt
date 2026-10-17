@@ -1,0 +1,52 @@
+1layer Flex/F32 flex_prompt_logits_match_the_reference: ok exit=0 wall=4.1s load=2.940728167s peak=15.136 GB (f4c56c4 17.176 GB, delta -2040.1 MB) identical_lines=True
+    prompt 0: 5 tokens, max |Δ| = 7.6293945e-5, mean |Δ| = 3.3899559309188657e-6
+    prompt 1: 13 tokens, max |Δ| = 7.05719e-5, mean |Δ| = 3.18732724717849e-6
+    prompt 2: 8 tokens, max |Δ| = 6.1035156e-5, mean |Δ| = 3.6147020893332775e-6
+1layer Flex/F32 flex_cached_greedy_matches_the_reference: ok exit=0 wall=6.1s load=2.951858833s peak=15.123 GB (f4c56c4 17.159 GB, delta -2037.0 MB) identical_lines=True
+    greedy: 32 of 32 tokens match
+1layer Flex/F32 flex_batched_prefill_matches_the_reference: ok exit=0 wall=4.1s load=2.948546625s peak=15.131 GB (f4c56c4 17.167 GB, delta -2035.6 MB) identical_lines=True
+    batched row 0: max |Δ| = 4.9591064e-5 to the reference, 4.9591064e-5 to the stateless pass
+    batched row 1: max |Δ| = 4.2915344e-5 to the reference, 3.71933e-5 to the stateless pass
+    batched row 2: max |Δ| = 5.1498413e-5 to the reference, 5.340576e-5 to the stateless pass
+1layer Flex/F32 flex_cached_long_prompt_matches_the_reference: ok exit=0 wall=4.1s load=2.95238675s peak=15.123 GB (f4c56c4 17.159 GB, delta -2036.5 MB) identical_lines=True
+    cached decode of a 13-token prompt (prefill 3): max |Δ| = 2.9563904e-5
+1layer Metal/F32 metal::metal_prompt_logits_match_the_reference: ok exit=0 wall=5.1s load=3.492171083s peak=22.566 GB (f4c56c4 27.542 GB, delta -4976.1 MB) identical_lines=True
+    prompt 0: 5 tokens, max |Δ| = 3.1471252e-5, mean |Δ| = 2.7181729764209066e-6
+    prompt 1: 13 tokens, max |Δ| = 2.9563904e-5, mean |Δ| = 2.2323041431836017e-6
+    prompt 2: 8 tokens, max |Δ| = 3.2424927e-5, mean |Δ| = 2.4995351325743624e-6
+1layer Metal/F32 metal::metal_cached_greedy_matches_the_reference: ok exit=0 wall=6.1s load=3.474774834s peak=22.634 GB (f4c56c4 27.543 GB, delta -4909.5 MB) identical_lines=True
+    greedy: 32 of 32 tokens match
+1layer Metal/F32 metal::metal_batched_prefill_matches_the_reference: ok exit=0 wall=5.1s load=3.463855792s peak=22.633 GB (f4c56c4 27.539 GB, delta -4906.1 MB) identical_lines=True
+    batched row 0: max |Δ| = 2.2888184e-5 to the reference, 0e0 to the stateless pass
+    batched row 1: max |Δ| = 1.6212463e-5 to the reference, 0e0 to the stateless pass
+    batched row 2: max |Δ| = 1.7642975e-5 to the reference, 9.536743e-6 to the stateless pass
+1layer Metal/F32 metal::metal_cached_long_prompt_matches_the_reference: ok exit=0 wall=5.1s load=3.472468833s peak=22.634 GB (f4c56c4 27.543 GB, delta -4909.3 MB) identical_lines=True
+    cached decode of a 13-token prompt (prefill 3): max |Δ| = 3.2424927e-5
+4layer Flex/F32 flex_prompt_logits_match_the_reference: ok exit=0 wall=12.2s load=9.247697208s peak=25.258 GB (f4c56c4 27.295 GB, delta -2037.6 MB) identical_lines=True
+    prompt 0: 5 tokens, max |Δ| = 5.6266785e-5, mean |Δ| = 4.877037294840762e-6
+    prompt 1: 13 tokens, max |Δ| = 6.484985e-5, mean |Δ| = 4.107968881426281e-6
+    prompt 2: 8 tokens, max |Δ| = 6.866455e-5, mean |Δ| = 4.96400607592685e-6
+    prompt 3: 183 tokens, max |Δ| = 1.282692e-4, mean |Δ| = 4.454966948125984e-6
+4layer Flex/F32 flex_cached_greedy_matches_the_reference: ok exit=0 wall=13.2s load=9.244956125s peak=25.204 GB (f4c56c4 27.239 GB, delta -2035.0 MB) identical_lines=True
+    greedy: 32 of 32 tokens match
+4layer Flex/F32 flex_batched_prefill_matches_the_reference: ok exit=0 wall=13.2s load=9.250895542s peak=25.478 GB (f4c56c4 27.499 GB, delta -2020.6 MB) identical_lines=True
+    batched row 0: max |Δ| = 5.531311e-5 to the reference, 4.5776367e-5 to the stateless pass
+    batched row 1: max |Δ| = 3.8146973e-5 to the reference, 3.9100647e-5 to the stateless pass
+    batched row 2: max |Δ| = 6.866455e-5 to the reference, 4.7683716e-5 to the stateless pass
+    batched row 3: max |Δ| = 4.7683716e-5 to the reference, 4.386902e-5 to the stateless pass
+4layer Flex/F32 flex_cached_long_prompt_matches_the_reference: ok exit=0 wall=23.3s load=9.241591167s peak=25.218 GB (f4c56c4 27.251 GB, delta -2033.1 MB) identical_lines=True
+    cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.673004e-5
+4layer Metal/F32 metal::metal_prompt_logits_match_the_reference: ok exit=0 wall=13.2s load=9.913157708s peak=30.294 GB (f4c56c4 39.052 GB, delta -8758.5 MB) identical_lines=True
+    prompt 0: 5 tokens, max |Δ| = 4.673004e-5, mean |Δ| = 4.405056670753809e-6
+    prompt 1: 13 tokens, max |Δ| = 3.8146973e-5, mean |Δ| = 3.803721218192966e-6
+    prompt 2: 8 tokens, max |Δ| = 4.9591064e-5, mean |Δ| = 4.411954888482253e-6
+    prompt 3: 183 tokens, max |Δ| = 5.1021576e-5, mean |Δ| = 3.914985075923837e-6
+4layer Metal/F32 metal::metal_cached_greedy_matches_the_reference: ok exit=0 wall=13.2s load=9.854729542s peak=30.295 GB (f4c56c4 39.055 GB, delta -8759.9 MB) identical_lines=True
+    greedy: 32 of 32 tokens match
+4layer Metal/F32 metal::metal_batched_prefill_matches_the_reference: ok exit=0 wall=13.2s load=9.880399917s peak=30.379 GB (f4c56c4 39.084 GB, delta -8704.9 MB) identical_lines=True
+    batched row 0: max |Δ| = 3.886223e-5 to the reference, 2.5749207e-5 to the stateless pass
+    batched row 1: max |Δ| = 3.0994415e-5 to the reference, 2.2888184e-5 to the stateless pass
+    batched row 2: max |Δ| = 3.6239624e-5 to the reference, 2.9563904e-5 to the stateless pass
+    batched row 3: max |Δ| = 2.861023e-5 to the reference, 0e0 to the stateless pass
+4layer Metal/F32 metal::metal_cached_long_prompt_matches_the_reference: ok exit=0 wall=19.3s load=9.869922875s peak=30.298 GB (f4c56c4 39.059 GB, delta -8760.5 MB) identical_lines=True
+    cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.863739e-5

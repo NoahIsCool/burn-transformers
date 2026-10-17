@@ -1,0 +1,39 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Flex/F32 flex_long_context_cached_decode_wraps_the_rings
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_long_context_cached_decode_wraps_the_rings
+== start 2026-10-17T08:05:22+00:00 load 12.08 9.31 6.25
+
+running 1 test
+test flex_long_context_cached_decode_wraps_the_rings ... load: 439 vision-tower tensors intentionally ignored
+cached: capacity 1245, 29 layers in 1024-slot rings
+cached chunk 0..1000: max |Δ| = 1.5115738e-4 at position 999
+cached chunk 1000..1237: max |Δ| = 6.818771e-5 at position 1236
+long greedy: 8 of 8 tokens match
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 29.98s
+
+       30.01 real       112.90 user         5.81 sys
+         23166812160  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1426192  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              160193  involuntary context switches
+       1555571277937  instructions retired
+        401094108353  cycles elapsed
+         23168058288  peak memory footprint
+== exit=0 wall=30.6s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

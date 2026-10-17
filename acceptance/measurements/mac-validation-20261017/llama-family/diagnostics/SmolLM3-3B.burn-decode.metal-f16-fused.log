@@ -1,0 +1,23 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:48:28Z load { 1.99 2.79 4.20 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump metal f16 /Volumes/T9/models/HuggingFaceTB/SmolLM3-3B 791\,6864\,315\,9822\,374\,12366\,13\,1102\,374\,279\,7928\,3363\,304\,9822\,323\,279\,1455\,95551\,58506\,3158\,304\,279\,7665\,9323\,13\,578\,3363\,374\,31183\,304\,18671\,85181\,9822\,11\,389\,279\,15140 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-burn-decode/metal-f16-fused fused 5
+wrote 38 points for 37 tokens (eager=false, prefill=5) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-burn-decode/metal-f16-fused
+       31.11 real         5.12 user        26.33 sys
+          3392536576  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              491385  page reclaims
+                  29  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 215  voluntary context switches
+              143813  involuntary context switches
+        504243130519  instructions retired
+        115757571057  cycles elapsed
+          9199586136  peak memory footprint
+== exit=0 wall=31s

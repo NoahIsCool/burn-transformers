@@ -1,0 +1,32 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:34:58Z load { 7.20 6.24 6.98 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/official_variants.py /Volumes/bag\ of\ holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 /Volumes/T9/transformers-references/SmolLM-135M-1d461723 /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM-135M-official-burnsilu cpu-bfloat16-eager-burnsilu cpu-bfloat16-sdpa-burnsilu mps-bfloat16-eager-burnsilu
+cpu-bfloat16-eager-burnsilu prompt 0: 5 tokens, max |d| = 1.380739e+00 at position 0 token 12844, mean |d| = 1.254415e-01
+cpu-bfloat16-eager-burnsilu prompt 1: 18 tokens, max |d| = 1.591841e+00 at position 0 token 6491, mean |d| = 1.092071e-01
+cpu-bfloat16-eager-burnsilu prompt 2: 8 tokens, max |d| = 2.121096e+00 at position 0 token 7953, mean |d| = 1.793000e-01
+cpu-bfloat16-sdpa-burnsilu prompt 0: 5 tokens, max |d| = 1.380739e+00 at position 0 token 12844, mean |d| = 2.122006e-01
+cpu-bfloat16-sdpa-burnsilu prompt 1: 18 tokens, max |d| = 1.591841e+00 at position 0 token 6491, mean |d| = 1.249734e-01
+cpu-bfloat16-sdpa-burnsilu prompt 2: 8 tokens, max |d| = 2.121096e+00 at position 0 token 7953, mean |d| = 1.789334e-01
+mps-bfloat16-eager-burnsilu prompt 0: 5 tokens, max |d| = 1.166528e+00 at position 0 token 19178, mean |d| = 1.381126e-01
+mps-bfloat16-eager-burnsilu prompt 1: 18 tokens, max |d| = 1.435591e+00 at position 0 token 6491, mean |d| = 1.052178e-01
+mps-bfloat16-eager-burnsilu prompt 2: 8 tokens, max |d| = 1.662742e+00 at position 0 token 9870, mean |d| = 1.768366e-01
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16 bfloat16
+        2.65 real         2.72 user         1.27 sys
+          1238089728  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              160346  page reclaims
+                   5  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  12  voluntary context switches
+               55817  involuntary context switches
+         39796517453  instructions retired
+         14426313880  cycles elapsed
+          1750321120  peak memory footprint
+== exit=0 wall=2s

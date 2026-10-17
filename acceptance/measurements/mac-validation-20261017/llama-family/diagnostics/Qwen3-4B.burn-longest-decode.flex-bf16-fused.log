@@ -1,0 +1,24 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:55:04Z load { 2.33 2.88 3.71 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump flex bf16 /Volumes/T9/models/Qwen/Qwen3-4B 750\,75698\,1445\,982\,262\,4210\,5598\,279\,308\,7563\,79683\,1372\,14442 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/Qwen3-4B-burn-longest-decode/flex-bf16-fused fused 3
+wrote 38 points for 13 tokens (eager=false, prefill=3) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/Qwen3-4B-burn-longest-decode/flex-bf16-fused
+       33.38 real        25.08 user        15.67 sys
+         10687430656  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              659195  page reclaims
+                 384  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 105  voluntary context switches
+              202360  involuntary context switches
+        422489479423  instructions retired
+        143496623200  cycles elapsed
+         10683261184  peak memory footprint
+== exit=0 wall=33s
+Qwen3-4B-burn-longest-decode/flex-bf16-fused: prompt 1 decoded after a 3-token prefill (prefill rows from the stateless pass): max 0.7323 at pos 0 (bound 0.8413), mean 0.04932 (bound 0.05204)

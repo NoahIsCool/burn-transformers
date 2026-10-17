@@ -104,7 +104,10 @@
 //! `τ = 0.16`. At the F32 defaults (`1e-3`; `5e-3` across Gemma's window)
 //! every step of every pinned F32 or F64 Llama-family, Gemma, and gpt-oss
 //! bundle is decisive, so both rules compare all of them and the recorded F32
-//! results are unchanged.
+//! results are unchanged. A half-precision Llama-family or Gemma run decides
+//! its steps by the same rule, with its prompt 0's official maximum bound as
+//! the tolerance (`Bound::greedy_tolerance` in
+//! `tests/support/half_precision_calibration.rs`).
 
 #![allow(
     dead_code,

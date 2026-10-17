@@ -1,0 +1,56 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Flex/BF16 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-17T07:19:44+00:00 load 6.46 8.51 10.82
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... BF16 bounds of prompt 0: max 8.400341033935547e-1, mean 9.356504341905933e-2 (1.2 × official BF16 7.000284194946289e-1, 7.797086951588278e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+BF16 bounds of prompt 1: max 8.413138389587402e-1, mean 5.2039653755092376e-2 (1.2 × official BF16 7.010948657989502e-1, 4.336637812924365e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+BF16 bounds of prompt 2: max 1.0554290771484374e0, mean 6.461845336599158e-2 (1.2 × official BF16 8.795242309570313e-1, 5.3848711138326316e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+cached prefill: max |Δ| = 2.7427005767822266e-1 to the reference (bound 8.400341033935547e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy step 0: reference margin 8.411083e-1 is not decisive; skipped
+greedy step 1: reference margin 1.67276e0 is not decisive; skipped
+greedy step 3: reference margin 1.443016e0 is not decisive; skipped
+greedy step 5: reference margin 1.1731529e-1 is not decisive; skipped
+greedy step 12: reference margin 7.9367065e-1 is not decisive; skipped
+greedy step 26: reference margin 1.270256e0 is not decisive; skipped
+greedy: 26 of 32 tokens match
+
+thread 'flex_cached_greedy_matches_the_reference' (34506756) panicked at tests/support/half_precision_calibration.rs:1073:13:
+cached decode step 1 at position 6: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    flex_cached_greedy_matches_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 29.46s
+
+       29.47 real        43.78 user         5.46 sys
+         10729357312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              662120  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              198998  involuntary context switches
+        549640414377  instructions retired
+        174594143721  cycles elapsed
+         10724483352  peak memory footprint
+== exit=101 wall=30.5s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

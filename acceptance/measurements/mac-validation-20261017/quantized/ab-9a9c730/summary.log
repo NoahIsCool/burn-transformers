@@ -1,0 +1,19 @@
+2026-10-17T12:01:48+00:00 lock acquired (waited 0s)
+2026-10-17T12:20:34+00:00 muse-q8-smoke.r1-control Metal/F16 activations + packed Q8/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal: == exit=0 wall=1125.4s min_free_pct=50 max_swap_growth_mib=0 swapin_mib=11 pressured_swapin_mib=0 end=2026-10-17T12:20:34+00:00 end_load 52.37 89.93 80.38
+2026-10-17T12:20:34+00:00 lock released
+2026-10-17T12:20:34+00:00 lock acquired (waited 0s)
+2026-10-17T12:31:40+00:00 muse-q8-smoke.r1-head Metal/F16 activations + packed Q8/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal: == exit=0 wall=665.8s min_free_pct=59 max_swap_growth_mib=0 swapin_mib=4 pressured_swapin_mib=0 end=2026-10-17T12:31:40+00:00 end_load 2.35 13.84 39.80
+2026-10-17T12:31:40+00:00 lock released
+2026-10-17T12:31:40+00:00 lock acquired (waited 0s)
+2026-10-17T12:42:47+00:00 muse-q8-smoke.r2-control Metal/F16 activations + packed Q8/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal: == exit=0 wall=666.0s min_free_pct=49 max_swap_growth_mib=0 swapin_mib=29 pressured_swapin_mib=0 end=2026-10-17T12:42:47+00:00 end_load 2.14 3.36 19.21
+2026-10-17T12:42:47+00:00 lock released
+2026-10-17T12:42:47+00:00 lock acquired (waited 0s)
+2026-10-17T12:53:56+00:00 muse-q8-smoke.r2-head Metal/F16 activations + packed Q8/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal: == exit=0 wall=669.1s min_free_pct=47 max_swap_growth_mib=0 swapin_mib=12 pressured_swapin_mib=0 end=2026-10-17T12:53:56+00:00 end_load 2.83 2.38 9.92
+2026-10-17T12:53:56+00:00 lock released
+2026-10-17T12:53:56+00:00 lock acquired (waited 0s)
+2026-10-17T13:02:04+00:00 muse-q4-smoke.r1-control Metal/F16 activations + packed Q4/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal: == exit=0 wall=487.6s min_free_pct=70 max_swap_growth_mib=0 swapin_mib=19 pressured_swapin_mib=0 end=2026-10-17T13:02:04+00:00 end_load 2.53 2.15 6.43
+2026-10-17T13:02:04+00:00 lock released
+2026-10-17T13:02:05+00:00 lock acquired (waited 0s)
+2026-10-17T13:10:10+00:00 muse-q4-smoke.r1-head Metal/F16 activations + packed Q4/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal: == exit=0 wall=484.8s min_free_pct=69 max_swap_growth_mib=0 swapin_mib=5 pressured_swapin_mib=0 end=2026-10-17T13:10:10+00:00 end_load 2.61 2.36 4.62
+2026-10-17T13:10:10+00:00 lock released
+2026-10-17T13:10:10Z ab exit

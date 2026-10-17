@@ -1,0 +1,514 @@
+## Llama-3.1-8B.bf16.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 3.125e-2 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 9.53226089477539e-2 to the reference (bound 1.6489391326904296e-1)
+batched row 1: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 1.4556217193603516e-1 to the reference (bound 2.5460836887359617e-1)
+batched row 2: max |Δ| = 3.125e-2 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.0872650146484375e-1 to the reference (bound 2.1823139190673826e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 15.94s
+15.97 real       116.57 user         7.83 sys
+20900789440  peak memory footprint
+== exit=0 wall=16.4s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.bf16.flex.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 9.53226089477539e-2 to the reference (bound 1.6489391326904296e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 27 of 32 tokens match
+cached decode: 32 decode steps from position 6: max |Δ| = 1.875e-1 to the stateless pass, at step 21 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 14 tokens, max |Δ| = 1.552443504333496e-1 at position 13 (bound 2.5460836887359617e-1), mean |Δ| = 1.958577064508735e-2 (bound 2.6541438644412937e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 54.49s
+54.51 real       132.28 user         7.90 sys
+20952874200  peak memory footprint
+== exit=0 wall=55.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.bf16.flex.prompt_logits_match_the_reference
+prompt 0: 6 tokens, max |Δ| = 1.2853384017944336e-1 at position 3 (bound 1.6489391326904296e-1), mean |Δ| = 1.7536760954088116e-2 (bound 2.060356723291985e-2)
+prompt 1: 14 tokens, max |Δ| = 1.603710651397705e-1 at position 11 (bound 2.5460836887359617e-1), mean |Δ| = 1.9057836976810027e-2 (bound 2.6541438644412937e-2)
+prompt 2: 9 tokens, max |Δ| = 1.339569091796875e-1 at position 2 (bound 2.1823139190673826e-1), mean |Δ| = 1.9369582470344923e-2 (bound 2.7870002538754903e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 10.87s
+10.90 real        61.36 user         6.61 sys
+20889976000  peak memory footprint
+== exit=0 wall=11.2s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f16.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 1.2764453887939453e-2 to the reference (bound 1.6489391326904296e-1)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.3163318634033203e-2 to the reference (bound 2.5460836887359617e-1)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.639270782470703e-2 to the reference (bound 2.1823139190673826e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.60s
+8.63 real         4.82 user         3.50 sys
+22469055600  peak memory footprint
+== exit=0 wall=9.1s min_free_pct=82 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f16.metal.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 1.2764453887939453e-2 to the reference (bound 1.6489391326904296e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 27 of 32 tokens match
+cached decode: 32 decode steps from position 6: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 14 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 2.5460836887359617e-1), mean |Δ| = 4.072374337708538e-3 (bound 2.6541438644412937e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 12.09s
+12.12 real         7.01 user         3.96 sys
+22455440496  peak memory footprint
+== exit=0 wall=12.2s min_free_pct=76 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f16.metal.prompt_logits_match_the_reference
+prompt 0: 6 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 1.6489391326904296e-1), mean |Δ| = 4.241448852490681e-3 (bound 2.060356723291985e-2)
+prompt 1: 14 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 2.5460836887359617e-1), mean |Δ| = 4.072374337708538e-3 (bound 2.6541438644412937e-2)
+prompt 2: 9 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 2.1823139190673826e-1), mean |Δ| = 4.129572535024818e-3 (bound 2.7870002538754903e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.41s
+8.43 real         4.75 user         3.52 sys
+22463730848  peak memory footprint
+== exit=0 wall=9.1s min_free_pct=81 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f32.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 6.2942505e-5
+batched row 1: max |Δ| = 5.531311e-5
+batched row 2: max |Δ| = 5.340576e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 11.21s
+11.27 real        71.88 user         6.17 sys
+36079200056  peak memory footprint
+== exit=0 wall=12.3s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f32.flex.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 24.83s
+24.88 real        44.07 user         5.95 sys
+36070369032  peak memory footprint
+== exit=0 wall=25.4s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f32.flex.prompt_logits_match_the_reference
+prompt 0: 6 tokens, max |Δ| = 7.05719e-5
+prompt 1: 14 tokens, max |Δ| = 6.389618e-5
+prompt 2: 9 tokens, max |Δ| = 7.1525574e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 33.82s
+33.88 real        67.63 user        10.99 sys
+36064438048  peak memory footprint
+== exit=0 wall=34.6s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f32.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 4.6253204e-5
+batched row 1: max |Δ| = 5.38826e-5
+batched row 2: max |Δ| = 4.9591064e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.31s
+8.36 real         2.97 user         4.97 sys
+43999126456  peak memory footprint
+== exit=0 wall=9.2s min_free_pct=62 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f32.metal.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 16.03s
+16.08 real         4.37 user         5.50 sys
+43964310456  peak memory footprint
+== exit=0 wall=16.2s min_free_pct=60 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Llama-3.1-8B.f32.metal.prompt_logits_match_the_reference
+prompt 0: 6 tokens, max |Δ| = 6.484985e-5
+prompt 1: 14 tokens, max |Δ| = 7.605553e-5
+prompt 2: 9 tokens, max |Δ| = 6.246567e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 13.39s
+13.46 real         3.11 user         5.75 sys
+43984741328  peak memory footprint
+== exit=0 wall=14.2s min_free_pct=66 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.bf16.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 1.1310577392578125e-1 to the reference (bound 1.0186697816848755e1)
+batched row 1: max |Δ| = 3.125e-2 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 1.6700506210327148e-1 to the reference (bound 8.214763927459716e0)
+batched row 2: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.412830352783203e-1 to the reference (bound 1.2866773796081542e1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 9.65s
+9.68 real        37.40 user         7.91 sys
+19225426272  peak memory footprint
+== exit=0 wall=10.2s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.bf16.flex.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 1.1310577392578125e-1 to the reference (bound 1.0186697816848755e1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 0 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 3.28125e-1 to the stateless pass, at step 21 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 13 tokens, max |Δ| = 6.658136606216431e0 at position 0 (bound 8.214763927459716e0), mean |Δ| = 1.3892350567926912e-1 (bound 3.7447859357650626e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 49.78s
+49.81 real        75.92 user         7.92 sys
+19263093088  peak memory footprint
+== exit=0 wall=50.8s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.bf16.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 8.582664847373962e0 at position 0 (bound 1.0186697816848755e1), mean |Δ| = 2.6560149607984423e-1 (bound 5.052116817270026e-1)
+prompt 1: 13 tokens, max |Δ| = 6.658136606216431e0 at position 0 (bound 8.214763927459716e0), mean |Δ| = 1.463923012986101e-1 (bound 3.7447859357650626e-1)
+prompt 2: 8 tokens, max |Δ| = 1.122231149673462e1 at position 0 (bound 1.2866773796081542e1), mean |Δ| = 3.760535200647879e-1 (bound 8.100082570225497e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.99s
+8.02 real        26.80 user         6.65 sys
+19230013792  peak memory footprint
+== exit=0 wall=8.1s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f16.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 1.4990839958190918e0 to the reference (bound 1.0186697816848755e1)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 1.7922477722167969e0 to the reference (bound 8.214763927459716e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 2.003965377807617e0 to the reference (bound 1.2866773796081542e1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.13s
+8.15 real         4.57 user         3.37 sys
+21263340848  peak memory footprint
+== exit=0 wall=9.2s min_free_pct=77 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f16.metal.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 1.4990839958190918e0 to the reference (bound 1.0186697816848755e1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 0 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 13 tokens, max |Δ| = 6.063056468963623e0 at position 0 (bound 8.214763927459716e0), mean |Δ| = 3.588853462510771e-1 (bound 3.7447859357650626e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 11.40s
+11.43 real         6.50 user         3.76 sys
+21291733960  peak memory footprint
+== exit=0 wall=12.2s min_free_pct=76 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f16.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 2.2135132551193237e0 at position 3 (bound 1.0186697816848755e1), mean |Δ| = 2.417193637029993e-1 (bound 5.052116817270026e-1)
+prompt 1: 13 tokens, max |Δ| = 6.063056468963623e0 at position 0 (bound 8.214763927459716e0), mean |Δ| = 3.588853462510771e-1 (bound 3.7447859357650626e-1)
+prompt 2: 8 tokens, max |Δ| = 2.003965377807617e0 at position 7 (bound 1.2866773796081542e1), mean |Δ| = 2.2658974975714197e-1 (bound 8.100082570225497e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.02s
+8.05 real         4.52 user         3.37 sys
+21266978048  peak memory footprint
+== exit=0 wall=8.1s min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f32.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 3.0994415e-5
+batched row 1: max |Δ| = 3.361702e-5
+batched row 2: max |Δ| = 4.4822693e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.29s
+7.35 real        24.75 user         5.57 sys
+34621023216  peak memory footprint
+== exit=0 wall=8.2s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f32.flex.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 25.18s
+25.24 real        36.51 user         5.31 sys
+34613584880  peak memory footprint
+== exit=0 wall=25.4s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f32.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 4.2915344e-5
+prompt 1: 13 tokens, max |Δ| = 2.8562546e-4
+prompt 2: 8 tokens, max |Δ| = 1.821518e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 30.00s
+30.09 real        32.05 user        10.08 sys
+34622137328  peak memory footprint
+== exit=0 wall=30.5s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f32.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 7.534027e-5
+batched row 1: max |Δ| = 6.389618e-5
+batched row 2: max |Δ| = 6.484985e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.05s
+8.11 real         2.83 user         4.88 sys
+43590150752  peak memory footprint
+== exit=0 wall=8.1s min_free_pct=65 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f32.metal.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 15.69s
+15.75 real         4.08 user         5.33 sys
+43583793712  peak memory footprint
+== exit=0 wall=16.2s min_free_pct=62 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen2-7B-f64.f32.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 5.181432e-4
+prompt 1: 13 tokens, max |Δ| = 3.8588047e-4
+prompt 2: 8 tokens, max |Δ| = 1.8978119e-3
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 13.28s
+13.35 real         2.96 user         5.58 sys
+43583793736  peak memory footprint
+== exit=0 wall=14.2s min_free_pct=66 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.bf16.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 3.125e-2 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 2.7427005767822266e-1 to the reference (bound 8.400341033935547e-1)
+batched row 1: max |Δ| = 3.125e-2 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.3467731475830078e-1 to the reference (bound 8.413138389587402e-1)
+batched row 2: max |Δ| = 3.125e-2 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.0748600959777832e-1 to the reference (bound 1.0554290771484374e0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.25s
+7.26 real        25.58 user         6.59 sys
+10709164288  peak memory footprint
+== exit=0 wall=8.2s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.bf16.flex.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 2.7427005767822266e-1 to the reference (bound 8.400341033935547e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 26 of 32 tokens match
+thread 'flex_cached_greedy_matches_the_reference' (34506756) panicked at tests/support/half_precision_calibration.rs:1073:13:
+cached decode step 1 at position 6: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 29.46s
+29.47 real        43.78 user         5.46 sys
+10724483352  peak memory footprint
+== exit=101 wall=30.5s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.bf16.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 7.688226699829102e-1 at position 0 (bound 8.400341033935547e-1), mean |Δ| = 5.88095239065007e-2 (bound 9.356504341905933e-2)
+prompt 1: 13 tokens, max |Δ| = 7.323448657989502e-1 at position 0 (bound 8.413138389587402e-1), mean |Δ| = 4.988319217483412e-2 (bound 5.2039653755092376e-2)
+prompt 2: 8 tokens, max |Δ| = 6.613216400146484e-1 at position 0 (bound 1.0554290771484374e0), mean |Δ| = 3.9489660686103045e-2 (bound 6.461845336599158e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 5.64s
+5.65 real        16.97 user         5.36 sys
+10693189888  peak memory footprint
+== exit=0 wall=6.1s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f16.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 4.73027229309082e-2 to the reference (bound 8.400341033935547e-1)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.3888587951660156e-2 to the reference (bound 8.413138389587402e-1)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.8686771392822266e-2 to the reference (bound 1.0554290771484374e0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.62s
+4.64 real         2.70 user         1.82 sys
+11748527560  peak memory footprint
+== exit=0 wall=5.1s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f16.metal.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 4.73027229309082e-2 to the reference (bound 8.400341033935547e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 26 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 13 tokens, max |Δ| = 6.45301342010498e-2 at position 0 (bound 8.413138389587402e-1), mean |Δ| = 5.8344752422051175e-3 (bound 5.2039653755092376e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.15s
+7.17 real         5.41 user         2.37 sys
+11748445640  peak memory footprint
+== exit=0 wall=8.1s min_free_pct=84 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f16.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 4.73027229309082e-2 at position 4 (bound 8.400341033935547e-1), mean |Δ| = 4.976689390551652e-3 (bound 9.356504341905933e-2)
+prompt 1: 13 tokens, max |Δ| = 6.45301342010498e-2 at position 0 (bound 8.413138389587402e-1), mean |Δ| = 5.8344752422051175e-3 (bound 5.2039653755092376e-2)
+prompt 2: 8 tokens, max |Δ| = 1.6913414001464844e-1 at position 0 (bound 1.0554290771484374e0), mean |Δ| = 6.684873947032355e-3 (bound 6.461845336599158e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.52s
+4.54 real         2.63 user         1.80 sys
+11747954096  peak memory footprint
+== exit=0 wall=5.1s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f32.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 1.2207031e-4
+batched row 1: max |Δ| = 5.8174133e-5
+batched row 2: max |Δ| = 4.7683716e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.34s
+4.36 real        15.22 user         3.15 sys
+18838009800  peak memory footprint
+== exit=0 wall=5.1s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f32.flex.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 13.40s
+13.42 real        19.43 user         3.09 sys
+18820183936  peak memory footprint
+== exit=0 wall=14.3s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f32.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 1.2207031e-4
+prompt 1: 13 tokens, max |Δ| = 1.335144e-4
+prompt 2: 8 tokens, max |Δ| = 1.411438e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 15.10s
+15.12 real        18.75 user         6.23 sys
+18824607688  peak memory footprint
+== exit=0 wall=15.3s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f32.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 1.05023384e-4
+batched row 1: max |Δ| = 6.2942505e-5
+batched row 2: max |Δ| = 4.196167e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.46s
+4.50 real         1.62 user         2.58 sys
+24170683016  peak memory footprint
+== exit=0 wall=5.1s min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f32.metal.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 9.90s
+9.94 real         3.47 user         3.00 sys
+24123660888  peak memory footprint
+== exit=0 wall=10.1s min_free_pct=76 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## Qwen3-4B.f32.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 1.05023384e-4
+prompt 1: 13 tokens, max |Δ| = 8.4877014e-5
+prompt 2: 8 tokens, max |Δ| = 6.1035156e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.37s
+7.41 real         1.76 user         2.68 sys
+24170732144  peak memory footprint
+== exit=0 wall=8.1s min_free_pct=76 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.bf16.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 1.8778610229492188e-1 to the reference (bound 1.7564580917358399e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.716398239135742e-1 to the reference (bound 1.321504783630371e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 2.524232864379883e-1 to the reference (bound 1.9828147888183594e0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.81s
+0.81 real         1.10 user         0.85 sys
+491193280  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.bf16.flex.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 1.8778610229492188e-1 to the reference (bound 1.7564580917358399e0)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 0 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 4-token prefill: 18 tokens, max |Δ| = 1.4355907440185547e0 at position 0 (bound 1.321504783630371e0), mean |Δ| = 7.91999231624649e-2 (bound 9.058183002097439e-2)
+thread 'flex_cached_greedy_matches_the_reference' (34488026) panicked at tests/support/half_precision_calibration.rs:963:9:
+prompt 1 decoded after a 4-token prefill: max |Δ| = 1.4355907440185547e0 exceeds the half-precision bound 1.321504783630371e0 of prompt 1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 6.03s
+6.03 real         6.23 user         0.55 sys
+524010432  peak memory footprint
+== exit=101 wall=6.1s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.bf16.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 1.1665282249450684e0 at position 0 (bound 1.7564580917358399e0), mean |Δ| = 1.5909925353384358e-1 (bound 2.283324482324453e-1)
+prompt 1: 18 tokens, max |Δ| = 1.4355907440185547e0 at position 0 (bound 1.321504783630371e0), mean |Δ| = 7.91999231624649e-2 (bound 9.058183002097439e-2)
+thread 'flex_prompt_logits_match_the_reference' (34487893) panicked at tests/support/half_precision_calibration.rs:963:9:
+prompt 1: max |Δ| = 1.4355907440185547e0 exceeds the half-precision bound 1.321504783630371e0 of prompt 1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.47s
+0.47 real         0.53 user         0.27 sys
+498566080  peak memory footprint
+== exit=101 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f16.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 3.796720504760742e-2 to the reference (bound 1.7564580917358399e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 4.71034049987793e-2 to the reference (bound 1.321504783630371e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 3.957664966583252e-2 to the reference (bound 1.9828147888183594e0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.64s
+0.65 real         0.34 user         0.14 sys
+777897016  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f16.metal.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 3.796720504760742e-2 to the reference (bound 1.7564580917358399e0)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 0 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 4-token prefill: 18 tokens, max |Δ| = 1.5863466262817383e-1 at position 0 (bound 1.321504783630371e0), mean |Δ| = 1.1295116977671372e-2 (bound 9.058183002097439e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.89s
+1.90 real         1.80 user         0.52 sys
+876119120  peak memory footprint
+== exit=0 wall=2.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f16.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 2.7783203125e-1 at position 0 (bound 1.7564580917358399e0), mean |Δ| = 2.6225438261280144e-2 (bound 2.283324482324453e-1)
+prompt 1: 18 tokens, max |Δ| = 1.5863466262817383e-1 at position 0 (bound 1.321504783630371e0), mean |Δ| = 1.1295116977671372e-2 (bound 9.058183002097439e-2)
+prompt 2: 8 tokens, max |Δ| = 2.8108787536621094e-1 at position 0 (bound 1.9828147888183594e0), mean |Δ| = 1.586290048371484e-2 (bound 8.464016019030864e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.64s
+0.64 real         0.29 user         0.13 sys
+856540168  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f32.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 2.4795532e-5
+batched row 1: max |Δ| = 3.2186508e-5
+batched row 2: max |Δ| = 2.7656555e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.22s
+0.22 real         0.41 user         0.41 sys
+685196392  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f32.flex.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.58s
+0.58 real         0.52 user         0.13 sys
+679773240  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f32.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 7.05719e-5
+prompt 1: 18 tokens, max |Δ| = 5.5789948e-5
+prompt 2: 8 tokens, max |Δ| = 9.10759e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.13s
+1.13 real         0.46 user         0.53 sys
+693273704  peak memory footprint
+== exit=0 wall=2.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f32.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 2.861023e-5
+batched row 1: max |Δ| = 4.5776367e-5
+batched row 2: max |Δ| = 4.053116e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.44s
+0.45 real         0.15 user         0.12 sys
+1132692608  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f32.metal.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.76s
+1.76 real         1.22 user         0.37 sys
+1148650552  peak memory footprint
+== exit=0 wall=2.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM-135M.f32.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 1.3446808e-4
+prompt 1: 18 tokens, max |Δ| = 4.7683716e-5
+prompt 2: 8 tokens, max |Δ| = 1.3160706e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.09s
+1.09 real         0.30 user         0.17 sys
+1227834496  peak memory footprint
+== exit=0 wall=2.1s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.bf16.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 2.2758150100708008e-1 to the reference (bound 7.537275695800781e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.587728500366211e-1 to the reference (bound 8.005458068847656e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 4.991941452026367e-1 to the reference (bound 6.393724822998046e0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.96s
+4.97 real        17.30 user         4.67 sys
+8008571144  peak memory footprint
+== exit=0 wall=5.1s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.bf16.flex.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 2.2758150100708008e-1 to the reference (bound 7.537275695800781e0)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 0 of 32 tokens match
+thread 'flex_cached_greedy_matches_the_reference' (34533552) panicked at tests/support/half_precision_calibration.rs:1073:13:
+cached decode step 13 at position 18: max |Δ| = 5.15625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 19.51s
+19.52 real        29.27 user         3.74 sys
+8036505864  peak memory footprint
+== exit=101 wall=20.3s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.bf16.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 6.281063079833984e0 at position 0 (bound 7.537275695800781e0), mean |Δ| = 1.6731078403588895e-1 (bound 1.877204010803211e-1)
+prompt 1: 13 tokens, max |Δ| = 6.671215057373047e0 at position 0 (bound 8.005458068847656e0), mean |Δ| = 9.712429430072679e-2 (bound 9.465184055010659e-2)
+thread 'flex_prompt_logits_match_the_reference' (34529973) panicked at tests/support/half_precision_calibration.rs:969:9:
+prompt 1: mean |Δ| = 9.712429430072679e-2 exceeds the half-precision bound 9.465184055010659e-2 of prompt 1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.21s
+3.22 real         8.92 user         2.90 sys
+7996627184  peak memory footprint
+== exit=101 wall=4.1s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f16.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 2.612447738647461e-2 to the reference (bound 7.537275695800781e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 4.6562910079956055e-2 to the reference (bound 8.005458068847656e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 4.2296648025512695e-2 to the reference (bound 6.393724822998046e0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.56s
+3.57 real         2.09 user         1.38 sys
+9227701056  peak memory footprint
+== exit=0 wall=4.1s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+## SmolLM3-3B.f16.metal.cached_greedy_matches_the_reference
+cached prefill: max |Δ| = 2.612447738647461e-2 to the reference (bound 7.537275695800781e0)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: 0 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 13 tokens, max |Δ| = 5.110836029052734e-1 at position 0 (bound 8.005458068847656e0), mean |Δ| = 9.725995530783656e-3 (bound 9.465184055010659e-2)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 5.65s
+5.66 real         4.09 user         1.78 sys
+9227602800  peak memory footprint
+== exit=0 wall=6.1s min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f16.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 4.0325117111206055e-1 at position 0 (bound 7.537275695800781e0), mean |Δ| = 1.577106668689626e-2 (bound 1.877204010803211e-1)
+prompt 1: 13 tokens, max |Δ| = 5.110836029052734e-1 at position 0 (bound 8.005458068847656e0), mean |Δ| = 9.725995530783656e-3 (bound 9.465184055010659e-2)
+prompt 2: 8 tokens, max |Δ| = 4.430093765258789e-1 at position 0 (bound 6.393724822998046e0), mean |Δ| = 1.5532928600614808e-2 (bound 2.1226978368011862e-1)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.50s
+3.51 real         2.03 user         1.37 sys
+9236368240  peak memory footprint
+== exit=0 wall=4.1s min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f32.flex.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 1.2207031e-4
+batched row 1: max |Δ| = 1.0108948e-4
+batched row 2: max |Δ| = 9.6321106e-5
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.21s
+3.23 real        11.03 user         2.27 sys
+14220847808  peak memory footprint
+== exit=0 wall=4.1s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f32.flex.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 10.19s
+10.20 real        14.57 user         2.16 sys
+14198712976  peak memory footprint
+== exit=0 wall=11.2s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f32.flex.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 2.1600723e-4
+prompt 1: 13 tokens, max |Δ| = 1.4591217e-4
+prompt 2: 8 tokens, max |Δ| = 3.8337708e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 12.50s
+12.52 real        13.30 user         4.55 sys
+14216293032  peak memory footprint
+== exit=0 wall=13.2s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f32.metal.batched_prefill_matches_the_reference
+batched row 0: max |Δ| = 1.0085106e-4
+batched row 1: max |Δ| = 8.201599e-5
+batched row 2: max |Δ| = 1.4829636e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.30s
+3.32 real         1.23 user         1.93 sys
+18846537008  peak memory footprint
+== exit=0 wall=4.1s min_free_pct=82 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f32.metal.cached_greedy_matches_the_reference
+greedy: 32 of 32 tokens match
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.12s
+8.15 real         2.69 user         2.25 sys
+18848699696  peak memory footprint
+== exit=0 wall=9.1s min_free_pct=79 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+## SmolLM3-3B.f32.metal.prompt_logits_match_the_reference
+prompt 0: 5 tokens, max |Δ| = 1.0681152e-4
+prompt 1: 13 tokens, max |Δ| = 1.4019012e-4
+prompt 2: 8 tokens, max |Δ| = 3.1661987e-4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 6.07s
+6.09 real         1.36 user         1.98 sys
+18846356736  peak memory footprint
+== exit=0 wall=7.1s min_free_pct=79 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

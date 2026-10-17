@@ -1,0 +1,37 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 sha256 f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42 (build E)
+== host conversion BF16->F16->Q8/G64 quantizes_pinned_qwen3_moe_weights_to_q8_burnpack
+== env TRANSFORMERS_QWEN3_MOE_DIR=/Volumes/bag of holding/models/Qwen/Qwen3-30B-A3B-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39
+== env TRANSFORMERS_QWEN3_MOE_Q8_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk
+== preflight output_parent=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777 free_bytes=328490016768 required_bytes=85694951930 output_exists=False
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 --ignored --exact --nocapture --test-threads 1 quantizes_pinned_qwen3_moe_weights_to_q8_burnpack
+== start 2026-10-17T10:10:19+00:00 lock_wait_s 0 load 3.00 2.21 2.54 free_pct 89 swap_used_mib 9042
+
+running 1 test
+test quantizes_pinned_qwen3_moe_weights_to_q8_burnpack ... Qwen3-MoE q8 conversion: path=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, tensors=18625, retained_f16=242, payload_bytes=32096174080, artifact_bytes=32110057725, largest_payload_bytes=330612736, source_reads=18867, max_open_shards=1, conversion_seconds=577.126
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 917.26s
+
+      917.77 real       776.59 user        71.08 sys
+         32310853632  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4131998  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               34529  voluntary context switches
+              797729  involuntary context switches
+      11860618096844  instructions retired
+       3057325758042  cycles elapsed
+          1756090400  peak memory footprint
+== exit=0 wall=918.6s min_free_pct=86 max_swap_growth_mib=0 swapin_mib=453 pressured_swapin_mib=0 end=2026-10-17T10:25:38+00:00 end_load 9.01 36.47 30.07
+== artifact /Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk bytes=32110057725 sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c (hashed outside the test in 14.6s)
+== authenticated /Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk bytes=32110057725 sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c identical=True

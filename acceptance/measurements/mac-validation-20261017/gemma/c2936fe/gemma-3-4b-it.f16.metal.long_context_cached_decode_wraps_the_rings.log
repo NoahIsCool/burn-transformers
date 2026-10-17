@@ -1,0 +1,50 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 952e2dd210fde1b8461835132a77257e7e1b85eb3621af1fac63d20fe61e3ffb
+== Metal/F16 metal::metal_long_context_cached_decode_wraps_the_rings
+== env TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=f16
+== env TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_MIN_GREEDY=0
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 metal::metal_long_context_cached_decode_wraps_the_rings
+== start 2026-10-17T08:51:13+00:00 load 5.77 13.40 15.93
+
+running 1 test
+test metal::metal_long_context_cached_decode_wraps_the_rings ... F16 bounds of prompt 0: max 9.686213636398316e0, mean 7.939982029344071e-2 (1.2 × official BF16 8.071844696998596e0, 6.61665169112006e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16)
+load: 439 vision-tower tensors intentionally ignored
+cached: capacity 1245, 29 layers in 1024-slot rings
+
+thread 'metal::metal_long_context_cached_decode_wraps_the_rings' (35046979) panicked at tests/support/half_precision_calibration.rs:660:9:
+cached chunk 0..1000 at position 999: the compared logits hold a non-finite value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    metal::metal_long_context_cached_decode_wraps_the_rings
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 15.75s
+
+       15.80 real        11.09 user         2.40 sys
+         10443800576  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              976850  page reclaims
+                  25  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               34704  involuntary context switches
+        191615821507  instructions retired
+         50264939598  cycles elapsed
+         16831142920  peak memory footprint
+== exit=101 wall=16.2s min_free_pct=81 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

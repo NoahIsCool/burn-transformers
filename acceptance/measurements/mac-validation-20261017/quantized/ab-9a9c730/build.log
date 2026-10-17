@@ -1,0 +1,8 @@
+== export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/gptoss-ab/src-9a9c730 (git archive of 9a9c7308cf233f90ccbee80c0156efdf4cceea27): commit=9a9c7308cf233f90ccbee80c0156efdf4cceea27 files=2225 dirty=39
+== build 2026-10-17T11:59:46Z: CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab cargo test --locked --release --no-default-features --features std,metal,tokenizers,kernel-tracing --test muse_glimmer_artifacts --no-run
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  Executable tests/muse_glimmer_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24)
+== build exit= 2026-10-17T12:01:01Z
+== note: the dirty=39 line above came from passing '.' as EXPORT_DIR; verify_export.py runs 'git -C REPO hash-object' on relative paths, so '.' resolved against the worktree, not the export. Re-verified with the absolute export path after the build:
+== reverify 2026-10-17T12:01:11Z: commit=9a9c7308cf233f90ccbee80c0156efdf4cceea27 files=2225 dirty=0
+== control binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 86630d8ec5ca4126248f231aff675ee27cf3eb5a4fefaf444d7e427a8fb64995 mtime Oct 17 08:01:01 2026

@@ -1,0 +1,302 @@
+[
+{
+"name": "SmolLM-135M Flex/F32 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/F32; p0 max 7.057e-05; p1 max 5.579e-05; p2 max 9.108e-05; peak 0.69 GB; wall 2.0 s; log SmolLM-135M.f32.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM-135M Flex/F32 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; greedy 32/32 tokens match; peak 0.68 GB; wall 1.0 s; log SmolLM-135M.f32.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Flex/F32 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; row0 max 2.48e-05; row1 max 3.219e-05; row2 max 2.766e-05; peak 0.69 GB; wall 1.0 s; log SmolLM-135M.f32.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Metal/F32 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F32; p0 max 0.0001345; p1 max 4.768e-05; p2 max 0.0001316; peak 1.23 GB; wall 2.1 s; log SmolLM-135M.f32.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM-135M Metal/F32 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; greedy 32/32 tokens match; peak 1.15 GB; wall 2.0 s; log SmolLM-135M.f32.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Metal/F32 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; row0 max 2.861e-05; row1 max 4.578e-05; row2 max 4.053e-05; peak 1.13 GB; wall 1.0 s; log SmolLM-135M.f32.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Flex/BF16 flex_prompt_logits_match_the_reference",
+"status": "fail",
+"detail": "Flex/BF16; p0 max 1.167@0/1.756 mean 0.1591/0.2283; p1 max 1.436@0/1.322 mean 0.0792/0.09058; FAILED: prompt 1: max |Δ| = 1.4355907440185547e0 exceeds the half-precision bound 1.321504783630371e0 of prompt 1; peak 0.50 GB; wall 1.0 s; log SmolLM-135M.bf16.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM-135M Flex/BF16 flex_cached_greedy_matches_the_reference",
+"status": "fail",
+"detail": "Flex/BF16; prefill vs reference 0.1878; prefill vs stateless 0; greedy 0/32 decisive steps compared, all match; 32 decode steps vs stateless max 0 (step 0, tolerance 0.5); p1 decoded after 4-token prefill max 1.436@0/1.322 mean 0.0792/0.09058; FAILED: prompt 1 decoded after a 4-token prefill: max |Δ| = 1.4355907440185547e0 exceeds the half-precision bound 1.321504783630371e0 of prompt 1; peak 0.52 GB; wall 6.1 s; log SmolLM-135M.bf16.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Flex/BF16 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; row0 vs stateless 0; row0 max 0.1878/1.756; row1 vs stateless 0; row1 max 0.2716/1.322; row2 vs stateless 0; row2 max 0.2524/1.983; peak 0.49 GB; wall 1.0 s; log SmolLM-135M.bf16.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Metal/F16 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F16; p0 max 0.2778@0/1.756 mean 0.02623/0.2283; p1 max 0.1586@0/1.322 mean 0.0113/0.09058; p2 max 0.2811@0/1.983 mean 0.01586/0.08464; peak 0.86 GB; wall 1.0 s; log SmolLM-135M.f16.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM-135M Metal/F16 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; prefill vs reference 0.03797; prefill vs stateless 0; greedy 0/32 decisive steps compared, all match; 32 decode steps vs stateless max 0 (step 0, tolerance 0.5); p1 decoded after 4-token prefill max 0.1586@0/1.322 mean 0.0113/0.09058; peak 0.88 GB; wall 2.0 s; log SmolLM-135M.f16.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM-135M Metal/F16 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; row0 vs stateless 0; row0 max 0.03797/1.756; row1 vs stateless 0; row1 max 0.0471/1.322; row2 vs stateless 0; row2 max 0.03958/1.983; peak 0.78 GB; wall 1.0 s; log SmolLM-135M.f16.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Flex/F32 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/F32; p0 max 0.0001221; p1 max 0.0001335; p2 max 0.0001411; peak 18.82 GB; wall 15.3 s; log Qwen3-4B.f32.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen3-4B Flex/F32 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; greedy 32/32 tokens match; peak 18.82 GB; wall 14.3 s; log Qwen3-4B.f32.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Flex/F32 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; row0 max 0.0001221; row1 max 5.817e-05; row2 max 4.768e-05; peak 18.84 GB; wall 5.1 s; log Qwen3-4B.f32.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Metal/F32 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F32; p0 max 0.000105; p1 max 8.488e-05; p2 max 6.104e-05; peak 24.17 GB; wall 8.1 s; log Qwen3-4B.f32.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen3-4B Metal/F32 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; greedy 32/32 tokens match; peak 24.12 GB; wall 10.1 s; log Qwen3-4B.f32.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Metal/F32 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; row0 max 0.000105; row1 max 6.294e-05; row2 max 4.196e-05; peak 24.17 GB; wall 5.1 s; log Qwen3-4B.f32.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Flex/BF16 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; p0 max 0.7688@0/0.84 mean 0.05881/0.09357; p1 max 0.7323@0/0.8413 mean 0.04988/0.05204; p2 max 0.6613@0/1.055 mean 0.03949/0.06462; peak 10.69 GB; wall 6.1 s; log Qwen3-4B.bf16.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen3-4B Flex/BF16 flex_cached_greedy_matches_the_reference",
+"status": "fail",
+"detail": "Flex/BF16; prefill vs reference 0.2743; prefill vs stateless 0; greedy 26/32 decisive steps compared, all match; FAILED: cached decode step 1 at position 6: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1; peak 10.72 GB; wall 30.5 s; log Qwen3-4B.bf16.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Flex/BF16 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; row0 vs stateless 0.03125; row0 max 0.2743/0.84; row1 vs stateless 0.03125; row1 max 0.2347/0.8413; row2 vs stateless 0.03125; row2 max 0.1075/1.055; peak 10.71 GB; wall 8.2 s; log Qwen3-4B.bf16.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Metal/F16 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F16; p0 max 0.0473@4/0.84 mean 0.004977/0.09357; p1 max 0.06453@0/0.8413 mean 0.005834/0.05204; p2 max 0.1691@0/1.055 mean 0.006685/0.06462; peak 11.75 GB; wall 5.1 s; log Qwen3-4B.f16.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen3-4B Metal/F16 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; prefill vs reference 0.0473; prefill vs stateless 0; greedy 26/32 decisive steps compared, all match; 32 decode steps vs stateless max 0 (step 0, tolerance 0.5); p1 decoded after 3-token prefill max 0.06453@0/0.8413 mean 0.005834/0.05204; peak 11.75 GB; wall 8.1 s; log Qwen3-4B.f16.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen3-4B Metal/F16 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; row0 vs stateless 0; row0 max 0.0473/0.84; row1 vs stateless 0; row1 max 0.02389/0.8413; row2 vs stateless 0; row2 max 0.01869/1.055; peak 11.75 GB; wall 5.1 s; log Qwen3-4B.f16.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Flex/F32 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/F32; p0 max 0.000216; p1 max 0.0001459; p2 max 0.0003834; peak 14.22 GB; wall 13.2 s; log SmolLM3-3B.f32.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Flex/F32 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; greedy 32/32 tokens match; peak 14.20 GB; wall 11.2 s; log SmolLM3-3B.f32.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Flex/F32 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; row0 max 0.0001221; row1 max 0.0001011; row2 max 9.632e-05; peak 14.22 GB; wall 4.1 s; log SmolLM3-3B.f32.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Metal/F32 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F32; p0 max 0.0001068; p1 max 0.0001402; p2 max 0.0003166; peak 18.85 GB; wall 7.1 s; log SmolLM3-3B.f32.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Metal/F32 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; greedy 32/32 tokens match; peak 18.85 GB; wall 9.1 s; log SmolLM3-3B.f32.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Metal/F32 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; row0 max 0.0001009; row1 max 8.202e-05; row2 max 0.0001483; peak 18.85 GB; wall 4.1 s; log SmolLM3-3B.f32.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Flex/BF16 flex_prompt_logits_match_the_reference",
+"status": "fail",
+"detail": "Flex/BF16; p0 max 6.281@0/7.537 mean 0.1673/0.1877; p1 max 6.671@0/8.005 mean 0.09712/0.09465; FAILED: prompt 1: mean |Δ| = 9.712429430072679e-2 exceeds the half-precision bound 9.465184055010659e-2 of prompt 1; peak 8.00 GB; wall 4.1 s; log SmolLM3-3B.bf16.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Flex/BF16 flex_cached_greedy_matches_the_reference",
+"status": "fail",
+"detail": "Flex/BF16; prefill vs reference 0.2276; prefill vs stateless 0; greedy 0/32 decisive steps compared, all match; FAILED: cached decode step 13 at position 18: max |Δ| = 5.15625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1; peak 8.04 GB; wall 20.3 s; log SmolLM3-3B.bf16.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Flex/BF16 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; row0 vs stateless 0; row0 max 0.2276/7.537; row1 vs stateless 0; row1 max 0.2588/8.005; row2 vs stateless 0; row2 max 0.4992/6.394; peak 8.01 GB; wall 5.1 s; log SmolLM3-3B.bf16.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Metal/F16 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F16; p0 max 0.4033@0/7.537 mean 0.01577/0.1877; p1 max 0.5111@0/8.005 mean 0.009726/0.09465; p2 max 0.443@0/6.394 mean 0.01553/0.2123; peak 9.24 GB; wall 4.1 s; log SmolLM3-3B.f16.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Metal/F16 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; prefill vs reference 0.02612; prefill vs stateless 0; greedy 0/32 decisive steps compared, all match; 32 decode steps vs stateless max 0 (step 0, tolerance 0.5); p1 decoded after 3-token prefill max 0.5111@0/8.005 mean 0.009726/0.09465; peak 9.23 GB; wall 6.1 s; log SmolLM3-3B.f16.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "SmolLM3-3B Metal/F16 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; row0 vs stateless 0; row0 max 0.02612/7.537; row1 vs stateless 0; row1 max 0.04656/8.005; row2 vs stateless 0; row2 max 0.0423/6.394; peak 9.23 GB; wall 4.1 s; log SmolLM3-3B.f16.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Flex/F32 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/F32; p0 max 4.292e-05; p1 max 0.0002856; p2 max 0.0001822; peak 34.62 GB; wall 30.5 s; log Qwen2-7B-f64.f32.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Flex/F32 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; greedy 32/32 tokens match; peak 34.61 GB; wall 25.4 s; log Qwen2-7B-f64.f32.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Flex/F32 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; row0 max 3.099e-05; row1 max 3.362e-05; row2 max 4.482e-05; peak 34.62 GB; wall 8.2 s; log Qwen2-7B-f64.f32.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Metal/F32 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F32; p0 max 0.0005181; p1 max 0.0003859; p2 max 0.001898; peak 43.58 GB; wall 14.2 s; log Qwen2-7B-f64.f32.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Metal/F32 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; greedy 32/32 tokens match; peak 43.58 GB; wall 16.2 s; log Qwen2-7B-f64.f32.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Metal/F32 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; row0 max 7.534e-05; row1 max 6.39e-05; row2 max 6.485e-05; peak 43.59 GB; wall 8.1 s; log Qwen2-7B-f64.f32.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Flex/BF16 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; p0 max 8.583@0/10.19 mean 0.2656/0.5052; p1 max 6.658@0/8.215 mean 0.1464/0.3745; p2 max 11.22@0/12.87 mean 0.3761/0.81; peak 19.23 GB; wall 8.1 s; log Qwen2-7B-f64.bf16.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Flex/BF16 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; prefill vs reference 0.1131; prefill vs stateless 0; greedy 0/32 decisive steps compared, all match; 32 decode steps vs stateless max 0.3281 (step 21, tolerance 0.5); p1 decoded after 3-token prefill max 6.658@0/8.215 mean 0.1389/0.3745; peak 19.26 GB; wall 50.8 s; log Qwen2-7B-f64.bf16.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Flex/BF16 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; row0 vs stateless 0.0625; row0 max 0.1131/10.19; row1 vs stateless 0.03125; row1 max 0.167/8.215; row2 vs stateless 0.0625; row2 max 0.1413/12.87; peak 19.23 GB; wall 10.2 s; log Qwen2-7B-f64.bf16.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Metal/F16 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F16; p0 max 2.214@3/10.19 mean 0.2417/0.5052; p1 max 6.063@0/8.215 mean 0.3589/0.3745; p2 max 2.004@7/12.87 mean 0.2266/0.81; peak 21.27 GB; wall 8.1 s; log Qwen2-7B-f64.f16.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Metal/F16 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; prefill vs reference 1.499; prefill vs stateless 0; greedy 0/32 decisive steps compared, all match; 32 decode steps vs stateless max 0 (step 0, tolerance 0.5); p1 decoded after 3-token prefill max 6.063@0/8.215 mean 0.3589/0.3745; peak 21.29 GB; wall 12.2 s; log Qwen2-7B-f64.f16.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Qwen2-7B-f64 Metal/F16 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; row0 vs stateless 0; row0 max 1.499/10.19; row1 vs stateless 0; row1 max 1.792/8.215; row2 vs stateless 0; row2 max 2.004/12.87; peak 21.26 GB; wall 9.2 s; log Qwen2-7B-f64.f16.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Flex/F32 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/F32; p0 max 7.057e-05; p1 max 6.39e-05; p2 max 7.153e-05; peak 36.06 GB; wall 34.6 s; log Llama-3.1-8B.f32.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Flex/F32 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; greedy 32/32 tokens match; peak 36.07 GB; wall 25.4 s; log Llama-3.1-8B.f32.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Flex/F32 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/F32; row0 max 6.294e-05; row1 max 5.531e-05; row2 max 5.341e-05; peak 36.08 GB; wall 12.3 s; log Llama-3.1-8B.f32.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Metal/F32 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F32; p0 max 6.485e-05; p1 max 7.606e-05; p2 max 6.247e-05; peak 43.98 GB; wall 14.2 s; log Llama-3.1-8B.f32.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Metal/F32 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; greedy 32/32 tokens match; peak 43.96 GB; wall 16.2 s; log Llama-3.1-8B.f32.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Metal/F32 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F32; row0 max 4.625e-05; row1 max 5.388e-05; row2 max 4.959e-05; peak 44.00 GB; wall 9.2 s; log Llama-3.1-8B.f32.metal.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Flex/BF16 flex_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; p0 max 0.1285@3/0.1649 mean 0.01754/0.0206; p1 max 0.1604@11/0.2546 mean 0.01906/0.02654; p2 max 0.134@2/0.2182 mean 0.01937/0.02787; peak 20.89 GB; wall 11.2 s; log Llama-3.1-8B.bf16.flex.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Flex/BF16 flex_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; prefill vs reference 0.09532; prefill vs stateless 0; greedy 27/32 decisive steps compared, all match; 32 decode steps vs stateless max 0.1875 (step 21, tolerance 0.5); p1 decoded after 3-token prefill max 0.1552@13/0.2546 mean 0.01959/0.02654; peak 20.95 GB; wall 55.0 s; log Llama-3.1-8B.bf16.flex.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Flex/BF16 flex_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Flex/BF16; row0 vs stateless 0.03125; row0 max 0.09532/0.1649; row1 vs stateless 0.0625; row1 max 0.1456/0.2546; row2 vs stateless 0.03125; row2 max 0.1087/0.2182; peak 20.90 GB; wall 16.4 s; log Llama-3.1-8B.bf16.flex.batched_prefill_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Metal/F16 metal::metal_prompt_logits_match_the_reference",
+"status": "pass",
+"detail": "Metal/F16; p0 max 0.1038@0/0.1649 mean 0.004241/0.0206; p1 max 0.1038@0/0.2546 mean 0.004072/0.02654; p2 max 0.1038@0/0.2182 mean 0.00413/0.02787; peak 22.46 GB; wall 9.1 s; log Llama-3.1-8B.f16.metal.prompt_logits_match_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Metal/F16 metal::metal_cached_greedy_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; prefill vs reference 0.01276; prefill vs stateless 0; greedy 27/32 decisive steps compared, all match; 32 decode steps vs stateless max 0 (step 0, tolerance 0.5); p1 decoded after 3-token prefill max 0.1038@0/0.2546 mean 0.004072/0.02654; peak 22.46 GB; wall 12.2 s; log Llama-3.1-8B.f16.metal.cached_greedy_matches_the_reference.log"
+},
+{
+"name": "Llama-3.1-8B Metal/F16 metal::metal_batched_prefill_matches_the_reference",
+"status": "pass",
+"detail": "Metal/F16; row0 vs stateless 0; row0 max 0.01276/0.1649; row1 vs stateless 0; row1 max 0.02316/0.2546; row2 vs stateless 0; row2 max 0.01639/0.2182; peak 22.47 GB; wall 9.1 s; log Llama-3.1-8B.f16.metal.batched_prefill_matches_the_reference.log"
+}
+]

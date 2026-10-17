@@ -1,0 +1,23 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T08:19:33Z load { 6.44 7.63 7.63 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump-gemma flex bf16 /Volumes/T9/models/google/gemma-3-4b-it 2\,818\,5279\,529\,7001\,563 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/gemma/diagnostics/data/burn/flex-bf16-fused/prompt0 fused
+wrote 36 points for 6 tokens (eager=false, prefill=0) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/gemma/diagnostics/data/burn/flex-bf16-fused/prompt0
+       11.23 real        10.91 user         9.37 sys
+         12077481984  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              744013  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  44  voluntary context switches
+              119570  involuntary context switches
+        176656253985  instructions retired
+         70790806324  cycles elapsed
+         12074395032  peak memory footprint
+== exit=0 wall=11s

@@ -1,0 +1,33 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a sha256 a97b2fbd2e1c91562a3a2b7bb429128466a959710eb28a4682b2abea996f7150 (build A)
+== Metal/packed Q4,Q8 (F16 and F32 activations) packed_q4_q8_matmul_launches_quantized_metal_kernels
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a --ignored --exact --nocapture --test-threads 1 packed_q4_q8_matmul_launches_quantized_metal_kernels
+== start 2026-10-17T09:30:53+00:00 lock_wait_s 0 load 5.48 8.32 8.95 free_pct 91 swap_used_mib 9114
+
+running 1 test
+test packed_q4_q8_matmul_launches_quantized_metal_kernels ... Q4S packed Metal kernel: launches=1, quantized_view=true, packed_axis=1, whole_weight_dequantizations=0; three F32 rows: launches=3
+Q8S packed Metal kernel: launches=1, quantized_view=true, packed_axis=1, whole_weight_dequantizations=0; three F32 rows: launches=1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+        0.23 real         0.02 user         0.02 sys
+            42057728  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2910  page reclaims
+                  10  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   5  voluntary context switches
+                 402  involuntary context switches
+           394966359  instructions retired
+           166563185  cycles elapsed
+           177423128  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:54+00:00 end_load 5.48 8.32 8.95

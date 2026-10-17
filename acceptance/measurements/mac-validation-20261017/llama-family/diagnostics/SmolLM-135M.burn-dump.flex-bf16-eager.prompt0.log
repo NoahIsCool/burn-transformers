@@ -1,0 +1,23 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:34:27Z load { 11.10 6.77 7.19 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump flex bf16 /Volumes/bag\ of\ holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 504\,3575\,282\,4649\,314 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM-135M-burn/flex-bf16-eager/prompt0 eager
+wrote 32 points for 5 tokens (eager=true, prefill=0) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM-135M-burn/flex-bf16-eager/prompt0
+        1.29 real         0.41 user         0.91 sys
+           490471424  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               30196  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   6  voluntary context switches
+                 337  involuntary context switches
+         18899260939  instructions retired
+          5091498585  cycles elapsed
+           481559464  peak memory footprint
+== exit=0 wall=1s

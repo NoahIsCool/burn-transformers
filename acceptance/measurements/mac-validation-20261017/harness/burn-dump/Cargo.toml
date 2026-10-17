@@ -1,0 +1,11 @@
+[package]
+name = "burn-dump"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+transformers = { path = "/Users/nover/repos/transformers-worktrees/tfm-polish-half", features = ["metal", "tokenizers"] }
+burn = { version = "=0.21.0", default-features = false }
+
+[workspace]

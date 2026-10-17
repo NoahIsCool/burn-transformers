@@ -1,0 +1,8 @@
+{
+ "A": "/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a",
+ "B": "/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d",
+ "C": "/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-a056c89048174866",
+ "D": "/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24",
+ "Dq": "/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-aa35af79e02f436b",
+ "E": "/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079"
+}

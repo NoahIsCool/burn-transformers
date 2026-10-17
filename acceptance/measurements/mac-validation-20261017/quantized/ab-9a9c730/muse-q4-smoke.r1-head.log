@@ -1,0 +1,34 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c (build D)
+== Metal/F16 activations + packed Q4/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal
+== env TRANSFORMERS_MUSE_GLIMMER_DIR=/Volumes/bag of holding/models/meta-models/Muse-Glimmer-30B-a4e59da52a7bc87ae7251dd5545c0dd437c44b68
+== env TRANSFORMERS_MUSE_GLIMMER_Q4_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 --ignored --exact --nocapture --test-threads 1 smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal
+== start 2026-10-17T13:02:05+00:00 lock_wait_s 0 load 2.53 2.15 6.43 free_pct 88 swap_used_mib 8362
+
+running 1 test
+test smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal ... Muse-Glimmer-30B Q4 packed Metal smoke: load_seconds=394.979, stateless_seconds=2.429, prefill_seconds=0.240, decode_seconds=0.237, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 483.91s
+
+      484.06 real       434.58 user        60.11 sys
+         26801242112  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             3694030  page reclaims
+              863933  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 424  voluntary context switches
+             2726216  involuntary context switches
+       6934092897600  instructions retired
+       1796362541647  cycles elapsed
+         29273580328  peak memory footprint
+== exit=0 wall=484.8s min_free_pct=69 max_swap_growth_mib=0 swapin_mib=5 pressured_swapin_mib=0 end=2026-10-17T13:10:10+00:00 end_load 2.61 2.36 4.62

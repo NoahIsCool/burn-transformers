@@ -413,6 +413,11 @@ code written against unreleased sources.
   bias that built them, and F16 residuals are clamped like the reference.
 - Gemma: multimodal checkpoints with a final soft cap the reference never
   applies are refused.
+- Feed-forward: tanh-approximate GELU on F16 and BF16 inputs is evaluated in
+  F32 and rounded once, as PyTorch's `gelu(approximate="tanh")` (Gemma's
+  `gelu_pytorch_tanh`) does. Burn's composed graph rounded every operation and
+  both constants to the activation dtype (BF16 `GeluTanh(-2)` was `-0.046875`
+  instead of `-0.0454`). F32 and F64 evaluation is unchanged.
 - Modular models: sinks with a soft cap are rejected at the spec field;
   sliding windows in encoder stacks are rejected; earlier block records still
   load; range contexts are validated once.
@@ -624,6 +629,41 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   deviation, at most `2.665`, mean at most `0.108`); it evaluates no Burn
   model and passes no gate
   ([record](acceptance/measurements/reference-precision-followups-20261016.json)).
+- Half-precision variants of the Llama-family and Gemma real-checkpoint gates
+  (`TRANSFORMERS_LLAMA_FAMILY_DTYPE`, `TRANSFORMERS_GEMMA_DTYPE`: `bf16` on
+  Flex, `f16` on Metal, either in the CUDA variants, where they refuse the F32
+  tolerance overrides whatever the TF32 probe finds; no CUDA run is recorded)
+  judge a run against the existing F32 (or F64) bundle with per-prompt bounds
+  read at run time from an official BF16 twin bundle, which is paired fail
+  closed: `1.2` times Transformers' own BF16 maximum and mean deviation, the
+  slack being the largest Burn/official ratio measured on gpt-oss-20b,
+  rounded up. These bounds calibrate BF16 runs; a Metal/F16 run reuses them as
+  an upper limit, since no official F16 bundle can be generated. Their greedy
+  continuations use the gates' shared teacher-forced rule, with prompt 0's
+  maximum bound as the tolerance. Every cached decode step and both Gemma
+  long-context chunk ends are checked against the same run's stateless pass,
+  and a prompt decoded token by token against both bounds, whether or not any
+  greedy step is decisive. The shared logic and its unit tests are in
+  `tests/support/half_precision_calibration.rs`; F32 runs are unchanged. The
+  seven official BF16 bundles and their calibration are recorded
+  ([record](acceptance/measurements/half-precision-calibration-20261017.json)).
+  Their first Burn runs are in the Mac validation record below.
+- A Mac validation round records 173 single-process test runs with their
+  logs, diagnostics, and harness, each named by source commit and binary
+  digest, and checked by `scripts/tests/test_mac_validation_record.py`
+  ([record](acceptance/measurements/mac-validation-20261017.json)). Under
+  `c15f24e`'s install order the Llama-family, gemma-3-4b-it, truncated
+  gpt-oss, and FLAN-T5-small F32 gates repeat every `f4c56c4` line, with
+  lower peak footprints for Qwen2-7B, Llama-3.1-8B, and truncated gpt-oss. The
+  Muse-Glimmer-30B and Qwen3-30B-A3B Q8/Q4 conversions reproduce their
+  authenticated Burnpacks byte for byte, and their packed Metal smokes and
+  audits pass. The first Burn half-precision runs of the Llama-family gates
+  pass on Metal/F16 and in 10 of 15 cases on Flex/BF16; Gemma's pass 4 of 5
+  on Flex/BF16 after the tanh GELU fix and cannot pass on Metal/F16, because
+  gemma-3-4b-it overflows F16 in Transformers too. The failures, which the
+  record traces to the calibration rule's width, the decode tolerance, and
+  the twice-rounded half-precision SiLU, remain open; no bound was changed
+  and no checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

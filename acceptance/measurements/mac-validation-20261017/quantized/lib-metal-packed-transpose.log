@@ -1,0 +1,31 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B)
+== Metal/packed install transpose checkpoint::runtime::packed_install::tests::metal_quantized_transpose_is_exact_and_stays_packed
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d --ignored --exact --nocapture --test-threads 1 checkpoint::runtime::packed_install::tests::metal_quantized_transpose_is_exact_and_stays_packed
+== start 2026-10-17T09:30:57+00:00 lock_wait_s 0 load 5.36 8.25 8.92 free_pct 91 swap_used_mib 9114
+
+running 1 test
+test checkpoint::runtime::packed_install::tests::metal_quantized_transpose_is_exact_and_stays_packed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3510 filtered out; finished in 0.11s
+
+        0.12 real         0.01 user         0.01 sys
+            41467904  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2959  page reclaims
+                   6  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 216  involuntary context switches
+           309419507  instructions retired
+           116317199  cycles elapsed
+           175293208  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:58+00:00 end_load 5.36 8.25 8.92

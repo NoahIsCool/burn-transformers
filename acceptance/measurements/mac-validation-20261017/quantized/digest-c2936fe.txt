@@ -1,0 +1,191 @@
+#### lib-metal-2bit-rejected.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B)
+  == start 2026-10-17T09:30:56+00:00 lock_wait_s 0 load 5.36 8.25 8.92 free_pct 91 swap_used_mib 9114
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3510 filtered out; finished in 0.02s
+  == exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:57+00:00 end_load 5.36 8.25 8.92
+  peak memory footprint: 16843544 bytes (0.017 GB)
+  maximum resident set size: 30425088 bytes (0.030 GB)
+  time real: 0.02 s
+#### lib-metal-packed-transpose.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B)
+  == start 2026-10-17T09:30:57+00:00 lock_wait_s 0 load 5.36 8.25 8.92 free_pct 91 swap_used_mib 9114
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3510 filtered out; finished in 0.11s
+  == exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:58+00:00 end_load 5.36 8.25 8.92
+  peak memory footprint: 175293208 bytes (0.175 GB)
+  maximum resident set size: 41467904 bytes (0.041 GB)
+  time real: 0.12 s
+#### lib-metal-q4-multirow.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B)
+  == start 2026-10-17T09:30:54+00:00 lock_wait_s 0 load 5.48 8.32 8.95 free_pct 91 swap_used_mib 9114
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3510 filtered out; finished in 0.10s
+  == exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:55+00:00 end_load 5.36 8.25 8.92
+  peak memory footprint: 179209032 bytes (0.179 GB)
+  maximum resident set size: 43696128 bytes (0.044 GB)
+  time real: 0.10 s
+#### lib-metal-q4-qwen35-shapes.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B)
+  == start 2026-10-17T09:30:55+00:00 lock_wait_s 0 load 5.36 8.25 8.92 free_pct 91 swap_used_mib 9114
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3510 filtered out; finished in 0.56s
+  == exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:56+00:00 end_load 5.36 8.25 8.92
+  peak memory footprint: 403686312 bytes (0.404 GB)
+  maximum resident set size: 202014720 bytes (0.202 GB)
+  time real: 0.56 s
+#### lib-ordinary.checkpointruntime.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B: --release --features metal --lib)
+  == start 2026-10-17T09:30:16Z
+  test result: ok. 173 passed; 0 failed; 4 ignored; 0 measured; 3334 filtered out; finished in 0.10s
+  == exit=0 end 2026-10-17T09:30:16Z
+  peak memory footprint: 41501224 bytes (0.042 GB)
+  maximum resident set size: 53788672 bytes (0.054 GB)
+  time real: 0.11 s
+#### lib-ordinary.operationstests.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B: --release --features metal --lib)
+  == start 2026-10-17T09:30:15Z
+  test result: ok. 29 passed; 0 failed; 5 ignored; 0 measured; 3477 filtered out; finished in 0.01s
+  == exit=0 end 2026-10-17T09:30:15Z
+  peak memory footprint: 6357568 bytes (0.006 GB)
+  maximum resident set size: 15958016 bytes (0.016 GB)
+  time real: 0.01 s
+#### muse-q4-conversion.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-a056c89048174866 sha256 2000c667b84f9a4fb7a99205cc90923e3a72fcddcf3ac33e24dbb365435a60f7 (build C)
+  == start 2026-10-17T09:54:05+00:00 lock_wait_s 0 load 2.12 2.07 3.49 free_pct 89 swap_used_mib 9066
+  test quantizes_pinned_muse_glimmer_weights_to_q4_burnpack ... Muse-Glimmer-30B Q4 Burnpack: path=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk, tensors=417, retained=210, payload_bytes=14911064064, artifact_bytes=14911372485, largest_payload_bytes=756467712, sha256=05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3, elapsed_seconds=500.653
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 501.73s
+  == exit=0 wall=501.9s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0 end=2026-10-17T10:02:27+00:00 end_load 1.56 2.03 2.89
+  == artifact /Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk bytes=14911372485 sha256=05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3 (hashed outside the test in 6.6s)
+  == authenticated /Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk bytes=14911372485 sha256=05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3 identical=True
+  peak memory footprint: 6765302920 bytes (6.765 GB)
+  maximum resident set size: 15112028160 bytes (15.112 GB)
+  time real: 501.73 s
+#### muse-q4-smoke.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c (build D)
+  == start 2026-10-17T10:02:33+00:00 lock_wait_s 0 load 1.55 2.01 2.87 free_pct 89 swap_used_mib 9066
+  test smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal ... Muse-Glimmer-30B Q4 packed Metal smoke: load_seconds=381.709, stateless_seconds=2.810, prefill_seconds=0.265, decode_seconds=0.226, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 465.21s
+  == exit=0 wall=465.6s min_free_pct=69 max_swap_growth_mib=0 swapin_mib=18 pressured_swapin_mib=0 end=2026-10-17T10:10:19+00:00 end_load 3.00 2.21 2.54
+  peak memory footprint: 29275972440 bytes (29.276 GB)
+  maximum resident set size: 26972307456 bytes (26.972 GB)
+  time real: 465.43 s
+#### muse-q8-conversion.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-a056c89048174866 sha256 2000c667b84f9a4fb7a99205cc90923e3a72fcddcf3ac33e24dbb365435a60f7 (build C)
+  == start 2026-10-17T09:31:14+00:00 lock_wait_s 0 load 4.62 7.94 8.80 free_pct 91 swap_used_mib 9114
+  test quantizes_pinned_muse_glimmer_weights_to_q8_burnpack ... Muse-Glimmer-30B Q8 Burnpack: path=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q8-a4e59da5/muse-glimmer-30b-a4e59da5-q8-g64-v2.bpk, tensors=417, retained=210, payload_bytes=28165343232, artifact_bytes=28165645337, largest_payload_bytes=1428883456, sha256=91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb, elapsed_seconds=719.112
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 719.11s
+  == exit=0 wall=719.5s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=9 pressured_swapin_mib=0 end=2026-10-17T09:43:13+00:00 end_load 2.31 3.40 5.42
+  == artifact /Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q8-a4e59da5/muse-glimmer-30b-a4e59da5-q8-g64-v2.bpk bytes=28165645337 sha256=91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb (hashed outside the test in 12.4s)
+  == authenticated /Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-q8-a4e59da5/muse-glimmer-30b-a4e59da5-q8-g64-v2.bpk bytes=28165645337 sha256=91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb identical=True
+  peak memory footprint: 7584945912 bytes (7.585 GB)
+  maximum resident set size: 28479799296 bytes (28.480 GB)
+  time real: 719.26 s
+#### muse-q8-smoke.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c (build D)
+  == start 2026-10-17T09:43:27+00:00 lock_wait_s 0 load 2.08 3.30 5.35 free_pct 91 swap_used_mib 9090
+  test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=497.335, stateless_seconds=4.183, prefill_seconds=0.385, decode_seconds=0.262, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 636.34s
+  == exit=0 wall=637.5s min_free_pct=47 max_swap_growth_mib=0 swapin_mib=26 pressured_swapin_mib=0 end=2026-10-17T09:54:05+00:00 end_load 2.12 2.07 3.49
+  peak memory footprint: 45678639968 bytes (45.679 GB)
+  maximum resident set size: 29130997760 bytes (29.131 GB)
+  time real: 636.91 s
+#### packed-metal-kernels.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a sha256 a97b2fbd2e1c91562a3a2b7bb429128466a959710eb28a4682b2abea996f7150 (build A)
+  == start 2026-10-17T09:30:53+00:00 lock_wait_s 0 load 5.48 8.32 8.95 free_pct 91 swap_used_mib 9114
+  test packed_q4_q8_matmul_launches_quantized_metal_kernels ... Q4S packed Metal kernel: launches=1, quantized_view=true, packed_axis=1, whole_weight_dequantizations=0; three F32 rows: launches=3
+  Q8S packed Metal kernel: launches=1, quantized_view=true, packed_axis=1, whole_weight_dequantizations=0; three F32 rows: launches=1
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+  == exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:54+00:00 end_load 5.48 8.32 8.95
+  peak memory footprint: 177423128 bytes (0.177 GB)
+  maximum resident set size: 42057728 bytes (0.042 GB)
+  time real: 0.23 s
+#### packed-metal-kernels.ordinary.build-A.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a sha256 a97b2fbd2e1c91562a3a2b7bb429128466a959710eb28a4682b2abea996f7150 (build A: std,kernel-tracing (--no-default-features))
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+  == exit=0
+  peak memory footprint: 177111832 bytes (0.177 GB)
+  maximum resident set size: 41697280 bytes (0.042 GB)
+  time real: 0.27 s
+#### packed-metal-kernels.ordinary.build-B.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-7de3d3302d9a9b49 sha256 d9de344e42b7fb96fb9d1f1590cb5544b563ad6a8774fe011414fa27e3357b8a (build B: default+metal (--features metal))
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  == exit=0
+  peak memory footprint: 1376640 bytes (0.001 GB)
+  maximum resident set size: 2260992 bytes (0.002 GB)
+  time real: 0.00 s
+#### qwen-q4-audit.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-aa35af79e02f436b sha256 4729b191dd1ac17bfbd3e13d90c53a6368ccc33a934df236c560329a06243244 (build Dq)
+  == start 2026-10-17T11:45:12+00:00 lock_wait_s 0 load 7.31 71.34 82.38 free_pct 88 swap_used_mib 8538
+  test audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels ... Qwen3-MoE q4 packed kernel audit: matmul_launches=1345, expected=1345, whole_weight_dequantizations=0
+  Qwen3-MoE q4 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk, artifact_sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4, packed_payload_bytes=16992092160, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=4f07e280b96484ab, cached_logits_fnv1a64=4f07e280b96484ab, stateless_trace_fnv1a64=ffc7c66f2df4ffde, cached_trace_fnv1a64=ffc7c66f2df4ffde, decoded_logits_fnv1a64=9cc237e913913a6c, load_seconds=515.839, source_reads=242, max_open_shards=1, stateless_seconds=0.557, prefill_seconds=0.417, decode_seconds=0.410
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 786.69s
+  == exit=0 wall=787.6s min_free_pct=83 max_swap_growth_mib=0 swapin_mib=151 pressured_swapin_mib=0 end=2026-10-17T11:58:20+00:00 end_load 27.52 68.56 70.52
+  peak memory footprint: 18736461240 bytes (18.736 GB)
+  maximum resident set size: 19661520896 bytes (19.662 GB)
+  time real: 786.71 s
+#### qwen-q4-conversion.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 sha256 f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42 (build E)
+  == start 2026-10-17T11:19:02+00:00 lock_wait_s 0 load 9.99 58.96 69.12 free_pct 68 swap_used_mib 8562
+  test quantizes_pinned_qwen3_moe_weights_to_q4_burnpack ... Qwen3-MoE q4 conversion: path=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk, sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4, tensors=18625, retained_f16=242, payload_bytes=16992092160, artifact_bytes=17006255982, largest_payload_bytes=175030272, source_reads=18867, max_open_shards=1, conversion_seconds=267.528
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 667.52s
+  == exit=0 wall=667.7s min_free_pct=86 max_swap_growth_mib=0 swapin_mib=8 pressured_swapin_mib=0 end=2026-10-17T11:30:10+00:00 end_load 154.28 88.64 67.99
+  == artifact /Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk bytes=17006255982 sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4 (hashed outside the test in 43.3s)
+  == authenticated /Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk bytes=17006255982 sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4 identical=True
+  peak memory footprint: 1949278968 bytes (1.949 GB)
+  maximum resident set size: 17193549824 bytes (17.194 GB)
+  time real: 667.52 s
+#### qwen-q4-smoke.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 sha256 f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42 (build E)
+  == start 2026-10-17T11:30:54+00:00 lock_wait_s 0 load 151.03 96.94 72.11 free_pct 88 swap_used_mib 8546
+  test loads_pinned_qwen3_moe_q4_and_runs_metal_smoke ... Qwen3-MoE q4 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk, artifact_sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4, packed_payload_bytes=16992092160, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=4f07e280b96484ab, cached_logits_fnv1a64=4f07e280b96484ab, stateless_trace_fnv1a64=ffc7c66f2df4ffde, cached_trace_fnv1a64=ffc7c66f2df4ffde, decoded_logits_fnv1a64=9cc237e913913a6c, load_seconds=340.285, source_reads=242, max_open_shards=1, stateless_seconds=0.580, prefill_seconds=0.412, decode_seconds=0.290
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 858.02s
+  == exit=0 wall=858.5s min_free_pct=83 max_swap_growth_mib=0 swapin_mib=10 pressured_swapin_mib=0 end=2026-10-17T11:45:12+00:00 end_load 7.60 72.47 82.84
+  peak memory footprint: 20609612584 bytes (20.610 GB)
+  maximum resident set size: 19988217856 bytes (19.988 GB)
+  time real: 858.04 s
+#### qwen-q8-audit.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-aa35af79e02f436b sha256 4729b191dd1ac17bfbd3e13d90c53a6368ccc33a934df236c560329a06243244 (build Dq)
+  == start 2026-10-17T10:58:22+00:00 lock_wait_s 0 load 10.05 42.58 54.81 free_pct 73 swap_used_mib 8562
+  test audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels ... Qwen3-MoE q8 packed kernel audit: matmul_launches=1345, expected=1345, whole_weight_dequantizations=0
+  Qwen3-MoE q8 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, artifact_sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, packed_payload_bytes=32096174080, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=8f6d7ff7572c95fe, cached_logits_fnv1a64=8f6d7ff7572c95fe, stateless_trace_fnv1a64=fcff807a7a0157f3, cached_trace_fnv1a64=fcff807a7a0157f3, decoded_logits_fnv1a64=5c91f05510f1591a, load_seconds=622.548, source_reads=242, max_open_shards=1, stateless_seconds=1.560, prefill_seconds=0.414, decode_seconds=0.506
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1239.39s
+  == exit=0 wall=1240.2s min_free_pct=52 max_swap_growth_mib=0 swapin_mib=10 pressured_swapin_mib=0 end=2026-10-17T11:19:02+00:00 end_load 9.99 58.96 69.12
+  peak memory footprint: 34555749000 bytes (34.556 GB)
+  maximum resident set size: 34768142336 bytes (34.768 GB)
+  time real: 1239.85 s
+#### qwen-q8-conversion.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 sha256 f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42 (build E)
+  == start 2026-10-17T10:10:19+00:00 lock_wait_s 0 load 3.00 2.21 2.54 free_pct 89 swap_used_mib 9042
+  test quantizes_pinned_qwen3_moe_weights_to_q8_burnpack ... Qwen3-MoE q8 conversion: path=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, tensors=18625, retained_f16=242, payload_bytes=32096174080, artifact_bytes=32110057725, largest_payload_bytes=330612736, source_reads=18867, max_open_shards=1, conversion_seconds=577.126
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 917.26s
+  == exit=0 wall=918.6s min_free_pct=86 max_swap_growth_mib=0 swapin_mib=453 pressured_swapin_mib=0 end=2026-10-17T10:25:38+00:00 end_load 9.01 36.47 30.07
+  == artifact /Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk bytes=32110057725 sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c (hashed outside the test in 14.6s)
+  == authenticated /Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk bytes=32110057725 sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c identical=True
+  peak memory footprint: 1756090400 bytes (1.756 GB)
+  maximum resident set size: 32310853632 bytes (32.311 GB)
+  time real: 917.77 s
+#### qwen-q8-smoke.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 sha256 f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42 (build E)
+  == start 2026-10-17T10:36:53+00:00 lock_wait_s 660 load 87.39 52.75 41.45 free_pct 90 swap_used_mib 8594
+  test loads_pinned_qwen3_moe_q8_and_runs_metal_smoke ... Qwen3-MoE q8 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, artifact_sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, packed_payload_bytes=32096174080, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=8f6d7ff7572c95fe, cached_logits_fnv1a64=8f6d7ff7572c95fe, stateless_trace_fnv1a64=fcff807a7a0157f3, cached_trace_fnv1a64=fcff807a7a0157f3, decoded_logits_fnv1a64=5c91f05510f1591a, load_seconds=620.371, source_reads=242, max_open_shards=1, stateless_seconds=1.733, prefill_seconds=0.468, decode_seconds=0.905
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 1287.82s
+  == exit=0 wall=1288.6s min_free_pct=52 max_swap_growth_mib=0 swapin_mib=24 pressured_swapin_mib=0 end=2026-10-17T10:58:22+00:00 end_load 10.05 42.58 54.81
+  peak memory footprint: 35451970808 bytes (35.452 GB)
+  maximum resident set size: 34899853312 bytes (34.900 GB)
+  time real: 1287.83 s

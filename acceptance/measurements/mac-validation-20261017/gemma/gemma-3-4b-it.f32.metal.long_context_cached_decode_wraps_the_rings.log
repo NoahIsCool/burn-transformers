@@ -1,0 +1,39 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Metal/F32 metal::metal_long_context_cached_decode_wraps_the_rings
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 metal::metal_long_context_cached_decode_wraps_the_rings
+== start 2026-10-17T08:06:29+00:00 load 8.08 9.14 6.44
+
+running 1 test
+test metal::metal_long_context_cached_decode_wraps_the_rings ... load: 439 vision-tower tensors intentionally ignored
+cached: capacity 1245, 29 layers in 1024-slot rings
+cached chunk 0..1000: max |Δ| = 1.3923645e-4 at position 999
+cached chunk 1000..1237: max |Δ| = 7.915497e-5 at position 1236
+long greedy: 8 of 8 tokens match
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 10.96s
+
+       11.05 real         5.04 user         3.23 sys
+         17064673280  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1714762  page reclaims
+                  39  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               44332  involuntary context switches
+         90741673369  instructions retired
+         30418843972  cycles elapsed
+         29919390088  peak memory footprint
+== exit=0 wall=11.2s min_free_pct=75 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

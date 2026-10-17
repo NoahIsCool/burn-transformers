@@ -1,0 +1,602 @@
+[
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:02:30+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 6.2,
+  "real_s": 5.41,
+  "test_finished_s": 5.38,
+  "peak_footprint_bytes": 15136451744,
+  "max_rss_bytes": 15139078144,
+  "min_free_pct": 90,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 4.986359667
+  },
+  "lines": [
+   "prompt 0: 5 tokens, max |Δ| = 7.6293945e-5, mean |Δ| = 3.3899559309188657e-6",
+   "prompt 1: 13 tokens, max |Δ| = 7.05719e-5, mean |Δ| = 3.18732724717849e-6",
+   "prompt 2: 8 tokens, max |Δ| = 6.1035156e-5, mean |Δ| = 3.6147020893332775e-6"
+  ],
+  "bundle": "1layer",
+  "test": "flex_prompt_logits_match_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "prompt 0: 5 tokens, max |Δ| = 7.6293945e-5, mean |Δ| = 3.3899559309188657e-6",
+   "prompt 1: 13 tokens, max |Δ| = 7.05719e-5, mean |Δ| = 3.18732724717849e-6",
+   "prompt 2: 8 tokens, max |Δ| = 6.1035156e-5, mean |Δ| = 3.6147020893332775e-6"
+  ],
+  "f4c56c4_peak_footprint_bytes": 17175868016,
+  "peak_delta_bytes": -2039416272,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.flex.prompt_logits_match_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:02:36+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 6.1,
+  "real_s": 5.32,
+  "test_finished_s": 5.3,
+  "peak_footprint_bytes": 15126047928,
+  "max_rss_bytes": 15128887296,
+  "min_free_pct": 90,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 3.066363916
+  },
+  "lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "bundle": "1layer",
+  "test": "flex_cached_greedy_matches_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "f4c56c4_peak_footprint_bytes": 17159484016,
+  "peak_delta_bytes": -2033436088,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.flex.cached_greedy_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:02:42+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 4.1,
+  "real_s": 3.64,
+  "test_finished_s": 3.62,
+  "peak_footprint_bytes": 15132339408,
+  "max_rss_bytes": 15135244288,
+  "min_free_pct": 90,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 3.055337875
+  },
+  "lines": [
+   "batched row 0: max |Δ| = 4.9591064e-5 to the reference, 4.9591064e-5 to the stateless pass",
+   "batched row 1: max |Δ| = 4.2915344e-5 to the reference, 3.71933e-5 to the stateless pass",
+   "batched row 2: max |Δ| = 5.1498413e-5 to the reference, 5.340576e-5 to the stateless pass"
+  ],
+  "bundle": "1layer",
+  "test": "flex_batched_prefill_matches_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "batched row 0: max |Δ| = 4.9591064e-5 to the reference, 4.9591064e-5 to the stateless pass",
+   "batched row 1: max |Δ| = 4.2915344e-5 to the reference, 3.71933e-5 to the stateless pass",
+   "batched row 2: max |Δ| = 5.1498413e-5 to the reference, 5.340576e-5 to the stateless pass"
+  ],
+  "f4c56c4_peak_footprint_bytes": 17166643824,
+  "peak_delta_bytes": -2034304416,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.flex.batched_prefill_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:02:47+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 4.1,
+  "real_s": 3.93,
+  "test_finished_s": 3.9,
+  "peak_footprint_bytes": 15124081824,
+  "max_rss_bytes": 15126986752,
+  "min_free_pct": 90,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 3.0850575
+  },
+  "lines": [
+   "cached decode of a 13-token prompt (prefill 3): max |Δ| = 2.9563904e-5"
+  ],
+  "bundle": "1layer",
+  "test": "flex_cached_long_prompt_matches_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "cached decode of a 13-token prompt (prefill 3): max |Δ| = 2.9563904e-5"
+  ],
+  "f4c56c4_peak_footprint_bytes": 17159025264,
+  "peak_delta_bytes": -2034943440,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.flex.cached_long_prompt_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:02:51+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 5.1,
+  "real_s": 4.67,
+  "test_finished_s": 4.61,
+  "peak_footprint_bytes": 22630264448,
+  "max_rss_bytes": 15798435840,
+  "min_free_pct": 82,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 3.719708542
+  },
+  "lines": [
+   "prompt 0: 5 tokens, max |Δ| = 3.1471252e-5, mean |Δ| = 2.7181729764209066e-6",
+   "prompt 1: 13 tokens, max |Δ| = 2.9563904e-5, mean |Δ| = 2.2323041431836017e-6",
+   "prompt 2: 8 tokens, max |Δ| = 3.2424927e-5, mean |Δ| = 2.4995351325743624e-6"
+  ],
+  "bundle": "1layer",
+  "test": "metal::metal_prompt_logits_match_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "prompt 0: 5 tokens, max |Δ| = 3.1471252e-5, mean |Δ| = 2.7181729764209066e-6",
+   "prompt 1: 13 tokens, max |Δ| = 2.9563904e-5, mean |Δ| = 2.2323041431836017e-6",
+   "prompt 2: 8 tokens, max |Δ| = 3.2424927e-5, mean |Δ| = 2.4995351325743624e-6"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27542043120,
+  "peak_delta_bytes": -4911778672,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.metal.prompt_logits_match_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:02:56+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 13.7,
+  "real_s": 13.54,
+  "test_finished_s": 13.47,
+  "peak_footprint_bytes": 22630756088,
+  "max_rss_bytes": 15811133440,
+  "min_free_pct": 83,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 9.155080416
+  },
+  "lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "bundle": "1layer",
+  "test": "metal::metal_cached_greedy_matches_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27543304712,
+  "peak_delta_bytes": -4912548624,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.metal.cached_greedy_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:03:10+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 12.6,
+  "real_s": 12.43,
+  "test_finished_s": 12.36,
+  "peak_footprint_bytes": 22563712784,
+  "max_rss_bytes": 15745171456,
+  "min_free_pct": 83,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 10.859685417
+  },
+  "lines": [
+   "batched row 0: max |Δ| = 2.2888184e-5 to the reference, 0e0 to the stateless pass",
+   "batched row 1: max |Δ| = 1.6212463e-5 to the reference, 0e0 to the stateless pass",
+   "batched row 2: max |Δ| = 1.7642975e-5 to the reference, 9.536743e-6 to the stateless pass"
+  ],
+  "bundle": "1layer",
+  "test": "metal::metal_batched_prefill_matches_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "batched row 0: max |Δ| = 2.2888184e-5 to the reference, 0e0 to the stateless pass",
+   "batched row 1: max |Δ| = 1.6212463e-5 to the reference, 0e0 to the stateless pass",
+   "batched row 2: max |Δ| = 1.7642975e-5 to the reference, 9.536743e-6 to the stateless pass"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27539012032,
+  "peak_delta_bytes": -4975299248,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.metal.batched_prefill_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:03:22+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 17.9,
+  "real_s": 16.87,
+  "test_finished_s": 16.8,
+  "peak_footprint_bytes": 22630723392,
+  "max_rss_bytes": 15812132864,
+  "min_free_pct": 81,
+  "panicked": false,
+  "loaded": {
+   "blocks": 1,
+   "dtype": "F32",
+   "seconds": 13.616585292
+  },
+  "lines": [
+   "cached decode of a 13-token prompt (prefill 3): max |Δ| = 3.2424927e-5"
+  ],
+  "bundle": "1layer",
+  "test": "metal::metal_cached_long_prompt_matches_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "cached decode of a 13-token prompt (prefill 3): max |Δ| = 3.2424927e-5"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27542878728,
+  "peak_delta_bytes": -4912155336,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-1layer.f32.metal.cached_long_prompt_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:03:40+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 37.6,
+  "real_s": 36.95,
+  "test_finished_s": 36.92,
+  "peak_footprint_bytes": 25255676288,
+  "max_rss_bytes": 25253462016,
+  "min_free_pct": 89,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 32.607623125
+  },
+  "lines": [
+   "prompt 0: 5 tokens, max |Δ| = 5.6266785e-5, mean |Δ| = 4.877037294840762e-6",
+   "prompt 1: 13 tokens, max |Δ| = 6.484985e-5, mean |Δ| = 4.107968881426281e-6",
+   "prompt 2: 8 tokens, max |Δ| = 6.866455e-5, mean |Δ| = 4.96400607592685e-6",
+   "prompt 3: 183 tokens, max |Δ| = 1.282692e-4, mean |Δ| = 4.454966948125984e-6"
+  ],
+  "bundle": "4layer",
+  "test": "flex_prompt_logits_match_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "prompt 0: 5 tokens, max |Δ| = 5.6266785e-5, mean |Δ| = 4.877037294840762e-6",
+   "prompt 1: 13 tokens, max |Δ| = 6.484985e-5, mean |Δ| = 4.107968881426281e-6",
+   "prompt 2: 8 tokens, max |Δ| = 6.866455e-5, mean |Δ| = 4.96400607592685e-6",
+   "prompt 3: 183 tokens, max |Δ| = 1.282692e-4, mean |Δ| = 4.454966948125984e-6"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27295289168,
+  "peak_delta_bytes": -2039612880,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.flex.prompt_logits_match_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:04:18+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 13.2,
+  "real_s": 13.19,
+  "test_finished_s": 13.17,
+  "peak_footprint_bytes": 25203657064,
+  "max_rss_bytes": 25201475584,
+  "min_free_pct": 90,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 9.509264416
+  },
+  "lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "bundle": "4layer",
+  "test": "flex_cached_greedy_matches_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27238616888,
+  "peak_delta_bytes": -2034959824,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.flex.cached_greedy_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:04:31+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 14.3,
+  "real_s": 13.79,
+  "test_finished_s": 13.77,
+  "peak_footprint_bytes": 25474845272,
+  "max_rss_bytes": 25472827392,
+  "min_free_pct": 90,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 9.93644525
+  },
+  "lines": [
+   "batched row 0: max |Δ| = 5.531311e-5 to the reference, 4.5776367e-5 to the stateless pass",
+   "batched row 1: max |Δ| = 3.8146973e-5 to the reference, 3.9100647e-5 to the stateless pass",
+   "batched row 2: max |Δ| = 6.866455e-5 to the reference, 4.7683716e-5 to the stateless pass",
+   "batched row 3: max |Δ| = 4.7683716e-5 to the reference, 4.386902e-5 to the stateless pass"
+  ],
+  "bundle": "4layer",
+  "test": "flex_batched_prefill_matches_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "batched row 0: max |Δ| = 5.531311e-5 to the reference, 4.5776367e-5 to the stateless pass",
+   "batched row 1: max |Δ| = 3.8146973e-5 to the reference, 3.9100647e-5 to the stateless pass",
+   "batched row 2: max |Δ| = 6.866455e-5 to the reference, 4.7683716e-5 to the stateless pass",
+   "batched row 3: max |Δ| = 4.7683716e-5 to the reference, 4.386902e-5 to the stateless pass"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27498778616,
+  "peak_delta_bytes": -2023933344,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.flex.batched_prefill_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:04:46+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 25.6,
+  "real_s": 24.98,
+  "test_finished_s": 24.95,
+  "peak_footprint_bytes": 25215732048,
+  "max_rss_bytes": 25213632512,
+  "min_free_pct": 89,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 11.009463167
+  },
+  "lines": [
+   "cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.673004e-5"
+  ],
+  "bundle": "4layer",
+  "test": "flex_cached_long_prompt_matches_the_reference",
+  "backend": "Flex",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.673004e-5"
+  ],
+  "f4c56c4_peak_footprint_bytes": 27251150600,
+  "peak_delta_bytes": -2035418552,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.flex.cached_long_prompt_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:05:11+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 14.3,
+  "real_s": 13.28,
+  "test_finished_s": 13.2,
+  "peak_footprint_bytes": 30292846096,
+  "max_rss_bytes": 16006512640,
+  "min_free_pct": 73,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 10.12216775
+  },
+  "lines": [
+   "prompt 0: 5 tokens, max |Δ| = 4.673004e-5, mean |Δ| = 4.405056670753809e-6",
+   "prompt 1: 13 tokens, max |Δ| = 3.8146973e-5, mean |Δ| = 3.803721218192966e-6",
+   "prompt 2: 8 tokens, max |Δ| = 4.9591064e-5, mean |Δ| = 4.411954888482253e-6",
+   "prompt 3: 183 tokens, max |Δ| = 5.1021576e-5, mean |Δ| = 3.914985075923837e-6"
+  ],
+  "bundle": "4layer",
+  "test": "metal::metal_prompt_logits_match_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "prompt 0: 5 tokens, max |Δ| = 4.673004e-5, mean |Δ| = 4.405056670753809e-6",
+   "prompt 1: 13 tokens, max |Δ| = 3.8146973e-5, mean |Δ| = 3.803721218192966e-6",
+   "prompt 2: 8 tokens, max |Δ| = 4.9591064e-5, mean |Δ| = 4.411954888482253e-6",
+   "prompt 3: 183 tokens, max |Δ| = 5.1021576e-5, mean |Δ| = 3.914985075923837e-6"
+  ],
+  "f4c56c4_peak_footprint_bytes": 39052344944,
+  "peak_delta_bytes": -8759498848,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.metal.prompt_logits_match_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:05:26+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 14.2,
+  "real_s": 13.68,
+  "test_finished_s": 13.6,
+  "peak_footprint_bytes": 30295664096,
+  "max_rss_bytes": 16073293824,
+  "min_free_pct": 76,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 10.326363916
+  },
+  "lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "bundle": "4layer",
+  "test": "metal::metal_cached_greedy_matches_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "greedy: 32 of 32 tokens match"
+  ],
+  "f4c56c4_peak_footprint_bytes": 39054720552,
+  "peak_delta_bytes": -8759056456,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.metal.cached_greedy_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:05:40+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 14.2,
+  "real_s": 13.26,
+  "test_finished_s": 13.19,
+  "peak_footprint_bytes": 30325450232,
+  "max_rss_bytes": 16006168576,
+  "min_free_pct": 72,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 9.865078416
+  },
+  "lines": [
+   "batched row 0: max |Δ| = 3.886223e-5 to the reference, 2.5749207e-5 to the stateless pass",
+   "batched row 1: max |Δ| = 3.0994415e-5 to the reference, 2.2888184e-5 to the stateless pass",
+   "batched row 2: max |Δ| = 3.6239624e-5 to the reference, 2.9563904e-5 to the stateless pass",
+   "batched row 3: max |Δ| = 2.861023e-5 to the reference, 0e0 to the stateless pass"
+  ],
+  "bundle": "4layer",
+  "test": "metal::metal_batched_prefill_matches_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "batched row 0: max |Δ| = 3.886223e-5 to the reference, 2.5749207e-5 to the stateless pass",
+   "batched row 1: max |Δ| = 3.0994415e-5 to the reference, 2.2888184e-5 to the stateless pass",
+   "batched row 2: max |Δ| = 3.6239624e-5 to the reference, 2.9563904e-5 to the stateless pass",
+   "batched row 3: max |Δ| = 2.861023e-5 to the reference, 0e0 to the stateless pass"
+  ],
+  "f4c56c4_peak_footprint_bytes": 39083638312,
+  "peak_delta_bytes": -8758188080,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.metal.batched_prefill_matches_the_reference.log"
+ },
+ {
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "binary_sha256": "00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb",
+  "start": "2026-10-17T09:05:55+00:00",
+  "result": "ok",
+  "passed": 1,
+  "failed": 0,
+  "exit": 0,
+  "wall_s": 19.3,
+  "real_s": 19.16,
+  "test_finished_s": 19.09,
+  "peak_footprint_bytes": 30300317176,
+  "max_rss_bytes": 16006299648,
+  "min_free_pct": 75,
+  "panicked": false,
+  "loaded": {
+   "blocks": 4,
+   "dtype": "F32",
+   "seconds": 10.195920209
+  },
+  "lines": [
+   "cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.863739e-5"
+  ],
+  "bundle": "4layer",
+  "test": "metal::metal_cached_long_prompt_matches_the_reference",
+  "backend": "Metal",
+  "dtype": "F32",
+  "identical_to_f4c56c4": true,
+  "f4c56c4_lines": [
+   "cached decode of a 183-token prompt (prefill 45): max |Δ| = 4.863739e-5"
+  ],
+  "f4c56c4_peak_footprint_bytes": 39058751064,
+  "peak_delta_bytes": -8758433888,
+  "log": "mac-validation/gpt-oss-truncated/gpt-oss-20b-4layer.f32.metal.cached_long_prompt_matches_the_reference.log"
+ }
+]

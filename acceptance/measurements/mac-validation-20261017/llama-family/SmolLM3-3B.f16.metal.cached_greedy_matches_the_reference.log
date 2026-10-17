@@ -1,0 +1,76 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Metal/F16 metal::metal_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 metal::metal_cached_greedy_matches_the_reference
+== start 2026-10-17T07:22:04+00:00 load 3.47 6.46 9.62
+
+running 1 test
+test metal::metal_cached_greedy_matches_the_reference ... F16 bounds of prompt 0: max 7.537275695800781e0, mean 1.877204010803211e-1 (1.2 × official BF16 6.281063079833984e0, 1.5643366756693425e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F16 bounds of prompt 1: max 8.005458068847656e0, mean 9.465184055010659e-2 (1.2 × official BF16 6.671215057373047e0, 7.88765337917555e-2; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F16 bounds of prompt 2: max 6.393724822998046e0, mean 2.1226978368011862e-1 (1.2 × official BF16 5.328104019165039e0, 1.7689148640009886e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+cached prefill: max |Δ| = 2.612447738647461e-2 to the reference (bound 7.537275695800781e0)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy step 0: reference margin 2.764536e0 is not decisive; skipped
+greedy step 1: reference margin 2.954979e-1 is not decisive; skipped
+greedy step 2: reference margin 1.0883331e-2 is not decisive; skipped
+greedy step 3: reference margin 1.890976e0 is not decisive; skipped
+greedy step 4: reference margin 1.3261223e-1 is not decisive; skipped
+greedy step 5: reference margin 3.543892e-1 is not decisive; skipped
+greedy step 6: reference margin 3.4183273e0 is not decisive; skipped
+greedy step 7: reference margin 3.3080559e0 is not decisive; skipped
+greedy step 8: reference margin 2.9730606e-1 is not decisive; skipped
+greedy step 9: reference margin 7.4734116e-1 is not decisive; skipped
+greedy step 10: reference margin 4.0584564e-1 is not decisive; skipped
+greedy step 11: reference margin 6.311226e-2 is not decisive; skipped
+greedy step 12: reference margin 4.5212555e-1 is not decisive; skipped
+greedy step 13: reference margin 4.6744537e-1 is not decisive; skipped
+greedy step 14: reference margin 3.5491562e0 is not decisive; skipped
+greedy step 15: reference margin 2.38278e0 is not decisive; skipped
+greedy step 16: reference margin 5.1213074e-1 is not decisive; skipped
+greedy step 17: reference margin 7.695574e0 is not decisive; skipped
+greedy step 18: reference margin 7.609749e0 is not decisive; skipped
+greedy step 19: reference margin 7.528305e-1 is not decisive; skipped
+greedy step 20: reference margin 4.3663406e-1 is not decisive; skipped
+greedy step 21: reference margin 1.7543755e0 is not decisive; skipped
+greedy step 22: reference margin 2.0983696e0 is not decisive; skipped
+greedy step 23: reference margin 1.7200089e-1 is not decisive; skipped
+greedy step 24: reference margin 1.3567104e0 is not decisive; skipped
+greedy step 25: reference margin 3.117981e-1 is not decisive; skipped
+greedy step 26: reference margin 2.2836494e-1 is not decisive; skipped
+greedy step 27: reference margin 3.2927704e0 is not decisive; skipped
+greedy step 28: reference margin 2.9909706e-1 is not decisive; skipped
+greedy step 29: reference margin 3.4399395e0 is not decisive; skipped
+greedy step 30: reference margin 2.87879e0 is not decisive; skipped
+greedy step 31: reference margin 6.081486e-1 is not decisive; skipped
+greedy: 0 of 32 tokens match
+cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 13 tokens, max |Δ| = 5.110836029052734e-1 at position 0 (bound 8.005458068847656e0), mean |Δ| = 9.725995530783656e-3 (bound 9.465184055010659e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 5.65s
+
+        5.66 real         4.09 user         1.78 sys
+          3421028352  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              493095  page reclaims
+                  23  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               33913  involuntary context switches
+         66477029877  instructions retired
+         21353414959  cycles elapsed
+          9227602800  peak memory footprint
+== exit=0 wall=6.1s min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

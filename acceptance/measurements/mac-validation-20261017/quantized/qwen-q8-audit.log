@@ -1,0 +1,35 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-aa35af79e02f436b sha256 4729b191dd1ac17bfbd3e13d90c53a6368ccc33a934df236c560329a06243244 (build Dq)
+== Metal/F16 activations + packed Q8/G64 (kernel-traced) audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels
+== env TRANSFORMERS_QWEN3_MOE_DIR=/Volumes/bag of holding/models/Qwen/Qwen3-30B-A3B-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39
+== env TRANSFORMERS_QWEN3_MOE_Q8_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-aa35af79e02f436b --ignored --exact --nocapture --test-threads 1 audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels
+== start 2026-10-17T10:58:22+00:00 lock_wait_s 0 load 10.05 42.58 54.81 free_pct 73 swap_used_mib 8562
+
+running 1 test
+test audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels ... Qwen3-MoE q8 packed kernel audit: matmul_launches=1345, expected=1345, whole_weight_dequantizations=0
+Qwen3-MoE q8 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, artifact_sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, packed_payload_bytes=32096174080, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=8f6d7ff7572c95fe, cached_logits_fnv1a64=8f6d7ff7572c95fe, stateless_trace_fnv1a64=fcff807a7a0157f3, cached_trace_fnv1a64=fcff807a7a0157f3, decoded_logits_fnv1a64=5c91f05510f1591a, load_seconds=622.548, source_reads=242, max_open_shards=1, stateless_seconds=1.560, prefill_seconds=0.414, decode_seconds=0.506
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1239.39s
+
+     1239.85 real       785.97 user        91.02 sys
+         34768142336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4282885  page reclaims
+                 493  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 707  voluntary context switches
+             3262719  involuntary context switches
+      10573436697228  instructions retired
+       2985392230701  cycles elapsed
+         34555749000  peak memory footprint
+== exit=0 wall=1240.2s min_free_pct=52 max_swap_growth_mib=0 swapin_mib=10 pressured_swapin_mib=0 end=2026-10-17T11:19:02+00:00 end_load 9.99 58.96 69.12

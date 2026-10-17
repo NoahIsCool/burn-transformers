@@ -1,0 +1,35 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:50:26Z load { 2.27 2.57 3.92 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/official_variants.py /Volumes/T9/models/Qwen/Qwen3-4B /Volumes/T9/transformers-references/Qwen3-4B-531c80e2 /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/Qwen3-4B-official cpu-bfloat16-eager cpu-bfloat16-sdpa mps-bfloat16-eager mps-bfloat16-sdpa
+cpu-bfloat16-eager prompt 0: 5 tokens, max |d| = 7.000284e-01 at position 0 token 330, mean |d| = 7.797087e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 1: 13 tokens, max |d| = 7.010949e-01 at position 0 token 15486, mean |d| = 4.336638e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 2: 8 tokens, max |d| = 8.795242e-01 at position 0 token 27, mean |d| = 5.384871e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-sdpa prompt 0: 5 tokens, max |d| = 7.000284e-01 at position 0 token 330, mean |d| = 6.144218e-02
+cpu-bfloat16-sdpa prompt 1: 13 tokens, max |d| = 7.010949e-01 at position 0 token 15486, mean |d| = 4.598432e-02
+cpu-bfloat16-sdpa prompt 2: 8 tokens, max |d| = 8.795242e-01 at position 0 token 27, mean |d| = 3.995567e-02
+mps-bfloat16-eager prompt 0: 5 tokens, max |d| = 7.000284e-01 at position 0 token 330, mean |d| = 7.365400e-02
+mps-bfloat16-eager prompt 1: 13 tokens, max |d| = 8.573449e-01 at position 0 token 15486, mean |d| = 5.640855e-02
+mps-bfloat16-eager prompt 2: 8 tokens, max |d| = 8.795242e-01 at position 0 token 27, mean |d| = 4.145880e-02
+mps-bfloat16-sdpa prompt 0: 5 tokens, max |d| = 7.000284e-01 at position 0 token 330, mean |d| = 4.882157e-02
+mps-bfloat16-sdpa prompt 1: 13 tokens, max |d| = 8.573449e-01 at position 0 token 15486, mean |d| = 6.317436e-02
+mps-bfloat16-sdpa prompt 2: 8 tokens, max |d| = 8.795242e-01 at position 0 token 27, mean |d| = 3.990625e-02
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16 bfloat16
+        7.76 real        14.55 user         4.39 sys
+          8583839744  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1038489  page reclaims
+                   7  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  81  voluntary context switches
+              133173  involuntary context switches
+        265431273310  instructions retired
+         67577450914  cycles elapsed
+          8997963408  peak memory footprint
+== exit=0 wall=8s

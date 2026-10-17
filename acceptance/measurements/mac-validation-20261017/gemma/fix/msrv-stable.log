@@ -1,0 +1,13 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== cmd cargo +1.92.0 test --locked --lib feed_forward (CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-polish-half-msrv)
+test models::custom::feed_forward::tests::clamped_experts_honor_the_layer_weighting_precision ... ok
+test models::qwen3_5::recipe::tests::changed_feed_forward_width_requires_explicit_reinitialization_and_is_audited ... ok
+test models::custom::causal::tests::every_mixer_and_feed_forward_point_propagates_edit_failures ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 3465 filtered out; finished in 0.63s
+
+== stable: cargo +stable test --locked --lib feed_forward
+test models::custom::causal::tests::every_mixer_and_feed_forward_point_propagates_edit_failures ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 3465 filtered out; finished in 0.62s
+

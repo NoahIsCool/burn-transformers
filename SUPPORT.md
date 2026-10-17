@@ -102,7 +102,9 @@ Quantized support is tracked independently from full-precision support. The
 same holds for families whose real-checkpoint parity has been measured but not
 recorded as accepted, such as the Llama, Gemma, and gpt-oss checkpoints listed
 on the [model status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence):
-they are experimentally validated, not supported.
+they are experimentally validated, not supported. That includes the
+half-precision runs of the Llama-family and Gemma gates. No real-checkpoint
+gate has been recorded on CUDA, so no checkpoint is validated there.
 
 Version 0.1 promotes exactly three profiles on the validated Apple M3 Max host:
 
