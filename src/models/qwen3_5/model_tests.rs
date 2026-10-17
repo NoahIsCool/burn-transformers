@@ -6,7 +6,10 @@ use burn::{
 };
 
 use super::*;
-use crate::{LogitsSelection, models::config::ModelConfig};
+use crate::{
+    LogitsSelection,
+    models::{config::ModelConfig, shared::test_support::deterministic_parameters},
+};
 
 /// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
@@ -519,13 +522,26 @@ fn readout_hidden(
 ///
 /// They multiply by the transposed table view without reshaping it (no
 /// per-call table copy on Flex); the logits must not change beyond rounding.
+///
+/// Each logit is a dot product of `n = 8` terms, and any summation order
+/// (any kernel, with or without fused multiply-adds) stays within
+/// `γ_n Σ|h_i E_vi|` of the exact value, `γ_n = n u / (1 - n u)` with
+/// `u = 2^-24`. Two orders therefore differ by at most twice that. The table
+/// comes from seed 211 through [`deterministic_parameters`] rather than from
+/// Burn's process-wide generator, whose draws depend on test scheduling, and
+/// for it twice the bound is at most 0.51 of the tolerance at every logit:
+/// the comparison passes for any summation order, not only for the orders
+/// measured on this host. (Each of 500 seeds stayed below 0.76.)
 #[test]
 fn tied_readouts_match_reshaping_linear_oracle() {
     let device = Default::default();
     let mut config = tiny_config();
     config.tie_word_embeddings = true;
-    let model = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
-        .expect("tied tiny model must initialize");
+    let model = deterministic_parameters(
+        Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
+            .expect("tied tiny model must initialize"),
+        211,
+    );
     let hidden = readout_hidden(config.hidden_size, &device);
     let oracle = burn::tensor::module::linear(
         hidden.clone(),

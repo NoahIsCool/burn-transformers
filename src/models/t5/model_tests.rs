@@ -8,7 +8,7 @@ use burn::{
 
 use super::*;
 use crate::LogitsSelection;
-use crate::models::config::ModelConfig;
+use crate::models::{config::ModelConfig, shared::test_support::deterministic_parameters};
 
 /// CPU backend used by T5 component and stateless execution tests.
 type TestBackend = Flex<f32, i32>;
@@ -855,13 +855,26 @@ fn readout_hidden(
 ///
 /// It multiplies by the transposed table view without reshaping it (no
 /// per-call table copy on Flex); the logits must not change beyond rounding.
+///
+/// Both sides scale the hidden states by the same F32 operation, so only the
+/// summation order of each `n = 4`-term dot product can differ. Any order
+/// (any kernel, with or without fused multiply-adds) stays within
+/// `γ_n Σ|h_i E_vi|` of the exact value, `γ_n = n u / (1 - n u)` with
+/// `u = 2^-24`, and two orders therefore differ by at most twice that. The
+/// table comes from seed 211 through [`deterministic_parameters`] rather
+/// than from Burn's process-wide generator, whose draws depend on test
+/// scheduling, and for it twice the bound is at most 0.13 of the tolerance
+/// at every logit: the comparison passes for any summation order. (Each of
+/// 1,000 seeds stayed below 0.15.)
 #[test]
 fn tied_readout_matches_reshaping_linear_oracle() {
     let device = Default::default();
     let config = tiny_config(T5FeedForwardProjection::Relu);
     let width = config.d_model;
-    let model =
-        T5ForConditionalGeneration::<TestBackend>::init(config, &device).expect("valid model");
+    let model = deterministic_parameters(
+        T5ForConditionalGeneration::<TestBackend>::init(config, &device).expect("valid model"),
+        211,
+    );
     let hidden = readout_hidden(width, &device);
     let oracle = burn::tensor::module::linear(
         hidden.clone().mul_scalar(1.0 / (width as f64).sqrt()),

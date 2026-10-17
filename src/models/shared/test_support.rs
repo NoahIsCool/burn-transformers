@@ -18,7 +18,7 @@ use std::{any::Any, collections::HashMap};
 
 use burn::{
     backend::Flex,
-    module::{Module, ModuleMapper, Param, ParamId},
+    module::{Module, ModuleMapper, ModuleVisitor, Param, ParamId},
     tensor::{Bool, Int, Tensor, TensorData, backend::Backend},
 };
 
@@ -190,12 +190,20 @@ pub(crate) fn assert_staged_edit_failures_propagate<B: Backend, M: StagedModel<B
 /// (`1 / sqrt(fan_in)` for Burn's `[d_in, d_out]` linear weights, and `1` for
 /// a non-constant vector), from a SplitMix64 stream keyed by `seed`, the
 /// parameter's position in visit order, and the element index. Constant
-/// parameters (unit norm weights, zero biases) are kept: their values never
-/// depend on the generator. A parameter shared between modules (a tied
-/// embedding) receives one value. Shapes, dtypes, devices, and trainability
-/// are preserved. The distribution is a test fixture, not a model
+/// parameters are kept (see [`is_constant`]): several equal elements (unit
+/// norm weights, zero biases), or a single element exactly `0` or `1`. Their
+/// values never depend on the generator. Any other single element is
+/// replaced, because one value cannot show whether Burn drew it (a one-head
+/// decay is drawn). A parameter shared between modules (a tied embedding)
+/// receives one value. Shapes, dtypes, devices, and trainability are
+/// preserved. The distribution is a test fixture, not a model
 /// initialization: its only purpose is that the same `seed` gives the same
 /// weights however tests are scheduled.
+///
+/// `tests/support/deterministic_parameters.rs` copies this construction for
+/// integration and example tests, which cannot reach this crate-private
+/// helper. Seeds on both sides are chosen by measured margins, so the two
+/// constructions, and the values both test suites pin, must change together.
 pub(crate) fn deterministic_parameters<B: Backend, M: Module<B>>(module: M, seed: u64) -> M {
     module.map(&mut DeterministicParameters {
         seed,
@@ -232,7 +240,7 @@ impl<B: Backend> ModuleMapper<B> for DeterministicParameters {
             .convert::<f32>()
             .to_vec::<f32>()
             .expect("F32 parameter values");
-        let replacement = if host.iter().all(|&element| element == host[0]) {
+        let replacement = if is_constant(&host) {
             value
         } else {
             let position = self.next;
@@ -259,12 +267,75 @@ impl<B: Backend> ModuleMapper<B> for DeterministicParameters {
     }
 }
 
+/// Whether a parameter's host values are a constant fill that Burn's generator did not draw.
+///
+/// More than one element, all equal, is a fill: unit norm scales, zero
+/// biases, unit skip weights. A single element cannot show whether it was
+/// drawn, so it counts as constant only when it is exactly `0` or `1`, the
+/// fills of a one-element bias, gate, or scale; any other single value (a
+/// one-head decay `A_log`, drawn at random) is replaced. An empty parameter
+/// has nothing to replace.
+fn is_constant(host: &[f32]) -> bool {
+    match host {
+        [] => true,
+        [single] => *single == 0.0 || *single == 1.0,
+        [first, rest @ ..] => rest.iter().all(|element| element == first),
+    }
+}
+
 /// SplitMix64's output function: a bijective 64-bit mix with full avalanche.
 fn split_mix64(state: u64) -> u64 {
     let mut z = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// Asserts that `build` followed by [`deterministic_parameters`] ignores Burn's generator.
+///
+/// Builds the module twice, after seeding Burn's process-wide generator with
+/// two different values, maps both with `seed`, and requires every float
+/// parameter to be bit-identical in visit order. A parameter the mapping
+/// keeps although Burn drew it then differs between the two builds and fails
+/// here, instead of leaving a seed-pinned fixture's weights to depend on test
+/// scheduling. Parallel tests drawing in between only make Burn's draws
+/// differ more, so the check cannot pass by accident.
+pub(crate) fn assert_weights_ignore_burn_seed<M: Module<TestBackend>>(
+    name: &str,
+    build: impl Fn() -> M,
+    seed: u64,
+) {
+    let device = Default::default();
+    let weights = |burn_seed| {
+        TestBackend::seed(&device, burn_seed);
+        let mut bits = ParameterBits(Vec::new());
+        deterministic_parameters(build(), seed).visit(&mut bits);
+        bits.0
+    };
+    let (first, second) = (weights(1), weights(2));
+    assert_eq!(first.len(), second.len(), "{name}: parameter count");
+    for (index, (first, second)) in first.iter().zip(&second).enumerate() {
+        assert!(
+            first == second,
+            "{name}: float parameter {index} (visit order) depends on Burn's generator"
+        );
+    }
+}
+
+/// [`ModuleVisitor`] collecting every float parameter's F32 bit patterns in visit order.
+struct ParameterBits(Vec<Vec<u32>>);
+
+impl ModuleVisitor<TestBackend> for ParameterBits {
+    /// Records one parameter as bit patterns, so even `-0.0` against `0.0` counts.
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<TestBackend, D>>) {
+        let values = param
+            .val()
+            .into_data()
+            .convert::<f32>()
+            .to_vec::<f32>()
+            .expect("F32 parameter values");
+        self.0.push(values.into_iter().map(f32::to_bits).collect());
+    }
 }
 
 #[cfg(test)]
@@ -362,4 +433,66 @@ mod tests {
         assert_eq!(mapped.first.val().dtype(), DType::F16);
         assert!(!mapped.first.val().is_require_grad());
     }
+
+    /// A module of one-element vectors, as per-head parameters of a one-head layer are.
+    #[derive(Module, Debug)]
+    struct Scalars<B: Backend> {
+        /// A zero fill, such as a bias.
+        zero: Param<Tensor<B, 1>>,
+        /// A unit fill, such as a norm scale or skip weight.
+        one: Param<Tensor<B, 1>>,
+        /// Any other value, which Burn may have drawn.
+        other: Param<Tensor<B, 1>>,
+    }
+
+    /// A single element is kept only when it is exactly zero or one; any other is replaced.
+    #[test]
+    fn single_elements_are_replaced_unless_zero_or_one() {
+        let device = Default::default();
+        let scalars = |other: f32| {
+            let vector = |value: f32| {
+                Param::from_tensor(Tensor::<TestBackend, 1>::from_floats([value], &device))
+            };
+            deterministic_parameters(
+                Scalars {
+                    zero: vector(0.0),
+                    one: vector(1.0),
+                    other: vector(other),
+                },
+                7,
+            )
+        };
+        let (first, second) = (scalars(0.25), scalars(2.5));
+        assert_eq!(host(&first.zero), [0.0]);
+        assert_eq!(host(&first.one), [1.0]);
+        // Whatever value it started from, the replacement comes from the seed alone.
+        assert_eq!(host(&first.other), host(&second.other));
+        assert!(host(&first.other)[0] != 0.25 && host(&first.other)[0].abs() <= 1.0);
+    }
+
+    /// The stream is pinned: these values must equal the copy's for the same seed and shape.
+    ///
+    /// Tests choose seeds by measured margins (the Qwen3.5 speculation,
+    /// staged T5 gradient, tied-readout, and bounded-prefill fixtures here,
+    /// the activation-patching models outside the crate), so a change to the
+    /// construction would silently move every chosen weight.
+    /// `tests/support/deterministic_parameters.rs` pins the same values for
+    /// its copy of the construction; the two pins must change together.
+    #[test]
+    fn the_stream_is_pinned() {
+        let device = Default::default();
+        let weight = Param::from_tensor(Tensor::<TestBackend, 2>::random(
+            [2, 2],
+            Distribution::Default,
+            &device,
+        ));
+        let mapped = deterministic_parameters(Linear { weight, bias: None }, 7);
+        assert_eq!(host(&mapped.weight), PINNED);
+    }
+
+    /// Values of a `[2, 2]` weight for seed 7, identical to the copy's pin.
+    ///
+    /// Each literal is the shortest decimal that round-trips to the recorded
+    /// F32, so the comparison is exact.
+    const PINNED: [f32; 4] = [0.15318744, -0.5272512, 0.50852245, 0.25228176];
 }
