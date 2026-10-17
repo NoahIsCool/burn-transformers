@@ -47,6 +47,16 @@ cargo doc --manifest-path Cargo.toml \
   --no-default-features --features std,flex,tokenizers,chat-templates --no-deps
 ```
 
+Then build the documentation exactly as docs.rs does, from
+`[package.metadata.docs.rs]`: nightly rustdoc with `--cfg docsrs`, which also
+labels feature-gated items with the Cargo feature they require.
+
+```text
+RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc \
+  --manifest-path Cargo.toml --locked --no-deps --lib \
+  --no-default-features --features std,flex,tokenizers,chat-templates
+```
+
 Run every public example with the feature set and local checkpoint revision
 documented by that example. Accelerator acceptance runs must use the certified
 backend and dtype rather than substituting a portable test backend.

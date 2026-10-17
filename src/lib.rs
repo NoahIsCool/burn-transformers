@@ -3,6 +3,11 @@
 // never returns a type that callers cannot name or match.
 #![warn(unnameable_types)]
 #![forbid(unsafe_code)]
+// docs.rs documents the crate on nightly with `--cfg docsrs` (see
+// `[package.metadata.docs.rs]` in Cargo.toml). There, rustdoc labels each item
+// that a Cargo feature gates, such as the `tokenizers` and `chat-templates`
+// APIs, with the feature it requires. Ordinary builds never set `docsrs`.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! Backend-generic implementations of modern transformer architectures.
 //!
