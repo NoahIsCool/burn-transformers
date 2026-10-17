@@ -1018,6 +1018,9 @@ mod tests {
     /// A described edit of a synthetic manifest.
     type Mutation = (&'static str, fn(&mut Value));
 
+    /// A described edit of a synthetic manifest and a fragment of the panic message it must cause.
+    type Refusal = (&'static str, &'static str, fn(&mut Value));
+
     /// Returns a valid synthetic manifest value with `prompts` (text, token IDs) and vocabulary 2.
     fn manifest_value(dtype: &str, prompts: &[(&str, &[i64])]) -> Value {
         json!({
@@ -1081,11 +1084,43 @@ mod tests {
         directory
     }
 
+    /// Applies `edit` to the manifest of the bundle in `directory` and writes it back.
+    fn edit_manifest(directory: &Path, edit: impl FnOnce(&mut Value)) {
+        let path = directory.join("reference.json");
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut manifest);
+        std::fs::write(&path, manifest.to_string()).unwrap();
+    }
+
     /// Asserts that `operation` panics.
     fn refuses(description: &str, operation: impl FnOnce() + std::panic::UnwindSafe) {
         assert!(
             catch_unwind(operation).is_err(),
             "{description} must be refused"
+        );
+    }
+
+    /// Asserts that `operation` panics with a message containing `expected`.
+    ///
+    /// The message is a `String` for formatted panics and assertions and a
+    /// `&str` for `Option::expect`; any other payload fails the test.
+    fn refuses_with(
+        description: &str,
+        expected: &str,
+        operation: impl FnOnce() + std::panic::UnwindSafe,
+    ) {
+        let payload = catch_unwind(operation)
+            .err()
+            .unwrap_or_else(|| panic!("{description} must be refused"));
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_else(|| panic!("{description}: the panic carries no message"));
+        assert!(
+            message.contains(expected),
+            "{description} must be refused with {expected:?}, not {message:?}"
         );
     }
 
@@ -1240,52 +1275,168 @@ mod tests {
         validate_pairing(&truth, &parse(&without));
     }
 
-    /// Malformed manifests are refused before any logit is read.
+    /// Malformed, mistyped, or incomplete manifests are refused, each for its own reason, before any logit is read.
     #[test]
     fn malformed_manifests_are_refused() {
         let prompts: &[(&str, &[i64])] = &[("a", &[1, 2])];
         let valid = manifest_value("float32", prompts);
         parse(&valid);
-        let mutations: [Mutation; 15] = [
-            ("old schema", |m| m["schema_version"] = json!(0)),
-            ("new schema", |m| m["schema_version"] = json!(2)),
-            ("vocabulary", |m| m["vocabulary_size"] = json!(1)),
-            ("missing dtype", |m| {
+        let refusals: [Refusal; 35] = [
+            ("old schema", "unsupported bundle schema 0", |m| {
+                m["schema_version"] = json!(0)
+            }),
+            ("new schema", "unsupported bundle schema 2", |m| {
+                m["schema_version"] = json!(2)
+            }),
+            (
+                "textual schema",
+                "schema_version must be an unsigned integer",
+                |m| m["schema_version"] = json!("1"),
+            ),
+            ("vocabulary", "at least two entries", |m| {
+                m["vocabulary_size"] = json!(1)
+            }),
+            (
+                "textual vocabulary",
+                "vocabulary_size must be an unsigned integer",
+                |m| m["vocabulary_size"] = json!("2"),
+            ),
+            ("mistyped model type", "model_type must be a string", |m| {
+                m["model_type"] = json!(7)
+            }),
+            ("missing model class", "missing model_class", |m| {
+                m.as_object_mut().unwrap().remove("model_class");
+            }),
+            ("missing provenance", "missing provenance", |m| {
+                m.as_object_mut().unwrap().remove("provenance");
+            }),
+            ("missing dtype", "missing provenance.dtype", |m| {
                 m["provenance"].as_object_mut().unwrap().remove("dtype");
             }),
-            ("shape", |m| m["prompts"][0]["logits_shape"] = json!([1, 2])),
-            ("empty tokens", |m| {
+            (
+                "mistyped revision",
+                "provenance.revision must be a string or null",
+                |m| m["provenance"]["revision"] = json!(5),
+            ),
+            (
+                "mistyped repository",
+                "provenance.repository must be a string or null",
+                |m| m["provenance"]["repository"] = json!(["owner/name"]),
+            ),
+            (
+                "weights not an object",
+                "weights_sha256 must be an object",
+                |m| m["provenance"]["weights_sha256"] = json!(["w0"]),
+            ),
+            (
+                "mistyped weight digest",
+                "every weight digest must be a string",
+                |m| m["provenance"]["weights_sha256"]["model.safetensors"] = json!(0),
+            ),
+            ("no weights", "names no weight file", |m| {
+                m["provenance"]["weights_sha256"] = json!({})
+            }),
+            (
+                "layers",
+                "num_hidden_layers must be a positive integer",
+                |m| m["provenance"]["num_hidden_layers"] = json!(0),
+            ),
+            (
+                "textual layers",
+                "num_hidden_layers must be a positive integer",
+                |m| m["provenance"]["num_hidden_layers"] = json!("4"),
+            ),
+            ("flag", "bf16_resident must be a boolean", |m| {
+                m["provenance"]["bf16_resident"] = json!("no")
+            }),
+            ("prompts not an array", "prompts must be an array", |m| {
+                m["prompts"] = json!({})
+            }),
+            ("no prompts", "at least one prompt", |m| {
+                m["prompts"] = json!([])
+            }),
+            (
+                "token IDs not an array",
+                "prompts[0].token_ids must be an array",
+                |m| m["prompts"][0]["token_ids"] = json!("1 2"),
+            ),
+            (
+                "non-integer token ID",
+                "prompts[0].token_ids must hold integers",
+                |m| m["prompts"][0]["token_ids"] = json!(["x", 2]),
+            ),
+            ("empty tokens", "prompts[0].token_ids is empty", |m| {
                 m["prompts"][0]["token_ids"] = json!([]);
                 m["prompts"][0]["logits_shape"] = json!([0, 2]);
             }),
-            ("no prompts", |m| m["prompts"] = json!([])),
-            ("path", |m| {
+            (
+                "shape",
+                "prompts[0].logits_shape must be [tokens, vocabulary]",
+                |m| m["prompts"][0]["logits_shape"] = json!([1, 2]),
+            ),
+            (
+                "textual shape",
+                "prompts[0].logits_shape must be [tokens, vocabulary]",
+                |m| m["prompts"][0]["logits_shape"] = json!("2x2"),
+            ),
+            ("path", "logits_file must be a plain file name", |m| {
                 m["prompts"][0]["logits_file"] = json!("../logits-0.f32le")
             }),
-            ("parent", |m| m["prompts"][0]["logits_file"] = json!("..")),
-            ("no weights", |m| {
-                m["provenance"]["weights_sha256"] = json!({})
+            ("parent", "logits_file must be a plain file name", |m| {
+                m["prompts"][0]["logits_file"] = json!("..")
             }),
-            ("layers", |m| {
-                m["provenance"]["num_hidden_layers"] = json!(0)
+            (
+                "current directory",
+                "logits_file must be a plain file name",
+                |m| m["prompts"][0]["logits_file"] = json!("."),
+            ),
+            (
+                "empty file name",
+                "logits_file must be a plain file name",
+                |m| m["prompts"][0]["logits_file"] = json!(""),
+            ),
+            (
+                "Windows path",
+                "logits_file must be a plain file name",
+                |m| m["prompts"][0]["logits_file"] = json!("sub\\logits-0.f32le"),
+            ),
+            ("missing digest", "missing prompts[0].logits_sha256", |m| {
+                m["prompts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("logits_sha256");
             }),
-            ("flag", |m| m["provenance"]["bf16_resident"] = json!("no")),
-            ("greedy prompt", |m| m["greedy"]["prompt_index"] = json!(1)),
-            ("margin overflow", |m| {
+            ("greedy prompt", "must extend prompt 0", |m| {
+                m["greedy"]["prompt_index"] = json!(1)
+            }),
+            ("steps not an array", "greedy.steps must be an array", |m| {
+                m["greedy"]["steps"] = Value::Null
+            }),
+            (
+                "textual greedy token",
+                "a greedy token must be an integer",
+                |m| m["greedy"]["steps"][0]["token"] = json!("1"),
+            ),
+            ("textual margin", "a greedy margin must be a number", |m| {
+                m["greedy"]["steps"][0]["margin"] = json!("3")
+            }),
+            ("margin overflow", "is negative or not finite in F32", |m| {
                 m["greedy"]["steps"][0]["margin"] = json!(1e39)
             }),
-            ("negative margin", |m| {
-                m["greedy"]["steps"][0]["margin"] = json!(-1.0)
-            }),
         ];
-        for (what, mutate) in mutations {
+        for (what, expected, mutate) in refusals {
             let mut changed = valid.clone();
             mutate(&mut changed);
-            refuses(what, move || {
+            refuses_with(what, expected, move || {
                 parse(&changed);
             });
         }
-        refuses("not JSON", || {
+        let mut negative = valid.clone();
+        negative["greedy"]["steps"][0]["margin"] = json!(-1.0);
+        refuses_with("negative margin", "greedy margin -1", move || {
+            parse(&negative);
+        });
+        refuses_with("not JSON", "reference.json is not JSON", || {
             Manifest::parse("{");
         });
     }
@@ -1414,24 +1565,44 @@ mod tests {
         calibration.report(&truth, &official);
 
         let identical = write_bundle(root.path(), "identical", "bfloat16", &exact);
-        refuses("an official bundle equal to the truth", || {
-            Calibration::read(&truth, &identical);
-        });
+        refuses_with(
+            "an official bundle equal to the truth",
+            "must be positive and finite",
+            || {
+                Calibration::read(&truth, &identical);
+            },
+        );
         let infinite = write_bundle(
             root.path(),
             "infinite",
             "bfloat16",
             &[&[1.0, 2.0, 3.0, f32::INFINITY], &[0.75, -0.5]],
         );
-        refuses("a non-finite official logit", || {
-            Calibration::read(&truth, &infinite);
-        });
+        refuses_with(
+            "a non-finite official logit",
+            "prompt 0: the compared logits hold a non-finite value",
+            || {
+                Calibration::read(&truth, &infinite);
+            },
+        );
         let relabeled = write_bundle(root.path(), "relabeled", "float32", &rounded);
-        refuses("a float32 official bundle", || {
+        refuses_with("a float32 official bundle", "a bfloat16 evaluation", || {
             Calibration::read(&truth, &relabeled);
         });
+        let binary = write_bundle(root.path(), "binary", "bfloat16", &rounded);
+        std::fs::write(binary.join("reference.json"), b"{\"schema_version\": \xff}").unwrap();
+        refuses_with("a non-UTF-8 manifest", "is not UTF-8", || {
+            Calibration::read(&truth, &binary);
+        });
+        let incomplete = write_bundle(root.path(), "incomplete", "bfloat16", &rounded);
+        let missing = incomplete.join("logits-1.f32le");
+        std::fs::remove_file(&missing).unwrap();
+        let unreadable = format!("read {}: ", missing.display());
+        refuses_with("a missing logits file", &unreadable, || {
+            Calibration::read(&truth, &incomplete);
+        });
         std::fs::write(official.join("logits-1.f32le"), [0_u8; 8]).unwrap();
-        refuses("a corrupted logits file", || {
+        refuses_with("a corrupted logits file", "is corrupted", || {
             Calibration::read(&truth, &official);
         });
         let short = write_bundle(
@@ -1440,9 +1611,6 @@ mod tests {
             "bfloat16",
             &[&[1.0, 2.5, 3.0, 3.0], &[0.75, -0.5]],
         );
-        let mut manifest: Value =
-            serde_json::from_str(&std::fs::read_to_string(short.join("reference.json")).unwrap())
-                .unwrap();
         let bytes = [
             0.75_f32.to_le_bytes(),
             (-0.5_f32).to_le_bytes(),
@@ -1450,14 +1618,39 @@ mod tests {
         ]
         .concat();
         std::fs::write(short.join("logits-1.f32le"), &bytes).unwrap();
-        manifest["prompts"][1]["logits_sha256"] = json!(hex(&Sha256::digest(&bytes)));
-        std::fs::write(short.join("reference.json"), manifest.to_string()).unwrap();
-        refuses("a logits file of the wrong size", || {
-            Calibration::read(&truth, &short);
+        edit_manifest(&short, |manifest| {
+            manifest["prompts"][1]["logits_sha256"] = json!(hex(&Sha256::digest(&bytes)));
         });
-        refuses("a missing bundle", || {
-            Calibration::read(&truth, &root.path().join("absent"));
+        refuses_with(
+            "a logits file of the wrong size",
+            "must hold [1, 2] F32 logits",
+            || {
+                Calibration::read(&truth, &short);
+            },
+        );
+        let absent = root.path().join("absent");
+        let unreadable = format!("read {}: ", absent.join("reference.json").display());
+        refuses_with("a missing bundle", &unreadable, || {
+            Calibration::read(&truth, &absent);
         });
+    }
+
+    /// A pair of bundles without a greedy continuation calibrates its prompts and has no decisive step.
+    #[test]
+    fn calibration_without_a_greedy_continuation_reports_no_step() {
+        let root = tempfile::tempdir().unwrap();
+        let truth = write_bundle(root.path(), "truth", "float32", &[&[1.0, 2.0]]);
+        let official = write_bundle(root.path(), "official", "bfloat16", &[&[1.0, 2.5]]);
+        for directory in [&truth, &official] {
+            edit_manifest(directory, |manifest| {
+                manifest["greedy"]["steps"] = json!([]);
+            });
+        }
+        let calibration = Calibration::read(&truth, &official);
+        assert!(calibration.truth.greedy.is_empty() && calibration.official.greedy.is_empty());
+        assert_eq!(calibration.prompts[0].official.maximum, 0.5);
+        assert!(calibration.decisive_greedy_steps().is_empty());
+        calibration.report(&truth, &official);
     }
 
     /// The gate applies both bounds to whole prompts, the maximum to rows, and the dtype tolerance to self-consistency.
