@@ -1,0 +1,57 @@
+diff --git a/crates/burn-core/src/module/param/base.rs b/crates/burn-core/src/module/param/base.rs
+index 83b6d5b..3ae5090 100644
+--- a/crates/burn-core/src/module/param/base.rs
++++ b/crates/burn-core/src/module/param/base.rs
+@@ -131,6 +131,28 @@ impl<T: Parameter> ParamMapper<T> {
+     }
+ }
+ 
++impl<T: Parameter + 'static> ParamMapper<T> {
++    /// Re-expresses both mappers on another parameter type `U`: each value is
++    /// converted to `T` with `into`, mapped, and converted back with `back`.
++    ///
++    /// Used to keep the mappers when a module moves between an autodiff backend
++    /// and its inner backend (`valid` and `from_inner`).
++    pub(crate) fn lift<U: Parameter + 'static>(
++        &self,
++        into: fn(U) -> T,
++        back: fn(T) -> U,
++    ) -> ParamMapper<U> {
++        let lift = |mapper: &Mapper<T>| -> Mapper<U> {
++            let mapper = mapper.clone();
++            new_mapper(move |value: U| back(mapper(into(value))))
++        };
++        ParamMapper {
++            load: self.load.as_ref().map(lift),
++            save: self.save.as_ref().map(lift),
++        }
++    }
++}
++
+ impl<T: Parameter> Default for ParamMapper<T> {
+     fn default() -> Self {
+         Self {
+diff --git a/crates/burn-core/src/module/param/tensor.rs b/crates/burn-core/src/module/param/tensor.rs
+index df84cd8..d414025 100644
+--- a/crates/burn-core/src/module/param/tensor.rs
++++ b/crates/burn-core/src/module/param/tensor.rs
+@@ -465,13 +465,18 @@ impl<const D: usize, B: AutodiffBackend> AutodiffModule<B> for Param<Tensor<B, D
+         let require_grad = self.require_grad;
+         let mut param = Param::initialized(self.id, self.val().inner().set_require_grad(false));
+         param.require_grad = require_grad;
++        // Keep the save/load mappers: they define the record layout (e.g. the
++        // `[d_output, d_input]` orientation of a column-layout linear weight).
++        param.param_mapper = self.param_mapper.lift(Tensor::from_inner, Tensor::inner);
+         param
+     }
+ 
+     fn from_inner(module: Self::InnerModule) -> Self {
+         // Reinstate the param's `require_grad` state
+         let tensor = Tensor::from_inner(module.val()).set_require_grad(module.require_grad);
+-        Param::initialized(module.id, tensor)
++        let mut param = Param::initialized(module.id, tensor);
++        param.param_mapper = module.param_mapper.lift(Tensor::inner, Tensor::from_inner);
++        param
+     }
+ }
+ 

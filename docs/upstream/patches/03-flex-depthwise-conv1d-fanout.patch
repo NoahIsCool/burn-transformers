@@ -1,0 +1,54 @@
+diff --git a/crates/burn-flex/src/ops/conv.rs b/crates/burn-flex/src/ops/conv.rs
+index 391b995..ca2127f 100644
+--- a/crates/burn-flex/src/ops/conv.rs
++++ b/crates/burn-flex/src/ops/conv.rs
+@@ -1212,19 +1212,40 @@ where
+         );
+     };
+ 
++    // Fan out to rayon only when the planes hold enough multiply-adds to
++    // amortize task dispatch. A one-column decode step (`out_spatial == 1`)
++    // holds `kernel` multiply-adds per plane; one task per plane would cost far
++    // more than the arithmetic, and under CPU contention the caller would wait
++    // in the join for descheduled workers. Each task covers at least
++    // `PARALLEL_THRESHOLD` multiply-adds, so small problems run inline.
+     #[cfg(feature = "rayon")]
+     {
+         use rayon::prelude::*;
+ 
+-        let dst_ptr = crate::ops::SendMutPtr::new(output.as_mut_ptr());
+-        (0..batch_size * channels).into_par_iter().for_each(|bc| {
+-            // SAFETY: disjoint `[bc * out_spatial, (bc+1) * out_spatial)`
+-            // ranges tile the output buffer.
+-            let out_plane: &mut [T] = unsafe {
+-                core::slice::from_raw_parts_mut(dst_ptr.ptr_add(bc * out_spatial), out_spatial)
+-            };
+-            plane_work(bc, out_plane);
+-        });
++        let plane_work_size = (out_spatial * k_spatial).max(1);
++        let planes_per_task = crate::ops::PARALLEL_THRESHOLD.div_ceil(plane_work_size);
++        if batch_size * channels > planes_per_task {
++            let dst_ptr = crate::ops::SendMutPtr::new(output.as_mut_ptr());
++            (0..batch_size * channels)
++                .into_par_iter()
++                .with_min_len(planes_per_task)
++                .for_each(|bc| {
++                    // SAFETY: disjoint `[bc * out_spatial, (bc+1) * out_spatial)`
++                    // ranges tile the output buffer.
++                    let out_plane: &mut [T] = unsafe {
++                        core::slice::from_raw_parts_mut(
++                            dst_ptr.ptr_add(bc * out_spatial),
++                            out_spatial,
++                        )
++                    };
++                    plane_work(bc, out_plane);
++                });
++        } else {
++            for bc in 0..batch_size * channels {
++                let out_base = bc * out_spatial;
++                plane_work(bc, &mut output[out_base..out_base + out_spatial]);
++            }
++        }
+     }
+     #[cfg(not(feature = "rayon"))]
+     {

@@ -1,0 +1,88 @@
+diff --git a/crates/burn-cubecl/src/kernel/matmul/base.rs b/crates/burn-cubecl/src/kernel/matmul/base.rs
+index c329b01..30c9a99 100644
+--- a/crates/burn-cubecl/src/kernel/matmul/base.rs
++++ b/crates/burn-cubecl/src/kernel/matmul/base.rs
+@@ -1,7 +1,7 @@
+ use super::init_matmul_output;
+ use crate::{CubeRuntime, kernel::quantization::dequantize, tensor::CubeTensor};
+ use burn_backend::{DType, QTensorPrimitive};
+-use burn_std::QuantLevel;
++use burn_std::{QuantLevel, QuantValue};
+ use cubek::{
+     matmul::{
+         definition::{MatmulElems, MatmulGlobalElems, MatmulSetupError},
+@@ -52,6 +52,31 @@ pub fn matmul<R: CubeRuntime>(
+     }
+ }
+ 
++/// Whether `strategy` is known to compute wrong values for this packed,
++/// block-quantized right-hand side (cubek-matmul 0.2): every such operand on
++/// `GemvUnitPerpendicular`, 4-bit operands on `GemvPlaneParallel`, and 4-bit
++/// operands with more than one left-hand row on the unit routines, which
++/// `Strategy::Auto` falls back to on devices without cooperative matrices.
++/// Those launches dequantize the operand first until the kernels are fixed.
++fn packed_rhs_is_unreliable<R: CubeRuntime>(
++    strategy: &Strategy,
++    lhs: &CubeTensor<R>,
++    rhs: &CubeTensor<R>,
++) -> bool {
++    if rhs.qparams.is_none() || !matches!(rhs.scheme().level, QuantLevel::Block(_)) {
++        return false;
++    }
++    let four_bit = matches!(rhs.scheme().value, QuantValue::Q4S | QuantValue::Q4F);
++    let shape = lhs.meta.shape();
++    let rows = shape[shape.num_dims() - 2];
++    match strategy {
++        Strategy::GemvUnitPerpendicular(_) => true,
++        Strategy::GemvPlaneParallel(_) => four_bit,
++        Strategy::Auto | Strategy::SimpleUnit(_) | Strategy::DoubleUnit(_) => four_bit && rows > 1,
++        _ => false,
++    }
++}
++
+ pub(crate) fn launch_matmul_naive<R: CubeRuntime>(
+     strategy: &Strategy,
+     mut lhs: CubeTensor<R>,
+@@ -86,6 +111,10 @@ pub(crate) fn launch_matmul<R: CubeRuntime>(
+ ) -> Result<(), MatmulSetupError> {
+     let client = &out.client;
+ 
++    if packed_rhs_is_unreliable(strategy, &lhs, &rhs) {
++        rhs = dequantize(rhs, out.dtype);
++    }
++
+     let lhs_quant_handles = lhs.quantized_handles();
+     let out_dtype: DType = out.dtype;
+ 
+diff --git a/crates/burn-cubecl/src/kernel/quantization/dequantize.rs b/crates/burn-cubecl/src/kernel/quantization/dequantize.rs
+index c329b09..351ae7f 100644
+--- a/crates/burn-cubecl/src/kernel/quantization/dequantize.rs
++++ b/crates/burn-cubecl/src/kernel/quantization/dequantize.rs
+@@ -1,6 +1,7 @@
+ use crate::tensor::CubeTensor;
+ use crate::{CubeRuntime, ops::numeric::empty_device_dtype};
+ use burn_backend::{DType, TensorMetadata};
++use burn_std::QuantStore;
+ 
+ /// Convert the tensor back to a higher precision data type.
+ pub fn dequantize<R>(tensor: CubeTensor<R>, dtype: DType) -> CubeTensor<R>
+@@ -12,6 +13,19 @@ where
+         _ => return tensor,
+     };
+ 
++    // The cubek kernel unpacks values along the innermost axis in storage order.
++    // A transposed view of a packed tensor (`swap_dims` of the last two axes, e.g.
++    // a column-layout weight `W^T`) is packed along the second-to-last axis
++    // instead; dequantize it in its storage layout and give the result the same
++    // transposed view.
++    let rank = tensor.meta.num_dims();
++    if rank >= 2
++        && let QuantStore::PackedU32(1) | QuantStore::PackedNative(1) = scheme.store
++    {
++        let storage = crate::ops::swap_dims(tensor, rank - 2, rank - 1);
++        return crate::ops::swap_dims(dequantize(storage, dtype), rank - 2, rank - 1);
++    }
++
+     let output = empty_device_dtype(
+         tensor.client.clone(),
+         tensor.device.clone(),

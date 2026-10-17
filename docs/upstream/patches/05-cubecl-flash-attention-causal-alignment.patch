@@ -1,0 +1,44 @@
+diff --git a/crates/burn-cubecl/src/kernel/attention/base.rs b/crates/burn-cubecl/src/kernel/attention/base.rs
+index bf592b4..5ba8018 100644
+--- a/crates/burn-cubecl/src/kernel/attention/base.rs
++++ b/crates/burn-cubecl/src/kernel/attention/base.rs
+@@ -96,6 +96,18 @@ pub fn flash_attention<R: CubeRuntime>(
+     options: AttentionModuleOptions,
+     strategy: launch::Strategy,
+ ) -> Result<CubeTensor<R>, AttentionSetupError> {
++    // The cubek flash kernels mask `row < col`, i.e. they align a causal mask
++    // top-left. Burn's `attention` contract (and `attention_fallback`) aligns
++    // it bottom-right: query row `i` of `seq_q` sits at key position
++    // `i + seq_kv - seq_q`. Both agree only for square problems, so decline
++    // the others; autotuning then keeps the fallback, and an explicit flash
++    // strategy reports the mismatch instead of returning top-left results.
++    if options.is_causal && query.meta.shape[2] != key.meta.shape[2] {
++        return Err(AttentionSetupError::InvalidConfig(Box::new(
++            "flash attention aligns causal masks top-left; causal attention with seq_q != seq_kv requires the bottom-right fallback",
++        )));
++    }
++
+     let client = query.client.clone();
+     let out = init_attention_output(&query, &value);
+ 
+diff --git a/crates/burn-cubecl/src/ops/module.rs b/crates/burn-cubecl/src/ops/module.rs
+index f206d75..dab4b6d 100644
+--- a/crates/burn-cubecl/src/ops/module.rs
++++ b/crates/burn-cubecl/src/ops/module.rs
+@@ -322,8 +322,14 @@ where
+         attn_bias: Option<FloatTensor<Self>>,
+         options: AttentionModuleOptions,
+     ) -> FloatTensor<Self> {
+-        // Fall back to naive attention for features the flash kernel doesn't support.
+-        if attn_bias.is_some() || options.softcap.is_some() || options.scale.is_some() {
++        // Fall back to naive attention for features the flash kernel doesn't support,
++        // including bottom-right causal alignment of non-square problems.
++        let non_square_causal = options.is_causal && query.meta.shape[2] != key.meta.shape[2];
++        if attn_bias.is_some()
++            || options.softcap.is_some()
++            || options.scale.is_some()
++            || non_square_causal
++        {
+             return burn_backend::ops::attention::attention_fallback::<Self>(
+                 query, key, value, mask, attn_bias, options,
+             );

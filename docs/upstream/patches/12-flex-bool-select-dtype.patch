@@ -1,0 +1,62 @@
+diff --git a/crates/burn-flex/src/ops/bool.rs b/crates/burn-flex/src/ops/bool.rs
+index df9a8ad..670ac31 100644
+--- a/crates/burn-flex/src/ops/bool.rs
++++ b/crates/burn-flex/src/ops/bool.rs
+@@ -282,7 +282,11 @@ impl BoolTensorOps<Flex> for Flex {
+         tensor: BoolTensor<Flex>,
+         indices: IntTensor<Flex>,
+     ) -> BoolTensor<Flex> {
+-        crate::ops::gather_scatter::gather_bool(tensor, dim, indices)
++        let dtype = tensor.dtype();
++        retag_bool(
++            crate::ops::gather_scatter::gather_bool(tensor, dim, indices),
++            dtype,
++        )
+     }
+ 
+     fn bool_scatter_or(
+@@ -361,7 +365,11 @@ impl BoolTensorOps<Flex> for Flex {
+         dim: usize,
+         indices: IntTensor<Flex>,
+     ) -> BoolTensor<Flex> {
+-        crate::ops::gather_scatter::select::<u8>(tensor, dim, indices)
++        let dtype = tensor.dtype();
++        retag_bool(
++            crate::ops::gather_scatter::select::<u8>(tensor, dim, indices),
++            dtype,
++        )
+     }
+ 
+     fn bool_select_or(
+@@ -370,6 +378,7 @@ impl BoolTensorOps<Flex> for Flex {
+         indices: IntTensor<Flex>,
+         value: BoolTensor<Flex>,
+     ) -> BoolTensor<Flex> {
++        let dtype = tensor.dtype();
+         let mut result = crate::ops::gather_scatter::select_add::<u8>(tensor, dim, indices, value);
+         // Clamp to 0/1: select_add sums u8 values, but bool OR saturates at 1
+         let storage: &mut [u8] = result.storage_mut();
+@@ -378,7 +387,7 @@ impl BoolTensorOps<Flex> for Flex {
+                 *v = 1;
+             }
+         }
+-        result
++        retag_bool(result, dtype)
+     }
+ 
+     fn bool_transpose(tensor: BoolTensor<Flex>) -> BoolTensor<Flex> {
+@@ -534,6 +543,14 @@ fn bool_binary_op_simd(lhs: FlexTensor, rhs: FlexTensor, op: BoolBinaryOp) -> Fl
+ // so they run against every backend. When adding new tests, keep them
+ // here only if they probe flex dtype dispatch; otherwise add them
+ // there.
++/// Re-tags the `u8` output of a shared numeric kernel with the input's Boolean
++/// dtype. The generic `select`/`gather` kernels label their result `U8`, which
++/// later Boolean consumers (`cat`, `into_data().to_vec::<bool>()`) reject.
++fn retag_bool(tensor: FlexTensor, dtype: DType) -> FlexTensor {
++    debug_assert!(matches!(dtype, DType::Bool(_)), "retag_bool: {dtype:?}");
++    FlexTensor::from_arc(tensor.data_arc(), tensor.layout().clone(), dtype)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use alloc::vec;

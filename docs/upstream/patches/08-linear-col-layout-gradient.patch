@@ -1,0 +1,35 @@
+diff --git a/crates/burn-core/src/module/param/base.rs b/crates/burn-core/src/module/param/base.rs
+index 9397e19..83b6d5b 100644
+--- a/crates/burn-core/src/module/param/base.rs
++++ b/crates/burn-core/src/module/param/base.rs
+@@ -350,9 +350,12 @@ impl<T: Parameter> Param<T> {
+             Some(value) => {
+                 let prev = value.init.clone();
+ 
+-                value.init = new_init_fn(move |a, b| {
+-                    let tensor = prev(a, b);
+-                    func(tensor)
++                // Map the untracked initial value, then apply the gradient policy, so the
++                // parameter is the leaf itself rather than a node derived from it (whose
++                // gradient a backward pass would consume instead of keeping it).
++                value.init = new_init_fn(move |device, require_grad| {
++                    let tensor = prev(device, false);
++                    func(tensor).set_require_grad(require_grad)
+                 });
+                 core::mem::drop(init);
+                 self
+diff --git a/crates/burn-core/src/module/param/tensor.rs b/crates/burn-core/src/module/param/tensor.rs
+index 2069c43..df84cd8 100644
+--- a/crates/burn-core/src/module/param/tensor.rs
++++ b/crates/burn-core/src/module/param/tensor.rs
+@@ -126,7 +126,9 @@ impl<B: Backend, const D: usize> Param<Tensor<B, D>> {
+             new_tensor = new_tensor.to_device(&expected_device).detach();
+         }
+ 
+-        new_tensor = mapper.on_load(new_tensor);
++        // A loaded value defines a new leaf: detach the mapped tensor, which may be
++        // a node derived from a tracked record tensor (e.g. a transposed weight).
++        new_tensor = mapper.on_load(new_tensor).detach();
+ 
+         // Make sure we load the tensor with the same autodiff setting.
+         new_tensor = new_tensor.set_require_grad(expected_require_grad);
