@@ -37,11 +37,15 @@
 //! ```
 //!
 //! To compare both Burn paths with their corresponding authenticated official
-//! rows, additionally select the external oracle bundle:
+//! rows, additionally select the external MPS/F16 oracle bundle and the
+//! official precision bundle (its F32 rows are the truth, and the official F16
+//! rows set each path's floor; see
+//! `scripts/generate_nemotron_h_precision_reference.py`):
 //!
 //! ```text
 //! TRANSFORMERS_NEMOTRON_H_DIR=/absolute/pinned/checkpoint \
 //! TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/pinned/reference.bundle \
+//! TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/absolute/pinned/precision.bundle \
 //! cargo test --release --manifest-path crates/transformers/Cargo.toml \
 //!   --no-default-features --features std,metal,tokenizers \
 //!   --test nemotron_h_artifacts \

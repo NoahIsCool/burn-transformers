@@ -604,7 +604,8 @@ fn checkpoint_step<E>(target: &str) -> impl FnOnce(CheckpointError) -> StepFailu
 ///
 /// Override ownership is frozen before any source or sink mutation, so a stateful
 /// predicate cannot select a target during group preflight and change its answer
-/// at installation time. Groups run in physical source order.
+/// at installation time. Groups run in physical source order, except that
+/// outsized groups run first (see [`execution_groups`]).
 #[allow(clippy::too_many_arguments)]
 fn install_primary_tensors<S, K, H, R>(
     plan: &LoadPlan,

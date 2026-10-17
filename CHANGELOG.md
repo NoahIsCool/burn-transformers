@@ -409,6 +409,13 @@ code written against unreleased sources.
   naming only the single file loads; provenance hashing stops at the first
   failing shard within a fixed buffer budget; element counts multiply left to
   right like SafeTensors; packed installs validate before probing.
+- Checkpoint loads install execution groups of at least 1 GiB (vocabulary
+  matrices) before the source-ordered schedule. Installing them last had raised
+  Metal's footprint: the Qwen3.8-27B F16 smoke peaked at 68.2 GB, and now
+  peaks at 60.6 GB with bitwise-identical logits. Checkpoints without such a
+  tensor keep the same schedule; Muse's conversion and F16 load open three
+  shards instead of two
+  ([record](acceptance/measurements/reference-precision-followups-20261016.json)).
 - Caches: stale steps and foreign read plans are rejected; cache topology is
   locked after prefill.
 - Experiments: fan-out transfer ties, unmatched initialization names, and
