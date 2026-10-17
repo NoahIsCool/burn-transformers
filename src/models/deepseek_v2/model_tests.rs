@@ -12,7 +12,7 @@ use crate::{
     architecture::TokenMask,
     models::{
         config::{RopeType, yarn_mscale},
-        shared::ensure_same_device,
+        shared::{ensure_same_device, test_support::deterministic_parameters},
     },
     position::RopeScaling,
 };
@@ -539,6 +539,18 @@ fn readout_hidden(
 ///
 /// It multiplies by the transposed table view without reshaping it (no
 /// per-call table copy on Flex) and still returns F32 logits.
+///
+/// Each logit is a dot product of `n = 8` terms, and any summation order
+/// (any kernel, with or without fused multiply-adds) stays within
+/// `γ_n Σ|h_i E_vi|` of the exact value, `γ_n = n u / (1 - n u)` with
+/// `u = 2^-24`. Two orders therefore differ by at most twice that. The table
+/// comes from seed 211 through [`deterministic_parameters`] rather than from
+/// Burn's process-wide generator, whose draws depend on test scheduling.
+/// The embedding is the first parameter, as in the Qwen3.5 tied-readout
+/// test, so the `[32, 8]` table is the same, and twice the bound is at most
+/// 0.51 of the tolerance at every logit: the comparison passes for any
+/// summation order, not only for the orders measured on this host. (Each of
+/// 1,000 seeds stayed below 0.76.)
 #[test]
 fn tied_readout_matches_reshaping_linear_oracle() {
     let device = Default::default();
@@ -546,8 +558,11 @@ fn tied_readout_matches_reshaping_linear_oracle() {
         tie_word_embeddings: true,
         ..tests_support::tiny_config()
     };
-    let model = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device)
-        .expect("tied tiny model");
+    let model = deterministic_parameters(
+        DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device)
+            .expect("tied tiny model"),
+        211,
+    );
     assert!(model.lm_head.is_none());
     let hidden = readout_hidden(config.hidden_size, &device);
     let oracle = burn::tensor::module::linear(
