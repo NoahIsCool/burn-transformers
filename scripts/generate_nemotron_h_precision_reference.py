@@ -41,7 +41,11 @@ Usage::
         --output /path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle
 
 Memory is the BF16 or F16 model (about 63 GB) plus one F32 block (about
-5 GB); the two half-precision loads run one after the other.
+5 GB); the two half-precision loads run one after the other. On a shared host,
+``--max-resident-gib`` with ``--offload-dir`` keeps only the leading blocks
+resident and lets Accelerate load the others from a temporary offload folder
+while they run; the widening then happens inside each block's innermost
+forward, after its weights are loaded, so the computation is unchanged.
 """
 
 from __future__ import annotations
@@ -249,15 +253,54 @@ def import_official(checkout: Path) -> tuple[Any, Any]:
     return torch, transformers
 
 
-def load_official(torch: Any, transformers: Any, model_dir: Path, dtype: str) -> Any:
-    """Loads the official class on the CPU in `dtype` with eager attention; checks the F32 router buffers."""
+def block_device_map(torch: Any, transformers: Any, model_dir: Path, dtype: str, budget_bytes: int) -> dict[str, str]:
+    """Keeps leading blocks resident until `budget_bytes` of `dtype` weights, offloading the rest to disk.
 
+    The embedding, final norm, and head always stay on the CPU. Block sizes
+    come from a parameterless meta-device instance of the official class.
+    """
+
+    config = transformers.AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    with torch.device("meta"):
+        skeleton = transformers.NemotronHForCausalLM(config)
+    width = torch.tensor([], dtype=getattr(torch, dtype)).element_size()
+    device_map = {f"model.{name}": "cpu" for name, _ in skeleton.model.named_children() if name != "layers"}
+    device_map["lm_head"] = "cpu"
+    resident = 0
+    for index, block in enumerate(skeleton.model.layers):
+        size = sum(parameter.numel() for parameter in block.parameters()) * width
+        if resident + size <= budget_bytes:
+            device_map[f"model.layers.{index}"] = "cpu"
+            resident += size
+        else:
+            device_map[f"model.layers.{index}"] = "disk"
+    return device_map
+
+
+def load_official(
+    torch: Any,
+    transformers: Any,
+    model_dir: Path,
+    dtype: str,
+    device_map: dict[str, str] | None = None,
+    offload_folder: Path | None = None,
+) -> Any:
+    """Loads the official class on the CPU in `dtype` with eager attention; checks the F32 router buffers.
+
+    With `device_map`, blocks mapped to ``"disk"`` are offloaded to
+    `offload_folder` and loaded by Accelerate only while they run.
+    """
+
+    options: dict[str, Any] = {}
+    if device_map is not None:
+        options = {"device_map": device_map, "offload_folder": str(offload_folder)}
     model = transformers.NemotronHForCausalLM.from_pretrained(
         model_dir,
         local_files_only=True,
         trust_remote_code=False,
         dtype=getattr(torch, dtype),
         attn_implementation="eager",
+        **options,
     ).eval()
     corrections = [
         buffer for name, buffer in model.named_buffers() if name.endswith("e_score_correction_bias")
@@ -271,10 +314,13 @@ def load_official(torch: Any, transformers: Any, model_dir: Path, dtype: str) ->
 def blocks_in_dtype(torch: Any, model: Any, dtype: Any) -> Iterator[None]:
     """Runs every decoder block in `dtype` while it executes; restores the model on exit.
 
-    Parameters outside ``model.model.layers`` are widened for the duration;
-    each block's parameters are widened by a forward pre-hook and restored by a
-    forward hook, so at most one block is held in `dtype`. Buffers are never
-    touched, so the F32 router corrections stay F32.
+    Parameters outside ``model.model.layers`` are widened for the duration.
+    Each block's innermost forward is wrapped so that its parameters are
+    widened just before the block computes and restored right after, so at
+    most one block is held in `dtype`. For a block offloaded by Accelerate,
+    the innermost forward is its ``_old_forward``, which runs after Accelerate
+    has loaded the block's weights and before it releases them. Buffers are
+    never touched, so the F32 router corrections stay F32.
     """
 
     blocks = model.model.layers
@@ -286,36 +332,50 @@ def blocks_in_dtype(torch: Any, model: Any, dtype: Any) -> Iterator[None]:
                 outside.append((parameter, parameter.data))
                 parameter.data = parameter.data.to(dtype)
 
-    def widen(block: Any, _arguments: Any) -> None:
-        """Replaces the block's parameters by `dtype` copies before it runs."""
+    def widened(block: Any, forward: Any) -> Any:
+        """Wraps `forward` so `block` computes with `dtype` parameters."""
 
-        stash = []
-        with torch.no_grad():
-            for parameter in block.parameters():
-                if parameter.is_floating_point() and parameter.dtype != dtype:
-                    stash.append((parameter, parameter.data))
-                    parameter.data = parameter.data.to(dtype)
-        block._precision_stash = stash
+        def run(*arguments: Any, **keywords: Any) -> Any:
+            """Widens, runs, and restores the block's parameters."""
 
-    def restore(block: Any, _arguments: Any, _output: Any) -> None:
-        """Puts the loaded parameters back once the block has run."""
+            stash = []
+            with torch.no_grad():
+                for parameter in block.parameters():
+                    if parameter.is_floating_point() and parameter.dtype != dtype:
+                        stash.append((parameter, parameter.data))
+                        parameter.data = parameter.data.to(dtype)
+            try:
+                return forward(*arguments, **keywords)
+            finally:
+                for parameter, data in stash:
+                    parameter.data = data
 
-        for parameter, data in block._precision_stash:
-            parameter.data = data
-        block._precision_stash = []
+        return run
 
-    handles = [handle for block in blocks for handle in (block.register_forward_pre_hook(widen), block.register_forward_hook(restore))]
+    patched = []
+    for block in blocks:
+        attribute = "_old_forward" if hasattr(block, "_old_forward") else "forward"
+        original = getattr(block, attribute)
+        setattr(block, attribute, widened(block, original))
+        patched.append((block, attribute, original))
     try:
         yield
     finally:
-        for handle in handles:
-            handle.remove()
+        for block, attribute, original in patched:
+            if attribute == "forward":
+                del block.forward
+            else:
+                setattr(block, attribute, original)
         for parameter, data in outside:
             parameter.data = data
 
 
 def evaluate(torch: Any, model: Any, prompt_ids: list[int], generated_ids: list[int]) -> dict[str, Any]:
-    """Runs the oracle's stateless prompt, teacher-forced, and cached calls on identical inputs."""
+    """Runs the oracle's stateless prompt, teacher-forced, and cached calls on identical inputs.
+
+    Decision `d` is predicted after the prompt and the first `d` generated
+    tokens, so there are as many teacher and cached rows as generated tokens.
+    """
 
     def ones(length: int) -> Any:
         """An all-valid attention mask for one row of `length` tokens."""
@@ -325,6 +385,7 @@ def evaluate(torch: Any, model: Any, prompt_ids: list[int], generated_ids: list[
     prompt = torch.tensor([prompt_ids], dtype=torch.long)
     teacher_ids = prompt_ids + generated_ids[:-1]
     first = len(prompt_ids) - 1
+    decisions = len(generated_ids)
     with torch.no_grad():
         stateless = model(
             input_ids=prompt, attention_mask=ones(len(prompt_ids)), use_cache=False, logits_to_keep=1, return_dict=True
@@ -335,12 +396,12 @@ def evaluate(torch: Any, model: Any, prompt_ids: list[int], generated_ids: list[
             use_cache=False,
             logits_to_keep=0,
             return_dict=True,
-        ).logits[0, first : first + DECISIONS].float()
+        ).logits[0, first : first + decisions].float()
         output = model(
             input_ids=prompt, attention_mask=ones(len(prompt_ids)), use_cache=True, logits_to_keep=1, return_dict=True
         )
         cached = [output.logits[0, -1].float()]
-        for decision in range(1, DECISIONS):
+        for decision in range(1, decisions):
             logical_length = len(prompt_ids) + decision - 1
             output = model(
                 input_ids=torch.tensor([[generated_ids[decision - 1]]], dtype=torch.long),
@@ -352,6 +413,89 @@ def evaluate(torch: Any, model: Any, prompt_ids: list[int], generated_ids: list[
             )
             cached.append(output.logits[0, -1].float())
     return {"prompt": stateless, "teacher": teacher, "cached": torch.stack(cached)}
+
+
+#: Tiny official topology for the widening self-check: every block kind, two scan chunks.
+SELF_CHECK_OVERRIDES = {
+    "hidden_size": 64,
+    "layers_block_type": ["mamba", "moe", "attention", "moe", "mamba", "moe"],
+    "num_hidden_layers": 6,
+    "mamba_num_heads": 8,
+    "mamba_head_dim": 16,
+    "ssm_state_size": 16,
+    "n_groups": 2,
+    "chunk_size": 4,
+    "n_routed_experts": 8,
+    "num_experts_per_tok": 2,
+    "n_group": 1,
+    "topk_group": 1,
+    "moe_intermediate_size": 32,
+    "moe_shared_expert_intermediate_size": 32,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "vocab_size": 128,
+    "intermediate_size": 64,
+    "num_nextn_predict_layers": 0,
+    "mtp_layers_block_type": [],
+}
+
+
+def self_check(torch: Any, transformers: Any, model_dir: Path) -> dict[str, Any]:
+    """Proves on a tiny random official model that widened BF16 blocks equal an F32 model bit for bit.
+
+    The tiny checkpoint uses the pinned config with small dimensions, BF16
+    weights, and F32 router corrections. It is evaluated three ways on the
+    same inputs, with the same teacher-forced and cached calls as the real
+    run: loaded in F32; loaded in BF16 with `blocks_in_dtype`; and loaded in
+    BF16 with every other block offloaded to disk. All rows must be equal.
+    """
+
+    config_values = json.loads((model_dir / "config.json").read_text())
+    for key in ("architectures", "auto_map", "hybrid_override_pattern"):
+        config_values.pop(key, None)
+    config_values.update(SELF_CHECK_OVERRIDES)
+    torch.manual_seed(0)
+    tiny = transformers.NemotronHForCausalLM(transformers.NemotronHConfig(**config_values)).eval()
+    with torch.no_grad():
+        for parameter in tiny.parameters():
+            parameter.data = (torch.randn_like(parameter.data) * 0.2).to(torch.bfloat16)
+        for name, buffer in tiny.named_buffers():
+            if name.endswith("e_score_correction_bias"):
+                buffer.copy_(torch.randn_like(buffer) * 0.05)
+    prompt, generated = [5, 9, 17, 3, 44, 60], [11, 22, 33, 44, 55, 66, 77, 88, 99, 100]
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        tiny.save_pretrained(root / "checkpoint")
+
+        def load(dtype: Any, **options: Any) -> Any:
+            """Loads the tiny checkpoint with the real run's loading options."""
+
+            return transformers.NemotronHForCausalLM.from_pretrained(
+                root / "checkpoint", local_files_only=True, dtype=dtype, attn_implementation="eager", **options
+            ).eval()
+
+        reference = evaluate(torch, load(torch.float32), prompt, generated)
+        resident = load(torch.bfloat16)
+        with blocks_in_dtype(torch, resident, torch.float32):
+            widened = evaluate(torch, resident, prompt, generated)
+        device_map = {f"model.{name}": "cpu" for name, _ in resident.model.named_children() if name != "layers"}
+        device_map["lm_head"] = "cpu"
+        for index in range(len(resident.model.layers)):
+            device_map[f"model.layers.{index}"] = "disk" if index % 2 else "cpu"
+        offloaded_model = load(torch.bfloat16, device_map=device_map, offload_folder=str(root / "offload"))
+        blocks = len(offloaded_model.model.layers)
+        hooked = sum(hasattr(block, "_old_forward") for block in offloaded_model.model.layers)
+        with blocks_in_dtype(torch, offloaded_model, torch.float32):
+            offloaded = evaluate(torch, offloaded_model, prompt, generated)
+    equal = {
+        variant: all(torch.equal(rows[kind], reference[kind]) for kind, _ in KINDS)
+        for variant, rows in (("resident", widened), ("offloaded", offloaded))
+    }
+    if not all(equal.values()) or hooked != blocks:
+        raise ValueError(f"widened BF16 blocks do not reproduce the F32 model: {equal}, hooked={hooked}/{blocks}")
+    offloaded_blocks = sum(device == "disk" for device in device_map.values())
+    return {"blocks": blocks, "offloaded_blocks": offloaded_blocks, "bitwise_equal": equal}
 
 
 def tensor_f32le(tensor: Any) -> bytes:
@@ -380,6 +524,7 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     oracle = read_oracle(arguments.oracle_dir.resolve(strict=True))
     torch, transformers = import_official(arguments.transformers_dir.resolve(strict=True))
     torch.use_deterministic_algorithms(True)
+    widening = self_check(torch, transformers, model_dir)
     torch.manual_seed(0)
 
     rows: dict[str, dict[str, Any]] = {
@@ -389,12 +534,22 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
         }
     }
     files = {}
-    loaded_dtype, model = None, None
+    offloads: dict[str, int] = {}
+    loaded_dtype, model, offload_root = None, None, None
     for label, load_dtype, evaluation_dtype in EVALUATIONS:
         if load_dtype != loaded_dtype:
             model = None
             gc.collect()
-            model = load_official(torch, transformers, model_dir, load_dtype)
+            if offload_root is not None:
+                shutil.rmtree(offload_root, ignore_errors=True)
+            device_map, offload_root = None, None
+            if arguments.max_resident_gib is not None:
+                budget = int(arguments.max_resident_gib * 2**30)
+                device_map = block_device_map(torch, transformers, model_dir, load_dtype, budget)
+                offload_root = Path(tempfile.mkdtemp(prefix=".offload.", dir=arguments.offload_dir.resolve(strict=True)))
+                offloaded_blocks = sorted(name for name, device in device_map.items() if device == "disk")
+                offloads[load_dtype] = len(offloaded_blocks)
+            model = load_official(torch, transformers, model_dir, load_dtype, device_map, offload_root)
             loaded_dtype = load_dtype
         context = (
             blocks_in_dtype(torch, model, getattr(torch, evaluation_dtype))
@@ -414,6 +569,8 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
             rows[label][kind] = tensor.contiguous()
     model = None
     gc.collect()
+    if offload_root is not None:
+        shutil.rmtree(offload_root, ignore_errors=True)
 
     comparisons = {
         label: {kind: summarize_tensors(rows[label][kind], rows["float32"][kind]) for kind, _ in KINDS}
@@ -449,6 +606,9 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
             "oracle_dir": str(arguments.oracle_dir.resolve()),
             "oracle_sha256": oracle["digests"],
             "attention_implementation": "eager",
+            "widening_self_check": widening,
+            "max_resident_gib": arguments.max_resident_gib,
+            "offloaded_blocks_by_load_dtype": offloads,
         },
     }
 
@@ -461,7 +621,16 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--transformers-dir", type=Path, required=True, help="clean checkout at the pinned revision")
     parser.add_argument("--oracle-dir", type=Path, required=True, help="authenticated MPS/F16 oracle bundle")
     parser.add_argument("--output", type=Path, required=True, help="bundle directory to create")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--max-resident-gib",
+        type=float,
+        help="keep at most this many GiB of decoder blocks in memory and offload the rest to --offload-dir",
+    )
+    parser.add_argument("--offload-dir", type=Path, help="directory for temporary offloaded blocks")
+    arguments = parser.parse_args(argv)
+    if (arguments.max_resident_gib is None) != (arguments.offload_dir is None):
+        parser.error("--max-resident-gib and --offload-dir go together")
+    return arguments
 
 
 def main(argv: Sequence[str] | None = None) -> int:

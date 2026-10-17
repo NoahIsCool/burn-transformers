@@ -18,6 +18,9 @@ assert SPEC is not None and SPEC.loader is not None
 PRECISION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PRECISION)
 
+#: Whether the PyTorch-backed tests can run.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+
 
 def rows_payload(rows: list[list[float]]) -> bytes:
     """Encodes rows as consecutive little-endian binary32 values."""
@@ -113,6 +116,18 @@ class PrecisionReferenceTests(unittest.TestCase):
             PRECISION.publish(staging, destination)
             self.assertTrue(destination.is_dir() and not staging.exists())
 
+    def test_offload_arguments_come_together(self) -> None:
+        """A resident budget needs an offload directory and vice versa."""
+
+        base = ["--model-dir", "m", "--transformers-dir", "t", "--oracle-dir", "o", "--output", "b"]
+        arguments = PRECISION.parse_arguments(base)
+        self.assertIsNone(arguments.max_resident_gib)
+        offloaded = PRECISION.parse_arguments(base + ["--max-resident-gib", "16", "--offload-dir", "d"])
+        self.assertEqual((offloaded.max_resident_gib, offloaded.offload_dir), (16.0, Path("d")))
+        for partial in (["--max-resident-gib", "16"], ["--offload-dir", "d"]):
+            with self.assertRaises(SystemExit):
+                PRECISION.parse_arguments(base + partial)
+
     def test_evaluation_plan_widens_only_from_bfloat16(self) -> None:
         """F32 is evaluated from BF16-resident weights; F16 and BF16 run as loaded."""
 
@@ -121,6 +136,78 @@ class PrecisionReferenceTests(unittest.TestCase):
         self.assertEqual(plan["bfloat16"], ("bfloat16", "bfloat16"))
         self.assertEqual(plan["float16"], ("float16", "float16"))
         self.assertEqual([kind for kind, _ in PRECISION.KINDS], ["prompt", "teacher", "cached"])
+
+
+@unittest.skipUnless(HAS_TORCH, "needs PyTorch")
+class BlockWideningTests(unittest.TestCase):
+    """Check `blocks_in_dtype` on a toy model shaped like the official class."""
+
+    @staticmethod
+    def toy(torch):
+        """A BF16 model with `model.embeddings`, `model.layers`, and `lm_head`, plus an F32 buffer."""
+
+        class Inner(torch.nn.Module):
+            """Embedding and three linear blocks."""
+
+            def __init__(self) -> None:
+                """Builds the toy backbone."""
+
+                super().__init__()
+                self.embeddings = torch.nn.Embedding(16, 8)
+                self.layers = torch.nn.ModuleList(torch.nn.Linear(8, 8) for _ in range(3))
+
+        class Toy(torch.nn.Module):
+            """Backbone plus head."""
+
+            def __init__(self) -> None:
+                """Builds the toy model."""
+
+                super().__init__()
+                self.model = Inner()
+                self.lm_head = torch.nn.Linear(8, 16, bias=False)
+                self.register_buffer("correction", torch.tensor([0.1, 0.2]))
+
+            def forward(self, tokens):
+                """Embeds, runs each block, and projects."""
+
+                hidden = self.model.embeddings(tokens)
+                for block in self.model.layers:
+                    hidden = torch.tanh(block(hidden))
+                return self.lm_head(hidden)
+
+        torch.manual_seed(0)
+        model = Toy()
+        for parameter in model.parameters():
+            parameter.data = parameter.data.to(torch.bfloat16)
+        return model
+
+    def test_widened_blocks_equal_a_permanent_cast_and_are_restored(self) -> None:
+        """Results match a once-widened model bit for bit; afterwards everything is BF16 again."""
+
+        import torch
+
+        tokens = torch.tensor([[1, 2, 3, 4]])
+        streamed, widened = self.toy(torch), self.toy(torch)
+        for parameter in widened.parameters():
+            parameter.data = parameter.data.to(torch.float32)
+        # Simulate Accelerate on one block: an outer forward calling `_old_forward`.
+        block = streamed.model.layers[1]
+        block._old_forward = block.forward
+        block.forward = lambda *arguments, **keywords: block._old_forward(*arguments, **keywords)
+        with torch.no_grad(), PRECISION.blocks_in_dtype(torch, streamed, torch.float32):
+            self.assertEqual(streamed.model.embeddings.weight.dtype, torch.float32)
+            self.assertEqual(streamed.model.layers[0].weight.dtype, torch.bfloat16)
+            result = streamed(tokens)
+        with torch.no_grad():
+            expected = widened(tokens)
+        self.assertEqual(result.dtype, torch.float32)
+        self.assertTrue(torch.equal(result, expected))
+        self.assertEqual({parameter.dtype for parameter in streamed.parameters()}, {torch.bfloat16})
+        self.assertEqual(streamed.correction.dtype, torch.float32)
+        self.assertNotIn("forward", vars(streamed.model.layers[0]))
+        self.assertIn("forward", vars(block))
+        with torch.no_grad():
+            self.assertEqual(streamed(tokens).dtype, torch.bfloat16)
 
 
 if __name__ == "__main__":
