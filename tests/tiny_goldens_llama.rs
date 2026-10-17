@@ -18,8 +18,9 @@
 //!    the rows have different cached lengths (6 versus 2 valid tokens), and
 //!    which also matches the golden logits;
 //! 4. the cached greedy continuation, compared at every step whose top-2
-//!    logit margin exceeds the tolerance (the reference's tokens are fed
-//!    back, so a closer race, a tie at the backend's precision, is skipped).
+//!    logit margin exceeds twice the tolerance (the reference's tokens are
+//!    fed back, so a closer race, a tie at the backend's precision, is
+//!    skipped), at least two steps per case.
 //!
 //! The checks are generic over the backend (shared helpers live in
 //! `tests/support/tiny_goldens.rs`). They run on Flex as ordinary tests and,
@@ -105,7 +106,7 @@ fn batched_cached_decode<A: Backend>(device: &A::Device, bound: Bound) {
     }
 }
 
-/// The cached greedy continuation matches the reference at every decisive step.
+/// The cached greedy continuation matches the reference at every decisive step, at least two per case.
 fn cached_greedy_continuation<A: Backend>(device: &A::Device, bound: Bound) {
     for case in CASES {
         let golden = Golden::case(case);

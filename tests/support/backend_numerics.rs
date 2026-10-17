@@ -16,10 +16,14 @@
 //!   can measure its effect before any GPU is available;
 //! * [`checkpoint_tolerance`] keeps the real-checkpoint gates' F32 default
 //!   tolerances to F32 devices and requires an explicit one on a TF32 device;
-//! * [`check_teacher_forced_greedy`] compares a real-checkpoint gate's cached
-//!   greedy continuation with the reference's at every step its tolerance
-//!   decides ([`greedy_step_is_decisive`]), skipping ties rather than stopping
-//!   at the first one (see [Greedy ties](#greedy-ties)).
+//! * [`compare_teacher_forced_greedy`] compares a cached greedy continuation
+//!   with the reference's at every step its tolerance decides
+//!   ([`greedy_step_is_decisive`]), skipping ties rather than stopping at the
+//!   first one (see [Greedy ties](#greedy-ties)). The real-checkpoint gates
+//!   decide each step on the bundle's recorded reference margin
+//!   ([`check_teacher_forced_greedy`]); the tiny goldens, which record only
+//!   tokens, decide it on the run's own margin against
+//!   [`Bound::allowed_for_actual_scale`].
 //!
 //! # Why CUDA "F32" is not always F32 for matrix products
 //!
@@ -73,6 +77,18 @@
 //! so a margin strictly above `2τ` forces the run to pick `b`. At or below
 //! `2τ` the run may pick the runner-up without any error beyond `τ`: the step
 //! is a tie at that tolerance and says nothing about correctness.
+//!
+//! The same bound holds with the roles exchanged, which is what a golden that
+//! records only the reference's tokens needs. If the run picks `r` while the
+//! reference picks `b ≠ r` (so `ref[b] ≥ ref[r]`), then
+//! `ours[r] − ours[b] ≤ (ref[r] + τ) − (ref[b] − τ) ≤ 2τ`, so the run's own
+//! top-2 margin is at most `2τ`. A run margin strictly above `2τ` therefore
+//! also forces agreement, and a run margin in `(τ, 2τ]` does not: reference
+//! `[1.00, 0.99]` and run `[0.98, 1.009]` differ by at most `0.02` everywhere,
+//! yet the run's margin `0.029` exceeds `τ = 0.02` and its argmax differs.
+//! When `τ` itself depends on the reference's scale, which such a golden does
+//! not record either, [`Bound::allowed_for_actual_scale`] bounds it from the
+//! run's scale.
 //!
 //! The gates feed the reference's token back at every step (teacher forcing),
 //! so each step continues the reference's own prefix whatever the run chose
@@ -468,6 +484,38 @@ impl Bound {
         self.absolute + self.relative * scale
     }
 
+    /// Returns the largest allowance any reference admitting `actual` can have, given `actual`'s scale.
+    ///
+    /// A check that sees only the run's values (a greedy step of a golden that
+    /// records no continuation logits) cannot evaluate [`Self::allowed`] at
+    /// the reference's scale `s`. If every entry is within the bound, then
+    /// `s ≤ s_actual + absolute + relative · s`, so for `relative < 1`
+    /// `s ≤ (s_actual + absolute) / (1 − relative)` and the allowance
+    /// `absolute + relative · s` is at most
+    /// `(absolute + relative · s_actual) / (1 − relative)`. That bound is
+    /// computed in F64 and rounded up to F32, so it never understates the
+    /// exact one. With `relative = 0` it equals `absolute`. Panics unless
+    /// `0 ≤ relative < 1` and `actual_scale` is finite and non-negative.
+    pub(crate) fn allowed_for_actual_scale(self, actual_scale: f32) -> f32 {
+        assert!(
+            (0.0..1.0).contains(&self.relative),
+            "a relative bound of {:e} admits references of any scale",
+            self.relative
+        );
+        assert!(
+            actual_scale.is_finite() && actual_scale >= 0.0,
+            "the actual scale must be finite and non-negative, not {actual_scale:e}"
+        );
+        let exact = (f64::from(self.absolute) + f64::from(self.relative) * f64::from(actual_scale))
+            / (1.0 - f64::from(self.relative));
+        let rounded = exact as f32;
+        if f64::from(rounded) < exact {
+            rounded.next_up()
+        } else {
+            rounded
+        }
+    }
+
     /// Whether `gap` lies within the bound.
     pub(crate) fn admits(self, gap: Gap) -> bool {
         gap.deviation <= self.allowed(gap.scale)
@@ -520,30 +568,126 @@ pub(crate) fn greedy_step_is_decisive(margin: f32, tolerance: f32) -> bool {
     margin > 2.0 * tolerance
 }
 
-/// Result of [`check_teacher_forced_greedy`].
+/// Returns the gap between the largest logit and the next largest.
+///
+/// The largest is [`argmax`]'s choice and the runner-up the largest of the
+/// others under the same [`f32::total_cmp`] order, so equal maxima give a
+/// margin of zero. A single logit has no runner-up and an infinite margin.
+/// Panics on an empty slice.
+pub(crate) fn top_two_margin(logits: &[f32]) -> f32 {
+    let best = argmax(logits);
+    (0..logits.len())
+        .filter(|&index| index != best)
+        .map(|index| logits[index])
+        .max_by(f32::total_cmp)
+        .map_or(f32::INFINITY, |runner_up| logits[best] - runner_up)
+}
+
+/// The margin and tolerance on which one greedy step is decided.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GreedyDecision {
+    /// Top-2 margin of the reference (real-checkpoint bundles) or of the run (tiny goldens).
+    pub(crate) margin: f32,
+    /// Absolute tolerance every logit of the run is held to at this step.
+    pub(crate) tolerance: f32,
+}
+
+impl GreedyDecision {
+    /// Whether the step decides the argmax: [`greedy_step_is_decisive`].
+    pub(crate) fn decisive(self) -> bool {
+        greedy_step_is_decisive(self.margin, self.tolerance)
+    }
+}
+
+/// Counts of a teacher-forced greedy comparison.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GreedyComparison {
     /// Decisive steps, each of which matched the reference token.
     pub(crate) compared: usize,
-    /// Steps skipped because their reference margin is a tie at the tolerance.
+    /// Steps skipped because their margin is a tie at the tolerance.
     pub(crate) ties: usize,
 }
 
 /// Compares a cached greedy continuation with the reference's at every decisive step.
 ///
-/// `reference` holds each step's reference `(token, top-2 margin)`, `logits`
-/// the run's last-position logits after its prefill, and `decode(token)`
-/// appends one token to the run's cache and returns the next position's
-/// logits. After every step but the last, the *reference's* token is
-/// decoded, so step `s` always continues the reference's own `s`-token
-/// prefix. Where [`greedy_step_is_decisive`] holds, the run's [`argmax`] must
-/// equal the reference token; any other step is a tie at `tolerance` and is
-/// skipped without ending the comparison (see [Greedy ties](#greedy-ties)).
+/// `tokens` holds the reference's continuation, `logits` the run's
+/// last-position logits after its prefill, and `decode(token)` appends one
+/// token to the run's cache and returns the next position's logits. After
+/// every step but the last, the *reference's* token is decoded, so step `s`
+/// always continues the reference's own `s`-token prefix. Every step's
+/// logits must be finite. `decide(step, logits)` returns the step's
+/// [`GreedyDecision`]; where it is decisive the run's [`argmax`] must equal
+/// the reference token, and any other step is a tie and is skipped without
+/// ending the comparison (see [Greedy ties](#greedy-ties)).
 ///
 /// At least `minimum` steps, capped at the continuation's length, must be
-/// decisive, so a run cannot pass vacuously; that panic names
-/// `minimum_variable`, the environment variable lowering the requirement.
+/// decisive, so a run cannot pass vacuously; that panic ends with `remedy`.
 /// Messages are prefixed with `context`. Returns the counts.
+#[track_caller]
+pub(crate) fn compare_teacher_forced_greedy(
+    context: &str,
+    tokens: &[i64],
+    minimum: usize,
+    remedy: &str,
+    mut decide: impl FnMut(usize, &[f32]) -> GreedyDecision,
+    mut logits: Vec<f32>,
+    mut decode: impl FnMut(i64) -> Vec<f32>,
+) -> GreedyComparison {
+    let mut outcome = GreedyComparison::default();
+    let mut smallest = f32::INFINITY;
+    for (step, &expected) in tokens.iter().enumerate() {
+        assert!(
+            logits.iter().all(|value| value.is_finite()),
+            "{context}: greedy step {step}: the run's logits are not all finite"
+        );
+        let decision = decide(step, &logits);
+        if decision.decisive() {
+            assert_eq!(
+                argmax(&logits) as i64,
+                expected,
+                "{context}: greedy step {step} (margin {:e} above twice the tolerance {:e})",
+                decision.margin,
+                decision.tolerance
+            );
+            outcome.compared += 1;
+            smallest = smallest.min(decision.margin);
+        } else {
+            eprintln!(
+                "{context}: greedy step {step}: margin {:e} is a tie at tolerance {:e}; skipped",
+                decision.margin, decision.tolerance
+            );
+            outcome.ties += 1;
+        }
+        if step + 1 < tokens.len() {
+            logits = decode(expected);
+        }
+    }
+    let required = minimum.min(tokens.len());
+    eprintln!(
+        "{context}: {} of {} greedy tokens decisive and matching (smallest decisive margin {:e}), \
+         {} ties skipped",
+        outcome.compared,
+        tokens.len(),
+        smallest,
+        outcome.ties
+    );
+    assert!(
+        outcome.compared >= required,
+        "{context}: only {} decisive greedy tokens were compared (minimum {required}; {} ties); \
+         {remedy}",
+        outcome.compared,
+        outcome.ties
+    );
+    outcome
+}
+
+/// Compares a real-checkpoint gate's cached greedy continuation with its bundle's.
+///
+/// `reference` holds each step's reference `(token, top-2 margin)`, and a
+/// step is decisive when that recorded margin exceeds twice the absolute
+/// `tolerance`; otherwise as [`compare_teacher_forced_greedy`]. A shortfall
+/// below `minimum` names `minimum_variable`, the environment variable
+/// lowering the requirement.
 #[track_caller]
 pub(crate) fn check_teacher_forced_greedy(
     context: &str,
@@ -551,46 +695,23 @@ pub(crate) fn check_teacher_forced_greedy(
     tolerance: f32,
     minimum: usize,
     minimum_variable: &str,
-    mut logits: Vec<f32>,
-    mut decode: impl FnMut(i64) -> Vec<f32>,
+    logits: Vec<f32>,
+    decode: impl FnMut(i64) -> Vec<f32>,
 ) -> GreedyComparison {
-    let mut outcome = GreedyComparison {
-        compared: 0,
-        ties: 0,
-    };
-    for (step, &(expected, margin)) in reference.iter().enumerate() {
-        if greedy_step_is_decisive(margin, tolerance) {
-            assert_eq!(
-                argmax(&logits) as i64,
-                expected,
-                "{context}: greedy step {step} (reference margin {margin:e})"
-            );
-            outcome.compared += 1;
-        } else {
-            eprintln!(
-                "{context}: greedy step {step}: reference margin {margin:e} is a tie at \
-                 tolerance {tolerance:e}; skipped"
-            );
-            outcome.ties += 1;
-        }
-        if step + 1 < reference.len() {
-            logits = decode(expected);
-        }
-    }
-    let required = minimum.min(reference.len());
-    eprintln!(
-        "{context}: {} of {} greedy tokens decisive and matching, {} ties skipped",
-        outcome.compared,
-        reference.len(),
-        outcome.ties
-    );
-    assert!(
-        outcome.compared >= required,
-        "{context}: only {} decisive greedy tokens were compared (minimum {required}; {} ties at \
-         tolerance {tolerance:e}); regenerate the bundle with another first prompt or lower \
-         {minimum_variable}",
-        outcome.compared,
-        outcome.ties
-    );
-    outcome
+    let tokens: Vec<i64> = reference.iter().map(|&(token, _)| token).collect();
+    compare_teacher_forced_greedy(
+        context,
+        &tokens,
+        minimum,
+        &format!(
+            "ties are judged at tolerance {tolerance:e}; regenerate the bundle with another \
+             first prompt or lower {minimum_variable}"
+        ),
+        |step, _| GreedyDecision {
+            margin: reference[step].1,
+            tolerance,
+        },
+        logits,
+        decode,
+    )
 }

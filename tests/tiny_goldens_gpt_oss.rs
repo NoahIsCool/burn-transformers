@@ -27,8 +27,8 @@
 //!    rows' windows differ), which also match the golden logits, at two
 //!    cache capacities;
 //! 4. the cached greedy continuation, compared at every step whose top-2
-//!    logit margin exceeds the tolerance (the reference's tokens are fed
-//!    back, so a tie is skipped);
+//!    logit margin exceeds twice the tolerance (the reference's tokens are
+//!    fed back, so a tie is skipped), at least two steps;
 //! 5. router diagnostics, and the load-balancing objective against
 //!    Transformers' pinned `aux_loss` for the same padded batch.
 //!
@@ -197,7 +197,7 @@ fn batched_cached_decode<A: Backend>(device: &A::Device, bound: Bound) {
     }
 }
 
-/// The cached greedy continuation matches the reference at every decisive step.
+/// The cached greedy continuation matches the reference at every decisive step, at least two.
 fn cached_greedy_continuation<A: Backend>(device: &A::Device, bound: Bound) {
     check_greedy(&load_model::<A>(device), &golden(), bound, device, CASE);
 }

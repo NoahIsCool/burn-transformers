@@ -40,9 +40,20 @@
 //! on that GPU but not F32 numerics.
 //!
 //! The greedy check feeds the reference's tokens, so every step sees the
-//! reference's prefix; a step whose top-2 margin lies within the bound's
-//! allowance is a tie at the backend's precision and is skipped rather than
-//! ending the comparison.
+//! reference's prefix. The goldens record the continuation's tokens but not
+//! its logits, so each step is decided on the run's own top-2 margin: it is
+//! compared when that margin exceeds twice the largest allowance any
+//! reference within the bound could have (`Bound::allowed_for_actual_scale`
+//! at the run's largest logit magnitude), which forces the reference's
+//! argmax, and is otherwise a tie at the backend's precision and skipped
+//! rather than ending the comparison (`backend_numerics`, "Greedy ties"). At
+//! least [`MIN_GREEDY`] steps of every case must be decisive. Continuation
+//! logits stay below magnitude `1.65`, so the threshold is `2e-5` on Flex,
+//! below `6e-5` on an F32 accelerator, and below `0.054` under the TF32
+//! bound. Flex compares all six steps of every case (smallest margin
+//! `9.4e-4`, OLMo 2); at the TF32 threshold its margins would leave four to
+//! six decisive steps per case, so the minimum does not depend on a close
+//! race.
 
 #![allow(
     dead_code,
@@ -58,7 +69,10 @@ use transformers::{
     LogitsSelection, TokenMask, cache::CacheConfig,
 };
 
-use crate::backend_numerics::{Bound, Gap, MatmulPrecision, host};
+use crate::backend_numerics::{
+    Bound, Gap, GreedyComparison, GreedyDecision, MatmulPrecision, compare_teacher_forced_greedy,
+    host, top_two_margin,
+};
 
 /// Tolerance of Flex against the goldens: `1e-5` absolute.
 ///
@@ -81,6 +95,11 @@ pub(crate) const PREFILL: usize = 6;
 
 /// Leading padding columns of the golden's second row.
 pub(crate) const PADDING: usize = 4;
+
+/// Decisive greedy steps every case's six-token continuation must compare.
+///
+/// Without a minimum, a run whose margins were all ties would pass vacuously.
+pub(crate) const MIN_GREEDY: usize = 2;
 
 /// Returns an accelerator's golden bound after probing how it multiplies F32 matrices.
 ///
@@ -241,13 +260,6 @@ pub(crate) fn slice(matrix: &[Vec<i64>], range: std::ops::Range<usize>) -> Vec<V
         .collect()
 }
 
-/// Index and margin of the largest logit.
-pub(crate) fn top_two(logits: &[f32]) -> (usize, f32) {
-    let mut order: Vec<usize> = (0..logits.len()).collect();
-    order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
-    (order[0], logits[order[0]] - logits[order[1]])
-}
-
 /// Options requesting the logits of every position.
 pub(crate) fn all_logits() -> ForwardOptions {
     ForwardOptions {
@@ -406,21 +418,23 @@ pub(crate) fn check_cached<B: Backend>(
 /// Compares the cached greedy continuation at every decisive step.
 ///
 /// The reference's tokens are fed back, so each step's logits continue the
-/// reference's own prefix. A step is decisive when our top-2 margin exceeds
-/// the bound's allowance at the step's logit scale; a closer race is a tie
-/// at the backend's precision and is skipped. Prints the count and the
-/// smallest compared margin, and returns the count.
+/// reference's own prefix. A step is decisive when the run's top-2 margin
+/// exceeds twice [`Bound::allowed_for_actual_scale`] at the run's largest
+/// logit magnitude; a closer race is a tie at the backend's precision and is
+/// skipped. At least [`MIN_GREEDY`] steps must be decisive. Prints the counts
+/// and the smallest decisive margin, and returns the counts.
+#[track_caller]
 pub(crate) fn check_greedy<B: Backend>(
     model: &AutoCausalLm<B>,
     golden: &Golden,
     bound: Bound,
     device: &B::Device,
     context: &str,
-) -> usize {
+) -> GreedyComparison {
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, device)
         .unwrap();
-    let mut logits = host(
+    let logits = host(
         model
             .prefill(
                 CausalLmInput {
@@ -434,36 +448,35 @@ pub(crate) fn check_greedy<B: Backend>(
             .unwrap()
             .logits,
     );
-    let mut compared = 0;
-    let mut smallest = f32::INFINITY;
-    for (step, &expected) in golden.greedy_tokens.iter().enumerate() {
-        let (token, margin) = top_two(&logits);
-        let scale = logits
-            .iter()
-            .fold(0.0_f32, |scale, &value| scale.max(value.abs()));
-        if margin > bound.allowed(scale) {
-            assert_eq!(token as i64, expected, "{context}: greedy token {step}");
-            compared += 1;
-            smallest = smallest.min(margin);
-        }
-        logits = host(
-            model
-                .decode(
-                    DecodeInput {
-                        token_ids: ints(&[vec![expected]], device),
-                        position_ids: None,
-                        token_mask: None,
-                    },
-                    &mut state,
-                    &ForwardOptions::default(),
-                )
-                .unwrap()
-                .logits,
-        );
-    }
-    eprintln!(
-        "{context}: {compared} of {} greedy tokens decisive and matching (smallest margin {smallest:.2e})",
-        golden.greedy_tokens.len()
-    );
-    compared
+    compare_teacher_forced_greedy(
+        context,
+        &golden.greedy_tokens,
+        MIN_GREEDY,
+        "the golden's continuation is too close to call at this bound",
+        |_, logits| GreedyDecision {
+            margin: top_two_margin(logits),
+            tolerance: bound.allowed_for_actual_scale(
+                logits
+                    .iter()
+                    .fold(0.0_f32, |scale, &value| scale.max(value.abs())),
+            ),
+        },
+        logits,
+        |token| {
+            host(
+                model
+                    .decode(
+                        DecodeInput {
+                            token_ids: ints(&[vec![token]], device),
+                            position_ids: None,
+                            token_mask: None,
+                        },
+                        &mut state,
+                        &ForwardOptions::default(),
+                    )
+                    .unwrap()
+                    .logits,
+            )
+        },
+    )
 }

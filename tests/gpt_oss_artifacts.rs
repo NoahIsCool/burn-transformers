@@ -160,7 +160,7 @@ use std::path::{Path, PathBuf};
 
 use backend_numerics::{
     MatmulPrecision, argmax, check_teacher_forced_greedy, checkpoint_tolerance,
-    greedy_step_is_decisive,
+    greedy_step_is_decisive, top_two_margin,
 };
 use burn::{
     backend::Flex,
@@ -519,16 +519,6 @@ fn gap(actual: &[f32], expected: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// Returns the reference's top-2 margin of one position.
-fn margin(logits: &[f32]) -> f32 {
-    let best = argmax(logits);
-    let runner_up = (0..logits.len())
-        .filter(|&index| index != best)
-        .map(|index| logits[index])
-        .fold(f32::NEG_INFINITY, f32::max);
-    logits[best] - runner_up
-}
-
 /// Stateless logits at every prompt position match the reference; decisive argmaxes agree.
 fn check_prompt_logits<B: Backend>(device: &B::Device) {
     let (model, reference, settings) = load::<B>(device);
@@ -557,7 +547,7 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
         );
         for position in 0..prompt.tokens.len() {
             let expected = &prompt.logits[position * vocabulary..(position + 1) * vocabulary];
-            if greedy_step_is_decisive(margin(expected), settings.tolerance) {
+            if greedy_step_is_decisive(top_two_margin(expected), settings.tolerance) {
                 let actual = &logits[position * vocabulary..(position + 1) * vocabulary];
                 assert_eq!(
                     argmax(actual),

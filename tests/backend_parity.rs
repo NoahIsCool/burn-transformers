@@ -124,9 +124,10 @@
 mod backend_numerics;
 
 use backend_numerics::{
-    Bound, Gap, GreedyComparison, MatmulPrecision, argmax, check_teacher_forced_greedy,
-    checkpoint_tolerance, copy_parameters, greedy_step_is_decisive, host, identity,
-    resolve_checkpoint_tolerance, round_to_tf32,
+    Bound, Gap, GreedyComparison, GreedyDecision, MatmulPrecision, TF32_BOUND, argmax,
+    check_teacher_forced_greedy, checkpoint_tolerance, compare_teacher_forced_greedy,
+    copy_parameters, greedy_step_is_decisive, host, identity, resolve_checkpoint_tolerance,
+    round_to_tf32, top_two_margin,
 };
 use burn::{
     backend::Flex,
@@ -1886,7 +1887,7 @@ fn teacher_forced_greedy_compares_every_decisive_step_of_the_full_bf16_gpt_oss_b
 
 /// A decisive step whose argmax differs from the reference fails, naming the step.
 #[test]
-#[should_panic(expected = "synthetic: greedy step 1 (reference margin 3e0)")]
+#[should_panic(expected = "synthetic: greedy step 1 (margin 3e0 above twice the tolerance 1e0)")]
 fn teacher_forced_greedy_rejects_a_decisive_mismatch() {
     check_teacher_forced_greedy(
         "synthetic",
@@ -1902,9 +1903,9 @@ fn teacher_forced_greedy_rejects_a_decisive_mismatch() {
 /// Too few decisive steps fail, naming the variable that lowers the minimum.
 #[test]
 #[should_panic(
-    expected = "synthetic: only 1 decisive greedy tokens were compared (minimum 2; 2 ties at \
-                tolerance 1e0); regenerate the bundle with another first prompt or lower \
-                TRANSFORMERS_EXAMPLE_MIN_GREEDY"
+    expected = "synthetic: only 1 decisive greedy tokens were compared (minimum 2; 2 ties); \
+                ties are judged at tolerance 1e0; regenerate the bundle with another first \
+                prompt or lower TRANSFORMERS_EXAMPLE_MIN_GREEDY"
 )]
 fn teacher_forced_greedy_requires_the_minimum_decisive_count() {
     check_teacher_forced_greedy(
@@ -1965,6 +1966,144 @@ fn teacher_forced_greedy_caps_the_minimum_at_the_continuation_length() {
     assert_eq!(empty, GreedyComparison::default());
 }
 
+/// The top-2 margin is the gap to the runner-up under `argmax`'s order.
+#[test]
+fn top_two_margins_measure_the_gap_to_the_runner_up() {
+    assert_eq!(top_two_margin(&[1.0, 3.0]), 2.0);
+    assert_eq!(top_two_margin(&[0.5, 2.0, -1.0, 1.5]), 0.5);
+    assert_eq!(top_two_margin(&[0.5, 2.0, -1.0, 2.0]), 0.0, "equal maxima");
+    assert_eq!(top_two_margin(&[-3.0]), f32::INFINITY, "no runner-up");
+    assert_eq!(top_two_margin(&[f32::NEG_INFINITY, 4.0]), f32::INFINITY);
+}
+
+/// Without logits there is no margin.
+#[test]
+#[should_panic(expected = "argmax of an empty slice")]
+fn top_two_margins_refuse_an_empty_slice() {
+    top_two_margin(&[]);
+}
+
+/// The allowance bounded from the run's scale covers the reference's and reduces to an absolute bound.
+#[test]
+fn run_scale_allowances_cover_every_admissible_reference() {
+    let absolute = Bound {
+        absolute: 1e-5,
+        relative: 0.0,
+    };
+    assert_eq!(absolute.allowed_for_actual_scale(0.0), 1e-5);
+    assert_eq!(absolute.allowed_for_actual_scale(1e6), 1e-5);
+    // TF32 at a run scale of 1.8: (1e-2 + 1e-2 · 1.8) / 0.99, rounded up.
+    let tf32 = TF32_BOUND.allowed_for_actual_scale(1.8);
+    let exact = (0.01_f64 + 0.01 * 1.8_f64) / 0.99;
+    assert!(f64::from(tf32) >= exact && f64::from(tf32.next_down()) < exact);
+    // Tight case: the run sits a full allowance below a reference of scale 2.
+    let bound = Bound {
+        absolute: 0.25,
+        relative: 0.5,
+    };
+    let reference_scale = 2.0;
+    let run_scale = reference_scale - bound.allowed(reference_scale);
+    assert_eq!(run_scale, 0.75);
+    assert_eq!(
+        bound.allowed_for_actual_scale(run_scale),
+        bound.allowed(reference_scale)
+    );
+}
+
+/// A relative bound of one or more admits references of unbounded scale.
+#[test]
+#[should_panic(expected = "a relative bound of 1e0 admits references of any scale")]
+fn run_scale_allowances_refuse_a_relative_bound_of_one() {
+    Bound {
+        absolute: 0.0,
+        relative: 1.0,
+    }
+    .allowed_for_actual_scale(1.0);
+}
+
+/// A non-finite run scale has no allowance.
+#[test]
+#[should_panic(expected = "the actual scale must be finite and non-negative, not NaN")]
+fn run_scale_allowances_refuse_a_non_finite_scale() {
+    TF32_BOUND.allowed_for_actual_scale(f32::NAN);
+}
+
+/// Regression: a run margin between `τ` and `2τ` is a tie, not a mismatch.
+///
+/// Reference `[1.00, 0.99]` and run `[0.98, 1.009]` differ by at most `0.02`,
+/// so the run is within `τ = 0.02`, yet its argmax differs. Its margin `0.029`
+/// exceeds `τ`, which the tiny goldens once treated as decisive, but not
+/// `2τ`, so the step is skipped.
+#[test]
+fn run_margins_within_twice_the_tolerance_are_ties() {
+    let reference = [1.00_f32, 0.99];
+    let run = vec![0.98_f32, 1.009];
+    let bound = Bound {
+        absolute: 0.02,
+        relative: 0.0,
+    };
+    bound.assert_close(&run, &reference, "within the bound");
+    assert_ne!(argmax(&run), argmax(&reference));
+    let margin = top_two_margin(&run);
+    let tolerance = bound.allowed_for_actual_scale(1.009);
+    assert!(margin > tolerance && !greedy_step_is_decisive(margin, tolerance));
+    let outcome = compare_teacher_forced_greedy(
+        "tiny",
+        &[argmax(&reference) as i64],
+        0,
+        "unused",
+        |_, logits| GreedyDecision {
+            margin: top_two_margin(logits),
+            tolerance: bound.allowed_for_actual_scale(1.009),
+        },
+        run,
+        |_| unreachable!("a one-step continuation decodes nothing"),
+    );
+    assert_eq!(
+        outcome,
+        GreedyComparison {
+            compared: 0,
+            ties: 1
+        }
+    );
+}
+
+/// A run-margin comparison also enforces its minimum, ending with the caller's remedy.
+#[test]
+#[should_panic(
+    expected = "tiny: only 0 decisive greedy tokens were compared (minimum 2; 2 ties); the \
+                golden's continuation is too close to call at this bound"
+)]
+fn run_margin_comparisons_require_the_minimum_decisive_count() {
+    compare_teacher_forced_greedy(
+        "tiny",
+        &[0, 1],
+        2,
+        "the golden's continuation is too close to call at this bound",
+        |_, logits| GreedyDecision {
+            margin: top_two_margin(logits),
+            tolerance: 0.5,
+        },
+        vec![1.0, 0.5],
+        |_| vec![0.5, 1.0],
+    );
+}
+
+/// Non-finite run logits fail a greedy step even when it is a tie.
+#[test]
+#[should_panic(expected = "synthetic: greedy step 0: the run's logits are not all finite")]
+fn teacher_forced_greedy_rejects_non_finite_logits() {
+    check_teacher_forced_greedy(
+        "synthetic",
+        &[(3, 0.5)],
+        1.0,
+        0,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        vec![0.0, f32::NAN, 0.0, 1.0],
+        |_| unreachable!("a one-step continuation decodes nothing"),
+    );
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 512,
@@ -1999,6 +2138,39 @@ proptest::proptest! {
             .fold(f32::NEG_INFINITY, |largest, (_, &value)| largest.max(value));
         if greedy_step_is_decisive(reference[best] - runner_up, tolerance) {
             proptest::prop_assert_eq!(argmax(&run), best);
+        }
+    }
+
+    /// Within a relative bound of every reference logit, a decisive run margin forces the reference's argmax.
+    ///
+    /// Each run logit is the reference plus `u · allowed(s)`, `s` being the
+    /// reference's largest magnitude and `|u| ≤ 1`; draws whose F32 rounding
+    /// leaves the exact allowance `absolute + relative · s` are discarded.
+    /// The tolerance comes from the run's scale alone, as in the tiny goldens,
+    /// and must cover that exact allowance.
+    #[test]
+    fn decisive_run_margins_force_the_reference_argmax_within_the_bound(
+        reference in proptest::collection::vec(-30.0_f32..30.0, 2..12),
+        units in proptest::collection::vec(-1.0_f32..=1.0, 12),
+        absolute in 0.0_f32..0.5,
+        relative in 0.0_f32..0.5,
+    ) {
+        let bound = Bound { absolute, relative };
+        let scale = reference.iter().fold(0.0_f32, |scale, &value| scale.max(value.abs()));
+        let exact = f64::from(absolute) + f64::from(relative) * f64::from(scale);
+        let run: Vec<f32> = reference
+            .iter()
+            .zip(&units)
+            .map(|(&value, &unit)| value + unit * bound.allowed(scale))
+            .collect();
+        proptest::prop_assume!(reference.iter().zip(&run).all(|(&expected, &actual)| {
+            (f64::from(actual) - f64::from(expected)).abs() <= exact
+        }));
+        let run_scale = run.iter().fold(0.0_f32, |scale, &value| scale.max(value.abs()));
+        let tolerance = bound.allowed_for_actual_scale(run_scale);
+        proptest::prop_assert!(f64::from(tolerance) >= exact);
+        if greedy_step_is_decisive(top_two_margin(&run), tolerance) {
+            proptest::prop_assert_eq!(argmax(&run), argmax(&reference));
         }
     }
 }

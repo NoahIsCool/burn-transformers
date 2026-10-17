@@ -90,9 +90,17 @@ compute capability 8.0) is held to `1e-5 + 1e-5 · magnitude`, because hidden
 states reach magnitude 8 where an absolute `1e-5` is below F32 noise: on an
 Apple M3 Max the largest deviations are `3.6e-6` for logits and `1.14e-5` for
 a `gemma2` hidden state of magnitude `7.0`. A CUDA GPU that rounds F32 matrix
-inputs to TF32 is held to `1e-2 + 1e-2 · magnitude` and skips greedy steps
-whose margin lies within it. No CUDA run has been recorded yet. Regenerate
-fixtures only deliberately, with those exact package versions:
+inputs to TF32 is held to `1e-2 + 1e-2 · magnitude`. The goldens record the
+greedy continuation's tokens but not its logits, so each greedy step is
+decided on the run's own top-2 margin: it is compared when that margin
+exceeds twice the largest allowance a reference within the bound could have
+(`Bound::allowed_for_actual_scale` in `tests/support/backend_numerics.rs`),
+which forces the reference's token, and skipped as a tie otherwise. At least
+two of each case's six steps must be compared on every backend. Flex compares
+all six of every case (smallest margin `9.4e-4`); under the TF32 bound the
+threshold stays below `0.054`, which Flex's margins clear at four to six
+steps per case. No CUDA run has been recorded yet. Regenerate fixtures only
+deliberately, with those exact package versions:
 
 ```sh
 python3 -I scripts/generate_tiny_goldens.py --output tests/fixtures/tiny_goldens [--case NAME ...]
