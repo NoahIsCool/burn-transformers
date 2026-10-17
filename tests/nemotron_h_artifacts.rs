@@ -1883,12 +1883,13 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
 /// floor: the worst cosine that the MPS/F16 oracle or the official CPU/F16
 /// evaluation reaches against F32 on that path, computed here from the
 /// authenticated rows (prompt `0.999194`, teacher `0.994466`, cached `0.998635`).
-/// A Burn F16 row therefore passes exactly when it is at least as faithful to
-/// F32 as the official F16 rows are; a `0.999` floor against the F16 oracle was
-/// unreachable even for the oracle, which is `0.994466` from F32 at teacher
-/// decision 18. Cosines against the F16 oracle are still reported. The three
-/// available hidden traces, recorded only at F16, keep the `0.999` threshold at
-/// their exact stateless/prefill/decode semantic points.
+/// Each Burn F16 row must therefore be at least as faithful to F32 as the worst
+/// official F16 row on its path (a per-path, not per-decision, bound); a
+/// `0.999` floor against the F16 oracle was unreachable even for the oracle,
+/// which is `0.994466` from F32 at teacher decision 18. Cosines against the F16
+/// oracle are still reported. The three available hidden traces, recorded only
+/// at F16, keep the `0.999` threshold at their exact stateless/prefill/decode
+/// semantic points.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 #[test]
 #[ignore = "requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory"]

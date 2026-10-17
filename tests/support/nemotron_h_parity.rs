@@ -12,8 +12,9 @@
 //! row carries its implementation's own rounding, and on this sparse hybrid
 //! two official F16 runs of the same code already disagree by cosine `0.9943`
 //! on a teacher-forced row. Each path's floor is the worst cosine any official
-//! F16 evaluation reaches against F32 on that path, so a Burn F16 row passes
-//! exactly when it is at least as faithful to F32 as the official F16 rows are.
+//! F16 evaluation reaches against F32 on that path, so a Burn F16 row must be
+//! at least as faithful to F32 as the worst official F16 row on its path. The
+//! bound is per path, not per decision.
 
 #![allow(dead_code)]
 

@@ -40,11 +40,25 @@ fit a 96 GiB host, while the BF16 one needs about 55 GiB while loading.
 ``--bf16-resident`` evaluates such a model in F32 anyway. It loads the
 checkpoint in BF16 and casts each decoder block's parameters to ``--dtype``
 only while that block runs, restoring them afterwards; the embedding, final
-norm, and head are cast once. Every block therefore computes exactly what it
-would in an F32 model, because BF16 widens to F32 exactly, while only one block
-is ever held in F32. The tool refuses this mode unless every floating tensor in
-the checkpoint is stored as BF16 (gpt-oss's MXFP4 blocks are integers and
-Transformers decodes them to BF16), so no weight is rounded on the way in.
+norm, and head are cast once. Only one block is ever held in F32, and because
+BF16 widens to F32 exactly, the result equals an F32 model's when two
+conditions hold, which the tool checks before evaluating anything:
+
+* every floating tensor in the checkpoint is stored as BF16 (gpt-oss's MXFP4
+  blocks are integers and Transformers decodes them to BF16), so no weight is
+  rounded on the way in;
+* every floating buffer of the BF16 model equals, in dtype and value, the
+  buffer a plain ``--dtype`` load would hold. Buffers are not cast, and a
+  model built under a BF16 default dtype can hold BF16-rounded constants:
+  Gemma3's ``embed_scale``, ``sqrt(hidden_size)``, becomes ``5.65625``
+  instead of ``5.656854`` on the tiny fixture, which moves its logits by up
+  to ``9.3e-5``, so Gemma3 is refused. The comparison instantiates the same
+  configuration in ``--dtype`` with its parameters on the meta device, so it
+  allocates only the buffers. Persistent floating buffers, whose values come
+  from the checkpoint, are refused.
+
+gpt-oss passes both checks: its only floating buffers are the F32 rotary
+tables, which Transformers computes in F32 under either default dtype.
 
 ``--dtype float64`` removes the reference's own rounding error, which matters
 for checkpoints with massive activations. Qwen2-7B's first-position hidden
@@ -266,8 +280,9 @@ def stream_blocks_in_dtype(model: Any, dtype: Any) -> int:
     with `cast_floating_parameters`. Each block keeps its loaded parameters;
     a forward pre-hook swaps in `dtype` copies and a forward hook restores the
     originals, so at most one block is held in `dtype` at a time. Buffers are
-    never touched (see `cast_floating_parameters`). Returns the number of
-    blocks hooked.
+    never touched (see `cast_floating_parameters`), so the result equals a
+    plain `dtype` model only if they already match one; `load_bf16_resident`
+    proves that before streaming. Returns the number of blocks hooked.
     """
 
     import torch
@@ -301,6 +316,116 @@ def stream_blocks_in_dtype(model: Any, dtype: Any) -> int:
         block.register_forward_pre_hook(widen)
         block.register_forward_hook(restore)
     return len(blocks)
+
+
+def instantiation_buffers(
+    model_dir: Path, dtype: str, layers: int | None = None
+) -> tuple[dict[str, Any], frozenset[str]]:
+    """Returns the buffers a plain `dtype` load of the checkpoint would hold, and the persistent names.
+
+    This repeats what ``from_pretrained`` does to buffers without allocating
+    any parameter: the configuration (truncated like `load_causal_lm` when
+    `layers` is given) is instantiated on the meta device under the `dtype`
+    default, every non-persistent buffer is materialized on the CPU, and the
+    model's own ``initialize_weights`` fills them, as ``from_pretrained`` does
+    for buffers that no checkpoint provides. Parameters stay on the meta
+    device, where initialization is a no-op. Persistent buffers are left on the
+    meta device: their values would come from the checkpoint, so they are only
+    named, in the returned set. Buffer names follow ``named_buffers``, which
+    lists a shared buffer once, as it does for the loaded model.
+    """
+
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    import torch
+    import transformers
+
+    config = transformers.AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    if layers is not None:
+        truncate_config(config, layers)
+    with torch.device("meta"):
+        skeleton = transformers.AutoModelForCausalLM.from_config(
+            config, dtype=getattr(torch, dtype), attn_implementation="eager"
+        )
+    persistent = frozenset(skeleton.state_dict(keep_vars=True))
+    names = [name for name, _buffer in skeleton.named_buffers()]
+    for name in names:
+        if name not in persistent:
+            owner, _, local = name.rpartition(".")
+            buffer = skeleton.get_buffer(name)
+            skeleton.get_submodule(owner).register_buffer(
+                local, torch.empty_like(buffer, device="cpu"), persistent=False
+            )
+    skeleton.initialize_weights()
+    return {name: skeleton.get_buffer(name) for name in names}, persistent
+
+
+def buffer_mismatches(model: Any, expected: dict[str, Any], persistent: frozenset[str]) -> list[str]:
+    """Describes every floating buffer of `model` that a plain load would not hold identically.
+
+    `expected` and `persistent` come from `instantiation_buffers`. A floating
+    buffer passes only when both sides hold it with the same dtype, shape, and
+    exact values (``torch.equal``, so a NaN never passes). A floating buffer
+    on one side only, or a persistent one, is reported too: either way the
+    loaded model is not known to compute what the plain one computes. Integer
+    buffers are not numerical constants of the forward pass and are ignored.
+    The result is sorted by buffer name and empty when nothing differs.
+    """
+
+    import torch
+
+    actual = {name: buffer for name, buffer in model.named_buffers() if buffer.is_floating_point()}
+    wanted = {name: buffer for name, buffer in expected.items() if buffer.is_floating_point()}
+    problems = []
+    for name in sorted(actual.keys() | wanted.keys()):
+        if name not in wanted:
+            problems.append(f"{name} (not a floating buffer of a plain load)")
+        elif name not in actual:
+            problems.append(f"{name} (not a floating buffer of the BF16 load)")
+        elif name in persistent:
+            problems.append(f"{name} (persistent; its value comes from the checkpoint)")
+        elif actual[name].dtype != wanted[name].dtype:
+            problems.append(f"{name} ({actual[name].dtype} instead of {wanted[name].dtype})")
+        elif actual[name].shape != wanted[name].shape or not torch.equal(
+            actual[name].cpu(), wanted[name].cpu()
+        ):
+            problems.append(f"{name} (values differ)")
+    return problems
+
+
+def require_bf16_resident_inputs(model_dir: Path, dtype: str) -> None:
+    """Refuses `--bf16-resident` before any load unless `dtype` is wider than BF16 and the checkpoint all BF16."""
+
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    if dtype == "bfloat16":
+        raise ValueError("--bf16-resident needs a wider --dtype than bfloat16")
+    require_bfloat16_checkpoint(model_dir)
+
+
+def load_bf16_resident(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> Any:
+    """Loads a BF16 checkpoint in BF16 and runs its blocks in `dtype` (see `stream_blocks_in_dtype`).
+
+    The run is refused with ``ValueError`` unless it reproduces a plain
+    `dtype` load exactly: before loading, `require_bf16_resident_inputs`
+    checks the requested dtype and the stored weights; after loading, every
+    floating buffer must match `instantiation_buffers` (see
+    `buffer_mismatches`), because streaming never casts buffers.
+    """
+
+    import torch
+
+    require_bf16_resident_inputs(model_dir, dtype)
+    model = load_causal_lm(model_dir, "bfloat16", layers)
+    expected, persistent = instantiation_buffers(model_dir, dtype, layers)
+    problems = buffer_mismatches(model, expected, persistent)
+    if problems:
+        raise ValueError(
+            f"--bf16-resident cannot reproduce a {dtype} model: these floating buffers of the BF16 "
+            f"load differ from a {dtype} instantiation: {'; '.join(problems)}"
+        )
+    stream_blocks_in_dtype(model, getattr(torch, dtype))
+    return model
 
 
 def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> Any:
@@ -351,25 +476,21 @@ def load_model(
     """Loads the checkpoint's own tokenizer and its eager model (see `load_causal_lm`).
 
     With `bf16_resident`, the model is loaded in BF16 and its blocks run in
-    `dtype` (see `stream_blocks_in_dtype` and `require_bfloat16_checkpoint`).
+    `dtype` (see `load_bf16_resident`, which refuses any run that would not
+    reproduce a plain `dtype` load).
     """
 
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
-    import torch
     import transformers
 
     if bf16_resident:
         # Fail before any load: the mode is exact only for wider dtypes and BF16 checkpoints.
-        if dtype == "bfloat16":
-            raise ValueError("--bf16-resident needs a wider --dtype than bfloat16")
-        require_bfloat16_checkpoint(model_dir)
+        require_bf16_resident_inputs(model_dir, dtype)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     if not bf16_resident:
         return tokenizer, load_causal_lm(model_dir, dtype, layers)
-    model = load_causal_lm(model_dir, "bfloat16", layers)
-    stream_blocks_in_dtype(model, getattr(torch, dtype))
-    return tokenizer, model
+    return tokenizer, load_bf16_resident(model_dir, dtype, layers)
 
 
 def prompt_logits(model: Any, token_ids: list[int]) -> Any:

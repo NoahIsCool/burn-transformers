@@ -320,19 +320,24 @@ The gate now judges Burn's logit rows against the official F32 rows of the same
 path, from the authenticated precision bundle. Each path's floor is the worst
 cosine any official F16 evaluation reaches against F32 on that path, computed
 in the test from authenticated rows and required to stay at or above `0.99`:
-prompt `0.999194`, teacher `0.994466`, cached `0.998635`. Burn passes exactly
-when its F16 rows are at least as faithful to F32 as the official F16 rows are,
-with exact top-1 everywhere. The three hidden traces exist only at F16 and keep
-the `0.999` floor against the oracle.
+prompt `0.999194`, teacher `0.994466`, cached `0.998635`. Every Burn F16 row
+must therefore be at least as close to F32 as the worst official F16 row on its
+path, with exact top-1 everywhere. This is a per-path bound, not a per-decision
+one: half-precision deviations spike at implementation-specific rows. The three
+hidden traces exist only at F16 and keep the `0.999` floor against the oracle.
 
 On source `9a9c730` the gate passes: against F32, Burn reaches `0.999224` on
 the prompt row, at least `0.997612` on every teacher-forced row (decision 30),
 and at least `0.998777` on every cached row (decision 22), with 32/32 top-1 on
-both paths. At teacher decision 18 Burn is closer to F32 than the oracle is.
-Against the F16 oracle its rows stay at the earlier values (teacher minimum
-`0.994340`, cached `0.999299`), and its hidden traces at least `0.999802`. The
-prompt and cached margins over their floors are small (`3e-5` and `1.4e-4`):
-both F16 implementations sit near the same distance from F32 there.
+both paths. At teacher decision 30 both official F16 evaluations are closer to
+F32 (`0.999968` MPS, `0.999958` CPU), so that row is a Burn-side half-precision
+deviation that remains unexplained; it stays above the teacher floor `0.994466`
+set by the oracle's decision 18. At teacher decision 18 Burn is closer to F32
+than the oracle is. Against the F16 oracle its rows stay at the earlier values
+(teacher minimum `0.994340`, cached `0.999299`), and its hidden traces at least
+`0.999802`. The prompt and cached margins over their floors are small (`3e-5`
+and `1.4e-4`): both F16 implementations sit near the same distance from F32
+there.
 
 The exact official cache has physical batch one while `DynamicCache.batch_size`
 reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution

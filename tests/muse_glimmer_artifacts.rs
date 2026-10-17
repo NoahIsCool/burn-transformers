@@ -4447,10 +4447,7 @@ fn quantize_pinned_muse_glimmer(scheme: SymmetricQuantization, output_environmen
     assert_eq!(outcome.execution.source.max_open_shards, 1);
     assert_eq!(
         outcome.execution.source.shard_open_order,
-        SHARDS
-            .iter()
-            .map(|(name, _, _)| (*name).to_owned())
-            .collect::<Vec<_>>()
+        [SHARDS[1].0, SHARDS[0].0, SHARDS[1].0]
     );
     for (phase, stats) in [
         ("pre-execution", outcome.provenance.pre_execution),
@@ -4711,8 +4708,10 @@ fn load_authenticated_muse_burnpack(
         execution.peak_host_staging_bytes,
         LARGEST_TARGET_PAYLOAD_BYTES
     );
-    // Only the retained `embed_tokens` (shard 1) reaches the loader's 1 GiB
-    // hoisting threshold, so hoisting it leaves the physical shard order intact.
+    // Both vocabulary matrices reach the loader's 1 GiB hoisting threshold and are
+    // installed first in plan order, but the certified packed `lm_head` comes from
+    // the sidecar without a source read. Only the retained `embed_tokens` (shard 1)
+    // opens a shard before the physical schedule, so the shard order stays physical.
     assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
     assert_eq!(
         execution.source.tensor_reads,
