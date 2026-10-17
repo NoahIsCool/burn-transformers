@@ -95,12 +95,19 @@
 //!
 //! Independently of the reference, cached and batched passes must agree with
 //! this crate's own stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for
-//! the dtype. Greedy tokens are compared while the reference's top-2 margin
-//! exceeds twice the tolerance, and at least [`DEFAULT_MIN_GREEDY`] tokens
-//! must be compared (`TRANSFORMERS_GPT_OSS_MIN_GREEDY` overrides it). A
-//! truncated model's greedy margins are mostly below one logit, so a
-//! half-precision run against a truncated bundle compares no greedy tokens
-//! and needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`.
+//! the dtype. The greedy check feeds the reference's tokens back, so every
+//! step continues the reference's prefix, and compares each step whose
+//! reference top-2 margin exceeds twice the tolerance; a closer race is a tie
+//! at that tolerance and is skipped rather than ending the comparison
+//! (`tests/support/backend_numerics.rs`, "Greedy ties"). At least
+//! [`DEFAULT_MIN_GREEDY`] tokens must be compared
+//! (`TRANSFORMERS_GPT_OSS_MIN_GREEDY` overrides it). At the half-precision
+//! tolerance only margins above `5` are decisive: the full BF16 bundle has
+//! five of 32 (its first, `3.06`, is a tie), so the defaults apply to it, but
+//! a truncated model's greedy margins are mostly below one logit (the pinned
+//! one-block F32 bundle has one above `5`, the four-block bundles none), so a
+//! half-precision run against a truncated bundle needs
+//! `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`.
 //!
 //! # Measured
 //!
@@ -113,8 +120,11 @@
 //! by `7.6e-5`, and all 32 greedy tokens match. The half-precision rows of
 //! the table above come from the same four-block F32 bundle and a four-block
 //! BF16 bundle generated from the same prompts
-//! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`). The
-//! full-model BF16 bundle and the Metal runs are the integrator's.
+//! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`). Against the
+//! full-model BF16 bundle, `metal_cached_greedy_matches_the_reference` with
+//! `TRANSFORMERS_GPT_OSS_DTYPE=f16` and default settings matches all five
+//! decisive greedy steps and skips 27 ties (2026-10-17); the bundle's other
+//! checks and the remaining Metal runs are the integrator's.
 //!
 //! # CUDA
 //!
@@ -148,7 +158,10 @@ mod backend_numerics;
 
 use std::path::{Path, PathBuf};
 
-use backend_numerics::{MatmulPrecision, checkpoint_tolerance};
+use backend_numerics::{
+    MatmulPrecision, argmax, check_teacher_forced_greedy, checkpoint_tolerance,
+    greedy_step_is_decisive,
+};
 use burn::{
     backend::Flex,
     tensor::{DType, Int, Tensor, TensorData, backend::Backend},
@@ -506,13 +519,6 @@ fn gap(actual: &[f32], expected: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// Returns the argmax, preferring the lowest index on ties.
-fn argmax(logits: &[f32]) -> usize {
-    (0..logits.len())
-        .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then(b.cmp(&a)))
-        .unwrap()
-}
-
 /// Returns the reference's top-2 margin of one position.
 fn margin(logits: &[f32]) -> f32 {
     let best = argmax(logits);
@@ -551,7 +557,7 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
         );
         for position in 0..prompt.tokens.len() {
             let expected = &prompt.logits[position * vocabulary..(position + 1) * vocabulary];
-            if margin(expected) > 2.0 * settings.tolerance {
+            if greedy_step_is_decisive(margin(expected), settings.tolerance) {
                 let actual = &logits[position * vocabulary..(position + 1) * vocabulary];
                 assert_eq!(
                     argmax(actual),
@@ -571,7 +577,10 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
     }
 }
 
-/// The cached greedy continuation of prompt 0 matches while it is decisive.
+/// The cached greedy continuation of prompt 0 matches at every decisive step.
+///
+/// The reference's tokens are fed back, so ties are skipped rather than
+/// ending the comparison; see [`check_teacher_forced_greedy`].
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let (model, reference, settings) = load::<B>(device);
     let prompt = &reference.prompts[0];
@@ -584,7 +593,7 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         token_mask: None,
         position_ids: None,
     };
-    let mut logits = host(
+    let logits = host(
         model
             .prefill(input, &mut state, &ForwardOptions::default())
             .unwrap()
@@ -595,34 +604,26 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         gap(&logits, last) <= settings.tolerance,
         "cached prefill logits"
     );
-    let mut compared = 0;
-    for (step, &(expected, step_margin)) in reference.greedy.iter().enumerate() {
-        if step_margin <= 2.0 * settings.tolerance {
-            eprintln!("greedy step {step}: reference margin {step_margin:e} is a tie; stopping");
-            break;
-        }
-        compared += 1;
-        assert_eq!(argmax(&logits) as i64, expected, "greedy step {step}");
-        let next = DecodeInput {
-            token_ids: row::<B>(&[expected], device),
-            position_ids: None,
-            token_mask: None,
-        };
-        logits = host(
-            model
-                .decode(next, &mut state, &ForwardOptions::default())
-                .unwrap()
-                .logits,
-        );
-    }
-    eprintln!(
-        "greedy: {compared} of {} tokens match",
-        reference.greedy.len()
-    );
-    let minimum = settings.minimum_greedy.min(reference.greedy.len());
-    assert!(
-        compared >= minimum,
-        "only {compared} decisive greedy tokens were compared (minimum {minimum})"
+    check_teacher_forced_greedy(
+        "greedy",
+        &reference.greedy,
+        settings.tolerance,
+        settings.minimum_greedy,
+        "TRANSFORMERS_GPT_OSS_MIN_GREEDY",
+        logits,
+        |token| {
+            let next = DecodeInput {
+                token_ids: row::<B>(&[token], device),
+                position_ids: None,
+                token_mask: None,
+            };
+            host(
+                model
+                    .decode(next, &mut state, &ForwardOptions::default())
+                    .unwrap()
+                    .logits,
+            )
+        },
     );
 }
 

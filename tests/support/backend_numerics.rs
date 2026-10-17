@@ -2,7 +2,7 @@
 //!
 //! An accelerator test asks one question: does a GPU backend evaluate the same
 //! graph as deterministic Flex/F32, or as a pinned F32 reference? Answering it
-//! needs five pieces, kept here so every suite answers it the same way:
+//! needs six pieces, kept here so every suite answers it the same way:
 //!
 //! * [`copy_parameters`] installs one model's parameters into an independently
 //!   constructed model of the same configuration on another backend, so both
@@ -15,7 +15,11 @@
 //! * [`round_to_tf32`] emulates TF32 input rounding on the host, so a CPU test
 //!   can measure its effect before any GPU is available;
 //! * [`checkpoint_tolerance`] keeps the real-checkpoint gates' F32 default
-//!   tolerances to F32 devices and requires an explicit one on a TF32 device.
+//!   tolerances to F32 devices and requires an explicit one on a TF32 device;
+//! * [`check_teacher_forced_greedy`] compares a real-checkpoint gate's cached
+//!   greedy continuation with the reference's at every step its tolerance
+//!   decides ([`greedy_step_is_decisive`]), skipping ties rather than stopping
+//!   at the first one (see [Greedy ties](#greedy-ties)).
 //!
 //! # Why CUDA "F32" is not always F32 for matrix products
 //!
@@ -58,6 +62,33 @@
 //! qualify F32 numerics, and a TF32 run qualifies execution. The bound is a
 //! derivation, not yet a CUDA measurement; the first Ampere-or-newer run
 //! records the measured deviations.
+//!
+//! # Greedy ties
+//!
+//! A real-checkpoint bundle records the reference's own greedy continuation
+//! as `(token, margin)` per step, the margin being the gap between its top
+//! two logits. If every logit of a run lies within the gate's absolute
+//! tolerance `τ` of the reference, the reference's best token `b` keeps
+//! `ours[b] ≥ ref[b] − τ` and any other token `j` keeps `ours[j] ≤ ref[j] + τ`,
+//! so a margin strictly above `2τ` forces the run to pick `b`. At or below
+//! `2τ` the run may pick the runner-up without any error beyond `τ`: the step
+//! is a tie at that tolerance and says nothing about correctness.
+//!
+//! The gates feed the reference's token back at every step (teacher forcing),
+//! so each step continues the reference's own prefix whatever the run chose
+//! at a tie. A tie therefore invalidates nothing after it and is skipped.
+//! Stopping at the first tie instead discards every later decisive step and
+//! makes the minimum-count check depend on where the first close race falls.
+//! The full BF16 gpt-oss-20b bundle opens with a margin of `3.0625`, a tie at
+//! the half-precision tolerance `2.5`, yet five of its 32 margins exceed `5`.
+//! Under TF32 tolerances, any `τ` of `0.1179` or more ends the Llama-3.1-8B
+//! comparison at step 0 (margin `0.2356`), and any of `0.0232` or more ends
+//! the SmolLM-135M one at step 1 (margin `0.0463`), below the default minimum
+//! of two, although 27 of 32 and 21 of 32 of their steps stay decisive at
+//! `τ = 0.16`. At the F32 defaults (`1e-3`; `5e-3` across Gemma's window)
+//! every step of every pinned F32 or F64 Llama-family, Gemma, and gpt-oss
+//! bundle is decisive, so both rules compare all of them and the recorded F32
+//! results are unchanged.
 
 #![allow(
     dead_code,
@@ -461,4 +492,105 @@ impl Bound {
         self.check(gap, context);
         gap
     }
+}
+
+// ---------------------------------------------------------------------------
+// Greedy continuations of real-checkpoint gates
+// ---------------------------------------------------------------------------
+
+/// Returns the index of the largest logit, preferring the lowest index among equal values.
+///
+/// Values are ordered by [`f32::total_cmp`], so the choice is deterministic
+/// for every input, as in the reference generator's `top_two_margin`.
+/// Panics on an empty slice.
+pub(crate) fn argmax(logits: &[f32]) -> usize {
+    (0..logits.len())
+        .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then(b.cmp(&a)))
+        .expect("argmax of an empty slice")
+}
+
+/// Whether a reference step with top-2 `margin` decides the argmax at absolute `tolerance`.
+///
+/// True exactly when `margin > 2 · tolerance`; see [Greedy ties](#greedy-ties)
+/// for why that implies argmax agreement whenever every logit is within
+/// `tolerance`. Doubling is exact in F32, and the bundle's margin (an exact
+/// F64 difference of two F32 logits) rounds to F32 monotonically, so a
+/// rounded margin exceeds `2 · tolerance` only when the exact one does.
+pub(crate) fn greedy_step_is_decisive(margin: f32, tolerance: f32) -> bool {
+    margin > 2.0 * tolerance
+}
+
+/// Result of [`check_teacher_forced_greedy`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GreedyComparison {
+    /// Decisive steps, each of which matched the reference token.
+    pub(crate) compared: usize,
+    /// Steps skipped because their reference margin is a tie at the tolerance.
+    pub(crate) ties: usize,
+}
+
+/// Compares a cached greedy continuation with the reference's at every decisive step.
+///
+/// `reference` holds each step's reference `(token, top-2 margin)`, `logits`
+/// the run's last-position logits after its prefill, and `decode(token)`
+/// appends one token to the run's cache and returns the next position's
+/// logits. After every step but the last, the *reference's* token is
+/// decoded, so step `s` always continues the reference's own `s`-token
+/// prefix. Where [`greedy_step_is_decisive`] holds, the run's [`argmax`] must
+/// equal the reference token; any other step is a tie at `tolerance` and is
+/// skipped without ending the comparison (see [Greedy ties](#greedy-ties)).
+///
+/// At least `minimum` steps, capped at the continuation's length, must be
+/// decisive, so a run cannot pass vacuously; that panic names
+/// `minimum_variable`, the environment variable lowering the requirement.
+/// Messages are prefixed with `context`. Returns the counts.
+#[track_caller]
+pub(crate) fn check_teacher_forced_greedy(
+    context: &str,
+    reference: &[(i64, f32)],
+    tolerance: f32,
+    minimum: usize,
+    minimum_variable: &str,
+    mut logits: Vec<f32>,
+    mut decode: impl FnMut(i64) -> Vec<f32>,
+) -> GreedyComparison {
+    let mut outcome = GreedyComparison {
+        compared: 0,
+        ties: 0,
+    };
+    for (step, &(expected, margin)) in reference.iter().enumerate() {
+        if greedy_step_is_decisive(margin, tolerance) {
+            assert_eq!(
+                argmax(&logits) as i64,
+                expected,
+                "{context}: greedy step {step} (reference margin {margin:e})"
+            );
+            outcome.compared += 1;
+        } else {
+            eprintln!(
+                "{context}: greedy step {step}: reference margin {margin:e} is a tie at \
+                 tolerance {tolerance:e}; skipped"
+            );
+            outcome.ties += 1;
+        }
+        if step + 1 < reference.len() {
+            logits = decode(expected);
+        }
+    }
+    let required = minimum.min(reference.len());
+    eprintln!(
+        "{context}: {} of {} greedy tokens decisive and matching, {} ties skipped",
+        outcome.compared,
+        reference.len(),
+        outcome.ties
+    );
+    assert!(
+        outcome.compared >= required,
+        "{context}: only {} decisive greedy tokens were compared (minimum {required}; {} ties at \
+         tolerance {tolerance:e}); regenerate the bundle with another first prompt or lower \
+         {minimum_variable}",
+        outcome.compared,
+        outcome.ties
+    );
+    outcome
 }

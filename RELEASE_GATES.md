@@ -182,6 +182,23 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 | Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY` | `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3` |
 | gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.5` max, `0.15` mean (provisional, calibrated on four blocks) |
 
+Every cached-greedy check feeds the reference's tokens back and compares each
+step whose reference top-2 margin exceeds twice the absolute tolerance; a
+closer race is a tie at that tolerance and is skipped, not a reason to stop
+(`check_teacher_forced_greedy` in `tests/support/backend_numerics.rs`). The
+minimum counts decisive steps over the whole continuation. At the F32
+defaults every step of the pinned F32 and F64 bundles is decisive, so the
+F32 results below are unchanged. Under half-precision or TF32 tolerances,
+stopping at the first tie used to end comparisons early, and the full BF16
+gpt-oss-20b bundle (first margin `3.0625`, a tie at `2τ = 5`) could not meet
+the default minimum on any backend. It now compares its five decisive steps:
+`metal_cached_greedy_matches_the_reference` on Metal F16 (Apple M3 Max,
+`TRANSFORMERS_GPT_OSS_DTYPE=f16`, default tolerances, bundle `reference.json`
+SHA-256 `9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac`,
+2026-10-17) matches all five and skips 27 ties, with a 50.6 GB peak memory
+footprint. Only that greedy check was run; the bundle's prompt, batched, and
+long-prompt checks have not been recorded on this source.
+
 The Gemma long-context bundle and the gpt-oss truncated bundles are described
 in each test's module documentation, which also records the measured results.
 Qualify half-precision gpt-oss runs (including Metal F16, with

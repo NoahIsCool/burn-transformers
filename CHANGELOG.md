@@ -573,7 +573,9 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   long-context bundle), and gpt-oss, on Flex, Metal, and CUDA (FLAN-T5-small's
   release gate gained a CUDA variant too), and artifact-gated tokenizer and
   chat-template parity tests for the pinned FLAN-T5-small, Qwen3.5, Nemotron-H,
-  and Muse Glimmer tokenizers.
+  and Muse Glimmer tokenizers. Their cached-greedy checks feed the reference's
+  tokens back and skip ties at the tolerance instead of stopping at the first
+  one, so the full BF16 gpt-oss-20b bundle meets its default minimum.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

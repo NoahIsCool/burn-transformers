@@ -124,7 +124,8 @@
 mod backend_numerics;
 
 use backend_numerics::{
-    Bound, Gap, MatmulPrecision, checkpoint_tolerance, copy_parameters, host, identity,
+    Bound, Gap, GreedyComparison, MatmulPrecision, argmax, check_teacher_forced_greedy,
+    checkpoint_tolerance, copy_parameters, greedy_step_is_decisive, host, identity,
     resolve_checkpoint_tolerance, round_to_tf32,
 };
 use burn::{
@@ -1740,6 +1741,266 @@ fn checkpoint_tolerances_refuse_a_malformed_override() {
         1e-3,
         MatmulPrecision::F32,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Greedy continuations of the real-checkpoint gates
+// ---------------------------------------------------------------------------
+
+/// Top-2 margins of the full BF16 gpt-oss-20b bundle's 32-step greedy continuation.
+///
+/// Copied from `gpt-oss-20b-6cee5e81-bf16-reference.bundle/reference.json`
+/// (SHA-256 `9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac`;
+/// Transformers 5.2.0, PyTorch 2.10.0, revision `6cee5e81`). BF16 logits make
+/// every margin a multiple of `1/16` here, so each is exact in F32.
+const GPT_OSS_FULL_BF16_GREEDY_MARGINS: [f32; 32] = [
+    3.0625, 0.0625, 0.6875, 0.0625, 0.4375, 0.25, 1.9375, 0.375, 0.375, 0.0625, 2.125, 10.25, 1.0,
+    0.125, 0.375, 3.375, 0.25, 0.375, 1.875, 2.25, 1.5, 10.25, 4.375, 7.5, 3.875, 5.625, 1.375,
+    2.5, 1.375, 1.125, 2.25, 5.625,
+];
+
+/// Eight logits whose argmax is `token`, by a margin of one.
+fn logits_choosing(token: usize) -> Vec<f32> {
+    let mut logits = vec![0.0; 8];
+    logits[token] = 1.0;
+    logits
+}
+
+/// Argmax prefers the lowest index among equal maxima, as the reference generator does.
+#[test]
+fn greedy_argmax_prefers_the_lowest_index_among_equal_maxima() {
+    assert_eq!(argmax(&[0.5, 2.0, -1.0, 2.0]), 1);
+    assert_eq!(argmax(&[-3.0]), 0);
+    assert_eq!(argmax(&[f32::NEG_INFINITY, -1e30]), 1);
+    assert_eq!(argmax(&[1.0, f32::INFINITY, f32::INFINITY]), 1);
+}
+
+/// The argmax of no logits is refused.
+#[test]
+#[should_panic(expected = "argmax of an empty slice")]
+fn greedy_argmax_refuses_an_empty_slice() {
+    argmax(&[]);
+}
+
+/// A margin decides the argmax only strictly above twice the tolerance, and that bound is tight.
+#[test]
+fn greedy_steps_are_decisive_only_strictly_above_twice_the_tolerance() {
+    let above_two = f32::from_bits(2.0_f32.to_bits() + 1);
+    assert!(!greedy_step_is_decisive(2.0, 1.0));
+    assert!(greedy_step_is_decisive(above_two, 1.0));
+    // An exact reference tie never decides; with no tolerance any positive margin does.
+    assert!(!greedy_step_is_decisive(0.0, 0.0));
+    assert!(greedy_step_is_decisive(f32::MIN_POSITIVE, 0.0));
+    // A NaN margin is never decisive; the minimum count still guards the gate.
+    assert!(!greedy_step_is_decisive(f32::NAN, 1e-3));
+    // The full BF16 gpt-oss-20b bundle at the half-precision tolerance.
+    assert!(!greedy_step_is_decisive(3.0625, 2.5));
+    assert!(greedy_step_is_decisive(5.625, 2.5));
+    // Tightness at τ = 1: at a margin of exactly 2τ, moving the best logit
+    // down by τ and the runner-up up by τ ties them, and the lowest index wins.
+    let tight = [1.0, 3.0];
+    assert_eq!(argmax(&tight), 1);
+    assert!(!greedy_step_is_decisive(tight[1] - tight[0], 1.0));
+    assert_eq!(argmax(&[tight[0] + 1.0, tight[1] - 1.0]), 0);
+    // One F32 unit above 2τ (every value here is exact), the same shift cannot.
+    let decisive = [1.0, 1.0 + above_two];
+    assert!(greedy_step_is_decisive(decisive[1] - decisive[0], 1.0));
+    assert_eq!(argmax(&[decisive[0] + 1.0, decisive[1] - 1.0]), 1);
+}
+
+/// A tie is skipped, later decisive steps are compared, and every fed token is the reference's.
+#[test]
+fn teacher_forced_greedy_skips_ties_and_feeds_the_reference_tokens() {
+    // At τ = 1 step 1 is a tie (margin 0.5 ≤ 2) and the run picks token 6 there
+    // instead of 4. That is no error, and step 2 continues the prefix [3, 4].
+    let reference = [(3, 4.0), (4, 0.5), (5, 2.5)];
+    let mut fed = Vec::new();
+    let mut later = [logits_choosing(6), logits_choosing(5)].into_iter();
+    let outcome = check_teacher_forced_greedy(
+        "synthetic",
+        &reference,
+        1.0,
+        2,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        logits_choosing(3),
+        |token| {
+            fed.push(token);
+            later.next().expect("one decode per later step")
+        },
+    );
+    assert_eq!(
+        outcome,
+        GreedyComparison {
+            compared: 2,
+            ties: 1
+        }
+    );
+    assert_eq!(
+        fed,
+        [3, 4],
+        "reference tokens only, none after the last step"
+    );
+}
+
+/// Regression: the full BF16 gpt-oss-20b bundle passes its default minimum at the half tolerance.
+///
+/// Its first margin, `3.0625`, is a tie at `2τ = 5`, so stopping at the first
+/// tie compared nothing and failed `DEFAULT_MIN_GREEDY = 2` on every backend.
+/// Skipping ties compares the five steps whose margins exceed `5`.
+#[test]
+fn teacher_forced_greedy_compares_every_decisive_step_of_the_full_bf16_gpt_oss_bundle() {
+    let tolerance = 2.5;
+    let reference: Vec<(i64, f32)> = GPT_OSS_FULL_BF16_GREEDY_MARGINS
+        .iter()
+        .enumerate()
+        .map(|(step, &margin)| ((step % 8) as i64, margin))
+        .collect();
+    let stopping_at_the_first_tie = reference
+        .iter()
+        .take_while(|&&(_, margin)| greedy_step_is_decisive(margin, tolerance))
+        .count();
+    assert_eq!(stopping_at_the_first_tie, 0);
+    let mut fed = Vec::new();
+    let outcome = check_teacher_forced_greedy(
+        "gpt-oss-20b BF16",
+        &reference,
+        tolerance,
+        2,
+        "TRANSFORMERS_GPT_OSS_MIN_GREEDY",
+        logits_choosing(0),
+        |token| {
+            fed.push(token);
+            logits_choosing(((token + 1) % 8) as usize)
+        },
+    );
+    assert_eq!(
+        outcome,
+        GreedyComparison {
+            compared: 5,
+            ties: 27
+        }
+    );
+    let tokens: Vec<i64> = reference.iter().map(|&(token, _)| token).collect();
+    assert_eq!(fed, tokens[..31]);
+}
+
+/// A decisive step whose argmax differs from the reference fails, naming the step.
+#[test]
+#[should_panic(expected = "synthetic: greedy step 1 (reference margin 3e0)")]
+fn teacher_forced_greedy_rejects_a_decisive_mismatch() {
+    check_teacher_forced_greedy(
+        "synthetic",
+        &[(3, 4.0), (4, 3.0)],
+        1.0,
+        0,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        logits_choosing(3),
+        |_| logits_choosing(6),
+    );
+}
+
+/// Too few decisive steps fail, naming the variable that lowers the minimum.
+#[test]
+#[should_panic(
+    expected = "synthetic: only 1 decisive greedy tokens were compared (minimum 2; 2 ties at \
+                tolerance 1e0); regenerate the bundle with another first prompt or lower \
+                TRANSFORMERS_EXAMPLE_MIN_GREEDY"
+)]
+fn teacher_forced_greedy_requires_the_minimum_decisive_count() {
+    check_teacher_forced_greedy(
+        "synthetic",
+        &[(3, 0.5), (4, 9.0), (5, 2.0)],
+        1.0,
+        2,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        logits_choosing(7),
+        |token| logits_choosing(token as usize + 1),
+    );
+}
+
+/// The minimum is capped at the continuation's length; zero admits a continuation of ties.
+#[test]
+fn teacher_forced_greedy_caps_the_minimum_at_the_continuation_length() {
+    let single = check_teacher_forced_greedy(
+        "synthetic",
+        &[(2, 9.0)],
+        1.0,
+        2,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        logits_choosing(2),
+        |_| unreachable!("a one-step continuation decodes nothing"),
+    );
+    assert_eq!(
+        single,
+        GreedyComparison {
+            compared: 1,
+            ties: 0
+        }
+    );
+    let ties = check_teacher_forced_greedy(
+        "synthetic",
+        &[(2, 0.1), (3, 0.2)],
+        1.0,
+        0,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        logits_choosing(7),
+        |_| logits_choosing(7),
+    );
+    assert_eq!(
+        ties,
+        GreedyComparison {
+            compared: 0,
+            ties: 2
+        }
+    );
+    let empty = check_teacher_forced_greedy(
+        "synthetic",
+        &[],
+        1.0,
+        2,
+        "TRANSFORMERS_EXAMPLE_MIN_GREEDY",
+        logits_choosing(0),
+        |_| unreachable!("an empty continuation decodes nothing"),
+    );
+    assert_eq!(empty, GreedyComparison::default());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: 512,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(20_261_017),
+        ..proptest::test_runner::Config::default()
+    })]
+
+    /// Within `τ` of every reference logit, a decisive reference margin forces the reference's argmax.
+    ///
+    /// Each run logit is the reference plus `u · τ` with `|u| ≤ 1`. F32
+    /// rounding of that sum can land up to half a unit beyond `τ`, which the
+    /// guarantee does not cover, so such draws are discarded.
+    #[test]
+    fn decisive_reference_margins_force_the_argmax_within_the_tolerance(
+        reference in proptest::collection::vec(-30.0_f32..30.0, 2..12),
+        units in proptest::collection::vec(-1.0_f32..=1.0, 12),
+        tolerance in 1e-3_f32..2.0,
+    ) {
+        let run: Vec<f32> = reference
+            .iter()
+            .zip(&units)
+            .map(|(&value, &unit)| value + unit * tolerance)
+            .collect();
+        proptest::prop_assume!(reference.iter().zip(&run).all(|(&expected, &actual)| {
+            (f64::from(actual) - f64::from(expected)).abs() <= f64::from(tolerance)
+        }));
+        let best = argmax(&reference);
+        let runner_up = reference
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| index != best)
+            .fold(f32::NEG_INFINITY, |largest, (_, &value)| largest.max(value));
+        if greedy_step_is_decisive(reference[best] - runner_up, tolerance) {
+            proptest::prop_assert_eq!(argmax(&run), best);
+        }
+    }
 }
 
 /// Gaps track the largest deviation and scale, and bounds scale with the reference.

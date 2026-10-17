@@ -41,9 +41,12 @@
 //! match. The default absolute tolerance, [`DEFAULT_TOLERANCE`] = `1e-3`,
 //! matches the Llama family's real-checkpoint gate and leaves about six
 //! times that drift. Set `TRANSFORMERS_GEMMA_TOLERANCE` to override it for
-//! other checkpoints or backends. Greedy tokens are compared
-//! while the reference's top-2 margin exceeds twice the tolerance; at least
-//! [`DEFAULT_MIN_GREEDY`] = 2 tokens must be compared
+//! other checkpoints or backends. The greedy checks feed the reference's
+//! tokens back, so every step continues the reference's prefix, and compare
+//! each step whose reference top-2 margin exceeds twice the tolerance; a
+//! closer race is a tie at that tolerance and is skipped rather than ending
+//! the comparison (`tests/support/backend_numerics.rs`, "Greedy ties"). At
+//! least [`DEFAULT_MIN_GREEDY`] = 2 tokens must be compared
 //! (`TRANSFORMERS_GEMMA_MIN_GREEDY` overrides the minimum).
 //!
 //! # Long context
@@ -122,7 +125,7 @@ mod backend_numerics;
 
 use std::path::{Path, PathBuf};
 
-use backend_numerics::{MatmulPrecision, checkpoint_tolerance};
+use backend_numerics::{MatmulPrecision, check_teacher_forced_greedy, checkpoint_tolerance};
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData, backend::Backend},
@@ -346,13 +349,6 @@ fn gap(actual: &[f32], expected: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// Returns the argmax.
-fn argmax(logits: &[f32]) -> usize {
-    (0..logits.len())
-        .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then(b.cmp(&a)))
-        .unwrap()
-}
-
 /// Stateless logits at every prompt position match the reference.
 fn check_prompt_logits<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance) = load::<B>(device);
@@ -379,7 +375,10 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
     }
 }
 
-/// The cached greedy continuation of prompt 0 matches while it is decisive.
+/// The cached greedy continuation of prompt 0 matches at every decisive step.
+///
+/// The reference's tokens are fed back, so ties are skipped rather than
+/// ending the comparison; see [`check_teacher_forced_greedy`].
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance) = load::<B>(device);
     let prompt = &reference.prompts[0];
@@ -392,7 +391,7 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         token_mask: None,
         position_ids: None,
     };
-    let mut logits = host(
+    let logits = host(
         model
             .prefill(input, &mut state, &ForwardOptions::default())
             .unwrap()
@@ -402,36 +401,35 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let prefill_gap = gap(&logits, last);
     eprintln!("cached prefill: max |Δ| = {prefill_gap:e}");
     assert!(prefill_gap <= tolerance, "cached prefill logits");
-    let mut compared = 0;
-    for (step, &(expected, margin)) in reference.greedy.iter().enumerate() {
-        if margin <= 2.0 * tolerance {
-            eprintln!("greedy step {step}: reference margin {margin:e} is a tie; stopping");
-            break;
-        }
-        compared += 1;
-        assert_eq!(argmax(&logits) as i64, expected, "greedy step {step}");
-        let next = DecodeInput {
-            token_ids: row::<B>(&[expected], device),
-            position_ids: None,
-            token_mask: None,
-        };
-        logits = host(
-            model
-                .decode(next, &mut state, &ForwardOptions::default())
-                .unwrap()
-                .logits,
-        );
-    }
-    eprintln!(
-        "greedy: {compared} of {} tokens match",
-        reference.greedy.len()
+    check_teacher_forced_greedy(
+        "greedy",
+        &reference.greedy,
+        tolerance,
+        minimum_greedy(),
+        "TRANSFORMERS_GEMMA_MIN_GREEDY",
+        logits,
+        |token| decode_one(&model, &mut state, token, device),
     );
-    let minimum = minimum_greedy().min(reference.greedy.len());
-    assert!(
-        compared >= minimum,
-        "only {compared} decisive greedy tokens were compared (minimum {minimum}); \
-         regenerate the bundle with another first prompt or lower TRANSFORMERS_GEMMA_MIN_GREEDY"
-    );
+}
+
+/// Appends one token to `state` and returns the logits of its position.
+fn decode_one<B: Backend>(
+    model: &AutoCausalLm<B>,
+    state: &mut AutoCausalDecodeState<B>,
+    token: i64,
+    device: &B::Device,
+) -> Vec<f32> {
+    let next = DecodeInput {
+        token_ids: row::<B>(&[token], device),
+        position_ids: None,
+        token_mask: None,
+    };
+    host(
+        model
+            .decode(next, state, &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    )
 }
 
 /// All prompts in one left-padded batch reproduce each prompt's last logits.
@@ -671,34 +669,14 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
         eprintln!("cached chunk {range:?}: max |Δ| = {largest:e} at position {last}");
         assert!(largest <= tolerance, "cached chunk {range:?}");
     }
-    let mut compared = 0;
-    for (step, &(expected, margin)) in reference.greedy.iter().enumerate() {
-        if margin <= 2.0 * tolerance {
-            eprintln!("greedy step {step}: reference margin {margin:e} is a tie; stopping");
-            break;
-        }
-        assert_eq!(argmax(&logits) as i64, expected, "greedy step {step}");
-        compared += 1;
-        let next = DecodeInput {
-            token_ids: row::<B>(&[expected], device),
-            position_ids: None,
-            token_mask: None,
-        };
-        logits = host(
-            model
-                .decode(next, &mut state, &ForwardOptions::default())
-                .unwrap()
-                .logits,
-        );
-    }
-    eprintln!(
-        "long greedy: {compared} of {} tokens match",
-        reference.greedy.len()
-    );
-    let minimum = minimum_greedy().min(reference.greedy.len());
-    assert!(
-        compared >= minimum,
-        "only {compared} decisive greedy tokens"
+    check_teacher_forced_greedy(
+        "long greedy",
+        &reference.greedy,
+        tolerance,
+        minimum_greedy(),
+        "TRANSFORMERS_GEMMA_MIN_GREEDY",
+        logits,
+        |token| decode_one(&model, &mut state, token, device),
     );
 }
 
