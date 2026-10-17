@@ -70,8 +70,14 @@ cargo test --locked                                   # unit, integration, tiny 
 cargo test --locked --features autodiff --lib         # gradient smoke tests
 cargo test --locked --test verus_harness              # proof-harness structure, no Verus needed
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-python3 -m unittest discover -s scripts/tests -v
+python3 -m unittest discover -s scripts/tests -v       # Python 3.11+; see below
 ```
+
+The Python tooling tests need Python 3.11 or newer and the maintainer's pinned
+reference environment: nine of them verify the installed PyTorch 2.10.0 and
+Transformers 5.2.0 wheels and their provenance, so they error on any other
+host. `.github/workflows/ci.yml` lists those nine by test ID and skips only
+them on its clean runner; the source and package gates run all of them.
 
 **Tiny reference goldens** run inside `cargo test`:
 `tiny_goldens_llama` (seven Llama-family cases), `tiny_goldens_gemma`, and
@@ -347,13 +353,39 @@ nested standalone packages from source archives, including the development-only
 Rust classifier. The archive does carry the Verus harnesses and their guide,
 because `tests/verus_harness.rs` reads them. After `cargo package` builds the
 extracted archive, the package gate runs its default `cargo test` there (in
-Cargo's normal target directory, as the verification build does), so a
-test that reads a file the archive omits fails the gate; the archive still does
-not run repository-only tooling (fuzzing, CI, the coverage classifier).
-The archive is about 28 MiB compressed, mostly `acceptance/` records that the
-packaged Python record tests read. That exceeds crates.io's 10 MB upload limit,
-so publishing would first need a narrower `include` and repository-only record
-tests; this is an open release decision, not a gate.
+Cargo's normal target directory, as the verification build does), so a Rust
+test that reads a file the archive omits fails the gate. It then runs the
+packaged Python tests (`scripts/tests`) from the archive too, so the package
+gate needs the same Python 3.11 reference environment as the source gate's
+tooling tests; on a clean Python the nine reference-environment tests error.
+The archive still does not run repository-only tooling (fuzzing, CI, the
+coverage classifier).
+
+crates.io accepts at most 10 MiB per compressed upload, and the recorded
+evidence alone is more than 20 MiB compressed, so the published crate carries
+only part of it. `Cargo.toml`'s `include` list publishes the checkpoint support
+records (`acceptance/*.json`), the one summary record per measurement campaign
+(`acceptance/measurements/*.json`) with that directory's README, and the
+compact summaries in `acceptance/measurements/small-model-performance-20260910/`,
+which the v0.1 release record names by path and SHA-256 as its timing
+baseline. Every other campaign directory (raw logs, coverage exports, replay
+reports, copied lockfiles, runner scripts) is repository-only, as are the
+recorded outputs of the mechanistic example studies: figures, `result.json`
+records, and captured `evidence/` and `results/` runs. Their programs,
+protocols, fixtures, and tests are published.
+[`scripts/package_contents.py`](scripts/package_contents.py) defines this
+split. The gate rejects a listing that contains repository-only evidence, and
+fails when the verified `.crate` exceeds an 8 MiB budget, which leaves headroom
+below the upload limit; it records the archive's size and SHA-256 in its
+manifest. Record tests read repository-only files through
+`scripts/tests/repository_evidence.py`: run from an extracted archive
+(recognized by the `Cargo.toml.orig` that Cargo writes into every archive,
+with no `.git` beside it), they skip with a message naming the omitted file;
+in a Git checkout a missing file still fails, even when a stray
+`Cargo.toml.orig` such as a `git mergetool` backup is present, and a published
+record is never skipped. With this split the
+archive is about 6.4 MiB compressed and holds about 950 files, against about
+28.5 MiB and 2,060 files before.
 The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is
 permitted only while that local alias actually resolves to Rust **1.92.0**.
 Coverage export warnings (including mismatched profile data) fail validation

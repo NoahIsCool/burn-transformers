@@ -8,16 +8,35 @@ description = "Backend-generic modern transformer architectures for Burn"
 readme = "README.md"
 keywords = ["burn", "transformer", "inference", "llm"]
 categories = ["science", "algorithms"]
+# crates.io limits an upload to 10 MiB compressed, so bulky evidence stays in
+# Git. scripts/package_contents.py describes the split, and the package gate
+# rejects a listing that breaks it. Patterns are root-anchored; later `!`
+# patterns remove files that earlier ones matched.
 include = [
     "/src/**",
     "/examples/**",
+    # Recorded outputs of the mechanistic studies: figures, result records,
+    # and captured runs. Their programs, protocols, and fixtures ship.
+    "!/examples/mechanistic/**/*.png",
+    "!/examples/mechanistic/**/*.svg",
+    "!/examples/mechanistic/**/result.json",
+    "!/examples/mechanistic/**/*.result.json",
+    "!/examples/mechanistic/*/evidence/**",
+    "!/examples/mechanistic/*/results/**",
     "/tests/**",
     "/scripts/**/*.py",
     "/scripts/COVERAGE_EVIDENCE.md",
     "/scripts/WHOLE_FILE_COVERAGE.md",
     "/scripts/tests/fixtures/coverage_lines/**",
     "/scripts/tests/fixtures/coverage_dependencies/**",
-    "/acceptance/**",
+    # Checkpoint support records, one summary record per measurement campaign,
+    # and the compact summaries the v0.1 release record names as its baseline.
+    # Other campaign directories (raw logs, coverage exports, replay reports)
+    # are repository-only.
+    "/acceptance/*.json",
+    "/acceptance/measurements/*.json",
+    "/acceptance/measurements/README.md",
+    "/acceptance/measurements/small-model-performance-20260910/**",
     # tests/verus_harness.rs reads the harnesses and their guide.
     "/verus/*.rs",
     "/verus/README.md",

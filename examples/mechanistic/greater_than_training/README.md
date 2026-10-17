@@ -54,7 +54,11 @@ python3 examples/mechanistic/greater_than_training/plot.py
 The plot uses all 97 held-out prompts for condition summaries and the same 80
 prompts with starting suffixes 10–89 at every cutoff-relative offset. Error bars
 show sample SD. The [plot validation record](plot_validation.json) records
-versions and figure/data hashes.
+versions and figure/data hashes. The recorded `result.json` and figures exist
+only in the Git repository, so in the published crate the default `--result` is
+missing: run the full study below, then pass `--result
+target/mechanistic/greater_than_training/full/result.json --output-dir
+target/mechanistic/greater_than_training/full`.
 
 ## Run it
 

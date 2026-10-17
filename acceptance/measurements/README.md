@@ -38,3 +38,19 @@ checkpoints, gemma-3-4b-it, truncated gpt-oss-20b, and the DeepSeek-V2-Lite
 smoke, 61 tests on Flex and Metal, each in its own process. Its log is committed
 with its SHA-256, and `scripts/tests/test_real_checkpoint_replay_record.py`
 checks that every summarized run appears in it. It promotes no checkpoint.
+
+## Published and repository-only records
+
+The crates.io package carries only part of this directory, because the
+complete evidence exceeds crates.io's 10 MiB upload limit. It publishes the
+top-level summary record of every campaign (`*.json` here), this README, and
+the [September 10 small-model refresh](small-model-performance-20260910/manifest.json)
+summaries that the v0.1 release record names as its timing baseline. The
+revision-named checkpoint records one directory above are published too.
+Every other campaign directory, with its raw logs, coverage exports, replay
+reports, copied lockfiles, and runner scripts, exists only in the Git
+repository, so a published record's link into one resolves only there.
+[`scripts/package_contents.py`](../../scripts/package_contents.py) defines the
+split and the package gate enforces it (see [RELEASE_GATES.md](../../RELEASE_GATES.md)).
+Run from the extracted package, the record tests that need a repository-only
+file skip with a message naming it; in a Git checkout a missing file fails.

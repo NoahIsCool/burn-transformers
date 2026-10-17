@@ -47,6 +47,16 @@ cargo doc --manifest-path Cargo.toml \
   --no-default-features --features std,flex,tokenizers,chat-templates --no-deps
 ```
 
+Then build the documentation exactly as docs.rs does, from
+`[package.metadata.docs.rs]`: nightly rustdoc with `--cfg docsrs`, which also
+labels feature-gated items with the Cargo feature they require.
+
+```text
+RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc \
+  --manifest-path Cargo.toml --locked --no-deps --lib \
+  --no-default-features --features std,flex,tokenizers,chat-templates
+```
+
 Run every public example with the feature set and local checkpoint revision
 documented by that example. Accelerator acceptance runs must use the certified
 backend and dtype rather than substituting a portable test backend.
@@ -62,9 +72,43 @@ cargo +stable package --manifest-path Cargo.toml --locked
 ```
 
 The list may contain source, examples, compact test fixtures, reference scripts,
-documentation, and acceptance metadata. It must not contain `models/`,
-`target/`, SafeTensors or PyTorch weights, Burnpack sidecars, authentication
-material, or generated reference payloads intended for external storage.
+documentation, and the published acceptance records. It must not contain
+`models/`, `target/`, SafeTensors or PyTorch weights, Burnpack sidecars,
+authentication material, generated reference payloads intended for external
+storage, or repository-only evidence: measurement campaign directories other
+than the published compact summaries, and the mechanistic studies' recorded
+figures, result records, and captured runs (see
+[`scripts/package_contents.py`](scripts/package_contents.py)). The compressed
+`.crate` must stay below the package gate's 8 MiB budget, under crates.io's
+10 MiB upload limit. `python3 scripts/check_release.py --gate package --offline`
+checks both and runs the archive's Rust and Python tests; its Python step needs
+the same pinned reference environment as the source gate (see
+[RELEASE_GATES.md](RELEASE_GATES.md)). Then run Cargo's publish preflight
+without uploading:
+
+```text
+cargo +stable publish --manifest-path Cargo.toml --locked --dry-run
+```
+
+The dry run only packages the crate and builds the extracted archive. It never
+contacts the registry's publish endpoint, so it checks neither crate-name
+ownership nor any other server-side rule. Before a real publish, confirm that
+the `package.name` in `Cargo.toml` is unclaimed on crates.io or already owned
+by the publishing account, and record the answer with the release evidence:
+
+```text
+curl -sS -A "<project> release check" https://crates.io/api/v1/crates/<package-name>/owners
+```
+
+A 404 response means the name is unclaimed; otherwise the publishing account
+must appear among the returned owners. (`cargo owner --list <package-name>`
+answers the same question but needs `cargo login` first.) The name
+`transformers` is registered to another publisher (sole owner `ljt019` when
+checked on 2026-10-16), so this crate cannot be uploaded under it without that
+owner's consent. A rename keeps the library's import path
+by setting `[lib] name = "transformers"` beside the new `[package] name`;
+path dependencies on the crate (the README example, `fuzz/Cargo.toml`) then
+also need `package = "<package-name>"`.
 
 Package from the clean, committed transformer source tree. Preserve unrelated
 changes outside this standalone crate. Record the commit ID and archive checksum

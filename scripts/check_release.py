@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,12 +27,17 @@ import tomllib
 
 from coverage_provenance import capture_sources, fingerprint_file, require_same_sources
 from coverage_binding import prepare_capture, validate_capture, read_json, require_identity
+import package_contents
 
 
 CRATE = Path(__file__).resolve().parents[1]
 FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
 GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package", "verus", "guides")
 MINIMUM_BUILD_FREE_BYTES = 20 * 1024**3
+# crates.io rejects uploads above 10 MiB. The package gate fails well before
+# that, so ordinary growth surfaces as a decision about what to publish rather
+# than as a rejected upload (see package_contents.py for the evidence split).
+PACKAGE_MAX_BYTES = 8 * 1024**2
 # Public experiments with fixed/random fixtures and numerical assertions. Paper
 # checkpoints have separate explicit preparation/replay protocols; never fetch
 # artifacts as a side effect of checking source code.
@@ -232,11 +238,42 @@ def cargo_target_directory() -> Path:
     return CRATE / configured if configured else CRATE / "target"
 
 
+def package_stem() -> str:
+    """Return ``NAME-VERSION``, the stem Cargo gives this crate's archive and its extraction."""
+
+    package = tomllib.loads((CRATE / "Cargo.toml").read_text())["package"]
+    return f"{package['name']}-{package['version']}"
+
+
 def package_directory() -> Path:
     """Return the directory where ``cargo package`` extracts and verifies the archive."""
 
-    package = tomllib.loads((CRATE / "Cargo.toml").read_text())["package"]
-    return cargo_target_directory() / "package" / f"{package['name']}-{package['version']}"
+    return cargo_target_directory() / "package" / package_stem()
+
+
+def package_archive() -> Path:
+    """Return the compressed ``.crate`` archive that ``cargo package`` writes."""
+
+    return cargo_target_directory() / "package" / f"{package_stem()}.crate"
+
+
+def measure_package_archive(archive: Path, maximum_bytes: int = PACKAGE_MAX_BYTES) -> dict:
+    """Identify the built archive and fail when it exceeds the upload budget.
+
+    Returns the archive's path, size, SHA-256 and the budget, which the gate
+    manifest retains beside the archive. Raises ``ValueError`` for a missing
+    or non-regular archive and for one larger than ``maximum_bytes``.
+    """
+
+    if archive.is_symlink() or not archive.is_file():
+        raise ValueError(f"package archive is not a regular file: {archive}")
+    size = archive.stat().st_size
+    if size > maximum_bytes:
+        raise ValueError(f"package archive {archive} is {size} bytes, above the {maximum_bytes}-byte "
+                         "budget below crates.io's 10 MiB upload limit; keep bulky evidence repository-only")
+    with archive.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"path": str(archive), "bytes": size, "sha256": digest, "maximum_bytes": maximum_bytes}
 
 
 def guide_doctests(markdown: str) -> tuple[str, int]:
@@ -324,6 +361,9 @@ def write_guide_doctests(crate: Path, directory: Path, offline: bool) -> dict:
     a downstream user would, and starts from a copy of this crate's lockfile.
     ``cargo metadata`` then adds only the scratch package, so the checked
     command can run with ``--locked`` against the same dependency versions.
+    The dependency key stays ``transformers``, the library name the guides
+    import, and names this crate's ``package.name`` explicitly, so a package
+    renamed with ``[lib] name = "transformers"`` needs no change here.
     """
 
     directory.mkdir(parents=True)
@@ -335,7 +375,8 @@ def write_guide_doctests(crate: Path, directory: Path, offline: bool) -> dict:
         "[package]\nname = \"transformers-guide-doctests\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"
         "publish = false\n\n[lib]\npath = \"lib.rs\"\n\n[dependencies]\n"
         f"burn = {{ version = \"{burn}\", default-features = false }}\n"
-        f"transformers = {{ path = {json.dumps(str(crate.resolve()))}, default-features = false, "
+        f"transformers = {{ package = {json.dumps(manifest['package']['name'])}, "
+        f"path = {json.dumps(str(crate.resolve()))}, default-features = false, "
         f"features = [{features}] }}\n\n[workspace]\n"
     )
     items, counts = [], {}
@@ -554,12 +595,15 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
         # suite runs there too: tests must not read files the archive omits.
         # Like the verification build, the tests share Cargo's normal target
         # directory; otherwise every dependency would be rebuilt inside the
-        # archive directory, which the next `cargo package` deletes.
+        # archive directory, which the next `cargo package` deletes. The
+        # packaged Python tests run there as well: record tests that need
+        # repository-only evidence must skip, not fail (package_contents.py).
         return [
             cargo + ["package"] + manifest + locked + ["--list"],
             cargo + ["package"] + manifest + locked,
             cargo + ["test", "--manifest-path", str(package_directory() / "Cargo.toml")] + locked
             + ["--target-dir", str(cargo_target_directory())],
+            [sys.executable, "-m", "unittest", "discover", "-s", str(package_directory() / "scripts/tests"), "-v"],
         ]
     if gate == "guides":
         # write_guide_doctests prepares this scratch crate before the command
@@ -658,7 +702,9 @@ def validate_package_listing(listing: str, root: Path = CRATE) -> int:
     symlink. Check its actual listing instead of assuming `.gitignore` prevails
     over an explicit package include. Compiler metadata warnings are not paths.
     Weight files are rejected except the tiny golden fixtures under ``root``
-    that the packaged tests read (see ``is_tiny_golden_fixture``).
+    that the packaged tests read (see ``is_tiny_golden_fixture``), and so is
+    repository-only evidence: unpublished acceptance campaign directories and
+    recorded mechanistic-study outputs (see ``package_contents.py``).
     """
 
     allowed_files = {"Cargo.toml", "Cargo.toml.orig", "Cargo.lock", "deny.toml",
@@ -678,6 +724,9 @@ def validate_package_listing(listing: str, root: Path = CRATE) -> int:
         if (path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}
                 and not is_tiny_golden_fixture(path, root)):
             raise ValueError(f"runtime artifact in source package: {raw}")
+        if ((path.parts[0] == "acceptance" and not package_contents.is_published_evidence(path))
+                or package_contents.is_example_output(path)):
+            raise ValueError(f"repository-only evidence in source package: {raw}")
         root_doc = len(path.parts) == 1 and path.suffix == ".md"
         if raw not in allowed_files and not root_doc and path.parts[0] not in allowed_roots:
             raise ValueError(f"unallowlisted package entry: {raw}")
@@ -816,6 +865,8 @@ def main() -> int:
                     row["exit_code"] = 1
             if completed.returncode == 0 and gate == "package" and "--list" in command:
                 row["package_files"] = validate_package_listing(log.read_text())
+            elif completed.returncode == 0 and gate == "package" and command[2:3] == ["package"]:
+                row["package_archive"] = measure_package_archive(package_archive())
             if completed.returncode == 0 and gate == "verus":
                 row.update(record_verus_step(verus_state, command, log.read_text()))
                 if "harness" in row:

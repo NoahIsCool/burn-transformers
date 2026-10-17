@@ -8,6 +8,8 @@ import re
 import struct
 import unittest
 
+from repository_evidence import repository_evidence
+
 
 MEASUREMENTS = Path(__file__).resolve().parents[2] / "acceptance/measurements"
 
@@ -22,11 +24,15 @@ class SmallModelRcRefreshTests(unittest.TestCase):
         cls.examples = json.loads((MEASUREMENTS / "public-examples-20260909.json").read_text())
 
     def execution(self, relative):
-        """Resolve a checked relative evidence path and verify every native log hash."""
+        """Resolve a checked relative evidence path and verify every native log hash.
+
+        The execution records and their logs are repository-only evidence, so
+        a test that needs them is skipped in the published crate.
+        """
         path = Path(relative)
         self.assertFalse(path.is_absolute())
         self.assertNotIn("..", path.parts)
-        record = json.loads((MEASUREMENTS / path).read_text())
+        record = json.loads(repository_evidence(MEASUREMENTS / path).read_text())
         self.assertEqual(record["source_before"], self.record["source"])
         self.assertEqual(record["source_before"], record["source_after"])
         self.assertEqual(record["executable_sha256_before"], record["executable_sha256_after"])
@@ -34,7 +40,7 @@ class SmallModelRcRefreshTests(unittest.TestCase):
         self.assertEqual(set(record["logs"]), {"stdout.log", "stderr.log"})
         for filename, identity in record["logs"].items():
             self.assertIn(filename, ("stdout.log", "stderr.log"))
-            data = (MEASUREMENTS / path.parent / filename).read_bytes()
+            data = repository_evidence(MEASUREMENTS / path.parent / filename).read_bytes()
             self.assertEqual(len(data), identity["bytes"])
             self.assertEqual(hashlib.sha256(data).hexdigest(), identity["sha256"])
         return record, MEASUREMENTS / path.parent
@@ -116,7 +122,7 @@ class SmallModelRcRefreshTests(unittest.TestCase):
         """Keep thirteen exact continuations but never accept the misleading AC label."""
         public = self.record["public_coordinator"]
         execution, _ = self.execution(public["execution_record"])
-        raw = (MEASUREMENTS / public["raw_report"]).read_bytes()
+        raw = repository_evidence(MEASUREMENTS / public["raw_report"]).read_bytes()
         self.assertEqual(hashlib.sha256(raw).hexdigest(), public["raw_report_sha256"])
         self.assertEqual(public["raw_report_sha256"], execution["benchmark"]["sha256"])
         report = json.loads(raw)
