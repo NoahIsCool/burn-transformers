@@ -1,0 +1,60 @@
+#### muse-q4-smoke.r1-control.log
+  == source 9a9c7308cf233f90ccbee80c0156efdf4cceea27 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 86630d8ec5ca4126248f231aff675ee27cf3eb5a4fefaf444d7e427a8fb64995 (build D)
+  == start 2026-10-17T12:53:57+00:00 lock_wait_s 0 load 2.69 2.36 9.87 free_pct 87 swap_used_mib 8370
+  test smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal ... Muse-Glimmer-30B Q4 packed Metal smoke: load_seconds=389.972, stateless_seconds=1.811, prefill_seconds=0.219, decode_seconds=0.239, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 486.85s
+  == exit=0 wall=487.6s min_free_pct=70 max_swap_growth_mib=0 swapin_mib=19 pressured_swapin_mib=0 end=2026-10-17T13:02:04+00:00 end_load 2.53 2.15 6.43
+  peak memory footprint: 29486064616 bytes (29.486 GB)
+  maximum resident set size: 25888899072 bytes (25.889 GB)
+  time real: 487.01 s
+#### muse-q4-smoke.r1-head.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c (build D)
+  == start 2026-10-17T13:02:05+00:00 lock_wait_s 0 load 2.53 2.15 6.43 free_pct 88 swap_used_mib 8362
+  test smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal ... Muse-Glimmer-30B Q4 packed Metal smoke: load_seconds=394.979, stateless_seconds=2.429, prefill_seconds=0.240, decode_seconds=0.237, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 483.91s
+  == exit=0 wall=484.8s min_free_pct=69 max_swap_growth_mib=0 swapin_mib=5 pressured_swapin_mib=0 end=2026-10-17T13:10:10+00:00 end_load 2.61 2.36 4.62
+  peak memory footprint: 29273580328 bytes (29.274 GB)
+  maximum resident set size: 26801242112 bytes (26.801 GB)
+  time real: 484.06 s
+#### muse-q8-smoke.r1-control.log
+  == source 9a9c7308cf233f90ccbee80c0156efdf4cceea27 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 86630d8ec5ca4126248f231aff675ee27cf3eb5a4fefaf444d7e427a8fb64995 (build D)
+  == start 2026-10-17T12:01:48+00:00 lock_wait_s 0 load 4.53 36.63 56.32 free_pct 89 swap_used_mib 8450
+  test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=793.115, stateless_seconds=5.133, prefill_seconds=0.790, decode_seconds=0.303, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 1124.08s
+  == exit=0 wall=1125.4s min_free_pct=50 max_swap_growth_mib=0 swapin_mib=11 pressured_swapin_mib=0 end=2026-10-17T12:20:34+00:00 end_load 52.37 89.93 80.38
+  peak memory footprint: 44091205616 bytes (44.091 GB)
+  maximum resident set size: 35504898048 bytes (35.505 GB)
+  time real: 1124.88 s
+#### muse-q8-smoke.r1-head.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c (build D)
+  == start 2026-10-17T12:20:34+00:00 lock_wait_s 0 load 52.37 89.93 80.38 free_pct 86 swap_used_mib 8426
+  test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=501.920, stateless_seconds=1.549, prefill_seconds=0.326, decode_seconds=0.250, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 665.72s
+  == exit=0 wall=665.8s min_free_pct=59 max_swap_growth_mib=0 swapin_mib=4 pressured_swapin_mib=0 end=2026-10-17T12:31:40+00:00 end_load 2.35 13.84 39.80
+  peak memory footprint: 31873484288 bytes (31.873 GB)
+  maximum resident set size: 28987392000 bytes (28.987 GB)
+  time real: 665.76 s
+#### muse-q8-smoke.r2-control.log
+  == source 9a9c7308cf233f90ccbee80c0156efdf4cceea27 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 86630d8ec5ca4126248f231aff675ee27cf3eb5a4fefaf444d7e427a8fb64995 (build D)
+  == start 2026-10-17T12:31:41+00:00 lock_wait_s 0 load 2.35 13.84 39.80 free_pct 88 swap_used_mib 8418
+  test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=504.504, stateless_seconds=4.117, prefill_seconds=0.429, decode_seconds=0.259, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 665.14s
+  == exit=0 wall=666.0s min_free_pct=49 max_swap_growth_mib=0 swapin_mib=29 pressured_swapin_mib=0 end=2026-10-17T12:42:47+00:00 end_load 2.14 3.36 19.21
+  peak memory footprint: 44081620928 bytes (44.082 GB)
+  maximum resident set size: 39323926528 bytes (39.324 GB)
+  time real: 665.51 s
+#### muse-q8-smoke.r2-head.log
+  == source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+  == binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c (build D)
+  == start 2026-10-17T12:42:47+00:00 lock_wait_s 0 load 2.14 3.36 19.21 free_pct 87 swap_used_mib 8386
+  test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=510.551, stateless_seconds=4.176, prefill_seconds=0.463, decode_seconds=0.240, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 668.26s
+  == exit=0 wall=669.1s min_free_pct=47 max_swap_growth_mib=0 swapin_mib=12 pressured_swapin_mib=0 end=2026-10-17T12:53:56+00:00 end_load 2.83 2.38 9.92
+  peak memory footprint: 45678672664 bytes (45.679 GB)
+  maximum resident set size: 35058663424 bytes (35.059 GB)
+  time real: 668.27 s

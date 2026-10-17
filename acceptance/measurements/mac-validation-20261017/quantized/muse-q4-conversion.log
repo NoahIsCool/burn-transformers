@@ -1,0 +1,37 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-a056c89048174866 sha256 2000c667b84f9a4fb7a99205cc90923e3a72fcddcf3ac33e24dbb365435a60f7 (build C)
+== host conversion BF16->F16->Q4/G64 quantizes_pinned_muse_glimmer_weights_to_q4_burnpack
+== env TRANSFORMERS_MUSE_GLIMMER_DIR=/Volumes/bag of holding/models/meta-models/Muse-Glimmer-30B-a4e59da52a7bc87ae7251dd5545c0dd437c44b68
+== env TRANSFORMERS_MUSE_GLIMMER_Q4_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk
+== preflight output_parent=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5 free_bytes=343195324416 required_bytes=51297581450 output_exists=False
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-a056c89048174866 --ignored --exact --nocapture --test-threads 1 quantizes_pinned_muse_glimmer_weights_to_q4_burnpack
+== start 2026-10-17T09:54:05+00:00 lock_wait_s 0 load 2.12 2.07 3.49 free_pct 89 swap_used_mib 9066
+
+running 1 test
+test quantizes_pinned_muse_glimmer_weights_to_q4_burnpack ... Muse-Glimmer-30B Q4 Burnpack: path=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk, tensors=417, retained=210, payload_bytes=14911064064, artifact_bytes=14911372485, largest_payload_bytes=756467712, sha256=05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3, elapsed_seconds=500.653
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 501.73s
+
+      501.73 real       461.37 user        38.49 sys
+         15112028160  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2398456  page reclaims
+                  13  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               26533  voluntary context switches
+              113244  involuntary context switches
+       7879937263129  instructions retired
+       1870475949897  cycles elapsed
+          6765302920  peak memory footprint
+== exit=0 wall=501.9s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0 end=2026-10-17T10:02:27+00:00 end_load 1.56 2.03 2.89
+== artifact /Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk bytes=14911372485 sha256=05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3 (hashed outside the test in 6.6s)
+== authenticated /Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk bytes=14911372485 sha256=05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3 identical=True

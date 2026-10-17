@@ -1,0 +1,34 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 sha256 f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42 (build E)
+== Metal/F16 activations + packed Q4/G64 loads_pinned_qwen3_moe_q4_and_runs_metal_smoke
+== env TRANSFORMERS_QWEN3_MOE_DIR=/Volumes/bag of holding/models/Qwen/Qwen3-30B-A3B-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39
+== env TRANSFORMERS_QWEN3_MOE_Q4_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079 --ignored --exact --nocapture --test-threads 1 loads_pinned_qwen3_moe_q4_and_runs_metal_smoke
+== start 2026-10-17T11:30:54+00:00 lock_wait_s 0 load 151.03 96.94 72.11 free_pct 88 swap_used_mib 8546
+
+running 1 test
+test loads_pinned_qwen3_moe_q4_and_runs_metal_smoke ... Qwen3-MoE q4 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk, artifact_sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4, packed_payload_bytes=16992092160, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=4f07e280b96484ab, cached_logits_fnv1a64=4f07e280b96484ab, stateless_trace_fnv1a64=ffc7c66f2df4ffde, cached_trace_fnv1a64=ffc7c66f2df4ffde, decoded_logits_fnv1a64=9cc237e913913a6c, load_seconds=340.285, source_reads=242, max_open_shards=1, stateless_seconds=0.580, prefill_seconds=0.412, decode_seconds=0.290
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 858.02s
+
+      858.04 real       637.42 user        61.04 sys
+         19988217856  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2360304  page reclaims
+                 678  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 450  voluntary context switches
+             2648771  involuntary context switches
+       9254746079907  instructions retired
+       2424308130523  cycles elapsed
+         20609612584  peak memory footprint
+== exit=0 wall=858.5s min_free_pct=83 max_swap_growth_mib=0 swapin_mib=10 pressured_swapin_mib=0 end=2026-10-17T11:45:12+00:00 end_load 7.60 72.47 82.84

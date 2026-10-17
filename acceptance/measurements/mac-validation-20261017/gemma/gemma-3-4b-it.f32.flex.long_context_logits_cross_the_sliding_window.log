@@ -1,0 +1,46 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Flex/F32 flex_long_context_logits_cross_the_sliding_window
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_long_context_logits_cross_the_sliding_window
+== start 2026-10-17T08:04:34+00:00 load 14.40 9.19 6.02
+
+running 1 test
+test flex_long_context_logits_cross_the_sliding_window ... load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 1.18255615e-4
+windowed: positions 1016..1024: max |Δ| = 5.452633e-4
+windowed: positions 1024..1032: max |Δ| = 1.6403198e-4
+windowed: positions 1032..1088: max |Δ| = 1.183033e-3
+windowed: positions 1088..1237: max |Δ| = 4.6396255e-4
+long prompt (1237 tokens, window 1024): max |Δ| = 5.452633e-4 before the window, 1.183033e-3 at or beyond it
+unwindowed: positions 0..4: max |Δ| = 1.18255615e-4
+unwindowed: positions 1016..1024: max |Δ| = 5.452633e-4
+unwindowed: positions 1024..1032: max |Δ| = 1.7370644e0
+unwindowed: positions 1032..1088: max |Δ| = 1.1642107e1
+unwindowed: positions 1088..1237: max |Δ| = 3.5908382e1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 47.03s
+
+       47.05 real       216.23 user         6.09 sys
+         23149051904  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1434200  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   2  voluntary context switches
+              172093  involuntary context switches
+       3057334969219  instructions retired
+        750927116165  cycles elapsed
+         23150674816  peak memory footprint
+== exit=0 wall=48.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

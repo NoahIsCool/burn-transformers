@@ -1,0 +1,29 @@
+fix(transformers): evaluate half-precision tanh GELU in F32 and round once
+
+Gemma's GeGLU gate is Transformers' gelu_pytorch_tanh, PyTorch's fused
+gelu(approximate="tanh"), whose CPU and MPS kernels evaluate an F16 or
+BF16 input in F32 and round the result once. apply_activation used
+Burn's gelu_approximate instead: eight tensor operations that Flex
+rounds to the activation dtype one by one, with 0.044715 and
+sqrt(2/pi) rounded to BF16 first (0.044677734, 0.796875), after which
+tanh(...) + 1 cancels most of the rounded tangent's bits for negative
+inputs. BF16 GeluTanh(-2) was -0.046875; the exact value is -0.0454.
+
+This was the root cause of the gemma-3-4b-it Flex/BF16 prompt-logits
+gate failure at 53f167b (prompt 1: max |delta| 0.770 against the
+official-calibrated bound 0.711). Replacing the official model's
+activation by the same rounded graph reproduced Burn at position 0
+(99.9% of residual entries identical after block 0, against 69.8% for
+the unmodified official model), and with the F32 evaluation Burn's
+per-prompt maxima became 0.346, 0.514 and 0.582 (bounds 0.460, 0.711,
+0.897). On Metal/F16 the residual after block 0 matches the official
+F16 model in 91% of entries instead of 73%.
+
+F32 and F64 inputs keep Burn's graph, so F32 numerics are unchanged.
+The test that pinned the composed F16 graph bit for bit is replaced by
+a grid test and a property test that require half-precision results
+within half a unit in the last place of the exact value (plus F32
+evaluation error), and that show the composed BF16 graph misses that
+bound at x = -2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

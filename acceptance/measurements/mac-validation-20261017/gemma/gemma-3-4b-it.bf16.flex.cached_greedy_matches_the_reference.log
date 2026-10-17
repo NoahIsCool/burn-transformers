@@ -1,0 +1,59 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Flex/BF16 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=bf16
+== env TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-17T08:06:54+00:00 load 5.76 8.50 6.29
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... BF16 bounds of prompt 0: max 4.6030082702636715e-1, mean 4.525028393759436e-2 (1.2 × official BF16 3.8358402252197266e-1, 3.77085699479953e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+BF16 bounds of prompt 1: max 7.106002807617188e-1, mean 6.263315950001885e-2 (1.2 × official BF16 5.921669006347656e-1, 5.219429958334905e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+BF16 bounds of prompt 2: max 8.973712921142578e-1, mean 7.606300748595012e-2 (1.2 × official BF16 7.478094100952148e-1, 6.33858395716251e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+load: 439 vision-tower tensors intentionally ignored
+cached prefill: max |Δ| = 2.2733402252197266e-1 to the reference (bound 4.6030082702636715e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy step 2: reference margin 7.2011757e-1 is not decisive; skipped
+greedy step 5: reference margin 6.552868e-1 is not decisive; skipped
+greedy step 6: reference margin 7.926197e-1 is not decisive; skipped
+greedy step 14: reference margin 3.008194e-1 is not decisive; skipped
+greedy step 17: reference margin 2.944317e-1 is not decisive; skipped
+greedy step 19: reference margin 2.3321152e-1 is not decisive; skipped
+greedy: 26 of 32 tokens match
+
+thread 'flex_cached_greedy_matches_the_reference' (34754530) panicked at tests/support/half_precision_calibration.rs:1073:13:
+cached decode step 9 at position 15: max |Δ| = 6.25e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    flex_cached_greedy_matches_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 35.81s
+
+       35.82 real        47.23 user         5.23 sys
+         12196298752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              751270  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              185779  involuntary context switches
+        619105604737  instructions retired
+        186369569245  cycles elapsed
+         12192245216  peak memory footprint
+== exit=101 wall=36.6s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

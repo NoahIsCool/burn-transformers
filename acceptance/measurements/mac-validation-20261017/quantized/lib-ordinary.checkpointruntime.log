@@ -1,0 +1,205 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B: --release --features metal --lib)
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d --test-threads 1 checkpoint::runtime::
+== start 2026-10-17T09:30:16Z
+
+running 177 tests
+test checkpoint::runtime::boundary_tests::checkpoint_contract_minimal_source_retries_a_lone_slice_after_io_failure ... ok
+test checkpoint::runtime::boundary_tests::checkpoint_contract_source_metadata_rejection_permits_corrected_retry ... ok
+test checkpoint::runtime::boundary_tests::failed_override_provider_preserves_prior_writes_and_closes_source ... ok
+test checkpoint::runtime::boundary_tests::install_accounting_overflow_is_atomic_before_sink_mutation ... ok
+test checkpoint::runtime::boundary_tests::invalid_plan_has_no_target_and_preserves_checkpoint_error_chain ... ok
+test checkpoint::runtime::boundary_tests::one_uncertified_concat_source_requires_complete_fallback_validation ... ok
+test checkpoint::runtime::boundary_tests::override_selection_is_frozen_and_uncertified_groups_read_once ... ok
+test checkpoint::runtime::boundary_tests::override_shape_mismatch_is_contextual_and_never_installed ... ok
+test checkpoint::runtime::boundary_tests::override_staging_limit_accounts_for_shared_payload_overlap ... ok
+test checkpoint::runtime::boundary_tests::partial_override_retains_one_shared_source_and_exact_sibling_values ... ok
+test checkpoint::runtime::convert::tests::conversion_throughput_against_previous_scalar_path ... ignored, timing benchmark; run explicitly in release mode
+test checkpoint::runtime::convert::tests::empty_inputs_produce_empty_outputs ... ok
+test checkpoint::runtime::convert::tests::equal_dtype_transpose_throughput_against_previous_tiled_path ... ignored, timing benchmark; run explicitly in release mode
+test checkpoint::runtime::convert::tests::equal_dtypes_preserve_every_bit_at_each_width ... ok
+test checkpoint::runtime::convert::tests::every_sixteen_bit_pattern_matches_the_reference_for_all_targets ... ok
+test checkpoint::runtime::convert::tests::f32_sticky_bits_below_the_bf16_tie_round_up ... ok
+test checkpoint::runtime::convert::tests::f64_sources_round_once_to_sixteen_bit_targets ... ok
+test checkpoint::runtime::convert::tests::gathered_intervals_match_naive_concatenation ... ok
+test checkpoint::runtime::convert::tests::malformed_kernel_inputs_are_rejected_without_panicking ... ok
+test checkpoint::runtime::convert::tests::scattered_blocks_match_naive_placement ... ok
+test checkpoint::runtime::convert::tests::threaded_converting_transpose_matches_bulk_conversion_for_every_budget ... ok
+test checkpoint::runtime::convert::tests::threaded_fixtures_split_into_several_bands ... ok
+test checkpoint::runtime::convert::tests::threaded_index_transpose_places_every_element_for_every_budget ... ok
+test checkpoint::runtime::convert::tests::tiled_transpose_matches_naive_index_transpose ... ok
+test checkpoint::runtime::convert::tests::transpose_into_converts_large_matrices_exactly ... ok
+test checkpoint::runtime::convert::tests::unsupported_pairs_and_widths_fail_before_the_kernel_runs ... ok
+test checkpoint::runtime::convert::tests::wide_sources_match_the_reference ... ok
+test checkpoint::runtime::convert::tests::zero_parallelism_budget_runs_on_the_caller_thread ... ok
+test checkpoint::runtime::packed_install::tests::axis_permutation_inverts_every_rank_four_permutation ... ok
+test checkpoint::runtime::packed_install::tests::axis_permutation_recovers_axes_and_rejects_rearrangements_it_cannot_explain ... ok
+test checkpoint::runtime::packed_install::tests::backend_default_requantizes_and_require_exact_refuses ... ok
+test checkpoint::runtime::packed_install::tests::dequantize_policy_installs_the_exact_artifact_values ... ok
+test checkpoint::runtime::packed_install::tests::flex_quantized_transpose_is_reported_inexact ... ok
+test checkpoint::runtime::packed_install::tests::float_data_takes_the_ordinary_install_path ... ok
+test checkpoint::runtime::packed_install::tests::mapper_probe_classifies_identity_permutations_and_arithmetic ... ok
+test checkpoint::runtime::packed_install::tests::mapper_probe_recognizes_higher_rank_permutations ... ok
+test checkpoint::runtime::packed_install::tests::metal_quantized_transpose_is_exact_and_stays_packed ... ignored, requires a Metal-capable macOS host
+test checkpoint::runtime::packed_install::tests::packed_install_reports_shape_errors_before_exactness ... ok
+test checkpoint::runtime::packed_install::tests::probe_dimensions_are_pairwise_distinct_for_every_rank ... ok
+test checkpoint::runtime::packed_install::tests::row_layout_keeps_exact_packed_storage ... ok
+test checkpoint::runtime::packed_install::tests::scaling_mapper_is_inexact_under_every_policy ... ok
+test checkpoint::runtime::permutation::tests::probe_lengths_strictly_increase ... ok
+test checkpoint::runtime::permutation::tests::recovered_permutations_match_the_used_flag_oracle ... ok
+test checkpoint::runtime::rounding::tests::arbitrary_values_match_round_to_odd_reference ... ok
+test checkpoint::runtime::rounding::tests::exact_ties_round_to_even ... ok
+test checkpoint::runtime::rounding::tests::exhaustive_midpoints_and_round_trips_in_both_formats ... ok
+test checkpoint::runtime::rounding::tests::hardware::binary16_matches_hardware_conversion ... ok
+test checkpoint::runtime::rounding::tests::infinities_and_nans_are_preserved ... ok
+test checkpoint::runtime::rounding::tests::range_boundaries_round_like_ieee_754 ... ok
+test checkpoint::runtime::rounding::tests::round_shifted_is_nearest_with_ties_to_even ... ok
+test checkpoint::runtime::rounding::tests::sticky_bits_below_the_upper_word_break_ties ... ok
+test checkpoint::runtime::rounding::tests::values_near_representable_points_match_reference ... ok
+test checkpoint::runtime::schedule::tests::fused_slices_group_at_their_first_member ... ok
+test checkpoint::runtime::schedule::tests::groups_match_the_oracle_and_partition_the_plan ... ok
+test checkpoint::runtime::source::boundary_tests::directory_replacement_is_rejected_before_open ... ok
+test checkpoint::runtime::source::boundary_tests::every_descriptor_field_is_revalidated_without_opening_a_shard ... ok
+test checkpoint::runtime::source::boundary_tests::forged_manifest_lengths_fail_closed_at_each_arithmetic_boundary ... ok
+test checkpoint::runtime::source::boundary_tests::forged_tensor_offsets_are_checked_before_reading ... ok
+test checkpoint::runtime::source::boundary_tests::payload_read_throughput_against_zero_filled_reads ... ignored, timing benchmark; run explicitly in release mode
+test checkpoint::runtime::source::boundary_tests::payload_reads_are_bounded_to_their_interval_and_counted_once ... ok
+test checkpoint::runtime::source::boundary_tests::public_manifest_mutations_cannot_bypass_shard_membership ... ok
+test checkpoint::runtime::source::boundary_tests::removed_shard_is_not_certified_and_fails_when_payload_is_requested ... ok
+test checkpoint::runtime::source::boundary_tests::reused_handle_detects_truncated_payload_and_close_allows_reopen ... ok
+test checkpoint::runtime::source::boundary_tests::source_payload_scalar_empty_and_storage_overflow_boundaries ... ok
+test checkpoint::runtime::source::boundary_tests::symlink_replacement_cannot_redirect_a_discovered_shard ... ok
+test checkpoint::runtime::source::boundary_tests::unreadable_shard_fails_at_open_without_counting_a_read ... ok
+test checkpoint::runtime::storage_order::tests::arithmetic_mapper_sees_unchanged_logical_values ... ok
+test checkpoint::runtime::storage_order::tests::byte_transpose_is_an_exact_permutation ... ok
+test checkpoint::runtime::storage_order::tests::byte_transpose_rejects_unsupported_widths_and_lengths ... ok
+test checkpoint::runtime::storage_order::tests::column_layout_projection_is_installed_contiguously ... ok
+test checkpoint::runtime::storage_order::tests::contiguous_and_strided_projections_agree ... ok
+test checkpoint::runtime::storage_order::tests::degenerate_matrices_keep_checkpoint_order ... ok
+test checkpoint::runtime::storage_order::tests::every_float_dtype_is_reordered_bit_exactly ... ok
+test checkpoint::runtime::storage_order::tests::flex_inference_backend_prefers_contiguous_matrices ... ok
+test checkpoint::runtime::storage_order::tests::higher_rank_parameters_keep_checkpoint_order ... ok
+test checkpoint::runtime::storage_order::tests::identity_mapper_matrix_keeps_checkpoint_order ... ok
+test checkpoint::runtime::storage_order::tests::parallel_byte_transpose_matches_naive_reference ... ok
+test checkpoint::runtime::storage_order::tests::reinstall_into_initialized_projection_stays_contiguous ... ok
+test checkpoint::runtime::storage_order::tests::rejected_install_never_initializes_or_probes_into_the_parameter ... ok
+test checkpoint::runtime::storage_order::tests::shape_specific_mapper_falls_back_to_checkpoint_order ... ok
+test checkpoint::runtime::tests::accounting_contract_install_overflow_precedes_sink_mutation ... ok
+test checkpoint::runtime::tests::accounting_contract_override_peak_checks_shape_and_exact_combined_budget ... ok
+test checkpoint::runtime::tests::accounting_contract_override_provider_failures_close_without_publication ... ok
+test checkpoint::runtime::tests::accounting_contract_parameter_error_messages_preserve_metadata ... ok
+test checkpoint::runtime::tests::accounting_contract_sink_failure_does_not_publish_install_counters ... ok
+test checkpoint::runtime::tests::alias_failure_does_not_claim_failed_or_later_aliases ... ok
+test checkpoint::runtime::tests::alias_installation_rejects_non_alias_entries_without_sink_calls ... ok
+test checkpoint::runtime::tests::aliases_are_flattened_and_installed_after_source_close ... ok
+test checkpoint::runtime::tests::aliases_observe_a_closed_source_boundary ... ok
+test checkpoint::runtime::tests::atomicity_concat_late_failures_preserve_only_prior_complete_targets ... ok
+test checkpoint::runtime::tests::atomicity_equivalence_pair_budget_rejects_before_reads_and_accepts_exactly ... ok
+test checkpoint::runtime::tests::auto_dtype_policy_keeps_checkpoint_floats_whatever_the_backend_float_element ... ok
+test checkpoint::runtime::tests::bf16_to_f16_identity_rejects_a_bound_smaller_than_its_reused_buffer ... ok
+test checkpoint::runtime::tests::checkpoint_standards_override_alias_failure_keeps_successful_owner_and_alias ... ok
+test checkpoint::runtime::tests::close_failure_stops_before_aliases_with_primary_reported ... ok
+test checkpoint::runtime::tests::concatenation_covers_every_axis_and_switches_one_shard_at_a_time ... ok
+test checkpoint::runtime::tests::custom_source_metadata_is_revalidated_and_closed_on_failure ... ok
+test checkpoint::runtime::tests::dense_parameter_payload_equations_fail_before_allocation ... ok
+test checkpoint::runtime::tests::dtype_policy_can_explicitly_cast_f64_to_bf16 ... ok
+test checkpoint::runtime::tests::equivalence_declarations_are_optional_but_physical_aliases_require_an_owner ... ok
+test checkpoint::runtime::tests::equivalence_pass_bounds_observed_payload_pairs ... ok
+test checkpoint::runtime::tests::equivalence_preflight_reports_only_verified_prefix_and_still_writes_nothing ... ok
+test checkpoint::runtime::tests::equivalence_shape_dtype_and_public_plan_mutations_fail_closed ... ok
+test checkpoint::runtime::tests::every_bf16_bit_pattern_casts_to_f16_with_half_semantics ... ok
+test checkpoint::runtime::tests::every_burn_representable_safetensors_dtype_is_delivered_without_reinterpretation ... ok
+test checkpoint::runtime::tests::every_f16_bit_pattern_casts_to_bf16_with_half_semantics ... ok
+test checkpoint::runtime::tests::execution_group_order_places_missing_descriptors_last ... ok
+test checkpoint::runtime::tests::executor_replaces_stale_runtime_report_records ... ok
+test checkpoint::runtime::tests::explicit_artifact_selection_still_streams_the_selected_file ... ok
+test checkpoint::runtime::tests::file_size_change_after_discovery_is_detected ... ok
+test checkpoint::runtime::tests::group_sizes_sum_fused_slices_and_saturate ... ok
+test checkpoint::runtime::tests::grouped_installation_rejects_inconsistent_dispositions ... ok
+test checkpoint::runtime::tests::grouped_split_failure_reports_only_accepted_outputs_without_rereading_source ... ok
+test checkpoint::runtime::tests::header_length_change_after_discovery_is_detected ... ok
+test checkpoint::runtime::tests::identity_and_rename_deliver_native_burn_tensor_data ... ok
+test checkpoint::runtime::tests::interleaved_targets_execute_once_per_shard_in_physical_offset_order ... ok
+test checkpoint::runtime::tests::invalid_boolean_wire_values_are_rejected_before_the_sink ... ok
+test checkpoint::runtime::tests::large_groups_precede_the_physical_schedule_in_plan_order ... ok
+test checkpoint::runtime::tests::mutated_plan_is_rejected_before_any_source_or_sink_action ... ok
+test checkpoint::runtime::tests::non_float_dtype_reinterpretation_in_a_mutated_plan_is_rejected ... ok
+test checkpoint::runtime::tests::packed_parameter_install_errors_name_their_remedy ... ok
+test checkpoint::runtime::tests::parameter_install_preserves_native_quantized_float_data ... ok
+test checkpoint::runtime::tests::parameter_install_rejects_bad_metadata_before_initialization ... ok
+test checkpoint::runtime::tests::parameter_install_rejects_truncated_float_storage_without_mutation ... ok
+test checkpoint::runtime::tests::parameter_install_uses_burns_checkpoint_layout_mapper ... ok
+test checkpoint::runtime::tests::physical_checkpoint_equivalence_is_verified_before_model_writes ... ok
+test checkpoint::runtime::tests::physical_checkpoint_equivalence_mismatch_fails_before_any_sink_mutation ... ok
+test checkpoint::runtime::tests::plan_source_descriptor_change_is_detected_by_local_source ... ok
+test checkpoint::runtime::tests::planned_large_converting_transpose_is_exact_above_the_thread_threshold ... ok
+test checkpoint::runtime::tests::preserve_float_identity_does_not_allocate_a_second_output_buffer ... ok
+test checkpoint::runtime::tests::rank_two_transpose_changes_shape_and_row_major_order ... ok
+test checkpoint::runtime::tests::runtime_coverage_empty_plan_runs_no_callbacks_and_finalizes_clean_progress ... ok
+test checkpoint::runtime::tests::runtime_coverage_equivalence_read_failures_preserve_verified_prefix_before_overrides ... ok
+test checkpoint::runtime::tests::runtime_coverage_fused_transform_failure_preserves_successful_slice_prefix ... ok
+test checkpoint::runtime::tests::runtime_coverage_initialized_column_parameter_keeps_checkpoint_shape_contract ... ok
+test checkpoint::runtime::tests::runtime_coverage_initialized_quantized_reload_rejects_before_mapper_without_mutation ... ok
+test checkpoint::runtime::tests::runtime_coverage_lazy_parameter_install_preserves_each_native_float_dtype ... ok
+test checkpoint::runtime::tests::runtime_coverage_parameter_size_overflow_leaves_lazy_storage_uninitialized ... ok
+test checkpoint::runtime::tests::runtime_coverage_payload_failure_keeps_primary_cause_when_close_also_fails ... ok
+test checkpoint::runtime::tests::runtime_coverage_save_mapper_shape_inspection_preserves_original_on_error ... ok
+test checkpoint::runtime::tests::runtime_coverage_shared_source_failure_precedes_override_and_keeps_prior_group ... ok
+test checkpoint::runtime::tests::shared_slice_keys_require_exactly_one_slice_source ... ok
+test checkpoint::runtime::tests::sink_boundary_can_construct_a_rank_typed_burn_parameter_immediately ... ok
+test checkpoint::runtime::tests::sink_write_failure_returns_an_exact_partial_report ... ok
+test checkpoint::runtime::tests::source_read_failure_preserves_prior_sink_writes_and_closes ... ok
+test checkpoint::runtime::tests::source_tensor_constructor_rejects_bad_lengths_and_overflowing_shapes ... ok
+test checkpoint::runtime::tests::splits_cover_first_middle_last_and_zero_length_axes ... ok
+test checkpoint::runtime::tests::staging_high_water_is_per_tensor_instead_of_complete_model_size ... ok
+test checkpoint::runtime::tests::tiled_equal_dtype_transpose_is_bit_exact ... ok
+test checkpoint::runtime::tests::tiled_transpose_covers_zero_and_every_tile_boundary ... ok
+test checkpoint::runtime::tests::tiled_transpose_is_bit_exact_for_every_runtime_dtype ... ok
+test checkpoint::runtime::tests::tiled_transpose_preserves_float_nan_payloads_signed_zero_and_tile_edges ... ok
+test checkpoint::runtime::tests::transpose_casts_bf16_directly_into_the_final_f16_layout ... ok
+test checkpoint::runtime::tests::transpose_matches_index_equation ... ok
+test checkpoint::runtime::tests::understated_memory_plan_is_rejected_before_allocating ... ok
+test checkpoint::runtime::tests::valid_but_unrepresentable_safetensors_dtype_fails_before_io ... ok
+test checkpoint::runtime::tiles::tests::large_geometries_partition_the_columns ... ok
+test checkpoint::runtime::tiles::tests::large_matrices_split_whole_blocks_across_threads ... ok
+test checkpoint::runtime::tiles::tests::small_geometries_partition_exhaustively ... ok
+test checkpoint::runtime::tiles::tests::small_matrices_use_one_band ... ok
+test checkpoint::runtime::tiles::tests::threads_never_exceed_blocks ... ok
+test checkpoint::runtime::transform::boundary_tests::all_real_dtype_pairs_preserve_row_major_layout_and_signed_zero ... ok
+test checkpoint::runtime::transform::boundary_tests::axis_views_report_bounds_overflow_and_host_size_separately ... ok
+test checkpoint::runtime::transform::boundary_tests::cast_validation_rejects_integer_reinterpretation_and_non_castable_floats ... ok
+test checkpoint::runtime::transform::boundary_tests::checked_byte_ranges_and_staging_counters_reject_wraparound ... ok
+test checkpoint::runtime::transform::boundary_tests::concatenation_contract_rejects_each_distinct_shape_violation ... ok
+test checkpoint::runtime::transform::boundary_tests::final_data_and_endian_boundaries_reject_malformed_storage ... ok
+test checkpoint::runtime::transform::boundary_tests::in_place_conversion_rejects_partial_scalars_and_width_changes ... ok
+test checkpoint::runtime::transform::boundary_tests::materializers_reject_unvalidated_layouts_with_contextual_errors ... ok
+test checkpoint::runtime::transform::boundary_tests::mxfp4_materialization_rejects_unvalidated_work_items ... ok
+test checkpoint::runtime::transform::boundary_tests::physical_equivalence_rejects_self_alias_and_equal_size_shape_changes ... ok
+test checkpoint::runtime::transform::boundary_tests::primary_operations_reject_duplicate_targets_and_invalid_unary_contracts ... ok
+test checkpoint::runtime::transform::boundary_tests::public_alias_entries_cannot_smuggle_sources_or_incompatible_owners ... ok
+test checkpoint::runtime::transform::boundary_tests::public_source_descriptors_require_names_extents_and_supported_dtypes ... ok
+test checkpoint::runtime::transform::boundary_tests::shared_slices_require_matching_payload_descriptors_and_slice_operations ... ok
+test checkpoint::runtime::transform::boundary_tests::slice_contract_rejects_axis_extent_shape_and_end_overflow ... ok
+test checkpoint::runtime::transform::boundary_tests::tiled_transpose_rejects_wrong_buffer_lengths_and_dimension_overflow ... ok
+
+test result: ok. 173 passed; 0 failed; 4 ignored; 0 measured; 3334 filtered out; finished in 0.10s
+
+        0.11 real         0.08 user         0.03 sys
+            53788672  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                4375  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   4  voluntary context switches
+                 686  involuntary context switches
+          2007354501  instructions retired
+           448834167  cycles elapsed
+            41501224  peak memory footprint
+== exit=0 end 2026-10-17T09:30:16Z

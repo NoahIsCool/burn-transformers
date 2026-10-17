@@ -1,0 +1,29 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T08:25:17Z load { 2.80 4.17 5.91 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/gemma_official_variants.py /Volumes/T9/models/google/gemma-3-4b-it /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38 /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/gemma/diagnostics/data/official-f16 cpu-float16-eager mps-float16-eager
+cpu-float16-eager prompt 0: 6 tokens, max |d| = nan at position 0 token 0 (bound 4.603008e-01), mean |d| = nan (bound 4.525028e-02); finite=False; OUTSIDE the rule
+cpu-float16-eager prompt 1: 19 tokens, max |d| = nan at position 0 token 0 (bound 7.106003e-01), mean |d| = nan (bound 6.263316e-02); finite=False; OUTSIDE the rule
+cpu-float16-eager prompt 2: 9 tokens, max |d| = nan at position 0 token 0 (bound 8.973713e-01), mean |d| = nan (bound 7.606301e-02); finite=False; OUTSIDE the rule
+mps-float16-eager prompt 0: 6 tokens, max |d| = nan at position 0 token 0 (bound 4.603008e-01), mean |d| = nan (bound 4.525028e-02); finite=False; OUTSIDE the rule
+mps-float16-eager prompt 1: 19 tokens, max |d| = nan at position 0 token 0 (bound 7.106003e-01), mean |d| = nan (bound 6.263316e-02); finite=False; OUTSIDE the rule
+mps-float16-eager prompt 2: 9 tokens, max |d| = nan at position 0 token 0 (bound 8.973713e-01), mean |d| = nan (bound 7.606301e-02); finite=False; OUTSIDE the rule
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 bfloat16
+        9.21 real        11.91 user         8.81 sys
+         25708249088  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2118684  page reclaims
+                 219  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 107  voluntary context switches
+              116702  involuntary context switches
+        173139325265  instructions retired
+         68870157967  cycles elapsed
+         16112749720  peak memory footprint
+== exit=0 wall=9s

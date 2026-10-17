@@ -1,0 +1,55 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Flex/BF16 flex_long_context_cached_decode_wraps_the_rings
+== env TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=bf16
+== env TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_MIN_GREEDY=0
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_long_context_cached_decode_wraps_the_rings
+== start 2026-10-17T08:08:47+00:00 load 17.15 10.39 7.21
+
+running 1 test
+test flex_long_context_cached_decode_wraps_the_rings ... BF16 bounds of prompt 0: max 9.686213636398316e0, mean 7.939982029344071e-2 (1.2 × official BF16 8.071844696998596e0, 6.61665169112006e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16)
+load: 439 vision-tower tensors intentionally ignored
+cached: capacity 1245, 29 layers in 1024-slot rings
+cached chunk 0..1000 at position 999: max |Δ| = 2.9888343811035156e-1 to the reference (bound 9.686213636398316e0)
+cached chunk 0..1000 at position 999: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+cached chunk 1000..1237 at position 1236: max |Δ| = 3.178896903991699e-1 to the reference (bound 9.686213636398316e0)
+cached chunk 1000..1237 at position 1236: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+greedy step 0: reference margin 3.3272362e-1 is not decisive; skipped
+greedy step 1: reference margin 4.0890846e0 is not decisive; skipped
+greedy step 2: reference margin 1.1780642e1 is not decisive; skipped
+greedy step 3: reference margin 5.645275e-1 is not decisive; skipped
+greedy step 4: reference margin 3.864561e0 is not decisive; skipped
+greedy step 5: reference margin 9.245333e0 is not decisive; skipped
+greedy step 6: reference margin 3.1096878e0 is not decisive; skipped
+greedy step 7: reference margin 5.6699867e0 is not decisive; skipped
+long greedy: 0 of 8 tokens match
+long cached decode: 8 decode steps from position 1237: max |Δ| = 2.5e-1 to the stateless pass, at step 0 (tolerance 5e-1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 73.09s
+
+       73.10 real       230.90 user         6.93 sys
+         13784596480  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1265938  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              412965  involuntary context switches
+       3252015701236  instructions retired
+        801366413939  cycles elapsed
+         13773089496  peak memory footprint
+== exit=0 wall=73.7s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

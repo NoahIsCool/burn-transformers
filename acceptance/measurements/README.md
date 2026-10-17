@@ -48,6 +48,19 @@ so it is neither a gate pass nor a support declaration;
 `scripts/tests/test_half_precision_calibration_record.py` ties every figure
 to its committed logs.
 
+The [October 17 Mac validation round](mac-validation-20261017.json) records
+the first Burn half-precision runs of the Llama-family and Gemma gates, the
+F32 reruns of the Llama-family, gemma-3-4b-it, truncated gpt-oss, and
+FLAN-T5-small gates under `c15f24e`'s install order, and the Muse-Glimmer-30B
+and Qwen3-30B-A3B Q8/Q4 conversions, smokes and audits, at sources `53f167b`
+and `c2936fe`, with controls from `9a9c730`. Each of its 173 test processes
+has its own log, named by source commit and binary digest, beside the
+diagnostics, summaries, and copied harness in its campaign directory. It
+lists its failing gates, the gates it did not run, and its open findings;
+`scripts/tests/test_mac_validation_record.py` ties every quoted figure,
+status, and identity to the committed logs and to the earlier records it
+repeats. It promotes no checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the

@@ -1,0 +1,28 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a sha256 a97b2fbd2e1c91562a3a2b7bb429128466a959710eb28a4682b2abea996f7150 (build A: std,kernel-tracing (--no-default-features))
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a --include-ignored --test-threads 1
+
+running 1 test
+test packed_q4_q8_matmul_launches_quantized_metal_kernels ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+        0.27 real         0.02 user         0.01 sys
+            41697280  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2894  page reclaims
+                   8  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 395  involuntary context switches
+           370796508  instructions retired
+           148692680  cycles elapsed
+           177111832  peak memory footprint
+== exit=0

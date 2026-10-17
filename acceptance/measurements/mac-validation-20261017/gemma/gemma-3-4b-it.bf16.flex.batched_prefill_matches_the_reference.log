@@ -1,0 +1,47 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Flex/BF16 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=bf16
+== env TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-17T08:07:30+00:00 load 5.05 8.03 6.20
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... BF16 bounds of prompt 0: max 4.6030082702636715e-1, mean 4.525028393759436e-2 (1.2 × official BF16 3.8358402252197266e-1, 3.77085699479953e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+BF16 bounds of prompt 1: max 7.106002807617188e-1, mean 6.263315950001885e-2 (1.2 × official BF16 5.921669006347656e-1, 5.219429958334905e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+BF16 bounds of prompt 2: max 8.973712921142578e-1, mean 7.606300748595012e-2 (1.2 × official BF16 7.478094100952148e-1, 6.33858395716251e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+load: 439 vision-tower tensors intentionally ignored
+batched row 0: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 2.2733402252197266e-1 to the reference (bound 4.6030082702636715e-1)
+batched row 1: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 4.68109130859375e-1 to the reference (bound 7.106002807617188e-1)
+batched row 2: max |Δ| = 6.25e-2 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.8796223402023315e-1 to the reference (bound 8.973712921142578e-1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 8.31s
+
+        8.32 real        24.36 user         6.32 sys
+         12175425536  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              749995  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              281689  involuntary context switches
+        198915432413  instructions retired
+        102264436088  cycles elapsed
+         12171519456  peak memory footprint
+== exit=0 wall=9.2s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

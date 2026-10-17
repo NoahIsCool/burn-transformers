@@ -1,0 +1,23 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:46:16Z load { 2.52 2.97 4.47 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump flex bf16 /Volumes/T9/models/HuggingFaceTB/SmolLM3-3B 755\,76798\,1471\,997\,262\,4304\,5715\,279\,308\,7716\,80783\,1396\,14781 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-burn/flex-bf16-fused/prompt1 fused
+wrote 38 points for 13 tokens (eager=false, prefill=0) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-burn/flex-bf16-fused/prompt1
+        9.86 real        10.23 user         9.24 sys
+          7973945344  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              493582  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  52  voluntary context switches
+               95741  involuntary context switches
+        187688741118  instructions retired
+         68486478947  cycles elapsed
+          7968905408  peak memory footprint
+== exit=0 wall=10s

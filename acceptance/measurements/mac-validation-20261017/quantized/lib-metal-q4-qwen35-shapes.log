@@ -1,0 +1,31 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B)
+== Metal/packed Q4, F16 activations, 1/3/17 rows operations::tests::metal_qfloat_projection_covers_qwen35_shapes
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d --ignored --exact --nocapture --test-threads 1 operations::tests::metal_qfloat_projection_covers_qwen35_shapes
+== start 2026-10-17T09:30:55+00:00 lock_wait_s 0 load 5.36 8.25 8.92 free_pct 91 swap_used_mib 9114
+
+running 1 test
+test operations::tests::metal_qfloat_projection_covers_qwen35_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3510 filtered out; finished in 0.56s
+
+        0.56 real         0.43 user         0.03 sys
+           202014720  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               13427  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                2419  involuntary context switches
+          4894386866  instructions retired
+          1811839939  cycles elapsed
+           403686312  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 end=2026-10-17T09:30:56+00:00 end_load 5.36 8.25 8.92

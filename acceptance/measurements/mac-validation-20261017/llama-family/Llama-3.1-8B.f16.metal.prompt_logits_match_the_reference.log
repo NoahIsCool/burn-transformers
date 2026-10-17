@@ -1,0 +1,41 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Metal/F16 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-17T07:28:52+00:00 load 4.92 4.25 7.18
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 1.6489391326904296e-1, mean 2.060356723291985e-2 (1.2 × official BF16 1.3741159439086914e-1, 1.7169639360766542e-2; /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16)
+F16 bounds of prompt 1: max 2.5460836887359617e-1, mean 2.6541438644412937e-2 (1.2 × official BF16 2.1217364072799683e-1, 2.211786553701078e-2; /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16)
+F16 bounds of prompt 2: max 2.1823139190673826e-1, mean 2.7870002538754903e-2 (1.2 × official BF16 1.8185949325561523e-1, 2.3225002115629088e-2; /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16)
+prompt 0: 6 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 1.6489391326904296e-1), mean |Δ| = 4.241448852490681e-3 (bound 2.060356723291985e-2)
+prompt 1: 14 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 2.5460836887359617e-1), mean |Δ| = 4.072374337708538e-3 (bound 2.6541438644412937e-2)
+prompt 2: 9 tokens, max |Δ| = 1.037539392709732e-1 at position 0 (bound 2.1823139190673826e-1), mean |Δ| = 4.129572535024818e-3 (bound 2.7870002538754903e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 8.41s
+
+        8.43 real         4.75 user         3.52 sys
+          7796817920  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1210507  page reclaims
+                  10  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               30626  involuntary context switches
+        126858553140  instructions retired
+         30466326599  cycles elapsed
+         22463730848  peak memory footprint
+== exit=0 wall=9.1s min_free_pct=81 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

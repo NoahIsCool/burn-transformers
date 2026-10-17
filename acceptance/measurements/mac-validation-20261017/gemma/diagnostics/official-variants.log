@@ -1,0 +1,47 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T08:24:56Z load { 2.66 4.24 5.98 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/gemma_official_variants.py /Volumes/T9/models/google/gemma-3-4b-it /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38 /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/gemma/diagnostics/data/official cpu-float32-eager cpu-bfloat16-eager cpu-bfloat16-eager-f32gelu cpu-bfloat16-eager-burngelu cpu-bfloat16-sdpa mps-bfloat16-eager mps-bfloat16-sdpa mps-bfloat16-eager-burngelu
+cpu-float32-eager prompt 0: 6 tokens, max |d| = 0.000000e+00 at position 0 token 0 (bound 4.603008e-01), mean |d| = 0.000000e+00 (bound 4.525028e-02); finite=True; within the rule
+cpu-float32-eager prompt 1: 19 tokens, max |d| = 0.000000e+00 at position 0 token 0 (bound 7.106003e-01), mean |d| = 0.000000e+00 (bound 6.263316e-02); finite=True; within the rule
+cpu-float32-eager prompt 2: 9 tokens, max |d| = 0.000000e+00 at position 0 token 0 (bound 8.973713e-01), mean |d| = 0.000000e+00 (bound 7.606301e-02); finite=True; within the rule
+cpu-bfloat16-eager prompt 0: 6 tokens, max |d| = 3.835840e-01 at position 5 token 1 (bound 4.603008e-01), mean |d| = 3.770857e-02 (bound 4.525028e-02); finite=True; within the rule; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 1: 19 tokens, max |d| = 5.921669e-01 at position 1 token 23130 (bound 7.106003e-01), mean |d| = 5.219430e-02 (bound 6.263316e-02); finite=True; within the rule; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 2: 9 tokens, max |d| = 7.478094e-01 at position 3 token 33178 (bound 8.973713e-01), mean |d| = 6.338584e-02 (bound 7.606301e-02); finite=True; within the rule; identical to the official BF16 bundle: True
+cpu-bfloat16-eager-f32gelu prompt 0: 6 tokens, max |d| = 3.835840e-01 at position 5 token 1 (bound 4.603008e-01), mean |d| = 3.770857e-02 (bound 4.525028e-02); finite=True; within the rule
+cpu-bfloat16-eager-f32gelu prompt 1: 19 tokens, max |d| = 5.921669e-01 at position 1 token 23130 (bound 7.106003e-01), mean |d| = 5.219430e-02 (bound 6.263316e-02); finite=True; within the rule
+cpu-bfloat16-eager-f32gelu prompt 2: 9 tokens, max |d| = 7.478094e-01 at position 3 token 33178 (bound 8.973713e-01), mean |d| = 6.338584e-02 (bound 7.606301e-02); finite=True; within the rule
+cpu-bfloat16-eager-burngelu prompt 0: 6 tokens, max |d| = 3.621206e-01 at position 1 token 1 (bound 4.603008e-01), mean |d| = 4.029498e-02 (bound 4.525028e-02); finite=True; within the rule
+cpu-bfloat16-eager-burngelu prompt 1: 19 tokens, max |d| = 6.530676e-01 at position 1 token 41896 (bound 7.106003e-01), mean |d| = 5.372567e-02 (bound 6.263316e-02); finite=True; within the rule
+cpu-bfloat16-eager-burngelu prompt 2: 9 tokens, max |d| = 1.167773e+00 at position 3 token 31071 (bound 8.973713e-01), mean |d| = 7.135279e-02 (bound 7.606301e-02); finite=True; OUTSIDE the rule
+cpu-bfloat16-sdpa prompt 0: 6 tokens, max |d| = 3.608737e-01 at position 1 token 102870 (bound 4.603008e-01), mean |d| = 4.012126e-02 (bound 4.525028e-02); finite=True; within the rule
+cpu-bfloat16-sdpa prompt 1: 19 tokens, max |d| = 6.167107e-01 at position 1 token 8512 (bound 7.106003e-01), mean |d| = 4.841416e-02 (bound 6.263316e-02); finite=True; within the rule
+cpu-bfloat16-sdpa prompt 2: 9 tokens, max |d| = 5.793014e-01 at position 1 token 50375 (bound 8.973713e-01), mean |d| = 5.543070e-02 (bound 7.606301e-02); finite=True; within the rule
+mps-bfloat16-eager prompt 0: 6 tokens, max |d| = 4.133453e-01 at position 1 token 39818 (bound 4.603008e-01), mean |d| = 4.420361e-02 (bound 4.525028e-02); finite=True; within the rule
+mps-bfloat16-eager prompt 1: 19 tokens, max |d| = 5.344839e-01 at position 1 token 48074 (bound 7.106003e-01), mean |d| = 5.316601e-02 (bound 6.263316e-02); finite=True; within the rule
+mps-bfloat16-eager prompt 2: 9 tokens, max |d| = 9.080334e-01 at position 3 token 51963 (bound 8.973713e-01), mean |d| = 6.989888e-02 (bound 7.606301e-02); finite=True; OUTSIDE the rule
+mps-bfloat16-sdpa prompt 0: 6 tokens, max |d| = 3.803834e-01 at position 1 token 31159 (bound 4.603008e-01), mean |d| = 4.187656e-02 (bound 4.525028e-02); finite=True; within the rule
+mps-bfloat16-sdpa prompt 1: 19 tokens, max |d| = 5.489140e-01 at position 1 token 80140 (bound 7.106003e-01), mean |d| = 4.945982e-02 (bound 6.263316e-02); finite=True; within the rule
+mps-bfloat16-sdpa prompt 2: 9 tokens, max |d| = 1.289978e+00 at position 3 token 3546 (bound 8.973713e-01), mean |d| = 6.711010e-02 (bound 7.606301e-02); finite=True; OUTSIDE the rule
+mps-bfloat16-eager-burngelu prompt 0: 6 tokens, max |d| = 7.062511e-01 at position 4 token 1 (bound 4.603008e-01), mean |d| = 4.113078e-02 (bound 4.525028e-02); finite=True; OUTSIDE the rule
+mps-bfloat16-eager-burngelu prompt 1: 19 tokens, max |d| = 6.695585e-01 at position 1 token 607 (bound 7.106003e-01), mean |d| = 5.537972e-02 (bound 6.263316e-02); finite=True; within the rule
+mps-bfloat16-eager-burngelu prompt 2: 9 tokens, max |d| = 1.621004e+00 at position 3 token 146975 (bound 8.973713e-01), mean |d| = 7.903865e-02 (bound 7.606301e-02); finite=True; OUTSIDE the rule
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 bfloat16
+       20.88 real        38.29 user        17.05 sys
+         26344423424  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             3493775  page reclaims
+               52167  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                3367  voluntary context switches
+              379172  involuntary context switches
+        680944437793  instructions retired
+        193838889499  cycles elapsed
+         17765004920  peak memory footprint
+== exit=0 wall=21s

@@ -1,0 +1,26 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== rustc rustc 1.94.0-nightly (4f14395c3 2025-12-22) cargo cargo 1.94.0-nightly (3861f60f6 2025-12-19)
+/dev/disk7s1   1.8Ti   1.5Ti   348Gi    82%    1.9M  3.6G    0%   /Volumes/bag of holding
+== build A: cargo test --locked --release --no-default-features --features std,kernel-tracing --test packed_metal_kernels --no-run  (2026-10-17T09:23:49Z)
+    Finished `release` profile [optimized] target(s) in 57.33s
+  Executable tests/packed_metal_kernels.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-d022358ee6eb7f4a)
+== build A exit=0 (2026-10-17T09:24:46Z)
+== build B: cargo test --locked --release --features metal --lib --test packed_metal_kernels --no-run  (2026-10-17T09:24:46Z)
+    Finished `release` profile [optimized] target(s) in 2m 00s
+  Executable unittests src/lib.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d)
+  Executable tests/packed_metal_kernels.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-7de3d3302d9a9b49)
+== build B exit=0 (2026-10-17T09:26:47Z)
+== build C: cargo test --locked --release --no-default-features --features std,tokenizers --test muse_glimmer_artifacts --no-run  (2026-10-17T09:26:47Z)
+    Finished `release` profile [optimized] target(s) in 26.76s
+  Executable tests/muse_glimmer_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-a056c89048174866)
+== build C exit=0 (2026-10-17T09:27:13Z)
+== build D: cargo test --locked --release --no-default-features --features std,metal,tokenizers,kernel-tracing --test muse_glimmer_artifacts --test qwen3_moe_artifacts --no-run  (2026-10-17T09:27:13Z)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  Executable tests/muse_glimmer_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/muse_glimmer_artifacts-14fa2946558d2b24)
+  Executable tests/qwen3_moe_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-aa35af79e02f436b)
+== build D exit=0 (2026-10-17T09:28:27Z)
+== build E: cargo test --locked --release --no-default-features --features std,metal,tokenizers,chat-templates --test qwen3_moe_artifacts --no-run  (2026-10-17T09:28:27Z)
+    Finished `release` profile [optimized] target(s) in 1m 08s
+  Executable tests/qwen3_moe_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/qwen3_moe_artifacts-7b2bee6375279079)
+== build E exit=0 (2026-10-17T09:29:35Z)
+== source after c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0

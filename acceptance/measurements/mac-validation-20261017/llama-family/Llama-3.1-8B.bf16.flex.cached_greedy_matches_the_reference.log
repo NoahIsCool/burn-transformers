@@ -1,0 +1,48 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Flex/BF16 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-17T07:27:40+00:00 load 4.66 4.22 7.43
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... BF16 bounds of prompt 0: max 1.6489391326904296e-1, mean 2.060356723291985e-2 (1.2 × official BF16 1.3741159439086914e-1, 1.7169639360766542e-2; /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16)
+BF16 bounds of prompt 1: max 2.5460836887359617e-1, mean 2.6541438644412937e-2 (1.2 × official BF16 2.1217364072799683e-1, 2.211786553701078e-2; /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16)
+BF16 bounds of prompt 2: max 2.1823139190673826e-1, mean 2.7870002538754903e-2 (1.2 × official BF16 1.8185949325561523e-1, 2.3225002115629088e-2; /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16)
+cached prefill: max |Δ| = 9.53226089477539e-2 to the reference (bound 1.6489391326904296e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy step 0: reference margin 2.3562431e-1 is not decisive; skipped
+greedy step 3: reference margin 2.7713203e-1 is not decisive; skipped
+greedy step 12: reference margin 2.9278755e-1 is not decisive; skipped
+greedy step 13: reference margin 9.292603e-3 is not decisive; skipped
+greedy step 24: reference margin 2.736721e-1 is not decisive; skipped
+greedy: 27 of 32 tokens match
+cached decode: 32 decode steps from position 6: max |Δ| = 1.875e-1 to the stateless pass, at step 21 (tolerance 5e-1)
+prompt 1 decoded after a 3-token prefill: 14 tokens, max |Δ| = 1.552443504333496e-1 at position 13 (bound 2.5460836887359617e-1), mean |Δ| = 1.958577064508735e-2 (bound 2.6541438644412937e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 54.49s
+
+       54.51 real       132.28 user         7.90 sys
+         20952563712  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1285470  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              256071  involuntary context switches
+       1013086472247  instructions retired
+        483686199501  cycles elapsed
+         20952874200  peak memory footprint
+== exit=0 wall=55.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

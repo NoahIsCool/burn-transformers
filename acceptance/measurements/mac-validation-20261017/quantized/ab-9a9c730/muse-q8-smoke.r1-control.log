@@ -1,0 +1,35 @@
+== source 9a9c7308cf233f90ccbee80c0156efdf4cceea27 dirty=0
+== export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/gptoss-ab/src-9a9c730 (git archive of 9a9c7308cf233f90ccbee80c0156efdf4cceea27, verified against its tree)
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 sha256 86630d8ec5ca4126248f231aff675ee27cf3eb5a4fefaf444d7e427a8fb64995 (build D)
+== Metal/F16 activations + packed Q8/G64 (kernel-traced) smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal
+== env TRANSFORMERS_MUSE_GLIMMER_DIR=/Volumes/bag of holding/models/meta-models/Muse-Glimmer-30B-a4e59da52a7bc87ae7251dd5545c0dd437c44b68
+== env TRANSFORMERS_MUSE_GLIMMER_Q8_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/mac-validation-quantized-20261017/muse-glimmer-30b-q8-a4e59da5/muse-glimmer-30b-a4e59da5-q8-g64-v2.bpk
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/gptoss-ab/src-9a9c730
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24 --ignored --exact --nocapture --test-threads 1 smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal
+== start 2026-10-17T12:01:48+00:00 lock_wait_s 0 load 4.53 36.63 56.32 free_pct 89 swap_used_mib 8450
+
+running 1 test
+test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=793.115, stateless_seconds=5.133, prefill_seconds=0.790, decode_seconds=0.303, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 1124.08s
+
+     1124.88 real       560.27 user       115.88 sys
+         35504898048  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             6476711  page reclaims
+             1719247  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 286  voluntary context switches
+             4999751  involuntary context switches
+       8235767885799  instructions retired
+       2381458705304  cycles elapsed
+         44091205616  peak memory footprint
+== exit=0 wall=1125.4s min_free_pct=50 max_swap_growth_mib=0 swapin_mib=11 pressured_swapin_mib=0 end=2026-10-17T12:20:34+00:00 end_load 52.37 89.93 80.38

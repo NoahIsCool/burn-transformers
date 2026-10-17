@@ -1,0 +1,52 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 952e2dd210fde1b8461835132a77257e7e1b85eb3621af1fac63d20fe61e3ffb
+== Flex/BF16 flex_long_context_logits_cross_the_sliding_window
+== env TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=bf16
+== env TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_long_context_logits_cross_the_sliding_window
+== start 2026-10-17T08:48:39+00:00 load 5.32 18.68 18.01
+
+running 1 test
+test flex_long_context_logits_cross_the_sliding_window ... BF16 bounds of prompt 0: max 9.686213636398316e0, mean 7.939982029344071e-2 (1.2 × official BF16 8.071844696998596e0, 6.61665169112006e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16)
+load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 7.429142e-1
+windowed: positions 1016..1024: max |Δ| = 4.9777985e-1
+windowed: positions 1024..1032: max |Δ| = 5.0349617e-1
+windowed: positions 1032..1088: max |Δ| = 3.1893172e0
+windowed: positions 1088..1237: max |Δ| = 1.1913462e0
+long prompt (1237 tokens, window 1024): max |Δ| = 8.858282e0 before the window, 3.1893172e0 at or beyond it
+long prompt: 1237 tokens, max |Δ| = 8.858282566070557e0 at position 733 (bound 9.686213636398316e0), mean |Δ| = 5.796337071908378e-2 (bound 7.939982029344071e-2)
+unwindowed: positions 0..4: max |Δ| = 7.429142e-1
+unwindowed: positions 1016..1024: max |Δ| = 4.9777985e-1
+unwindowed: positions 1024..1032: max |Δ| = 1.6141014e0
+unwindowed: positions 1032..1088: max |Δ| = 1.1886862e1
+unwindowed: positions 1088..1237: max |Δ| = 3.684514e1
+unwindowed: max |Δ| = 3.684513854980469e1 (bound 9.686213636398316e0), mean |Δ| = 2.537080889561706e-1 (bound 7.939982029344071e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 58.77s
+
+       58.78 real       253.40 user         5.43 sys
+         18054283264  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1653300  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              169578  involuntary context switches
+       3636687847892  instructions retired
+        874949393288  cycles elapsed
+         18046859040  peak memory footprint
+== exit=0 wall=59.2s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

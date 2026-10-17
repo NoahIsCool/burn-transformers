@@ -1,0 +1,7 @@
+== tree 53f167b9f18c201e4392c708133b988198f12116 + uncommitted GELU fix (git diff sha 6f412309ceded77d)
+2026-10-17T08:38:20Z
+    Checking transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-polish-half)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.26s
+== clippy exit=
+2026-10-17T08:38:49Z
+clippy exit=0

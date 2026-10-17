@@ -1,0 +1,44 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:31:44Z load { 5.16 4.57 6.75 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/official_variants.py /Volumes/bag\ of\ holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 /Volumes/T9/transformers-references/SmolLM-135M-1d461723 /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM-135M-official
+cpu-float32-eager prompt 0: 5 tokens, max |d| = 0.000000e+00 at position 0 token 0, mean |d| = 0.000000e+00
+cpu-float32-eager prompt 1: 18 tokens, max |d| = 0.000000e+00 at position 0 token 0, mean |d| = 0.000000e+00
+cpu-float32-eager prompt 2: 8 tokens, max |d| = 0.000000e+00 at position 0 token 0, mean |d| = 0.000000e+00
+cpu-bfloat16-eager prompt 0: 5 tokens, max |d| = 1.463715e+00 at position 0 token 5166, mean |d| = 1.902770e-01; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 1: 18 tokens, max |d| = 1.101254e+00 at position 0 token 19178, mean |d| = 7.548486e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 2: 8 tokens, max |d| = 1.652346e+00 at position 0 token 7953, mean |d| = 7.053347e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-sdpa prompt 0: 5 tokens, max |d| = 1.463715e+00 at position 0 token 5166, mean |d| = 1.915275e-01
+cpu-bfloat16-sdpa prompt 1: 18 tokens, max |d| = 1.101254e+00 at position 0 token 19178, mean |d| = 9.662856e-02
+cpu-bfloat16-sdpa prompt 2: 8 tokens, max |d| = 1.652346e+00 at position 0 token 7953, mean |d| = 1.288997e-01
+mps-bfloat16-eager prompt 0: 5 tokens, max |d| = 1.419013e+00 at position 0 token 2253, mean |d| = 1.781719e-01
+mps-bfloat16-eager prompt 1: 18 tokens, max |d| = 1.080326e+00 at position 0 token 38460, mean |d| = 8.553217e-02
+mps-bfloat16-eager prompt 2: 8 tokens, max |d| = 1.718082e+00 at position 0 token 42057, mean |d| = 1.547887e-01
+mps-bfloat16-sdpa prompt 0: 5 tokens, max |d| = 1.419013e+00 at position 0 token 2253, mean |d| = 1.910818e-01
+mps-bfloat16-sdpa prompt 1: 18 tokens, max |d| = 1.080326e+00 at position 0 token 38460, mean |d| = 9.197122e-02
+mps-bfloat16-sdpa prompt 2: 8 tokens, max |d| = 1.718082e+00 at position 0 token 42057, mean |d| = 1.059722e-01
+cpu-float16-eager prompt 0: 5 tokens, max |d| = 1.259680e-01 at position 0 token 38171, mean |d| = 1.875159e-02
+cpu-float16-eager prompt 1: 18 tokens, max |d| = 2.211347e-01 at position 0 token 45473, mean |d| = 1.173484e-02
+cpu-float16-eager prompt 2: 8 tokens, max |d| = 1.851397e-01 at position 0 token 34, mean |d| = 1.501946e-02
+mps-float16-eager prompt 0: 5 tokens, max |d| = 2.778320e-01 at position 0 token 23309, mean |d| = 2.061527e-02
+mps-float16-eager prompt 1: 18 tokens, max |d| = 1.614919e-01 at position 0 token 35535, mean |d| = 9.733252e-03
+mps-float16-eager prompt 2: 8 tokens, max |d| = 2.697983e-01 at position 0 token 43558, mean |d| = 2.168589e-02
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16 bfloat16
+       11.35 real         3.90 user         2.73 sys
+          1702707200  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              268307  page reclaims
+               39874  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                4233  voluntary context switches
+              125145  involuntary context switches
+         57258599474  instructions retired
+         23310908880  cycles elapsed
+          1826719712  peak memory footprint
+== exit=0 wall=11s

@@ -1,0 +1,38 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gpt_oss_artifacts-98a177a8f6a4ce38 sha256 00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb
+== Flex/F32 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_GPT_OSS_DIR=/Volumes/T9/models/openai/gpt-oss-20b
+== env TRANSFORMERS_GPT_OSS_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-4layer-f32-reference.bundle
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gpt_oss_artifacts-98a177a8f6a4ce38 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-17T09:04:31+00:00 load 84.26 37.26 22.37 free_pct 90 swap_used_mib 9162
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... loaded 4 blocks as F32 in 9.93644525s
+batched row 0: max |Δ| = 5.531311e-5 to the reference, 4.5776367e-5 to the stateless pass
+batched row 1: max |Δ| = 3.8146973e-5 to the reference, 3.9100647e-5 to the stateless pass
+batched row 2: max |Δ| = 6.866455e-5 to the reference, 4.7683716e-5 to the stateless pass
+batched row 3: max |Δ| = 4.7683716e-5 to the reference, 4.386902e-5 to the stateless pass
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 13.77s
+
+       13.79 real        31.50 user         7.18 sys
+         25472827392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1555688  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              246422  involuntary context switches
+        355850036616  instructions retired
+        130528976097  cycles elapsed
+         25474845272  peak memory footprint
+== exit=0 wall=14.3s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

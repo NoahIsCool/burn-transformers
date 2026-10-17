@@ -1,0 +1,8 @@
+   Compiling burn-dump-gemma v0.0.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/burn-dump-gemma)
+    Finished `release` profile [optimized] target(s) in 38.98s
+   Compiling transformers v0.1.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/patched-gelu)
+   Compiling burn-dump-gemma-patched v0.0.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/burn-dump-gemma-patched)
+    Finished `release` profile [optimized] target(s) in 52.34s
+   Compiling transformers v0.1.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/patched-gelu)
+    Finished `release` profile [optimized] target(s) in 52.50s
+  Executable tests/gemma_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979)
