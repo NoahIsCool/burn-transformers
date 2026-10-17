@@ -1198,8 +1198,8 @@ impl<B: Backend> ChunkOperands<B> {
             query: arrange(prepared.query.clone()),
             key: arrange(prepared.key.clone()),
             value: arrange(prepared.value.clone()),
-            beta: arrange(prepared.beta.clone().unsqueeze_dim(3)),
-            log_decay: arrange(prepared.log_decay.clone().unsqueeze_dim(3)),
+            beta: arrange(trailing_unit_axis(prepared.beta.clone())),
+            log_decay: arrange(trailing_unit_axis(prepared.log_decay.clone())),
             chunk: plan.chunk,
             chunks: plan.chunks,
             padded: plan.padded,
@@ -1666,7 +1666,10 @@ impl<B: Backend> PreparedDeltaRule<B> {
 /// on CUDA and ROCm) while Flex was exact. Reshaping the unswapped
 /// `[batch, 1, heads]` slice instead is still unsafe with one head whenever
 /// CubeCL slices it as an aligned view rather than a copy: its strides then
-/// become all ones.
+/// become all ones. The chunked kernel's operands had the same flaw: with one
+/// head and factors passed as a transposed view (unmasked, so never copied),
+/// `unsqueeze_dim(3)` of `[batch, sequence, 1]` gave the token axis the unit
+/// axis's stride. Both kernels now take their factors through this function.
 fn trailing_unit_axis<B: Backend>(tensor: Tensor<B, 3>) -> Tensor<B, 4> {
     tensor.unsqueeze_dim::<4>(0).permute([1, 2, 3, 0])
 }
