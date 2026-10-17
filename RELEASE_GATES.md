@@ -397,6 +397,13 @@ all-feature Clippy on the equipped build host before release:
 cargo clippy --manifest-path Cargo.toml --locked --all-targets --all-features -- -D warnings
 ```
 
+`--all-features` includes Metal and so lints only on macOS; CI's Linux job
+lints every other feature. The `cpu` feature's build runs a prebuilt LLVM that
+needs glibc 2.34+ and GCC 11+ libstdc++, so on an older Linux release host
+(RHEL/Alma 8) drop `cpu` from that feature list, which leaves the linted crate
+code unchanged, and rely on CI's `ubuntu-latest` job for the `cpu` build; see
+[SUPPORT.md](SUPPORT.md#host-requirement-of-the-cpu-feature).
+
 The source group also runs tests embedded in examples, retains a separate
 doctest pass, and executes the six download-free experiments listed in
 `SOURCE_EXPERIMENTS` in the runner. Their assertions check public workflows as
