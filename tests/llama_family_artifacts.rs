@@ -14,10 +14,12 @@
 //! ```
 //!
 //! Weights are loaded with the strict automatic loader and cast to F32 while
-//! streaming (BF16 to F32 is exact, as in the reference). Each test runs on
-//! Flex; with the `metal` feature the same checks also run on Metal in F32.
-//! The pairing of checkpoint and bundle is verified through the bundle's
-//! SHA-256 of `config.json`.
+//! streaming (BF16 to F32 is exact, as in the reference), unless
+//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects half precision (see
+//! [Half precision](#half-precision)). Each test runs on Flex; with the
+//! `metal` feature the same checks also run on Metal. The pairing of
+//! checkpoint and bundle is verified through the bundle's SHA-256 of
+//! `config.json`.
 //!
 //! # Tolerance
 //!
@@ -55,6 +57,86 @@
 //! `config.json` SHA-256
 //! `54acfad3cffe057640904ca8a1e83525e6551c70c7a04c641f5a9eda0bbf64bd`) stays
 //! within `7.6e-5` on both backends against an F32 bundle.
+//!
+//! # Half precision
+//!
+//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects the stored dtype: `f32` (the
+//! default; everything above), `bf16` (the Flex profile), or `f16` (the Metal
+//! profile); any other value panics. A half-precision run is judged against
+//! the same F32 bundle (the F64 one for Qwen2-7B): against a half-precision
+//! bundle the two implementations' roundings would add, as the gpt-oss gate
+//! found. Its bounds are not chosen here but measured from the official
+//! implementation: `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR` names the
+//! bundle's BF16 twin, written by the same script with `--dtype bfloat16` from
+//! the same checkpoint, prompts, and greedy length, and
+//! `tests/support/half_precision_calibration.rs` validates the pairing fail
+//! closed (configuration and weight digests, versions, vocabulary,
+//! truncation, prompts and token IDs, dtype labels) before the checkpoint
+//! loads. Per prompt, Transformers' own BF16 logits deviate from the F32
+//! bundle by at most `M` and on average by `μ`; this crate's logits must stay
+//! within `1.2 M` at every position and `1.2 μ` on average. The factor `1.2`
+//! is the largest ratio of a Burn half-precision statistic to the official
+//! one measured on gpt-oss-20b (`1.1725`), rounded up; that module documents
+//! its derivation and fixes it for every checkpoint. The cached prefill and
+//! each batched row must lie within their prompt's `1.2 M` of the bundle and
+//! within `0.5` of the stateless pass (the gpt-oss self-consistency
+//! tolerance for F16 and BF16). The greedy continuation is teacher-forced, so
+//! every step whose F32 margin exceeds `2.4 M` of prompt 0 is compared, not
+//! only those before the first tie. `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` is
+//! refused, because it would replace the calibration;
+//! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` still applies.
+//!
+//! The official BF16 bundles were generated on 2026-10-17 (Transformers
+//! 5.2.0, PyTorch 2.10.0) and are recorded with their SHA-256s in
+//! `acceptance/measurements/half-precision-calibration-20261017.json`. Per
+//! prompt, they deviate from their twins by:
+//!
+//! | checkpoint | max \|Δ\| (position) | mean \|Δ\| | decisive greedy steps |
+//! | --- | --- | --- | --- |
+//! | SmolLM-135M | `1.46` (0), `1.10` (0), `1.65` (0) | `0.190`, `0.075`, `0.071` | 0 of 32 |
+//! | Qwen3-4B | `0.700` (0), `0.701` (0), `0.880` (0) | `0.078`, `0.043`, `0.054` | 26 of 32 |
+//! | SmolLM3-3B | `6.28` (0), `6.67` (0), `5.33` (0) | `0.156`, `0.079`, `0.177` | 0 of 32 |
+//! | Qwen2-7B (F64 bundle) | `8.49` (0), `6.85` (0), `10.7` (0) | `0.421`, `0.312`, `0.675` | 0 of 32 |
+//! | Llama-3.1-8B | `0.137` (4), `0.212` (5), `0.182` (7) | `0.017`, `0.022`, `0.023` | 27 of 32 |
+//!
+//! Except on Llama-3.1-8B, the largest official deviation lies at the first
+//! position, whose massive activations round worst in BF16, so the maximum
+//! bound is loose at later positions and the mean is the sharper check.
+//! Where no greedy step is decisive, the cached greedy test needs
+//! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0`, as gpt-oss's half-precision
+//! greedy tests do; Qwen2-7B's official BF16 run already picks another first
+//! token than its F64 bundle. No half-precision run of this crate has been
+//! measured against these bounds yet. To run the Flex/BF16 gate (set `f16`,
+//! `--features metal`, and the `metal::` tests for Metal/F16):
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16 \
+//! TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B \
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b \
+//! TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//! cargo test --release --test llama_family_artifacts -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! The official BF16 bundle takes the twin's prompts (`--prompt`, repeated in
+//! order) and greedy length; for the default prompts:
+//!
+//! ```text
+//! python3 -I scripts/generate_causal_lm_reference.py --dtype bfloat16 \
+//!   --model-dir /Volumes/T9/models/meta-llama/Llama-3.1-8B \
+//!   --output /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//!   --repository meta-llama/Llama-3.1-8B --revision d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
+//! ```
+//!
+//! `official_bf16_reference_calibrates_the_half_precision_bounds` reproduces
+//! the table from the two bundles alone. It loads no checkpoint and runs no
+//! Burn model, so its pass qualifies no Burn run:
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b \
+//! TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//! cargo test --test llama_family_artifacts -- --ignored --exact \
+//!   official_bf16_reference_calibrates_the_half_precision_bounds --nocapture
+//! ```
 
 #![cfg(feature = "flex")]
 

@@ -586,6 +586,17 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   deviation, at most `2.665`, mean at most `0.108`); it evaluates no Burn
   model and passes no gate
   ([record](acceptance/measurements/reference-precision-followups-20261016.json)).
+- Half-precision variants of the Llama-family and Gemma real-checkpoint gates
+  (`TRANSFORMERS_LLAMA_FAMILY_DTYPE`, `TRANSFORMERS_GEMMA_DTYPE`: `bf16` on
+  Flex, `f16` on Metal) judge a run against the existing F32 (or F64) bundle
+  with per-prompt bounds read at run time from an official BF16 twin bundle,
+  which is paired fail closed: `1.2` times Transformers' own BF16 maximum and
+  mean deviation, the slack being the largest Burn/official ratio measured on
+  gpt-oss-20b, rounded up. The shared logic and its unit tests are in
+  `tests/support/half_precision_calibration.rs`; F32 runs are unchanged. The
+  seven official BF16 bundles and their calibration are recorded
+  ([record](acceptance/measurements/half-precision-calibration-20261017.json));
+  no Burn half-precision run of these gates has been made yet.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.
