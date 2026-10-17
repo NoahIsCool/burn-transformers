@@ -2226,6 +2226,51 @@ fn gaps_and_bounds_measure_relative_to_the_reference_scale() {
     );
 }
 
+/// Non-finite values never pass a bound, even one that scales with the reference.
+#[test]
+fn gaps_with_non_finite_values_never_pass_a_bound() {
+    let relative = Bound {
+        absolute: 1e-5,
+        relative: 1e-5,
+    };
+    // Regression: an infinite reference once made the scale, and with it a
+    // relative allowance, infinite, so an infinite run passed.
+    let infinite = Gap::measure(&[f32::INFINITY, 1.0], &[f32::INFINITY, 2.0]);
+    assert_eq!(
+        infinite,
+        Gap {
+            deviation: f32::INFINITY,
+            scale: 2.0
+        }
+    );
+    assert!(!relative.admits(infinite));
+    for (actual, reference) in [
+        (f32::NAN, 0.0),
+        (0.0, f32::NAN),
+        (f32::NEG_INFINITY, 0.0),
+        (0.0, f32::INFINITY),
+    ] {
+        let gap = Gap::measure(&[actual], &[reference]);
+        assert_eq!(gap.deviation, f32::INFINITY, "{actual} against {reference}");
+        assert!(!relative.admits(gap));
+    }
+    assert!(!relative.admits(Gap {
+        deviation: f32::INFINITY,
+        scale: f32::INFINITY
+    }));
+    assert!(!relative.admits(Gap {
+        deviation: f32::NAN,
+        scale: 1.0
+    }));
+}
+
+/// Sets of different lengths are refused rather than silently truncated.
+#[test]
+#[should_panic(expected = "compared lengths differ")]
+fn gaps_refuse_sets_of_different_lengths() {
+    Gap::measure(&[1.0, 2.0], &[1.0]);
+}
+
 /// A deviation beyond the bound fails with its context, deviation, and allowance.
 #[test]
 #[should_panic(expected = "far: max |Δ| = 2e0 exceeds 6.25e-1 (reference scale 1e0)")]

@@ -432,21 +432,27 @@ impl Gap {
     /// Measures `actual` against `reference`, which must have equal lengths.
     ///
     /// A non-finite value on either side yields an infinite deviation, so it
-    /// can never pass a [`Bound`].
+    /// can never pass a [`Bound`]. The scale counts finite reference values
+    /// only: an infinite reference entry would otherwise make a relative
+    /// bound's allowance infinite as well.
     pub(crate) fn measure(actual: &[f32], reference: &[f32]) -> Self {
         assert_eq!(actual.len(), reference.len(), "compared lengths differ");
         actual
             .iter()
             .zip(reference)
             .fold(Self::default(), |gap, (&a, &r)| {
-                let deviation = if a.is_finite() && r.is_finite() {
-                    (a - r).abs()
-                } else {
-                    f32::INFINITY
-                };
+                let finite = a.is_finite() && r.is_finite();
                 Self {
-                    deviation: gap.deviation.max(deviation),
-                    scale: gap.scale.max(r.abs()),
+                    deviation: gap.deviation.max(if finite {
+                        (a - r).abs()
+                    } else {
+                        f32::INFINITY
+                    }),
+                    scale: if r.is_finite() {
+                        gap.scale.max(r.abs())
+                    } else {
+                        gap.scale
+                    },
                 }
             })
     }
@@ -516,9 +522,9 @@ impl Bound {
         }
     }
 
-    /// Whether `gap` lies within the bound.
+    /// Whether `gap` lies within the bound; a non-finite deviation never does.
     pub(crate) fn admits(self, gap: Gap) -> bool {
-        gap.deviation <= self.allowed(gap.scale)
+        gap.deviation.is_finite() && gap.deviation <= self.allowed(gap.scale)
     }
 
     /// Panics with `context` when `gap` exceeds the bound.

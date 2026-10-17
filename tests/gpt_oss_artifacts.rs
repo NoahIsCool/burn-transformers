@@ -159,7 +159,7 @@ mod backend_numerics;
 use std::path::{Path, PathBuf};
 
 use backend_numerics::{
-    MatmulPrecision, argmax, check_teacher_forced_greedy, checkpoint_tolerance,
+    Gap, MatmulPrecision, argmax, check_teacher_forced_greedy, checkpoint_tolerance,
     greedy_step_is_decisive, top_two_margin,
 };
 use burn::{
@@ -510,13 +510,13 @@ fn host<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
     tensor.cast(DType::F32).into_data().to_vec::<f32>().unwrap()
 }
 
-/// Returns the largest absolute difference.
+/// Returns the largest absolute difference of two equally long sets of logits.
+///
+/// A non-finite value on either side counts as an infinite difference, so a
+/// NaN or infinite logit fails every tolerance (see [`Gap::measure`], which
+/// also rejects a length mismatch).
 fn gap(actual: &[f32], expected: &[f32]) -> f32 {
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).abs())
-        .fold(0.0, f32::max)
+    Gap::measure(actual, expected).deviation
 }
 
 /// Stateless logits at every prompt position match the reference; decisive argmaxes agree.
