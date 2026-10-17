@@ -6,7 +6,8 @@ implementation computes for a local checkpoint, so the Rust crate can be
 compared against it without Python at test time. It
 
 * loads ``AutoModelForCausalLM`` from a local directory only (no Hub access),
-  in F32 (or, with ``--dtype float64`` or ``bfloat16``, F64 or BF16) on the CPU with eager
+  in F32 (or, with ``--dtype float64``, ``bfloat16``, or ``float16``, F64, BF16,
+  or F16) on the CPU with eager
   attention (unless ``--device`` or ``--attn-implementation`` selects another
   graph) and deterministic kernels;
 * tokenizes a few fixed prompts with the checkpoint's own tokenizer and
@@ -95,6 +96,34 @@ identical to the one a gate decodes even where the two continuations
 diverge. Both sets of logits are written as ``decode-cached.f32le`` and
 ``decode-stateless.f32le`` (``[steps, vocabulary]``) with each step's
 largest absolute difference, taken in F64.
+
+``--dtype float16`` evaluates the official F16 graphs (on ``cpu`` or
+``mps``), whose unit roundoff ``2^-11`` is eight times finer than BF16's
+``2^-8`` but whose finite range ends at ``65,504``. It is refused with
+``--bf16-resident``, which can only widen BF16 weights to F32 or F64.
+
+``--prompt-decode`` also records the official model's own cached decode
+under the crate's quarter-prefill protocol, on the longest prompt (the first
+of equally long ones): its first ``max(T // 4, 1)`` tokens are prefilled into
+the model's KV cache, returning logits at every prefill position, and every
+remaining token is then fed alone, returning the logits of its own position.
+The ``[T, vocabulary]`` rows are written as ``decode-prompt.f32le`` and
+described by the manifest's ``prompt_decode`` record. A gate that decodes a
+prompt this way is judged against the envelope of these rows, not against
+stateless prompt logits, because cached decoding rounds differently.
+
+Non-finite results are data, not errors: the range overflow of an official
+graph (gemma-3-4b-it in F16, for example) is exactly what such a bundle must
+record. A prompt whose logits hold a NaN or an infinity records ``"finite":
+false`` and the first such entry in row-major order as ``first_non_finite``
+(``position``, ``token``), and its ``last_top1`` and ``last_margin`` are
+``null`` when its last row is affected. The greedy continuation stops before
+the first step whose logits are not all finite, since its margin is then
+undefined, and records ``"stopped": "non_finite"``. Decode records always
+carry ``finite``; a non-finite one names its first non-finite entry and
+leaves the affected gaps ``null``. Every new key is optional (absent means
+finite), so ``SCHEMA_VERSION`` stays 1, and the manifest is written with
+``allow_nan=False``, so it stays strict JSON whatever the logits hold.
 """
 
 from __future__ import annotations
@@ -135,7 +164,9 @@ DEFAULT_GREEDY_TOKENS = 32
 #: Name of the bundle's manifest.
 MANIFEST = "reference.json"
 #: Evaluation dtypes accepted by ``--dtype``; logits are always written as F32.
-DTYPES = ("float32", "float64", "bfloat16")
+DTYPES = ("float32", "float64", "bfloat16", "float16")
+#: Half-precision dtypes, to which ``--bf16-resident`` cannot widen.
+HALF_DTYPES = ("bfloat16", "float16")
 #: Devices accepted by ``--device``; the model is loaded on the CPU and moved.
 DEVICES = ("cpu", "mps")
 #: Transformers attention implementations accepted by ``--attn-implementation``.
@@ -143,6 +174,8 @@ ATTENTION_IMPLEMENTATIONS = ("eager", "sdpa")
 #: Names of the decode self-consistency logits files (``--decode-tokens-from``).
 DECODE_CACHED_FILE = "decode-cached.f32le"
 DECODE_STATELESS_FILE = "decode-stateless.f32le"
+#: Name of the quarter-prefill prompt decode logits file (``--prompt-decode``).
+PROMPT_DECODE_FILE = "decode-prompt.f32le"
 
 
 def sha256_file(path: Path) -> str:
@@ -427,12 +460,17 @@ def buffer_mismatches(model: Any, expected: dict[str, Any], persistent: frozense
 
 
 def require_bf16_resident_inputs(model_dir: Path, dtype: str) -> None:
-    """Refuses `--bf16-resident` before any load unless `dtype` is wider than BF16 and the checkpoint all BF16."""
+    """Refuses `--bf16-resident` before any load unless `dtype` is wider than BF16 and the checkpoint all BF16.
+
+    F16 is no wider than BF16 (it has more significand bits but a smaller
+    exponent range), so widening BF16 weights to it would round them; both
+    half-precision dtypes are refused.
+    """
 
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
-    if dtype == "bfloat16":
-        raise ValueError("--bf16-resident needs a wider --dtype than bfloat16")
+    if dtype in HALF_DTYPES:
+        raise ValueError(f"--bf16-resident needs a wider --dtype than bfloat16 (float32 or float64), not {dtype}")
     require_bfloat16_checkpoint(model_dir)
 
 
@@ -585,8 +623,39 @@ def tensor_f32le(tensor: Any) -> bytes:
     return tensor.contiguous().numpy().astype("<f4", copy=False).tobytes()
 
 
+def all_finite(tensor: Any) -> bool:
+    """Whether every entry of a floating tensor is finite (neither NaN nor infinite)."""
+
+    import torch
+
+    return bool(torch.isfinite(tensor).all())
+
+
+def first_non_finite(rows: Any) -> dict[str, int] | None:
+    """Returns the first non-finite entry of `[rows, vocabulary]` logits in row-major order, or ``None``.
+
+    The entry is reported as ``{"position": row, "token": column}``; for prompt
+    logits the row is the prompt position.
+    """
+
+    import torch
+
+    bad = ~torch.isfinite(rows)
+    if not bool(bad.any()):
+        return None
+    flat = int(bad.reshape(-1).nonzero()[0])
+    columns = rows.shape[-1]
+    return {"position": flat // columns, "token": flat % columns}
+
+
 def greedy_continuation(model: Any, token_ids: list[int], steps: int) -> list[dict[str, Any]]:
-    """Decodes `steps` greedy tokens with the model's own KV cache."""
+    """Decodes up to `steps` greedy tokens with the model's own KV cache.
+
+    The continuation stops before the first step whose logits are not all
+    finite: its argmax and margin would be undefined, so a shorter list than
+    `steps` means exactly that (see `build_bundle`, which records it as
+    ``"stopped": "non_finite"``).
+    """
 
     import torch
 
@@ -594,7 +663,10 @@ def greedy_continuation(model: Any, token_ids: list[int], steps: int) -> list[di
     with torch.no_grad():
         output = model(input_ids=model_input(model, token_ids), use_cache=True)
         for _ in range(steps):
-            token, margin = top_two_margin(output.logits[0, -1].to(torch.float32).tolist())
+            row = output.logits[0, -1].to(torch.float32)
+            if not all_finite(row):
+                break
+            token, margin = top_two_margin(row.tolist())
             records.append({"token": token, "margin": margin})
             output = model(
                 input_ids=model_input(model, [token]),
@@ -660,39 +732,66 @@ def decode_logits(model: Any, prompt_ids: list[int], tokens: list[int]) -> tuple
     return torch.stack(cached).contiguous(), stateless
 
 
-def step_gaps(cached: Sequence[Sequence[float]], stateless: Sequence[Sequence[float]]) -> list[float]:
+def step_gaps(cached: Sequence[Sequence[float]], stateless: Sequence[Sequence[float]]) -> list[float | None]:
     """Returns, per decode step, the largest `|cached - stateless|` over the vocabulary, taken in F64.
 
     Both arguments are equally shaped `[steps, vocabulary]` rows of F32 values
-    (anything whose rows iterate as floats). A non-finite value on either side
-    raises ``ValueError``: the gap would not bound anything, so no record is
-    written.
+    (anything whose rows iterate as floats). A step whose rows hold a
+    non-finite value on either side has no gap (``None``): a difference of
+    non-finite values bounds nothing, and the record says so through its
+    ``finite`` flag instead. Misshapen rows raise ``ValueError``.
     """
 
     if len(cached) != len(stateless):
         raise ValueError("cached and stateless logits hold different numbers of steps")
-    gaps = []
+    gaps: list[float | None] = []
     for step, (left, right) in enumerate(zip(cached, stateless)):
         left, right = [float(value) for value in left], [float(value) for value in right]
         if len(left) != len(right) or not left:
             raise ValueError(f"decode step {step}: cached and stateless rows differ in length or are empty")
         if not all(math.isfinite(value) for value in left + right):
-            raise ValueError(f"decode step {step}: the logits hold a non-finite value")
+            gaps.append(None)
+            continue
         gaps.append(max(abs(a - b) for a, b in zip(left, right)))
     return gaps
+
+
+def first_non_finite_step(cached: Any, stateless: Any, first: int) -> dict[str, Any] | None:
+    """Returns the earliest non-finite decode entry of either pass, or ``None`` when both are finite.
+
+    The entry names the pass (``cached`` before ``stateless`` at the same
+    step), the step, its sequence position `first + step`, and the token.
+    """
+
+    found = []
+    for name, rows in (("cached", cached), ("stateless", stateless)):
+        entry = first_non_finite(rows)
+        if entry is not None:
+            found.append((entry["position"], entry["token"], name))
+    if not found:
+        return None
+    step, token, name = min(found, key=lambda item: (item[0], item[2] != "cached", item[1]))
+    return {"logits": name, "step": step, "position": first + step, "token": token}
 
 
 def decode_record(
     model: Any, prompt_ids: list[int], tokens: list[int], source: dict[str, Any], staging: Path
 ) -> dict[str, Any]:
-    """Writes both decode logits files into `staging` and returns the manifest's ``decode_consistency`` record."""
+    """Writes both decode logits files into `staging` and returns the manifest's ``decode_consistency`` record.
+
+    A finite record is the round-2 record plus ``"finite": true``. A
+    non-finite one says ``"finite": false``, names its first non-finite entry
+    (`first_non_finite_step`), and leaves the gap of every affected step and
+    the overall ``max_abs_gap`` ``null``.
+    """
 
     cached, stateless = decode_logits(model, prompt_ids, tokens)
     gaps = step_gaps(cached.tolist(), stateless.tolist())
     (staging / DECODE_CACHED_FILE).write_bytes(tensor_f32le(cached))
     (staging / DECODE_STATELESS_FILE).write_bytes(tensor_f32le(stateless))
     first = len(prompt_ids)
-    return {
+    bad = first_non_finite_step(cached, stateless, first)
+    record = {
         "prompt_index": 0,
         "first_position": first,
         "tokens_source": source,
@@ -705,8 +804,76 @@ def decode_record(
             {"position": first + step, "fed_token": token, "max_abs_gap": gap}
             for step, (token, gap) in enumerate(zip(tokens, gaps))
         ],
-        "max_abs_gap": max(gaps),
+        "max_abs_gap": None if bad is not None else max(gaps),
+        "finite": bad is None,
     }
+    if bad is not None:
+        record["first_non_finite"] = bad
+    return record
+
+
+def longest_prompt(prompts: Sequence[dict[str, Any]]) -> int:
+    """Returns the index of the longest prompt, the first of equally long ones."""
+
+    if not prompts:
+        raise ValueError("no prompt to decode")
+    return max(range(len(prompts)), key=lambda index: (len(prompts[index]["token_ids"]), -index))
+
+
+def quarter_prefill(tokens: int) -> int:
+    """Returns the prefill length of the quarter-prefill protocol, `max(tokens // 4, 1)`."""
+
+    if tokens < 1:
+        raise ValueError("a prompt to decode needs at least one token")
+    return max(tokens // 4, 1)
+
+
+def prompt_decode_logits(model: Any, token_ids: list[int], prefill: int) -> Any:
+    """Returns the official cached-decode F32 logits `[tokens, vocabulary]` of one prompt, on the CPU.
+
+    The first `prefill` tokens are prefilled into the model's own KV cache,
+    which returns logits at each of their positions; every later token is fed
+    alone with that cache and returns the logits of its own position. Row `t`
+    therefore holds position `t`'s logits whichever way they were computed.
+    """
+
+    import torch
+
+    if not 1 <= prefill <= len(token_ids):
+        raise ValueError(f"cannot prefill {prefill} of {len(token_ids)} tokens")
+    with torch.no_grad():
+        output = model(input_ids=model_input(model, token_ids[:prefill]), use_cache=True)
+        rows = [output.logits[0].to(torch.float32).cpu()]
+        for token in token_ids[prefill:]:
+            output = model(
+                input_ids=model_input(model, [token]),
+                past_key_values=output.past_key_values,
+                use_cache=True,
+            )
+            rows.append(output.logits[0, -1:].to(torch.float32).cpu())
+    return torch.cat(rows).contiguous()
+
+
+def prompt_decode_record(model: Any, prompts: Sequence[dict[str, Any]], staging: Path) -> dict[str, Any]:
+    """Writes the longest prompt's quarter-prefill decode logits into `staging` and returns the ``prompt_decode`` record."""
+
+    index = longest_prompt(prompts)
+    token_ids = prompts[index]["token_ids"]
+    prefill = quarter_prefill(len(token_ids))
+    logits = prompt_decode_logits(model, token_ids, prefill)
+    (staging / PROMPT_DECODE_FILE).write_bytes(tensor_f32le(logits))
+    bad = first_non_finite(logits)
+    record = {
+        "prompt_index": index,
+        "prefill_tokens": prefill,
+        "logits_file": PROMPT_DECODE_FILE,
+        "logits_sha256": sha256_file(staging / PROMPT_DECODE_FILE),
+        "logits_shape": list(logits.shape),
+        "finite": bad is None,
+    }
+    if bad is not None:
+        record["first_non_finite"] = bad
+    return record
 
 
 def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]:
@@ -727,19 +894,27 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
         logits = prompt_logits(model, token_ids)
         name = f"logits-{index}.f32le"
         (staging / name).write_bytes(tensor_f32le(logits))
-        last_top1, last_margin = top_two_margin(logits[-1].tolist())
-        prompts.append(
-            {
-                "text": text,
-                "token_ids": token_ids,
-                "logits_file": name,
-                "logits_shape": list(logits.shape),
-                "logits_sha256": sha256_file(staging / name),
-                "last_top1": last_top1,
-                "last_margin": last_margin,
-            }
+        last_top1, last_margin = (
+            top_two_margin(logits[-1].tolist()) if all_finite(logits[-1]) else (None, None)
         )
+        record = {
+            "text": text,
+            "token_ids": token_ids,
+            "logits_file": name,
+            "logits_shape": list(logits.shape),
+            "logits_sha256": sha256_file(staging / name),
+            "last_top1": last_top1,
+            "last_margin": last_margin,
+        }
+        bad = first_non_finite(logits)
+        if bad is not None:
+            record["finite"] = False
+            record["first_non_finite"] = bad
+        prompts.append(record)
     greedy = greedy_continuation(model, prompts[0]["token_ids"], arguments.greedy_tokens)
+    greedy_record: dict[str, Any] = {"prompt_index": 0, "steps": greedy}
+    if len(greedy) < arguments.greedy_tokens:
+        greedy_record["stopped"] = "non_finite"
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "model_type": model.config.model_type,
@@ -747,12 +922,14 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
         "vocabulary_size": prompts[0]["logits_shape"][1],
         "provenance": provenance(model_dir, arguments),
         "prompts": prompts,
-        "greedy": {"prompt_index": 0, "steps": greedy},
+        "greedy": greedy_record,
     }
     if arguments.decode_tokens_from is not None:
         prompt_ids = prompts[0]["token_ids"]
         tokens, source = teacher_tokens(arguments.decode_tokens_from, prompt_ids, manifest["vocabulary_size"])
         manifest["decode_consistency"] = decode_record(model, prompt_ids, tokens, source, staging)
+    if arguments.prompt_decode:
+        manifest["prompt_decode"] = prompt_decode_record(model, prompts, staging)
     return manifest
 
 
@@ -810,11 +987,18 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="truth bundle whose greedy tokens are teacher-forced to record decode self-consistency",
     )
+    parser.add_argument(
+        "--prompt-decode",
+        action="store_true",
+        help="also record the longest prompt's cached decode after a quarter-prompt prefill",
+    )
     arguments = parser.parse_args(argv)
     if arguments.device == "mps" and arguments.dtype == "float64":
         parser.error("--device mps has no float64 kernels")
     if arguments.bf16_resident and (arguments.device, arguments.attn_implementation) != ("cpu", "eager"):
         parser.error("--bf16-resident evaluates the eager CPU graph only")
+    if arguments.bf16_resident and arguments.dtype in HALF_DTYPES:
+        parser.error("--bf16-resident needs --dtype float32 or float64")
     if arguments.prompts is None:
         arguments.prompts = list(DEFAULT_PROMPTS)
     if arguments.greedy_tokens < 1:
@@ -840,7 +1024,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
     try:
         manifest = build_bundle(arguments, staging)
-        (staging / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+        (staging / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True, allow_nan=False) + "\n")
         publish(staging, destination)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

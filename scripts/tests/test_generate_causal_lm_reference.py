@@ -245,18 +245,21 @@ class ReferenceGeneratorTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             REFERENCE.parse_arguments(["--model-dir", "m", "--output", "o", "--greedy-tokens", "0"])
 
-    def test_dtype_defaults_to_float32_and_accepts_float64_and_bfloat16(self) -> None:
-        """The evaluation dtype is F32 unless F64 or BF16 is requested; others are refused."""
+    def test_dtype_defaults_to_float32_and_accepts_float64_and_both_half_precisions(self) -> None:
+        """The evaluation dtype is F32 unless F64, BF16, or F16 is requested; others are refused."""
 
         base = ["--model-dir", "m", "--output", "o"]
         self.assertEqual(REFERENCE.parse_arguments(base).dtype, "float32")
-        self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", "float64"]).dtype, "float64")
-        self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", "bfloat16"]).dtype, "bfloat16")
-        self.assertEqual(REFERENCE.DTYPES, ("float32", "float64", "bfloat16"))
-        with self.assertRaises(SystemExit):
-            REFERENCE.parse_arguments(base + ["--dtype", "float16"])
-        with self.assertRaises(ValueError):
-            REFERENCE.load_model(Path("m"), "float16")
+        for dtype in ("float64", "bfloat16", "float16"):
+            self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", dtype]).dtype, dtype)
+        self.assertEqual(REFERENCE.DTYPES, ("float32", "float64", "bfloat16", "float16"))
+        self.assertEqual(REFERENCE.HALF_DTYPES, ("bfloat16", "float16"))
+        for dtype in ("half", "float8", "fp16"):
+            with self.subTest(dtype=dtype):
+                with self.assertRaises(SystemExit):
+                    REFERENCE.parse_arguments(base + ["--dtype", dtype])
+                with self.assertRaises(ValueError):
+                    REFERENCE.load_model(Path("m"), dtype)
 
     def test_truncation_keeps_the_first_layers(self) -> None:
         """Truncation cuts the depth and the layer schedule; impossible depths are refused."""
@@ -365,10 +368,11 @@ class ReferenceGeneratorTests(unittest.TestCase):
         """A BF16 or unknown target is refused before any file is read."""
 
         missing = Path("no-such-checkpoint")
-        with self.assertRaisesRegex(ValueError, "wider"):
-            REFERENCE.require_bf16_resident_inputs(missing, "bfloat16")
+        for dtype in ("bfloat16", "float16"):
+            with self.assertRaisesRegex(ValueError, "wider"):
+                REFERENCE.require_bf16_resident_inputs(missing, dtype)
         with self.assertRaisesRegex(ValueError, "dtype must be one of"):
-            REFERENCE.require_bf16_resident_inputs(missing, "float16")
+            REFERENCE.require_bf16_resident_inputs(missing, "float8")
         with self.assertRaises(FileNotFoundError):
             REFERENCE.require_bf16_resident_inputs(missing, "float64")
 
@@ -435,7 +439,7 @@ class ModelLoadingTests(unittest.TestCase):
         self.assertEqual(len(truncated.model.layers), 2)
         self.assertEqual(truncated.config.layer_types, ["sliding_attention", "full_attention"])
         with self.assertRaises(ValueError):
-            REFERENCE.load_causal_lm(GPT_OSS_FIXTURE, "float16")
+            REFERENCE.load_causal_lm(GPT_OSS_FIXTURE, "float8")
 
     def test_float64_references_hold_f64_parameters_and_agree_with_f32(self) -> None:
         """An F64 reference casts every parameter to F64 and stays within F32 rounding of F32 logits."""
@@ -521,7 +525,7 @@ class ModelLoadingTests(unittest.TestCase):
         truncated, _persistent = REFERENCE.instantiation_buffers(GPT_OSS_FIXTURE, "float32", layers=1)
         self.assertEqual(set(truncated), {"model.rotary_emb.inv_freq", "model.rotary_emb.original_inv_freq"})
         with self.assertRaises(ValueError):
-            REFERENCE.instantiation_buffers(GPT_OSS_FIXTURE, "float16")
+            REFERENCE.instantiation_buffers(GPT_OSS_FIXTURE, "float8")
 
     def test_buffer_mismatches_report_every_difference(self) -> None:
         """Dtype, value, shape, one-sided, and persistent floating buffers are reported; integer buffers are not."""
@@ -716,7 +720,7 @@ class GraphAndDecodeArgumentTests(unittest.TestCase):
                 REFERENCE.load_model(missing, "float32", bf16_resident=True, attention=attention, device=device)
 
     def test_step_gaps_are_each_steps_largest_absolute_difference(self) -> None:
-        """Gaps are per-step maxima over the vocabulary; non-finite or misshapen logits are refused."""
+        """Gaps are per-step maxima over the vocabulary; a non-finite step has none, misshapen logits are refused."""
 
         self.assertEqual(
             REFERENCE.step_gaps([[1.0, 2.0, 3.0], [0.0, -1.0, 5.0]], [[1.0, 2.5, 2.0], [0.0, -1.0, 5.0]]),
@@ -724,9 +728,13 @@ class GraphAndDecodeArgumentTests(unittest.TestCase):
         )
         # The difference is taken in F64: 1 + 2^-23 and 1 are F32 neighbours.
         self.assertEqual(REFERENCE.step_gaps([[1.0 + 2.0**-23]], [[1.0]]), [2.0**-23])
+        # A non-finite value on either side leaves its step without a gap; the other steps keep theirs.
+        self.assertEqual(
+            REFERENCE.step_gaps([[float("nan"), 0.0], [1.0, 2.0], [0.0, 0.0]],
+                                [[0.0, 0.0], [1.5, 2.0], [0.0, float("-inf")]]),
+            [None, 0.5, None],
+        )
         for cached, stateless, message in (
-            ([[float("nan"), 0.0]], [[0.0, 0.0]], "non-finite"),
-            ([[0.0, 0.0]], [[0.0, float("inf")]], "non-finite"),
             ([[0.0], [0.0]], [[0.0]], "different numbers of steps"),
             ([[0.0, 1.0]], [[0.0]], "differ in length"),
             ([[]], [[]], "differ in length or are empty"),
@@ -895,6 +903,319 @@ class GraphAndDecodeModelTests(unittest.TestCase):
             record = manifest["decode_consistency"]
             self.assertEqual([step["fed_token"] for step in record["steps"]], TOKENS[4:])
             self.assertEqual(record["tokens_source"]["manifest_sha256"], REFERENCE.sha256_file(truth / "reference.json"))
+
+
+
+class FixedTokenizer:
+    """Tokenizes the test prompts to fixed IDs, as the tiny fixtures carry no tokenizer."""
+
+    #: Token IDs of each test prompt; ``"b"`` is the longest.
+    IDS = {"a": TOKENS[:4], "b": TOKENS, "c": [2, 4]}
+
+    def __call__(self, text, add_special_tokens=True):
+        """Returns the fixed IDs of `text`."""
+
+        return {"input_ids": list(self.IDS[text])}
+
+
+def scaled_head_copy(source: Path, destination: Path, factor: float) -> Path:
+    """Writes `source` to `destination` with its untied output head multiplied by `factor`.
+
+    A large enough factor drives the logits beyond F16's finite range (65,504)
+    while F32 evaluation stays finite, which is the official F16 overflow that
+    a bundle must record as data.
+    """
+
+    from safetensors.torch import load_file, save_file
+
+    destination.mkdir(parents=True)
+    (destination / "config.json").write_bytes((source / "config.json").read_bytes())
+    for path in REFERENCE.weight_files(source):
+        tensors = load_file(path)
+        tensors["lm_head.weight"] = tensors["lm_head.weight"] * factor
+        save_file(tensors, destination / path.name, metadata={"format": "pt"})
+    return destination
+
+
+def build_with(model, arguments: list, staging: Path) -> dict:
+    """Runs `build_bundle` on `arguments` with `model` and the fixed tokenizer in place of a load."""
+
+    from unittest import mock
+
+    with mock.patch.object(REFERENCE, "load_model", return_value=(FixedTokenizer(), model)):
+        return REFERENCE.build_bundle(REFERENCE.parse_arguments(arguments), staging)
+
+
+class HalfPrecisionAndPromptDecodeArgumentTests(unittest.TestCase):
+    """Check the float16 dtype, the prompt-decode option, and their refusals without PyTorch."""
+
+    def test_half_precision_dtypes_are_refused_with_bf16_resident(self) -> None:
+        """`--bf16-resident` widens BF16 weights, so it is refused with either half-precision dtype."""
+
+        base = ["--model-dir", "m", "--output", "o", "--bf16-resident"]
+        self.assertTrue(REFERENCE.parse_arguments(base).bf16_resident)
+        self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", "float64"]).dtype, "float64")
+        for dtype in REFERENCE.HALF_DTYPES:
+            with self.subTest(dtype=dtype), self.assertRaises(SystemExit):
+                REFERENCE.parse_arguments(base + ["--dtype", dtype])
+        # MPS runs F16 and BF16 but not F64.
+        mps = ["--model-dir", "m", "--output", "o", "--device", "mps"]
+        self.assertEqual(REFERENCE.parse_arguments(mps + ["--dtype", "float16"]).dtype, "float16")
+        REFERENCE.require_graph("float16", "sdpa", "mps")
+        with self.assertRaises(SystemExit):
+            REFERENCE.parse_arguments(mps + ["--dtype", "float64"])
+
+    def test_prompt_decode_is_off_by_default(self) -> None:
+        """Only `--prompt-decode` adds the quarter-prefill record."""
+
+        base = ["--model-dir", "m", "--output", "o"]
+        self.assertFalse(REFERENCE.parse_arguments(base).prompt_decode)
+        self.assertTrue(REFERENCE.parse_arguments(base + ["--prompt-decode"]).prompt_decode)
+        self.assertEqual(REFERENCE.PROMPT_DECODE_FILE, "decode-prompt.f32le")
+
+    def test_longest_prompt_and_quarter_prefill_follow_the_gate_protocol(self) -> None:
+        """The longest prompt is decoded (the first of equal ones) after `max(T // 4, 1)` prefill tokens."""
+
+        prompts = [{"token_ids": [1] * 5}, {"token_ids": [1] * 13}, {"token_ids": [1] * 13}, {"token_ids": [1] * 8}]
+        self.assertEqual(REFERENCE.longest_prompt(prompts), 1)
+        self.assertEqual(REFERENCE.longest_prompt(prompts[:1]), 0)
+        with self.assertRaisesRegex(ValueError, "no prompt"):
+            REFERENCE.longest_prompt([])
+        self.assertEqual(
+            [REFERENCE.quarter_prefill(tokens) for tokens in (1, 3, 4, 7, 8, 13, 1237)],
+            [1, 1, 1, 1, 2, 3, 309],
+        )
+        with self.assertRaisesRegex(ValueError, "at least one token"):
+            REFERENCE.quarter_prefill(0)
+
+
+@unittest.skipUnless(HAS_TORCH, "needs PyTorch and Transformers")
+class HalfPrecisionAndPromptDecodeModelTests(unittest.TestCase):
+    """Check float16 evaluations, prompt-decode records, non-finite records, and unchanged default outputs."""
+
+    def test_float16_references_hold_f16_parameters_and_stay_within_f16_rounding(self) -> None:
+        """F16 runs on the CPU (and MPS when present) keep F32 rotary tables and stay near F32.
+
+        The tiny fixture's logits are below 1.3 in magnitude, and F16's unit
+        roundoff ``2^-11`` accumulated through four blocks moved them by
+        ``3.1e-3`` on both devices when this test was written. The bound
+        ``8e-3`` lies between that and the BF16 evaluation's ``1.7e-2``, so a
+        graph that silently ran in BF16 fails, and a zero deviation (a graph
+        that silently ran in F32) fails too.
+        """
+
+        import torch
+
+        single = REFERENCE.prompt_logits(REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32"), TOKENS)
+        bfloat = REFERENCE.prompt_logits(REFERENCE.load_causal_lm(QWEN2_FIXTURE, "bfloat16"), TOKENS)
+        self.assertGreater(float((bfloat - single).abs().max()), 8e-3)
+        devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float16", device=device)
+                self.assertEqual({parameter.dtype for parameter in model.parameters()}, {torch.float16})
+                tables = {buffer.dtype for name, buffer in model.named_buffers() if name.endswith("inv_freq")}
+                self.assertEqual(tables, {torch.float32})
+                logits = REFERENCE.prompt_logits(model, TOKENS)
+                self.assertEqual((logits.device.type, logits.dtype), ("cpu", torch.float32))
+                deviation = float((logits - single).abs().max())
+                self.assertGreater(deviation, 0.0)
+                self.assertLess(deviation, 8e-3)
+
+    def test_prompt_decode_equals_a_hand_written_quarter_prefill_decode(self) -> None:
+        """The record's rows are the prefill's own logits followed by one cached decode per later token."""
+
+        import torch
+
+        model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        prefill = REFERENCE.quarter_prefill(len(TOKENS))
+        self.assertEqual(prefill, 2)
+        rows = []
+        with torch.no_grad():
+            output = model(input_ids=torch.tensor([TOKENS[:prefill]]), use_cache=True)
+            rows.extend(output.logits[0].tolist())
+            for token in TOKENS[prefill:]:
+                output = model(input_ids=torch.tensor([[token]]), past_key_values=output.past_key_values, use_cache=True)
+                rows.append(output.logits[0, -1].tolist())
+        decoded = REFERENCE.prompt_decode_logits(model, TOKENS, prefill)
+        self.assertEqual(decoded.tolist(), rows)
+        # Cached decoding agrees with the stateless pass to F32 rounding, not bit for bit.
+        self.assertLess(float((decoded - REFERENCE.prompt_logits(model, TOKENS)).abs().max()), 1e-5)
+        for bad in (0, len(TOKENS) + 1):
+            with self.assertRaisesRegex(ValueError, "cannot prefill"):
+                REFERENCE.prompt_decode_logits(model, TOKENS, bad)
+        vocabulary = model.config.vocab_size
+        with tempfile.TemporaryDirectory() as root:
+            staging = Path(root)
+            manifest = build_with(
+                model,
+                ["--model-dir", str(QWEN2_FIXTURE), "--output", str(staging / "out"), "--prompt", "a",
+                 "--prompt", "b", "--prompt", "c", "--greedy-tokens", "2", "--prompt-decode"],
+                staging,
+            )
+            record = manifest["prompt_decode"]
+            self.assertEqual(
+                {key: record[key] for key in ("prompt_index", "prefill_tokens", "logits_file", "logits_shape", "finite")},
+                {"prompt_index": 1, "prefill_tokens": 2, "logits_file": "decode-prompt.f32le",
+                 "logits_shape": [len(TOKENS), vocabulary], "finite": True},
+            )
+            self.assertNotIn("first_non_finite", record)
+            self.assertEqual(record["logits_sha256"], REFERENCE.sha256_file(staging / record["logits_file"]))
+            self.assertEqual(read_rows(staging / record["logits_file"], vocabulary), rows)
+            REFERENCE.json.dumps(manifest, allow_nan=False)
+
+    def test_an_overflowing_evaluation_is_recorded_as_non_finite_data(self) -> None:
+        """F16 logits beyond 65,504 become infinite: prompts, greedy, and decode records say so in strict JSON."""
+
+        import torch
+
+        plain = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        largest = float(REFERENCE.prompt_logits(plain, TOKENS).abs().max())
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            # Scale the head so that F32 logits reach about 1e6, far beyond F16's range.
+            overflowing = scaled_head_copy(QWEN2_FIXTURE, root / "overflowing", 1e6 / largest)
+            wide = REFERENCE.prompt_logits(REFERENCE.load_causal_lm(overflowing, "float32"), TOKENS)
+            self.assertTrue(bool(torch.isfinite(wide).all()))
+            self.assertGreater(float(wide.abs().max()), 65504.0)
+            model = REFERENCE.load_causal_lm(overflowing, "float16")
+            truth = write_truth_manifest(root / "truth", TOKENS[:4], TOKENS[4:])
+            staging = root / "staging"
+            staging.mkdir()
+            manifest = build_with(
+                model,
+                ["--model-dir", str(overflowing), "--output", str(root / "out"), "--prompt", "a", "--prompt", "b",
+                 "--greedy-tokens", "3", "--dtype", "float16", "--decode-tokens-from", str(truth), "--prompt-decode"],
+                staging,
+            )
+            text = REFERENCE.json.dumps(manifest, indent=1, sort_keys=True, allow_nan=False)
+            self.assertEqual(REFERENCE.json.loads(text), manifest)
+            logits = REFERENCE.prompt_logits(model, TOKENS[:4])
+            expected = REFERENCE.first_non_finite(logits)
+            self.assertIsNotNone(expected)
+            prompt = manifest["prompts"][0]
+            self.assertEqual((prompt["finite"], prompt["first_non_finite"]), (False, expected))
+            flat = expected["position"] * logits.shape[1] + expected["token"]
+            self.assertFalse(math.isfinite(float(logits.reshape(-1)[flat])))
+            self.assertTrue(bool(torch.isfinite(logits.reshape(-1)[:flat]).all()))
+            if not REFERENCE.all_finite(logits[-1]):
+                self.assertEqual((prompt["last_top1"], prompt["last_margin"]), (None, None))
+            self.assertEqual((manifest["greedy"]["steps"], manifest["greedy"]["stopped"]), ([], "non_finite"))
+            decode = manifest["decode_consistency"]
+            self.assertFalse(decode["finite"])
+            self.assertIsNone(decode["max_abs_gap"])
+            self.assertIn(decode["first_non_finite"]["logits"], ("cached", "stateless"))
+            self.assertEqual(decode["first_non_finite"]["position"], 4 + decode["first_non_finite"]["step"])
+            self.assertFalse(manifest["prompt_decode"]["finite"])
+            self.assertIn("first_non_finite", manifest["prompt_decode"])
+            # The non-finite logits themselves are written, byte for byte.
+            self.assertEqual((staging / "logits-0.f32le").read_bytes(), REFERENCE.tensor_f32le(logits))
+
+    def test_greedy_stops_before_the_first_non_finite_step(self) -> None:
+        """A continuation that turns non-finite mid-way keeps its finite steps and records why it stopped."""
+
+        import torch
+
+        class TurnsNonFinite:
+            """Returns the wrapped model's logits, made NaN from the third cached call on."""
+
+            def __init__(self, model):
+                """Wraps a loaded model."""
+
+                self.model, self.device, self.calls = model, model.device, 0
+                self.config = model.config
+
+            def __call__(self, **inputs):
+                """Runs the model and poisons its logits once two calls have returned."""
+
+                output = self.model(**inputs)
+                self.calls += 1
+                if self.calls > 2 and inputs.get("use_cache"):
+                    output.logits = torch.full_like(output.logits, float("nan"))
+                return output
+
+        model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        honest = REFERENCE.greedy_continuation(model, TOKENS[:4], 4)
+        poisoned = REFERENCE.greedy_continuation(TurnsNonFinite(model), TOKENS[:4], 4)
+        self.assertEqual(len(honest), 4)
+        self.assertEqual(poisoned, honest[:2])
+        with tempfile.TemporaryDirectory() as root:
+            staging = Path(root)
+            manifest = build_with(
+                TurnsNonFinite(model),
+                ["--model-dir", str(QWEN2_FIXTURE), "--output", str(staging / "out"), "--prompt", "a",
+                 "--greedy-tokens", "4"],
+                staging,
+            )
+        # The prompt pass is the first call, so the cached prefill and one decode stay finite.
+        self.assertEqual(manifest["greedy"]["stopped"], "non_finite")
+        self.assertEqual(manifest["greedy"]["steps"], honest[:1])
+        self.assertNotIn("finite", manifest["prompts"][0])
+
+    def test_default_outputs_are_those_of_the_previous_protocol(self) -> None:
+        """Finite float32 and bfloat16 bundles hold exactly what the generator wrote before these options.
+
+        The previous protocol is restated here by hand: one uncached pass per
+        prompt, a cached greedy continuation of prompt 0 margin by margin, and
+        cached against stateless decode rows. Every logits file must equal it
+        byte for byte, and the manifest records must carry no new key except
+        the decode record's ``finite`` flag.
+        """
+
+        import torch
+
+        def previous(model, prompts, steps, tokens):
+            """Returns the logits bytes, greedy steps, and decode bytes of the previous protocol."""
+
+            files = {}
+            with torch.no_grad():
+                for index, ids in enumerate(prompts):
+                    logits = model(input_ids=torch.tensor([ids]), use_cache=False).logits[0].to(torch.float32)
+                    files[f"logits-{index}.f32le"] = logits.contiguous().numpy().astype("<f4").tobytes()
+                greedy = []
+                output = model(input_ids=torch.tensor([prompts[0]]), use_cache=True)
+                for _ in range(steps):
+                    token, margin = REFERENCE.top_two_margin(output.logits[0, -1].to(torch.float32).tolist())
+                    greedy.append({"token": token, "margin": margin})
+                    output = model(input_ids=torch.tensor([[token]]), past_key_values=output.past_key_values, use_cache=True)
+                cached = []
+                output = model(input_ids=torch.tensor([prompts[0]]), use_cache=True)
+                for token in tokens:
+                    output = model(input_ids=torch.tensor([[token]]), past_key_values=output.past_key_values, use_cache=True)
+                    cached.append(output.logits[0, -1].to(torch.float32))
+                stateless = model(input_ids=torch.tensor([prompts[0] + tokens]), use_cache=False).logits
+                stateless = stateless[0, len(prompts[0]):].to(torch.float32).contiguous()
+            files["decode-cached.f32le"] = torch.stack(cached).numpy().astype("<f4").tobytes()
+            files["decode-stateless.f32le"] = stateless.numpy().astype("<f4").tobytes()
+            return files, greedy
+
+        for dtype in ("float32", "bfloat16"):
+            with self.subTest(dtype=dtype), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, dtype)
+                truth = write_truth_manifest(root / "truth", TOKENS[:4], TOKENS[4:])
+                staging = root / "staging"
+                staging.mkdir()
+                manifest = build_with(
+                    model,
+                    ["--model-dir", str(QWEN2_FIXTURE), "--output", str(root / "out"), "--prompt", "a",
+                     "--prompt", "c", "--greedy-tokens", "3", "--dtype", dtype, "--decode-tokens-from", str(truth)],
+                    staging,
+                )
+                files, greedy = previous(model, [TOKENS[:4], [2, 4]], 3, TOKENS[4:])
+                self.assertEqual(sorted(path.name for path in staging.iterdir()), sorted(files))
+                for name, payload in files.items():
+                    self.assertEqual((staging / name).read_bytes(), payload, name)
+                self.assertEqual(manifest["greedy"], {"prompt_index": 0, "steps": greedy})
+                for prompt in manifest["prompts"]:
+                    self.assertEqual(
+                        set(prompt),
+                        {"text", "token_ids", "logits_file", "logits_shape", "logits_sha256", "last_top1", "last_margin"},
+                    )
+                decode = manifest["decode_consistency"]
+                self.assertIs(decode["finite"], True)
+                self.assertNotIn("first_non_finite", decode)
+                self.assertNotIn("prompt_decode", manifest)
 
 
 if __name__ == "__main__":

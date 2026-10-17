@@ -70,14 +70,21 @@ class HalfPrecisionCalibrationRecordTests(unittest.TestCase):
         self.assertTrue(record["not_run"], "the Burn half-precision gates have not run")
 
     def test_f16_runs_are_bounded_only_as_an_upper_limit(self):
-        """The record says the BF16 bounds do not calibrate F16 runs, for which no official bundle exists."""
+        """The record says its BF16 bounds do not calibrate F16 runs, for which its generator wrote no bundle.
+
+        That generator is historical: the current one writes ``float16``
+        graphs, from which F16 runs are now calibrated on their own (see
+        ``tests/support/half_precision_calibration.rs``), so this record's
+        upper-limit note describes its own campaign only.
+        """
         notes = [note for note in self.record["notes"] if "F16" in note and "upper limit" in note]
         self.assertEqual(len(notes), 1)
         self.assertIn("do not reflect F16 rounding", notes[0])
+        self.assertIn("The generator writes no float16 bundle", notes[0])
         generator = (ROOT / "scripts/generate_causal_lm_reference.py").read_text()
         dtypes = re.search(r"^DTYPES = \(([^)]*)\)", generator, re.MULTILINE)
         self.assertIsNotNone(dtypes)
-        self.assertNotIn('"float16"', dtypes.group(1), "the generator now writes F16 twins; calibrate F16 runs from them")
+        self.assertIn('"float16"', dtypes.group(1), "the current generator writes the F16 graphs that calibrate F16 runs")
 
     def test_logs_and_runner_scripts_match_their_digests(self):
         """Every committed evidence file is authenticated by its recorded SHA-256."""
