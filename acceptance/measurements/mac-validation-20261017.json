@@ -97,7 +97,7 @@
     "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
     "9a9c7308cf233f90ccbee80c0156efdf4cceea27"
    ],
-   "summary": "At c2936fe the packed Q4/Q8 Metal kernel test and four ignored lib Metal tests pass (per-row Q4 launches for F32 activations, Qwen3.5 projection shapes, 2-bit refusal, exact packed transpose). Both Muse-Glimmer-30B conversions reproduce the authenticated Q8/G64 and Q4/G64 Burnpacks byte for byte, with the test's three-open shard order now exercised on real weights; both Muse packed Metal smokes pass (top-1 85068 and 90, cached cosine 1.0). The Qwen3-30B-A3B Q8 and Q4 conversions are byte-identical to the authenticated Burnpacks, and their smokes and kernel audits pass with logit, trace and decode digests identical to the 8a4404a large replay and 1,345 of 1,345 packed launches. An alternating A/B against 9a9c730 shows c15f24e raising the packed Muse Q8 smoke's peak by about 1.6 GB."
+   "summary": "At c2936fe the packed Q4/Q8 Metal kernel test and four ignored lib Metal tests pass (per-row Q4 launches for F32 activations, Qwen3.5 projection shapes, 2-bit refusal, exact packed transpose). Both Muse-Glimmer-30B conversions reproduce the authenticated Q8/G64 and Q4/G64 Burnpacks byte for byte, with the test's three-open shard order now exercised on real weights; both Muse packed Metal smokes pass (top-1 85068 and 90, cached cosine 1.0). The Qwen3-30B-A3B Q8 and Q4 conversions are byte-identical to the authenticated Burnpacks, and their smokes and kernel audits pass with logit, trace and decode digests identical to the 8a4404a large replay and 1,345 of 1,345 packed launches. In the two Q8 rounds alternated with 9a9c730, the head's packed Muse Q8 smoke peaked 1.60 GB higher in one and 12.2 GB lower in the other, and its non-alternated gate run also peaked at 45.68 GB: an unexplained peak variance, not attributed to c15f24e (findings)."
   }
  ],
  "tallies": [
@@ -372,7 +372,7 @@
   },
   {
    "gates": "CUDA and ROCm compile checks, dependency advisory and license checks, coverage, the consolidated source gate, warning-denied Clippy and the full test suite at the committed c2936fe tree, and a full `cargo test --features metal` run",
-   "reason": "Not part of this round. fmt, all-feature Clippy and the default-feature test suite ran on the uncommitted tree whose content became c2936fe (checks); the focused feed_forward tests ran at the clean c2936fe tree on 1.92.0 and stable."
+   "reason": "Not part of this round. All-feature Clippy and the default-feature test suite ran on the uncommitted tree whose content became c2936fe (checks), and no fmt run of that tree is logged; the focused feed_forward tests ran at the clean c2936fe tree on 1.92.0 and stable."
   }
  ],
  "findings": [
@@ -712,14 +712,25 @@
    ]
   },
   {
-   "id": "c15f24e-raises-muse-q8-packed-peak",
-   "status": "open: memory observation, no bound applies (integrator decision)",
-   "summary": "In a same-session alternating A/B, the packed Muse-Glimmer-30B Q8 Metal smoke peaked at 45.68 GB in two of three c2936fe rounds against 44.09 and 44.08 GB for c15f24e's parent 9a9c730 (+1.59 GB, +3.6%); the large replay recorded 43.99 GB at 4f9502a. The third head round peaked at 31.87 GB with about the same instruction count, so single-run packed peaks vary widely. Q4 moved the other way (29.27 GB against 29.49 GB). By the quantized group's reading of the load plan, the head binary now allocates the packed lm_head (planned F16 size 2.69 GB) first, from the sidecar, while embed_tokens was already first in shard 1. Every round passes with identical top-1 tokens and cached cosine 1.0.",
+   "id": "muse-q8-packed-peak-variance",
+   "status": "open: unexplained memory variance, no bound applies; more alternated rounds needed (integrator decision)",
+   "summary": "In the two same-session Q8 rounds alternated with c15f24e's parent 9a9c730, the packed Muse-Glimmer-30B Q8 Metal smoke at c2936fe peaked 1.60 GB above its control in one (round 2: 45.68 against 44.08 GB) and 12.2 GB below it in the other (round 1: 31.87 against 44.09 GB), with about the same instruction count in every run. The head's gate run that morning (09:43Z to 09:54Z), outside the alternation and with no paired control, also peaked at 45.68 GB; the large replay recorded 43.99 GB at 4f9502a. The two alternated rounds disagree in sign, so the A/B attributes no change to c15f24e: this is an unexplained peak variance, to investigate with more alternated rounds. In the one alternated Q4 round the head peaked 0.21 GB lower (29.27 against 29.49 GB). By the quantized group's reading of the load plan, the head binary now allocates the packed lm_head (planned F16 size 2.69 GB) first, from the sidecar, while embed_tokens was already first in shard 1. Every round passes with identical top-1 tokens and cached cosine 1.0.",
    "evidence": [
     {
      "log": "mac-validation-20261017/quantized/muse-q8-smoke.log",
      "quotes": [
-      "         45678639968  peak memory footprint"
+      "== start 2026-10-17T09:43:27+00:00",
+      "         45678639968  peak memory footprint",
+      "end=2026-10-17T09:54:05+00:00"
+     ]
+    },
+    {
+     "log": "mac-validation-20261017/quantized/ab-9a9c730/summary.log",
+     "quotes": [
+      "2026-10-17T12:20:34+00:00 muse-q8-smoke.r1-control",
+      "2026-10-17T12:31:40+00:00 muse-q8-smoke.r1-head",
+      "2026-10-17T12:42:47+00:00 muse-q8-smoke.r2-control",
+      "2026-10-17T12:53:56+00:00 muse-q8-smoke.r2-head"
      ]
     },
     {

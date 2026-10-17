@@ -125,8 +125,8 @@
 //! SmolLM3-3B's prompt-logit test (prompt 1 mean `0.0971` against `0.0947`),
 //! and the cached decode steps of Qwen3-4B (`0.5625`) and SmolLM3-3B
 //! (`0.516`) against the `0.5` self-consistency tolerance; the record traces
-//! these to the rule's width (Transformers' own SDPA and MPS BF16 graphs fail
-//! it too) and to the twice-rounded half-precision SiLU of
+//! these to the rule's width (some of Transformers' own SDPA and MPS BF16
+//! graphs fail it too) and to the twice-rounded half-precision SiLU of
 //! `feed_forward::apply_activation`. To run the Flex/BF16 gate (set `f16`,
 //! `--features metal`, and the `metal::` tests for Metal/F16):
 //!

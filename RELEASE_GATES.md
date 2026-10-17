@@ -468,17 +468,24 @@ round repeats. The record promotes no checkpoint.
   weights); the Muse packed Metal smokes and the Qwen3-30B-A3B smokes and
   kernel audits pass, the latter with logit, trace, and decode digests
   identical to the large replay; the packed-kernel and lib Metal tests pass.
-  An alternating A/B against `9a9c730` shows `c15f24e` raising the packed Muse
-  Q8 smoke's peak footprint by about 1.6 GB (45.7 against 44.1 GB) in two of
-  three rounds.
-- Diagnostics: Transformers 5.2.0's own BF16 graphs other than the
-  calibrating CPU eager one fail the same `1.2` rule on SmolLM-135M, Qwen3-4B,
-  SmolLM3-3B, and gemma-3-4b-it, and its own BF16 cached decode departs from
-  its stateless pass by up to `1.75` (Qwen2-7B), while F32 decode stays within
-  `2.6e-4` in both implementations. Burn's half-precision SiLU
-  (`x * sigmoid(x)` with the sigmoid rounded first) alone accounts for
-  SmolLM-135M's prompt-1 maximum; evaluating it in F32 turns no gate green,
-  so it was not changed. No bound, tolerance, or slack was changed.
+  In the two Q8 rounds alternated with `9a9c730`, the packed Muse Q8 smoke's
+  peak footprint at `c2936fe` was 1.60 GB higher in one (45.68 against
+  44.08 GB) and 12.2 GB lower in the other (31.87 against 44.09 GB); the
+  head's earlier gate run, outside the alternation, also peaked at 45.68 GB.
+  This is an unexplained peak variance, not an effect attributed to
+  `c15f24e`.
+- Diagnostics: scored against the same bundles and bounds, some of
+  Transformers 5.2.0's own BF16 graphs fail the same `1.2` rule: CPU SDPA and
+  MPS (eager and SDPA) on SmolLM-135M, MPS (eager and SDPA) on Qwen3-4B and
+  gemma-3-4b-it, and MPS SDPA on SmolLM3-3B; every graph passes on Qwen2-7B
+  and Llama-3.1-8B. Transformers' own BF16 cached decode departs from its
+  stateless pass by up to `1.75` (Qwen2-7B), while its F32 decode stays
+  within `2.6e-4` on all six diagnosed checkpoints; Burn's F32 decode,
+  measured on Qwen3-4B, SmolLM3-3B, and gemma-3-4b-it only, stays within
+  `2.5e-4`. Burn's half-precision SiLU (`x * sigmoid(x)` with the sigmoid
+  rounded first) alone accounts for SmolLM-135M's prompt-1 maximum;
+  evaluating it in F32 turns no gate green, so it was not changed. No bound,
+  tolerance, or slack was changed.
 
 The round did not run the Qwen3.5-0.8B and DeepSeek-V2-Lite gates (last at
 `f4c56c4`), the full gpt-oss gates (last at `c15f24e`), the Muse official
@@ -495,6 +502,10 @@ Still open after these replays, the follow-ups, and the Mac validation round:
   F16 row;
 - Q8/Q4 quantized-reference and quality gates (Qwen3.8, Qwen3-30B-A3B, Muse),
   and an official reference for Qwen3-30B-A3B (no bundle exists);
+- the Qwen3.8-27B Q8/Q4 create-only conversions and packed Metal smokes under
+  `c15f24e`'s install order (last run at `8a4404a`; the Muse-Glimmer-30B
+  counterparts reran at `c2936fe` in the Mac validation round, and its
+  official gate and streaming audit at `c15f24e`);
 - the failing Flex/BF16 Llama-family and Gemma half-precision gates: a
   reviewed decision on the prompt-bound rule (its `1.2` slack over one
   official evaluation is narrower than Transformers' own BF16 spread), on
@@ -504,7 +515,9 @@ Still open after these replays, the follow-ups, and the Mac validation round:
 - the Gemma Metal/F16 profile, which cannot pass because gemma-3-4b-it
   overflows F16: refuse F16 for Gemma 3 with a contextual error, drop the
   profile, or qualify Metal in BF16;
-- the packed Muse Q8 smoke's higher peak footprint under `c15f24e` (no bound
+- the packed Muse Q8 smoke's unexplained peak variance at `c2936fe` (31.87 to
+  45.68 GB across three runs, against 44.09 and 44.08 GB for the two
+  `9a9c730` controls), to investigate with more alternated rounds (no bound
   applies);
 - real Mistral and OLMo 2 checkpoints (tiny goldens only).
 
