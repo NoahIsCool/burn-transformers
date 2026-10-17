@@ -1,0 +1,11 @@
+# Probe built at 69f8232 with an experimental comparator equivalent to c15f24e's for these checkpoints:
+# groups of at least 1 GiB first in plan order, then the physical source schedule.
+# Output lines of footprint_trace.py and the plateau computation, copied verbatim.
+qwen3.8 hoist:
+test probe_post_load_footprint ... probe loaded causal in 81.1s shard_opens=Some(18)
+peak=57129521256 at 79.27s of 84.49s samples=1554 exit=0
+qwen3.8 hoist plateau 54.924
+muse hoist:
+test probe_post_load_footprint ... probe loaded causal in 85.8s shard_opens=Some(3)
+peak=60552780688 at 79.73s of 88.89s samples=1626 exit=0
+muse hoist plateau 59.396
