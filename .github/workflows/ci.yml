@@ -14,8 +14,10 @@
 #   LLVM in its build script and runs its `llvm-config`, which needs glibc
 #   2.34+ and GCC 11+ libstdc++ (ubuntu-latest qualifies; RHEL/Alma 8 does
 #   not). To reproduce these lints on an older host, drop `cpu` from the
-#   feature list: no crate code depends on it (SUPPORT.md, "Host requirement
-#   of the `cpu` feature").
+#   feature list: no library code depends on it, only tests (SUPPORT.md,
+#   "Host requirement of the `cpu` feature").
+# - Linux's test job also runs the CubeCL CPU backend (`cpu`) against Flex
+#   and the tiny Transformers goldens, under the same glibc requirement.
 #
 # The documentation audit requires a literal doc comment on every authored
 # item, including Verus proof functions, exactly as the release gate
@@ -137,6 +139,23 @@ jobs:
         run: |
           cargo test --locked --no-fail-fast --no-default-features --features "$CPU_FEATURES" --lib --tests
           cargo test --locked --no-default-features --features "$CPU_FEATURES" --doc
+      # Burn's CubeCL CPU backend (the `cpu` feature) against Flex and the tiny
+      # Transformers goldens: the `cpu` modules of backend_parity and the three
+      # tiny-golden suites, and the router's CubeCL CPU lib tests. The family
+      # cases are #[ignore]d for their run time (the backend compiles every
+      # kernel shape with LLVM at first launch), so --include-ignored selects
+      # them. The three skipped tests fail on Burn 0.21 through a CubeCL CPU
+      # copy defect (docs/upstream/15-cubecl-cpu-reshape-copy.md). One test
+      # thread, because each test's CubeCL CPU runtime occupies every core.
+      - name: CubeCL CPU backend parity
+        if: runner.os == 'Linux'
+        run: >-
+          cargo test --locked --no-fail-fast --no-default-features --features std,flex,cpu
+          --lib --test backend_parity --test tiny_goldens_llama --test tiny_goldens_gemma
+          --test tiny_goldens_gpt_oss cpu --
+          --include-ignored --test-threads 1
+          --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex
+          --skip cpu_reshaped_strided_views_match_flex
       # qwen35_chat needs Metal to build; its argument tests create no device.
       - name: Metal example argument tests
         if: runner.os == 'macOS'
