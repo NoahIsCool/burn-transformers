@@ -15,9 +15,10 @@
 //!
 //! Weights are loaded with the strict automatic loader and cast to F32 while
 //! streaming (BF16 to F32 is exact, as in the reference). Each test runs on
-//! Flex; with the `metal` feature the same checks also run on Metal in F32.
-//! The pairing of checkpoint and bundle is verified through the bundle's
-//! SHA-256 of `config.json`.
+//! Flex; with the `metal` feature the same checks also run on Metal in F32,
+//! and with the `cuda` feature on CUDA in F32 (see [CUDA](#cuda)). The
+//! pairing of checkpoint and bundle is verified through the bundle's SHA-256
+//! of `config.json`.
 //!
 //! # Tolerance
 //!
@@ -55,11 +56,36 @@
 //! `config.json` SHA-256
 //! `54acfad3cffe057640904ca8a1e83525e6551c70c7a04c641f5a9eda0bbf64bd`) stays
 //! within `7.6e-5` on both backends against an F32 bundle.
+//!
+//! # CUDA
+//!
+//! The `cuda` module repeats the three checks on Burn's `Cuda` backend
+//! (device 0; `CUDA_VISIBLE_DEVICES` selects the GPU), built and run on the
+//! GPU host with the CUDA toolkit available (`nvcc` at build time,
+//! `$CUDA_PATH/include` for run-time kernel compilation):
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_DIR=/path/to/checkpoint \
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/path/to/reference-bundle \
+//! cargo test --release --features cuda --test llama_family_artifacts cuda_ -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! Each load first probes how the device multiplies F32 matrices
+//! (`tests/support/backend_numerics.rs`). A GPU below compute capability 8.0
+//! multiplies in F32, and the defaults above apply. From compute capability
+//! 8.0 Burn 0.21 rounds F32 matrix inputs to TF32 (10-bit mantissas), which
+//! no measured default covers: the run then requires
+//! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` and qualifies TF32 execution, not
+//! F32 numerics. No CUDA run has been recorded yet.
 
 #![cfg(feature = "flex")]
 
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
+
 use std::path::{Path, PathBuf};
 
+use backend_numerics::{MatmulPrecision, checkpoint_tolerance};
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData, backend::Backend},
@@ -159,15 +185,20 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Returns the checkpoint directory, the bundle directory, and the tolerance.
-fn environment() -> (PathBuf, PathBuf, f32) {
+///
+/// [`DEFAULT_TOLERANCE`] applies only to a device of F32 `precision`; a TF32
+/// device requires `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`.
+fn environment(precision: MatmulPrecision) -> (PathBuf, PathBuf, f32) {
     let variable = |name: &str| {
         std::env::var_os(name)
             .map(PathBuf::from)
             .unwrap_or_else(|| panic!("set {name}; see the module documentation"))
     };
-    let tolerance = std::env::var("TRANSFORMERS_LLAMA_FAMILY_TOLERANCE")
-        .map(|value| value.parse().expect("tolerance must be a float"))
-        .unwrap_or(DEFAULT_TOLERANCE);
+    let tolerance = checkpoint_tolerance(
+        "TRANSFORMERS_LLAMA_FAMILY_TOLERANCE",
+        DEFAULT_TOLERANCE,
+        precision,
+    );
     (
         variable("TRANSFORMERS_LLAMA_FAMILY_DIR"),
         variable("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR"),
@@ -183,8 +214,13 @@ fn minimum_greedy() -> usize {
 }
 
 /// Loads the checkpoint with F32 casts after checking it matches the bundle.
+///
+/// The device is probed first, so a TF32 device without an explicit
+/// tolerance fails before loading.
 fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32) {
-    let (model_dir, reference_dir, tolerance) = environment();
+    let precision = MatmulPrecision::probe::<B>(device);
+    let (model_dir, reference_dir, tolerance) = environment(precision);
+    eprintln!("F32 matrix products use {precision:?} inputs; tolerance {tolerance:e}");
     let reference = Reference::read(&reference_dir);
     let config = std::fs::read(model_dir.join("config.json")).unwrap();
     assert_eq!(
@@ -406,5 +442,37 @@ mod metal {
     #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
     fn metal_batched_prefill_matches_the_reference() {
         super::check_batched_prefill::<Metal>(&Default::default());
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    //! CUDA/F32 counterparts of the Flex checks, run serially on the GPU host.
+    //!
+    //! A GPU that rounds F32 matrix inputs to TF32 needs an explicit
+    //! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`; see the [module
+    //! documentation](super#cuda).
+
+    use burn::backend::Cuda;
+
+    /// CUDA/F32: every prompt position's logits.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn cuda_prompt_logits_match_the_reference() {
+        super::check_prompt_logits::<Cuda>(&Default::default());
+    }
+
+    /// CUDA/F32: the cached greedy continuation.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn cuda_cached_greedy_matches_the_reference() {
+        super::check_cached_greedy::<Cuda>(&Default::default());
+    }
+
+    /// CUDA/F32: a ragged left-padded batch of every prompt.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn cuda_batched_prefill_matches_the_reference() {
+        super::check_batched_prefill::<Cuda>(&Default::default());
     }
 }

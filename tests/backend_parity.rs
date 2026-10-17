@@ -123,7 +123,8 @@
 mod backend_numerics;
 
 use backend_numerics::{
-    Bound, Gap, MatmulPrecision, copy_parameters, host, identity, round_to_tf32,
+    Bound, Gap, MatmulPrecision, checkpoint_tolerance, copy_parameters, host, identity,
+    resolve_checkpoint_tolerance, round_to_tf32,
 };
 use burn::{
     backend::Flex,
@@ -1691,6 +1692,53 @@ fn matmul_precision_probe_classifies_input_rounding() {
 #[should_panic(expected = "match neither F32 nor TF32 inputs")]
 fn matmul_precision_probe_refuses_inputs_coarser_than_tf32() {
     MatmulPrecision::classify(&[32.0; 4], &[32.0; 4]);
+}
+
+/// Real-checkpoint tolerances: an override applies anywhere, the F32 default only to an F32 device.
+#[test]
+fn checkpoint_tolerances_take_overrides_and_keep_f32_defaults_to_f32_devices() {
+    for precision in [MatmulPrecision::F32, MatmulPrecision::Tf32] {
+        assert_eq!(
+            resolve_checkpoint_tolerance("TOLERANCE", Some("2.5e-2"), 1e-3, precision),
+            2.5e-2
+        );
+    }
+    assert_eq!(
+        resolve_checkpoint_tolerance("TOLERANCE", None, 1e-3, MatmulPrecision::F32),
+        1e-3
+    );
+    assert_eq!(
+        checkpoint_tolerance(
+            "TRANSFORMERS_BACKEND_PARITY_UNSET_TOLERANCE",
+            1e-3,
+            MatmulPrecision::F32
+        ),
+        1e-3
+    );
+}
+
+/// A TF32 device without an override is refused, naming the variable to set.
+#[test]
+#[should_panic(expected = "set TRANSFORMERS_EXAMPLE_TOLERANCE to the tolerance this TF32 run")]
+fn checkpoint_tolerances_require_an_override_on_tf32_devices() {
+    resolve_checkpoint_tolerance(
+        "TRANSFORMERS_EXAMPLE_TOLERANCE",
+        None,
+        1e-3,
+        MatmulPrecision::Tf32,
+    );
+}
+
+/// A malformed override is refused rather than ignored.
+#[test]
+#[should_panic(expected = "TRANSFORMERS_EXAMPLE_TOLERANCE must be a float, not \"loose\"")]
+fn checkpoint_tolerances_refuse_a_malformed_override() {
+    resolve_checkpoint_tolerance(
+        "TRANSFORMERS_EXAMPLE_TOLERANCE",
+        Some("loose"),
+        1e-3,
+        MatmulPrecision::F32,
+    );
 }
 
 /// Gaps track the largest deviation and scale, and bounds scale with the reference.

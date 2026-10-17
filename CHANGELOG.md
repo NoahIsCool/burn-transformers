@@ -570,7 +570,8 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   the MTP bank of cache transactions) and property suites for generation,
   RoPE, and connectivity; open findings are kept as ignored reproducers.
 - Ignored real-checkpoint gates for the Llama family, Gemma (including a
-  long-context bundle), and gpt-oss, and artifact-gated tokenizer and
+  long-context bundle), and gpt-oss, on Flex, Metal, and CUDA (FLAN-T5-small's
+  release gate gained a CUDA variant too), and artifact-gated tokenizer and
   chat-template parity tests for the pinned FLAN-T5-small, Qwen3.5, Nemotron-H,
   and Muse Glimmer tokenizers.
 - The configuration fuzz target covers all eleven family parsers without

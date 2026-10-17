@@ -26,7 +26,8 @@
 //! automatic loader and cast to F32 while streaming (BF16 to F32 is exact,
 //! as in the reference); the vision tower's tensors must be reported as
 //! intentionally ignored. Each test runs on Flex; with the `metal` feature
-//! the same checks also run on Metal in F32. The pairing of checkpoint and
+//! the same checks also run on Metal in F32, and with the `cuda` feature on
+//! CUDA in F32 (see [CUDA](#cuda)). The pairing of checkpoint and
 //! bundle is verified through the bundle's SHA-256 of `config.json`. An F32
 //! 4B text tower needs about 16 GiB, so run one test at a time.
 //!
@@ -87,11 +88,41 @@
 //! positions are unchanged. The cached run stores 29 of 34 layers in rings,
 //! its chunk ends deviate by `1.5e-4` and `6.9e-5`, and all 8 greedy tokens
 //! match.
+//!
+//! # CUDA
+//!
+//! The `cuda` module repeats all five checks on Burn's `Cuda` backend
+//! (device 0; `CUDA_VISIBLE_DEVICES` selects the GPU), built and run on the
+//! GPU host with the CUDA toolkit available (`nvcc` at build time,
+//! `$CUDA_PATH/include` for run-time kernel compilation):
+//!
+//! ```text
+//! TRANSFORMERS_GEMMA_DIR=/path/to/checkpoint \
+//! TRANSFORMERS_GEMMA_REFERENCE_DIR=/path/to/reference-bundle \
+//! TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/path/to/long-reference-bundle \
+//! cargo test --release --features cuda --test gemma_artifacts cuda_ -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! Each load first probes how the device multiplies F32 matrices
+//! (`tests/support/backend_numerics.rs`). A GPU below compute capability 8.0
+//! multiplies in F32, and the defaults above apply. From compute capability
+//! 8.0 Burn 0.21 rounds F32 matrix inputs to TF32 (10-bit mantissas), which
+//! no measured default covers: the short-prompt checks then require
+//! `TRANSFORMERS_GEMMA_TOLERANCE`, the long-context ones
+//! `TRANSFORMERS_GEMMA_LONG_TOLERANCE`, and the run qualifies TF32 execution,
+//! not F32 numerics. The window-decisiveness check requires the unwindowed
+//! logits to leave ten times the long tolerance, so a TF32 long tolerance
+//! must stay below a tenth of the `1.7` that removing the window moves them.
+//! No CUDA run has been recorded yet.
 
 #![cfg(feature = "flex")]
 
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
+
 use std::path::{Path, PathBuf};
 
+use backend_numerics::{MatmulPrecision, checkpoint_tolerance};
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData, backend::Backend},
@@ -203,20 +234,28 @@ fn directory(name: &str) -> PathBuf {
 }
 
 /// Returns the absolute logit tolerance: `TRANSFORMERS_GEMMA_TOLERANCE` or [`DEFAULT_TOLERANCE`].
-fn tolerance() -> f32 {
-    float_variable("TRANSFORMERS_GEMMA_TOLERANCE", DEFAULT_TOLERANCE)
+///
+/// The default applies only to a device of F32 `precision`.
+fn tolerance(precision: MatmulPrecision) -> f32 {
+    checkpoint_tolerance("TRANSFORMERS_GEMMA_TOLERANCE", DEFAULT_TOLERANCE, precision)
 }
 
 /// Returns the long-context tolerance: `TRANSFORMERS_GEMMA_LONG_TOLERANCE` or [`DEFAULT_LONG_TOLERANCE`].
-fn long_tolerance() -> f32 {
-    float_variable("TRANSFORMERS_GEMMA_LONG_TOLERANCE", DEFAULT_LONG_TOLERANCE)
+///
+/// The default applies only to a device of F32 `precision`.
+fn long_tolerance(precision: MatmulPrecision) -> f32 {
+    checkpoint_tolerance(
+        "TRANSFORMERS_GEMMA_LONG_TOLERANCE",
+        DEFAULT_LONG_TOLERANCE,
+        precision,
+    )
 }
 
-/// Parses the float environment variable `name`, or returns `default`.
-fn float_variable(name: &str, default: f32) -> f32 {
-    std::env::var(name)
-        .map(|value| value.parse().expect("tolerance must be a float"))
-        .unwrap_or(default)
+/// Probes how `device` multiplies F32 matrices and prints the result.
+fn probe<B: Backend>(device: &B::Device) -> MatmulPrecision {
+    let precision = MatmulPrecision::probe::<B>(device);
+    eprintln!("F32 matrix products use {precision:?} inputs");
+    precision
 }
 
 /// Returns how many decisive greedy tokens a run must compare.
@@ -226,9 +265,14 @@ fn minimum_greedy() -> usize {
         .unwrap_or(DEFAULT_MIN_GREEDY)
 }
 
-/// Loads the checkpoint and the short-prompt bundle.
+/// Loads the checkpoint and the short-prompt bundle; returns the model, bundle, and tolerance.
+///
+/// The device is probed first, so a TF32 device without an explicit
+/// tolerance fails before loading.
 fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32) {
-    load_bundle(&directory("TRANSFORMERS_GEMMA_REFERENCE_DIR"), device)
+    let tolerance = tolerance(probe::<B>(device));
+    let (model, reference) = load_bundle(&directory("TRANSFORMERS_GEMMA_REFERENCE_DIR"), device);
+    (model, reference, tolerance)
 }
 
 /// Loads the checkpoint with F32 casts after checking it matches the bundle in `reference_dir`.
@@ -238,9 +282,8 @@ fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32) {
 fn load_bundle<B: Backend>(
     reference_dir: &Path,
     device: &B::Device,
-) -> (AutoCausalLm<B>, Reference, f32) {
+) -> (AutoCausalLm<B>, Reference) {
     let model_dir = directory("TRANSFORMERS_GEMMA_DIR");
-    let tolerance = tolerance();
     let reference = Reference::read(reference_dir);
     let config = std::fs::read(model_dir.join("config.json")).unwrap();
     assert_eq!(
@@ -277,7 +320,7 @@ fn load_bundle<B: Backend>(
     );
     let model = loaded.into_model();
     assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
-    (model, reference, tolerance)
+    (model, reference)
 }
 
 /// Uploads one row of token IDs.
@@ -437,9 +480,9 @@ fn check_batched_prefill<B: Backend>(device: &B::Device) {
 
 /// Loads the long-context bundle and returns the model, bundle, long tolerance, and sliding window.
 fn load_long<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32, usize) {
-    let (model, reference, _) =
+    let tolerance = long_tolerance(probe::<B>(device));
+    let (model, reference) =
         load_bundle::<B>(&directory("TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR"), device);
-    let tolerance = long_tolerance();
     let AutoCausalLm::Gemma(gemma) = &model else {
         panic!("the checkpoint must load as the Gemma family");
     };
@@ -733,5 +776,50 @@ mod metal {
     #[ignore = "needs Metal, TRANSFORMERS_GEMMA_DIR, and _LONG_REFERENCE_DIR"]
     fn metal_long_context_cached_decode_wraps_the_rings() {
         super::check_long_context_cached::<Metal>(&Default::default());
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    //! CUDA/F32 counterparts of the Flex checks, run serially on the GPU host.
+    //!
+    //! A GPU that rounds F32 matrix inputs to TF32 needs explicit
+    //! tolerances; see the [module documentation](super#cuda).
+
+    use burn::backend::Cuda;
+
+    /// CUDA/F32: every prompt position's logits.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GEMMA_DIR, and _REFERENCE_DIR"]
+    fn cuda_prompt_logits_match_the_reference() {
+        super::check_prompt_logits::<Cuda>(&Default::default());
+    }
+
+    /// CUDA/F32: the cached greedy continuation.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GEMMA_DIR, and _REFERENCE_DIR"]
+    fn cuda_cached_greedy_matches_the_reference() {
+        super::check_cached_greedy::<Cuda>(&Default::default());
+    }
+
+    /// CUDA/F32: a ragged left-padded batch of every prompt.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GEMMA_DIR, and _REFERENCE_DIR"]
+    fn cuda_batched_prefill_matches_the_reference() {
+        super::check_batched_prefill::<Cuda>(&Default::default());
+    }
+
+    /// CUDA/F32: long-context logits across the sliding window.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GEMMA_DIR, and _LONG_REFERENCE_DIR"]
+    fn cuda_long_context_logits_cross_the_sliding_window() {
+        super::check_long_context_logits::<Cuda>(&Default::default());
+    }
+
+    /// CUDA/F32: cached prefill chunks that wrap the sliding rings.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GEMMA_DIR, and _LONG_REFERENCE_DIR"]
+    fn cuda_long_context_cached_decode_wraps_the_rings() {
+        super::check_long_context_cached::<Cuda>(&Default::default());
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! An accelerator test asks one question: does a GPU backend evaluate the same
 //! graph as deterministic Flex/F32, or as a pinned F32 reference? Answering it
-//! needs four pieces, kept here so every suite answers it the same way:
+//! needs five pieces, kept here so every suite answers it the same way:
 //!
 //! * [`copy_parameters`] installs one model's parameters into an independently
 //!   constructed model of the same configuration on another backend, so both
@@ -13,7 +13,9 @@
 //! * [`MatmulPrecision::probe`] detects whether a device multiplies F32
 //!   matrices in F32 or with TF32 inputs, and selects the matching bound;
 //! * [`round_to_tf32`] emulates TF32 input rounding on the host, so a CPU test
-//!   can measure its effect before any GPU is available.
+//!   can measure its effect before any GPU is available;
+//! * [`checkpoint_tolerance`] keeps the real-checkpoint gates' F32 default
+//!   tolerances to F32 devices and requires an explicit one on a TF32 device.
 //!
 //! # Why CUDA "F32" is not always F32 for matrix products
 //!
@@ -162,6 +164,52 @@ impl MatmulPrecision {
             Self::F32 => f32,
             Self::Tf32 => TF32_BOUND,
         }
+    }
+}
+
+/// Resolves a real-checkpoint gate's absolute tolerance from the environment variable `variable`.
+///
+/// See [`resolve_checkpoint_tolerance`].
+pub(crate) fn checkpoint_tolerance(
+    variable: &str,
+    default: f32,
+    precision: MatmulPrecision,
+) -> f32 {
+    resolve_checkpoint_tolerance(
+        variable,
+        std::env::var(variable).ok().as_deref(),
+        default,
+        precision,
+    )
+}
+
+/// Resolves a real-checkpoint gate's absolute tolerance from an optional override.
+///
+/// The real-checkpoint gates measured their default tolerances with F32
+/// arithmetic against F32 (or F64) references. An override (`value`, read
+/// from `variable`) applies on any device. Without one, an F32 device gets
+/// `default`; a device that rounds F32 matrix inputs to TF32 has no measured
+/// default, so the call panics, naming `variable`, rather than holding TF32
+/// arithmetic to an F32 tolerance it is not expected to meet or silently
+/// loosening the gate. Panics when `value` is not a float.
+pub(crate) fn resolve_checkpoint_tolerance(
+    variable: &str,
+    value: Option<&str>,
+    default: f32,
+    precision: MatmulPrecision,
+) -> f32 {
+    match (value, precision) {
+        (Some(value), _) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("{variable} must be a float, not {value:?}")),
+        (None, MatmulPrecision::F32) => default,
+        (None, MatmulPrecision::Tf32) => panic!(
+            "this device rounds F32 matrix inputs to TF32 (a CUDA GPU of compute capability 8.0 \
+             or newer), so the default tolerance {default:e}, measured with F32 arithmetic, does \
+             not apply; set {variable} to the tolerance this TF32 run is held to (each test \
+             prints its measured deviations) and record the result as TF32 evidence, not as F32 \
+             qualification"
+        ),
     }
 }
 

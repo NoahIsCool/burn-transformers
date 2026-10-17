@@ -173,7 +173,8 @@ python3 -I scripts/generate_causal_lm_reference.py --model-dir MODEL_DIR \
 
 Each test verifies the checkpoint/bundle pairing through the bundle's
 `config.json` SHA-256, loads strictly, and runs on Flex; adding
-`--features metal` repeats the checks on Metal. Run them one at a time:
+`--features metal` repeats the checks on Metal, and `--features cuda` on CUDA
+(tests named `cuda_*`). Run them one at a time:
 
 | Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
 | --- | --- | --- | --- |
@@ -189,6 +190,29 @@ Qualify half-precision gpt-oss runs (including Metal F16, with
 gates establish experimental validation only; none promotes a checkpoint.
 The Flex and Metal F32 runs at `f4c56c4` (below) are experimental evidence on
 the same terms.
+
+**CUDA.** Build and run the `cuda_*` tests on the GPU host with the CUDA
+toolkit available: `cudarc` reads `nvcc --version` at build time and CubeCL
+compiles kernels at run time with NVRTC against `$CUDA_PATH/include`
+(default `/usr/local/cuda`). Device 0 is used, so `CUDA_VISIBLE_DEVICES`
+selects the GPU. Every load first probes how the device multiplies F32
+matrices. A GPU below compute capability 8.0 multiplies in F32 and the
+defaults above apply. From compute capability 8.0, Burn 0.21 rounds F32
+matrix inputs to TF32, for which no default was measured: an F32 run then
+requires the gate's tolerance variables (`TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`;
+`TRANSFORMERS_GEMMA_TOLERANCE` and `_LONG_TOLERANCE`;
+`TRANSFORMERS_GPT_OSS_TOLERANCE` and `_MEAN_TOLERANCE`) and is recorded as
+TF32 evidence, not F32 qualification; half-precision gpt-oss runs keep their
+defaults. The FLAN-T5-small release gate qualifies F32 numerics at
+`atol = rtol = 1e-4` and refuses a TF32 device:
+
+```sh
+cargo test --release --no-default-features --features std,cuda,tokenizers \
+  --test flan_t5_small flan_t5_small_cuda_matches_official_reference \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+No CUDA run of any gate has been recorded yet.
 
 ### Artifact-gated tokenizer and chat-template parity
 
