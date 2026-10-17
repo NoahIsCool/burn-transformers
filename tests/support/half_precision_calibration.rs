@@ -20,8 +20,9 @@
 //! μ = (1 / (T V)) Σ_{t,v} |o[t,v] - r[t,v]|
 //! ```
 //!
-//! with each difference of two F32 values taken exactly in F64 and the sum
-//! accumulated in F64 ([`Deviation::measure`]). One rule applies to every
+//! with each difference of two F32 values taken in F64 (exact unless their
+//! binary exponents differ by more than 29) and the sum accumulated in F64
+//! ([`Deviation::measure`]). One rule applies to every
 //! checkpoint and every prompt: a half-precision run passes the prompt when
 //!
 //! ```text
@@ -596,29 +597,31 @@ pub(crate) struct Deviation {
 }
 
 impl Deviation {
-    /// Measures `actual` against `truth`, element by element.
+    /// Measures `actual` against `truth`, element by element; `label` names the comparison in panics.
     ///
-    /// Each difference of two F32 values is exact in F64, and the mean is
-    /// summed in F64 over `actual.len()` entries. On ties the first index
-    /// attaining the maximum is reported.
+    /// Each difference of two F32 values is taken in F64, where it is exact
+    /// unless their binary exponents differ by more than 29 (a 24-bit
+    /// significand shifted by `d` bits needs `24 + d` of F64's 53), and the
+    /// mean is summed in F64 over `actual.len()` entries. On ties the first
+    /// index attaining the maximum is reported.
     ///
     /// # Panics
     ///
     /// If the slices differ in length, are empty, or hold a non-finite value.
-    pub(crate) fn measure(actual: &[f32], truth: &[f32]) -> Self {
+    pub(crate) fn measure(label: &str, actual: &[f32], truth: &[f32]) -> Self {
         assert_eq!(
             actual.len(),
             truth.len(),
-            "compared logits differ in length"
+            "{label}: compared logits differ in length"
         );
-        assert!(!actual.is_empty(), "no logits to compare");
+        assert!(!actual.is_empty(), "{label}: no logits to compare");
         assert!(
             actual.iter().all(|value| value.is_finite()),
-            "the compared logits hold a non-finite value"
+            "{label}: the compared logits hold a non-finite value"
         );
         assert!(
             truth.iter().all(|value| value.is_finite()),
-            "the reference logits hold a non-finite value"
+            "{label}: the reference logits hold a non-finite value"
         );
         let mut deviation = Self {
             maximum: 0.0,
@@ -765,10 +768,12 @@ impl Calibration {
             .prompts
             .iter()
             .zip(&official.prompts)
-            .map(|(expected, rounded)| {
+            .enumerate()
+            .map(|(index, (expected, rounded))| {
                 let exact = read_logits(truth_dir, expected, truth.vocabulary);
                 let half = read_logits(official_dir, rounded, official.vocabulary);
-                let official = Deviation::measure(&half, &exact);
+                let label = format!("{} prompt {index}", official_dir.display());
+                let official = Deviation::measure(&label, &half, &exact);
                 PromptCalibration {
                     tokens: expected.token_ids.len(),
                     official,
@@ -891,7 +896,7 @@ impl HalfPrecisionGate {
             calibration.tokens * vocabulary,
             "prompt {prompt}: the reference logits must cover every position"
         );
-        let observed = Deviation::measure(actual, truth);
+        let observed = Deviation::measure(&format!("prompt {prompt}"), actual, truth);
         let bound = calibration.bound;
         eprintln!(
             "prompt {prompt}: {} tokens, max |Δ| = {:e} at position {} (bound {:e}), mean |Δ| = {:e} (bound {:e})",
@@ -929,7 +934,7 @@ impl HalfPrecisionGate {
         actual: &[f32],
         truth: &[f32],
     ) -> Deviation {
-        let observed = Deviation::measure(actual, truth);
+        let observed = Deviation::measure(label, actual, truth);
         let bound = self.bound(prompt);
         eprintln!(
             "{label}: max |Δ| = {:e} to the reference (bound {:e})",
@@ -956,7 +961,7 @@ impl HalfPrecisionGate {
         actual: &[f32],
         stateless: &[f32],
     ) -> Deviation {
-        let observed = Deviation::measure(actual, stateless);
+        let observed = Deviation::measure(label, actual, stateless);
         let tolerance = self_consistency_tolerance(self.dtype);
         eprintln!(
             "{label}: max |Δ| = {:e} to the stateless pass (tolerance {tolerance:e})",
@@ -1269,13 +1274,13 @@ mod tests {
     #[test]
     fn deviation_locates_the_first_largest_gap_and_rejects_non_finite_logits() {
         let truth = [0.0, 1.0, 2.0, 3.0];
-        let deviation = Deviation::measure(&[0.5, 1.0, 0.0, 5.0], &truth);
+        let deviation = Deviation::measure("t", &[0.5, 1.0, 0.0, 5.0], &truth);
         assert_eq!((deviation.maximum, deviation.index), (2.0, 2));
         assert_eq!(deviation.mean, 4.5 / 4.0);
-        let exact = Deviation::measure(&truth, &truth);
+        let exact = Deviation::measure("t", &truth, &truth);
         assert_eq!((exact.maximum, exact.index, exact.mean), (0.0, 0, 0.0));
         // The difference is taken in F64: F32 subtraction would round this one.
-        let small = Deviation::measure(&[1.0 + f32::EPSILON], &[-f32::EPSILON / 4.0]);
+        let small = Deviation::measure("t", &[1.0 + f32::EPSILON], &[-f32::EPSILON / 4.0]);
         assert_eq!(small.maximum, 1.0 + 1.25 * f64::from(f32::EPSILON));
         for (actual, expected) in [
             (vec![f32::NAN, 0.0], vec![0.0, 0.0]),
@@ -1285,7 +1290,7 @@ mod tests {
             (vec![], vec![]),
         ] {
             refuses("invalid logits", move || {
-                Deviation::measure(&actual, &expected);
+                Deviation::measure("t", &actual, &expected);
             });
         }
     }

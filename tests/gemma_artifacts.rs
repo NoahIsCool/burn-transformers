@@ -766,7 +766,11 @@ fn check_long_context_logits<B: Backend>(device: &B::Device) {
         f64::from(unwindowed.before) <= bound.maximum,
         "positions before the window cannot depend on it"
     );
-    let missing = Deviation::measure(&unwindowed_logits, &reference.prompts[0].logits);
+    let missing = Deviation::measure(
+        "unwindowed",
+        &unwindowed_logits,
+        &reference.prompts[0].logits,
+    );
     eprintln!(
         "unwindowed: max |Δ| = {:e} (bound {:e}), mean |Δ| = {:e} (bound {:e})",
         missing.maximum, bound.maximum, missing.mean, bound.mean
