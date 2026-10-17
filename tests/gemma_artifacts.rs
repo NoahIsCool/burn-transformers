@@ -373,13 +373,6 @@ fn long_tolerance(precision: MatmulPrecision) -> f32 {
     )
 }
 
-/// Probes how `device` multiplies F32 matrices and prints the result.
-fn probe<B: Backend>(device: &B::Device) -> MatmulPrecision {
-    let precision = MatmulPrecision::probe::<B>(device);
-    eprintln!("F32 matrix products use {precision:?} inputs");
-    precision
-}
-
 /// Returns how many decisive greedy tokens a run must compare.
 fn minimum_greedy() -> usize {
     std::env::var("TRANSFORMERS_GEMMA_MIN_GREEDY")
@@ -415,7 +408,10 @@ fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
 /// BF16 run refuses both F32 tolerance overrides on every device and is
 /// judged by the official calibration from the bundle that the environment
 /// variable `official_variable` names, which is validated before the
-/// checkpoint loads.
+/// checkpoint loads. Either run then prints one line with the probe's
+/// finding and what judges the run: the F32 tolerance, or, in half
+/// precision, the official calibration and its greedy tolerance, so a
+/// half-precision log states that the probe was not applied.
 fn load_bundle<B: Backend>(
     reference_dir: &Path,
     official_variable: &str,
@@ -423,16 +419,22 @@ fn load_bundle<B: Backend>(
     device: &B::Device,
 ) -> Loaded<B> {
     let dtype = run_dtype("TRANSFORMERS_GEMMA_DTYPE");
-    let precision = probe::<B>(device);
+    let precision = MatmulPrecision::probe::<B>(device);
     let (tolerance, half) = if is_half_precision(dtype) {
         reject_overrides(&[
             "TRANSFORMERS_GEMMA_TOLERANCE",
             "TRANSFORMERS_GEMMA_LONG_TOLERANCE",
         ]);
         let half = HalfPrecisionGate::new(dtype, reference_dir, &directory(official_variable));
-        (half.greedy_tolerance(), Some(half))
+        let tolerance = half.greedy_tolerance();
+        eprintln!(
+            "F32 matrix products use {precision:?} inputs; the {dtype:?} run is judged by the official calibration, greedy steps at {tolerance:e}"
+        );
+        (tolerance, Some(half))
     } else {
-        (f32_tolerance(precision), None)
+        let tolerance = f32_tolerance(precision);
+        eprintln!("F32 matrix products use {precision:?} inputs; tolerance {tolerance:e}");
+        (tolerance, None)
     };
     let model_dir = directory("TRANSFORMERS_GEMMA_DIR");
     let reference = Reference::read(reference_dir);
