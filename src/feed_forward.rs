@@ -27,7 +27,7 @@ mod widths;
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig, LinearLayout},
-    tensor::{Tensor, activation, backend::Backend},
+    tensor::{DType, Tensor, activation, backend::Backend},
 };
 
 use crate::intervention::{Hooks, Layer, PointInfo};
@@ -351,6 +351,28 @@ impl ClampedSwiGlu {
 /// `Gelu` is the exact `x * Phi(x)`; `GeluTanh` is PyTorch's
 /// `0.5 x (1 + tanh(sqrt(2 / pi) (x + 0.044715 x^3)))` via Burn's
 /// `gelu_approximate`, which is the T5 `gelu_new` function.
+///
+/// # Precision
+///
+/// `GeluTanh` follows PyTorch's `gelu(approximate="tanh")` (Transformers'
+/// `gelu_pytorch_tanh`, Gemma's activation), whose CPU and MPS kernels
+/// evaluate the whole expression in F32 for an F16 or BF16 input and round
+/// the result once. Burn's `gelu_approximate` instead composes eight tensor
+/// operations, each rounded to the input dtype, with both constants rounded
+/// to it first (in BF16, `0.044715` becomes `0.044677734` and `sqrt(2 / pi)`
+/// becomes `0.796875`); for negative inputs `tanh(...) + 1` then cancels
+/// most of the rounded tangent's bits, so BF16 `GeluTanh(-2)` came out as
+/// `-0.046875` instead of `-0.0454`, twelve half-units in the last place
+/// away. An F16 or BF16 input is therefore widened to F32 and the result
+/// rounded once ([`evaluate_in_f32`]); F32 and F64 inputs run Burn's graph in
+/// their own dtype, unchanged. Transformers' `gelu_new` (T5, GPT-2) composes
+/// the same operations in the activation dtype with unrounded constants, so
+/// neither graph reproduces its half-precision rounding exactly; the two
+/// agree in F32.
+///
+/// The other activations use Burn's operations as they are: in F16 and BF16,
+/// `Silu` rounds `sigmoid(x)` before the product, unlike PyTorch's fused
+/// SiLU, which rounds once.
 pub fn apply_activation<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     activation_kind: Activation,
@@ -359,8 +381,27 @@ pub fn apply_activation<B: Backend, const D: usize>(
         Activation::Relu => activation::relu(input),
         Activation::Silu => activation::silu(input),
         Activation::Gelu => activation::gelu(input),
-        Activation::GeluTanh => activation::gelu_approximate(input),
+        Activation::GeluTanh => evaluate_in_f32(input, activation::gelu_approximate),
         Activation::ReluSquared => activation::relu(input).square(),
+    }
+}
+
+/// Evaluates an elementwise `function` in F32 for an F16 or BF16 `input` and rounds the result once to the input dtype.
+///
+/// This is PyTorch's `opmath` convention for half-precision pointwise
+/// kernels: every intermediate keeps F32's 24 significand bits and only the
+/// output is rounded, so the result is the correctly rounded F32 value
+/// (within one rounding of F32 evaluation error). Any other dtype is passed
+/// to `function` unchanged. The F32 intermediate costs one tensor of the
+/// input's shape at four bytes per element, live only during the call.
+fn evaluate_in_f32<B: Backend, const D: usize>(
+    input: Tensor<B, D>,
+    function: impl FnOnce(Tensor<B, D>) -> Tensor<B, D>,
+) -> Tensor<B, D> {
+    let dtype = input.dtype();
+    match dtype {
+        DType::F16 | DType::BF16 => function(input.cast(DType::F32)).cast(dtype),
+        _ => function(input),
     }
 }
 

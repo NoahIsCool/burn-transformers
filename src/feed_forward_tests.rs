@@ -225,26 +225,140 @@ fn erf(x: f64) -> f64 {
     sum * 2.0 / core::f64::consts::PI.sqrt()
 }
 
-/// Burn's `gelu_approximate` reproduces the previous hand-written tanh-GELU bit for bit.
+/// In F32, tanh-GELU is Burn's `gelu_approximate`, the previous hand-written graph, bit for bit.
 #[test]
-fn tanh_gelu_matches_previous_operation_graph_exactly() {
-    use burn::tensor::DType;
-
+fn tanh_gelu_matches_previous_operation_graph_exactly_in_f32() {
     let device = Default::default();
     let values = (0..64)
         .map(|index| index as f32 * 0.17 - 5.0)
         .collect::<Vec<_>>();
-    for dtype in [DType::F32, DType::F16] {
-        let input = Tensor::<Flex, 1>::from_data(TensorData::new(values.clone(), [64]), &device)
+    let input = Tensor::<Flex, 1>::from_data(TensorData::new(values, [64]), &device);
+    let previous = composed_tanh_gelu(input.clone());
+    assert_eq!(
+        apply_activation(input, Activation::GeluTanh).into_data(),
+        previous.into_data()
+    );
+}
+
+/// The hand-written tanh-GELU graph, which Burn's `gelu_approximate` reproduces in every dtype.
+fn composed_tanh_gelu(input: Tensor<Flex, 1>) -> Tensor<Flex, 1> {
+    let cubic = input.clone().powf_scalar(3.0);
+    let inner = (input.clone() + cubic * 0.044_715) * 0.797_884_560_802_865_4;
+    input * (inner.tanh() + 1.0) * 0.5
+}
+
+/// Exact tanh-GELU `0.5 x (1 + tanh(sqrt(2 / pi) (x + 0.044715 x^3)))` in F64.
+fn tanh_gelu_f64(x: f64) -> f64 {
+    0.5 * x * (1.0 + ((2.0 / core::f64::consts::PI).sqrt() * (x + 0.044_715 * x.powi(3))).tanh())
+}
+
+/// Returns the largest error a once-rounded F32 evaluation of tanh-GELU may have at `x` in `dtype`.
+///
+/// Rounding the exact value `y` to a format with `p` significand bits errs
+/// by at most half a unit in its last place, `2^(floor(log2 |y|) + 1 - p)`,
+/// floored at the format's smallest subnormal step. F32 evaluation adds at
+/// most a few F32 roundings, about `6e-8` relative each, of `|x|` (the
+/// cancellation in `1 + tanh` makes the error absolute in `x`, not relative
+/// in `y`); `1e-6 (|x| + |y|)` bounds it with margin.
+fn once_rounded_bound(x: f64, exact: f64, dtype: burn::tensor::DType) -> f64 {
+    use burn::tensor::DType;
+
+    let (significand_bits, smallest_step) = match dtype {
+        DType::BF16 => (8, 2.0_f64.powi(-133)),
+        DType::F16 => (11, 2.0_f64.powi(-24)),
+        other => unreachable!("no half-precision format {other:?}"),
+    };
+    let unit = if exact == 0.0 {
+        smallest_step
+    } else {
+        2.0_f64
+            .powi(exact.abs().log2().floor() as i32 + 1 - significand_bits)
+            .max(smallest_step)
+    };
+    0.5 * unit + 1e-6 * (x.abs() + exact.abs())
+}
+
+/// Reads a one-dimensional Flex tensor of any float dtype as F64 values.
+fn as_f64(tensor: Tensor<Flex, 1>) -> Vec<f64> {
+    tensor
+        .cast(burn::tensor::DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .into_iter()
+        .map(f64::from)
+        .collect()
+}
+
+/// In F16 and BF16, tanh-GELU is evaluated in F32 and rounded once, as PyTorch's `gelu(approximate="tanh")` is.
+///
+/// Every input of a grid exactly representable in both formats must land
+/// within half a unit in the last place of the exact value (plus F32
+/// evaluation error), and must equal the F32 result rounded to the dtype.
+/// The composed graph, rounded after every operation and with its constants
+/// rounded to BF16, misses the bound by about twelve half-units at `x = -2`
+/// (`-0.046875` against `-0.0454`), so this test detects it.
+#[test]
+fn half_precision_tanh_gelu_rounds_the_f32_value_once() {
+    use burn::tensor::DType;
+
+    let device = Default::default();
+    // Multiples of 1/16 in [-8, 8]: exact in F16 and BF16 alike.
+    let values = (-128..=128)
+        .map(|step| step as f32 / 16.0)
+        .collect::<Vec<_>>();
+    let count = values.len();
+    for dtype in [DType::BF16, DType::F16] {
+        let input = Tensor::<Flex, 1>::from_data(TensorData::new(values.clone(), [count]), &device)
             .cast(dtype);
-        let previous = {
-            let cubic = input.clone().powf_scalar(3.0);
-            let inner = (input.clone() + cubic * 0.044_715) * 0.797_884_560_802_865_4;
-            input.clone() * (inner.tanh() + 1.0) * 0.5
-        };
+        let actual = apply_activation(input.clone(), Activation::GeluTanh);
+        assert_eq!(actual.dtype(), dtype, "the output keeps the input dtype");
+        let widened =
+            apply_activation(input.clone().cast(DType::F32), Activation::GeluTanh).cast(dtype);
         assert_eq!(
-            apply_activation(input, Activation::GeluTanh).into_data(),
-            previous.into_data()
+            actual.clone().into_data(),
+            widened.into_data(),
+            "{dtype:?}: the F32 evaluation rounded once"
+        );
+        for (&x, actual) in values.iter().zip(as_f64(actual)) {
+            let x = f64::from(x);
+            let exact = tanh_gelu_f64(x);
+            let bound = once_rounded_bound(x, exact, dtype);
+            assert!(
+                (actual - exact).abs() <= bound,
+                "{dtype:?} tanh-GELU({x}) = {actual}, exact {exact}, bound {bound:e}"
+            );
+        }
+    }
+    // The composed graph in BF16 fails the same bound: its rounding is the defect this guards against.
+    let minus_two = Tensor::<Flex, 1>::from_floats([-2.0], &device).cast(DType::BF16);
+    let composed = as_f64(composed_tanh_gelu(minus_two))[0];
+    let exact = tanh_gelu_f64(-2.0);
+    assert_eq!(composed, -0.046_875);
+    assert!((composed - exact).abs() > 10.0 * once_rounded_bound(-2.0, exact, DType::BF16));
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(256))]
+
+    /// For any finite half-precision input, tanh-GELU lies within half a unit in the last place of the exact value.
+    #[test]
+    fn half_precision_tanh_gelu_is_once_rounded_for_any_input(
+        x in -12.0_f32..12.0,
+        bf16 in proptest::bool::ANY,
+    ) {
+        use burn::tensor::DType;
+
+        let dtype = if bf16 { DType::BF16 } else { DType::F16 };
+        let input = Tensor::<Flex, 1>::from_floats([x], &Default::default()).cast(dtype);
+        // The input as the half-precision format holds it.
+        let x = as_f64(input.clone())[0];
+        let actual = as_f64(apply_activation(input, Activation::GeluTanh))[0];
+        let exact = tanh_gelu_f64(x);
+        let bound = once_rounded_bound(x, exact, dtype);
+        proptest::prop_assert!(
+            (actual - exact).abs() <= bound,
+            "{:?} tanh-GELU({}) = {}, exact {}, bound {:e}", dtype, x, actual, exact, bound
         );
     }
 }

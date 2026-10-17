@@ -399,6 +399,11 @@ code written against unreleased sources.
   bias that built them, and F16 residuals are clamped like the reference.
 - Gemma: multimodal checkpoints with a final soft cap the reference never
   applies are refused.
+- Feed-forward: tanh-approximate GELU on F16 and BF16 inputs is evaluated in
+  F32 and rounded once, as PyTorch's `gelu(approximate="tanh")` (Gemma's
+  `gelu_pytorch_tanh`) does. Burn's composed graph rounded every operation and
+  both constants to the activation dtype (BF16 `GeluTanh(-2)` was `-0.046875`
+  instead of `-0.0454`). F32 and F64 evaluation is unchanged.
 - Modular models: sinks with a soft cap are rejected at the spec field;
   sliding windows in encoder stacks are rejected; earlier block records still
   load; range contexts are validated once.
