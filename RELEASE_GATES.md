@@ -70,8 +70,14 @@ cargo test --locked                                   # unit, integration, tiny 
 cargo test --locked --features autodiff --lib         # gradient smoke tests
 cargo test --locked --test verus_harness              # proof-harness structure, no Verus needed
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-python3 -m unittest discover -s scripts/tests -v
+python3 -m unittest discover -s scripts/tests -v       # Python 3.11+; see below
 ```
+
+The Python tooling tests need Python 3.11 or newer and the maintainer's pinned
+reference environment: nine of them verify the installed PyTorch 2.10.0 and
+Transformers 5.2.0 wheels and their provenance, so they error on any other
+host. `.github/workflows/ci.yml` lists those nine by test ID and skips only
+them on its clean runner; the source and package gates run all of them.
 
 **Tiny reference goldens** run inside `cargo test`:
 `tiny_goldens_llama` (seven Llama-family cases), `tiny_goldens_gemma`, and
@@ -349,8 +355,11 @@ because `tests/verus_harness.rs` reads them. After `cargo package` builds the
 extracted archive, the package gate runs its default `cargo test` there (in
 Cargo's normal target directory, as the verification build does), so a Rust
 test that reads a file the archive omits fails the gate. It then runs the
-packaged Python tests (`scripts/tests`) from the archive too. The archive still
-does not run repository-only tooling (fuzzing, CI, the coverage classifier).
+packaged Python tests (`scripts/tests`) from the archive too, so the package
+gate needs the same Python 3.11 reference environment as the source gate's
+tooling tests; on a clean Python the nine reference-environment tests error.
+The archive still does not run repository-only tooling (fuzzing, CI, the
+coverage classifier).
 
 crates.io accepts at most 10 MiB per compressed upload, and the recorded
 evidence alone is more than 20 MiB compressed, so the published crate carries
