@@ -90,6 +90,9 @@
 
 #![cfg(feature = "flex")]
 
+#[path = "support/half_precision_calibration.rs"]
+mod half_precision_calibration;
+
 use std::path::{Path, PathBuf};
 
 use burn::{
