@@ -1597,6 +1597,17 @@ fn every_registered_family_has_a_parity_case() {
 /// a comparable half (support module documentation), so a quarter of the
 /// bound leaves twice the expected full deviation as headroom. The printed
 /// fractions are the measurements the support module quotes.
+///
+/// The quarter holds for the pinned draw ([`SEED`]), which [`seeded`] keeps
+/// independent of test scheduling and which every accelerator case shares,
+/// not for random weights in general. Re-seeding 400 draws (`SEED` to
+/// `SEED + 399`, each in a sequential process) failed 100, mostly Muse
+/// Glimmer (42), Qwen3.5 (35), and gpt-oss (13); gpt-oss's deviation reached
+/// 36.9 times the quarter bound, about nine times the full TF32 bound. On the
+/// pinned draw Muse Glimmer uses about half of it (`1.30e-3` against
+/// `2.89e-3`). A change to `SEED`, to a family's parameter order, or to
+/// Burn's generator therefore calls for re-measuring this test and the bound
+/// it supports, not for re-seeding until it passes.
 #[test]
 fn tf32_weight_rounding_stays_within_a_quarter_of_the_tf32_bound() {
     let device = Default::default();

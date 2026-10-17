@@ -60,9 +60,16 @@
 //! the scale. [`TF32_BOUND`] admits `1e-2` absolute plus `1e-2` of the scale,
 //! at least four times the weight effect (asserted by
 //! `tf32_weight_rounding_stays_within_a_quarter_of_the_tf32_bound`), which
-//! leaves twice the expected full deviation as headroom. A logit-moving kernel
-//! fault (a wrong mask, cache slot, ring offset, or routing decision) still
-//! fails it, but subtler F32 discrepancies need an F32 device: Flex and Metal
+//! leaves twice the expected full deviation as headroom. These measurements
+//! describe the suite's pinned random draw, which every accelerator case
+//! shares, not random weights in general: of 400 draws of the same tiny
+//! models (seeds from the pinned one upward), a quarter exceeded a quarter of
+//! the bound, and rounding
+//! gpt-oss's weights alone moved its logits by up to about nine times the
+//! full bound. The bound therefore qualifies TF32 runs of these pinned
+//! models only. A logit-moving kernel fault (a wrong mask, cache slot, ring
+//! offset, or routing decision) still fails it, but subtler F32
+//! discrepancies need an F32 device: Flex and Metal
 //! qualify F32 numerics, and a TF32 run qualifies execution. The bound is a
 //! derivation, not yet a CUDA measurement; the first Ampere-or-newer run
 //! records the measured deviations.
