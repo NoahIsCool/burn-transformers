@@ -56,6 +56,16 @@
 //! cargo test --locked --features cuda --test backend_parity -- --ignored --nocapture --test-threads 1
 //! ```
 //!
+//! With the `cpu` feature, `cpu::cpu_delta_rule_kernels_match_flex` is an
+//! ordinary test: Burn's CubeCL CPU backend shares the GPU backends' reshape,
+//! so it checks the DeltaNet reshape workaround without a GPU (it measured at
+//! most `6e-8` against Flex on an Apple M3 Max, and fails when
+//! `trailing_unit_axis` is reverted to `unsqueeze_dim(3)`):
+//!
+//! ```text
+//! cargo test --locked --features cpu --test backend_parity cpu::
+//! ```
+//!
 //! Build and run the CUDA tests on the GPU host with the CUDA toolkit
 //! available: `cudarc` reads `nvcc --version` at build time, and CubeCL
 //! compiles every kernel at run time with NVRTC against
@@ -2514,5 +2524,35 @@ mod cuda {
     #[ignore = "requires a CUDA device"]
     fn cuda_delta_rule_kernels_match_flex() {
         super::delta_rule_kernels_match_flex::<Cuda>(&Default::default(), cuda_bound());
+    }
+}
+
+#[cfg(feature = "cpu")]
+mod cpu {
+    //! Burn's CubeCL CPU backend against Flex/F32 for the gated delta rule's kernels.
+    //!
+    //! The CubeCL CPU backend decides reshapes with the same `burn-cubecl` code
+    //! as Metal, CUDA, and ROCm, so it reproduces on the CPU the reshape defect
+    //! that `trailing_unit_axis` in `src/delta_net.rs` works around (unsqueezing
+    //! a strided token slice behind its unit axis reads the wrong rows). This
+    //! test is therefore ordinary rather than ignored: wherever the `cpu`
+    //! feature builds, `cargo test --features cpu` fails if the workaround is
+    //! reverted or a kernel reintroduces such a reshape.
+
+    use burn::backend::Cpu;
+
+    use super::{F32_BOUND, MatmulPrecision};
+
+    /// CubeCL CPU: the gated delta rule's recurrent, snapshot, and chunked kernels.
+    #[test]
+    fn cpu_delta_rule_kernels_match_flex() {
+        let device = Default::default();
+        let precision = MatmulPrecision::probe::<Cpu>(&device);
+        assert_eq!(
+            precision,
+            MatmulPrecision::F32,
+            "the CubeCL CPU backend is expected to multiply F32 matrices in F32"
+        );
+        super::delta_rule_kernels_match_flex::<Cpu>(&device, F32_BOUND);
     }
 }

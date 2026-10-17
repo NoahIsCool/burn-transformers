@@ -130,7 +130,15 @@ Burn 0.21 rounds F32 matrix inputs to TF32, so those runs are held to
 `1e-2 + 1e-2 · scale` (derived in `tests/support/backend_numerics.rs`) and
 qualify execution rather than F32 numerics. No CUDA run has been recorded
 yet. The suite found two DeltaNet defects on CubeCL backends that every CPU
-test missed (see the changelog).
+test missed (see the changelog). Burn's CubeCL CPU backend shares those
+backends' reshape and reproduces the defect, so on a host where the `cpu`
+feature builds (see SUPPORT.md), its delta-rule case runs without a GPU and
+fails if `trailing_unit_axis` is reverted; a lib unit test also pins the
+upstream reshape decisions the workaround rests on:
+
+```sh
+cargo test --locked --features cpu --test backend_parity cpu::
+```
 
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
 with a larger budget:

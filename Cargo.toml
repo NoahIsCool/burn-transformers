@@ -80,6 +80,10 @@ minijinja = { version = "=2.19.0", default-features = false, features = ["adjace
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_keep_ghost_body)", "cfg(verus_only)"] }
 
 [dev-dependencies]
+# Burn's own shape and stride utilities, already in the graph through burn. A
+# unit test pins the CubeCL reshape decision that `delta_net`'s
+# `trailing_unit_axis` works around, so a Burn upgrade that changes it fails.
+burn-std = { version = "=0.21.0", default-features = false }
 proptest = "1.9.0"
 tempfile = "3.27.0"
 tracing = "=0.1.44"

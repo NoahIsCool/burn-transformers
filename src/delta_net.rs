@@ -1670,6 +1670,9 @@ impl<B: Backend> PreparedDeltaRule<B> {
 /// head and factors passed as a transposed view (unmasked, so never copied),
 /// `unsqueeze_dim(3)` of `[batch, sequence, 1]` gave the token axis the unit
 /// axis's stride. Both kernels now take their factors through this function.
+/// `cubecl_reshape_decisions_justify_the_trailing_unit_axis_workaround`
+/// (`delta_net_tests.rs`) pins both CubeCL reshape decisions on the CPU, so a
+/// Burn upgrade that changes either one fails `cargo test`.
 fn trailing_unit_axis<B: Backend>(tensor: Tensor<B, 3>) -> Tensor<B, 4> {
     tensor.unsqueeze_dim::<4>(0).permute([1, 2, 3, 0])
 }

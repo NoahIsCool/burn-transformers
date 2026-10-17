@@ -567,8 +567,11 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   every executable family on Metal or CUDA with Flex's exact parameters and
   compares stateless, ragged, and cached prefill-plus-decode logits; each
   device is probed for F32 or TF32 matrix inputs and held to the matching
-  bound. Its deviation measure, which the real-checkpoint gates now share,
-  fails NaN and infinite values instead of ignoring them.
+  bound. Its delta-rule case also runs, not ignored, on Burn's CubeCL CPU
+  backend (`--features cpu`), which reproduces the DeltaNet reshape defect,
+  and a unit test pins Burn 0.21's reshape decisions behind the workaround.
+  Its deviation measure, which the real-checkpoint gates now share, fails
+  NaN and infinite values instead of ignoring them.
 - Twelve fuzz targets (new: logits processing, chat templates, RoPE
   parameters, SafeTensors headers, attention connectivity, modular specs, and
   the MTP bank of cache transactions) and property suites for generation,
