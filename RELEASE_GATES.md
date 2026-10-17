@@ -83,6 +83,32 @@ package versions:
 python3 -I scripts/generate_tiny_goldens.py --output tests/fixtures/tiny_goldens [--case NAME ...]
 ```
 
+**Accelerator parity.** `tests/backend_parity.rs` installs the seeded
+parameters of a tiny model of every executable family (T5, GPT-2, GPT-NeoX,
+the seven Llama-family configurations, Gemma 2 and 3, gpt-oss, Qwen3.5,
+Qwen3-MoE, DeepSeek-V2, Muse Glimmer, Nemotron-H, and modular causal and
+encoder-decoder models, one of them with single-head mixers) into the same
+model on an accelerator and compares its stateless, ragged left-padded, and
+cached prefill-plus-decode logits with Flex, as well as the gated delta
+rule's recurrent and chunked kernels. Its Flex run is part of `cargo test`;
+the accelerator tests are ignored:
+
+```sh
+cargo test --locked --features metal --test backend_parity -- --ignored --nocapture --test-threads 1
+cargo test --locked --features cuda --test backend_parity -- --ignored --nocapture --test-threads 1
+```
+
+Each accelerator test first probes how its device multiplies F32 matrices.
+Metal, and CUDA GPUs below compute capability 8.0, multiply in F32 and must
+stay within `2e-5 + 2e-5 · scale` of Flex; on an Apple M3 Max the largest
+Metal deviation is `9.5e-6` (Gemma 2, logit scale 25.6) and the largest
+relative one `1.2e-6`. On CUDA GPUs of compute capability 8.0 and newer,
+Burn 0.21 rounds F32 matrix inputs to TF32, so those runs are held to
+`1e-2 + 1e-2 · scale` (derived in `tests/support/backend_numerics.rs`) and
+qualify execution rather than F32 numerics. No CUDA run has been recorded
+yet. The suite found two DeltaNet defects on CubeCL backends that every CPU
+test missed (see the changelog).
+
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
 with a larger budget:
 

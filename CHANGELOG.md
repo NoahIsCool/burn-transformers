@@ -559,6 +559,11 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
 - Batched-versus-stateless and batched-versus-row-by-row parity suites in every
   family, with ragged and padded rows, ring wraparound, and rollback, reorder,
   and truncation.
+- An accelerator-parity suite (`tests/backend_parity.rs`) runs a tiny model of
+  every executable family on Metal or CUDA with Flex's exact parameters and
+  compares stateless, ragged, and cached prefill-plus-decode logits; each
+  device is probed for F32 or TF32 matrix inputs and held to the matching
+  bound.
 - Twelve fuzz targets (new: logits processing, chat templates, RoPE
   parameters, SafeTensors headers, attention connectivity, modular specs, and
   the MTP bank of cache transactions) and property suites for generation,
