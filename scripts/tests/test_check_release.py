@@ -776,6 +776,11 @@ class ReleaseGateTests(unittest.TestCase):
         extracted archive, which the next ``cargo package`` deletes.
         """
 
+        # Read the stem from the manifest so a version bump or a package
+        # rename does not break this test; test_package_stem_is_name_and_version
+        # pins the format itself.
+        package_table = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())["package"]
+        stem = f"{package_table['name']}-{package_table['version']}"
         for target, expected in ((None, GATES.CRATE / "target"), ("/explicit/target", Path("/explicit/target")),
                                  ("relative-target", GATES.CRATE / "relative-target")):
             environment = {} if target is None else {"CARGO_TARGET_DIR": target}
@@ -785,10 +790,10 @@ class ReleaseGateTests(unittest.TestCase):
                 archive = GATES.package_archive()
             self.assertIn("--list", listing)
             self.assertEqual(package[:3], ["cargo", "+stable", "package"])
-            self.assertEqual(archive, expected / "package/transformers-0.1.0.crate")
+            self.assertEqual(archive, expected / "package" / f"{stem}.crate")
             self.assertEqual(archive_tests[:3], ["cargo", "+stable", "test"])
             manifest = Path(archive_tests[archive_tests.index("--manifest-path") + 1])
-            self.assertEqual(manifest, expected / "package/transformers-0.1.0/Cargo.toml")
+            self.assertEqual(manifest, expected / "package" / stem / "Cargo.toml")
             self.assertEqual(archive_tests.count("--target-dir"), 1)
             self.assertEqual(Path(archive_tests[archive_tests.index("--target-dir") + 1]), expected)
             self.assertIn("--locked", archive_tests)
@@ -798,8 +803,21 @@ class ReleaseGateTests(unittest.TestCase):
             # so a record test that needs repository-only evidence must skip.
             self.assertEqual(archive_scripts[:4], [GATES.sys.executable, "-m", "unittest", "discover"])
             self.assertEqual(Path(archive_scripts[archive_scripts.index("-s") + 1]),
-                             expected / "package/transformers-0.1.0/scripts/tests")
+                             expected / "package" / stem / "scripts/tests")
             self.assertFalse(GATES.command_compiles(archive_scripts))
+
+    def test_package_stem_is_name_and_version(self):
+        """Cargo names the archive and its extraction NAME-VERSION from [package]."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            (crate / "Cargo.toml").write_text('[package]\nname = "renamed-crate"\nversion = "2.3.4-rc.1"\n\n'
+                                              '[lib]\nname = "transformers"\n')
+            with mock.patch.object(GATES, "CRATE", crate), \
+                    mock.patch.dict(GATES.os.environ, {"CARGO_TARGET_DIR": "/explicit/target"}, clear=True):
+                self.assertEqual(GATES.package_stem(), "renamed-crate-2.3.4-rc.1")
+                self.assertEqual(GATES.package_archive(), Path("/explicit/target/package/renamed-crate-2.3.4-rc.1.crate"))
+                self.assertEqual(GATES.package_directory(), Path("/explicit/target/package/renamed-crate-2.3.4-rc.1"))
 
     def test_package_include_matches_the_evidence_policy(self):
         """Cargo's include list publishes exactly the evidence package_contents.py allows."""
@@ -967,10 +985,22 @@ class ReleaseGateTests(unittest.TestCase):
     def test_guide_doctest_crate_depends_on_this_crate_by_path(self):
         """The scratch crate uses the source gate's features and this crate's lockfile."""
 
+        for package_name in ("transformers", "renamed-transformers"):
+            with self.subTest(package=package_name):
+                self.check_guide_doctest_crate(package_name)
+
+    def check_guide_doctest_crate(self, package_name):
+        """Generate the guide doctest crate for a crate whose package is ``package_name``.
+
+        The guides import the library as ``transformers``, so the dependency
+        keeps that key and names the package explicitly; a renamed package
+        with ``[lib] name = "transformers"`` then needs no tooling change.
+        """
+
         with tempfile.TemporaryDirectory() as directory:
             crate, scratch = Path(directory) / "crate", Path(directory) / "out/guides"
             crate.mkdir()
-            (crate / "Cargo.toml").write_text('[package]\nname = "transformers"\n\n[dependencies]\n'
+            (crate / "Cargo.toml").write_text(f'[package]\nname = "{package_name}"\n\n[dependencies]\n'
                                              'burn = { version = "=0.21.0", default-features = false }\n')
             (crate / "Cargo.lock").write_text("version = 4\n")
             for guide in GATES.GUIDES:
@@ -980,6 +1010,7 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertEqual(summary["compiled_blocks"], len(GATES.GUIDES))
             manifest = tomllib.loads((scratch / "Cargo.toml").read_text())
             dependency = manifest["dependencies"]["transformers"]
+            self.assertEqual(dependency["package"], package_name)
             self.assertEqual(dependency["path"], str(crate.resolve()))
             self.assertFalse(dependency["default-features"])
             self.assertEqual(dependency["features"], [*GATES.FEATURES.split(","), "train"])

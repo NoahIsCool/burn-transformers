@@ -355,6 +355,9 @@ def write_guide_doctests(crate: Path, directory: Path, offline: bool) -> dict:
     a downstream user would, and starts from a copy of this crate's lockfile.
     ``cargo metadata`` then adds only the scratch package, so the checked
     command can run with ``--locked`` against the same dependency versions.
+    The dependency key stays ``transformers``, the library name the guides
+    import, and names this crate's ``package.name`` explicitly, so a package
+    renamed with ``[lib] name = "transformers"`` needs no change here.
     """
 
     directory.mkdir(parents=True)
@@ -366,7 +369,8 @@ def write_guide_doctests(crate: Path, directory: Path, offline: bool) -> dict:
         "[package]\nname = \"transformers-guide-doctests\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"
         "publish = false\n\n[lib]\npath = \"lib.rs\"\n\n[dependencies]\n"
         f"burn = {{ version = \"{burn}\", default-features = false }}\n"
-        f"transformers = {{ path = {json.dumps(str(crate.resolve()))}, default-features = false, "
+        f"transformers = {{ package = {json.dumps(manifest['package']['name'])}, "
+        f"path = {json.dumps(str(crate.resolve()))}, default-features = false, "
         f"features = [{features}] }}\n\n[workspace]\n"
     )
     items, counts = [], {}
