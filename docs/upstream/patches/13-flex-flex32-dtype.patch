@@ -12,7 +12,7 @@ index bc3f8ba..3d829b9 100644
          }
      }
 diff --git a/crates/burn-flex/src/ops/float.rs b/crates/burn-flex/src/ops/float.rs
-index fb28d97..cd8d555 100644
+index fb28d97..0947db8 100644
 --- a/crates/burn-flex/src/ops/float.rs
 +++ b/crates/burn-flex/src/ops/float.rs
 @@ -21,7 +21,11 @@ use crate::ops::unary;
@@ -69,10 +69,10 @@ index fb28d97..cd8d555 100644
          match dt {
              DType::F32 => FlexTensor::filled_typed(shape, dt, fill_value.to_f32().unwrap()),
              DType::F64 => FlexTensor::filled_typed(shape, dt, fill_value.to_f64().unwrap()),
-@@ -1095,6 +1099,16 @@ impl FloatTensorOps<Flex> for Flex {
- // When adding new tests, keep them here only if they probe flex dtype
- // storage or flex internals; otherwise add them to
- // crates/burn-backend-tests/tests/tensor/float/ops/.
+@@ -1087,6 +1091,16 @@ impl FloatTensorOps<Flex> for Flex {
+     }
+ }
+ 
 +/// The dtype Flex stores a float tensor of `dtype` in. `Flex32` is f32
 +/// storage computed at F32 precision on the CPU, so Flex stores it as `F32`
 +/// (as `float_random` already does); every Flex kernel dispatches on `F32`.
@@ -83,6 +83,6 @@ index fb28d97..cd8d555 100644
 +    }
 +}
 +
- #[cfg(test)]
- mod tests {
-     use burn_backend::TensorData;
+ // Tests kept here exercise flex-specific behavior: direct `Flex::`
+ // backend-op calls with explicit IntDType/FloatDType to pin dtype storage
+ // selection (U8/I32/I64, F16/F64). Plain arithmetic, math, cast, cross,

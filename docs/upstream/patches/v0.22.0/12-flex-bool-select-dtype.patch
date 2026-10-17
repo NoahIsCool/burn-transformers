@@ -1,0 +1,37 @@
+diff --git a/crates/burn-flex/src/ops/bool.rs b/crates/burn-flex/src/ops/bool.rs
+index 13e369f..3e96669 100644
+--- a/crates/burn-flex/src/ops/bool.rs
++++ b/crates/burn-flex/src/ops/bool.rs
+@@ -357,7 +357,7 @@ impl BoolTensorOps<Flex> for Flex {
+         dim: usize,
+         indices: IntTensor<Flex>,
+     ) -> BoolTensor<Flex> {
+-        crate::ops::gather_scatter::select::<u8>(tensor, dim, indices)
++        crate::ops::gather_scatter::select_bool(tensor, dim, indices)
+     }
+ 
+     fn bool_select_or(
+diff --git a/crates/burn-flex/src/ops/gather_scatter.rs b/crates/burn-flex/src/ops/gather_scatter.rs
+index 476a8df..23fe823 100644
+--- a/crates/burn-flex/src/ops/gather_scatter.rs
++++ b/crates/burn-flex/src/ops/gather_scatter.rs
+@@ -1435,7 +1435,18 @@ pub fn select_or(
+ }
+ 
+ pub fn gather_bool(tensor: FlexTensor, dim: usize, indices: FlexTensor) -> FlexTensor {
+-    gather::<u8>(tensor, dim, indices)
++    let dtype = tensor.dtype();
++    let result = gather::<u8>(tensor, dim, indices);
++    // The shared kernel tags its output as u8; retain the input's bool dtype.
++    FlexTensor::from_arc(result.data_arc(), result.layout().clone(), dtype)
++}
++
++/// Select for bool tensors: the slices of `tensor` at 1D `indices` along `dim`.
++pub fn select_bool(tensor: FlexTensor, dim: usize, indices: FlexTensor) -> FlexTensor {
++    let dtype = tensor.dtype();
++    let result = select::<u8>(tensor, dim, indices);
++    // The shared kernel tags its output as u8; retain the input's bool dtype.
++    FlexTensor::from_arc(result.data_arc(), result.layout().clone(), dtype)
+ }
+ 
+ /// Scatter OR for bool tensors: ORs values into tensor at indexed positions.

@@ -1,5 +1,5 @@
 diff --git a/crates/burn-core/src/module/param/base.rs b/crates/burn-core/src/module/param/base.rs
-index 83b6d5b..3ae5090 100644
+index 9397e19..7a5b7cf 100644
 --- a/crates/burn-core/src/module/param/base.rs
 +++ b/crates/burn-core/src/module/param/base.rs
 @@ -131,6 +131,28 @@ impl<T: Parameter> ParamMapper<T> {
@@ -32,10 +32,10 @@ index 83b6d5b..3ae5090 100644
      fn default() -> Self {
          Self {
 diff --git a/crates/burn-core/src/module/param/tensor.rs b/crates/burn-core/src/module/param/tensor.rs
-index df84cd8..d414025 100644
+index 2069c43..70666da 100644
 --- a/crates/burn-core/src/module/param/tensor.rs
 +++ b/crates/burn-core/src/module/param/tensor.rs
-@@ -465,13 +465,18 @@ impl<const D: usize, B: AutodiffBackend> AutodiffModule<B> for Param<Tensor<B, D
+@@ -463,13 +463,18 @@ impl<const D: usize, B: AutodiffBackend> AutodiffModule<B> for Param<Tensor<B, D
          let require_grad = self.require_grad;
          let mut param = Param::initialized(self.id, self.val().inner().set_require_grad(false));
          param.require_grad = require_grad;

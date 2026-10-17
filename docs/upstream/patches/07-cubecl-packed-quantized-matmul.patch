@@ -1,26 +1,19 @@
 diff --git a/crates/burn-cubecl/src/kernel/matmul/base.rs b/crates/burn-cubecl/src/kernel/matmul/base.rs
-index c329b01..30c9a99 100644
+index c329b01..fbd4a58 100644
 --- a/crates/burn-cubecl/src/kernel/matmul/base.rs
 +++ b/crates/burn-cubecl/src/kernel/matmul/base.rs
-@@ -1,7 +1,7 @@
- use super::init_matmul_output;
- use crate::{CubeRuntime, kernel::quantization::dequantize, tensor::CubeTensor};
- use burn_backend::{DType, QTensorPrimitive};
--use burn_std::QuantLevel;
-+use burn_std::{QuantLevel, QuantValue};
- use cubek::{
-     matmul::{
-         definition::{MatmulElems, MatmulGlobalElems, MatmulSetupError},
-@@ -52,6 +52,31 @@ pub fn matmul<R: CubeRuntime>(
+@@ -52,6 +52,34 @@ pub fn matmul<R: CubeRuntime>(
      }
  }
  
 +/// Whether `strategy` is known to compute wrong values for this packed,
-+/// block-quantized right-hand side (cubek-matmul 0.2): every such operand on
-+/// `GemvUnitPerpendicular`, 4-bit operands on `GemvPlaneParallel`, and 4-bit
-+/// operands with more than one left-hand row on the unit routines, which
-+/// `Strategy::Auto` falls back to on devices without cooperative matrices.
-+/// Those launches dequantize the operand first until the kernels are fixed.
++/// block-quantized right-hand side (cubek-matmul 0.2), by the width of its
++/// values: 2-bit operands on every routine (wrong even for one left-hand row),
++/// every operand on `GemvUnitPerpendicular`, sub-byte operands on
++/// `GemvPlaneParallel`, and sub-byte operands with more than one left-hand row
++/// on the unit routines, which `Strategy::Auto` falls back to when the
++/// cooperative-matrix routine declines the problem. Those launches dequantize
++/// the operand first until the kernels are fixed.
 +fn packed_rhs_is_unreliable<R: CubeRuntime>(
 +    strategy: &Strategy,
 +    lhs: &CubeTensor<R>,
@@ -29,13 +22,14 @@ index c329b01..30c9a99 100644
 +    if rhs.qparams.is_none() || !matches!(rhs.scheme().level, QuantLevel::Block(_)) {
 +        return false;
 +    }
-+    let four_bit = matches!(rhs.scheme().value, QuantValue::Q4S | QuantValue::Q4F);
++    let bits = rhs.scheme().value.size_bits();
 +    let shape = lhs.meta.shape();
 +    let rows = shape[shape.num_dims() - 2];
 +    match strategy {
++        _ if bits < 4 => true,
 +        Strategy::GemvUnitPerpendicular(_) => true,
-+        Strategy::GemvPlaneParallel(_) => four_bit,
-+        Strategy::Auto | Strategy::SimpleUnit(_) | Strategy::DoubleUnit(_) => four_bit && rows > 1,
++        Strategy::GemvPlaneParallel(_) => bits < 8,
++        Strategy::Auto | Strategy::SimpleUnit(_) | Strategy::DoubleUnit(_) => bits < 8 && rows > 1,
 +        _ => false,
 +    }
 +}
@@ -43,7 +37,7 @@ index c329b01..30c9a99 100644
  pub(crate) fn launch_matmul_naive<R: CubeRuntime>(
      strategy: &Strategy,
      mut lhs: CubeTensor<R>,
-@@ -86,6 +111,10 @@ pub(crate) fn launch_matmul<R: CubeRuntime>(
+@@ -86,6 +114,10 @@ pub(crate) fn launch_matmul<R: CubeRuntime>(
  ) -> Result<(), MatmulSetupError> {
      let client = &out.client;
  

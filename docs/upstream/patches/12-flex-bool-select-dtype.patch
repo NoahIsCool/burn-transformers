@@ -1,5 +1,5 @@
 diff --git a/crates/burn-flex/src/ops/bool.rs b/crates/burn-flex/src/ops/bool.rs
-index df9a8ad..670ac31 100644
+index df9a8ad..3f719c2 100644
 --- a/crates/burn-flex/src/ops/bool.rs
 +++ b/crates/burn-flex/src/ops/bool.rs
 @@ -282,7 +282,11 @@ impl BoolTensorOps<Flex> for Flex {
@@ -45,10 +45,10 @@ index df9a8ad..670ac31 100644
      }
  
      fn bool_transpose(tensor: BoolTensor<Flex>) -> BoolTensor<Flex> {
-@@ -534,6 +543,14 @@ fn bool_binary_op_simd(lhs: FlexTensor, rhs: FlexTensor, op: BoolBinaryOp) -> Fl
- // so they run against every backend. When adding new tests, keep them
- // here only if they probe flex dtype dispatch; otherwise add them
- // there.
+@@ -527,6 +536,14 @@ fn bool_binary_op_simd(lhs: FlexTensor, rhs: FlexTensor, op: BoolBinaryOp) -> Fl
+     crate::ops::comparison::make_bool_tensor(result, shape, out_dtype)
+ }
+ 
 +/// Re-tags the `u8` output of a shared numeric kernel with the input's Boolean
 +/// dtype. The generic `select`/`gather` kernels label their result `U8`, which
 +/// later Boolean consumers (`cat`, `into_data().to_vec::<bool>()`) reject.
@@ -57,6 +57,6 @@ index df9a8ad..670ac31 100644
 +    FlexTensor::from_arc(tensor.data_arc(), tensor.layout().clone(), dtype)
 +}
 +
- #[cfg(test)]
- mod tests {
-     use alloc::vec;
+ // Tests kept here exercise flex-specific dtype storage selection via
+ // explicit IntDType/FloatDType. Plain bool ops, bool-to-int/float
+ // casts, and negative-stride (flipped) bool coverage have been migrated

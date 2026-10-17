@@ -1,8 +1,8 @@
 diff --git a/crates/burn-backend/src/backend/ops/modules/linear.rs b/crates/burn-backend/src/backend/ops/modules/linear.rs
-index 9292fe2..dc37ec5 100644
+index 9292fe2..a519b91 100644
 --- a/crates/burn-backend/src/backend/ops/modules/linear.rs
 +++ b/crates/burn-backend/src/backend/ops/modules/linear.rs
-@@ -8,83 +8,78 @@ use burn_std::Shape;
+@@ -8,83 +8,82 @@ use burn_std::Shape;
  ///
  /// Computes `y = x @ weight [+ bias]`.
  ///
@@ -50,22 +50,26 @@ index 9292fe2..dc37ec5 100644
      let ndims = shape.num_dims();
 -    if ndims >= target_ndims {
 +    if ndims == 2 {
-         return tensor;
-     }
--    let mut new_dims = vec![1usize; target_ndims - ndims];
--    for i in 0..ndims {
--        new_dims.push(shape[i]);
++        return tensor;
++    }
 +    let width = shape[ndims - 1];
 +    let rows = (0..ndims - 1).map(|dim| shape[dim]).product::<usize>();
 +    B::float_reshape(tensor, Shape::new([rows, width]))
 +}
 +
 +/// Reshapes `[rows, width]` back to the leading axes of `leading` followed by `width`.
-+fn restore_rows<B: Backend>(tensor: FloatTensor<B>, leading: &Shape, width: usize) -> FloatTensor<B> {
++fn restore_rows<B: Backend>(
++    tensor: FloatTensor<B>,
++    leading: &Shape,
++    width: usize,
++) -> FloatTensor<B> {
 +    let ndims = leading.num_dims();
 +    if ndims == 2 {
-+        return tensor;
-+    }
+         return tensor;
+     }
+-    let mut new_dims = vec![1usize; target_ndims - ndims];
+-    for i in 0..ndims {
+-        new_dims.push(shape[i]);
 +    let mut dims = vec![0usize; ndims];
 +    for (dim, size) in dims.iter_mut().enumerate().take(ndims - 1) {
 +        *size = leading[dim];
