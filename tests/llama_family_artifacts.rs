@@ -61,6 +61,11 @@
 #[path = "support/half_precision_calibration.rs"]
 mod half_precision_calibration;
 
+use half_precision_calibration::{
+    Calibration, HalfPrecisionGate, is_half_precision, reject_overrides, required_directory,
+    run_dtype,
+};
+
 use std::path::{Path, PathBuf};
 
 use burn::{
@@ -73,7 +78,7 @@ use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection,
     TokenMask,
     cache::CacheConfig,
-    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
+    checkpoint::{DTypePolicy, LoadOptions},
 };
 
 /// Default absolute logit tolerance; see the module documentation.
@@ -185,9 +190,25 @@ fn minimum_greedy() -> usize {
         .unwrap_or(DEFAULT_MIN_GREEDY)
 }
 
-/// Loads the checkpoint with F32 casts after checking it matches the bundle.
-fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32) {
+/// A loaded checkpoint, its bundle, the F32 tolerance, and the gate of an F16 or BF16 run.
+type Loaded<B> = (AutoCausalLm<B>, Reference, f32, Option<HalfPrecisionGate>);
+
+/// Loads the checkpoint in `TRANSFORMERS_LLAMA_FAMILY_DTYPE` after checking it matches the bundle.
+///
+/// F32 (the default) keeps the F32 tolerance. An F16 or BF16 run refuses
+/// `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` and is judged by the official
+/// calibration from `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR`, which is
+/// validated before the checkpoint loads.
+fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
+    let dtype = run_dtype("TRANSFORMERS_LLAMA_FAMILY_DTYPE");
+    if is_half_precision(dtype) {
+        reject_overrides(&["TRANSFORMERS_LLAMA_FAMILY_TOLERANCE"]);
+    }
     let (model_dir, reference_dir, tolerance) = environment();
+    let half = is_half_precision(dtype).then(|| {
+        let official = required_directory("TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR");
+        HalfPrecisionGate::new(dtype, &reference_dir, &official)
+    });
     let reference = Reference::read(&reference_dir);
     let config = std::fs::read(model_dir.join("config.json")).unwrap();
     assert_eq!(
@@ -197,7 +218,7 @@ fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32) {
     );
     let options = AutoLoadOptions {
         checkpoint: LoadOptions {
-            dtype_policy: DTypePolicy::Cast(TensorDType::F32),
+            dtype_policy: DTypePolicy::Cast(dtype),
             ..LoadOptions::default()
         },
         load_tokenizer: false,
@@ -207,7 +228,7 @@ fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, f32) {
         .expect("strict load")
         .into_model();
     assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
-    (model, reference, tolerance)
+    (model, reference, tolerance, half)
 }
 
 /// Uploads one row of token IDs.
@@ -222,6 +243,25 @@ fn host<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
         .into_data()
         .to_vec::<f32>()
         .unwrap()
+}
+
+/// Returns the stateless last-position logits of one unpadded prompt.
+fn last_logits<B: Backend>(
+    model: &AutoCausalLm<B>,
+    tokens: &[i64],
+    device: &B::Device,
+) -> Vec<f32> {
+    let input = CausalLmInput {
+        token_ids: row::<B>(tokens, device),
+        token_mask: None,
+        position_ids: None,
+    };
+    host(
+        model
+            .forward(input, &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    )
 }
 
 /// Returns the largest absolute difference.
@@ -242,7 +282,7 @@ fn argmax(logits: &[f32]) -> usize {
 
 /// Stateless logits at every prompt position match the reference.
 fn check_prompt_logits<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance) = load::<B>(device);
+    let (model, reference, tolerance, half) = load::<B>(device);
     let options = ForwardOptions {
         logits: LogitsSelection::All,
         ..ForwardOptions::default()
@@ -254,6 +294,10 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
             position_ids: None,
         };
         let logits = host(model.forward(input, &options).unwrap().logits);
+        if let Some(half) = &half {
+            half.check_prompt(index, &logits, &prompt.logits);
+            continue;
+        }
         let largest = gap(&logits, &prompt.logits);
         eprintln!(
             "prompt {index}: {} tokens, max |Δ| = {largest:e}",
@@ -267,8 +311,12 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
 }
 
 /// The cached greedy continuation of prompt 0 matches while it is decisive.
+///
+/// An F32 run stops at the first tie. A half-precision run also checks the
+/// prefill against the stateless pass and, the continuation being
+/// teacher-forced, compares every decisive step.
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance) = load::<B>(device);
+    let (model, reference, tolerance, half) = load::<B>(device);
     let prompt = &reference.prompts[0];
     let capacity = prompt.tokens.len() + reference.greedy.len();
     let mut state = model
@@ -286,15 +334,31 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
             .logits,
     );
     let last = &prompt.logits[(prompt.tokens.len() - 1) * reference.vocabulary..];
-    assert!(gap(&logits, last) <= tolerance, "cached prefill logits");
+    match &half {
+        None => assert!(gap(&logits, last) <= tolerance, "cached prefill logits"),
+        Some(half) => {
+            half.check_rows("cached prefill", 0, &logits, last);
+            let stateless = last_logits(&model, &prompt.tokens, device);
+            half.check_consistency("cached prefill", &logits, &stateless);
+        }
+    }
     let mut compared = 0;
     for (step, &(expected, margin)) in reference.greedy.iter().enumerate() {
-        if margin <= 2.0 * tolerance {
-            eprintln!("greedy step {step}: reference margin {margin:e} is a tie; stopping");
-            break;
+        match &half {
+            None if margin <= 2.0 * tolerance => {
+                eprintln!("greedy step {step}: reference margin {margin:e} is a tie; stopping");
+                break;
+            }
+            Some(half) if !half.is_decisive(margin) => {
+                eprintln!(
+                    "greedy step {step}: reference margin {margin:e} is not decisive; skipped"
+                );
+            }
+            _ => {
+                compared += 1;
+                assert_eq!(argmax(&logits) as i64, expected, "greedy step {step}");
+            }
         }
-        compared += 1;
-        assert_eq!(argmax(&logits) as i64, expected, "greedy step {step}");
         let next = DecodeInput {
             token_ids: row::<B>(&[expected], device),
             position_ids: None,
@@ -320,8 +384,10 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
 }
 
 /// All prompts in one left-padded batch reproduce each prompt's last logits.
+///
+/// A half-precision run also checks each row against the stateless pass.
 fn check_batched_prefill<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance) = load::<B>(device);
+    let (model, reference, tolerance, half) = load::<B>(device);
     let width = reference
         .prompts
         .iter()
@@ -357,27 +423,48 @@ fn check_batched_prefill<B: Backend>(device: &B::Device) {
     for (index, prompt) in reference.prompts.iter().enumerate() {
         let actual = &logits[index * reference.vocabulary..(index + 1) * reference.vocabulary];
         let expected = &prompt.logits[(prompt.tokens.len() - 1) * reference.vocabulary..];
+        if let Some(half) = &half {
+            let label = format!("batched row {index}");
+            half.check_consistency(&label, actual, &last_logits(&model, &prompt.tokens, device));
+            half.check_rows(&label, index, actual, expected);
+            continue;
+        }
         let largest = gap(actual, expected);
         eprintln!("batched row {index}: max |Δ| = {largest:e}");
         assert!(largest <= tolerance, "batched row {index}");
     }
 }
 
-/// Flex/F32: every prompt position's logits.
+/// The official BF16 bundle's distance from the F32 (or F64) bundle, which sets the half-precision bounds.
+///
+/// Reads only the two bundles, validates their pairing, and prints each
+/// manifest's SHA-256, each prompt's official maximum (with its position and
+/// vocabulary entry) and mean deviation, the bounds the rule derives, and the
+/// greedy steps a half-precision run compares. No Burn model runs, so a pass
+/// qualifies no Burn run.
+#[test]
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR and _BF16_REFERENCE_DIR (bundles only)"]
+fn official_bf16_reference_calibrates_the_half_precision_bounds() {
+    let truth = required_directory("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR");
+    let official = required_directory("TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR");
+    Calibration::read(&truth, &official).report(&truth, &official);
+}
+
+/// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): every prompt position's logits.
 #[test]
 #[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DIR and _REFERENCE_DIR"]
 fn flex_prompt_logits_match_the_reference() {
     check_prompt_logits::<Flex<f32, i32>>(&Default::default());
 }
 
-/// Flex/F32: the cached greedy continuation.
+/// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): the cached greedy continuation.
 #[test]
 #[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DIR and _REFERENCE_DIR"]
 fn flex_cached_greedy_matches_the_reference() {
     check_cached_greedy::<Flex<f32, i32>>(&Default::default());
 }
 
-/// Flex/F32: a ragged left-padded batch of every prompt.
+/// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): a ragged left-padded batch of every prompt.
 #[test]
 #[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DIR and _REFERENCE_DIR"]
 fn flex_batched_prefill_matches_the_reference() {
@@ -386,25 +473,28 @@ fn flex_batched_prefill_matches_the_reference() {
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal {
-    //! Metal/F32 counterparts of the Flex checks, run serially by the integrator.
+    //! Metal counterparts of the Flex checks, run serially by the integrator.
+    //!
+    //! They run in F32 unless `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects the
+    //! F16 profile (`f16`).
 
     use burn::backend::Metal;
 
-    /// Metal/F32: every prompt position's logits.
+    /// Metal: every prompt position's logits.
     #[test]
     #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
     fn metal_prompt_logits_match_the_reference() {
         super::check_prompt_logits::<Metal>(&Default::default());
     }
 
-    /// Metal/F32: the cached greedy continuation.
+    /// Metal: the cached greedy continuation.
     #[test]
     #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
     fn metal_cached_greedy_matches_the_reference() {
         super::check_cached_greedy::<Metal>(&Default::default());
     }
 
-    /// Metal/F32: a ragged left-padded batch of every prompt.
+    /// Metal: a ragged left-padded batch of every prompt.
     #[test]
     #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
     fn metal_batched_prefill_matches_the_reference() {
