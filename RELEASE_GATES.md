@@ -370,9 +370,11 @@ fails when the verified `.crate` exceeds an 8 MiB budget, which leaves headroom
 below the upload limit; it records the archive's size and SHA-256 in its
 manifest. Record tests read repository-only files through
 `scripts/tests/repository_evidence.py`: run from an extracted archive
-(recognized by the `Cargo.toml.orig` that Cargo writes into every archive),
-they skip with a message naming the omitted file; in a Git checkout a missing
-file still fails, and a published record is never skipped. With this split the
+(recognized by the `Cargo.toml.orig` that Cargo writes into every archive,
+with no `.git` beside it), they skip with a message naming the omitted file;
+in a Git checkout a missing file still fails, even when a stray
+`Cargo.toml.orig` such as a `git mergetool` backup is present, and a published
+record is never skipped. With this split the
 archive is about 6.4 MiB compressed and holds about 950 files, against about
 28.5 MiB and 2,060 files before.
 The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is

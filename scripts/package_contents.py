@@ -26,6 +26,7 @@ them fail in a Git checkout when a file is missing.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path, PurePath
 
 
@@ -81,7 +82,12 @@ def is_packaged_archive(root: Path) -> bool:
     """Whether ``root`` is a crate extracted from a ``cargo package`` archive.
 
     Cargo writes the author's original manifest beside the normalized one as
-    ``Cargo.toml.orig`` in every archive; a Git checkout never contains it.
+    ``Cargo.toml.orig`` in every archive, and an archive never contains
+    ``.git``. A Git checkout can also hold a stray ``Cargo.toml.orig`` (for
+    example the backup ``git mergetool`` keeps after resolving a manifest
+    conflict), so a root with a ``.git`` directory, or the ``.git`` file of a
+    linked worktree, is always a checkout. Erring that way fails closed: a
+    missing repository-only file then fails its test instead of skipping it.
     """
 
-    return (root / "Cargo.toml.orig").is_file()
+    return (root / "Cargo.toml.orig").is_file() and not os.path.lexists(root / ".git")

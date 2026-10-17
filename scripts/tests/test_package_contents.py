@@ -86,6 +86,37 @@ class EvidencePolicyTests(unittest.TestCase):
             (root / "Cargo.toml.orig").write_text("[package]\n")
             self.assertTrue(CONTENTS.is_packaged_archive(root))
 
+    def test_checkout_with_a_stray_original_manifest_is_not_an_archive(self):
+        """A mergetool backup Cargo.toml.orig never turns a Git checkout into an archive.
+
+        A clone has a ``.git`` directory and a linked worktree a ``.git``
+        file; a dangling ``.git`` symlink is treated as a checkout too, so
+        the check fails closed.
+        """
+
+        def plant_directory(path):
+            """Create the ``.git`` directory of an ordinary clone."""
+
+            path.mkdir()
+
+        def plant_file(path):
+            """Create the ``.git`` file that points a linked worktree at its repository."""
+
+            path.write_text("gitdir: /elsewhere/.git/worktrees/branch\n")
+
+        def plant_dangling_link(path):
+            """Create a ``.git`` symlink whose target does not exist."""
+
+            path.symlink_to(path.parent / "missing-git-directory")
+
+        for plant in (plant_directory, plant_file, plant_dangling_link):
+            with self.subTest(git=plant.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "Cargo.toml").write_text("[package]\n")
+                (root / "Cargo.toml.orig").write_text("[package]\n")
+                plant(root / ".git")
+                self.assertFalse(CONTENTS.is_packaged_archive(root))
+
     def test_this_checkout_classifies_its_own_evidence(self):
         """The repository has both kinds of evidence, and only Git holds the second."""
 
@@ -102,8 +133,13 @@ class EvidencePolicyTests(unittest.TestCase):
 class RepositoryEvidenceTests(unittest.TestCase):
     """Skip only for omitted repository-only evidence inside an extracted archive."""
 
-    def fixture(self, archive):
-        """Create a crate root with one published record and one campaign log."""
+    def fixture(self, archive, stray_original=False):
+        """Create a crate root with one published record and one campaign log.
+
+        ``archive`` adds the ``Cargo.toml.orig`` of an extracted archive.
+        ``stray_original`` instead makes a Git checkout (a ``.git``
+        directory) that also holds a leftover ``Cargo.toml.orig``.
+        """
 
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -111,8 +147,10 @@ class RepositoryEvidenceTests(unittest.TestCase):
         (root / "acceptance/measurements/campaign").mkdir(parents=True)
         (root / "acceptance/measurements/campaign.json").write_text("{}\n")
         (root / "acceptance/measurements/campaign/present.log").write_text("log\n")
-        if archive:
+        if archive or stray_original:
             (root / "Cargo.toml.orig").write_text("[package]\n")
+        if stray_original:
+            (root / ".git").mkdir()
         return root
 
     def test_checkout_returns_every_repository_only_path(self):
@@ -125,6 +163,15 @@ class RepositoryEvidenceTests(unittest.TestCase):
                 self.assertEqual(repository_evidence.repository_evidence(path, root), path)
         with self.assertRaises(FileNotFoundError):
             repository_evidence.repository_evidence(root / "acceptance/measurements/campaign/missing.log", root).read_text()
+
+    def test_checkout_with_a_stray_original_manifest_still_fails(self):
+        """A mergetool backup Cargo.toml.orig in a checkout does not turn a missing file into a skip."""
+
+        root = self.fixture(archive=False, stray_original=True)
+        missing = root / "acceptance/measurements/campaign/missing.log"
+        self.assertEqual(repository_evidence.repository_evidence(missing, root), missing)
+        with self.assertRaises(FileNotFoundError):
+            repository_evidence.repository_evidence(missing, root).read_text()
 
     def test_archive_skips_only_an_omitted_campaign_file(self):
         """The skip names the omitted file; a present one is still read."""
