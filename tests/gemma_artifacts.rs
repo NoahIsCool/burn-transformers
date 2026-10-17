@@ -105,7 +105,10 @@
 //! deviate from a prompt's F32 logits by at most `M` and on average by `μ`,
 //! this crate's must stay within `1.2 M` at every position and `1.2 μ` on
 //! average; the factor and its derivation from gpt-oss-20b measurements are
-//! documented in that module. Cached prefills, batched rows, and the long
+//! documented in that module. A Metal/F16 run is held to the same BF16
+//! bounds, reused as an upper limit because no official F16 bundle can be
+//! generated; they do not reflect F16 rounding, so its pass is weaker
+//! evidence than a Flex/BF16 pass. Cached prefills, batched rows, and the long
 //! prompt's chunk ends must lie within their prompt's `1.2 M`; the cached
 //! prefill and batched rows also within `0.5` of the stateless pass. The
 //! teacher-forced greedy continuations are compared at every step whose F32

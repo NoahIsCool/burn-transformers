@@ -77,7 +77,11 @@
 //! within `1.2 M` at every position and `1.2 μ` on average. The factor `1.2`
 //! is the largest ratio of a Burn half-precision statistic to the official
 //! one measured on gpt-oss-20b (`1.1725`), rounded up; that module documents
-//! its derivation and fixes it for every checkpoint. The cached prefill and
+//! its derivation and fixes it for every checkpoint. The bounds are BF16's in
+//! both profiles: no official F16 bundle can be generated, so the Metal/F16
+//! run reuses them as an upper limit that does not reflect F16's eightfold
+//! smaller rounding unit, and its pass is weaker evidence than a Flex/BF16
+//! pass (that module's F16 runs section). The cached prefill and
 //! each batched row must lie within their prompt's `1.2 M` of the bundle and
 //! within `0.5` of the stateless pass (the gpt-oss self-consistency
 //! tolerance for F16 and BF16). The greedy continuation is teacher-forced, so

@@ -185,7 +185,13 @@ mean against Transformers' own BF16 run, from the
 [follow-up record](acceptance/measurements/reference-precision-followups-20261016.json)),
 rounded up to two significant digits, as `2.665` was to `2.7`; with `1` that
 run would fail four of its eight statistics. It was fixed before any
-Llama-family or Gemma half-precision run. Cached prefills and batched rows
+Llama-family or Gemma half-precision run. The bounds calibrate BF16 runs
+only. The generator writes no `float16` bundle, so a Metal/F16 run is held
+to the same BF16 bounds, reused as an upper limit in the way gpt-oss applies
+one bound to any half-precision side. They do not reflect F16's rounding
+unit, which is eight times smaller (on gpt-oss-20b, Metal/F16 reached `0.007`
+to `0.874` of the official BF16 statistics), so an F16 pass is weaker
+evidence than a BF16 pass. Cached prefills and batched rows
 must also agree with the stateless pass within gpt-oss's self-consistency
 tolerance (`0.5` for F16 and BF16), and the teacher-forced greedy continuation
 is compared at every step whose F32 margin exceeds `2.4 M`. The F32 tolerance

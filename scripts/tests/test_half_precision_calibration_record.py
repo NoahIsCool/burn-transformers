@@ -69,6 +69,16 @@ class HalfPrecisionCalibrationRecordTests(unittest.TestCase):
                 self.assertTrue(log.startswith(f"== source {source['commit']} dirty=0\n"))
         self.assertTrue(record["not_run"], "the Burn half-precision gates have not run")
 
+    def test_f16_runs_are_bounded_only_as_an_upper_limit(self):
+        """The record says the BF16 bounds do not calibrate F16 runs, for which no official bundle exists."""
+        notes = [note for note in self.record["notes"] if "F16" in note and "upper limit" in note]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("do not reflect F16 rounding", notes[0])
+        generator = (ROOT / "scripts/generate_causal_lm_reference.py").read_text()
+        dtypes = re.search(r"^DTYPES = \(([^)]*)\)", generator, re.MULTILINE)
+        self.assertIsNotNone(dtypes)
+        self.assertNotIn('"float16"', dtypes.group(1), "the generator now writes F16 twins; calibrate F16 runs from them")
+
     def test_logs_and_runner_scripts_match_their_digests(self):
         """Every committed evidence file is authenticated by its recorded SHA-256."""
         files = {**self.record["logs"], **self.record["runner_scripts"]}

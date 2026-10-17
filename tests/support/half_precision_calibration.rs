@@ -2,11 +2,13 @@
 //!
 //! A half-precision (F16 or BF16) Burn run is judged against the same F32 (or
 //! F64) Transformers bundle as an F32 run, called the *truth* here. Its bounds
-//! are not chosen by hand: they are the official implementation's own
-//! half-precision distance from that truth, read at run time from an official
-//! BF16 bundle that `scripts/generate_causal_lm_reference.py --dtype bfloat16`
-//! wrote from the same checkpoint, prompts, and options. The F32 gates do not
-//! use this module.
+//! are not chosen by hand: they are the official implementation's own BF16
+//! distance from that truth, read at run time from an official BF16 bundle
+//! that `scripts/generate_causal_lm_reference.py --dtype bfloat16` wrote from
+//! the same checkpoint, prompts, and options. For a BF16 run that is the
+//! official evaluation in the run's own precision; an F16 run reuses it as an
+//! upper limit only (see [F16 runs](self#f16-runs)). The F32 gates do not use
+//! this module.
 //!
 //! # Rule
 //!
@@ -49,9 +51,9 @@
 //!
 //! # Slack
 //!
-//! The factor `s` covers the difference between two half-precision
-//! implementations of one model: Burn normalizes softmaxes in F32 and orders
-//! its reductions differently, so its rounding is not Transformers'. It is
+//! The factor `s` covers the difference between two BF16 implementations of
+//! one model: Burn normalizes softmaxes in F32 and orders its reductions
+//! differently, so its rounding is not Transformers'. It is
 //! fixed from the only measurement of Burn half-precision runs next to the
 //! official BF16 evaluation of the same truth: gpt-oss-20b, all 24 blocks, on
 //! the four prompts of `gpt-oss-20b-6cee5e81-f32-reference.bundle`, recorded
@@ -72,7 +74,23 @@
 //! fixed before any Llama-family or Gemma half-precision run and is not to be
 //! changed to make one pass; it is a measured property of Burn's
 //! half-precision kernels on one other family, so a failure under it is a
-//! finding to review.
+//! finding to review. Only the Flex/BF16 ratios set it; the Metal/F16 row is
+//! listed because it is the same measurement, not because it calibrates F16.
+//!
+//! # F16 runs
+//!
+//! The Metal profile stores F16, whose unit roundoff `2^-11` is eight times
+//! smaller than BF16's `2^-8` (11 against 8 significand bits). No official
+//! F16 evaluation exists to calibrate it: the generator writes `float32`,
+//! `float64`, and `bfloat16` bundles only. An F16 run is therefore judged by
+//! the BF16 bounds above, reused as an upper limit, as the gpt-oss gate
+//! applies one half-precision bound whichever side is half precision. These
+//! bounds do not reflect F16 rounding and do not show that an F16 run is as
+//! close to the truth as F16 allows: on gpt-oss-20b, Metal/F16 reached
+//! `0.007` to `0.759` of the official BF16 maxima and `0.026` to `0.874` of
+//! its means, so an F16 run whose error far exceeds F16 rounding can still
+//! pass. A failure is still a finding; a pass is weaker evidence than a
+//! BF16 pass.
 //!
 //! # Self-consistency
 //!
@@ -853,7 +871,9 @@ pub(crate) struct HalfPrecisionGate {
 impl HalfPrecisionGate {
     /// Calibrates a `dtype` run against the truth in `truth_dir` from the official BF16 bundle in `official_dir`.
     ///
-    /// Prints each prompt's bounds.
+    /// Prints each prompt's bounds. A BF16 run is bounded by the official
+    /// evaluation in its own precision; an F16 run by the same BF16 bounds,
+    /// reused as an upper limit (see [F16 runs](self#f16-runs)).
     ///
     /// # Panics
     ///

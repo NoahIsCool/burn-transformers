@@ -487,6 +487,7 @@
   "The maximum official deviation of every Llama-family prompt except Llama-3.1-8B's lies at position 0, whose massive activations round worst in BF16; the per-prompt mean is the sharper half-precision check there.",
   "With no decisive greedy step at the bound, the cached greedy gates of SmolLM-135M, SmolLM3-3B, Qwen2-7B and the Gemma long-context bundle need TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0 or TRANSFORMERS_GEMMA_MIN_GREEDY=0, as the gpt-oss half-precision gates do.",
   "Qwen2-7B's official BF16 run already picks another first greedy token (32671) than its F64 twin (12095, margin 0.603).",
-  "Peak memory footprint excludes the checkpoints' memory-mapped SafeTensors pages; the maximum resident set size includes them."
+  "Peak memory footprint excludes the checkpoints' memory-mapped SafeTensors pages; the maximum resident set size includes them.",
+  "These bounds calibrate BF16 runs only. The generator writes no float16 bundle, so the Metal/F16 gates reuse the BF16 bounds as an upper limit (as gpt-oss applies one bound to any half-precision side); they do not reflect F16 rounding, whose unit roundoff 2^-11 is eight times smaller than BF16's 2^-8, so an F16 pass is weaker evidence than a BF16 pass."
  ]
 }
