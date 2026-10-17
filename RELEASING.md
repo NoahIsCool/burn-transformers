@@ -62,9 +62,21 @@ cargo +stable package --manifest-path Cargo.toml --locked
 ```
 
 The list may contain source, examples, compact test fixtures, reference scripts,
-documentation, and acceptance metadata. It must not contain `models/`,
-`target/`, SafeTensors or PyTorch weights, Burnpack sidecars, authentication
-material, or generated reference payloads intended for external storage.
+documentation, and the published acceptance records. It must not contain
+`models/`, `target/`, SafeTensors or PyTorch weights, Burnpack sidecars,
+authentication material, generated reference payloads intended for external
+storage, or repository-only evidence: measurement campaign directories other
+than the published compact summaries, and the mechanistic studies' recorded
+figures, result records, and captured runs (see
+[`scripts/package_contents.py`](scripts/package_contents.py)). The compressed
+`.crate` must stay below the package gate's 8 MiB budget, under crates.io's
+10 MiB upload limit. `python3 scripts/check_release.py --gate package --offline`
+checks both and runs the archive's Rust and Python tests. Finally, confirm that
+the registry would accept the archive without uploading it:
+
+```text
+cargo +stable publish --manifest-path Cargo.toml --locked --dry-run
+```
 
 Package from the clean, committed transformer source tree. Preserve unrelated
 changes outside this standalone crate. Record the commit ID and archive checksum
