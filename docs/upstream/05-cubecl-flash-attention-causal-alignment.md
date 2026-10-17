@@ -3,15 +3,17 @@
 | | |
 |---|---|
 | Upstream | [tracel-ai/burn](https://github.com/tracel-ai/burn), crate `burn-cubecl` (kernels in [tracel-ai/cubek](https://github.com/tracel-ai/cubek), `cubek-attention`) |
-| Version reproduced | burn 0.21.0, cubek-attention 0.2.0 |
+| Version reproduced | burn 0.21.0, cubek-attention 0.2.0 (this crate's pin) |
 | Kind | Correctness (different results from the same call depending on the kernel selected) |
-| Upstream status, checked 2026-10-16 | **Not fixed** on `main`: `burn-cubecl`'s `attention` falls back only for bias, softcap or a custom scale, and cubek's logical mask is still `row < col`. File this one. |
+| Upstream status, checked 2026-10-16 | **Fixed in v0.22.0; do not file.** [cubek#406](https://github.com/tracel-ai/cubek/pull/406) ("Fix attention", merged 2026-07-14, `7fb51b0b`) made `LogicalTileMask::should_mask` bottom-right aligned (`pos.1 + seq_q > pos.0 + seq_kv`, commented as matching Burn's fallback) and updated the CPU reference to `j + seq_q > i + seq_kv`. It ships in cubek-attention 0.3.0, which burn-cubecl 0.22.0 uses. The plain `pos.0 < pos.1` rule remains only for a mask built without bounds, and cubek-attention 0.3.0's only global attention (`global/simple/attention.rs`) always passes `(seq_q, seq_kv)`, so tile-aligned non-square shapes (for example `Q = 512, K = 4096`) are covered too. Checked by reading the 0.3.0 sources; the repro was not ported, because v0.22.0 removed the backend type parameter it uses to call each strategy. |
 | Repro | [`repros/cubecl-flash-attention-causal-alignment`](repros/cubecl-flash-attention-causal-alignment) |
 | Patch | [`patches/05-cubecl-flash-attention-causal-alignment.patch`](patches/05-cubecl-flash-attention-causal-alignment.patch) (`crates/burn-cubecl`) |
 | Patch verified | Yes, Metal on Apple M3 Max: `FlashUnit` on a `Q = 512, K = 4097` causal problem differs from Burn's bottom-right reference by 0.50 unpatched and declines with an explicit error patched; the square control still runs the flash kernel |
 | Workarounds an upstream fix removes | `src/attention/dispatch.rs` passes `is_causal` only for square planes and otherwise materializes a bottom-right mask ("Causal alignment"); the opt-in test `metal_causal_suffix_matches_eager_reference` guards it |
 
-## Issue draft
+## Issue draft (not to be filed: fixed in v0.22.0)
+
+Kept as the record of the 0.21.0 behaviour this crate works around.
 
 **Title:** CubeCL attention: flash kernels use top-left causal alignment while `attention_fallback` uses bottom-right (`is_causal` with `seq_q != seq_kv`)
 
@@ -92,8 +94,13 @@ Rust 1.94 nightly, Apple M3 Max, macOS 27.0.1. Not run on CUDA/ROCm.
 
 ## Notes for this crate
 
-- Observation from the same run, not part of this issue: `FlashUnit`'s F32 output differs
-  from an F64 reference by about 3e-4 even when it is correct (square case), against 7e-7
-  for the fallback, although it is launched with `AccumulatorPrecision::Strict(F32)`.
-- CUDA validation (where flash candidates are more likely to win autotuning) was not run;
-  it would need a GPU job on the SCC under an explicitly chosen project.
+- After upgrading to v0.22.0 the square-only `is_causal` rule and the explicit bottom-right
+  mask in `src/attention/dispatch.rs` can be removed; keep the opt-in test
+  `metal_causal_suffix_matches_eager_reference`, and extend it with a tile-aligned
+  non-square case (`Q = 512, K = 4096`) when doing so, since that path was only checked by
+  reading the source.
+- Observation from the same 0.21.0 run, not part of this issue: `FlashUnit`'s F32 output
+  differs from an F64 reference by about 3e-4 even when it is correct (square case),
+  against 7e-7 for the fallback, although it is launched with
+  `AccumulatorPrecision::Strict(F32)`.
+- Not run on CUDA or ROCm.

@@ -3,44 +3,55 @@
 | | |
 |---|---|
 | Upstream | [tracel-ai/burn](https://github.com/tracel-ai/burn), crate `burn-flex` |
-| Version reproduced | 0.21.0 (this crate's pin) |
+| Version reproduced | 0.21.0 (this crate's pin) and **0.22.0** |
 | Kind | Correctness (panics and read errors on valid Boolean tensors) |
-| Upstream status, checked 2026-10-16 | Probably **not fixed**: on `main`, `bool_select` and `bool_gather` still return `select::<u8>` / `gather_bool` directly without re-tagging (the helpers themselves were not inspected). Re-run the repro on v0.22.0 before filing. |
-| Repro | [`repros/flex-bool-select-dtype`](repros/flex-bool-select-dtype) |
-| Patch | [`patches/12-flex-bool-select-dtype.patch`](patches/12-flex-bool-select-dtype.patch) (`crates/burn-flex/src/ops/bool.rs`) |
-| Patch verified | Yes: 4 of 4 Boolean reads fail → 0 of 4 |
+| Upstream status, checked 2026-10-16 | **Open.** v0.22.0 reproduces it (4 of 4 Boolean reads fail, measured below). On `main` at `df0812e`, `bool_select` still returns `select::<u8>(..)` and `gather_bool` is still `gather::<u8>(..)`; `bool_select_or` (renamed `bool_select_assign` on `main`) already re-tags its output since v0.22.0. File this one. |
+| Repro | [`repros/v0.22.0/flex-bool-select-dtype`](repros/v0.22.0/flex-bool-select-dtype) (to file); [`repros/flex-bool-select-dtype`](repros/flex-bool-select-dtype) (0.21.0) |
+| Patch | To file: [`patches/v0.22.0/12-flex-bool-select-dtype.patch`](patches/v0.22.0/12-flex-bool-select-dtype.patch) (v0.22.0) and the same change rebased onto `main`, [`patches/v0.22.0/12-flex-bool-select-dtype-main.patch`](patches/v0.22.0/12-flex-bool-select-dtype-main.patch). For this crate's pin: [`patches/12-flex-bool-select-dtype.patch`](patches/12-flex-bool-select-dtype.patch) (v0.21.0, `crates/burn-flex/src/ops/bool.rs`; its `retag_bool` helper now sits above the test-module comment block) |
+| Patch verified | Yes, Apple M3 Max: 4 of 4 Boolean reads fail → 0 of 4, on v0.22.0 and on v0.21.0; burn-flex's 425 unit tests pass with the v0.22.0 patch. The `main` patch was checked with `git apply --check` only (changed lines identical to the v0.22.0 patch). |
 | Workarounds an upstream fix removes | `select_bool_tensor` in `src/architecture/types.rs`, which selects through an integer round trip, and the integer-based Boolean readback helper next to it |
 
 ## Issue draft
 
-**Title:** burn-flex: `Tensor<Bool>::select` / `gather` produce `DType::U8` tensors, so `cat` panics and `to_vec::<bool>()` fails
+**Title:** burn-flex: `Tensor<_, Bool>::select` / `gather` produce `DType::U8` tensors, so `cat` panics and `try_to_vec::<bool>()` fails
 
 ### Describe the bug
 
-On Flex, `bool_select`, `bool_gather` and `bool_select_or` reuse the numeric `u8`
-kernels, whose output is labelled `DType::U8` instead of the input's `DType::Bool(..)`.
-The bytes are correct, but Boolean consumers that check the dtype fail:
-`Tensor::cat` with another Boolean tensor panics ("cat: dtype mismatch: expected U8, got
-Bool(Native)"), and `into_data().to_vec::<bool>()` returns `TypeMismatch`.
+On Flex, `bool_select` and `bool_gather` reuse the numeric `u8` kernels, whose output is
+labelled `DType::U8` instead of the input's `DType::Bool(..)`. The bytes are correct, but
+Boolean consumers that check the dtype fail: `Tensor::cat` with another Boolean tensor
+panics ("cat: dtype mismatch: expected U8, got Bool(Native)"), and
+`into_data().try_to_vec::<bool>()` returns `DTypeMismatch`. `bool_select_or` had the same
+problem and was fixed in v0.22.0 by re-tagging its output; `select` and `gather` were not.
 
-### To reproduce
+### To Reproduce
 
-Standalone project: `repros/flex-bool-select-dtype` (`burn = "=0.21.0"`, feature `flex`).
+Standalone project `repros/v0.22.0/flex-bool-select-dtype` (`burn = "=0.22.0"`, feature
+`flex`), `cargo run --release`:
 
 ```rust
-let mask = Tensor::<Flex, 2, Bool>::from_bool(TensorData::from([[true, false], [false, true], [true, true]]), &device);
-let selected = mask.clone().select(0, Tensor::<Flex, 1, Int>::from_ints([2, 0], &device));
-selected.dtype();                                  // U8, expected Bool(Native)
-selected.clone().into_data().to_vec::<bool>();     // Err(TypeMismatch)
-Tensor::cat(vec![selected, other_bool_row], 0);    // panics
+let device = Device::flex();
+let mask = Tensor::<2, Bool>::from_bool(
+    TensorData::from([[true, false], [false, true], [true, true]]),
+    &device,
+);
+let selected = mask.clone().select(0, Tensor::<1, Int>::from_ints([2, 0], &device));
+selected.dtype();                                    // U8, expected Bool(Native)
+selected.clone().into_data().try_to_vec::<bool>();   // Err(DTypeMismatch { .. })
+Tensor::cat(vec![selected, other_bool_row], 0);      // panics
 ```
 
-### Actual behavior
+### Expected behavior
+
+`select` and `gather` of a Boolean tensor return a tensor with the input's Boolean dtype.
+
+### Actual behavior (burn 0.22.0)
 
 ```text
 input dtype:  Bool(Native)
 select dtype: U8
-  to_vec::<bool>(): Err(TypeMismatch("Invalid target element type (expected U8, got Bool(Native))"))
+  try_to_vec::<bool>(): Err(DTypeMismatch { expected: Bool(Native), actual: U8 })
+    panic: assertion `left == right` failed: cat: dtype mismatch: expected U8, got Bool(Native)
   cat with a Bool tensor: panicked
 gather dtype: U8
   ... (same)
@@ -50,26 +61,34 @@ gather dtype: U8
 ### Root cause
 
 `crates/burn-flex/src/ops/bool.rs`: `bool_select` returns
-`gather_scatter::select::<u8>(tensor, dim, indices)` and `bool_gather` returns
-`gather_scatter::gather_bool(...)` (= `gather::<u8>`); both create their output with
-`E::dtype()`, i.e. `U8`. Other Boolean ops (`bool_not`, comparisons, `scatter_or`) carry
-the input's `BoolDType` explicitly.
+`gather_scatter::select::<u8>(tensor, dim, indices)`, and `bool_gather` returns
+`gather_scatter::gather_bool(..)`, which is `gather::<u8>(..)`; both create their output
+with `E::dtype()`, i.e. `U8`. `select_or` in `gather_scatter.rs` already restores the dtype
+("The shared update kernel tags its output as u8; retain the input's bool dtype").
 
 ### Proposed fix
 
-Re-tag the shared kernels' output with the input's Boolean dtype (no copy; the `Arc` is
-re-wrapped):
+Re-tag the output the same way `select_or` does (no copy; the `Arc` is re-wrapped): in
+`gather_bool`, and in a new `select_bool` that `bool_select` calls.
 
 ```rust
-fn retag_bool(tensor: FlexTensor, dtype: DType) -> FlexTensor {
-    FlexTensor::from_arc(tensor.data_arc(), tensor.layout().clone(), dtype)
+pub fn select_bool(tensor: FlexTensor, dim: usize, indices: FlexTensor) -> FlexTensor {
+    let dtype = tensor.dtype();
+    let result = select::<u8>(tensor, dim, indices);
+    // The shared kernel tags its output as u8; retain the input's bool dtype.
+    FlexTensor::from_arc(result.data_arc(), result.layout().clone(), dtype)
 }
 ```
 
-applied in `bool_select`, `bool_gather` and `bool_select_or`. With the patch the selected
-and gathered tensors are `Bool(Native)`, read back as `[true, true, true, false]` and
-`[false, true, false, false, true, true]`, and concatenate with other Boolean tensors.
+With the patch the selected and gathered tensors are `Bool(Native)`, read back as `[true,
+true, true, false]` and `[false, true, false, false, true, true]`, and concatenate with
+other Boolean tensors.
 
 ### Environment
 
-burn 0.21.0, Flex backend, Rust 1.94 nightly, Apple M3 Max, macOS 27.0.1.
+burn 0.22.0, Flex backend, Rust 1.99.1, Apple M3 Max, macOS 27.0.1.
+
+## Notes for this crate
+
+- On the crate's pin (0.21.0), `bool_select_or` is affected too; the v0.21.0 patch re-tags
+  all three with a `retag_bool` helper in `ops/bool.rs`.

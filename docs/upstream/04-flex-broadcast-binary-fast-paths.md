@@ -3,15 +3,17 @@
 | | |
 |---|---|
 | Upstream | [tracel-ai/burn](https://github.com/tracel-ai/burn), crate `burn-flex` |
-| Version reproduced | 0.21.0 (this crate's pin) |
+| Version reproduced | 0.21.0 (this crate's pin); not reproducible on 0.22.0 |
 | Kind | Performance (30-70x slower than the dense equivalent) |
-| Upstream status, checked 2026-10-16 | Reworked on `main`: the `SharedRow`/`PerRowScalar` paths were removed in favour of a collapsed loop nest (`crate::zip`) that is documented to handle every stride pattern. **Re-measure with the repro against v0.22.0 before filing**; file only if the ratios below persist. |
+| Upstream status, checked 2026-10-16 | **Fixed in v0.22.0; do not file.** Measured with the repro ported to v0.22.0: RoPE broadcast 247.7 µs vs 240.5 µs dense (1.0x), contiguous RoPE 236.9 vs 245.6 µs (1.0x), outer product 27.2 vs 58.9 µs (0.5x). v0.22.0 replaced the `SharedRow`/`PerRowScalar` special cases with a collapsed loop nest (`crate::zip`) that handles every stride pattern. |
 | Repro | [`repros/flex-broadcast-binary-fast-paths`](repros/flex-broadcast-binary-fast-paths) |
 | Patch | [`patches/04-flex-broadcast-binary-fast-paths.patch`](patches/04-flex-broadcast-binary-fast-paths.patch) (`crates/burn-flex/src/ops/binary.rs`) |
 | Patch verified | Yes: RoPE product 19.6 ms → 0.38 ms, outer product 1.9 ms → 0.05 ms, results bit-identical |
 | Workarounds an upstream fix removes | The fused split-half RoPE kernel `src/position/tensor/flex.rs`; the outer-product-as-matmul `input_update` in `src/mamba2.rs` (`recurrent_scan`); the flattened `SegmentMasks` layout in `src/mamba2.rs` |
 
-## Issue draft
+## Issue draft (not to be filed: fixed in v0.22.0)
+
+Kept as the record of the 0.21.0 behaviour this crate works around.
 
 **Title:** burn-flex: F32 add/sub/mul/div take a scalar `StridedIter` path for broadcasts other than "shared row" and "per-row scalar"
 
@@ -82,7 +84,9 @@ burn 0.21.0, burn-flex default features, Rust 1.94 nightly, Apple M3 Max, macOS 
 
 ## Notes for this crate
 
-- If v0.22.0's `zip` loop nest already reaches dense speed on these shapes, close this
-  draft and simply plan to remove the crate's fused RoPE kernel and outer-product
-  `input_update` after upgrading (both are bit-identical to the broadcast formulation, so
-  their tests can assert equality with it).
+- v0.22.0's `zip` loop nest reaches dense speed on these shapes, so after upgrading the
+  crate can remove its fused RoPE kernel and the outer-product `input_update`; both are
+  bit-identical to the broadcast formulation, so their tests can assert equality with it.
+- The v0.22.0 measurement used a mechanical port of `repros/flex-broadcast-binary-fast-paths`
+  (backend type parameter removed, `Device::flex()`); it is not kept here because nothing
+  remains to file.

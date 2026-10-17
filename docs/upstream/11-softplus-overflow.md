@@ -3,15 +3,18 @@
 | | |
 |---|---|
 | Upstream | [tracel-ai/burn](https://github.com/tracel-ai/burn), crate `burn-tensor` (`tensor::activation`) |
-| Version reproduced | 0.21.0 (this crate's pin) |
+| Version reproduced | 0.21.0 (this crate's pin); not reproducible on 0.22.0 |
 | Kind | Correctness (non-finite values and gradients for finite inputs) |
-| Upstream status, checked 2026-10-16 | **Fixed in v0.22.0** (`softplus` calls `softplus_with_threshold(tensor, beta, DEFAULT_SOFTPLUS_THRESHOLD)`). Do not file; kept as a record. |
+| Upstream status, checked 2026-10-16 | **Fixed in v0.22.0; do not file.** [burn#5373](https://github.com/tracel-ai/burn/issues/5373), fixed by [#5374](https://github.com/tracel-ai/burn/pull/5374) (merged 2026-08-24): `softplus` calls `softplus_with_threshold(tensor, beta, DEFAULT_SOFTPLUS_THRESHOLD)`. The repro, ported mechanically to v0.22.0, reports 0 of 10 inputs with a wrong value or gradient. |
+| Related upstream issues | burn#5373 / #5374 |
 | Repro | [`repros/softplus-overflow`](repros/softplus-overflow) |
 | Patch | [`patches/11-softplus-overflow.patch`](patches/11-softplus-overflow.patch) (`crates/burn-tensor/src/tensor/activation/base.rs`) |
 | Patch verified | Yes: 4 of 10 inputs with a wrong value or gradient → 0 of 10 |
 | Workarounds an upstream fix removes | `delta_net::softplus` (`src/delta_net.rs`), PyTorch's thresholded softplus, also used by `src/mamba2.rs` for `dt` |
 
-## Issue draft
+## Issue draft (not to be filed: fixed in v0.22.0)
+
+Kept as the record of the 0.21.0 behaviour this crate works around.
 
 **Title:** `activation::softplus` returns `inf` (and a `NaN` gradient) for `beta * x > 88.7` and 0 for `beta * x < -17` in F32
 

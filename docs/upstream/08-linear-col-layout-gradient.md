@@ -3,15 +3,17 @@
 | | |
 |---|---|
 | Upstream | [tracel-ai/burn](https://github.com/tracel-ai/burn), crate `burn-core` (`module::param`), seen through `burn-nn`'s `LinearConfig` |
-| Version reproduced | 0.21.0 (this crate's pin) |
+| Version reproduced | 0.21.0 (this crate's pin); not reproducible on 0.22.0 |
 | Kind | Correctness (first optimizer step skips the weight; `load_record` panics) |
-| Upstream status, checked 2026-10-16 | `init_mapper`: **fixed in v0.22.0** (it detaches the base value, maps it, then applies the gradient policy). The `load_record` panic (`transform_for_load` maps a tracked tensor before `set_require_grad`) was not confirmed on `main` because that code moved; re-run the repro on v0.22.0 and file only if it still panics. |
+| Upstream status, checked 2026-10-16 | **Fixed in v0.22.0; do not file.** Both halves, measured with the repro ported to v0.22.0 (`Linear` is no longer generic there): with the column layout the first SGD step changes the weight, the weight has a gradient on passes 1, 2 and 3, and `load_record` of a record taken from a live autodiff module loads. v0.22.0's `init_mapper` detaches the base value, maps it, then applies the gradient policy. |
 | Repro | [`repros/linear-col-layout-gradient`](repros/linear-col-layout-gradient) |
 | Patch | [`patches/08-linear-col-layout-gradient.patch`](patches/08-linear-col-layout-gradient.patch) (`crates/burn-core/src/module/param/{base,tensor}.rs`) |
 | Patch verified | Yes: column layout — first SGD step changes the weight false → true, gradient on passes 1..3 `[false, true, true]` → `[true, true, true]`, `load_record` from a live module panics → loads |
 | Workarounds an upstream fix removes | `operations::init_linear` (`src/operations.rs`), which rebuilds every column-layout weight as a detached lazy leaf and detaches in its load mapper; `t5_linear` in `src/models/t5/model.rs`, which uses `LinearLayout::Row` to avoid the problem; the "untracked until the layout mapper finishes" ordering in `checkpoint::runtime::install_float_parameter` |
 
-## Issue draft
+## Issue draft (not to be filed: fixed in v0.22.0)
+
+Kept as the record of the 0.21.0 behaviour this crate works around.
 
 **Title:** `LinearLayout::Col` weights get no gradient on the first backward pass, and `load_record` of a live autodiff record panics ("Can't convert a non leaf tensor into a tracked tensor")
 
@@ -92,7 +94,9 @@ burn 0.21.0, Flex backend with `Autodiff`, Rust 1.94 nightly, Apple M3 Max, macO
 
 ## Notes for this crate
 
-- v0.22.0's `init_mapper` matches the first half of the patch; once the crate upgrades,
-  `init_linear`'s lazy re-wrapping for autodiff becomes unnecessary (its contiguous
-  re-layout for inference Flex is a separate, performance-only concern), and T5 can use
-  the column layout again.
+- After upgrading to v0.22.0, `init_linear`'s lazy re-wrapping for autodiff becomes
+  unnecessary (its contiguous re-layout for inference Flex is a separate,
+  performance-only concern), T5 can use the column layout again, and the "untracked until
+  the layout mapper finishes" ordering in `install_float_parameter` can be revisited.
+- The v0.22.0 measurement used a port of `repros/linear-col-layout-gradient` (non-generic
+  `Linear`, `SgdConfig::new().init()`); it is not kept here because nothing remains to file.

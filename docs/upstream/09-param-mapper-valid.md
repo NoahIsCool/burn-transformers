@@ -3,15 +3,17 @@
 | | |
 |---|---|
 | Upstream | [tracel-ai/burn](https://github.com/tracel-ai/burn), crate `burn-core` (`module::param`) |
-| Version reproduced | 0.21.0 (this crate's pin) |
+| Version reproduced | 0.21.0 (this crate's pin); not reproducible on 0.22.0 |
 | Kind | Correctness (records saved after `valid()` have the wrong layout; square projections reload transposed without any error) |
-| Upstream status, checked 2026-10-16 | Appears **fixed on `main`**: `Param` conversion now passes `param_mapper` through (`valid()` / `train()` keep it). Re-run the repro on v0.22.0; file only if it still fails. |
+| Upstream status, checked 2026-10-16 | **Fixed in v0.22.0; do not file.** Measured with a port of the repro to v0.22.0 (where `valid()` is a `Module` method and `from_inner()` no longer exists): a square column-layout projection saved after `valid()` and reloaded through `ModuleRecord::into_bytes`/`from_bytes` reproduces the owner's outputs exactly, and a non-square record taken after `valid()` loads into a fresh column-layout module. |
 | Repro | [`repros/param-mapper-valid`](repros/param-mapper-valid) |
 | Patch | [`patches/09-param-mapper-valid.patch`](patches/09-param-mapper-valid.patch) (`crates/burn-core/src/module/param/{base,tensor}.rs`) |
-| Patch verified | Yes: square column-layout projection saved after `valid()` and reloaded, max output error 0.71-0.83 → 0; saved weight shape `[in, out]` → `[out, in]` |
+| Patch verified | Yes (0.21.0): square column-layout projection saved after `valid()` and reloaded, max output error 0.66 in this run (0.71-0.88 in earlier runs; the weights are random) → 0; saved weight shape `[in, out]` → `[out, in]`. The patch is now generated against pristine v0.21.0 (its index lines name the v0.21.0 blobs) and applies alone or after patch 08. |
 | Workarounds an upstream fix removes | The rule in `src/training.rs` (module docs) to save records only from the original training owner, never from a `valid()` or `from_inner()` copy |
 
-## Issue draft
+## Issue draft (not to be filed: fixed in v0.22.0)
+
+Kept as the record of the 0.21.0 behaviour this crate works around.
 
 **Title:** `valid()` / `from_inner()` drop `Param` save/load mappers, so records saved afterwards have the wrong layout (`LinearLayout::Col` weights saved transposed)
 
@@ -88,5 +90,8 @@ burn 0.21.0, Flex backend with `Autodiff`, Rust 1.94 nightly, Apple M3 Max, macO
 
 ## Notes for this crate
 
-- The same lifting would apply to `Param<Tensor<B, D, Int>>` and `Bool` if they ever carry
-  mappers; the patch covers float parameters, the only ones with layout mappers in Burn.
+- After upgrading to v0.22.0, the rule in `src/training.rs` to save records only from the
+  original training owner can be relaxed for `valid()` copies (re-check before removing
+  it, since 0.22.0 has no `from_inner()` to test).
+- The v0.22.0 measurement used a rewritten port (the 0.21 `Recorder`/`AutodiffModule` API is
+  gone); it is not kept here because nothing remains to file.

@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| Upstream | [sarah-ek/gemm](https://github.com/sarah-ek/gemm), crate `gemm-common` (reached through `burn-flex`'s matmul) |
-| Version reproduced | gemm / gemm-common 0.19.0 (what burn-flex 0.21.0 resolves to) |
+| Upstream | [sarah-quinones/gemm](https://github.com/sarah-quinones/gemm) (formerly `sarah-ek/gemm`), crate `gemm-common` (reached through `burn-flex`'s matmul) |
+| Version reproduced | gemm / gemm-common 0.19.0, which both burn-flex 0.21.0 and 0.22.0 depend on (`gemm = "0.19"`) |
 | Kind | Numerical reproducibility (bitwise results depend on memory layout) |
-| Upstream status, checked 2026-10-16 | **No knob on `main`**: the horizontal path is still gated only by `lhs_cs == 1 && rhs_rs == 1 && m * n <= 256`, and the gemv shortcuts only by shape and strides. File as a feature request with the patch. |
+| Upstream status, checked 2026-10-16 | **Open; no knob.** `gemm-common/src/gemm.rs` on `main` is byte-identical to 0.19.0 (blob `07626e2`; last push 2025-11-14), so the horizontal path is still gated only by `lhs_cs == 1 && rhs_rs == 1 && m * n <= 256`, and the gemv shortcuts only by shape and strides. File as a feature request with the patch, which applies to `main` unchanged. |
 | Repro | [`repros/gemm-layout-dependent-accumulation`](repros/gemm-layout-dependent-accumulation) |
 | Patch | [`patches/06-gemm-layout-dependent-accumulation.patch`](patches/06-gemm-layout-dependent-accumulation.patch) (against the gemm repository root, `gemm-common/src/gemm.rs`) |
-| Patch verified | Yes, on both architectures: x86-64 (BU SCC login node, Intel Xeon Gold 6242, AVX-512) 5 of 7 products layout-dependent unpatched and with the patch's default, 0 of 7 with the new setting; aarch64 (Apple M3 Max) 3 of 7 unpatched, 0 of 7 with the setting |
+| Patch verified | Yes, on both architectures: x86-64 (BU SCC login node, Intel Xeon Gold 6242, AVX-512) 5 of 7 products layout-dependent unpatched and with the patch's default, 0 of 7 with the new setting (earlier round; not re-run since, as the patch and repro are unchanged); aarch64 (Apple M3 Max) 3 of 7 unpatched, 0 of 7 with the setting (re-run in this round) |
 | Workarounds an upstream fix removes | None needed for correctness; the crate's tests compare results across weight layouts to F32 rounding instead of bitwise (commit `fe9e795`, e.g. `src/models/gpt_oss/model_tests.rs`, `src/training_tests.rs`, `examples/burn_training.rs`), and `src/checkpoint/runtime/storage_order.rs` documents the reassociation |
 
 ## Issue draft
