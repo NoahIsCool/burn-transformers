@@ -172,6 +172,13 @@ The [v0.3 validation](../acceptance/measurements/v0_3-training-validation-202609
 adds native training checks, the eleven inexpensive example executions, and
 both compiler profiles. Longer scientific runs retain their individual evidence.
 
+The published crate carries every study's programs, protocols, fixtures, and
+tests, but not its recorded outputs (`result.json` records, figures, and
+captured `evidence/` and `results/` runs) or the measurement campaign
+directories linked above: those exist only in the Git repository, where every
+link here resolves. From the crate, rerun a study and point its plot script at
+the new output (see [`scripts/package_contents.py`](../scripts/package_contents.py)).
+
 ## Load a checkpoint and generate
 
 These programs read a local checkpoint directory; none downloads anything.
