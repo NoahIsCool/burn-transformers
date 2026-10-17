@@ -14,8 +14,34 @@
 //!   --test flan_t5_small flan_t5_small_flex_matches_official_reference \
 //!   -- --ignored --exact --nocapture --test-threads=1
 //! ```
+//!
+//! The same gate runs on Metal (`--features std,metal,tokenizers`,
+//! `flan_t5_small_metal_matches_official_reference`) and on CUDA:
+//!
+//! ```text
+//! TRANSFORMERS_FLAN_T5_SMALL_DIR=/path/to/checkpoint \
+//! TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/path/to/reference.bundle \
+//! cargo test --release --no-default-features --features std,cuda,tokenizers \
+//!   --test flan_t5_small flan_t5_small_cuda_matches_official_reference \
+//!   -- --ignored --exact --nocapture --test-threads=1
+//! ```
+//!
+//! Build and run the CUDA gate on the GPU host with the CUDA toolkit
+//! available (`nvcc` at build time, `$CUDA_PATH/include` for run-time kernel
+//! compilation); Burn's `Cuda` device 0 is used, so `CUDA_VISIBLE_DEVICES`
+//! selects the GPU. The gate qualifies F32 numerics at `atol = rtol = 1e-4`,
+//! so it first probes how the device multiplies F32 matrices
+//! (`tests/support/backend_numerics.rs`) and refuses a device that rounds
+//! their inputs to TF32, as Burn 0.21 does on CUDA GPUs of compute capability
+//! 8.0 and newer: the release gate's tolerance has no TF32 counterpart, and
+//! the backend-parity suite (`tests/backend_parity.rs`) already measures T5
+//! on such GPUs. A GPU below compute capability 8.0 multiplies in F32 and
+//! runs the full gate. No CUDA run has been recorded yet.
 
 #![cfg(feature = "tokenizers")]
+
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
 
 use std::{
     collections::BTreeSet,
@@ -25,6 +51,9 @@ use std::{
     time::Instant,
 };
 
+use backend_numerics::MatmulPrecision;
+#[cfg(feature = "cuda")]
+use burn::backend::Cuda;
 #[cfg(feature = "flex")]
 use burn::backend::Flex;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -734,7 +763,19 @@ fn reference_root() -> PathBuf {
 }
 
 /// Runs the complete release gate on one backend.
+///
+/// The gate's tolerances qualify F32 arithmetic, so a device whose F32
+/// matrix products round their inputs to TF32 is refused before any
+/// artifact is read.
 fn run_reference_gate<B: Backend>(device: &B::Device, backend: &str) {
+    let precision = MatmulPrecision::probe::<B>(device);
+    assert_eq!(
+        precision,
+        MatmulPrecision::F32,
+        "{backend}: this device rounds F32 matrix inputs to TF32 (a CUDA GPU of compute \
+         capability 8.0 or newer), so the F32 release gate cannot qualify it; run it on an F32 \
+         device, or measure TF32 execution with tests/backend_parity.rs"
+    );
     let reference = ReferenceBundle::open(&reference_root());
     let root = authenticate_checkpoint(&checkpoint_root());
     let started = Instant::now();
@@ -1174,6 +1215,17 @@ fn flan_t5_small_flex_encoder_extraction_and_staged_hooks_are_exact() {
 #[ignore = "requires the pinned FLAN-T5-small checkpoint, reference bundle, and Metal"]
 fn flan_t5_small_metal_matches_official_reference() {
     run_reference_gate::<Metal>(&Default::default(), "Metal/F32");
+}
+
+/// Strictly loads FLAN-T5-small on CUDA and matches every official F32 path.
+///
+/// Only a GPU that multiplies F32 matrices in F32 (compute capability below
+/// 8.0) can pass; see the module documentation.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires the pinned FLAN-T5-small checkpoint, reference bundle, and an F32 CUDA GPU"]
+fn flan_t5_small_cuda_matches_official_reference() {
+    run_reference_gate::<Cuda>(&Default::default(), "CUDA/F32");
 }
 
 /// Pure helpers preserve tie semantics and the committed boundary digest.

@@ -16,6 +16,38 @@ tokenization or template support are selected with crate features. Enabling a
 backend proves that its code compiles; real-checkpoint execution is supported
 only where the checkpoint's acceptance record names that backend and precision.
 
+### Host requirement of the `cpu` feature
+
+The `cpu` feature (Burn's CubeCL MLIR backend) has a build-host requirement
+that the other features lack. Unless it is already installed, its build
+scripts download a prebuilt LLVM 20 (tracel-llvm `20.1.4-7`) and run its
+`llvm-config`. The bundler keeps the downloaded archive and its checksum file
+in `$HOME/.cache/tracel`, a path it derives from the home directory alone, so
+`XDG_CACHE_HOME` does not move it; it extracts the LLVM (about 430 MB on
+macOS) into the platform's local data directory: `$XDG_DATA_HOME/tracel`, by
+default `~/.local/share/tracel`, on Linux and
+`~/Library/Application Support/tracel` on macOS. To keep both off a
+quota-limited home directory, set `HOME` (and `XDG_DATA_HOME`, if it is set)
+to other storage for the build. The bundled `llvm-config` needs glibc 2.34 or
+newer and libstdc++ from GCC 11 or newer (`GLIBCXX_3.4.29`): Ubuntu 22.04 or
+newer and RHEL/AlmaLinux 9 or newer qualify; RHEL/AlmaLinux 8
+(glibc 2.28, GCC 8), still common on HPC clusters, does not. There the build
+stops in `tracel-mlir-rs-macros` or `tracel-tblgen-rs`, before this crate
+compiles, with loader errors such as `` version `GLIBC_2.34' not found `` and
+`` version `GLIBCXX_3.4.29' not found ``. The bundler sets
+`MLIR_SYS_200_PREFIX` and `TABLEGEN_200_PREFIX` itself before reading them,
+so pointing those variables at another LLVM has no effect.
+
+No crate code depends on `cpu`: only three test reports record whether it is
+enabled (`cfg!(feature = "cpu")` in `tests/muse_glimmer_artifacts.rs`,
+`tests/qwen35_benchmarks.rs`, and `tests/support/benchmark_identity.rs`). On such a
+host, omit the feature: lint with
+`--no-default-features --features std,flex,cuda,rocm,tokenizers,chat-templates,autodiff,train`,
+which compiles the same crate code, or build inside a container with a newer
+userland (Singularity or Apptainer with an Ubuntu 22.04 image, for example).
+The `cpu` build itself is then checked only where the requirement holds, such
+as CI's `ubuntu-latest` job.
+
 ## Checkpoint support
 
 A model-family implementation is not by itself a checkpoint support claim. A

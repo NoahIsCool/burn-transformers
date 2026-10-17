@@ -340,7 +340,7 @@ masks, cache transactions, SafeTensors headers, chat templates, and generation.
 | `default` | Enables `std` and the deterministic `flex` backend used by ordinary tests. |
 | `std` | Enables Burn's standard-library support. |
 | `flex` | Enables Burn Flex with SIMD kernels and parallel matrix products. |
-| `cpu` | Enables Burn's CPU backend. |
+| `cpu` | Enables Burn's CPU (CubeCL MLIR) backend. Its build runs a downloaded prebuilt LLVM that needs glibc 2.34+ and GCC 11+ libstdc++, so it does not build on RHEL/Alma 8; see [SUPPORT.md](SUPPORT.md#host-requirement-of-the-cpu-feature). |
 | `metal` | Enables Burn Metal. |
 | `cuda` | Enables Burn CUDA. |
 | `rocm` | Enables Burn ROCm. |

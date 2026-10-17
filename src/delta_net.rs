@@ -1198,8 +1198,8 @@ impl<B: Backend> ChunkOperands<B> {
             query: arrange(prepared.query.clone()),
             key: arrange(prepared.key.clone()),
             value: arrange(prepared.value.clone()),
-            beta: arrange(prepared.beta.clone().unsqueeze_dim(3)),
-            log_decay: arrange(prepared.log_decay.clone().unsqueeze_dim(3)),
+            beta: arrange(trailing_unit_axis(prepared.beta.clone())),
+            log_decay: arrange(trailing_unit_axis(prepared.log_decay.clone())),
             chunk: plan.chunk,
             chunks: plan.chunks,
             padded: plan.padded,
@@ -1625,20 +1625,16 @@ impl<B: Backend> PreparedDeltaRule<B> {
         let token = |tensor: &Tensor<B, 4>, index: usize| {
             tensor.clone().narrow(1, index, 1).swap_dims(1, 2)
         };
-        // One per-head scalar as `[batch, heads, 1, 1]`.
-        let scalar = |tensor: &Tensor<B, 3>, index: usize| {
-            tensor
-                .clone()
-                .narrow(1, index, 1)
-                .swap_dims(1, 2)
-                .unsqueeze_dim::<4>(3)
-        };
+        // The per-head scalars as `[batch, sequence, heads, 1]`, so that
+        // `token` yields one token's `[batch, heads, 1, 1]` factors.
+        let beta = trailing_unit_axis(self.beta.clone());
+        let log_decay = trailing_unit_axis(self.log_decay.clone());
         for index in 0..sequence {
             let query = token(&self.query, index);
             let key = token(&self.key, index);
             let value = token(&self.value, index);
-            let beta = scalar(&self.beta, index);
-            let decay = scalar(&self.log_decay, index).exp();
+            let beta = token(&beta, index);
+            let decay = token(&log_decay, index).exp();
 
             state = state * decay;
             let retrieved = key.clone().matmul(state.clone());
@@ -1654,6 +1650,31 @@ impl<B: Backend> PreparedDeltaRule<B> {
             .cast(self.output_dtype);
         (values, state, states)
     }
+}
+
+/// Appends a unit axis, `[batch, sequence, heads]` to `[batch, sequence, heads, 1]`.
+///
+/// The unit axis is prepended and then permuted to the end. Prepending is the
+/// one reshape Burn 0.21's CubeCL backends handle for any strides (a
+/// broadcast that keeps them); the permutation only reorders them. Inserting
+/// unit axes behind a strided tensor's trailing unit axis is not safe there:
+/// `burn_std::tensor::split_strides` starts from that axis's stride and never
+/// moves past it. The recurrence once unsqueezed each token's swapped
+/// `[batch, heads, 1]` slice, whose unit axis has stride `heads`; the result
+/// received strides `[heads², heads, heads, heads]` and read the wrong rows
+/// for every batch above one on Metal (and, through the same CubeCL reshape,
+/// on CUDA and ROCm) while Flex was exact. Reshaping the unswapped
+/// `[batch, 1, heads]` slice instead is still unsafe with one head whenever
+/// CubeCL slices it as an aligned view rather than a copy: its strides then
+/// become all ones. The chunked kernel's operands had the same flaw: with one
+/// head and factors passed as a transposed view (unmasked, so never copied),
+/// `unsqueeze_dim(3)` of `[batch, sequence, 1]` gave the token axis the unit
+/// axis's stride. Both kernels now take their factors through this function.
+/// `cubecl_reshape_decisions_justify_the_trailing_unit_axis_workaround`
+/// (`delta_net_tests.rs`) pins both CubeCL reshape decisions on the CPU, so a
+/// Burn upgrade that changes either one fails `cargo test`.
+fn trailing_unit_axis<B: Backend>(tensor: Tensor<B, 3>) -> Tensor<B, 4> {
+    tensor.unsqueeze_dim::<4>(0).permute([1, 2, 3, 0])
 }
 
 /// Normalizes the last axis using the FLA-compatible sum-of-squares convention.

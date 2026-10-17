@@ -82,11 +82,68 @@ them on its clean runner; the source and package gates run all of them.
 **Tiny reference goldens** run inside `cargo test`:
 `tiny_goldens_llama` (seven Llama-family cases), `tiny_goldens_gemma`, and
 `tiny_goldens_gpt_oss`, each against Transformers 5.2.0 / PyTorch 2.10.0 at an
-F32 tolerance of `1e-5`. Regenerate fixtures only deliberately, with those exact
-package versions:
+F32 tolerance of `1e-5`. The same checks run, ignored, on Metal and CUDA:
+
+```sh
+cargo test --locked --features metal --test tiny_goldens_llama --test tiny_goldens_gemma \
+  --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+cargo test --locked --features cuda --test tiny_goldens_llama --test tiny_goldens_gemma \
+  --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+```
+
+An accelerator that multiplies F32 matrices in F32 (Metal, CUDA below
+compute capability 8.0) is held to `1e-5 + 1e-5 · magnitude`, because hidden
+states reach magnitude 8 where an absolute `1e-5` is below F32 noise: on an
+Apple M3 Max the largest deviations are `3.6e-6` for logits and `1.14e-5` for
+a `gemma2` hidden state of magnitude `7.0`. A CUDA GPU that rounds F32 matrix
+inputs to TF32 is held to `1e-2 + 1e-2 · magnitude`. The goldens record the
+greedy continuation's tokens but not its logits, so each greedy step is
+decided on the run's own top-2 margin: it is compared when that margin
+exceeds twice the largest allowance a reference within the bound could have
+(`Bound::allowed_for_actual_scale` in `tests/support/backend_numerics.rs`),
+which forces the reference's token, and skipped as a tie otherwise. At least
+two of each case's six steps must be compared on every backend. Flex compares
+all six of every case (smallest margin `9.4e-4`); under the TF32 bound the
+threshold stays below `0.054`, which Flex's margins clear at four to six
+steps per case. No CUDA run has been recorded yet. Regenerate fixtures only
+deliberately, with those exact package versions:
 
 ```sh
 python3 -I scripts/generate_tiny_goldens.py --output tests/fixtures/tiny_goldens [--case NAME ...]
+```
+
+**Accelerator parity.** `tests/backend_parity.rs` installs the seeded
+parameters of a tiny model of every executable family (T5, GPT-2, GPT-NeoX,
+the seven Llama-family configurations, Gemma 2 and 3, gpt-oss, Qwen3.5,
+Qwen3-MoE, DeepSeek-V2, Muse Glimmer, Nemotron-H, and modular causal and
+encoder-decoder models, one of them with single-head mixers) into the same
+model on an accelerator and compares its stateless, ragged left-padded, and
+cached prefill-plus-decode logits with Flex, as well as the gated delta
+rule's recurrent and chunked kernels. Its Flex run is part of `cargo test`;
+the accelerator tests are ignored:
+
+```sh
+cargo test --locked --features metal --test backend_parity -- --ignored --nocapture --test-threads 1
+cargo test --locked --features cuda --test backend_parity -- --ignored --nocapture --test-threads 1
+```
+
+Each accelerator test first probes how its device multiplies F32 matrices.
+Metal, and CUDA GPUs below compute capability 8.0, multiply in F32 and must
+stay within `2e-5 + 2e-5 · scale` of Flex; on an Apple M3 Max the largest
+Metal deviation is `9.5e-6` (Gemma 2, logit scale 25.6) and the largest
+relative one `1.2e-6`. On CUDA GPUs of compute capability 8.0 and newer,
+Burn 0.21 rounds F32 matrix inputs to TF32, so those runs are held to
+`1e-2 + 1e-2 · scale` (derived in `tests/support/backend_numerics.rs`) and
+qualify execution rather than F32 numerics. No CUDA run has been recorded
+yet. The suite found two DeltaNet defects on CubeCL backends that every CPU
+test missed (see the changelog). Burn's CubeCL CPU backend shares those
+backends' reshape and reproduces the defect, so on a host where the `cpu`
+feature builds (see SUPPORT.md), its delta-rule case runs without a GPU and
+fails if `trailing_unit_axis` is reverted; a lib unit test also pins the
+upstream reshape decisions the workaround rests on:
+
+```sh
+cargo test --locked --features cpu --test backend_parity cpu::
 ```
 
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
@@ -138,13 +195,38 @@ python3 -I scripts/generate_causal_lm_reference.py --model-dir MODEL_DIR \
 
 Each test verifies the checkpoint/bundle pairing through the bundle's
 `config.json` SHA-256, loads strictly, and runs on Flex; adding
-`--features metal` repeats the checks on Metal. Run them one at a time:
+`--features metal` repeats the checks on Metal, and `--features cuda` on CUDA
+(tests named `cuda_*`). Run them one at a time:
 
 | Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
 | --- | --- | --- | --- |
 | Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift `7.6e-5` to `3.83e-4` on SmolLM-135M, Qwen3-4B, SmolLM3-3B, and Llama-3.1-8B, Flex and Metal); at least 2 decisive greedy tokens. Qwen2-7B's first-position activations reach about 7,000, so an F32 bundle's own rounding (`1.6e-3`) exceeds the tolerance: qualify it against a `--dtype float64` bundle, where Flex stays within `2.9e-4` and Metal reaches `1.9e-3` at one first-position logit, run with `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3` |
 | Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY` | `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3` |
 | gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.7` max, Transformers' own full-model BF16 deviation from the full F32 reference (`2.665`) rounded up, and `0.15` mean, kept from the earlier four-block calibration (the official BF16 mean is at most `0.108`, the crate's Flex/BF16 mean `0.112`) |
+
+Every cached-greedy check feeds the reference's tokens back and compares each
+step whose reference top-2 margin exceeds twice the absolute tolerance; a
+closer race is a tie at that tolerance and is skipped, not a reason to stop
+(`check_teacher_forced_greedy` in `tests/support/backend_numerics.rs`). The
+minimum counts decisive steps over the whole continuation. At the F32
+defaults every step of the pinned F32 and F64 bundles is decisive, so the
+F32 results below are unchanged. Under half-precision or TF32 tolerances,
+stopping at the first tie used to end comparisons early, and the full BF16
+gpt-oss-20b bundle (first margin `3.0625`, a tie at `2τ = 5`) could not meet
+the default minimum on any backend. It now compares its five decisive steps.
+At source `16822a0` (Apple M3 Max, default tolerances and minimum, bundle
+`reference.json` SHA-256
+`9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac`,
+2026-10-17), `flex_cached_greedy_matches_the_reference` in BF16 and
+`metal_cached_greedy_matches_the_reference` with
+`TRANSFORMERS_GPT_OSS_DTYPE=f16` each match all five and skip 27 ties, in 57
+and 60 seconds; the Metal run's peak memory footprint was 50.6 GB. Only these
+greedy checks were run; the bundle's prompt, batched, and long-prompt checks
+have not been recorded on this source. The same source reproduces every
+greedy token of the pinned F32 bundles through the shared helper: SmolLM-135M
+on Flex and Metal (32 of 32), gemma-3-4b-it on Metal (32 of 32, and 8 of 8
+for the long-context bundle), and the one-block gpt-oss F32 bundle on Flex
+(32 of 32), each with no ties.
 
 The Gemma long-context bundle and the gpt-oss truncated bundles are described
 in each test's module documentation, which also records the measured results.
@@ -165,6 +247,29 @@ model, so its pass is not a gate pass.
 These gates establish experimental validation only; none promotes a
 checkpoint. The Flex and Metal F32 runs at `f4c56c4` (below) are experimental
 evidence on the same terms.
+
+**CUDA.** Build and run the `cuda_*` tests on the GPU host with the CUDA
+toolkit available: `cudarc` reads `nvcc --version` at build time and CubeCL
+compiles kernels at run time with NVRTC against `$CUDA_PATH/include`
+(default `/usr/local/cuda`). Device 0 is used, so `CUDA_VISIBLE_DEVICES`
+selects the GPU. Every load first probes how the device multiplies F32
+matrices. A GPU below compute capability 8.0 multiplies in F32 and the
+defaults above apply. From compute capability 8.0, Burn 0.21 rounds F32
+matrix inputs to TF32, for which no default was measured: an F32 run then
+requires the gate's tolerance variables (`TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`;
+`TRANSFORMERS_GEMMA_TOLERANCE` and `_LONG_TOLERANCE`;
+`TRANSFORMERS_GPT_OSS_TOLERANCE` and `_MEAN_TOLERANCE`) and is recorded as
+TF32 evidence, not F32 qualification; half-precision gpt-oss runs keep their
+defaults. The FLAN-T5-small release gate qualifies F32 numerics at
+`atol = rtol = 1e-4` and refuses a TF32 device:
+
+```sh
+cargo test --release --no-default-features --features std,cuda,tokenizers \
+  --test flan_t5_small flan_t5_small_cuda_matches_official_reference \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+No CUDA run of any gate has been recorded yet.
 
 ### Artifact-gated tokenizer and chat-template parity
 
@@ -481,6 +586,13 @@ all-feature Clippy on the equipped build host before release:
 ```sh
 cargo clippy --manifest-path Cargo.toml --locked --all-targets --all-features -- -D warnings
 ```
+
+`--all-features` includes Metal and so lints only on macOS; CI's Linux job
+lints every other feature. The `cpu` feature's build runs a prebuilt LLVM that
+needs glibc 2.34+ and GCC 11+ libstdc++, so on an older Linux release host
+(RHEL/Alma 8) drop `cpu` from that feature list, which leaves the linted crate
+code unchanged, and rely on CI's `ubuntu-latest` job for the `cpu` build; see
+[SUPPORT.md](SUPPORT.md#host-requirement-of-the-cpu-feature).
 
 The source group also runs tests embedded in examples, retains a separate
 doctest pass, and executes the six download-free experiments listed in

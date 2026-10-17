@@ -12,7 +12,7 @@ use super::{
     GatedDeltaNet, GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, block_chunk_ranges,
     causal_decay_matrix, chunked_gated_delta_rule, mask_hidden, prefers_recurrence,
     recurrent_gated_delta_rule, recurrent_gated_delta_rule_with_snapshots, softplus,
-    unit_lower_inverse,
+    trailing_unit_axis, unit_lower_inverse,
 };
 
 /// Deterministic F32 CPU backend for recurrent and chunked delta-rule comparisons.
@@ -2005,5 +2005,110 @@ fn stateless_forward_rejects_an_empty_batch() {
     assert!(
         matches!(&error, crate::Error::Configuration { field, .. } if field == "delta_net.batch_size"),
         "{error:?}"
+    );
+}
+
+/// A strided per-head tensor gains its trailing unit axis without moving any value.
+///
+/// The input is a transposed view, so its strides are not row-major; every
+/// token's `[batch, heads, 1, 1]` slice, as the recurrence takes it, must
+/// still hold that token's per-head values of every row.
+#[test]
+fn trailing_unit_axis_keeps_every_row_of_a_strided_tensor() {
+    let device = Default::default();
+    let [batch, sequence] = [3, 5];
+    for heads in [1, 2] {
+        let values = (0..batch * heads * sequence)
+            .map(|index| index as f32)
+            .collect::<Vec<_>>();
+        // `[batch, heads, sequence]` storage viewed as `[batch, sequence, heads]`.
+        let strided = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(values, [batch, heads, sequence]),
+            &device,
+        )
+        .swap_dims(1, 2);
+        let expected = strided.clone().into_data().to_vec::<f32>().unwrap();
+        let lifted = trailing_unit_axis(strided);
+        assert_eq!(lifted.dims(), [batch, sequence, heads, 1]);
+        assert_eq!(
+            lifted.clone().into_data().to_vec::<f32>().unwrap(),
+            expected
+        );
+        for token in 0..sequence {
+            let factors = lifted.clone().narrow(1, token, 1).swap_dims(1, 2);
+            assert_eq!(factors.dims(), [batch, heads, 1, 1]);
+            let actual = factors.into_data().to_vec::<f32>().unwrap();
+            let wanted = (0..batch)
+                .flat_map(|row| (0..heads).map(move |head| (row, head)))
+                .map(|(row, head)| ((row * heads + head) * sequence + token) as f32)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, wanted, "{heads} heads, token {token}");
+        }
+    }
+}
+
+/// Unwraps the strides of a reshape that only rewrites strides.
+fn updated_strides(action: burn_std::tensor::ReshapeAction) -> Vec<usize> {
+    match action {
+        burn_std::tensor::ReshapeAction::UpdateStrides { strides } => strides.to_vec(),
+        other => panic!("expected new strides, got {other:?}"),
+    }
+}
+
+/// Burn 0.21's CubeCL reshape misplaces a strided trailing unit axis and keeps a prepended one.
+///
+/// `burn-cubecl` decides every reshape with `burn_std::tensor::reshape_action`,
+/// so this pins on the CPU the two decisions [`trailing_unit_axis`] rests on;
+/// Flex reshapes by its own rules, which is why
+/// [`trailing_unit_axis_keeps_every_row_of_a_strided_tensor`] cannot catch a
+/// regression of the workaround. First, the defect: a strided tensor whose
+/// trailing axis has extent one, unsqueezed behind that axis, gets strides
+/// that `split_strides` builds from the unit axis's own stride. Second, the
+/// workaround's premise: prepending a unit axis to a strided tensor is a
+/// broadcast that keeps every original stride. When a Burn upgrade fixes the
+/// first, its assertions fail and the workaround can be revisited.
+#[test]
+fn cubecl_reshape_decisions_justify_the_trailing_unit_axis_workaround() {
+    use burn_std::tensor::reshape_action;
+    let [batch, sequence, heads] = [3_usize, 5, 2];
+
+    // One token's `[batch, heads, 1]` slice of `[batch, sequence, heads]`
+    // storage swapped to `[batch, heads, sequence]`: element `(b, h)` lies at
+    // `b · sequence · heads + h`. Unsqueezing it to `[batch, heads, 1, 1]`
+    // yields strides `[heads², heads, heads, heads]`, which address
+    // `b · heads² + h · heads` instead and read other rows for `b ≥ 1`.
+    let slice = reshape_action(
+        &[batch, heads, 1].into(),
+        &[sequence * heads, 1, heads].into(),
+        &[batch, heads, 1, 1].into(),
+    );
+    assert_eq!(updated_strides(slice), [heads * heads, heads, heads, heads]);
+
+    // With one head, a transposed `[batch, 1, sequence]` view as
+    // `[batch, sequence, 1]` (strides `[sequence, 1, sequence]`) unsqueezed to
+    // `[batch, sequence, 1, 1]` gives the token axis the unit axis's stride.
+    let one_head = reshape_action(
+        &[batch, sequence, 1].into(),
+        &[sequence, 1, sequence].into(),
+        &[batch, sequence, 1, 1].into(),
+    );
+    assert_eq!(
+        updated_strides(one_head),
+        [sequence * sequence, sequence, sequence, sequence]
+    );
+
+    // The workaround's first step: a prepended unit axis keeps the strides of
+    // the transposed `[batch, sequence, heads]` view of `[batch, heads,
+    // sequence]` storage and gives the new axis the element count, which its
+    // extent of one never multiplies.
+    let strided = [heads * sequence, 1, sequence];
+    let prepended = reshape_action(
+        &[batch, sequence, heads].into(),
+        &strided.into(),
+        &[1, batch, sequence, heads].into(),
+    );
+    assert_eq!(
+        updated_strides(prepended),
+        [batch * sequence * heads, strided[0], strided[1], strided[2]]
     );
 }

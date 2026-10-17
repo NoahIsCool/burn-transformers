@@ -319,6 +319,18 @@ class ReferenceHelperTests(unittest.TestCase):
                     REFERENCE.verify_checkpoint(root)
 
     def test_authenticated_file_rejects_links_and_detects_identity_changes(self) -> None:
+        """A replaced directory entry changes the identity; links are refused.
+
+        The original is renamed aside, not unlinked, while its replacement is
+        written. Two files alive on one device always have distinct inode
+        numbers, so the replacement's ``(st_dev, st_ino)`` must differ on every
+        filesystem. After an unlink, ext4 may reuse the freed inode at once, and
+        a kernel stamping mtime/ctime from a 1 ms clock (Linux 4.18 on RHEL 8)
+        then reproduces every identity field for identical bytes. That is no
+        product defect: the content SHA-256, not the identity, authenticates
+        the bytes, and a same-identity, same-bytes replacement changes nothing.
+        """
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
@@ -332,11 +344,13 @@ class ReferenceHelperTests(unittest.TestCase):
             )
             self.assertEqual(record, {"bytes": 7, "sha256": digest})
             self.assertEqual(payload, b"trusted")
-            source.unlink()
+            source.rename(root / "original")
             source.write_bytes(b"trusted")
             _, replacement_identity, _ = REFERENCE.authenticated_file(
                 source, expected_sha256=digest, expected_bytes=7
             )
+            self.assertEqual(replacement_identity[0], identity[0], "same directory, same device")
+            self.assertNotEqual(replacement_identity[1], identity[1], "both inodes are live")
             self.assertNotEqual(identity, replacement_identity)
             link = root / "link"
             link.symlink_to(source)

@@ -5890,6 +5890,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "burn-flex",
+ "burn-std",
  "burn-store",
  "minijinja",
  "proptest",

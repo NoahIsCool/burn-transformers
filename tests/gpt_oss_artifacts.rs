@@ -46,7 +46,7 @@
 //! ```text
 //! TRANSFORMERS_GPT_OSS_DIR=/Volumes/T9/models/openai/gpt-oss-20b \
 //! TRANSFORMERS_GPT_OSS_REFERENCE_DIR=/path/to/reference.bundle \
-//! cargo test --release [--features metal] --test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1
+//! cargo test --release [--features metal|cuda] --test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1
 //! ```
 //!
 //! A full bundle loads through the strict automatic loader; a truncated one
@@ -134,12 +134,19 @@
 //!
 //! Independently of the reference, cached and batched passes must agree with
 //! this crate's own stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for
-//! the dtype. Greedy tokens are compared while the reference's top-2 margin
-//! exceeds twice the tolerance, and at least [`DEFAULT_MIN_GREEDY`] tokens
-//! must be compared (`TRANSFORMERS_GPT_OSS_MIN_GREEDY` overrides it). A
-//! truncated model's greedy margins are mostly below one logit, so a
-//! half-precision run against a truncated bundle compares no greedy tokens
-//! and needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`.
+//! the dtype. The greedy check feeds the reference's tokens back, so every
+//! step continues the reference's prefix, and compares each step whose
+//! reference top-2 margin exceeds twice the tolerance; a closer race is a tie
+//! at that tolerance and is skipped rather than ending the comparison
+//! (`tests/support/backend_numerics.rs`, "Greedy ties"). At least
+//! [`DEFAULT_MIN_GREEDY`] tokens must be compared
+//! (`TRANSFORMERS_GPT_OSS_MIN_GREEDY` overrides it). At the half-precision
+//! tolerance only margins above `5.4` are decisive: the full F32 bundle has
+//! seven of 32 and the full BF16 bundle five (both first margins, `3.09` and
+//! `3.06`, are ties), so the defaults apply to them, but a truncated model's
+//! greedy margins are mostly below one logit (the pinned one-block F32 bundle
+//! has one above `5.4`, the four-block bundles none), so a half-precision run
+//! against a truncated bundle needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`.
 //!
 //! # Measured
 //!
@@ -162,15 +169,52 @@
 //! long-prompt decode by `0.94` and `1.59`. Against the BF16 bundle Metal/F16
 //! reached `2.66` at prompt 0, about the BF16 bundle's own distance from F32
 //! there. That comparison of two half-precision roundings is informational,
-//! not a gate pass. The F32 reference's first greedy margin is `3.09`, below
-//! twice [`HALF_TOLERANCE`], so a half-precision greedy check compares no
-//! tokens and needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`, as with the truncated
-//! bundles.
+//! not a gate pass. Those runs predate the tie-skipping greedy check: under the
+//! earlier stop-at-the-first-tie rule the F32 reference's first margin,
+//! `3.09`, ended the comparison, so they ran with
+//! `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`. Against the full-model BF16 bundle at
+//! default settings, the tie-skipping cached greedy check on Flex in BF16 and
+//! on Metal in F16 (`TRANSFORMERS_GPT_OSS_DTYPE=f16`) each matched all five
+//! decisive steps and skipped 27 ties (2026-10-17, at the earlier `2.5`
+//! bound, whose decisive steps are the same five); no tie-skipping
+//! half-precision run against the full F32 bundle has been recorded yet.
+//!
+//! # CUDA
+//!
+//! The `cuda` module repeats the four checks on Burn's `Cuda` backend
+//! (device 0; `CUDA_VISIBLE_DEVICES` selects the GPU), built and run on the
+//! GPU host with the CUDA toolkit available (`nvcc` at build time,
+//! `$CUDA_PATH/include` for run-time kernel compilation):
+//!
+//! ```text
+//! TRANSFORMERS_GPT_OSS_DIR=/path/to/gpt-oss-20b \
+//! TRANSFORMERS_GPT_OSS_REFERENCE_DIR=/path/to/reference.bundle \
+//! cargo test --release --features cuda --test gpt_oss_artifacts cuda_ -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! The memory figures above become device-memory requirements there.
+//! Half-precision runs multiply through half-precision tensor cores and keep
+//! their rounding-derived defaults. For an F32 run, each load first probes
+//! how the device multiplies F32 matrices (`tests/support/backend_numerics.rs`):
+//! a GPU below compute capability 8.0 multiplies in F32 and the F32 defaults
+//! apply, while from compute capability 8.0 Burn 0.21 rounds F32 matrix
+//! inputs to TF32 (10-bit mantissas), which no measured default covers. Such
+//! an F32 run against an F32 bundle requires `TRANSFORMERS_GPT_OSS_TOLERANCE`
+//! and `TRANSFORMERS_GPT_OSS_MEAN_TOLERANCE`, holds its self-consistency to
+//! the former, and qualifies TF32 execution, not F32 numerics. No CUDA run
+//! has been recorded yet.
 
 #![cfg(feature = "flex")]
 
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
+
 use std::path::{Path, PathBuf};
 
+use backend_numerics::{
+    Gap, MatmulPrecision, argmax, check_teacher_forced_greedy, checkpoint_tolerance,
+    greedy_step_is_decisive, top_two_margin,
+};
 use burn::{
     backend::Flex,
     tensor::{DType, Int, Tensor, TensorData, backend::Backend},
@@ -330,6 +374,8 @@ struct Settings {
     mean_tolerance: f32,
     /// Minimum number of decisive greedy tokens.
     minimum_greedy: usize,
+    /// Whether this is a full-precision run whose matrix products round their inputs to TF32.
+    tf32: bool,
 }
 
 /// Returns the dtype a bundle was evaluated in, from its provenance name.
@@ -341,14 +387,17 @@ fn bundle_dtype(name: &str) -> TensorDType {
     }
 }
 
+/// Whether a `run` against a `bundle` reference is full precision on both sides.
+fn full_precision(bundle: TensorDType, run: TensorDType) -> bool {
+    bundle == TensorDType::F32 && matches!(run, TensorDType::F32 | TensorDType::F64)
+}
+
 /// Returns the default `(maximum, mean)` logit tolerances of running `run` against a `bundle` reference.
 ///
 /// Only a full-precision run against an F32 bundle is held to reduction-order
 /// accuracy; any half-precision side is held to rounding accuracy.
 fn default_tolerances(bundle: TensorDType, run: TensorDType) -> (f32, f32) {
-    let full_precision =
-        bundle == TensorDType::F32 && matches!(run, TensorDType::F32 | TensorDType::F64);
-    if full_precision {
+    if full_precision(bundle, run) {
         (F32_TOLERANCE, F32_MEAN_TOLERANCE)
     } else {
         (HALF_TOLERANCE, HALF_MEAN_TOLERANCE)
@@ -357,7 +406,12 @@ fn default_tolerances(bundle: TensorDType, run: TensorDType) -> (f32, f32) {
 
 impl Settings {
     /// Reads the settings; dtype and tolerance defaults follow the bundle's dtype.
-    fn new(model_dir: PathBuf, reference: &Reference) -> Self {
+    ///
+    /// `precision` is how the device multiplies F32 matrices. A full-precision
+    /// run on a TF32 device has no default tolerances: both
+    /// `TRANSFORMERS_GPT_OSS_TOLERANCE` and `TRANSFORMERS_GPT_OSS_MEAN_TOLERANCE`
+    /// must be set. Half-precision runs keep their rounding-derived defaults.
+    fn new(model_dir: PathBuf, reference: &Reference, precision: MatmulPrecision) -> Self {
         let bundle = bundle_dtype(&reference.dtype);
         let dtype = match std::env::var("TRANSFORMERS_GPT_OSS_DTYPE").as_deref() {
             Ok("f64") => TensorDType::F64,
@@ -370,6 +424,13 @@ impl Settings {
             }
         };
         let (default_tolerance, default_mean) = default_tolerances(bundle, dtype);
+        // Only the full-precision defaults assume F32 matrix products.
+        let tf32 = full_precision(bundle, dtype) && precision == MatmulPrecision::Tf32;
+        let defaults = if tf32 {
+            MatmulPrecision::Tf32
+        } else {
+            MatmulPrecision::F32
+        };
         let parse = |name: &str| {
             std::env::var(name)
                 .ok()
@@ -378,15 +439,31 @@ impl Settings {
         Self {
             model_dir,
             dtype,
-            tolerance: parse("TRANSFORMERS_GPT_OSS_TOLERANCE").unwrap_or(default_tolerance),
-            mean_tolerance: parse("TRANSFORMERS_GPT_OSS_MEAN_TOLERANCE").unwrap_or(default_mean),
+            tolerance: checkpoint_tolerance(
+                "TRANSFORMERS_GPT_OSS_TOLERANCE",
+                default_tolerance,
+                defaults,
+            ),
+            mean_tolerance: checkpoint_tolerance(
+                "TRANSFORMERS_GPT_OSS_MEAN_TOLERANCE",
+                default_mean,
+                defaults,
+            ),
             minimum_greedy: parse("TRANSFORMERS_GPT_OSS_MIN_GREEDY")
                 .map_or(DEFAULT_MIN_GREEDY, |value| value as usize),
+            tf32,
         }
     }
 
     /// Returns the self-consistency tolerance of the selected dtype.
+    ///
+    /// A full-precision run on a TF32 device is held to its explicit
+    /// tolerance instead: TF32 input rounding can turn F32-level differences
+    /// between the cached, batched, and stateless graphs into TF32-level ones.
     fn consistency(&self) -> f32 {
+        if self.tf32 {
+            return self.tolerance;
+        }
         SELF_CONSISTENCY_TOLERANCE
             .iter()
             .find(|(dtype, _)| *dtype == self.dtype)
@@ -425,7 +502,9 @@ fn check_report(report: &LoadReport, layers: usize) {
 fn load<B: Backend>(device: &B::Device) -> (AutoCausalLm<B>, Reference, Settings) {
     let model_dir = directory("TRANSFORMERS_GPT_OSS_DIR");
     let reference = Reference::read(&directory("TRANSFORMERS_GPT_OSS_REFERENCE_DIR"));
-    let settings = Settings::new(model_dir, &reference);
+    let precision = MatmulPrecision::probe::<B>(device);
+    eprintln!("F32 matrix products use {precision:?} inputs");
+    let settings = Settings::new(model_dir, &reference, precision);
     let text = std::fs::read_to_string(settings.model_dir.join("config.json")).unwrap();
     assert_eq!(
         hex(&Sha256::digest(text.as_bytes())),
@@ -493,16 +572,18 @@ fn host<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
     tensor.cast(DType::F32).into_data().to_vec::<f32>().unwrap()
 }
 
-/// Returns the largest absolute difference.
+/// Returns the largest absolute difference of two equally long sets of logits.
+///
+/// A non-finite value on either side counts as an infinite difference, so a
+/// NaN or infinite logit fails every tolerance (see [`Gap::measure`], which
+/// also rejects a length mismatch).
 fn gap(actual: &[f32], expected: &[f32]) -> f32 {
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).abs())
-        .fold(0.0, f32::max)
+    Gap::measure(actual, expected).deviation
 }
 
 /// Returns the flat index and value of the largest absolute difference, the first on ties.
+///
+/// Callers check finiteness first; a NaN difference never replaces the running maximum.
 fn largest_gap(actual: &[f32], expected: &[f32]) -> (usize, f32) {
     actual
         .iter()
@@ -525,23 +606,6 @@ fn mean_gap(actual: &[f32], expected: &[f32]) -> f64 {
         .map(|(a, e)| f64::from((a - e).abs()))
         .sum::<f64>()
         / actual.len() as f64
-}
-
-/// Returns the argmax, preferring the lowest index on ties.
-fn argmax(logits: &[f32]) -> usize {
-    (0..logits.len())
-        .max_by(|&a, &b| logits[a].total_cmp(&logits[b]).then(b.cmp(&a)))
-        .unwrap()
-}
-
-/// Returns the reference's top-2 margin of one position.
-fn margin(logits: &[f32]) -> f32 {
-    let best = argmax(logits);
-    let runner_up = (0..logits.len())
-        .filter(|&index| index != best)
-        .map(|index| logits[index])
-        .fold(f32::NEG_INFINITY, f32::max);
-    logits[best] - runner_up
 }
 
 /// Stateless logits at every prompt position match the reference; decisive argmaxes agree.
@@ -567,7 +631,7 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
         );
         for position in 0..prompt.tokens.len() {
             let expected = &prompt.logits[position * vocabulary..(position + 1) * vocabulary];
-            if margin(expected) > 2.0 * settings.tolerance {
+            if greedy_step_is_decisive(top_two_margin(expected), settings.tolerance) {
                 let actual = &logits[position * vocabulary..(position + 1) * vocabulary];
                 assert_eq!(
                     argmax(actual),
@@ -587,7 +651,10 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
     }
 }
 
-/// The cached greedy continuation of prompt 0 matches while it is decisive.
+/// The cached greedy continuation of prompt 0 matches at every decisive step.
+///
+/// The reference's tokens are fed back, so ties are skipped rather than
+/// ending the comparison; see [`check_teacher_forced_greedy`].
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let (model, reference, settings) = load::<B>(device);
     let prompt = &reference.prompts[0];
@@ -600,7 +667,7 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         token_mask: None,
         position_ids: None,
     };
-    let mut logits = host(
+    let logits = host(
         model
             .prefill(input, &mut state, &ForwardOptions::default())
             .unwrap()
@@ -611,34 +678,26 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         gap(&logits, last) <= settings.tolerance,
         "cached prefill logits"
     );
-    let mut compared = 0;
-    for (step, &(expected, step_margin)) in reference.greedy.iter().enumerate() {
-        if step_margin <= 2.0 * settings.tolerance {
-            eprintln!("greedy step {step}: reference margin {step_margin:e} is a tie; stopping");
-            break;
-        }
-        compared += 1;
-        assert_eq!(argmax(&logits) as i64, expected, "greedy step {step}");
-        let next = DecodeInput {
-            token_ids: row::<B>(&[expected], device),
-            position_ids: None,
-            token_mask: None,
-        };
-        logits = host(
-            model
-                .decode(next, &mut state, &ForwardOptions::default())
-                .unwrap()
-                .logits,
-        );
-    }
-    eprintln!(
-        "greedy: {compared} of {} tokens match",
-        reference.greedy.len()
-    );
-    let minimum = settings.minimum_greedy.min(reference.greedy.len());
-    assert!(
-        compared >= minimum,
-        "only {compared} decisive greedy tokens were compared (minimum {minimum})"
+    check_teacher_forced_greedy(
+        "greedy",
+        &reference.greedy,
+        settings.tolerance,
+        settings.minimum_greedy,
+        "TRANSFORMERS_GPT_OSS_MIN_GREEDY",
+        logits,
+        |token| {
+            let next = DecodeInput {
+                token_ids: row::<B>(&[token], device),
+                position_ids: None,
+                token_mask: None,
+            };
+            host(
+                model
+                    .decode(next, &mut state, &ForwardOptions::default())
+                    .unwrap()
+                    .logits,
+            )
+        },
     );
 }
 
@@ -944,5 +1003,44 @@ mod metal {
     #[ignore = "needs Metal, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
     fn metal_batched_prefill_matches_the_reference() {
         super::check_batched_prefill::<Metal>(&Default::default());
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    //! CUDA counterparts of the Flex checks, run serially on the GPU host.
+    //!
+    //! The stored dtype follows the bundle unless `TRANSFORMERS_GPT_OSS_DTYPE`
+    //! is set. An F32 run on a GPU that rounds F32 matrix inputs to TF32 needs
+    //! explicit tolerances; see the [module documentation](super#cuda).
+
+    use burn::backend::Cuda;
+
+    /// CUDA: every prompt position's logits.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
+    fn cuda_prompt_logits_match_the_reference() {
+        super::check_prompt_logits::<Cuda>(&Default::default());
+    }
+
+    /// CUDA: the cached greedy continuation.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
+    fn cuda_cached_greedy_matches_the_reference() {
+        super::check_cached_greedy::<Cuda>(&Default::default());
+    }
+
+    /// CUDA: the longest prompt decoded token by token, past the window.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
+    fn cuda_cached_long_prompt_matches_the_reference() {
+        super::check_cached_long_prompt::<Cuda>(&Default::default());
+    }
+
+    /// CUDA: a ragged left-padded batch of every prompt.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_GPT_OSS_DIR, and _REFERENCE_DIR"]
+    fn cuda_batched_prefill_matches_the_reference() {
+        super::check_batched_prefill::<Cuda>(&Default::default());
     }
 }

@@ -385,7 +385,13 @@ code written against unreleased sources.
   configs carrying both `rope_type` and `type` are accepted when they agree;
   Gemma 3 RoPE mappings saved by Transformers 5.2 load.
 - DeltaNet: width-one convolutions, padding removed from convolution taps and
-  history, PyTorch's thresholded softplus, and exact decay differences.
+  history, PyTorch's thresholded softplus, and exact decay differences. The
+  token-by-token recurrence read the wrong rows' decay and update strength
+  for every batch above one on Metal, CUDA, and ROCm (Burn 0.21's CubeCL
+  reshape of a transposed unit axis), so batched gated-DeltaNet decoding and
+  short prefills, Qwen3.5's included, were wrong there; Flex was exact. The
+  chunked kernel misread single-head factors passed as strided views on the
+  same backends.
 - Mamba-2: padding cleared by replacement; the reference `dt` graph; the chunk
   scan for a first Nemotron-H prompt token; padded Nemotron-H queries stay
   inside their row's keys.
@@ -569,18 +575,34 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
 
 - Tiny Transformers 5.2.0 goldens for the Llama family (seven cases), Gemma
   (two), and gpt-oss, and HF-generated goldens for the shared router, RoPE
-  rules, sinks, and differential attention.
+  rules, sinks, and differential attention. The tiny-golden checks are
+  backend-generic and also run, ignored, on Metal and CUDA. Their greedy check
+  compares a step only when the run's own margin exceeds twice the bound's
+  largest allowance (a margin above one allowance does not force the
+  reference's token), and every case must compare at least two steps.
 - Batched-versus-stateless and batched-versus-row-by-row parity suites in every
   family, with ragged and padded rows, ring wraparound, and rollback, reorder,
   and truncation.
+- An accelerator-parity suite (`tests/backend_parity.rs`) runs a tiny model of
+  every executable family on Metal or CUDA with Flex's exact parameters and
+  compares stateless, ragged, and cached prefill-plus-decode logits; each
+  device is probed for F32 or TF32 matrix inputs and held to the matching
+  bound. Its delta-rule case also runs, not ignored, on Burn's CubeCL CPU
+  backend (`--features cpu`), which reproduces the DeltaNet reshape defect,
+  and a unit test pins Burn 0.21's reshape decisions behind the workaround.
+  Its deviation measure, which the real-checkpoint gates now share, fails
+  NaN and infinite values instead of ignoring them.
 - Twelve fuzz targets (new: logits processing, chat templates, RoPE
   parameters, SafeTensors headers, attention connectivity, modular specs, and
   the MTP bank of cache transactions) and property suites for generation,
   RoPE, and connectivity; open findings are kept as ignored reproducers.
 - Ignored real-checkpoint gates for the Llama family, Gemma (including a
-  long-context bundle), and gpt-oss, and artifact-gated tokenizer and
+  long-context bundle), and gpt-oss, on Flex, Metal, and CUDA (FLAN-T5-small's
+  release gate gained a CUDA variant too), and artifact-gated tokenizer and
   chat-template parity tests for the pinned FLAN-T5-small, Qwen3.5, Nemotron-H,
-  and Muse Glimmer tokenizers.
+  and Muse Glimmer tokenizers. Their cached-greedy checks feed the reference's
+  tokens back and skip ties at the tolerance instead of stopping at the first
+  one, so the full BF16 gpt-oss-20b bundle meets its default minimum.
 - An ignored gpt-oss test reproduces the half-precision bound's calibration
   from the official BF16 and F32 bundles alone (Transformers' own BF16
   deviation, at most `2.665`, mean at most `0.108`); it evaluates no Burn
