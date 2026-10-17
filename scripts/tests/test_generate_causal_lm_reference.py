@@ -193,6 +193,38 @@ class ReferenceGeneratorTests(unittest.TestCase):
             )
 
 
+    def test_bf16_resident_mode_accepts_only_bfloat16_floating_tensors(self) -> None:
+        """Header inspection ignores integer tensors and refuses any wider floating weight."""
+
+        def write(path: Path, dtypes: dict[str, str]) -> None:
+            """Writes a SafeTensors header naming one two-byte tensor per entry."""
+
+            header, offset = {}, 0
+            for name, dtype in dtypes.items():
+                header[name] = {"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + 2]}
+                offset += 2
+            encoded = REFERENCE.json.dumps(header).encode()
+            path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + bytes(offset))
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            write(root / "a.safetensors", {"w": "BF16", "blocks": "U8"})
+            write(root / "b.safetensors", {"bias": "BF16", "scales": "U8"})
+            self.assertEqual(REFERENCE.checkpoint_floating_dtypes(root), {"BF16"})
+            REFERENCE.require_bfloat16_checkpoint(root)
+            write(root / "c.safetensors", {"correction": "F32"})
+            self.assertEqual(REFERENCE.checkpoint_floating_dtypes(root), {"BF16", "F32"})
+            with self.assertRaisesRegex(ValueError, "all BF16"):
+                REFERENCE.require_bfloat16_checkpoint(root)
+
+    def test_bf16_resident_flag_is_recorded(self) -> None:
+        """The command line exposes the mode and defaults it off."""
+
+        base = ["--model-dir", "m", "--output", "o"]
+        self.assertFalse(REFERENCE.parse_arguments(base).bf16_resident)
+        self.assertTrue(REFERENCE.parse_arguments(base + ["--bf16-resident"]).bf16_resident)
+
+
 @unittest.skipUnless(HAS_TORCH, "needs PyTorch and Transformers")
 class ModelLoadingTests(unittest.TestCase):
     """Check that loaded references compute what plain Transformers inference computes."""
@@ -273,6 +305,48 @@ class ModelLoadingTests(unittest.TestCase):
         # (for example BF16 weights) would exceed it.
         self.assertEqual(double_logits.dtype, torch.float32)
         self.assertLess(float((double_logits - single_logits).abs().max()), 1e-4)
+
+
+    def test_bf16_resident_blocks_compute_exactly_what_a_wider_model_computes(self) -> None:
+        """Casting each block only while it runs equals casting the BF16 model once, bit for bit.
+
+        The fixture stores F32 weights, so both sides start from the same BF16
+        rounding; the comparison isolates the streaming mechanism. After a
+        forward pass every block holds its BF16 parameters again.
+        """
+
+        import torch
+
+        tokens = torch.tensor([[1, 5, 9, 14, 3, 27, 40, 8]])
+        streamed = REFERENCE.load_causal_lm(GPT_OSS_FIXTURE, "bfloat16")
+        self.assertEqual(REFERENCE.stream_blocks_in_dtype(streamed, torch.float32), 4)
+        widened = REFERENCE.load_causal_lm(GPT_OSS_FIXTURE, "bfloat16")
+        REFERENCE.cast_floating_parameters(widened, torch.float32)
+        with torch.no_grad():
+            streamed_logits = streamed(input_ids=tokens).logits
+            widened_logits = widened(input_ids=tokens).logits
+        self.assertEqual(streamed_logits.dtype, torch.float32)
+        self.assertTrue(torch.equal(streamed_logits, widened_logits))
+        blocks = REFERENCE.decoder_blocks(streamed)
+        self.assertEqual({parameter.dtype for parameter in blocks.parameters()}, {torch.bfloat16})
+        outside = {id(parameter) for parameter in blocks.parameters()}
+        self.assertEqual(
+            {parameter.dtype for parameter in streamed.parameters() if id(parameter) not in outside},
+            {torch.float32},
+        )
+        # The cached path runs the same hooks and agrees with the cast model too.
+        self.assertEqual(
+            REFERENCE.greedy_continuation(streamed, [1, 5, 9], 4),
+            REFERENCE.greedy_continuation(widened, [1, 5, 9], 4),
+        )
+
+    def test_bf16_resident_loading_refuses_the_f32_fixture(self) -> None:
+        """The fixture's F32 weights would be rounded by a BF16 load, so the mode is refused."""
+
+        with self.assertRaisesRegex(ValueError, "all BF16"):
+            REFERENCE.load_model(GPT_OSS_FIXTURE, "float32", bf16_resident=True)
+        with self.assertRaisesRegex(ValueError, "wider"):
+            REFERENCE.load_model(GPT_OSS_FIXTURE, "bfloat16", bf16_resident=True)
 
 
 if __name__ == "__main__":

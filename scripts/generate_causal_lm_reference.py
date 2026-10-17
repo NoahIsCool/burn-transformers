@@ -37,6 +37,15 @@ motivating case: without CUDA kernels Transformers decodes its MXFP4
 experts to BF16, and the F32 model (about 78 GiB for gpt-oss-20b) does not
 fit a 96 GiB host, while the BF16 one needs about 55 GiB while loading.
 
+``--bf16-resident`` evaluates such a model in F32 anyway. It loads the
+checkpoint in BF16 and casts each decoder block's parameters to ``--dtype``
+only while that block runs, restoring them afterwards; the embedding, final
+norm, and head are cast once. Every block therefore computes exactly what it
+would in an F32 model, because BF16 widens to F32 exactly, while only one block
+is ever held in F32. The tool refuses this mode unless every floating tensor in
+the checkpoint is stored as BF16 (gpt-oss's MXFP4 blocks are integers and
+Transformers decodes them to BF16), so no weight is rounded on the way in.
+
 ``--dtype float64`` removes the reference's own rounding error, which matters
 for checkpoints with massive activations. Qwen2-7B's first-position hidden
 states reach magnitudes near 7,000; on its third prompt, F32 Transformers
@@ -161,6 +170,7 @@ def provenance(model_dir: Path, arguments: argparse.Namespace) -> dict[str, Any]
         "config_sha256": sha256_file(model_dir / "config.json"),
         "weights_sha256": {path.name: sha256_file(path) for path in weight_files(model_dir)},
         "dtype": arguments.dtype,
+        "bf16_resident": arguments.bf16_resident,
         "num_hidden_layers": arguments.num_hidden_layers,
         "device": "cpu",
         "attention_implementation": "eager",
@@ -205,6 +215,94 @@ def cast_floating_parameters(model: Any, dtype: Any) -> int:
     return changed
 
 
+#: SafeTensors dtype names of floating-point tensors.
+FLOATING_SAFETENSORS_DTYPES = frozenset({"F16", "BF16", "F32", "F64", "F8_E4M3", "F8_E5M2"})
+
+
+def checkpoint_floating_dtypes(model_dir: Path) -> set[str]:
+    """Returns the SafeTensors dtypes of every floating tensor stored in the checkpoint."""
+
+    found = set()
+    for path in weight_files(model_dir):
+        with path.open("rb") as handle:
+            (length,) = struct.unpack("<Q", handle.read(8))
+            header = json.loads(handle.read(length))
+        for name, record in header.items():
+            if name != "__metadata__" and record["dtype"] in FLOATING_SAFETENSORS_DTYPES:
+                found.add(record["dtype"])
+    return found
+
+
+def require_bfloat16_checkpoint(model_dir: Path) -> None:
+    """Refuses `--bf16-resident` unless loading in BF16 rounds no stored weight."""
+
+    dtypes = checkpoint_floating_dtypes(model_dir)
+    if dtypes != {"BF16"}:
+        raise ValueError(
+            f"--bf16-resident needs a checkpoint whose floating tensors are all BF16, found {sorted(dtypes)}"
+        )
+
+
+def decoder_blocks(model: Any) -> Any:
+    """Returns the model's unique `ModuleList` holding `config.num_hidden_layers` blocks."""
+
+    import torch
+
+    count = model.config.num_hidden_layers
+    candidates = [
+        module
+        for module in model.modules()
+        if isinstance(module, torch.nn.ModuleList) and len(module) == count
+    ]
+    if len(candidates) != 1:
+        raise ValueError(f"expected one {count}-block ModuleList, found {len(candidates)}")
+    return candidates[0]
+
+
+def stream_blocks_in_dtype(model: Any, dtype: Any) -> int:
+    """Casts each decoder block's floating parameters to `dtype` only while it runs.
+
+    Parameters outside the blocks (embedding, final norm, head) are cast once
+    with `cast_floating_parameters`. Each block keeps its loaded parameters;
+    a forward pre-hook swaps in `dtype` copies and a forward hook restores the
+    originals, so at most one block is held in `dtype` at a time. Buffers are
+    never touched (see `cast_floating_parameters`). Returns the number of
+    blocks hooked.
+    """
+
+    import torch
+
+    blocks = decoder_blocks(model)
+    inside = {id(parameter) for parameter in blocks.parameters()}
+    with torch.no_grad():
+        for parameter in model.parameters():
+            if id(parameter) not in inside and parameter.is_floating_point() and parameter.dtype != dtype:
+                parameter.data = parameter.data.to(dtype)
+
+    def widen(block: Any, _arguments: Any) -> None:
+        """Replaces the block's parameters by `dtype` copies before it runs."""
+
+        stash = []
+        with torch.no_grad():
+            for parameter in block.parameters():
+                if parameter.is_floating_point() and parameter.dtype != dtype:
+                    stash.append((parameter, parameter.data))
+                    parameter.data = parameter.data.to(dtype)
+        block._reference_stash = stash
+
+    def restore(block: Any, _arguments: Any, _output: Any) -> None:
+        """Puts the loaded parameters back once the block has run."""
+
+        for parameter, data in block._reference_stash:
+            parameter.data = data
+        block._reference_stash = []
+
+    for block in blocks:
+        block.register_forward_pre_hook(widen)
+        block.register_forward_hook(restore)
+    return len(blocks)
+
+
 def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> Any:
     """Loads the eager model, in `dtype` (one of `DTYPES`), from local files only.
 
@@ -244,15 +342,34 @@ def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None =
     return model
 
 
-def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> tuple[Any, Any]:
-    """Loads the checkpoint's own tokenizer and its eager model (see `load_causal_lm`)."""
+def load_model(
+    model_dir: Path,
+    dtype: str = "float32",
+    layers: int | None = None,
+    bf16_resident: bool = False,
+) -> tuple[Any, Any]:
+    """Loads the checkpoint's own tokenizer and its eager model (see `load_causal_lm`).
+
+    With `bf16_resident`, the model is loaded in BF16 and its blocks run in
+    `dtype` (see `stream_blocks_in_dtype` and `require_bfloat16_checkpoint`).
+    """
 
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    import torch
     import transformers
 
+    if bf16_resident:
+        # Fail before any load: the mode is exact only for wider dtypes and BF16 checkpoints.
+        if dtype == "bfloat16":
+            raise ValueError("--bf16-resident needs a wider --dtype than bfloat16")
+        require_bfloat16_checkpoint(model_dir)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-    return tokenizer, load_causal_lm(model_dir, dtype, layers)
+    if not bf16_resident:
+        return tokenizer, load_causal_lm(model_dir, dtype, layers)
+    model = load_causal_lm(model_dir, "bfloat16", layers)
+    stream_blocks_in_dtype(model, getattr(torch, dtype))
+    return tokenizer, model
 
 
 def prompt_logits(model: Any, token_ids: list[int]) -> Any:
@@ -294,7 +411,9 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     """Evaluates the prompts and writes the logits files into `staging`."""
 
     model_dir = arguments.model_dir.resolve(strict=True)
-    tokenizer, model = load_model(model_dir, arguments.dtype, arguments.num_hidden_layers)
+    tokenizer, model = load_model(
+        model_dir, arguments.dtype, arguments.num_hidden_layers, arguments.bf16_resident
+    )
     prompts = []
     for index, text in enumerate(arguments.prompts):
         token_ids = tokenizer(text, add_special_tokens=arguments.add_special_tokens)["input_ids"]
@@ -350,6 +469,11 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--num-hidden-layers",
         type=int,
         help="keep only the first N decoder blocks (a real-weight smoke reference)",
+    )
+    parser.add_argument(
+        "--bf16-resident",
+        action="store_true",
+        help="load in BF16 and run each block in --dtype only while it executes (BF16 checkpoints only)",
     )
     parser.add_argument(
         "--no-special-tokens",
