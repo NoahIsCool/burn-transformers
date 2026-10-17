@@ -152,16 +152,24 @@ and two router unit tests check the top-k on CubeCL's reduction. The family
 and golden cases are ignored because they take minutes (the backend compiles
 every kernel shape with LLVM at first launch: on the Apple M3 Max, debug, one
 test thread, the parity cases took 405 to 420 s over two runs, the golden
-modules 73 s, and the delta-rule guard alone about 70 s). CI runs every passing
-case on `ubuntu-latest`:
+modules 73 s, and the delta-rule guard alone about 70 s). CI's `cpu-parity`
+job runs every passing case on `ubuntu-latest`, apart from the ordinary test
+job so that this build and run cannot time out or fill the disk of the other
+Linux tests; it builds (`--no-run`) and runs in separate steps:
 
 ```sh
 cargo test --locked --no-default-features --features std,flex,cpu \
   --lib --test backend_parity --test tiny_goldens_llama --test tiny_goldens_gemma \
-  --test tiny_goldens_gpt_oss cpu -- --include-ignored --test-threads 1 \
+  --test tiny_goldens_gpt_oss cpu -- --include-ignored --nocapture --test-threads 1 \
   --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex \
   --skip cpu_reshaped_strided_views_match_flex
 ```
+
+With `e999943`'s sources, a warm build, and a real-checkpoint job sharing the
+Mac, that selection passed 28 tests in 490 s of wall time and 4380 s of CPU
+time (user plus system; `/usr/bin/time -l`), about nine of the Mac's 14 cores
+on average. On the runner's 4 vCPUs the same work should take several times
+longer (an estimate, not yet measured), so the job has its own 90-minute limit.
 
 The parity cases stay within the F32 bound: largest deviation `6.7e-6`
 (SmolLM3 and Gemma 3 text, logit scales `37.5` and `37.9`), `5.7e-6` for
@@ -176,9 +184,9 @@ moves Nemotron-H's and the modular causal decoders' logits by up to `0.58`;
 cubecl-std 0.11 (Burn 0.22) fixes it, and with that fix applied both pass at
 `2.8e-7` ([docs/upstream/15](docs/upstream/15-cubecl-cpu-reshape-copy.md)).
 `cpu_reshaped_strided_views_match_flex` is the reproducer. These numbers are
-from the Mac at `93cef3c` (two runs, identical deviations); the step has not
-run on GitHub's runners yet, so the first CI run records Linux's deviations and
-run time.
+from the Mac at `93cef3c` (two runs, identical deviations); the job has not
+run on GitHub's runners yet, so its first run records Linux's deviations, its
+build and test step times, and its disk headroom (the job's last step).
 
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
 with a larger budget:

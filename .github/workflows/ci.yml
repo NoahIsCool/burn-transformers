@@ -16,8 +16,12 @@
 #   not). To reproduce these lints on an older host, drop `cpu` from the
 #   feature list: no library code depends on it, only tests (SUPPORT.md,
 #   "Host requirement of the `cpu` feature").
-# - Linux's test job also runs the CubeCL CPU backend (`cpu`) against Flex
-#   and the tiny Transformers goldens, under the same glibc requirement.
+# - The `cpu-parity` job runs the CubeCL CPU backend (`cpu`) against Flex and
+#   the tiny Transformers goldens on Linux, under the same glibc requirement.
+#   It is a job of its own, not a step of `test`, because it builds a third
+#   feature set (Burn recompiled with `burn/cpu`) and the prebuilt LLVM, and
+#   its run time on GitHub's runners is unmeasured: a slow or failing run then
+#   cannot time out or fill the disk of the ordinary Linux tests.
 #
 # The documentation audit requires a literal doc comment on every authored
 # item, including Verus proof functions, exactly as the release gate
@@ -139,27 +143,87 @@ jobs:
         run: |
           cargo test --locked --no-fail-fast --no-default-features --features "$CPU_FEATURES" --lib --tests
           cargo test --locked --no-default-features --features "$CPU_FEATURES" --doc
-      # Burn's CubeCL CPU backend (the `cpu` feature) against Flex and the tiny
-      # Transformers goldens: the `cpu` modules of backend_parity and the three
-      # tiny-golden suites, and the router's CubeCL CPU lib tests. The family
-      # cases are #[ignore]d for their run time (the backend compiles every
-      # kernel shape with LLVM at first launch), so --include-ignored selects
-      # them. The three skipped tests fail on Burn 0.21 through a CubeCL CPU
-      # copy defect (docs/upstream/15-cubecl-cpu-reshape-copy.md). One test
-      # thread, because each test's CubeCL CPU runtime occupies every core.
-      - name: CubeCL CPU backend parity
-        if: runner.os == 'Linux'
-        run: >-
-          cargo test --locked --no-fail-fast --no-default-features --features std,flex,cpu
-          --lib --test backend_parity --test tiny_goldens_llama --test tiny_goldens_gemma
-          --test tiny_goldens_gpt_oss cpu --
-          --include-ignored --test-threads 1
-          --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex
-          --skip cpu_reshaped_strided_views_match_flex
       # qwen35_chat needs Metal to build; its argument tests create no device.
       - name: Metal example argument tests
         if: runner.os == 'macOS'
         run: cargo test --locked --no-default-features --features std,metal,chat-templates --example qwen35_chat
+
+  # Burn's CubeCL CPU backend (the `cpu` feature) against Flex and the tiny
+  # Transformers goldens, separate from `test` (see the header). Its
+  # rust-cache entry is its own, since rust-cache keys on the job ID. Building
+  # and running are separate steps, so each reports its own time. On the
+  # development Mac the tests alone took 490 s and 4380 s of CPU time
+  # (RELEASE_GATES.md); on this runner's 4 vCPUs at half the Mac's per-core
+  # speed that is about 37 minutes, before a cold build, hence the limit.
+  cpu-parity:
+    name: CubeCL CPU backend parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # The `cpu` modules of backend_parity and the three tiny-golden suites,
+      # and the router's CubeCL CPU lib tests.
+      CPU_TESTS: >-
+        --no-default-features --features std,flex,cpu
+        --lib --test backend_parity --test tiny_goldens_llama --test tiny_goldens_gemma
+        --test tiny_goldens_gpt_oss
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      # The `cpu` build scripts download a prebuilt LLVM into ~/.cache/tracel
+      # and extract it into ~/.local/share/tracel (SUPPORT.md), outside
+      # rust-cache's paths, and skip the download when the extracted LLVM's
+      # install sentinel exists. Both directories are cached per tracel-llvm
+      # release, read from Cargo.lock, and saved right after the build, so a
+      # failing test run still keeps them.
+      - name: Read the tracel-llvm release
+        id: tracel
+        run: |
+          version="$(grep -A1 '^name = "tracel-llvm-bundler"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          test -n "$version" || { echo "tracel-llvm-bundler is not in Cargo.lock"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the prebuilt LLVM
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/tracel
+            ~/.local/share/tracel
+          key: tracel-llvm-${{ runner.os }}-${{ runner.arch }}-${{ steps.tracel.outputs.version }}
+      - name: Build the tests
+        run: cargo test --locked --no-run $CPU_TESTS
+      - name: Save the prebuilt LLVM
+        if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/tracel
+            ~/.local/share/tracel
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      # The family cases are #[ignore]d for their run time (the backend
+      # compiles every kernel shape with LLVM at first launch), so
+      # --include-ignored selects them. The three skipped tests fail on Burn
+      # 0.21 through a CubeCL CPU copy defect
+      # (docs/upstream/15-cubecl-cpu-reshape-copy.md). One test thread,
+      # because each test's CubeCL CPU runtime occupies every core.
+      # --nocapture keeps each passing case's measured deviation in the log.
+      - name: CubeCL CPU against Flex and the tiny goldens
+        run: >-
+          cargo test --locked --no-fail-fast $CPU_TESTS cpu --
+          --include-ignored --nocapture --test-threads 1
+          --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex
+          --skip cpu_reshaped_strided_views_match_flex
+      # Disk headroom after the third feature set's build, for RELEASE_GATES.md.
+      - name: Disk use
+        if: always()
+        run: df -h /
 
   msrv:
     name: MSRV (Rust 1.92)

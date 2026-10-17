@@ -84,8 +84,9 @@ group-limited router, the rotary de-interleave of multi-head latent attention,
 and a masked gated DeltaNet whose key heads are shared by several value heads
 meet it, and those cases deviate from Flex by up to `0.58`; any other graph
 that reshapes such a view can return wrong values on this backend. The crate
-does not work around it. CI runs the passing cases on `ubuntu-latest`; until a CI run has
-completed, the measurements above are this Mac's only.
+does not work around it. CI's `cpu-parity` job runs the passing cases on
+`ubuntu-latest`; until it has completed a run, the measurements above are this
+Mac's only.
 
 ## Checkpoint support
 
