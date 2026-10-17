@@ -18,7 +18,8 @@
 //! Family-specific copies follow the same rule, including Muse's scale-free
 //! embedding and Q/K RMS norms. Vocabulary logits that reference implementations
 //! return as FP32 (DeepSeek-V2 and Nemotron-H) are promoted with it rather than
-//! cast unconditionally to F32.
+//! cast unconditionally to F32, and sampling's cumulative probability sums use
+//! it as well.
 //!
 //! [`at_least_f32`] is the single rule that selects that evaluation dtype:
 //!

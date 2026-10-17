@@ -46,7 +46,9 @@ fn non_floating_tags_keep_historical_f32_promotion() {
 /// The rule is usable in constant contexts, so policies can be fixed at compile time.
 #[test]
 fn rule_is_const_evaluable() {
+    /// Half precision promoted at compile time.
     const PROMOTED: DType = at_least_f32(DType::F16);
+    /// Double precision preserved at compile time.
     const PRESERVED: DType = at_least_f32(DType::F64);
     assert_eq!(PROMOTED, DType::F32);
     assert_eq!(PRESERVED, DType::F64);

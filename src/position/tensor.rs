@@ -153,8 +153,10 @@ pub fn rotary_angles<B: Backend>(
 /// `position_ids` holds `[batch, sequence]` absolute positions. Tables have dtype
 /// [`at_least_f32`]`(activation_dtype)`: F32 for F16/BF16/F32 activations,
 /// bit-identical to [`rotary_angles`], and F64 for F64 activations, with
-/// frequencies, positions, angles, and cosine/sine all evaluated in F64. See
-/// the [module documentation](self) for the error this removes.
+/// frequencies, positions, angles, and cosine/sine all evaluated in F64.
+/// Rounding an F32 phase `p * omega` leaves an error of up to roughly
+/// `p * omega * 2^-23` radians, which F64 tables reduce to `p * omega * 2^-52`;
+/// the rule is [`crate::precision::at_least_f32`].
 pub fn rotary_angles_for_dtype<B: Backend>(
     config: RopeConfig,
     position_ids: Tensor<B, 2, Int>,
