@@ -398,10 +398,11 @@ code written against unreleased sources.
 - DeepSeek: F16/BF16 decoding with an inactive row no longer panics; inactive
   rows keep F32 router logits; the balance loss scale.
 - Embedding lookups never see padding sentinels (Llama family, DeepSeek, Muse).
-- MoE routing on Metal, CUDA, ROCm, and the CubeCL CPU backend: a token whose
-  remaining scores were all `-inf` or NaN received an out-of-range expert ID,
-  and dispatch rejected it, because Burn 0.21's CubeCL maximum of a row of
-  `-inf` is `f32::MIN`; the deterministic top-k now decides such rows
+- MoE routing on CubeCL backends (measured on Metal and the CubeCL CPU
+  backend; CUDA and ROCm run the same cubek-reduce kernel but were not run): a
+  token whose remaining scores were all `-inf` or NaN received an out-of-range
+  expert ID, and dispatch rejected it, because Burn 0.21's CubeCL maximum of a
+  row of `-inf` is `f32::MIN`; the deterministic top-k now decides such rows
   explicitly and stays total on every backend.
 - Qwen: a speculative cycle whose commit fails rolls back; oversized
   transactional calls fail before model work; new recipe parameters take the
