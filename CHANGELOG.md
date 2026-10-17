@@ -385,7 +385,11 @@ code written against unreleased sources.
   configs carrying both `rope_type` and `type` are accepted when they agree;
   Gemma 3 RoPE mappings saved by Transformers 5.2 load.
 - DeltaNet: width-one convolutions, padding removed from convolution taps and
-  history, PyTorch's thresholded softplus, and exact decay differences.
+  history, PyTorch's thresholded softplus, and exact decay differences. The
+  token-by-token recurrence read the wrong rows' decay and update strength
+  for every batch above one on Metal, CUDA, and ROCm (Burn 0.21's CubeCL
+  reshape of a transposed unit axis), so batched gated-DeltaNet decoding and
+  short prefills, Qwen3.5's included, were wrong there; Flex was exact.
 - Mamba-2: padding cleared by replacement; the reference `dt` graph; the chunk
   scan for a first Nemotron-H prompt token; padded Nemotron-H queries stay
   inside their row's keys.

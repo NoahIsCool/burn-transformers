@@ -12,7 +12,7 @@ use super::{
     GatedDeltaNet, GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, block_chunk_ranges,
     causal_decay_matrix, chunked_gated_delta_rule, mask_hidden, prefers_recurrence,
     recurrent_gated_delta_rule, recurrent_gated_delta_rule_with_snapshots, softplus,
-    unit_lower_inverse,
+    trailing_unit_axis, unit_lower_inverse,
 };
 
 /// Deterministic F32 CPU backend for recurrent and chunked delta-rule comparisons.
@@ -2006,4 +2006,43 @@ fn stateless_forward_rejects_an_empty_batch() {
         matches!(&error, crate::Error::Configuration { field, .. } if field == "delta_net.batch_size"),
         "{error:?}"
     );
+}
+
+/// A strided per-head tensor gains its trailing unit axis without moving any value.
+///
+/// The input is a transposed view, so its strides are not row-major; every
+/// token's `[batch, heads, 1, 1]` slice, as the recurrence takes it, must
+/// still hold that token's per-head values of every row.
+#[test]
+fn trailing_unit_axis_keeps_every_row_of_a_strided_tensor() {
+    let device = Default::default();
+    let [batch, sequence] = [3, 5];
+    for heads in [1, 2] {
+        let values = (0..batch * heads * sequence)
+            .map(|index| index as f32)
+            .collect::<Vec<_>>();
+        // `[batch, heads, sequence]` storage viewed as `[batch, sequence, heads]`.
+        let strided = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(values, [batch, heads, sequence]),
+            &device,
+        )
+        .swap_dims(1, 2);
+        let expected = strided.clone().into_data().to_vec::<f32>().unwrap();
+        let lifted = trailing_unit_axis(strided);
+        assert_eq!(lifted.dims(), [batch, sequence, heads, 1]);
+        assert_eq!(
+            lifted.clone().into_data().to_vec::<f32>().unwrap(),
+            expected
+        );
+        for token in 0..sequence {
+            let factors = lifted.clone().narrow(1, token, 1).swap_dims(1, 2);
+            assert_eq!(factors.dims(), [batch, heads, 1, 1]);
+            let actual = factors.into_data().to_vec::<f32>().unwrap();
+            let wanted = (0..batch)
+                .flat_map(|row| (0..heads).map(move |head| (row, head)))
+                .map(|(row, head)| ((row * heads + head) * sequence + token) as f32)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, wanted, "{heads} heads, token {token}");
+        }
+    }
 }
