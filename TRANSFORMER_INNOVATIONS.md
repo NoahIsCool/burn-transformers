@@ -501,7 +501,10 @@ position $p$ by angle $p\omega_i$, where
 $\omega_i=\theta^{-2i/d_{rot}}$. Thus
 $(R_pq)^\mathsf{T}(R_jk)=q^\mathsf{T}R_{j-p}k$, making the score depend on
 relative displacement without an additive embedding. RoPE is applied to Q/K,
-never V.
+never V. An F32 phase $p\omega_i$ carries an absolute error that grows with
+$p$; tables built for F64 activations therefore evaluate frequencies, integer
+positions, phases, and cosine/sine in F64, while reduced and single precision
+keep the bit-identical F32 tables.
 
 **Implementation:** validated frequencies in
 [`position/rope.rs`](src/position/rope.rs) and tensor rotation in
@@ -893,14 +896,15 @@ RMSNorm rescales without subtracting a mean:
 $y=x/\sqrt{\operatorname{mean}(x^2)+\epsilon}\odot\gamma$. It preserves the
 directional offset of the vector and avoids LayerNorm's centering reduction.
 The local implementation accumulates the mean square in FP32 for reduced-
-precision inputs and casts according to each checkpoint's ordering. Division
-by a square root, multiplication by `pow(mean_square, -0.5)`, and
-multiplication by a reciprocal square root are algebraically equivalent but
-can differ by an F16 ULP. The shared configuration retains these operation
-graphs explicitly: Muse ordinary and scale-free norms use the power form,
-while its centered block norms and Nemotron-H use the reciprocal-square-root
-form. Nemotron additionally rounds the unit-RMS activation before learned
-scaling.
+precision inputs, and in F64 for F64 inputs under the shared
+[`at_least_f32`](src/precision.rs) rule, and casts according to each
+checkpoint's ordering. Division by a square root, multiplication by
+`pow(mean_square, -0.5)`, and multiplication by a reciprocal square root are
+algebraically equivalent but can differ by an F16 ULP. The shared
+configuration retains these operation graphs explicitly: Muse ordinary and
+scale-free norms use the power form, while its centered block norms and
+Nemotron-H use the reciprocal-square-root form. Nemotron additionally rounds
+the unit-RMS activation before learned scaling.
 
 **Implementation:** [`normalization.rs`](src/normalization.rs). **Reference:**
 [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467).

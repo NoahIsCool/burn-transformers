@@ -49,6 +49,11 @@ versioning, with the additional pre-1.0 compatibility policy documented in
   learning curves, checkpoint controls, and bounded reproduction claims.
 - Training documentation covering connected activation losses, frozen suffixes,
   initialization, dropout, native records, and packed quantization limits.
+- A documented evaluation-precision rule, `precision::at_least_f32`: F16, BF16,
+  and Flex32 promote to F32, F32 stays F32, and F64 is never narrowed. F64-capable
+  rotary builders `inverse_frequencies_f64`, `rotary_angles_for_dtype`, and
+  `mrope_angles_for_dtype` accompany the unchanged F32 `inverse_frequencies`,
+  `rotary_angles`, and `mrope_angles`.
 
 ### Fixed
 
@@ -59,6 +64,10 @@ versioning, with the additional pre-1.0 compatibility policy documented in
   registered experiment to survive serialization and reloading.
 - Reject packed quantized autodiff before unsupported Burn operations panic,
   including checkpoint installation; validate the explicit dequantized path.
+- Keep F64 models in F64 through RMSNorm (including Muse scale-free norms),
+  explicit eager and latent-attention softmax, rotary tables at every family
+  call site, and DeepSeek-V2/Nemotron-H vocabulary logits. These previously cast
+  to F32 unconditionally; F16, BF16, and F32 graphs remain bit-identical.
 
 ## [0.1.0] - 2026-09-10
 

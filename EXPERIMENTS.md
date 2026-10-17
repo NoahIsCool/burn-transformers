@@ -322,6 +322,25 @@ scopes are rejected. Custom attention or other processing can be ordinary Rust
 and Burn tensor operations, as in the grokking model. Hooks do not require a
 graph language or checkpoint naming convention.
 
+## Evaluate in double precision
+
+To bound F32 rounding when measuring small numerical differences, cast every
+floating parameter to F64 on Flex, for example with a Burn `ModuleMapper` whose
+`map_float` returns `param.map(|tensor| tensor.cast(DType::F64))`. Embeddings,
+projections, SwiGLU, backend attention, and vocabulary heads then run in F64.
+Rounding-sensitive shared operations follow `precision::at_least_f32`: RMS
+normalization, explicit eager softmax, and rotary cosine/sine tables are
+evaluated in F64 for F64 activations, while F16, BF16, and F32 keep their FP32
+graphs bit for bit. Model families build rotary tables for their activation
+dtype; when rotating your own tensors, call `rotary_angles_for_dtype` with their
+dtype instead of the F32-only `rotary_angles`.
+
+A few components still evaluate selected arithmetic in F32 by design and are
+not covered by this rule: sparse-MoE routing (router probabilities everywhere,
+plus FP32 expert weighting or accumulation in Qwen3-MoE, DeepSeek-V2, and
+Nemotron-H), Gated DeltaNet recurrences, and Nemotron-H Mamba2 state. Choose
+dense attention and SwiGLU layers when every operation must be F64.
+
 ## Current boundaries
 
 Interventions remain stateless; hooks do not modify cached generation or recurrent
