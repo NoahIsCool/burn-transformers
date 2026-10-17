@@ -865,6 +865,10 @@ fn greedy_speculation_reproduces_plain_greedy_decoding() {
 /// After speculative cycles, every readable MTP cache entry equals the one a
 /// fresh MTP prefill writes from the target's hidden states over the same
 /// committed tokens.
+///
+/// The comparison needs history written by accepted drafts. The weights
+/// depend on the seed alone ([`random_hybrid_model`]), and seed 100 accepts
+/// 2 of its 27 drafts over these 12 tokens.
 #[test]
 fn committed_mtp_history_comes_from_target_hidden_states() {
     let device = Default::default();
@@ -873,19 +877,12 @@ fn committed_mtp_history_comes_from_target_hidden_states() {
         max_draft_tokens: 3,
         ..Default::default()
     };
-    // Burn's backend seed is process-global and parameters initialize
-    // lazily, so concurrent tests can change the weights; try models until
-    // one accepts a draft, which the comparison needs.
-    let (model, state, run) = (0..16)
-        .find_map(|seed| {
-            let model = random_hybrid_model(100 + seed, &device);
-            let mut state = model
-                .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
-                .unwrap();
-            let run = speculative_greedy(&model, &prompt, 12, config.clone(), &mut state);
-            (run.accepted > 0).then_some((model, state, run))
-        })
-        .expect("some random model accepts a draft");
+    let model = random_hybrid_model(100, &device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
+        .unwrap();
+    let run = speculative_greedy(&model, &prompt, 12, config, &mut state);
+    assert!(run.accepted > 0, "the fixture must accept a draft");
     let committed = state.tensor_state().lengths()[0];
     let mut sequence = prompt.to_vec();
     sequence.extend(&run.tokens[..committed - prompt.len()]);
