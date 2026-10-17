@@ -387,11 +387,12 @@ code written against unreleased sources.
 - DeltaNet: width-one convolutions, padding removed from convolution taps and
   history, PyTorch's thresholded softplus, and exact decay differences. The
   token-by-token recurrence read the wrong rows' decay and update strength
-  for every batch above one on Metal, CUDA, and ROCm (Burn 0.21's CubeCL
-  reshape of a transposed unit axis), so batched gated-DeltaNet decoding and
-  short prefills, Qwen3.5's included, were wrong there; Flex was exact. The
-  chunked kernel misread single-head factors passed as strided views on the
-  same backends.
+  for every batch above one on CubeCL backends (Burn 0.21's CubeCL reshape of
+  a transposed unit axis), so batched gated-DeltaNet decoding and short
+  prefills, Qwen3.5's included, were wrong there; Flex was exact. The chunked
+  kernel misread single-head factors passed as strided views on the same
+  backends. Both were measured on Metal and the CubeCL CPU backend; CUDA and
+  ROCm share the reshape code but were not run with the defect.
 - Mamba-2: padding cleared by replacement; the reference `dt` graph; the chunk
   scan for a first Nemotron-H prompt token; padded Nemotron-H queries stay
   inside their row's keys.
