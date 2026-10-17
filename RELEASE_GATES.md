@@ -191,8 +191,8 @@ to the same BF16 bounds, reused as an upper limit in the way gpt-oss applies
 one bound to any half-precision side. They do not reflect F16's rounding
 unit, which is eight times smaller (on gpt-oss-20b, Metal/F16 reached `0.007`
 to `0.874` of the official BF16 statistics), so an F16 pass is weaker
-evidence than a BF16 pass. Cached prefills and batched rows
-must also agree with the stateless pass within gpt-oss's self-consistency
+evidence than a BF16 pass. Cached prefills, long-context chunk ends, and
+batched rows must also agree with the stateless pass within gpt-oss's self-consistency
 tolerance (`0.5` for F16 and BF16), and the teacher-forced greedy continuation
 is compared at every step whose F32 margin exceeds `2.4 M`. Whatever the
 margins, the cached greedy tests also check the decode path: every decode
@@ -220,7 +220,12 @@ as the gpt-oss half-precision greedy tests do; that drops only the argmax
 floor, not the decode checks. On the long Gemma prompt the
 maximum bound (`9.7`) exceeds what a missing sliding window moves at the
 window's first positions, so a half-precision run requires only that the run
-without the window fails the rule; the F32 run keeps the tenfold check. The
+without the window fails the rule; the F32 run keeps the tenfold check. That
+bound cannot catch a ring that keeps or evicts the wrong keys either, so at
+half precision the long cached test holds both chunk ends and all 8 decode
+steps after the wrap to the self-consistency tolerance against the same run's
+stateless sliding-window pass, which the long logits test ties to the bundle;
+the F32 run catches such a ring through its `5e-3` tolerance. The
 ignored tests `official_bf16_reference_calibrates_the_half_precision_bounds`
 (Llama family) and `official_bf16_references_calibrate_the_half_precision_bounds`
 (Gemma) reproduce the figures from the bundles alone; they evaluate no Burn

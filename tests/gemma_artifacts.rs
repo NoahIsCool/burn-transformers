@@ -109,8 +109,8 @@
 //! bounds, reused as an upper limit because no official F16 bundle can be
 //! generated; they do not reflect F16 rounding, so its pass is weaker
 //! evidence than a Flex/BF16 pass. Cached prefills, batched rows, and the long
-//! prompt's chunk ends must lie within their prompt's `1.2 M`; the cached
-//! prefill and batched rows also within `0.5` of the stateless pass. The
+//! prompt's chunk ends must lie within their prompt's `1.2 M`, and also
+//! within `0.5` of the same run's stateless pass. The
 //! teacher-forced greedy continuations are compared at every step whose F32
 //! margin exceeds `2.4 M` of their prompt. Whatever the margins, the short
 //! cached greedy test also checks the decode path: every decode step must lie
@@ -135,7 +135,13 @@
 //! first positions (`1.7` in F32), so the tenfold decisiveness check above
 //! cannot hold there; a half-precision run instead requires the run without
 //! the window to fail the half-precision rule on the whole prompt (the F32
-//! run keeps the stronger check). No half-precision run of this crate has
+//! run keeps the stronger check). For the same reason the maximum bound
+//! cannot catch a ring that keeps or evicts the wrong keys in the long cached
+//! test, which the F32 run catches through its `5e-3` tolerance; at half
+//! precision both chunk ends and all 8 decode steps after the wrap must
+//! instead lie within `0.5` of the same run's stateless sliding-window pass
+//! at their positions, the pass that the long logits test ties to the
+//! bundle. No half-precision run of this crate has
 //! been measured against these bounds yet. To run the Flex/BF16 gates (set
 //! `f16`, `--features metal`, and the `metal::` tests for Metal/F16):
 //!
@@ -894,13 +900,29 @@ fn check_long_context_logits<B: Backend>(device: &B::Device) {
 ///
 /// A half-precision run applies the long prompt's maximum bound to the chunk
 /// ends and, the continuation being teacher-forced, compares every decisive
-/// greedy step.
+/// greedy step. That bound (`9.7`) is far above what a ring that keeps or
+/// evicts the wrong keys moves, so the chunk ends and every decode step after
+/// the wrap must also agree with the same run's stateless sliding-window pass
+/// within the self-consistency tolerance (`0.5`), as the short cached prefill
+/// does; the long logits test ties that stateless pass to the bundle.
 fn check_long_context_cached<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance, window, half) = load_long::<B>(device);
     let prompt = &reference.prompts[0];
     let vocabulary = reference.vocabulary;
     let length = prompt.tokens.len();
     let capacity = length + reference.greedy.len();
+    let split = window - 24;
+    // At half precision, one stateless pass over the prompt and the
+    // teacher-forced greedy tokens, read at both chunk ends and then at every
+    // decoded position (decode step s fed greedy token s at position T + s).
+    let judged = half.as_ref().map(|half| {
+        let continued = continued_prompt(&reference);
+        let positions: Vec<usize> = [split - 1, length - 1]
+            .into_iter()
+            .chain(length..continued.len())
+            .collect();
+        (half, logits_at(&model, &continued, &positions, device))
+    });
     let mut state = model
         .new_decode_state(CacheConfig::new(1, capacity).unwrap(), 1, device)
         .unwrap();
@@ -910,9 +932,8 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
     let rings = gemma_state.ring_layers();
     eprintln!("cached: capacity {capacity}, {rings} layers in {window}-slot rings");
     assert!(rings > 0, "sliding layers below the capacity live in rings");
-    let split = window - 24;
     let mut logits = Vec::new();
-    for range in [0..split, split..length] {
+    for (chunk, range) in [0..split, split..length].into_iter().enumerate() {
         let input = CausalLmInput {
             token_ids: row::<B>(&prompt.tokens[range.clone()], device),
             token_mask: None,
@@ -926,9 +947,11 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
         );
         let last = range.end - 1;
         let expected = &prompt.logits[last * vocabulary..(last + 1) * vocabulary];
-        if let Some(half) = &half {
+        if let Some((half, stateless)) = &judged {
             let label = format!("cached chunk {range:?} at position {last}");
             half.check_rows(&label, 0, &logits, expected);
+            let alone = &stateless[chunk * vocabulary..(chunk + 1) * vocabulary];
+            half.check_consistency(&label, &logits, alone);
             continue;
         }
         let largest = gap(&logits, expected);
@@ -936,6 +959,8 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
         assert!(largest <= tolerance, "cached chunk {range:?}");
     }
     let mut compared = 0;
+    // Half precision keeps every decode step's logits for the check below.
+    let mut decoded = Vec::new();
     for (step, &(expected, margin)) in reference.greedy.iter().enumerate() {
         match &half {
             None if margin <= 2.0 * tolerance => {
@@ -963,11 +988,22 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
                 .unwrap()
                 .logits,
         );
+        if judged.is_some() {
+            decoded.push(logits.clone());
+        }
     }
     eprintln!(
         "long greedy: {compared} of {} tokens match",
         reference.greedy.len()
     );
+    if let Some((half, stateless)) = &judged {
+        half.check_decode_steps(
+            "long cached decode",
+            length,
+            &decoded,
+            &stateless[2 * vocabulary..],
+        );
+    }
     let minimum = minimum_greedy().min(reference.greedy.len());
     assert!(
         compared >= minimum,

@@ -115,9 +115,10 @@
 //!
 //! # Self-consistency
 //!
-//! Independently of the truth, a cached prefill, every cached decode step,
-//! and every row of a left-padded batch must agree with the same run's
-//! stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for the run's dtype.
+//! Independently of the truth, a cached prefill, each end of a chunked cached
+//! prefill, every cached decode step, and every row of a left-padded batch
+//! must agree with the same run's stateless pass within
+//! [`SELF_CONSISTENCY_TOLERANCE`] for the run's dtype.
 //!
 //! # Pairing
 //!
