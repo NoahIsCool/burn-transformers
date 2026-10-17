@@ -32,6 +32,10 @@ mod state_contracts;
 /// Host-validated causal inputs, output/gradient parity, and compatibility failures.
 mod prepared_input;
 
+#[path = "precision_tests.rs"]
+/// F64 end-to-end decoder precision, F32 parity, and rotary shift invariance.
+mod precision;
+
 /// Standard scale-only normalization for compact fixtures.
 fn rms() -> NormalizationSpec {
     NormalizationSpec::Rms {
