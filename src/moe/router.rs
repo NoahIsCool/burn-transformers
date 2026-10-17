@@ -28,7 +28,7 @@
 
 use burn::{
     nn::Linear,
-    tensor::{Bool, DType, Int, Tensor, activation, backend::Backend},
+    tensor::{Bool, DType, Int, Tensor, activation, backend::Backend, bf16, f16},
 };
 use serde::{Deserialize, Serialize};
 
@@ -585,26 +585,33 @@ pub fn router_logits<B: Backend, const D: usize>(
 /// separately from scores, so for `k <= E` every returned index is in range and
 /// distinct within a row even when all remaining keys are `-inf` or NaN. The
 /// gathered values come from the original tensor and may therefore be NaN.
-/// For finite inputs the result equals the historical implementation.
+/// For inputs without `-inf` or NaN the result equals the historical
+/// implementation.
 ///
-/// # Exhausted rows
+/// # Finite ranking keys
 ///
-/// A row is *exhausted* when every key is `-inf` (retired keys are `-inf`, so
-/// then every available key is too); all of them tie, and the smallest
-/// available index is chosen. That is decided by an explicit test rather than
-/// by comparing keys with the row maximum, because Burn 0.21's CubeCL
-/// backends start their maximum reduction from the lowest *finite* value
-/// (cubek-reduce 0.2; measured on the CubeCL CPU backend and Metal, and the
-/// same kernel source serves CUDA and ROCm): `max_dim` of a row of `-inf`
-/// returns `f32::MIN`, which equals none of the row's keys. Without the test
-/// such a row matched no index, and the `min_dim` over an all-masked row
-/// returned the sentinel `columns`, an out-of-range expert ID that dispatch
-/// then rejected. On Flex, which returns `-inf`, the test changes no result.
-/// It costs three launches per selected index (a comparison, an `all_dim`,
-/// and a disjunction) and is exact: no finite key is conflated with `-inf`.
-/// `cubecl_max_reduction_of_negative_infinities_justifies_the_exhausted_row_rule`
+/// Ranking keys are clamped once to the lowest finite value `L` of the
+/// values' dtype ([`lowest_finite`]), and retired keys are set to `L`. NaN,
+/// `-inf`, and a genuine `L` therefore form one lowest class, ordered by
+/// index; every other key keeps its exact order. Every key is then finite,
+/// which keeps the maximum exact on every backend: Burn 0.21's CubeCL
+/// backends start their maximum reduction from `L` (cubek-reduce 0.2;
+/// measured on the CubeCL CPU backend and Metal, and the same kernel source
+/// serves CUDA and ROCm), so `max_dim` of a row of `-inf` returns `L`, which
+/// equals none of the row's keys. With `-inf` keys such a row matched no
+/// index, and the `min_dim` over an all-masked row returned the sentinel
+/// `columns`, an out-of-range expert ID that dispatch then rejected. On Flex,
+/// which returns `-inf`, the clamp changes no selection that does not involve
+/// a key equal to `L`.
+///
+/// The clamp is one launch per call. An exact alternative, an explicit
+/// all-`-inf` test in every iteration, costs three launches per selected
+/// index; at Qwen3-30B-A3B's routing shape on Metal (128 experts, `k = 8`,
+/// 48 layers) it raised top-k time from about 40 to 54 ms per decoded token,
+/// while the clamp measured the same as the unguarded loop.
+/// `cubecl_max_reduction_of_negative_infinities_justifies_the_finite_keys`
 /// (`router_tests.rs`) pins the CubeCL behavior on the CPU, so a Burn upgrade
-/// that fixes it fails `cargo test --features cpu` and the rule can be
+/// that fixes it fails `cargo test --features cpu` and the clamp can be
 /// revisited (`docs/upstream/16-cubecl-max-reduction-negative-infinity.md`).
 pub(crate) fn deterministic_top_k<B: Backend>(
     values: Tensor<B, 3>,
@@ -616,22 +623,18 @@ pub(crate) fn deterministic_top_k<B: Backend>(
     let ids = Tensor::<B, 1, Int>::arange(0..columns as i64, &device)
         .reshape([1, 1, columns])
         .expand([batch, rows, columns]);
+    // Every key is finite and at least `lowest` (see "Finite ranking keys").
+    let lowest = lowest_finite(values.dtype());
     let mut keys = values
         .clone()
-        .mask_fill(values.clone().is_nan(), f32::NEG_INFINITY);
+        .mask_fill(values.clone().is_nan(), lowest)
+        .clamp_min(lowest);
     let mut available = ids.clone().lower_elem(columns as i64);
     let mut selected_values = Vec::with_capacity(k);
     let mut selected_indices = Vec::with_capacity(k);
     for _ in 0..k {
         let maximum = keys.clone().max_dim(2);
-        // `[batch, rows, 1]`: every key is `-inf`. Retired keys are `-inf`
-        // too, so then every available key ties (see "Exhausted rows").
-        let exhausted = keys.clone().equal_elem(f32::NEG_INFINITY).all_dim(2);
-        let tied = keys
-            .clone()
-            .equal(maximum)
-            .bool_or(exhausted.expand([batch, rows, columns]))
-            .bool_and(available.clone());
+        let tied = keys.clone().equal(maximum).bool_and(available.clone());
         let index = ids
             .clone()
             .mask_fill(tied.bool_not(), columns as i64)
@@ -641,13 +644,28 @@ pub(crate) fn deterministic_top_k<B: Backend>(
             .equal(index.clone().expand([batch, rows, columns]));
         selected_values.push(values.clone().gather(2, index.clone()));
         selected_indices.push(index);
-        keys = keys.mask_fill(chosen.clone(), f32::NEG_INFINITY);
+        keys = keys.mask_fill(chosen.clone(), lowest);
         available = available.bool_and(chosen.bool_not());
     }
     (
         Tensor::cat(selected_values, 2),
         Tensor::cat(selected_indices, 2),
     )
+}
+
+/// Returns the lowest finite value of a floating dtype, exactly representable in it.
+///
+/// [`deterministic_top_k`] clamps its ranking keys to this value. It must be
+/// the dtype's own minimum: `f32::MIN` rounds to `-inf` in F16, which would
+/// reintroduce non-finite keys. Non-float dtypes never reach the router; they
+/// map to the F32 minimum.
+fn lowest_finite(dtype: DType) -> f64 {
+    match dtype {
+        DType::F64 => f64::MIN,
+        DType::F16 => f64::from(f16::MIN),
+        DType::BF16 => f64::from(bf16::MIN),
+        _ => f64::from(f32::MIN),
+    }
 }
 
 #[cfg(test)]

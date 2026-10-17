@@ -707,10 +707,11 @@ fn host_ints<B: Backend, const D: usize>(tensor: Tensor<B, D, Int>) -> Vec<i64> 
 
 /// Top-k over [`NON_FINITE_ROWS`] picks every index once per row, NaN and `-inf` last.
 ///
-/// The all-NaN and all-`-inf` rows are exhausted from their first selection:
-/// every index ties and the smallest available one wins. The router flags
-/// the NaN rows. Generic so the CubeCL CPU backend runs the same assertions
-/// as Flex (see "Exhausted rows" in [`deterministic_top_k`]).
+/// Every key of the all-NaN and all-`-inf` rows is in the lowest class from
+/// the first selection: every index ties and the smallest available one wins.
+/// The router flags the NaN rows. Generic so the CubeCL CPU backend runs the
+/// same assertions as Flex (see "Finite ranking keys" in
+/// [`deterministic_top_k`]).
 fn check_top_k_is_total_for_non_finite_rows<B: Backend>(device: &B::Device) {
     let (selected, ids) = deterministic_top_k(
         four_columns::<B>(&NON_FINITE_ROWS, device).unsqueeze_dim::<3>(0),
@@ -732,6 +733,71 @@ fn check_top_k_is_total_for_non_finite_rows<B: Backend>(device: &B::Device) {
         .unwrap();
     assert_eq!(host_ints(decision.non_finite_tokens.int()), [1, 1, 0, 0]);
     assert_eq!(host_ints(decision.experts), [0, 1, 2, 0, 0, 1, 0, 2]);
+}
+
+/// Rows mixing `-inf`, NaN, and the F32 minimum with ordinary keys, `[2, 4]`.
+const LOWEST_CLASS_ROWS: [f32; 8] = [
+    f32::NEG_INFINITY,
+    f32::MIN,
+    0.0,
+    f32::NAN,
+    f32::MIN,
+    -1.0,
+    f32::NEG_INFINITY,
+    f32::MIN,
+];
+
+/// `-inf`, NaN, and the dtype's lowest finite key form one class ordered by index.
+///
+/// Ordinary keys keep their exact order ahead of that class. Generic so the
+/// CubeCL CPU backend runs the same assertions as Flex (see "Finite ranking
+/// keys" in [`deterministic_top_k`]).
+fn check_top_k_ranks_the_lowest_class_by_index<B: Backend>(device: &B::Device) {
+    let (_, ids) = deterministic_top_k(
+        four_columns::<B>(&LOWEST_CLASS_ROWS, device).unsqueeze_dim::<3>(0),
+        4,
+    );
+    assert_eq!(host_ints(ids), [2, 0, 1, 3, 1, 0, 2, 3]);
+}
+
+/// Flex: the lowest key class is ordered by index.
+#[test]
+fn top_k_ranks_the_lowest_class_by_index() {
+    check_top_k_ranks_the_lowest_class_by_index::<TestBackend>(&Default::default());
+}
+
+/// Half-precision keys stay total: an F16 row of `-inf` selects every index once.
+///
+/// `f32::MIN` rounds to `-inf` in F16, so the clamp must use the dtype's own
+/// minimum ([`lowest_finite`]).
+#[test]
+fn half_precision_top_k_is_total_for_negative_infinity_rows() {
+    let device = Default::default();
+    for dtype in [DType::F16, DType::BF16] {
+        let values = four_columns::<TestBackend>(&[f32::NEG_INFINITY; 4], &device)
+            .cast(dtype)
+            .unsqueeze_dim::<3>(0);
+        let (_, ids) = deterministic_top_k(values, 4);
+        assert_eq!(host_ints(ids), [0, 1, 2, 3], "{dtype:?}");
+    }
+}
+
+/// Each float dtype's lowest finite value is exact, finite, and the dtype's minimum.
+#[test]
+fn lowest_finite_is_each_dtype_minimum() {
+    assert_eq!(lowest_finite(DType::F64), f64::MIN);
+    assert_eq!(lowest_finite(DType::F32), f64::from(f32::MIN));
+    assert_eq!(lowest_finite(DType::F16), -65504.0);
+    assert_eq!(
+        burn::tensor::f16::from_f64(lowest_finite(DType::F16)),
+        burn::tensor::f16::MIN
+    );
+    assert_eq!(
+        burn::tensor::bf16::from_f64(lowest_finite(DType::BF16)),
+        burn::tensor::bf16::MIN
+    );
+    // A non-float dtype never reaches the router and falls back to F32's minimum.
+    assert_eq!(lowest_finite(DType::I32), f64::from(f32::MIN));
 }
 
 /// Tokens whose final weights are not finite are flagged even when no score is NaN.
@@ -1123,15 +1189,21 @@ mod cubecl_cpu {
         super::check_top_k_is_total_for_non_finite_rows::<Cpu>(&Default::default());
     }
 
+    /// CubeCL orders the lowest key class by index, exactly as Flex does.
+    #[test]
+    fn cubecl_cpu_top_k_ranks_the_lowest_class_by_index() {
+        super::check_top_k_ranks_the_lowest_class_by_index::<Cpu>(&Default::default());
+    }
+
     /// Burn 0.21's CubeCL maximum of a row of `-inf` is `f32::MIN`, not `-inf`.
     ///
     /// `cubek-reduce` 0.2 seeds `Max` with the lowest finite value
     /// (`docs/upstream/16-cubecl-max-reduction-negative-infinity.md`), which is
-    /// why [`super::deterministic_top_k`] decides exhausted rows explicitly.
-    /// Flex returns `-inf`. When a Burn upgrade fixes the reduction, this test
-    /// fails and the rule can be revisited.
+    /// why [`super::deterministic_top_k`] clamps its ranking keys to finite
+    /// values. Flex returns `-inf`. When a Burn upgrade fixes the reduction,
+    /// this test fails and the clamp can be revisited.
     #[test]
-    fn cubecl_max_reduction_of_negative_infinities_justifies_the_exhausted_row_rule() {
+    fn cubecl_max_reduction_of_negative_infinities_justifies_the_finite_keys() {
         let row = || [[f32::NEG_INFINITY; 4]];
         let cubecl = Tensor::<Cpu, 2>::from_floats(row(), &Default::default())
             .max_dim(1)

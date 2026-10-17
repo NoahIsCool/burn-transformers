@@ -10,7 +10,7 @@
 | Repro | [`repros/cubecl-max-reduction-negative-infinity`](repros/cubecl-max-reduction-negative-infinity) (`--features metal` adds Metal) |
 | Patch | None drafted: fixed upstream before this report, and a 0.21.0 patch would have to rebuild the 0.3.0 identity helpers, which need `elem_type_of` from cubecl 0.11 |
 | Patch verified | Not applicable |
-| Workarounds an upstream fix removes | The "Exhausted rows" rule of `deterministic_top_k` in `src/moe/router.rs`; its pin `cubecl_max_reduction_of_negative_infinities_justifies_the_exhausted_row_rule` (`src/moe/router_tests.rs`, `--features cpu`) fails once the reduction is fixed |
+| Workarounds an upstream fix removes | The finite ranking keys of `deterministic_top_k` in `src/moe/router.rs` ("Finite ranking keys"); its pin `cubecl_max_reduction_of_negative_infinities_justifies_the_finite_keys` (`src/moe/router_tests.rs`, `--features cpu`) fails once the reduction is fixed |
 
 ## Issue draft (not to be filed: fixed in v0.22.0)
 
@@ -91,12 +91,16 @@ run.
   the token); on every CubeCL backend (measured on Metal and the CubeCL CPU backend; CUDA
   and ROCm run the same kernel source) it broke that promise for every row whose remaining
   keys were all `-inf` or NaN.
-- Fixed in the crate, exactly and for every backend: `deterministic_top_k` treats a row
-  whose available keys are all `-inf` as one tie and picks the smallest available index,
-  without consulting the maximum (`src/moe/router.rs`, "Exhausted rows"). Flex results
-  are unchanged. `cubecl_cpu_top_k_is_total_for_non_finite_rows` runs the existing
-  totality test on the CubeCL CPU backend; without the rule it returns ID 4 for the
-  all-NaN and all-`-inf` rows.
+- Fixed in the crate for every backend: `deterministic_top_k` clamps its ranking keys
+  once to the dtype's lowest finite value and retires chosen keys to it, so every key is
+  finite and the maximum is exact everywhere (`src/moe/router.rs`, "Finite ranking
+  keys"). NaN, `-inf`, and a genuine lowest finite key form one class ordered by index;
+  other selections, and Flex results without such a key, are unchanged.
+  `cubecl_cpu_top_k_is_total_for_non_finite_rows` runs the existing totality test on the
+  CubeCL CPU backend; with `-inf` keys it returns ID 4 for the all-NaN and all-`-inf`
+  rows. An exact per-iteration all-`-inf` test was tried first; it cost three launches
+  per selected index, about 40 to 54 ms of top-k per decoded Qwen3-30B-A3B token on
+  Metal, while the clamp measured the same as the unguarded loop.
 - Other `max_dim` users were checked: `generation.rs`'s min-p filter and
   `training::log_softmax` give the same results with `f32::MIN` as with `-inf` for a row of
   `-inf` (both mask or produce NaN there). Not changed: greedy `select` in
