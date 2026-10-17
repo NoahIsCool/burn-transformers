@@ -133,6 +133,8 @@
 #[path = "support/backend_numerics.rs"]
 mod backend_numerics;
 
+use std::sync::{Mutex, PoisonError};
+
 use backend_numerics::{
     Bound, Gap, GreedyComparison, GreedyDecision, MatmulPrecision, TF32_BOUND, argmax,
     check_teacher_forced_greedy, checkpoint_tolerance, compare_teacher_forced_greedy,
@@ -203,6 +205,34 @@ const TARGET_PREFILL: usize = 2;
 
 /// Seed of every Flex reference initialization.
 const SEED: u64 = 20_261_016;
+
+/// Serializes every draw from Flex's random number generator in this test binary.
+///
+/// Burn Flex keeps one process-wide RNG: `Backend::seed` stores it, and each
+/// random initialization takes it, draws, and puts it back. Tests run on
+/// parallel threads, so two tests seeding and initializing models at once
+/// interleave their draws, and each model's weights, and every deviation
+/// measured on them, then depend on thread scheduling. Under load that
+/// moved Muse Glimmer's TF32 weight-rounding deviation from `1.30e-3` to
+/// `4.23e-3`, past the quarter bound `2.89e-3` of
+/// [`tf32_weight_rounding_stays_within_a_quarter_of_the_tf32_bound`]. Every
+/// Flex parameter initialization here, seeded or not, therefore runs inside
+/// [`seeded`], which holds this lock. Burn initializes a parameter lazily, on
+/// its first access, so the closure must also make that access:
+/// [`copy_parameters`] visits every parameter of both models, and a model
+/// whose parameters are never read draws nothing.
+static FLEX_RNG: Mutex<()> = Mutex::new(());
+
+/// Seeds Flex's RNG with [`SEED`] and runs `build` while no other test of this binary can draw from it.
+///
+/// A poisoned lock (a test panicked while holding it, as the refused
+/// parameter copies do) is recovered, because the guarded state is the RNG
+/// itself, which every call reseeds.
+fn seeded<T>(build: impl FnOnce() -> T) -> T {
+    let _exclusive = FLEX_RNG.lock().unwrap_or_else(PoisonError::into_inner);
+    Reference::seed(&Default::default(), SEED);
+    build()
+}
 
 /// Bound for two F32 backends that differ only in reduction order; see the module documentation.
 const F32_BOUND: Bound = Bound {
@@ -915,9 +945,11 @@ fn registry_pair<A: Backend>(
     device: &A::Device,
 ) -> (AutoCausalLm<Reference>, AutoCausalLm<A>) {
     let flex_device = Default::default();
-    Reference::seed(&flex_device, SEED);
-    let reference = config.build::<Reference>(&flex_device);
-    let accelerated = copy_parameters(&reference, config.build::<A>(device), identity);
+    let (reference, accelerated) = seeded(|| {
+        let reference = config.build::<Reference>(&flex_device);
+        let accelerated = copy_parameters(&reference, config.build::<A>(device), identity);
+        (reference, accelerated)
+    });
     (reference, accelerated)
 }
 
@@ -1148,13 +1180,15 @@ fn modular_causal_matches_flex<A: Backend>(device: &A::Device, bound: Bound) -> 
         ("modular causal", modular_decoder()),
         ("single-head modular causal", modular_single_head_decoder()),
     ] {
-        Reference::seed(&flex_device, SEED);
-        let reference = ModularCausalLm::<Reference>::init(spec.clone(), &flex_device).unwrap();
-        let accelerated = copy_parameters(
-            &reference,
-            ModularCausalLm::<A>::init(spec, device).unwrap(),
-            identity,
-        );
+        let (reference, accelerated) = seeded(|| {
+            let reference = ModularCausalLm::<Reference>::init(spec.clone(), &flex_device).unwrap();
+            let accelerated = copy_parameters(
+                &reference,
+                ModularCausalLm::<A>::init(spec, device).unwrap(),
+                identity,
+            );
+            (reference, accelerated)
+        });
         for mode in [
             AttentionPrecisionMode::BackendDefault,
             AttentionPrecisionMode::EagerFp32Softmax,
@@ -1189,13 +1223,16 @@ fn modular_seq2seq() -> Seq2SeqSpec {
 /// The modular encoder-decoder under both attention modes on the accelerator.
 fn modular_seq2seq_matches_flex<A: Backend>(device: &A::Device, bound: Bound) -> Report {
     let flex_device = Default::default();
-    Reference::seed(&flex_device, SEED);
-    let reference = ModularSeq2SeqLm::<Reference>::init(modular_seq2seq(), &flex_device).unwrap();
-    let accelerated = copy_parameters(
-        &reference,
-        ModularSeq2SeqLm::<A>::init(modular_seq2seq(), device).unwrap(),
-        identity,
-    );
+    let (reference, accelerated) = seeded(|| {
+        let reference =
+            ModularSeq2SeqLm::<Reference>::init(modular_seq2seq(), &flex_device).unwrap();
+        let accelerated = copy_parameters(
+            &reference,
+            ModularSeq2SeqLm::<A>::init(modular_seq2seq(), device).unwrap(),
+            identity,
+        );
+        (reference, accelerated)
+    });
     let mut largest = Report::default();
     for mode in [
         AttentionPrecisionMode::BackendDefault,
@@ -1231,13 +1268,15 @@ fn t5() -> T5Config {
 /// T5 on the accelerator.
 fn t5_matches_flex<A: Backend>(device: &A::Device, bound: Bound) -> Report {
     let flex_device = Default::default();
-    Reference::seed(&flex_device, SEED);
-    let reference = T5ForConditionalGeneration::<Reference>::init(t5(), &flex_device).unwrap();
-    let accelerated = copy_parameters(
-        &reference,
-        T5ForConditionalGeneration::<A>::init(t5(), device).unwrap(),
-        identity,
-    );
+    let (reference, accelerated) = seeded(|| {
+        let reference = T5ForConditionalGeneration::<Reference>::init(t5(), &flex_device).unwrap();
+        let accelerated = copy_parameters(
+            &reference,
+            T5ForConditionalGeneration::<A>::init(t5(), device).unwrap(),
+            identity,
+        );
+        (reference, accelerated)
+    });
     let report = compare_seq2seq(&reference, &accelerated, device, 32);
     report.check("T5", bound);
     report
@@ -1259,13 +1298,15 @@ fn gpt2() -> Gpt2Config {
 /// GPT-2 under eager and fused attention on the accelerator (stateless only).
 fn gpt2_matches_flex<A: Backend>(device: &A::Device, bound: Bound) -> Report {
     let flex_device = Default::default();
-    Reference::seed(&flex_device, SEED);
-    let reference = Gpt2ForCausalLm::<Reference>::init(gpt2(), &flex_device).unwrap();
-    let accelerated = copy_parameters(
-        &reference,
-        Gpt2ForCausalLm::<A>::init(gpt2(), device).unwrap(),
-        identity,
-    );
+    let (reference, accelerated) = seeded(|| {
+        let reference = Gpt2ForCausalLm::<Reference>::init(gpt2(), &flex_device).unwrap();
+        let accelerated = copy_parameters(
+            &reference,
+            Gpt2ForCausalLm::<A>::init(gpt2(), device).unwrap(),
+            identity,
+        );
+        (reference, accelerated)
+    });
     let mut largest = Report::default();
     for mode in [
         AttentionPrecisionMode::EagerFp32Softmax,
@@ -1302,13 +1343,15 @@ fn gpt_neox() -> GptNeoXConfig {
 /// GPT-NeoX under eager and fused attention on the accelerator (stateless only).
 fn gpt_neox_matches_flex<A: Backend>(device: &A::Device, bound: Bound) -> Report {
     let flex_device = Default::default();
-    Reference::seed(&flex_device, SEED);
-    let reference = GptNeoXForCausalLm::<Reference>::init(gpt_neox(), &flex_device).unwrap();
-    let accelerated = copy_parameters(
-        &reference,
-        GptNeoXForCausalLm::<A>::init(gpt_neox(), device).unwrap(),
-        identity,
-    );
+    let (reference, accelerated) = seeded(|| {
+        let reference = GptNeoXForCausalLm::<Reference>::init(gpt_neox(), &flex_device).unwrap();
+        let accelerated = copy_parameters(
+            &reference,
+            GptNeoXForCausalLm::<A>::init(gpt_neox(), device).unwrap(),
+            identity,
+        );
+        (reference, accelerated)
+    });
     let mut largest = Report::default();
     for mode in [
         AttentionPrecisionMode::EagerFp32Softmax,
@@ -1524,7 +1567,7 @@ fn every_family_matches_itself_on_flex() {
 fn every_registered_family_has_a_parity_case() {
     let device = Default::default();
     let covered: Vec<AutoCausalConfig> = registry_cases()
-        .map(|(_, config)| config.build::<Reference>(&device).family())
+        .map(|(_, config)| seeded(|| config.build::<Reference>(&device)).family())
         .collect();
     for family in AutoCausalConfig::ALL {
         assert!(covered.contains(family), "{family:?} lacks a parity case");
@@ -1561,9 +1604,12 @@ fn tf32_weight_rounding_stays_within_a_quarter_of_the_tf32_bound() {
         }
     };
     for (name, config) in registry_cases() {
-        Reference::seed(&device, SEED);
-        let exact = config.build::<Reference>(&device);
-        let rounded = copy_parameters(&exact, config.build::<Reference>(&device), round_to_tf32);
+        let (exact, rounded) = seeded(|| {
+            let exact = config.build::<Reference>(&device);
+            let rounded =
+                copy_parameters(&exact, config.build::<Reference>(&device), round_to_tf32);
+            (exact, rounded)
+        });
         let vocabulary = exact.config().vocabulary_size();
         check(name, compare_causal(&exact, &rounded, &device, vocabulary));
     }
@@ -1571,41 +1617,49 @@ fn tf32_weight_rounding_stays_within_a_quarter_of_the_tf32_bound() {
         ("modular causal", modular_decoder()),
         ("single-head modular causal", modular_single_head_decoder()),
     ] {
-        Reference::seed(&device, SEED);
-        let exact = ModularCausalLm::<Reference>::init(spec.clone(), &device).unwrap();
-        let rounded = copy_parameters(
-            &exact,
-            ModularCausalLm::<Reference>::init(spec, &device).unwrap(),
-            round_to_tf32,
-        );
+        let (exact, rounded) = seeded(|| {
+            let exact = ModularCausalLm::<Reference>::init(spec.clone(), &device).unwrap();
+            let rounded = copy_parameters(
+                &exact,
+                ModularCausalLm::<Reference>::init(spec, &device).unwrap(),
+                round_to_tf32,
+            );
+            (exact, rounded)
+        });
         check(name, compare_causal(&exact, &rounded, &device, 32));
     }
-    Reference::seed(&device, SEED);
-    let exact = ModularSeq2SeqLm::<Reference>::init(modular_seq2seq(), &device).unwrap();
-    let rounded = copy_parameters(
-        &exact,
-        ModularSeq2SeqLm::<Reference>::init(modular_seq2seq(), &device).unwrap(),
-        round_to_tf32,
-    );
+    let (exact, rounded) = seeded(|| {
+        let exact = ModularSeq2SeqLm::<Reference>::init(modular_seq2seq(), &device).unwrap();
+        let rounded = copy_parameters(
+            &exact,
+            ModularSeq2SeqLm::<Reference>::init(modular_seq2seq(), &device).unwrap(),
+            round_to_tf32,
+        );
+        (exact, rounded)
+    });
     check(
         "modular seq2seq",
         compare_seq2seq(&exact, &rounded, &device, 32),
     );
-    Reference::seed(&device, SEED);
-    let exact = T5ForConditionalGeneration::<Reference>::init(t5(), &device).unwrap();
-    let rounded = copy_parameters(
-        &exact,
-        T5ForConditionalGeneration::<Reference>::init(t5(), &device).unwrap(),
-        round_to_tf32,
-    );
+    let (exact, rounded) = seeded(|| {
+        let exact = T5ForConditionalGeneration::<Reference>::init(t5(), &device).unwrap();
+        let rounded = copy_parameters(
+            &exact,
+            T5ForConditionalGeneration::<Reference>::init(t5(), &device).unwrap(),
+            round_to_tf32,
+        );
+        (exact, rounded)
+    });
     check("T5", compare_seq2seq(&exact, &rounded, &device, 32));
-    Reference::seed(&device, SEED);
-    let exact = Gpt2ForCausalLm::<Reference>::init(gpt2(), &device).unwrap();
-    let rounded = copy_parameters(
-        &exact,
-        Gpt2ForCausalLm::<Reference>::init(gpt2(), &device).unwrap(),
-        round_to_tf32,
-    );
+    let (exact, rounded) = seeded(|| {
+        let exact = Gpt2ForCausalLm::<Reference>::init(gpt2(), &device).unwrap();
+        let rounded = copy_parameters(
+            &exact,
+            Gpt2ForCausalLm::<Reference>::init(gpt2(), &device).unwrap(),
+            round_to_tf32,
+        );
+        (exact, rounded)
+    });
     check(
         "GPT-2",
         compare_stateless(
@@ -1615,13 +1669,15 @@ fn tf32_weight_rounding_stays_within_a_quarter_of_the_tf32_bound() {
             32,
         ),
     );
-    Reference::seed(&device, SEED);
-    let exact = GptNeoXForCausalLm::<Reference>::init(gpt_neox(), &device).unwrap();
-    let rounded = copy_parameters(
-        &exact,
-        GptNeoXForCausalLm::<Reference>::init(gpt_neox(), &device).unwrap(),
-        round_to_tf32,
-    );
+    let (exact, rounded) = seeded(|| {
+        let exact = GptNeoXForCausalLm::<Reference>::init(gpt_neox(), &device).unwrap();
+        let rounded = copy_parameters(
+            &exact,
+            GptNeoXForCausalLm::<Reference>::init(gpt_neox(), &device).unwrap(),
+            round_to_tf32,
+        );
+        (exact, rounded)
+    });
     check(
         "GPT-NeoX",
         compare_stateless(
@@ -2296,16 +2352,18 @@ fn bounds_reject_deviations_beyond_the_allowance() {
 #[test]
 fn parameter_copies_are_exact_and_apply_the_transform() {
     let device = Default::default();
-    Reference::seed(&device, SEED);
-    let source = LinearConfig::new(3, 2).init::<Reference>(&device);
     let fresh = || LinearConfig::new(3, 2).init::<Reference>(&device);
-    let copied = copy_parameters(&source, fresh(), identity);
+    let (source, copied, doubled) = seeded(|| {
+        let source = fresh();
+        let copied = copy_parameters(&source, fresh(), identity);
+        let doubled = copy_parameters(&source, fresh(), |value| 2.0 * value);
+        (source, copied, doubled)
+    });
     let input = Tensor::<Reference, 2>::from_data([[0.5, -1.0, 2.0]], &device);
     assert_eq!(
         host(copied.forward(input.clone())),
         host(source.forward(input))
     );
-    let doubled = copy_parameters(&source, fresh(), |value| 2.0 * value);
     assert_eq!(
         host(doubled.weight.val()),
         host(source.weight.val())
@@ -2320,12 +2378,13 @@ fn parameter_copies_are_exact_and_apply_the_transform() {
 #[should_panic(expected = "float parameter 0: source and target shapes differ")]
 fn parameter_copies_refuse_a_shape_mismatch() {
     let device = Default::default();
-    let source = LinearConfig::new(3, 2).init::<Reference>(&device);
-    copy_parameters(
-        &source,
-        LinearConfig::new(4, 2).init::<Reference>(&device),
-        identity,
-    );
+    seeded(|| {
+        copy_parameters(
+            &LinearConfig::new(3, 2).init::<Reference>(&device),
+            LinearConfig::new(4, 2).init::<Reference>(&device),
+            identity,
+        )
+    });
 }
 
 /// A target with fewer parameters than the source is refused.
@@ -2333,14 +2392,15 @@ fn parameter_copies_refuse_a_shape_mismatch() {
 #[should_panic(expected = "the source has more parameters than the target")]
 fn parameter_copies_refuse_a_parameter_count_mismatch() {
     let device = Default::default();
-    let source = LinearConfig::new(3, 2).init::<Reference>(&device);
-    copy_parameters(
-        &source,
-        LinearConfig::new(3, 2)
-            .with_bias(false)
-            .init::<Reference>(&device),
-        identity,
-    );
+    seeded(|| {
+        copy_parameters(
+            &LinearConfig::new(3, 2).init::<Reference>(&device),
+            LinearConfig::new(3, 2)
+                .with_bias(false)
+                .init::<Reference>(&device),
+            identity,
+        )
+    });
 }
 
 /// The Metal bound: Metal must multiply F32 matrices in F32, so [`F32_BOUND`] applies.
