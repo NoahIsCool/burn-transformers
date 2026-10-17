@@ -191,13 +191,20 @@ defaults every step of the pinned F32 and F64 bundles is decisive, so the
 F32 results below are unchanged. Under half-precision or TF32 tolerances,
 stopping at the first tie used to end comparisons early, and the full BF16
 gpt-oss-20b bundle (first margin `3.0625`, a tie at `2τ = 5`) could not meet
-the default minimum on any backend. It now compares its five decisive steps:
-`metal_cached_greedy_matches_the_reference` on Metal F16 (Apple M3 Max,
-`TRANSFORMERS_GPT_OSS_DTYPE=f16`, default tolerances, bundle `reference.json`
-SHA-256 `9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac`,
-2026-10-17) matches all five and skips 27 ties, with a 50.6 GB peak memory
-footprint. Only that greedy check was run; the bundle's prompt, batched, and
-long-prompt checks have not been recorded on this source.
+the default minimum on any backend. It now compares its five decisive steps.
+At source `16822a0` (Apple M3 Max, default tolerances and minimum, bundle
+`reference.json` SHA-256
+`9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac`,
+2026-10-17), `flex_cached_greedy_matches_the_reference` in BF16 and
+`metal_cached_greedy_matches_the_reference` with
+`TRANSFORMERS_GPT_OSS_DTYPE=f16` each match all five and skip 27 ties, in 57
+and 60 seconds; the Metal run's peak memory footprint was 50.6 GB. Only these
+greedy checks were run; the bundle's prompt, batched, and long-prompt checks
+have not been recorded on this source. The same source reproduces every
+greedy token of the pinned F32 bundles through the shared helper: SmolLM-135M
+on Flex and Metal (32 of 32), gemma-3-4b-it on Metal (32 of 32, and 8 of 8
+for the long-context bundle), and the one-block gpt-oss F32 bundle on Flex
+(32 of 32), each with no ties.
 
 The Gemma long-context bundle and the gpt-oss truncated bundles are described
 in each test's module documentation, which also records the measured results.

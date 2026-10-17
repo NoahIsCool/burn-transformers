@@ -121,10 +121,10 @@
 //! the table above come from the same four-block F32 bundle and a four-block
 //! BF16 bundle generated from the same prompts
 //! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`). Against the
-//! full-model BF16 bundle, `metal_cached_greedy_matches_the_reference` with
-//! `TRANSFORMERS_GPT_OSS_DTYPE=f16` and default settings matches all five
-//! decisive greedy steps and skips 27 ties (2026-10-17); the bundle's other
-//! checks and the remaining Metal runs are the integrator's.
+//! full-model BF16 bundle at default settings, the cached greedy check on
+//! Flex in BF16 and on Metal in F16 (`TRANSFORMERS_GPT_OSS_DTYPE=f16`) each
+//! match all five decisive steps and skip 27 ties (2026-10-17); the bundle's
+//! other checks and the remaining Metal runs are the integrator's.
 //!
 //! # CUDA
 //!
