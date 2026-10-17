@@ -8,6 +8,7 @@
 use burn::backend::{Autodiff, Flex};
 use burn::tensor::{Tensor, activation::softplus};
 
+/// The backend under test: Flex with autodiff.
 type B = Autodiff<Flex>;
 
 /// Prints values and gradients against PyTorch's thresholded softplus.

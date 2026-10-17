@@ -2,13 +2,16 @@
 //! right-hand side returns wrong values for some kernels.
 //!
 //! `x[m, k] · W` with `W` packed as `QuantStore::PackedU32`, symmetric
-//! `Q8S`/`Q4S`, `QuantLevel::block([1, g])`. The reference is the host F64
-//! product with the same packed bytes dequantized independently on Flex.
+//! `Q8S`/`Q4S`/`Q2S`, `QuantLevel::block([1, g])`. The reference is the host
+//! F64 product with the same packed bytes dequantized independently on Flex
+//! (and, for F16 activations, the F16-rounded activations).
 //!
-//! Part 1 goes through Burn's public `Tensor::matmul` on the Metal backend:
-//! `W` is the transposed view of a packed `[n, k]` checkpoint matrix (blocks
-//! along `k`, a column-major right-hand side), as a `LinearLayout::Col` weight
-//! loaded from a checkpoint. Run it twice:
+//! Part 1 goes through Burn's public `Tensor::matmul` on the Metal backend
+//! with F32 and F16 activations: `W` is either the transposed view of a packed
+//! `[n, k]` checkpoint matrix (blocks along `k`, a column-major right-hand
+//! side, as a `LinearLayout::Col` weight loaded from a checkpoint) or packed
+//! `[k, n]` in place. A narrow `W[1024, 16]` shows that no row threshold is
+//! safe. Run it twice:
 //!   cargo run --release                     # no autotuning (Strategy::Auto)
 //!   cargo run --release --features autotune # Burn's default for GPU backends
 //! Part 2 calls each cubek-matmul strategy explicitly, with the operands bound
@@ -88,13 +91,17 @@ fn host_matmul(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
 }
 
 /// Largest error of `values` relative to the largest reference magnitude.
+///
+/// A non-finite value counts as an infinite error (`f64::max` would skip NaN).
 fn relative_error(values: &[f32], reference: &[f64]) -> f64 {
     let scale = reference.iter().fold(0.0f64, |a, v| a.max(v.abs()));
-    values
-        .iter()
-        .zip(reference)
-        .fold(0.0f64, |a, (v, r)| a.max((*v as f64 - r).abs()))
-        / scale
+    values.iter().zip(reference).fold(0.0f64, |a, (v, r)| {
+        if v.is_finite() {
+            a.max((*v as f64 - r).abs())
+        } else {
+            f64::INFINITY
+        }
+    }) / scale
 }
 
 /// `x · W` with one explicit cubek strategy and a packed `W`, bound as
@@ -185,6 +192,43 @@ fn strategies() -> Vec<(&'static str, Strategy)> {
     ]
 }
 
+/// One Part 1 row: `x[m, k] · W` through the public `matmul` for each `m`, with
+/// `activation` (F32 or F16) left-hand values; returns the cells and the number
+/// of products whose error exceeds `wrong_above`.
+fn part1_row(
+    w: &Tensor<Metal, 2>,
+    w_values: &[f32],
+    activation: DType,
+    rows: &[usize],
+    wrong_above: f64,
+) -> (String, usize) {
+    let [k, n] = w.dims();
+    let mut wrong = 0;
+    let cells: Vec<String> = rows
+        .iter()
+        .map(|&m| {
+            // F16-representable activations, so both dtypes share one reference.
+            let x = Tensor::<Metal, 2>::random([m, k], Distribution::Default, &Default::default())
+                .cast(DType::F16)
+                .cast(activation);
+            let x_values: Vec<f32> = x.clone().cast(DType::F32).into_data().to_vec().unwrap();
+            let reference = host_matmul(&x_values, w_values, m, k, n);
+            // The first call autotunes when autotuning is on; report the second.
+            let _ = x.clone().matmul(w.clone()).into_data();
+            let values: Vec<f32> = x
+                .matmul(w.clone())
+                .cast(DType::F32)
+                .into_data()
+                .to_vec()
+                .unwrap();
+            let error = relative_error(&values, &reference);
+            wrong += (error > wrong_above) as usize;
+            format!("m={m}: {error:.1e}")
+        })
+        .collect();
+    (cells.join(", "), wrong)
+}
+
 /// Prints Part 1 (public `matmul`) and Part 2 (explicit strategies).
 fn main() {
     // Autotuning's own kernel-expansion failures panic inside caught tasks; keep them quiet.
@@ -199,8 +243,11 @@ fn main() {
             "off"
         }
     );
-    let mut wrong = 0;
-    let mut total = 0;
+    println!("  (wrong: above 1e-4 with F32 activations, above 1e-2 with F16 activations)");
+    let values = [QuantValue::Q8S, QuantValue::Q4S, QuantValue::Q2S];
+    let rows = [1usize, 2, 4, 8, 32, 64];
+    let mut wrong = [0usize; 2];
+    let mut total = [0usize; 2];
     // (column-major blocks along k, group 64): a column-layout checkpoint weight;
     // (row-major blocks along n, group 32): a weight quantized in place as [k, n].
     for (transposed, group) in [(true, 64u8), (false, 32u8)] {
@@ -210,31 +257,29 @@ fn main() {
             "row-major, 32-element groups"
         };
         println!("  W[{k}, {n}] {layout}:");
-        for value in [QuantValue::Q8S, QuantValue::Q4S] {
+        for value in values {
             let (w, w_values) = packed_weight::<Metal>(&scheme(value, group), k, n, transposed);
-            let cells: Vec<String> = [1usize, 2, 4, 8, 32, 64]
+            for (index, (activation, limit)) in [(DType::F32, 1e-4), (DType::F16, 1e-2)]
                 .into_iter()
-                .map(|m| {
-                    let x = Tensor::<Metal, 2>::random(
-                        [m, k],
-                        Distribution::Default,
-                        &Default::default(),
-                    );
-                    let x_values: Vec<f32> = x.clone().into_data().to_vec().unwrap();
-                    let reference = host_matmul(&x_values, &w_values, m, k, n);
-                    // The first call autotunes when autotuning is on; report the second.
-                    let _ = x.clone().matmul(w.clone()).into_data();
-                    let values: Vec<f32> = x.matmul(w.clone()).into_data().to_vec().unwrap();
-                    let error = relative_error(&values, &reference);
-                    wrong += (error > 1e-4) as usize;
-                    total += 1;
-                    format!("m={m}: {error:.1e}")
-                })
-                .collect();
-            println!("    {value:?}: {}", cells.join(", "));
+                .enumerate()
+            {
+                let (cells, bad) = part1_row(&w, &w_values, activation, &rows, limit);
+                wrong[index] += bad;
+                total[index] += rows.len();
+                println!("    {:<3} x {activation:?}: {cells}", format!("{value:?}"));
+            }
         }
     }
-    println!("  {wrong} of {total} products are wrong (relative error above 1e-4)");
+    println!(
+        "  {} of {} F32-activation and {} of {} F16-activation products are wrong",
+        wrong[0], total[0], wrong[1], total[1]
+    );
+    println!("  Narrow output, W[{k}, 16] col-major, 64-element groups, F32 activations:");
+    for value in [QuantValue::Q4S, QuantValue::Q2S] {
+        let (w, w_values) = packed_weight::<Metal>(&scheme(value, 64), k, 16, true);
+        let (cells, _) = part1_row(&w, &w_values, DType::F32, &[1, 2, 8, 32, 33, 64], 1e-4);
+        println!("    {:<3}: {cells}", format!("{value:?}"));
+    }
     for value in [QuantValue::Q8S, QuantValue::Q4S] {
         let (w, w_values) = packed_weight::<Metal>(&scheme(value, 64), k, n, true);
         let values: Vec<f32> = w.dequantize().into_data().to_vec().unwrap();
@@ -247,7 +292,7 @@ fn main() {
 
     println!();
     println!("Part 2: explicit cubek-matmul strategies, max relative error vs the host reference:");
-    for value in [QuantValue::Q8S, QuantValue::Q4S] {
+    for value in [QuantValue::Q8S, QuantValue::Q4S, QuantValue::Q2S] {
         for transposed in [false, true] {
             let layout = if transposed { "col-major" } else { "row-major" };
             let (w, w_values) = packed_weight::<Raw>(&scheme(value, 32), k, n, transposed);

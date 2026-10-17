@@ -14,7 +14,9 @@ use burn::nn::{Linear, LinearConfig, LinearLayout};
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::{Distribution, Tensor, backend::Backend};
 
+/// The backend under test: Flex with autodiff.
 type B = Autodiff<Flex>;
+/// In-memory full-precision recorder used for the save/load round trip.
 type Bytes = BinBytesRecorder<FullPrecisionSettings>;
 
 /// Saves a `Linear<S>` record to bytes and loads it into a fresh inference module.

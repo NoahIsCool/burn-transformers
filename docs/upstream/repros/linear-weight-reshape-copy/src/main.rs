@@ -13,6 +13,7 @@ use std::time::Instant;
 use burn::backend::{Autodiff, Flex};
 use burn::tensor::{Distribution, Tensor, module::linear};
 
+/// The backend under test.
 type B = Flex;
 
 /// Median of `samples` timings of `body`, in microseconds.
@@ -30,6 +31,7 @@ fn median_us(samples: usize, mut body: impl FnMut()) -> f64 {
 
 /// Checks `module::linear` values and gradients against an explicit broadcast matmul.
 fn gradient_parity() {
+    /// Flex with autodiff, for the gradient check.
     type A = Autodiff<Flex>;
     let device = Default::default();
     let mut worst = 0.0f32;

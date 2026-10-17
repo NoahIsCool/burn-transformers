@@ -16,9 +16,12 @@ use std::time::Instant;
 use burn::backend::Flex;
 use burn::tensor::{Distribution, Tensor, module::conv1d, ops::ConvOptions};
 
+/// The backend under test.
 type B = Flex;
 
+/// Channels of the depthwise convolution.
 const CHANNELS: usize = 6144;
+/// Taps of the causal convolution.
 const KERNEL: usize = 4;
 
 /// Median and 99th percentile of `samples` timings of `body`, in microseconds.

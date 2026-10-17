@@ -16,6 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use burn::backend::Flex;
 use burn::tensor::{DType, Tensor, TensorData, activation::softmax};
 
+/// The backend under test.
 type B = Flex;
 
 /// Runs common operations on `Flex32` tensors and reports which panic.
@@ -34,6 +35,7 @@ fn main() {
         "zeros requested as Flex32 on Flex: tensor dtype {:?}",
         zeros.dtype()
     );
+    /// One operation under test: maps a tensor to its values as `f32`.
     type Op = Box<dyn Fn(Tensor<B, 2>) -> Vec<f32>>;
     let values = |t: Tensor<B, 2>| t.cast(DType::F32).into_data().to_vec::<f32>().unwrap();
     let ops: Vec<(&str, Op)> = vec![

@@ -11,6 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use burn::backend::Flex;
 use burn::tensor::{Bool, Int, Tensor, TensorData};
 
+/// The backend under test.
 type B = Flex;
 
 /// Selects and gathers Boolean rows and reads them back as Booleans.

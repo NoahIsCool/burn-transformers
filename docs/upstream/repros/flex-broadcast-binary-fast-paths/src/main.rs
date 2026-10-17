@@ -18,6 +18,7 @@ use std::time::Instant;
 use burn::backend::Flex;
 use burn::tensor::{Distribution, Tensor};
 
+/// The backend under test.
 type B = Flex;
 
 /// Median of `samples` timings of `body`, in microseconds.

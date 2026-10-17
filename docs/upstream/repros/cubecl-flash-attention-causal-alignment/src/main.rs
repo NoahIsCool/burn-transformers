@@ -20,7 +20,9 @@ use burn_cubecl::kernel::attention::{AttentionStrategy, attention as cube_attent
 /// The Metal backend without fusion, whose primitives are `CubeTensor`s.
 type Raw = CubeBackend<WgpuRuntime, f32, i32, u8>;
 
+/// Attention heads.
 const HEADS: usize = 4;
+/// Head dimension.
 const DIM: usize = 64;
 
 /// Causal attention inputs `[1, HEADS, len, DIM]` with `queries <= keys`.

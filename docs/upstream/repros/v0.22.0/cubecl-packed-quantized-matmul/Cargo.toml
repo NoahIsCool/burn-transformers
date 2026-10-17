@@ -1,0 +1,16 @@
+[package]
+name = "cubecl-packed-quantized-matmul"
+version = "0.0.0"
+edition = "2024"
+publish = false
+rust-version = "1.95"
+
+[dependencies]
+burn = { version = "=0.22.0", default-features = false, features = ["std", "metal", "flex"] }
+
+[features]
+# Burn's own default features turn this on for the GPU backends.
+autotune = ["burn/autotune"]
+
+# Standalone: never join an enclosing workspace.
+[workspace]

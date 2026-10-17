@@ -16,6 +16,7 @@ use burn::tensor::quantization::{
 };
 use burn::tensor::{Tensor, TensorData};
 
+/// The backend under test.
 type B = Flex;
 
 /// Compares transposing before and after dequantization per original row.

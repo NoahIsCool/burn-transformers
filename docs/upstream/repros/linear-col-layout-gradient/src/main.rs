@@ -23,6 +23,7 @@ use burn::nn::{Linear, LinearConfig, LinearLayout};
 use burn::optim::{GradientsParams, Optimizer, SgdConfig};
 use burn::tensor::{Distribution, Tensor};
 
+/// The backend under test: Flex with autodiff.
 type B = Autodiff<Flex>;
 
 /// Whether the weight has a gradient on each of three consecutive passes.
