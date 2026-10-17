@@ -36,7 +36,7 @@ use crate::{
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{RopeConfig, apply_rotary, rotary_angles},
+    position::{RopeConfig, apply_rotary, rotary_angles_for_dtype},
     precision::at_least_f32,
 };
 
@@ -289,7 +289,8 @@ impl<B: Backend> MlaProjection<B> {
     /// This supports cross-attention with different query and source lengths.
     /// Omitting this operation gives ordinary unrotated attention; an additive
     /// relative-position bias can instead be supplied to attention. Content
-    /// channels and the compressed KV latent are unchanged.
+    /// channels and the compressed KV latent are unchanged. Tables are built for
+    /// each rotary tensor's dtype, so F64 projections rotate with F64 phases.
     pub fn with_rotary(
         mut self,
         query_positions: Tensor<B, 2, Int>,
@@ -297,8 +298,18 @@ impl<B: Backend> MlaProjection<B> {
         rope: RopeConfig,
         evaluated_context: usize,
     ) -> Result<Self> {
-        let query_angles = rotary_angles(rope, query_positions, evaluated_context)?;
-        let key_angles = rotary_angles(rope, key_positions, evaluated_context)?;
+        let query_angles = rotary_angles_for_dtype(
+            rope,
+            query_positions,
+            evaluated_context,
+            self.query_rotary.dtype(),
+        )?;
+        let key_angles = rotary_angles_for_dtype(
+            rope,
+            key_positions,
+            evaluated_context,
+            self.rotated_key.dtype(),
+        )?;
         self.query_rotary =
             apply_rotary(self.query_rotary.clone(), self.query_rotary, &query_angles)?.0;
         self.rotated_key = apply_rotary(self.rotated_key.clone(), self.rotated_key, &key_angles)?.0;
@@ -741,7 +752,8 @@ impl<B: Backend> MultiLatentAttention<B> {
             .reshape([batch, sequence, 1, self.config.qk_rope_head_dim])
             .swap_dims(1, 2);
         let raw_key = interleaved_to_split(raw_key, "mla.rotary_key")?;
-        let angles = rotary_angles(rope, positions, evaluated_context)?;
+        let angles =
+            rotary_angles_for_dtype(rope, positions, evaluated_context, query_rotary.dtype())?;
         let (query_rotary, rotated_key) = apply_rotary(query_rotary, raw_key, &angles)?;
         Ok(MlaProjection {
             query_content,

@@ -1941,3 +1941,103 @@ fn release_contract_capacity_rejects_unrepresentable_indices_before_allocation()
             .contains("portable signed position-index range")
     );
 }
+
+/// F64 stateless and cached Qwen hybrid logits keep F64 rotary phases under a position shift.
+///
+/// Recurrent layers precede the single full-attention layer and ignore
+/// positions. Stateless logits and cached prefill/decode logits computed at
+/// positions shifted by `2^22` must reproduce their unshifted counterparts to
+/// F64 accuracy, which requires F64 tables in both paths; the F32 model
+/// visibly resolves the same shift. Cached runs are compared with cached runs
+/// because recurrent and chunked DeltaNet evaluation differ by F32 rounding.
+#[test]
+fn f64_stateless_and_cached_logits_are_rotary_shift_invariant() {
+    use crate::precision::test_support::{
+        CastParameters, ROTARY_SHIFT, assert_rotary_shift_invariant, assert_rotary_shift_sensitive,
+    };
+    use burn::{module::Module, tensor::DType};
+
+    let device = Default::default();
+    TestBackend::seed(&device, 307);
+    let mut config = tiny_config();
+    config.max_position_embeddings = ROTARY_SHIFT as usize + 8;
+    // Mapping materializes every lazy parameter, so the F64 clone shares values.
+    let single = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device)
+        .expect("tiny Qwen model must initialize")
+        .map(&mut CastParameters(DType::F32));
+    let double = single.clone().map(&mut CastParameters(DType::F64));
+    let positions = |offset: i32, count: usize| {
+        let values = (0..count as i32)
+            .map(|index| offset + index)
+            .collect::<Vec<_>>();
+        Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(values, [1, count]), &device)
+    };
+    let all = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let stateless = |model: &Qwen3_5ForCausalLm<TestBackend>, offset: i32| {
+        model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3, 4]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset, 4)),
+                },
+                &all,
+            )
+            .expect("stateless forward")
+            .logits
+            .into_data()
+    };
+    let cached = |model: &Qwen3_5ForCausalLm<TestBackend>, offset: i32| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).expect("cache config"), 1, &device)
+            .expect("decode state");
+        let prefill = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset, 3)),
+                },
+                &mut state,
+                &all,
+            )
+            .expect("prefill")
+            .logits;
+        let decoded = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[4]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset + 3, 1)),
+                },
+                &mut state,
+                &all,
+            )
+            .expect("decode")
+            .logits;
+        Tensor::cat(vec![prefill, decoded], 1).into_data()
+    };
+    assert_rotary_shift_invariant(
+        &stateless(&double, 0),
+        &stateless(&double, ROTARY_SHIFT),
+        "stateless F64",
+    );
+    assert_rotary_shift_sensitive(
+        &stateless(&single, 0),
+        &stateless(&single, ROTARY_SHIFT),
+        "stateless F32",
+    );
+    assert_rotary_shift_invariant(
+        &cached(&double, 0),
+        &cached(&double, ROTARY_SHIFT),
+        "cached F64",
+    );
+    assert_rotary_shift_sensitive(
+        &cached(&single, 0),
+        &cached(&single, ROTARY_SHIFT),
+        "cached F32",
+    );
+}

@@ -24,7 +24,9 @@ use crate::{
         TensorDecodeState,
     },
     moe::SparseMoeOutput,
-    position::{RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles},
+    position::{
+        RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles_for_dtype,
+    },
 };
 
 use super::{
@@ -419,7 +421,8 @@ impl<B: Backend> Qwen3MoeModel<B> {
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        let rotary = rotary_angles(self.rope, positions, evaluated_context)?;
+        let rotary =
+            rotary_angles_for_dtype(self.rope, positions, evaluated_context, hidden.dtype())?;
         for (layer_index, layer) in self.layers.iter().enumerate() {
             let (next, routed) = layer.forward_cached(
                 hidden,

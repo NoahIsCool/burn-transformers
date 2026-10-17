@@ -8,9 +8,9 @@ use crate::{
 };
 use burn::{
     backend::Flex,
-    module::Param,
+    module::{Module, Param},
     nn::{EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::{Tensor, TensorData},
+    tensor::{DType, Tensor, TensorData},
 };
 
 /// CPU tensor backend used for exact small-graph reference comparisons.
@@ -358,4 +358,44 @@ fn replacing_attention_derives_partial_rope_from_the_new_head_width() {
     let (expected, _) = apply_rotary(projection.query, projection.key, &angles).unwrap();
     let actual = hooks.get(&query).unwrap();
     assert!((actual - expected).abs().max().into_scalar() < 1e-7);
+}
+
+/// F64 GPT-NeoX keeps F64 rotary phases, so a common position shift preserves its logits.
+///
+/// RoPE is the model's only positional input. The fixture rotates whole heads so
+/// a non-unit frequency is present: with only `omega = 1`, integer F32 phases
+/// are exact and could not discriminate. The widened F64 model must reproduce
+/// unshifted logits after a `2^22` shift to F64 accuracy, while the same shift
+/// visibly moves the F32 model's logits.
+#[test]
+fn f64_logits_are_invariant_to_rotary_position_shifts() {
+    use crate::precision::test_support::{
+        CastParameters, ROTARY_SHIFT, assert_rotary_shift_invariant, assert_rotary_shift_sensitive,
+    };
+
+    let mut single = model();
+    single.config.rotary_pct = 1.0;
+    single.config.max_position_embeddings = ROTARY_SHIFT as usize + 8;
+    let single = single.map(&mut CastParameters(DType::F32));
+    let double = single.clone().map(&mut CastParameters(DType::F64));
+    let logits = |model: &GptNeoXModel<B>, offset: i32| {
+        let device = Default::default();
+        model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_data([[1, 4, 2]], &device),
+                    token_mask: None,
+                    position_ids: Some(Tensor::from_data(
+                        [[offset, offset + 2, offset + 5]],
+                        &device,
+                    )),
+                },
+                &options(),
+            )
+            .expect("shifted forward")
+            .logits
+            .into_data()
+    };
+    assert_rotary_shift_invariant(&logits(&double, 0), &logits(&double, ROTARY_SHIFT), "F64");
+    assert_rotary_shift_sensitive(&logits(&single, 0), &logits(&single, ROTARY_SHIFT), "F32");
 }

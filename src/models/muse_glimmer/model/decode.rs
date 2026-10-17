@@ -25,7 +25,7 @@ use crate::{
         CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
         TensorDecodeState,
     },
-    position::{RopeScaling, apply_rotary, derive_position_ids, rotary_angles},
+    position::{RopeScaling, apply_rotary, derive_position_ids, rotary_angles_for_dtype},
 };
 
 use super::{
@@ -493,7 +493,12 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
         let normalized = self.input_layernorm.forward(hidden);
         let mut projection = self.self_attn.project_self(normalized)?;
         if let Some(rope) = self.rope {
-            let angles = rotary_angles(rope, positions, evaluated_context)?;
+            let angles = rotary_angles_for_dtype(
+                rope,
+                positions,
+                evaluated_context,
+                projection.query.dtype(),
+            )?;
             (projection.query, projection.key) =
                 apply_rotary(projection.query, projection.key, &angles)?;
         }

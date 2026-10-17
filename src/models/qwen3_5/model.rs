@@ -34,7 +34,7 @@ use crate::{
     operations,
     position::{
         DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
-        rotary_angles,
+        rotary_angles_for_dtype,
     },
 };
 
@@ -217,7 +217,12 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                     Error::Checkpoint("Qwen full-attention layer has no attention module".into())
                 })?;
                 let mut projection = attention.project_self(normalized)?;
-                let angles = rotary_angles(rope, positions, evaluated_context)?;
+                let angles = rotary_angles_for_dtype(
+                    rope,
+                    positions,
+                    evaluated_context,
+                    projection.query.dtype(),
+                )?;
                 (projection.query, projection.key) =
                     apply_rotary(projection.query, projection.key, &angles)?;
                 let [batch, _, query_sequence, _] = projection.query.dims();

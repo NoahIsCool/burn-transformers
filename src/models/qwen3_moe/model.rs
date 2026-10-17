@@ -47,7 +47,7 @@ use crate::{
     operations,
     position::{
         DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
-        rotary_angles,
+        rotary_angles_for_dtype,
     },
 };
 
@@ -140,7 +140,8 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
         let residual = hidden.clone();
         let normalized = self.input_layernorm.forward(hidden);
         let mut projection = self.self_attn.project_self(normalized)?;
-        let angles = rotary_angles(rope, positions, evaluated_context)?;
+        let angles =
+            rotary_angles_for_dtype(rope, positions, evaluated_context, projection.query.dtype())?;
         (projection.query, projection.key) =
             apply_rotary(projection.query, projection.key, &angles)?;
         let [batch, _, sequence, _] = projection.query.dims();

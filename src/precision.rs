@@ -8,7 +8,12 @@
 //!   scaling, `x / sqrt(mean(x^2) + epsilon) * scale`;
 //! - explicit eager attention softmax, `exp(s_j - max s) / sum_k exp(s_k - max s)`,
 //!   whose exponentials and row sums are taken over a whole key axis, including
-//!   multi-head latent attention.
+//!   multi-head latent attention;
+//! - rotary angles `p * omega_i` and their cosine/sine tables built for an
+//!   activation dtype by [`crate::position::rotary_angles_for_dtype`] and
+//!   [`crate::position::mrope_angles_for_dtype`], whose absolute phase error
+//!   grows in proportion to the position `p`. Model families pass their
+//!   query/key dtype to these builders.
 //!
 //! [`at_least_f32`] is the single rule that selects that evaluation dtype:
 //!

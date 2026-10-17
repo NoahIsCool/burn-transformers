@@ -1136,3 +1136,121 @@ fn autodiff_smoke_reaches_embedding_weights() {
     let gradients = loss.backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
+
+/// F64 stateless and cached Qwen3-MoE logits keep F64 rotary phases under a position shift.
+///
+/// Layer zero keeps its expert bank but with zero expert weights, so its routed
+/// contribution is exactly zero and FP32 routing cannot perturb the comparison;
+/// layer one is a dense SwiGLU block. Unit input-norm scales and Q/K norm scales
+/// of three make attention large enough to resolve rotary phase errors. Prefill
+/// and decode at positions shifted by `2^22` must reproduce the unshifted
+/// stateless logits to F64 accuracy, which requires F64 tables on both the
+/// stateless and the cached decode paths; the F32 model visibly resolves the
+/// shift.
+#[test]
+fn f64_stateless_and_cached_logits_are_rotary_shift_invariant() {
+    use crate::precision::test_support::{
+        CastParameters, ROTARY_SHIFT, assert_rotary_shift_invariant, assert_rotary_shift_sensitive,
+    };
+
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.mlp_only_layers = vec![1];
+    config.max_position_embeddings = ROTARY_SHIFT as usize + 8;
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .expect("tiny contract");
+    let mut single = initialized_model::<TestBackend>(config, &device);
+    for expected in contract.expected_tensors() {
+        let value: f32 = if expected.name.contains(".sparse_mlp.routed.") {
+            0.0
+        } else if expected.name.ends_with(".input_layernorm.weight") {
+            1.0
+        } else if expected.name.ends_with("_norm.weight") && expected.name.contains(".self_attn.") {
+            3.0
+        } else {
+            continue;
+        };
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&dimension| usize::try_from(dimension).expect("tiny dimension"))
+            .collect::<Vec<_>>();
+        let values = vec![value; shape.iter().product()];
+        TensorSink::write_tensor(&mut single, &expected.name, TensorData::new(values, shape))
+            .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
+    }
+    let double = single.clone().map(&mut CastParameters(DType::F64));
+    let positions = |offset: i32, count: usize| {
+        let values = (0..count as i32)
+            .map(|index| offset + index)
+            .collect::<Vec<_>>();
+        Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(values, [1, count]), &device)
+    };
+    let all = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let stateless = |model: &Qwen3MoeForCausalLm<TestBackend>, offset: i32| {
+        model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3, 4]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset, 4)),
+                },
+                &all,
+            )
+            .expect("stateless forward")
+            .logits
+    };
+    let base = stateless(&double, 0);
+    assert_rotary_shift_invariant(
+        &base.to_data(),
+        &stateless(&double, ROTARY_SHIFT).into_data(),
+        "stateless F64",
+    );
+    assert_rotary_shift_sensitive(
+        &stateless(&single, 0).into_data(),
+        &stateless(&single, ROTARY_SHIFT).into_data(),
+        "stateless F32",
+    );
+
+    let mut state = double
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let prefill = double
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: Some(positions(ROTARY_SHIFT, 3)),
+            },
+            &mut state,
+            &all,
+        )
+        .expect("shifted prefill")
+        .logits;
+    let decoded = double
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[4]], &device),
+                token_mask: None,
+                position_ids: Some(positions(ROTARY_SHIFT + 3, 1)),
+            },
+            &mut state,
+            &all,
+        )
+        .expect("shifted decode")
+        .logits;
+    assert_rotary_shift_invariant(
+        &base.clone().narrow(1, 0, 3).into_data(),
+        &prefill.into_data(),
+        "cached prefill F64",
+    );
+    assert_rotary_shift_invariant(
+        &base.narrow(1, 3, 1).into_data(),
+        &decoded.into_data(),
+        "cached decode F64",
+    );
+}

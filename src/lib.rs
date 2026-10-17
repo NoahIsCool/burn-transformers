@@ -19,9 +19,9 @@
 //! # Numerical precision
 //!
 //! Parameters and activations keep their runtime dtype. Shared rounding-sensitive
-//! operations (RMS normalization and explicit eager attention softmax) evaluate in
-//! [`precision::at_least_f32`] of the activation dtype: F16/BF16 promote to F32,
-//! F32 stays F32, and F64 is never narrowed.
+//! operations (RMS normalization, explicit eager attention softmax, and rotary
+//! cosine/sine tables) evaluate in [`precision::at_least_f32`] of the activation
+//! dtype: F16/BF16 promote to F32, F32 stays F32, and F64 is never narrowed.
 
 pub mod architecture;
 pub mod attention;

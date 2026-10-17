@@ -24,7 +24,9 @@ use crate::{
         TensorCacheBank, TensorCacheError, TensorCacheMark, TensorDecodeState,
     },
     delta_net::{DeltaNetMode, GatedDeltaNetState},
-    position::{RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles},
+    position::{
+        RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles_for_dtype,
+    },
 };
 
 use super::{
@@ -581,7 +583,12 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             return Err(Error::Cache("Qwen MTP graph contains no layer".into()));
         }
         let layer_index = step % layer_count;
-        let rotary = rotary_angles(self.model.rope, positions, evaluated_context)?;
+        let rotary = rotary_angles_for_dtype(
+            self.model.rope,
+            positions,
+            evaluated_context,
+            hidden.dtype(),
+        )?;
         let mut pending = PendingQwenCacheWrites::new();
         let bank = state
             .tensors
@@ -815,7 +822,12 @@ impl<B: Backend> Qwen3_5TextModel<B> {
             .iter()
             .any(|slot| matches!(slot, Qwen3_5LayerCache::FullAttention(_)))
         {
-            Some(rotary_angles(self.rope, positions, evaluated_context)?)
+            Some(rotary_angles_for_dtype(
+                self.rope,
+                positions,
+                evaluated_context,
+                hidden.dtype(),
+            )?)
         } else {
             None
         };

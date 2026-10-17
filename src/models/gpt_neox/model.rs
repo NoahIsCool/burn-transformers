@@ -32,7 +32,7 @@ use crate::{
     feed_forward::{DenseFeedForward, DenseFeedForwardConfig, apply_activation},
     intervention::{Hooks, Layer, PointInfo, Stack},
     operations,
-    position::{RopeConfig, RopeScaling, RotaryAngles, apply_rotary, rotary_angles},
+    position::{RopeConfig, RopeScaling, RotaryAngles, apply_rotary, rotary_angles_for_dtype},
 };
 
 use super::GptNeoXConfig;
@@ -428,8 +428,12 @@ impl<B: Backend> GptNeoXModel<B> {
             .map_err(|error| {
                 Error::configuration(format!("gpt_neox.layers.{index}.rotary"), error.to_string())
             })?;
-            let angles =
-                rotary_angles(rope, positions.clone(), self.config.max_position_embeddings)?;
+            let angles = rotary_angles_for_dtype(
+                rope,
+                positions.clone(),
+                self.config.max_position_embeddings,
+                hidden.dtype(),
+            )?;
             hidden = layer.forward_scoped(
                 hidden,
                 &angles,

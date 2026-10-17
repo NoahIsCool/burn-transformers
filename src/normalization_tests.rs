@@ -9,6 +9,7 @@ use burn::{
 use super::{RmsNorm, RmsNormConfig, RmsNormRootMode};
 use crate::precision::test_support::{
     assert_bitwise_eq, assert_f32_path_is_distinguishable, assert_matches_f64_reference,
+    host_rms_norm, widened_values,
 };
 
 /// Conventional and zero-centered initialization both begin with unit scale.
@@ -240,21 +241,6 @@ fn precision_input() -> Vec<f64> {
         .collect()
 }
 
-/// Host F64 RMSNorm, `x_i / sqrt(mean(x^2) + epsilon) * scale_i`, applied per row.
-fn host_rms_norm(input: &[f64], weight: &[f64], epsilon: f64, zero_centered: bool) -> Vec<f64> {
-    input
-        .chunks_exact(weight.len())
-        .flat_map(|row| {
-            let mean_square = row.iter().map(|value| value * value).sum::<f64>() / row.len() as f64;
-            let inverse_root = (mean_square + epsilon).sqrt().recip();
-            row.iter().zip(weight).map(move |(value, weight)| {
-                let scale = if zero_centered { 1.0 + weight } else { *weight };
-                value * inverse_root * scale
-            })
-        })
-        .collect()
-}
-
 /// Creates a tensor with explicit storage dtype from host doubles.
 fn tensor_from_f64<const D: usize>(
     values: Vec<f64>,
@@ -310,16 +296,19 @@ fn f64_operation_graphs_match_an_independent_f64_reference() {
             let mut norm = config.init::<Flex>(&device).expect("valid norm");
             let weight = tensor_from_f64(stored_weight(&config), [PRECISION_WIDTH], weight_dtype);
             // An F32 checkpoint scale is exactly widened; the reference sees those values.
-            let reference_weight =
-                crate::precision::test_support::widened_values(&weight.to_data());
+            let scale = widened_values(&weight.to_data())
+                .into_iter()
+                .map(|weight| {
+                    if config.zero_centered {
+                        1.0 + weight
+                    } else {
+                        weight
+                    }
+                })
+                .collect::<Vec<_>>();
             norm.weight = Param::from_tensor(weight);
             let activation = tensor_from_f64(input.clone(), [2, 3, PRECISION_WIDTH], DType::F64);
-            let expected = host_rms_norm(
-                &input,
-                &reference_weight,
-                config.epsilon,
-                config.zero_centered,
-            );
+            let expected = host_rms_norm(&input, &scale, config.epsilon);
             let context = format!("{config:?} with {weight_dtype:?} weights");
 
             let actual = norm.forward(activation.clone()).into_data();

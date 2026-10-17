@@ -33,7 +33,7 @@ use crate::{
     normalization::{RmsNorm, RmsNormConfig},
     position::{
         RopeConfig, RopeScaling, T5RelativePositionBias, T5RelativePositionBiasConfig, YarnConfig,
-        apply_rotary, rotary_angles,
+        apply_rotary, rotary_angles_for_dtype,
     },
 };
 
@@ -299,7 +299,13 @@ impl<B: Backend> ModularAttention<B> {
     ) -> Result<Tensor<B, 3>> {
         let mut projection = self.attention.project_self(hidden)?;
         if let Some(rope) = self.rope {
-            let angles = rotary_angles(rope, positions.clone(), evaluated_context)?;
+            // F64 activations rotate with F64 tables; other dtypes keep F32 tables.
+            let angles = rotary_angles_for_dtype(
+                rope,
+                positions.clone(),
+                evaluated_context,
+                projection.query.dtype(),
+            )?;
             (projection.query, projection.key) =
                 apply_rotary(projection.query, projection.key, &angles)?;
         }

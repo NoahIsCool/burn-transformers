@@ -7,7 +7,10 @@
 //! evaluation (errors near F64 unit roundoff, about `1.1e-16`) from F32
 //! evaluation cast back to F64 (errors near F32 unit roundoff, about `6e-8`).
 
-use burn::tensor::{DType, TensorData, bf16, f16};
+use burn::{
+    module::{ModuleMapper, Param},
+    tensor::{DType, Tensor, TensorData, backend::Backend, bf16, f16},
+};
 
 /// Relative tolerance for agreement between F64 tensor execution and a host F64 reference.
 ///
@@ -192,4 +195,118 @@ pub(crate) fn host_masked_softmax(
             weights.into_iter().map(|weight| weight / total).collect()
         })
         .collect()
+}
+
+/// Host F64 RMS normalization of consecutive rows: `x / sqrt(mean(x^2) + epsilon) * scale`.
+///
+/// `scale` holds the effective per-channel multiplier, already including any
+/// zero-centered `1 + weight` convention, and its length is the row width.
+pub(crate) fn host_rms_norm(input: &[f64], scale: &[f64], epsilon: f64) -> Vec<f64> {
+    assert!(
+        !scale.is_empty() && input.len().is_multiple_of(scale.len()),
+        "complete normalized rows"
+    );
+    input
+        .chunks_exact(scale.len())
+        .flat_map(|row| {
+            let mean_square = row.iter().map(|value| value * value).sum::<f64>() / row.len() as f64;
+            let inverse_root = (mean_square + epsilon).sqrt().recip();
+            row.iter()
+                .zip(scale)
+                .map(move |(value, scale)| value * inverse_root * scale)
+        })
+        .collect()
+}
+
+/// Casts every floating parameter of a module to one dtype.
+///
+/// Mapping also materializes lazily initialized parameters, so clones taken
+/// afterwards share values. Widening F16, BF16, or F32 parameters to F64 is
+/// exact, so a widened model computes the same function in double precision.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CastParameters(
+    /// Storage dtype assigned to every floating parameter.
+    pub(crate) DType,
+);
+
+impl<B: Backend> ModuleMapper<B> for CastParameters {
+    /// Casts one floating parameter while preserving its identity.
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+        let dtype = self.0;
+        param.map(|tensor| tensor.cast(dtype))
+    }
+}
+
+/// Common rotary position offset used by shift-invariance tests: `2^22`.
+///
+/// Integer positions this large remain exact in F32, but F32 phases `p * omega`
+/// carry errors near `4e6 * omega * 1e-7` radians, while F64 phases stay near
+/// `1e-9 * omega` radians.
+pub(crate) const ROTARY_SHIFT: i32 = 1 << 22;
+
+/// Largest scaled output change accepted for an F64 model under [`ROTARY_SHIFT`].
+pub(crate) const F64_SHIFT_TOLERANCE: f64 = 1e-9;
+
+/// Smallest scaled output change that shows an F32 model resolves [`ROTARY_SHIFT`].
+pub(crate) const F32_SHIFT_SENSITIVITY: f64 = 1e-6;
+
+/// Returns `max |a - b| / max |a|` for two floating tensors of equal shape.
+///
+/// Normalizing by the largest reference magnitude makes the measure
+/// independent of a fixture's logit scale.
+pub(crate) fn scaled_max_difference(left: &TensorData, right: &TensorData) -> f64 {
+    assert_eq!(left.shape, right.shape, "compared shapes");
+    let left = widened_values(left);
+    let right = widened_values(right);
+    let scale = left
+        .iter()
+        .fold(0.0_f64, |maximum, value| maximum.max(value.abs()));
+    assert!(scale > 0.0, "reference outputs must not all be zero");
+    left.iter()
+        .zip(&right)
+        .fold(0.0_f64, |maximum, (left, right)| {
+            assert!(left.is_finite() && right.is_finite(), "finite outputs");
+            maximum.max((left - right).abs())
+        })
+        / scale
+}
+
+/// Asserts that F64 outputs at positions shifted by [`ROTARY_SHIFT`] agree to F64 accuracy.
+///
+/// Rotary attention scores depend only on position differences, so models
+/// without absolute positional inputs compute the same function after a common
+/// shift. F32 rotary phases in an F64 model violate this by orders of magnitude.
+pub(crate) fn assert_rotary_shift_invariant(
+    base: &TensorData,
+    shifted: &TensorData,
+    context: &str,
+) {
+    assert_eq!(
+        base.dtype,
+        DType::F64,
+        "{context}: unshifted outputs must be F64"
+    );
+    assert_eq!(
+        shifted.dtype,
+        DType::F64,
+        "{context}: shifted outputs must be F64"
+    );
+    let difference = scaled_max_difference(base, shifted);
+    assert!(
+        difference <= F64_SHIFT_TOLERANCE,
+        "{context}: F64 rotary shift changed outputs by {difference:e}"
+    );
+}
+
+/// Asserts that F32 outputs resolve a [`ROTARY_SHIFT`], proving the fixture discriminates.
+pub(crate) fn assert_rotary_shift_sensitive(
+    base: &TensorData,
+    shifted: &TensorData,
+    context: &str,
+) {
+    let difference = scaled_max_difference(base, shifted);
+    assert!(
+        difference > F32_SHIFT_SENSITIVITY,
+        "{context}: F32 rotary shift sensitivity {difference:e} cannot discriminate"
+    );
 }
