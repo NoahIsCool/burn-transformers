@@ -165,11 +165,12 @@ cargo test --locked --no-default-features --features std,flex,cpu \
   --skip cpu_reshaped_strided_views_match_flex
 ```
 
-With `e999943`'s sources, a warm build, and a real-checkpoint job sharing the
-Mac, that selection passed 28 tests in 490 s of wall time and 4380 s of CPU
-time (user plus system; `/usr/bin/time -l`), about nine of the Mac's 14 cores
-on average. On the runner's 4 vCPUs the same work should take several times
-longer (an estimate, not yet measured), so the job has its own 90-minute limit.
+With `e999943`'s Rust sources and a warm build, two runs of that selection,
+each sharing the Mac with other builds or a real-checkpoint job, passed 28
+tests in 490 and 479 s of wall time and 4380 and 3932 s of CPU time (user plus
+system; `/usr/bin/time -l`), eight to nine of the Mac's 14 cores on average.
+On the runner's 4 vCPUs the same work should take several times longer (an
+estimate, not yet measured), so the job has its own 90-minute limit.
 
 The parity cases stay within the F32 bound: largest deviation `6.7e-6`
 (SmolLM3 and Gemma 3 text, logit scales `37.5` and `37.9`), `5.7e-6` for
@@ -184,9 +185,11 @@ moves Nemotron-H's and the modular causal decoders' logits by up to `0.58`;
 cubecl-std 0.11 (Burn 0.22) fixes it, and with that fix applied both pass at
 `2.8e-7` ([docs/upstream/15](docs/upstream/15-cubecl-cpu-reshape-copy.md)).
 `cpu_reshaped_strided_views_match_flex` is the reproducer. These numbers are
-from the Mac at `93cef3c` (two runs, identical deviations); the job has not
-run on GitHub's runners yet, so its first run records Linux's deviations, its
-build and test step times, and its disk headroom (the job's last step).
+from the Mac at `93cef3c` (two runs, identical deviations), and the second
+timed run above, at `430e0d4` with `--nocapture`, reproduced each of them.
+The job has not run on GitHub's runners yet, so its first run records Linux's
+deviations, its build and test step times, and its disk headroom (the job's
+last step).
 
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
 with a larger budget:

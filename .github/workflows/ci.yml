@@ -152,7 +152,7 @@ jobs:
   # Transformers goldens, separate from `test` (see the header). Its
   # rust-cache entry is its own, since rust-cache keys on the job ID. Building
   # and running are separate steps, so each reports its own time. On the
-  # development Mac the tests alone took 490 s and 4380 s of CPU time
+  # development Mac the tests alone took up to 490 s and 4380 s of CPU time
   # (RELEASE_GATES.md); on this runner's 4 vCPUs at half the Mac's per-core
   # speed that is about 37 minutes, before a cold build, hence the limit.
   cpu-parity:
