@@ -6,6 +6,7 @@
 | Version reproduced | 0.21.0 (this crate's pin); not reproducible on 0.22.0 |
 | Kind | Correctness on 0.21.0 (a transpose changes a small row's values by 39% (Q8) or 100% (Q4)) |
 | Upstream status, checked 2026-10-16 | **Fixed in v0.22.0; do not file.** v0.22.0's `q_swap_dims` and `q_permute` call `scheme.swap_block_dims` / `permute_block_dims` before `block_safe_layout_op`, whose documentation now says a permuted tensor's blocks are permuted with it, as every other backend keeps them; Flex quantize and dequantize index through a multi-axis block layout. Measured with the repro ported to v0.22.0: the transpose changes no value (0.0 for Q8S Native, Q8S packed and Q4S packed; 0.21.0: 0.39, 0.39 and 1.0). |
+| Related upstream change | [#5262](https://github.com/tracel-ai/burn/pull/5262) ("support two-level quantization scales", merged 2026-08-19, in v0.22.0) added the block-dim permutation to Flex's `q_swap_dims`/`q_permute` and the `block_safe_layout_op` documentation quoted above. No issue was filed for the 0.21.0 behaviour. |
 | Repro | [`repros/flex-quantized-layout-requantize`](repros/flex-quantized-layout-requantize) (0.21.0) |
 | Patch | None: on 0.21.0 this needed a design change in `FlexQTensor`, which v0.22.0 made |
 | Patch verified | Not applicable; the effect is measured |

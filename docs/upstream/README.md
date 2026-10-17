@@ -90,7 +90,7 @@ reports:
   for 07; burn#5278 / #5281 (transposed `dequantize`, fixed in 0.22.0).
 - burn#5373 / #5374 (softplus, 11).
 - burn#6055 / #6056 and burn#6068 / #6069 (`Flex32` data on `main`, 13).
-- cubek#406 (bottom-right causal mask, 05).
+- cubek#406 (bottom-right causal mask, 05) and burn#5262 (Flex block-dim permutation, 14).
 - burn#4725 and burn#4659 (reshaping sub-byte and block-quantized tensors; not this crate's
   path, which never reshapes packed weights).
 
