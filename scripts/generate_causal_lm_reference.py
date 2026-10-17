@@ -7,7 +7,8 @@ compared against it without Python at test time. It
 
 * loads ``AutoModelForCausalLM`` from a local directory only (no Hub access),
   in F32 (or, with ``--dtype float64`` or ``bfloat16``, F64 or BF16) on the CPU with eager
-  attention and deterministic kernels;
+  attention (unless ``--device`` or ``--attn-implementation`` selects another
+  graph) and deterministic kernels;
 * tokenizes a few fixed prompts with the checkpoint's own tokenizer and
   records their token IDs, so consumers need no tokenizer;
 * writes every prompt position's full-vocabulary logits as raw little-endian
@@ -15,6 +16,8 @@ compared against it without Python at test time. It
 * records a cached greedy continuation of the first prompt (default 32
   tokens) with each step's top-2 logit margin, so consumers can skip steps
   that are ties at F32 precision;
+* with ``--decode-tokens-from``, records cached-decode against stateless
+  logits on a truth bundle's greedy tokens (see below);
 * records provenance: tool versions, interpreter and platform, the caller's
   repository and revision, and SHA-256 digests of the configuration, every
   weight file, this script, and every output file.
@@ -70,6 +73,28 @@ instead of the sum of two. Memory is twice the F32 requirement (about 61 GB
 of weights for a 7B checkpoint), Transformers still computes its rotary
 tables in F32, and kernels without an F64 implementation (such as gpt-oss's
 grouped expert products) refuse F64 inputs.
+
+``--device`` and ``--attn-implementation`` select another graph that
+Transformers itself runs: ``mps`` (Apple's Metal Performance Shaders, which
+has no F64) and ``sdpa`` (PyTorch's fused ``scaled_dot_product_attention``).
+The model is loaded on the CPU as before and then moved, so only the
+kernels differ. The defaults, ``cpu`` and ``eager``, compute exactly what
+the tool computed before these options existed. One BF16 bundle per graph
+measures how far the official implementation's own half-precision graphs
+spread around a single F32 truth; a BF16 gate calibrated on one graph alone
+is narrower than that spread.
+
+``--decode-tokens-from TRUTH`` also records decode self-consistency, the
+quantity the crate's half-precision cached greedy gates bound. Prompt 0 is
+prefilled into the model's own KV cache, the greedy tokens of the bundle
+``TRUTH`` (whose prompt 0 must tokenize identically) are fed one at a time,
+and each step's logits are compared with one stateless pass over prompt 0
+and all of those tokens at the same position. Teacher-forcing the truth's
+tokens, rather than this evaluation's own greedy choices, keeps the sequence
+identical to the one a gate decodes even where the two continuations
+diverge. Both sets of logits are written as ``decode-cached.f32le`` and
+``decode-stateless.f32le`` (``[steps, vocabulary]``) with each step's
+largest absolute difference, taken in F64.
 """
 
 from __future__ import annotations
@@ -78,6 +103,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -110,6 +136,13 @@ DEFAULT_GREEDY_TOKENS = 32
 MANIFEST = "reference.json"
 #: Evaluation dtypes accepted by ``--dtype``; logits are always written as F32.
 DTYPES = ("float32", "float64", "bfloat16")
+#: Devices accepted by ``--device``; the model is loaded on the CPU and moved.
+DEVICES = ("cpu", "mps")
+#: Transformers attention implementations accepted by ``--attn-implementation``.
+ATTENTION_IMPLEMENTATIONS = ("eager", "sdpa")
+#: Names of the decode self-consistency logits files (``--decode-tokens-from``).
+DECODE_CACHED_FILE = "decode-cached.f32le"
+DECODE_STATELESS_FILE = "decode-stateless.f32le"
 
 
 def sha256_file(path: Path) -> str:
@@ -186,8 +219,8 @@ def provenance(model_dir: Path, arguments: argparse.Namespace) -> dict[str, Any]
         "dtype": arguments.dtype,
         "bf16_resident": arguments.bf16_resident,
         "num_hidden_layers": arguments.num_hidden_layers,
-        "device": "cpu",
-        "attention_implementation": "eager",
+        "device": arguments.device,
+        "attention_implementation": arguments.attn_implementation,
     }
 
 
@@ -428,11 +461,37 @@ def load_bf16_resident(model_dir: Path, dtype: str = "float32", layers: int | No
     return model
 
 
-def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> Any:
-    """Loads the eager model, in `dtype` (one of `DTYPES`), from local files only.
+def require_graph(dtype: str, attention: str, device: str) -> None:
+    """Refuses an unknown attention implementation or device, and F64 on a device without it.
+
+    Raises ``ValueError`` before anything is loaded: MPS has no F64 kernels,
+    so an F64 evaluation there would fail mid-run or silently run elsewhere.
+    """
+
+    if attention not in ATTENTION_IMPLEMENTATIONS:
+        raise ValueError(f"attention must be one of {ATTENTION_IMPLEMENTATIONS}, not {attention!r}")
+    if device not in DEVICES:
+        raise ValueError(f"device must be one of {DEVICES}, not {device!r}")
+    if device == "mps" and dtype == "float64":
+        raise ValueError("MPS has no float64 kernels; evaluate float64 on the cpu device")
+
+
+def load_causal_lm(
+    model_dir: Path,
+    dtype: str = "float32",
+    layers: int | None = None,
+    attention: str = "eager",
+    device: str = "cpu",
+) -> Any:
+    """Loads the model, in `dtype` (one of `DTYPES`), from local files only.
 
     With `layers`, only the first `layers` decoder blocks are built and
     loaded (see `truncate_config`); the checkpoint's other blocks are ignored.
+    `attention` selects the Transformers attention implementation (`eager` by
+    default, or `sdpa`) and `device` where the loaded model runs (see
+    `require_graph`). The model is always loaded and cast on the CPU and only
+    then moved, so every device starts from the same parameters; moving by
+    device alone never changes a dtype, so buffers keep theirs.
 
     Quantized checkpoints can leave dequantized parameters in another dtype:
     without CUDA kernels Transformers decodes MXFP4 experts to BF16 whatever
@@ -446,6 +505,7 @@ def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None =
 
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    require_graph(dtype, attention, device)
     import torch
     import transformers
 
@@ -460,9 +520,11 @@ def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None =
         config=config,
         local_files_only=True,
         dtype=getattr(torch, dtype),
-        attn_implementation="eager",
+        attn_implementation=attention,
     )
     cast_floating_parameters(model, getattr(torch, dtype))
+    if device != "cpu":
+        model.to(device)
     model.eval()
     return model
 
@@ -472,35 +534,49 @@ def load_model(
     dtype: str = "float32",
     layers: int | None = None,
     bf16_resident: bool = False,
+    attention: str = "eager",
+    device: str = "cpu",
 ) -> tuple[Any, Any]:
-    """Loads the checkpoint's own tokenizer and its eager model (see `load_causal_lm`).
+    """Loads the checkpoint's own tokenizer and its model (see `load_causal_lm`).
 
     With `bf16_resident`, the model is loaded in BF16 and its blocks run in
     `dtype` (see `load_bf16_resident`, which refuses any run that would not
-    reproduce a plain `dtype` load).
+    reproduce a plain `dtype` load); that mode is defined for the eager CPU
+    graph only and refuses any other `attention` or `device`.
     """
 
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
-    import transformers
-
+    require_graph(dtype, attention, device)
     if bf16_resident:
+        if (attention, device) != ("eager", "cpu"):
+            raise ValueError("--bf16-resident evaluates the eager CPU graph only")
         # Fail before any load: the mode is exact only for wider dtypes and BF16 checkpoints.
         require_bf16_resident_inputs(model_dir, dtype)
+    import transformers
+
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     if not bf16_resident:
-        return tokenizer, load_causal_lm(model_dir, dtype, layers)
+        return tokenizer, load_causal_lm(model_dir, dtype, layers, attention, device)
     return tokenizer, load_bf16_resident(model_dir, dtype, layers)
 
 
+def model_input(model: Any, token_ids: list[int]) -> Any:
+    """Returns one unpadded row of token IDs `[1, tokens]` on the model's device."""
+
+    import torch
+
+    return torch.tensor([token_ids], device=model.device)
+
+
 def prompt_logits(model: Any, token_ids: list[int]) -> Any:
-    """Returns every position's full-vocabulary F32 logits `[tokens, vocabulary]` for one prompt."""
+    """Returns every position's full-vocabulary F32 logits `[tokens, vocabulary]` for one prompt, on the CPU."""
 
     import torch
 
     with torch.no_grad():
-        output = model(input_ids=torch.tensor([token_ids]), use_cache=False)
-    return output.logits[0].to(torch.float32).contiguous()
+        output = model(input_ids=model_input(model, token_ids), use_cache=False)
+    return output.logits[0].to(torch.float32).cpu().contiguous()
 
 
 def tensor_f32le(tensor: Any) -> bytes:
@@ -516,16 +592,121 @@ def greedy_continuation(model: Any, token_ids: list[int], steps: int) -> list[di
 
     records = []
     with torch.no_grad():
-        output = model(input_ids=torch.tensor([token_ids]), use_cache=True)
+        output = model(input_ids=model_input(model, token_ids), use_cache=True)
         for _ in range(steps):
             token, margin = top_two_margin(output.logits[0, -1].to(torch.float32).tolist())
             records.append({"token": token, "margin": margin})
             output = model(
-                input_ids=torch.tensor([[token]]),
+                input_ids=model_input(model, [token]),
                 past_key_values=output.past_key_values,
                 use_cache=True,
             )
     return records
+
+
+def teacher_tokens(bundle: Path, prompt_ids: list[int], vocabulary: int) -> tuple[list[int], dict[str, Any]]:
+    """Reads the greedy tokens a decode self-consistency record feeds, from the truth bundle `bundle`.
+
+    The truth's greedy continuation must extend its prompt 0, which must hold
+    exactly `prompt_ids`, and every token must index the `vocabulary`;
+    otherwise ``ValueError`` is raised, because the record would describe
+    another sequence than the one a gate decodes. Returns the tokens and the
+    source's identity (SHA-256 of its exact manifest bytes and its dtype).
+    """
+
+    manifest_path = bundle / MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    if manifest["prompts"][0]["token_ids"] != prompt_ids:
+        raise ValueError(f"{manifest_path}: prompt 0 has other token IDs than this evaluation's prompt 0")
+    greedy = manifest["greedy"]
+    if greedy["prompt_index"] != 0:
+        raise ValueError(f"{manifest_path}: the greedy continuation does not extend prompt 0")
+    tokens = [step["token"] for step in greedy["steps"]]
+    if not tokens:
+        raise ValueError(f"{manifest_path}: the greedy continuation is empty")
+    if any(not isinstance(token, int) or isinstance(token, bool) or not 0 <= token < vocabulary for token in tokens):
+        raise ValueError(f"{manifest_path}: a greedy token is not an integer below {vocabulary}")
+    source = {
+        "manifest_sha256": sha256_file(manifest_path),
+        "dtype": manifest["provenance"]["dtype"],
+    }
+    return tokens, source
+
+
+def decode_logits(model: Any, prompt_ids: list[int], tokens: list[int]) -> tuple[Any, Any]:
+    """Returns the cached-decode and stateless F32 logits `[len(tokens), vocabulary]` of `tokens` after a prompt.
+
+    Cached: prompt 0 is prefilled into the model's own KV cache, then each of
+    `tokens` is fed alone; step `s` feeds `tokens[s]` at position
+    `len(prompt_ids) + s` and returns that position's logits. Stateless: one
+    pass without a cache over the prompt followed by every token, read at the
+    same positions. Both are returned on the CPU.
+    """
+
+    import torch
+
+    with torch.no_grad():
+        output = model(input_ids=model_input(model, prompt_ids), use_cache=True)
+        cached = []
+        for token in tokens:
+            output = model(
+                input_ids=model_input(model, [token]),
+                past_key_values=output.past_key_values,
+                use_cache=True,
+            )
+            cached.append(output.logits[0, -1].to(torch.float32).cpu())
+        stateless = model(input_ids=model_input(model, prompt_ids + tokens), use_cache=False).logits
+    stateless = stateless[0, len(prompt_ids):].to(torch.float32).cpu().contiguous()
+    return torch.stack(cached).contiguous(), stateless
+
+
+def step_gaps(cached: Sequence[Sequence[float]], stateless: Sequence[Sequence[float]]) -> list[float]:
+    """Returns, per decode step, the largest `|cached - stateless|` over the vocabulary, taken in F64.
+
+    Both arguments are equally shaped `[steps, vocabulary]` rows of F32 values
+    (anything whose rows iterate as floats). A non-finite value on either side
+    raises ``ValueError``: the gap would not bound anything, so no record is
+    written.
+    """
+
+    if len(cached) != len(stateless):
+        raise ValueError("cached and stateless logits hold different numbers of steps")
+    gaps = []
+    for step, (left, right) in enumerate(zip(cached, stateless)):
+        left, right = [float(value) for value in left], [float(value) for value in right]
+        if len(left) != len(right) or not left:
+            raise ValueError(f"decode step {step}: cached and stateless rows differ in length or are empty")
+        if not all(math.isfinite(value) for value in left + right):
+            raise ValueError(f"decode step {step}: the logits hold a non-finite value")
+        gaps.append(max(abs(a - b) for a, b in zip(left, right)))
+    return gaps
+
+
+def decode_record(
+    model: Any, prompt_ids: list[int], tokens: list[int], source: dict[str, Any], staging: Path
+) -> dict[str, Any]:
+    """Writes both decode logits files into `staging` and returns the manifest's ``decode_consistency`` record."""
+
+    cached, stateless = decode_logits(model, prompt_ids, tokens)
+    gaps = step_gaps(cached.tolist(), stateless.tolist())
+    (staging / DECODE_CACHED_FILE).write_bytes(tensor_f32le(cached))
+    (staging / DECODE_STATELESS_FILE).write_bytes(tensor_f32le(stateless))
+    first = len(prompt_ids)
+    return {
+        "prompt_index": 0,
+        "first_position": first,
+        "tokens_source": source,
+        "logits_shape": list(cached.shape),
+        "cached_logits_file": DECODE_CACHED_FILE,
+        "cached_logits_sha256": sha256_file(staging / DECODE_CACHED_FILE),
+        "stateless_logits_file": DECODE_STATELESS_FILE,
+        "stateless_logits_sha256": sha256_file(staging / DECODE_STATELESS_FILE),
+        "steps": [
+            {"position": first + step, "fed_token": token, "max_abs_gap": gap}
+            for step, (token, gap) in enumerate(zip(tokens, gaps))
+        ],
+        "max_abs_gap": max(gaps),
+    }
 
 
 def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]:
@@ -533,7 +714,12 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
 
     model_dir = arguments.model_dir.resolve(strict=True)
     tokenizer, model = load_model(
-        model_dir, arguments.dtype, arguments.num_hidden_layers, arguments.bf16_resident
+        model_dir,
+        arguments.dtype,
+        arguments.num_hidden_layers,
+        arguments.bf16_resident,
+        arguments.attn_implementation,
+        arguments.device,
     )
     prompts = []
     for index, text in enumerate(arguments.prompts):
@@ -554,7 +740,7 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
             }
         )
     greedy = greedy_continuation(model, prompts[0]["token_ids"], arguments.greedy_tokens)
-    return {
+    manifest = {
         "schema_version": SCHEMA_VERSION,
         "model_type": model.config.model_type,
         "model_class": type(model).__name__,
@@ -563,6 +749,11 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
         "prompts": prompts,
         "greedy": {"prompt_index": 0, "steps": greedy},
     }
+    if arguments.decode_tokens_from is not None:
+        prompt_ids = prompts[0]["token_ids"]
+        tokens, source = teacher_tokens(arguments.decode_tokens_from, prompt_ids, manifest["vocabulary_size"])
+        manifest["decode_consistency"] = decode_record(model, prompt_ids, tokens, source, staging)
+    return manifest
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -602,7 +793,28 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_false",
         help="tokenize without the tokenizer's special tokens",
     )
+    parser.add_argument(
+        "--device",
+        choices=DEVICES,
+        default="cpu",
+        help="device the loaded model runs on (loading and casting stay on the CPU)",
+    )
+    parser.add_argument(
+        "--attn-implementation",
+        choices=ATTENTION_IMPLEMENTATIONS,
+        default="eager",
+        help="Transformers attention implementation",
+    )
+    parser.add_argument(
+        "--decode-tokens-from",
+        type=Path,
+        help="truth bundle whose greedy tokens are teacher-forced to record decode self-consistency",
+    )
     arguments = parser.parse_args(argv)
+    if arguments.device == "mps" and arguments.dtype == "float64":
+        parser.error("--device mps has no float64 kernels")
+    if arguments.bf16_resident and (arguments.device, arguments.attn_implementation) != ("cpu", "eager"):
+        parser.error("--bf16-resident evaluates the eager CPU graph only")
     if arguments.prompts is None:
         arguments.prompts = list(DEFAULT_PROMPTS)
     if arguments.greedy_tokens < 1:

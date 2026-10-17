@@ -641,5 +641,261 @@ class ModelLoadingTests(unittest.TestCase):
                 load("bfloat16")
 
 
+def write_truth_manifest(root: Path, prompt_ids: list, tokens: list, prompt_index: int = 0) -> Path:
+    """Writes the fields of a truth manifest that `teacher_tokens` reads: prompt 0 and its greedy tokens."""
+
+    import json
+
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "prompts": [{"token_ids": prompt_ids}],
+        "greedy": {"prompt_index": prompt_index, "steps": [{"token": token, "margin": 1.0} for token in tokens]},
+        "provenance": {"dtype": "float32"},
+    }
+    (root / "reference.json").write_text(json.dumps(manifest))
+    return root
+
+
+def read_rows(path: Path, columns: int) -> list:
+    """Reads an f32le file as rows of `columns` values."""
+
+    values = REFERENCE.decode_f32le(path.read_bytes())
+    return [values[start:start + columns] for start in range(0, len(values), columns)]
+
+
+class GraphAndDecodeArgumentTests(unittest.TestCase):
+    """Check the graph options and the decode self-consistency helpers without PyTorch."""
+
+    def test_graph_defaults_to_the_eager_cpu_graph_and_accepts_mps_and_sdpa(self) -> None:
+        """Without options the eager CPU graph runs; MPS, SDPA, and a truth bundle can be chosen."""
+
+        base = ["--model-dir", "m", "--output", "o"]
+        defaults = REFERENCE.parse_arguments(base)
+        self.assertEqual(
+            (defaults.device, defaults.attn_implementation, defaults.decode_tokens_from), ("cpu", "eager", None)
+        )
+        chosen = REFERENCE.parse_arguments(
+            base + ["--device", "mps", "--attn-implementation", "sdpa", "--dtype", "bfloat16",
+                    "--decode-tokens-from", "truth"]
+        )
+        self.assertEqual(
+            (chosen.device, chosen.attn_implementation, chosen.decode_tokens_from), ("mps", "sdpa", Path("truth"))
+        )
+        self.assertEqual(REFERENCE.DEVICES, ("cpu", "mps"))
+        self.assertEqual(REFERENCE.ATTENTION_IMPLEMENTATIONS, ("eager", "sdpa"))
+        for extra in (
+            ["--device", "cuda"],
+            ["--attn-implementation", "flash_attention_2"],
+            ["--device", "mps", "--dtype", "float64"],
+            ["--bf16-resident", "--device", "mps"],
+            ["--bf16-resident", "--attn-implementation", "sdpa"],
+        ):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                REFERENCE.parse_arguments(base + extra)
+
+    def test_graph_requirements_are_checked_before_anything_loads(self) -> None:
+        """Unknown graphs, F64 on MPS, and BF16-resident streaming off the eager CPU graph are refused first."""
+
+        REFERENCE.require_graph("float64", "eager", "cpu")
+        REFERENCE.require_graph("bfloat16", "sdpa", "mps")
+        missing = Path("no-such-checkpoint")
+        for (dtype, attention, device), message in (
+            (("float32", "flash", "cpu"), "attention must be one of"),
+            (("float32", "eager", "cuda"), "device must be one of"),
+            (("float64", "eager", "mps"), "no float64"),
+        ):
+            with self.subTest(attention=attention, device=device):
+                with self.assertRaisesRegex(ValueError, message):
+                    REFERENCE.require_graph(dtype, attention, device)
+                with self.assertRaisesRegex(ValueError, message):
+                    REFERENCE.load_model(missing, dtype, attention=attention, device=device)
+                with self.assertRaisesRegex(ValueError, message):
+                    REFERENCE.load_causal_lm(missing, dtype, attention=attention, device=device)
+        for attention, device in (("sdpa", "cpu"), ("eager", "mps")):
+            with self.assertRaisesRegex(ValueError, "eager CPU graph only"):
+                REFERENCE.load_model(missing, "float32", bf16_resident=True, attention=attention, device=device)
+
+    def test_step_gaps_are_each_steps_largest_absolute_difference(self) -> None:
+        """Gaps are per-step maxima over the vocabulary; non-finite or misshapen logits are refused."""
+
+        self.assertEqual(
+            REFERENCE.step_gaps([[1.0, 2.0, 3.0], [0.0, -1.0, 5.0]], [[1.0, 2.5, 2.0], [0.0, -1.0, 5.0]]),
+            [1.0, 0.0],
+        )
+        # The difference is taken in F64: 1 + 2^-23 and 1 are F32 neighbours.
+        self.assertEqual(REFERENCE.step_gaps([[1.0 + 2.0**-23]], [[1.0]]), [2.0**-23])
+        for cached, stateless, message in (
+            ([[float("nan"), 0.0]], [[0.0, 0.0]], "non-finite"),
+            ([[0.0, 0.0]], [[0.0, float("inf")]], "non-finite"),
+            ([[0.0], [0.0]], [[0.0]], "different numbers of steps"),
+            ([[0.0, 1.0]], [[0.0]], "differ in length"),
+            ([[]], [[]], "differ in length or are empty"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                REFERENCE.step_gaps(cached, stateless)
+
+    def test_teacher_tokens_come_only_from_a_matching_truth_bundle(self) -> None:
+        """The truth's greedy tokens are returned with its identity; any mismatch is refused."""
+
+        with tempfile.TemporaryDirectory() as root:
+            truth = write_truth_manifest(Path(root) / "truth", [1, 5, 9], [4, 7, 2])
+            tokens, source = REFERENCE.teacher_tokens(truth, [1, 5, 9], 10)
+            self.assertEqual(tokens, [4, 7, 2])
+            self.assertEqual(
+                source, {"manifest_sha256": REFERENCE.sha256_file(truth / "reference.json"), "dtype": "float32"}
+            )
+            for name, steps, index, ours, message in (
+                ("other prompt", [4], 0, [1, 5], "other token IDs"),
+                ("other prompt index", [4], 1, [1, 5, 9], "does not extend prompt 0"),
+                ("empty", [], 0, [1, 5, 9], "is empty"),
+                ("beyond the vocabulary", [4, 10], 0, [1, 5, 9], "not an integer below 10"),
+                ("negative", [-1], 0, [1, 5, 9], "not an integer below 10"),
+                ("boolean", [True], 0, [1, 5, 9], "not an integer below 10"),
+                ("float", [4.0], 0, [1, 5, 9], "not an integer below 10"),
+            ):
+                with self.subTest(name=name):
+                    bad = write_truth_manifest(Path(root) / name, [1, 5, 9], steps, index)
+                    with self.assertRaisesRegex(ValueError, message):
+                        REFERENCE.teacher_tokens(bad, ours, 10)
+
+
+@unittest.skipUnless(HAS_TORCH, "needs PyTorch and Transformers")
+class GraphAndDecodeModelTests(unittest.TestCase):
+    """Check other graphs and the decode self-consistency record on the tiny fixtures."""
+
+    def test_sdpa_graph_is_selected_and_agrees_with_eager_within_f32_rounding(self) -> None:
+        """`attention` reaches Transformers; on the CPU in F32 both graphs agree to rounding."""
+
+        eager = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        sdpa = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32", attention="sdpa")
+        self.assertEqual((eager.config._attn_implementation, sdpa.config._attn_implementation), ("eager", "sdpa"))
+        gap = (REFERENCE.prompt_logits(eager, TOKENS) - REFERENCE.prompt_logits(sdpa, TOKENS)).abs().max()
+        self.assertLess(float(gap), 1e-5)
+
+    def test_mps_graph_runs_on_the_device_and_returns_cpu_logits(self) -> None:
+        """An MPS model keeps its dtypes (F32 rotary tables included) and agrees with the CPU in F32."""
+
+        import torch
+
+        if not torch.backends.mps.is_available():
+            self.skipTest("needs an MPS device")
+        cpu = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        mps = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32", device="mps")
+        self.assertEqual({parameter.device.type for parameter in mps.parameters()}, {"mps"})
+        logits = REFERENCE.prompt_logits(mps, TOKENS)
+        self.assertEqual((logits.device.type, logits.dtype), ("cpu", torch.float32))
+        self.assertLess(float((logits - REFERENCE.prompt_logits(cpu, TOKENS)).abs().max()), 1e-4)
+        self.assertEqual(len(REFERENCE.greedy_continuation(mps, [1, 5, 9], 3)), 3)
+        half = REFERENCE.load_causal_lm(GPT_OSS_FIXTURE, "bfloat16", device="mps")
+        self.assertEqual({parameter.dtype for parameter in half.parameters()}, {torch.bfloat16})
+        tables = {buffer.dtype for name, buffer in half.named_buffers() if name.endswith("inv_freq")}
+        self.assertEqual(tables, {torch.float32})
+
+    def test_decode_record_compares_each_cached_step_with_one_stateless_pass(self) -> None:
+        """Cached rows are the model's own cached decode, stateless rows one uncached pass, gaps their F32 drift."""
+
+        import torch
+
+        model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        vocabulary = model.config.vocab_size
+        prompt, tokens = TOKENS[:4], TOKENS[4:]
+        source = {"manifest_sha256": "0" * 64, "dtype": "float32"}
+        with tempfile.TemporaryDirectory() as root:
+            staging = Path(root)
+            record = REFERENCE.decode_record(model, prompt, tokens, source, staging)
+            cached = read_rows(staging / REFERENCE.DECODE_CACHED_FILE, vocabulary)
+            stateless = read_rows(staging / REFERENCE.DECODE_STATELESS_FILE, vocabulary)
+            self.assertEqual(record["cached_logits_sha256"], REFERENCE.sha256_file(staging / record["cached_logits_file"]))
+            self.assertEqual(
+                record["stateless_logits_sha256"], REFERENCE.sha256_file(staging / record["stateless_logits_file"])
+            )
+        self.assertEqual(record["logits_shape"], [len(tokens), vocabulary])
+        self.assertEqual((record["prompt_index"], record["first_position"], record["tokens_source"]), (0, 4, source))
+        self.assertEqual([step["position"] for step in record["steps"]], [4, 5, 6, 7])
+        self.assertEqual([step["fed_token"] for step in record["steps"]], tokens)
+        full = REFERENCE.prompt_logits(model, prompt + tokens)
+        self.assertEqual(stateless, full[len(prompt):].tolist())
+        manual = []
+        with torch.no_grad():
+            output = model(input_ids=torch.tensor([prompt]), use_cache=True)
+            for token in tokens:
+                output = model(input_ids=torch.tensor([[token]]), past_key_values=output.past_key_values, use_cache=True)
+                manual.append(output.logits[0, -1].tolist())
+        self.assertEqual(cached, manual)
+        gaps = [step["max_abs_gap"] for step in record["steps"]]
+        self.assertEqual(gaps, REFERENCE.step_gaps(cached, stateless))
+        self.assertEqual(record["max_abs_gap"], max(gaps))
+        self.assertLess(record["max_abs_gap"], 1e-5)
+
+    def test_decode_record_exposes_a_decode_position_off_by_one(self) -> None:
+        """A cached decode at the wrong rotary position, a typical cache defect, opens a gap far above rounding."""
+
+        class ShiftedDecode:
+            """Feeds every cached decode step one position too far, as an off-by-one cache offset would."""
+
+            def __init__(self, model):
+                """Wraps a loaded model."""
+
+                self.model = model
+                self.device = model.device
+
+            def __call__(self, **inputs):
+                """Runs the model, shifting the position of single-token cached steps by one."""
+
+                import torch
+
+                past = inputs.get("past_key_values")
+                if past is not None:
+                    position = past.get_seq_length() + 1
+                    inputs["position_ids"] = torch.tensor([[position]], device=self.device)
+                return self.model(**inputs)
+
+        model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32")
+        with tempfile.TemporaryDirectory() as honest_root, tempfile.TemporaryDirectory() as shifted_root:
+            honest = REFERENCE.decode_record(model, TOKENS[:4], TOKENS[4:], {}, Path(honest_root))
+            shifted = REFERENCE.decode_record(ShiftedDecode(model), TOKENS[:4], TOKENS[4:], {}, Path(shifted_root))
+        self.assertLess(honest["max_abs_gap"], 1e-5)
+        self.assertGreater(shifted["max_abs_gap"], 1e-2)
+
+    def test_bundle_records_the_graph_and_the_decode_record(self) -> None:
+        """`build_bundle` passes the graph to the loader, records it, and adds decode files only on request."""
+
+        import json
+        from unittest import mock
+
+        class Tokenizer:
+            """Tokenizes the two test prompts to fixed IDs, as the fixtures carry no tokenizer."""
+
+            def __call__(self, text, add_special_tokens=True):
+                """Returns the fixed IDs of `text`."""
+
+                return {"input_ids": {"a": TOKENS[:4], "b": [2, 4]}[text]}
+
+        model = REFERENCE.load_causal_lm(QWEN2_FIXTURE, "float32", attention="sdpa")
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            truth = write_truth_manifest(root / "truth", TOKENS[:4], TOKENS[4:])
+            base = ["--model-dir", str(QWEN2_FIXTURE), "--output", str(root / "out"), "--prompt", "a",
+                    "--prompt", "b", "--greedy-tokens", "2", "--attn-implementation", "sdpa"]
+            for extra, files in (
+                ([], ["logits-0.f32le", "logits-1.f32le"]),
+                (["--decode-tokens-from", str(truth)],
+                 ["decode-cached.f32le", "decode-stateless.f32le", "logits-0.f32le", "logits-1.f32le"]),
+            ):
+                with self.subTest(extra=extra):
+                    staging = Path(tempfile.mkdtemp(dir=root))
+                    with mock.patch.object(REFERENCE, "load_model", return_value=(Tokenizer(), model)) as load:
+                        manifest = REFERENCE.build_bundle(REFERENCE.parse_arguments(base + extra), staging)
+                    load.assert_called_once_with(QWEN2_FIXTURE.resolve(), "float32", None, False, "sdpa", "cpu")
+                    provenance = manifest["provenance"]
+                    self.assertEqual((provenance["device"], provenance["attention_implementation"]), ("cpu", "sdpa"))
+                    self.assertEqual(sorted(path.name for path in staging.iterdir()), files)
+                    self.assertEqual("decode_consistency" in manifest, bool(extra))
+                    json.dumps(manifest, allow_nan=False)
+            record = manifest["decode_consistency"]
+            self.assertEqual([step["fed_token"] for step in record["steps"]], TOKENS[4:])
+            self.assertEqual(record["tokens_source"]["manifest_sha256"], REFERENCE.sha256_file(truth / "reference.json"))
+
+
 if __name__ == "__main__":
     unittest.main()
