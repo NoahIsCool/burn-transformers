@@ -6,15 +6,21 @@
 //! `convert_moe_packed_tensors`, which this crate reproduces bit for bit). Two
 //! kinds of bundle are useful:
 //!
-//! * a **full** BF16 reference of gpt-oss-20b, the release gate (the F32 model
-//!   does not fit a 96 GiB host):
+//! * a **full** F32 reference of gpt-oss-20b, the release gate. The F32 model
+//!   does not fit a 96 GiB host, so `--bf16-resident` keeps the decoded BF16
+//!   weights resident and widens each block to F32 only while it runs, which
+//!   computes exactly what the F32 model computes (a four-block bundle made
+//!   this way is byte-identical to a plain F32 one); it needs about 47 GB:
 //!
 //!   ```text
-//!   python3 scripts/generate_causal_lm_reference.py --dtype bfloat16 \
+//!   python3 scripts/generate_causal_lm_reference.py --dtype float32 --bf16-resident \
 //!     --model-dir /Volumes/T9/models/openai/gpt-oss-20b \
-//!     --output /path/to/gpt-oss-20b-6cee5e81-bf16-reference.bundle \
+//!     --output /path/to/gpt-oss-20b-6cee5e81-f32-reference.bundle \
 //!     --repository openai/gpt-oss-20b --revision 6cee5e81ee83917806bbde320786a8fb61efebee
 //!   ```
+//!
+//!   A full `--dtype bfloat16` bundle measures Transformers' own BF16
+//!   rounding against it.
 //!
 //! * a **truncated** F32 reference (`--num-hidden-layers 1`): the real
 //!   embedding, first block (sliding attention with real sinks, the real
@@ -86,12 +92,22 @@
 //! | crate F16 | BF16 | `1.85` | at most `0.060` |
 //! | Transformers BF16 | F32 | `1.73` | at most `0.055` |
 //!
-//! So a half-precision run (Metal F16 included) is best qualified against a
-//! truncated **F32** bundle, which measures its own rounding; a full BF16
-//! bundle then checks the whole depth at the BF16 reference's resolution.
-//! The half-precision defaults cover the four-block measurements with some
-//! headroom; they are provisional for the full 24-block model, whose
-//! deviation the integrator records.
+//! So a half-precision run (Metal F16 included) is qualified against an
+//! **F32** bundle, which measures its own rounding. Against a half-precision
+//! bundle the two implementations' roundings add, which a single
+//! half-precision bound does not describe. On the full 24-block model against
+//! the full F32 bundle (the four prompts below):
+//!
+//! | run | max \|Δ\| per prompt | mean \|Δ\| per prompt |
+//! | --- | --- | --- |
+//! | Transformers BF16 | `2.665`, `1.24`, `0.70`, `1.66` | at most `0.108` |
+//! | crate Flex BF16 | `2.19`, `1.26`, `0.57`, `1.67` | at most `0.112` |
+//! | crate Metal F16 | `0.018`, `0.18`, `0.53`, `1.15` | at most `0.025` |
+//!
+//! The half-precision defaults are therefore calibrated on the official
+//! implementation itself: a run must be at least as close to the F32
+//! reference as Transformers' own BF16 evaluation of the full model (largest
+//! deviation `2.665`, at prompt 0 position 3; largest mean `0.108`).
 //!
 //! Independently of the reference, cached and batched passes must agree with
 //! this crate's own stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for
@@ -115,16 +131,17 @@
 //! BF16 bundle generated from the same prompts
 //! (`gpt-oss-20b-6cee5e81-4layer-{f32,bf16}-reference.bundle`).
 //!
-//! Against the full 24-block BF16 bundle of the same four prompts (source
-//! `8a4404a`, `acceptance/measurements/large-checkpoint-replay-20261016.json`),
-//! Flex/BF16 deviates by at most `1.62` (mean at most `0.064`), its batched
-//! rows by `0.5`, and the cached long-prompt decode by `1.32`. Metal/F16
-//! deviates by `2.66` at prompt 0 (mean `0.109`) and at most `1.74` elsewhere,
-//! above the provisional [`HALF_TOLERANCE`]; yet against the four-block F32
-//! bundle Metal/F16 stays within `0.122`, so the full-model gap is the BF16
-//! reference's own rounding. The reference's first greedy margin is `3.06`,
-//! below twice [`HALF_TOLERANCE`], so its greedy check compares no tokens and
-//! needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0` like the truncated bundles.
+//! Against the full 24-block bundles of the same four prompts
+//! (`acceptance/measurements/large-checkpoint-replay-20261016.json` and
+//! `acceptance/measurements/reference-precision-followups-20261016.json`):
+//! against the F32 bundle, Metal/F16 and Flex/BF16 deviate as tabulated
+//! above, their batched rows by at most `0.53` and `0.68`, and the cached
+//! long-prompt decode by `0.94` and `1.59`. Against the BF16 bundle, a
+//! half-precision comparison of two roundings, Metal/F16 reached `2.66` at
+//! prompt 0, the BF16 bundle's own distance from F32 there. The F32
+//! reference's first greedy margin is `3.09`, below twice
+//! [`HALF_TOLERANCE`], so a half-precision greedy check compares no tokens and
+//! needs `TRANSFORMERS_GPT_OSS_MIN_GREEDY=0`, as with the truncated bundles.
 
 #![cfg(feature = "flex")]
 
@@ -155,15 +172,17 @@ const F32_MEAN_TOLERANCE: f32 = 1e-4;
 
 /// Default absolute logit tolerance when the run or the bundle is half precision.
 ///
-/// Four real blocks deviate by at most `1.85` in every half-precision pairing
-/// (see the module documentation); provisional for the full model.
-const HALF_TOLERANCE: f32 = 2.5;
+/// Transformers' own BF16 evaluation of the full model deviates from the full
+/// F32 reference by at most `2.665` (see the module documentation); a
+/// half-precision run must be at least that faithful.
+const HALF_TOLERANCE: f32 = 2.7;
 
 /// Default bound on one prompt's mean absolute logit deviation in half precision.
 ///
-/// Four real blocks stay at or below `0.062`; an architectural error moves
-/// most logits of most positions, so the mean separates it from rounding
-/// noise far better than the maximum. Provisional for the full model.
+/// Transformers' own BF16 evaluation of the full model stays at or below
+/// `0.108` per prompt; an architectural error moves most logits of most
+/// positions, so the mean separates it from rounding noise far better than
+/// the maximum.
 const HALF_MEAN_TOLERANCE: f32 = 0.15;
 
 /// Absolute agreement of cached/batched passes with this crate's stateless pass, per dtype.
@@ -720,9 +739,10 @@ fn tolerance_defaults_follow_the_bundle_and_run_dtypes() {
             "{bundle:?} bundle, {run:?} run"
         );
     }
-    // The mean bound is the sharper half-precision check, and both cover the measurements.
+    // The mean bound is the sharper half-precision check, and both admit
+    // Transformers' own full-model BF16 deviation from F32.
     const { assert!(HALF_MEAN_TOLERANCE < HALF_TOLERANCE / 10.0) };
-    const { assert!(HALF_TOLERANCE > 1.85 && HALF_MEAN_TOLERANCE > 0.062) };
+    const { assert!(HALF_TOLERANCE > 2.665 && HALF_MEAN_TOLERANCE > 0.108) };
 }
 
 /// Flex: every prompt position's logits.

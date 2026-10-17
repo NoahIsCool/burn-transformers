@@ -37,11 +37,15 @@
 //! ```
 //!
 //! To compare both Burn paths with their corresponding authenticated official
-//! rows, additionally select the external oracle bundle:
+//! rows, additionally select the external MPS/F16 oracle bundle and the
+//! official precision bundle (its F32 rows are the truth, and the official F16
+//! rows set each path's floor; see
+//! `scripts/generate_nemotron_h_precision_reference.py`):
 //!
 //! ```text
 //! TRANSFORMERS_NEMOTRON_H_DIR=/absolute/pinned/checkpoint \
 //! TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/pinned/reference.bundle \
+//! TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/absolute/pinned/precision.bundle \
 //! cargo test --release --manifest-path crates/transformers/Cargo.toml \
 //!   --no-default-features --features std,metal,tokenizers \
 //!   --test nemotron_h_artifacts \
@@ -61,6 +65,9 @@ mod nemotron_h_base_reference;
 
 #[path = "support/nemotron_h_parity.rs"]
 mod nemotron_h_parity;
+
+#[path = "support/nemotron_h_precision_reference.rs"]
+mod nemotron_h_precision_reference;
 
 use serde::{
     Deserialize, Deserializer,
@@ -1867,27 +1874,82 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
 /// The stateless half evaluates the literal prompt and one 37-token
 /// teacher-forced chunk, selecting the 32 causal decision positions retained by
 /// the official stateless oracle. The cached half evaluates the prompt prefill
-/// followed by 31 one-token recurrent updates against the official cached
-/// oracle. Typed reference rows make a cached-versus-teacher comparison fail
-/// before cosine is computed. All 64 decision rows require full-vocabulary
-/// cosine `>= 0.999` and exact top-1; the three available hidden traces use the
-/// same threshold at their exact stateless/prefill/decode semantic points.
+/// followed by 31 one-token recurrent updates. Typed rows make a
+/// cached-versus-teacher comparison fail before cosine is computed.
+///
+/// Logit rows are judged against the official class's F32 rows of the same
+/// path from the precision bundle (`TRANSFORMERS_NEMOTRON_H_PRECISION_DIR`).
+/// Each row needs exact top-1 and a cosine at least the path's official F16
+/// floor: the worst cosine that the MPS/F16 oracle or the official CPU/F16
+/// evaluation reaches against F32 on that path, computed here from the
+/// authenticated rows (prompt `0.999194`, teacher `0.994466`, cached `0.998635`).
+/// A Burn F16 row therefore passes exactly when it is at least as faithful to
+/// F32 as the official F16 rows are; a `0.999` floor against the F16 oracle was
+/// unreachable even for the oracle, which is `0.994466` from F32 at teacher
+/// decision 18. Cosines against the F16 oracle are still reported. The three
+/// available hidden traces, recorded only at F16, keep the `0.999` threshold at
+/// their exact stateless/prefill/decode semantic points.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 #[test]
 #[ignore = "requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory"]
 fn compares_pinned_nemotron_f16_with_official_base_reference() {
     use nemotron_h_base_reference::{
-        OfficialExecutionPath, OfficialHiddenPoint, REFERENCE_DECISIONS, REFERENCE_HIDDEN_ROWS,
-        REFERENCE_HIDDEN_SIZE, REFERENCE_VOCABULARY_SIZE,
+        OfficialHiddenPoint, REFERENCE_DECISIONS, REFERENCE_HIDDEN_ROWS, REFERENCE_HIDDEN_SIZE,
+        REFERENCE_VOCABULARY_SIZE,
     };
     use nemotron_h_parity::{
-        CorrespondingPathSummary, assert_corresponding_hidden_trace, assert_corresponding_logit_row,
+        TruthPathSummary, assert_corresponding_hidden_trace, assert_row_against_truth,
+        half_precision_floor,
     };
+    use nemotron_h_precision_reference::{Precision, RowKind};
 
     let started = Instant::now();
     let reference = nemotron_h_base_reference::load_and_validate_reference_bundle();
     assert_eq!(reference.prompt_token_ids(), SMOKE_TOKEN_IDS);
     assert_eq!(reference.generation_token_ids().len(), REFERENCE_DECISIONS);
+    let generated = reference
+        .generation_token_ids()
+        .iter()
+        .map(|&token| token as usize)
+        .collect::<Vec<_>>();
+
+    // The F32 truth and each path's official F16 floor, from authenticated rows only.
+    let precision = nemotron_h_precision_reference::load_and_validate_precision_bundle(
+        reference.generation_token_ids(),
+    );
+    let oracle_prompt = reference.stateless_prompt_row().values().to_vec();
+    let oracle_matrix = |row: &dyn Fn(usize) -> Vec<f32>| {
+        (0..REFERENCE_DECISIONS).flat_map(row).collect::<Vec<f32>>()
+    };
+    let oracle_teacher = oracle_matrix(&|decision| {
+        reference
+            .teacher_row(decision)
+            .expect("official teacher row")
+            .values()
+            .to_vec()
+    });
+    let oracle_cached = oracle_matrix(&|decision| {
+        reference
+            .cached_row(decision)
+            .expect("official cached row")
+            .values()
+            .to_vec()
+    });
+    let floor = |kind: RowKind, oracle: &[f32]| {
+        half_precision_floor(
+            "Nemotron official F16 floor",
+            precision.matrix(Precision::Float32, kind),
+            &[oracle, precision.matrix(Precision::Float16, kind)],
+            REFERENCE_VOCABULARY_SIZE,
+        )
+    };
+    let prompt_floor = floor(RowKind::Prompt, &oracle_prompt);
+    let teacher_floor = floor(RowKind::Teacher, &oracle_teacher);
+    let cached_floor = floor(RowKind::Cached, &oracle_cached);
+    let oracle_row = |matrix: &[f32], decision: usize| {
+        matrix[decision * REFERENCE_VOCABULARY_SIZE..(decision + 1) * REFERENCE_VOCABULARY_SIZE]
+            .to_vec()
+    };
 
     let supplied = pinned_root();
     let root = supplied
@@ -1951,12 +2013,15 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         &stateless.logits,
     );
     assert_eq!(stateless_logits.len(), REFERENCE_VOCABULARY_SIZE);
-    let stateless_prompt = assert_corresponding_logit_row(
+    let stateless_prompt = assert_row_against_truth(
         "Nemotron stateless prompt",
-        OfficialExecutionPath::Stateless,
+        RowKind::Prompt,
         &stateless_logits,
-        reference.stateless_prompt_row(),
+        precision.truth(RowKind::Prompt, 0),
+        generated[0],
+        prompt_floor,
     );
+    let stateless_prompt_oracle = cosine_similarity(&stateless_logits, &oracle_prompt);
     let stateless_hidden = hidden_trace(
         "Nemotron official-parity stateless hidden trace",
         &stateless.hidden_states,
@@ -2016,25 +2081,30 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         "Nemotron official-parity teacher-forced logits",
         &teacher.logits,
     );
-    let mut stateless_summary = CorrespondingPathSummary::new(OfficialExecutionPath::Stateless);
-    for decision in 0..REFERENCE_DECISIONS {
+    let mut stateless_summary = TruthPathSummary::new(RowKind::Teacher, teacher_floor);
+    let mut teacher_oracle_minimum = f64::INFINITY;
+    for (decision, &expected) in generated.iter().enumerate() {
         let position = prompt_length - 1 + decision;
         let start = position * REFERENCE_VOCABULARY_SIZE;
         let end = start + REFERENCE_VOCABULARY_SIZE;
         stateless_summary.observe(
             "Nemotron teacher-forced row",
             &teacher_values[start..end],
-            reference
-                .teacher_row(decision)
-                .unwrap_or_else(|| panic!("missing official teacher row {decision}")),
+            precision.truth(RowKind::Teacher, decision),
+            expected,
         );
+        teacher_oracle_minimum = teacher_oracle_minimum.min(cosine_similarity(
+            &teacher_values[start..end],
+            &oracle_row(&oracle_teacher, decision),
+        ));
     }
     let stateless_summary = stateless_summary.finish(REFERENCE_DECISIONS);
     let teacher_seconds = teacher_started.elapsed().as_secs_f64();
     drop(teacher);
     drop(teacher_values);
 
-    let mut cached_summary = CorrespondingPathSummary::new(OfficialExecutionPath::Cached);
+    let mut cached_summary = TruthPathSummary::new(RowKind::Cached, cached_floor);
+    let mut cached_oracle_minimum = f64::INFINITY;
     let mut state = loaded
         .model()
         .new_decode_state(
@@ -2068,10 +2138,13 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
     cached_summary.observe(
         "Nemotron cached-prefill row",
         &prefill_logits,
-        reference
-            .cached_row(0)
-            .expect("official cached-prefill row"),
+        precision.truth(RowKind::Cached, 0),
+        generated[0],
     );
+    cached_oracle_minimum = cached_oracle_minimum.min(cosine_similarity(
+        &prefill_logits,
+        &oracle_row(&oracle_cached, 0),
+    ));
     let cached_prefill_hidden = hidden_trace(
         "Nemotron official-parity cached-prefill hidden trace",
         &prefill.hidden_states,
@@ -2088,7 +2161,7 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
 
     let mut cached_decode_hidden = None;
     let mut cached_decode_hidden_summary = None;
-    for decision in 1..REFERENCE_DECISIONS {
+    for (decision, &expected) in generated.iter().enumerate().skip(1) {
         let capture_hidden = decision == 1;
         let decoded = loaded
             .model()
@@ -2119,10 +2192,13 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         cached_summary.observe(
             "Nemotron recurrent cached row",
             &decoded_logits,
-            reference
-                .cached_row(decision)
-                .unwrap_or_else(|| panic!("missing official cached row {decision}")),
+            precision.truth(RowKind::Cached, decision),
+            expected,
         );
+        cached_oracle_minimum = cached_oracle_minimum.min(cosine_similarity(
+            &decoded_logits,
+            &oracle_row(&oracle_cached, decision),
+        ));
         if capture_hidden {
             let trace = hidden_trace(
                 "Nemotron official-parity first recurrent hidden trace",
@@ -2154,8 +2230,10 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
     eprintln!(
         "Nemotron 3.5 official corresponding-path parity: load_seconds={load_seconds:.3}, \
          stateless_prompt_seconds={stateless_prompt_seconds:.3}, teacher_seconds={teacher_seconds:.3}, \
-         cached_seconds={cached_seconds:.3}, prompt_cosine={:.12}, \
-         stateless_minimum_cosine={:.12}@{}, cached_minimum_cosine={:.12}@{}, \
+         cached_seconds={cached_seconds:.3}, f16_floors[prompt,teacher,cached]=[{prompt_floor:.9}, {teacher_floor:.9}, {cached_floor:.9}], \
+         f32_truth_prompt_cosine={:.12}, f32_truth_teacher_minimum={:.12}@{}, f32_truth_cached_minimum={:.12}@{}, \
+         f16_oracle_prompt_cosine={stateless_prompt_oracle:.12}, f16_oracle_teacher_minimum={teacher_oracle_minimum:.12}, \
+         f16_oracle_cached_minimum={cached_oracle_minimum:.12}, \
          stateless_hidden_minimum_cosine={:.12}@{}, \
          cached_prefill_hidden_minimum_cosine={:.12}@{}, \
          cached_decode_hidden_minimum_cosine={:.12}@{}, \

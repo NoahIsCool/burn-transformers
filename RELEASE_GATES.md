@@ -144,14 +144,18 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 | --- | --- | --- | --- |
 | Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift `7.6e-5` to `3.83e-4` on SmolLM-135M, Qwen3-4B, SmolLM3-3B, and Llama-3.1-8B, Flex and Metal); at least 2 decisive greedy tokens. Qwen2-7B's first-position activations reach about 7,000, so an F32 bundle's own rounding (`1.6e-3`) exceeds the tolerance: qualify it against a `--dtype float64` bundle, where Flex stays within `2.9e-4` and Metal reaches `1.9e-3` at one first-position logit, run with `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3` |
 | Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY` | `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3` |
-| gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.5` max, `0.15` mean (provisional, calibrated on four blocks) |
+| gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.7` max, `0.15` mean, calibrated on Transformers' own full-model BF16 deviation from the full F32 reference (`2.665`, mean at most `0.108`) |
 
 The Gemma long-context bundle and the gpt-oss truncated bundles are described
 in each test's module documentation, which also records the measured results.
 Qualify half-precision gpt-oss runs (including Metal F16, with
-`TRANSFORMERS_GPT_OSS_DTYPE=f16`) against a truncated F32 bundle. The full
-24-block BF16 bundle took 358 s to generate at a 29 GB peak footprint (the
-checkpoint is memory-mapped); its Flex/BF16 and Metal/F16 results are below.
+`TRANSFORMERS_GPT_OSS_DTYPE=f16`) against an F32 bundle: comparing two
+half-precision evaluations sums their roundings. The full 24-block F32 bundle
+needs `--dtype float32 --bf16-resident`, which keeps the decoded BF16 weights
+resident and widens each block to F32 only while it runs (exact; 47 GB peak,
+174 s). Against it Metal/F16 deviates by at most `1.15` (mean at most `0.025`),
+Flex/BF16 by `2.19` (`0.112`), and Transformers' own BF16 run by `2.665`
+(`0.108`) ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)).
 These gates establish experimental validation only; none promotes a
 checkpoint. The Flex and Metal F32 runs at `f4c56c4` (below) are experimental
 evidence on the same terms.
@@ -266,16 +270,67 @@ The Qwen3.8 and Qwen3-30B-A3B F32 logit digests differ from their pre-polish
 records (top-1 tokens and cosines do not): the polish cycle reordered
 reductions. The Qwen3.8 smoke's
 peak footprint rose from 63.3 GB to 68.3 GB; timings on this shared host are
-not performance measurements. None of these replays advertises a checkpoint.
+not performance measurements (both resolved below). None of these replays
+advertises a checkpoint.
 
-Still open after these replays:
+### Reference-precision and memory follow-ups
 
-- the Nemotron official-gate calibration decision above, and real-weight
-  Nemotron MTP parity;
+The [follow-up record](acceptance/measurements/reference-precision-followups-20261016.json)
+settles the three items the replay left for review. It keeps every source,
+binary and bundle identity, the alternating Qwen3.8 rounds with their load
+averages, the bisection and footprint traces, two superseded attempts with
+their diagnoses, and the full log. Everything ran on this Mac; the offered SCC node
+was not used (the record's `compute_note` explains why).
+
+- Nemotron 3.5 Lightning: the official class evaluated on the CPU in F32
+  (BF16-resident blocks widened only while they run, which is exact), BF16 and
+  F16 shows that the MPS/F16 oracle is itself only `0.994466` from F32 at
+  teacher decision 18, below the `0.999` floor it was used to enforce. The gate
+  now judges Burn against the official F32 rows of each path, with each path's
+  floor set by the official F16 evaluations' own distance from F32 (prompt
+  `0.999194`, teacher `0.994466`, cached `0.998635`), and passes at `9a9c730`
+  ([analysis](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)).
+- gpt-oss-20b: a full 24-block F32 reference (generated block by block from the
+  BF16-resident model at a 46.6 GB peak) shows that the `2.66` was the BF16
+  reference's own rounding. Transformers' own BF16 run is `2.665` from F32,
+  Flex/BF16 `2.19`, and Metal/F16 at most `1.15` (mean at most `0.025`). The
+  half-precision bound is now calibrated to `2.7` (mean `0.15`) from that
+  official deviation. At `c15f24e` all six gates pass against the F32 bundle,
+  and Metal/F16 passes against the BF16 bundle (prompt logits within
+  `2.66`, mean at most `0.109`). Load order leaves every logit bitwise
+  unchanged.
+- Qwen3.8-27B timing: alternating rounds at load averages below 4 show no
+  stateless-pass regression (base `1.70`, `1.18`, `2.27` and `9.64` s;
+  current `0.99` and `2.13` s; fixed `1.17` and `1.07` s). The first Metal
+  forward varies widely on this shared host, so the replay's `10.3` s is noise.
+- Qwen3.8-27B memory: the regression was real but smaller than recorded. The
+  base source itself now measures `66.5`–`66.6` GB here against `68.2` GB for
+  current, so the original `63.3` GB is not reproducible from code on this
+  host. Bisection finds `ad992d7`, which streamed checkpoints in physical
+  source order: the two 2.37 GiB vocabulary matrices were then allocated after
+  every per-layer tensor, and the footprint traces are consistent with
+  Metal's first-fit memory pages staying fragmented. `c15f24e` installs
+  execution groups of at least 1 GiB first and keeps the source order for
+  everything else. The smoke then peaks at `60.6` GB in both rounds, 6 GB below
+  the base that alternated with it, with logits bitwise identical to current,
+  and the official gate passes again (prompt cosine `0.999999873`, 32/32 greedy
+  tokens).
+- Muse-Glimmer-30B, the other pinned checkpoint with such tensors, settles
+  5.4 GB lower after loading, and its strict streaming audit peaks at `66.2` GB
+  against `68.9` GB for the pre-fix binary in alternating rounds. The audit
+  passes with the new three-open shard order, and the official gate reproduces
+  every recorded cosine (minimum hidden `0.999943377`, 32/32 greedy tokens).
+  The same pre-fix binary measured `63.5` GB here a day earlier, so only
+  same-session peaks are compared. Nemotron-H, Qwen3-30B-A3B, FLAN-T5-XXL, and
+  DeepSeek-V2-Lite have no tensor that large, so their schedules are
+  unchanged.
+
+Still open after these replays and follow-ups:
+
+- real-weight Nemotron MTP parity, and official F32 hidden traces for its
+  base gate;
 - Q8/Q4 quantized-reference and quality gates (Qwen3.8, Qwen3-30B-A3B, Muse),
   and an official reference for Qwen3-30B-A3B (no bundle exists);
-- the gpt-oss full-model half-precision bound (above) and a full F32
-  reference;
 - F16/BF16 runs of the Llama-family and Gemma gates, and real Mistral and
   OLMo 2 checkpoints (tiny goldens only).
 

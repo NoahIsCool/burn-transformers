@@ -1,0 +1,324 @@
+== source 8d552027dd5e4dc3080f5da6d6f87123b8443823 dirty=0
+== gpt-oss-20b full 24-block F32 reference, BF16-resident blocks cast to F32 while running (Transformers 5.2.0, PyTorch 2.10.0, CPU, eager)
+Using MXFP4 quantized models requires a GPU, we will default to dequantizing the model to bf16
+{"bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle", "prompts": 4}
+174.49 s wall
+         46579150984  peak memory footprint
+== exit=0 wall=174.5s min_free_pct=80 max_swap_growth_mib=0 swapin_mib=3 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; default half-precision tolerances)
+test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 34.073432s
+prompt 0: 5 tokens, max |Δ| = 1.7961979e-2, mean |Δ| = 2.8594930701156397e-3
+prompt 1: 13 tokens, max |Δ| = 1.8078518e-1, mean |Δ| = 7.2562084062556785e-3
+prompt 2: 8 tokens, max |Δ| = 5.33165e-1, mean |Δ| = 2.533850352676753e-2
+prompt 3: 183 tokens, max |Δ| = 1.1478596e0, mean |Δ| = 2.0401271856852733e-2
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 36.38s
+36.86 s wall
+         51274897792  peak memory footprint
+== exit=0 wall=36.9s min_free_pct=54 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 46.238674042s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 9.4389546e-1
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 67.82s
+67.89 s wall
+         50599222088  peak memory footprint
+== exit=0 wall=67.9s min_free_pct=56 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 51.105120625s
+batched row 0: max |Δ| = 1.4416218e-2 to the reference, 0e0 to the stateless pass
+batched row 1: max |Δ| = 3.6909103e-2 to the reference, 0e0 to the stateless pass
+batched row 2: max |Δ| = 5.33165e-1 to the reference, 0e0 to the stateless pass
+batched row 3: max |Δ| = 1.8426684e-1 to the reference, 0e0 to the stateless pass
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 57.82s
+57.97 s wall
+         50686761800  peak memory footprint
+== exit=0 wall=58.0s min_free_pct=47 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Flex/BF16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16; default half-precision tolerances)
+test flex_prompt_logits_match_the_reference ... loaded all blocks as BF16 in 45.113264792s
+prompt 0: 5 tokens, max |Δ| = 2.1905198e0, mean |Δ| = 1.1201361490284749e-1
+prompt 1: 13 tokens, max |Δ| = 1.2558413e0, mean |Δ| = 4.5869092210264736e-2
+prompt 2: 8 tokens, max |Δ| = 5.7128024e-1, mean |Δ| = 3.399790924767457e-2
+prompt 3: 183 tokens, max |Δ| = 1.6707368e0, mean |Δ| = 4.884157500240779e-2
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 58.45s
+58.47 s wall
+         49373154800  peak memory footprint
+== exit=0 wall=58.5s min_free_pct=87 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+test flex_cached_long_prompt_matches_the_reference ... loaded all blocks as BF16 in 55.490808s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 1.5865326e0
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 141.92s
+141.94 s wall
+         49310272960  peak memory footprint
+== exit=0 wall=141.9s min_free_pct=87 max_swap_growth_mib=0 swapin_mib=3 pressured_swapin_mib=0
+test flex_batched_prefill_matches_the_reference ... loaded all blocks as BF16 in 52.306062916s
+batched row 0: max |Δ| = 8.2344055e-2 to the reference, 3.125e-1 to the stateless pass
+batched row 1: max |Δ| = 1.3420129e-1 to the reference, 1.25e-1 to the stateless pass
+batched row 2: max |Δ| = 2.3739195e-1 to the reference, 1.25e-1 to the stateless pass
+batched row 3: max |Δ| = 6.8287873e-1 to the reference, 6.25e-2 to the stateless pass
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 80.87s
+80.90 s wall
+         49500212840  peak memory footprint
+== exit=0 wall=80.9s min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source eca73b9a7005435691187995bb6ca984db60f113 dirty=0
+== Nemotron 3.5 Lightning official cfa309 class on CPU: BF16, F32 (BF16-resident blocks widened while running), F16; oracle prompt and greedy tokens
+== exit=-9 wall=94.9s min_free_pct=37 max_swap_growth_mib=8993 swapin_mib=30 pressured_swapin_mib=0 WATCHDOG_KILLED: swap grew by 8993 MiB
+== source 67db7e7d57a4cb20fca3f29d497bb60a4bbe9480 dirty=0
+== Nemotron 3.5 Lightning official cfa309 class on CPU, 16 GiB resident budget with disk offload: BF16, F32 (BF16 blocks widened while running), F16; oracle prompt and greedy tokens
+[transformers] `causal_conv1d_fn` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+[transformers] `mamba_chunk_scan_combined` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.
+[transformers] `causal_conv1d_update` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+[transformers] `selective_state_update` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.
+Some parameters are on the meta device because they were offloaded to the cpu and disk.
+Some parameters are on the meta device because they were offloaded to the cpu and disk.
+Some parameters are on the meta device because they were offloaded to the cpu and disk.
+{"bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle", "minimum_cosines": {"float16-mps-oracle": {"prompt": [0.999194502, 0], "teacher": [0.994466421, 18], "cached": [0.998635047, 22]}, "float16": {"prompt": [0.999194145, 0], "teacher": [0.998632038, 27], "cached": [0.999096934, 26]}, "bfloat16": {"prompt": [0.998238482, 0], "teacher": [0.96662901, 30], "cached": [0.9965072, 16]}, "float16-mps-oracle-vs-float16": {"prompt": [0.999998998, 0], "teacher": [0.994335709, 18], "cached": [0.998541087, 22]}}}
+6716.31 s wall
+         23806951000  peak memory footprint
+== exit=0 wall=6716.3s min_free_pct=68 max_swap_growth_mib=0 swapin_mib=3155 pressured_swapin_mib=0
+== source 9a9c7308cf233f90ccbee80c0156efdf4cceea27 dirty=0
+== Nemotron 3.5 Lightning Metal/F16 official corresponding-path gate against the official F32 rows (std,metal,tokenizers,chat-templates; binary built at 9a9c730)
+test compares_pinned_nemotron_f16_with_official_base_reference ... Nemotron 3.5 official corresponding-path parity: load_seconds=103.809, stateless_prompt_seconds=3.854, teacher_seconds=2.232, cached_seconds=8.473, f16_floors[prompt,teacher,cached]=[0.999194145, 0.994466421, 0.998635047], f32_truth_prompt_cosine=0.999223815858, f32_truth_teacher_minimum=0.997611898218@30, f32_truth_cached_minimum=0.998776735807@22, f16_oracle_prompt_cosine=0.999985150326, f16_oracle_teacher_minimum=0.994340101181, f16_oracle_cached_minimum=0.999299206381, stateless_hidden_minimum_cosine=0.999967369503@24, cached_prefill_hidden_minimum_cosine=0.999967369503@24, cached_decode_hidden_minimum_cosine=0.999802135405@35, stateless_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, cached_prefill_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, cached_decode_hidden_sha256=6622235da52e1865e6b479f4063ce80432cf78f9907570459c5d092a1da0d7f9, official_crossed_path_minimum_diagnostic=0.921504794757, decisions_per_path=32, total_seconds=293.573
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 293.58s
+293.64 s wall
+         69194173320  peak memory footprint
+== exit=0 wall=293.6s min_free_pct=32 max_swap_growth_mib=6122 swapin_mib=662 pressured_swapin_mib=0
+== Qwen3.8 timing round 1 base (load averages 3.89 9.17 27.48 at start; waited 600s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=84.514, stateless_seconds=1.703, prefill_seconds=0.298, mtp_seconds=0.116, decode_seconds=0.325
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 87.38s
+88.04 s wall
+         66505577248  peak memory footprint
+== exit=0 wall=88.0s min_free_pct=34 max_swap_growth_mib=0 swapin_mib=44 pressured_swapin_mib=0
+== Qwen3.8 timing round 1 current (load averages 2.06 7.28 25.02 at start; waited 0s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=79.705, stateless_seconds=0.990, prefill_seconds=0.284, mtp_seconds=0.084, decode_seconds=0.297
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 81.68s
+82.72 s wall
+         68235323712  peak memory footprint
+== exit=0 wall=82.7s min_free_pct=41 max_swap_growth_mib=0 swapin_mib=15 pressured_swapin_mib=0
+== Qwen3.8 timing round 2 base (load averages 1.46 5.81 22.76 at start; waited 0s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=80.635, stateless_seconds=1.178, prefill_seconds=0.285, mtp_seconds=0.086, decode_seconds=0.302
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 82.82s
+83.07 s wall
+         66506625776  peak memory footprint
+== exit=0 wall=83.1s min_free_pct=34 max_swap_growth_mib=0 swapin_mib=40 pressured_swapin_mib=0
+== Qwen3.8 timing round 2 current (load averages 1.77 4.83 20.77 at start; waited 0s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=83.497, stateless_seconds=2.125, prefill_seconds=0.294, mtp_seconds=0.060, decode_seconds=0.305
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 86.65s
+86.79 s wall
+         68149307664  peak memory footprint
+== exit=0 wall=86.8s min_free_pct=39 max_swap_growth_mib=0 swapin_mib=34 pressured_swapin_mib=0
+== source c15f24e2be300515127a96b14fb2cc5796843b82 dirty=0
+== Qwen3.8 timing round 3 base (load averages 3.71 5.10 7.26 at start; waited 30s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=86.676, stateless_seconds=8.851, prefill_seconds=0.286, mtp_seconds=0.037, decode_seconds=0.255
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 96.97s
+97.02 s wall
+         74435455248  peak memory footprint
+== exit=0 wall=97.0s min_free_pct=32 max_swap_growth_mib=0 swapin_mib=37 pressured_swapin_mib=0
+== Qwen3.8 timing round 4 base (load averages 3.31 7.06 7.54 at start; waited 330s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=84.038, stateless_seconds=2.274, prefill_seconds=0.298, mtp_seconds=0.118, decode_seconds=0.329
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 87.47s
+87.91 s wall
+         66593100576  peak memory footprint
+== exit=0 wall=87.9s min_free_pct=31 max_swap_growth_mib=0 swapin_mib=6 pressured_swapin_mib=0
+== Qwen3.8 timing round 4 fixed (load averages 3.22 6.14 7.14 at start; waited 0s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=78.376, stateless_seconds=1.173, prefill_seconds=0.288, mtp_seconds=0.088, decode_seconds=0.310
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 80.57s
+80.60 s wall
+         60607009736  peak memory footprint
+== exit=0 wall=80.6s min_free_pct=38 max_swap_growth_mib=0 swapin_mib=5 pressured_swapin_mib=0
+== Qwen3.8 timing round 5 base (load averages 2.18 5.11 6.66 at start; waited 0s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=84.422, stateless_seconds=9.641, prefill_seconds=0.287, mtp_seconds=0.059, decode_seconds=0.303
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 95.67s
+95.73 s wall
+         66608288616  peak memory footprint
+== exit=0 wall=95.7s min_free_pct=31 max_swap_growth_mib=0 swapin_mib=7 pressured_swapin_mib=0
+== Qwen3.8 timing round 5 fixed (load averages 3.10 4.54 6.26 at start; waited 0s)
+test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=85.688, stateless_seconds=1.066, prefill_seconds=0.285, mtp_seconds=0.055, decode_seconds=0.311
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 87.74s
+87.78 s wall
+         60566639512  peak memory footprint
+== exit=0 wall=87.8s min_free_pct=38 max_swap_growth_mib=0 swapin_mib=12 pressured_swapin_mib=0
+== Qwen3.8-27B Metal/F16 official reference (std,metal,tokenizers,chat-templates; binary built at c15f24e)
+test matches_pinned_qwen38_official_reference_on_metal ... Qwen3.8 official F16 parity: prompt_cosine=0.999999873, top1=799, greedy_tokens=32
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 246.33s
+246.41 s wall
+         64565912864  peak memory footprint
+== exit=0 wall=246.4s min_free_pct=38 max_swap_growth_mib=0 swapin_mib=157 pressured_swapin_mib=0
+== Muse-Glimmer-30B Metal/F16 strict streaming audit (exactly std,metal,tokenizers; binary built at c15f24e)
+test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 257.51s
+257.58 s wall
+         66168433488  peak memory footprint
+== exit=0 wall=257.6s min_free_pct=39 max_swap_growth_mib=0 swapin_mib=62 pressured_swapin_mib=0
+== Muse-Glimmer-30B Metal/F16 official reference (exactly std,metal,tokenizers; binary built at c15f24e)
+test matches_pinned_muse_glimmer_official_f16_reference_on_metal ... 
+thread 'matches_pinned_muse_glimmer_official_f16_reference_on_metal' (33900007) panicked at tests/muse_glimmer_artifacts.rs:2937:9:
+inspect Muse reference bundle /Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-a4e59da-reference.bundle/muse-glimmer-30b-a4e59da-reference.bundle: No such file or directory (os error 2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+failures:
+failures:
+    matches_pinned_muse_glimmer_official_f16_reference_on_metal
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+0.00 s wall
+             2998752  peak memory footprint
+== exit=101 wall=0.0s min_free_pct=100 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)
+test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 65.202597667s
+prompt 0: 5 tokens, max |Δ| = 1.7961979e-2, mean |Δ| = 2.8594930701156397e-3
+prompt 1: 13 tokens, max |Δ| = 1.8078518e-1, mean |Δ| = 7.2562084062556785e-3
+prompt 2: 8 tokens, max |Δ| = 5.33165e-1, mean |Δ| = 2.533850352676753e-2
+prompt 3: 183 tokens, max |Δ| = 1.1478596e0, mean |Δ| = 2.0401271856852733e-2
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 67.99s
+68.04 s wall
+         49171714920  peak memory footprint
+== exit=0 wall=68.0s min_free_pct=53 max_swap_growth_mib=0 swapin_mib=3 pressured_swapin_mib=0
+== gpt-oss-20b full BF16 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)
+test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 29.556034833s
+prompt 0: 5 tokens, max |Δ| = 2.6601563e0, mean |Δ| = 1.0853238918968665e-1
+prompt 1: 13 tokens, max |Δ| = 1.234375e0, mean |Δ| = 4.909117747119321e-2
+prompt 2: 8 tokens, max |Δ| = 7.03125e-1, mean |Δ| = 4.216956998858225e-2
+prompt 3: 183 tokens, max |Δ| = 1.7373047e0, mean |Δ| = 5.7520232734584044e-2
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 33.10s
+33.13 s wall
+         49171813272  peak memory footprint
+== exit=0 wall=33.1s min_free_pct=56 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+== gpt-oss-20b full BF16 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)
+test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 29.637603917s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 1.3432617e0
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 48.48s
+48.52 s wall
+         48509080928  peak memory footprint
+== exit=0 wall=48.5s min_free_pct=59 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+== gpt-oss-20b full BF16 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)
+test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 29.598317917s
+batched row 0: max |Δ| = 4.7265625e-1 to the reference, 0e0 to the stateless pass
+batched row 1: max |Δ| = 1.40625e-1 to the reference, 0e0 to the stateless pass
+batched row 2: max |Δ| = 7.03125e-1 to the reference, 0e0 to the stateless pass
+batched row 3: max |Δ| = 7.421875e-1 to the reference, 0e0 to the stateless pass
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 32.88s
+32.91 s wall
+         48562804088  peak memory footprint
+== exit=0 wall=32.9s min_free_pct=54 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+== gpt-oss-20b full BF16 bundle, Metal/F16 greedy (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; TRANSFORMERS_GPT_OSS_MIN_GREEDY=0; binary built at c15f24e)
+test metal::metal_cached_greedy_matches_the_reference ... loaded all blocks as F16 in 29.459721666s
+greedy step 0: reference margin 3.0625e0 is a tie; stopping
+greedy: 0 of 32 tokens match
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 30.26s
+30.30 s wall
+         48509244792  peak memory footprint
+== exit=0 wall=30.3s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)
+test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 29.555599167s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 9.4389546e-1
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 48.13s
+48.17 s wall
+         48508163424  peak memory footprint
+== exit=0 wall=48.2s min_free_pct=62 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)
+test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 29.668025041s
+batched row 0: max |Δ| = 1.4416218e-2 to the reference, 0e0 to the stateless pass
+batched row 1: max |Δ| = 3.6909103e-2 to the reference, 0e0 to the stateless pass
+batched row 2: max |Δ| = 5.33165e-1 to the reference, 0e0 to the stateless pass
+batched row 3: max |Δ| = 1.8426684e-1 to the reference, 0e0 to the stateless pass
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 32.58s
+32.61 s wall
+         48703444224  peak memory footprint
+== exit=0 wall=32.6s min_free_pct=50 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Flex/BF16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16; calibrated half-precision tolerances; binary built at c15f24e)
+test flex_prompt_logits_match_the_reference ... loaded all blocks as BF16 in 28.107689667s
+prompt 0: 5 tokens, max |Δ| = 2.1905198e0, mean |Δ| = 1.1201361490284749e-1
+prompt 1: 13 tokens, max |Δ| = 1.2558413e0, mean |Δ| = 4.5869092210264736e-2
+prompt 2: 8 tokens, max |Δ| = 5.7128024e-1, mean |Δ| = 3.399790924767457e-2
+prompt 3: 183 tokens, max |Δ| = 1.6707368e0, mean |Δ| = 4.884157500240779e-2
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 40.53s
+40.54 s wall
+         48310766320  peak memory footprint
+== exit=0 wall=40.6s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Flex/BF16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16; calibrated half-precision tolerances; binary built at c15f24e)
+test flex_cached_long_prompt_matches_the_reference ... loaded all blocks as BF16 in 27.773017792s
+cached decode of a 183-token prompt (prefill 45): max |Δ| = 1.5865326e0
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 96.41s
+96.42 s wall
+         48245787328  peak memory footprint
+== exit=0 wall=96.4s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=4 pressured_swapin_mib=0
+== gpt-oss-20b full F32 bundle, Flex/BF16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16; calibrated half-precision tolerances; binary built at c15f24e)
+test flex_batched_prefill_matches_the_reference ... loaded all blocks as BF16 in 27.786228292s
+batched row 0: max |Δ| = 8.2344055e-2 to the reference, 3.125e-1 to the stateless pass
+batched row 1: max |Δ| = 1.3420129e-1 to the reference, 1.25e-1 to the stateless pass
+batched row 2: max |Δ| = 2.3739195e-1 to the reference, 1.25e-1 to the stateless pass
+batched row 3: max |Δ| = 6.8287873e-1 to the reference, 6.25e-2 to the stateless pass
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 54.26s
+54.28 s wall
+         48437414760  peak memory footprint
+== exit=0 wall=54.3s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=3 pressured_swapin_mib=0
+== Muse-Glimmer-30B streaming audit round 1 pre-fix (load averages 1.99 2.33 3.46 at start; waited 0s)
+test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 239.17s
+239.47 s wall
+         68885148440  peak memory footprint
+== exit=0 wall=239.5s min_free_pct=37 max_swap_growth_mib=0 swapin_mib=54 pressured_swapin_mib=0
+== Muse-Glimmer-30B streaming audit round 1 fixed (load averages 2.31 2.24 3.13 at start; waited 0s)
+test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 245.44s
+245.50 s wall
+         66188307256  peak memory footprint
+== exit=0 wall=245.5s min_free_pct=41 max_swap_growth_mib=0 swapin_mib=19 pressured_swapin_mib=0
+== Muse-Glimmer-30B streaming audit round 2 pre-fix (load averages 2.34 2.15 2.86 at start; waited 0s)
+test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 241.49s
+241.59 s wall
+         68871516880  peak memory footprint
+== exit=0 wall=241.6s min_free_pct=39 max_swap_growth_mib=0 swapin_mib=73 pressured_swapin_mib=0
+== Muse-Glimmer-30B streaming audit round 2 fixed (load averages 3.83 2.79 2.90 at start; waited 30s)
+test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 243.09s
+243.15 s wall
+         66176822120  peak memory footprint
+== exit=0 wall=243.2s min_free_pct=44 max_swap_growth_mib=0 swapin_mib=11 pressured_swapin_mib=0
+== Muse-Glimmer-30B Metal/F16 official reference, rerun with the reference parent directory (exactly std,metal,tokenizers; binary built at c15f24e)
+test matches_pinned_muse_glimmer_official_f16_reference_on_metal ... muse_rust_acceptance_provenance={"git_head":"c15f24e2be300515127a96b14fb2cc5796843b82","git_tree":"d26bdca9276f06499e6f14aa866d2e5cf2600e70","transformers_tree":"d26bdca9276f06499e6f14aa866d2e5cf2600e70","transformers_tree_dirty":false,"test_source_sha256":"fa307ab7427ef3441b071427ba818e6e3731ffbe7654259103f19cc053c05ad9","quantized_quality_source_sha256":"e5104d33e832a8cb8f5e137c68d29ffb853544aa8ed52d5dd5c0a79e5fc8dc1c","cargo_package_rust_version":"1.92","rustc_verbose":"rustc 1.94.0-nightly (4f14395c3 2025-12-22)\nbinary: rustc\ncommit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22\ncommit-date: 2025-12-22\nhost: aarch64-apple-darwin\nrelease: 1.94.0-nightly\nLLVM version: 21.1.8","profile":"release","target":"aarch64-macos","features":["std","metal","tokenizers"]}
+Muse-Glimmer-30B official F16 parity: prompt_cosine=0.999999616, cached_prompt_cosine=0.999999616, minimum_hidden_cosine=0.999943377, minimum_cached_prefill_hidden_cosine=0.999943377, minimum_burn_prefill_stateless_hidden_cosine=1.000000000, minimum_decode_hidden_cosine=0.999987445, minimum_cached_official_cosine=0.999999616, minimum_teacher_official_cosine=0.999999333, minimum_burn_cached_teacher_cosine=0.999999726, greedy_tokens=32
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 257.34s
+257.37 s wall
+         66062576272  peak memory footprint
+== exit=0 wall=257.4s min_free_pct=35 max_swap_growth_mib=0 swapin_mib=32 pressured_swapin_mib=0
+== artifact identities (shasum -a 256, run in /Volumes/bag of holding/models/transformers-acceptance)
+f17350306ef8a04994e223d18660e6c2ca231f446ebf28553b58b094d0430b6c  gpt-oss-20b-6cee5e81-f32-reference.bundle/logits-0.f32le
+d6a8e4924ec691cfcb3c1e69cc453441b352e9a2b4e842dc75eacb66f6c29046  gpt-oss-20b-6cee5e81-f32-reference.bundle/logits-1.f32le
+ff8e115923d9afd13c140bb44fabe465519ff53e57fbf698524a6c74bf1813ff  gpt-oss-20b-6cee5e81-f32-reference.bundle/logits-2.f32le
+7b666f7be3235844323b8c4e80a873dfbb0151c02aabf7e6d8a3a3ef2b5365c0  gpt-oss-20b-6cee5e81-f32-reference.bundle/logits-3.f32le
+17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e  gpt-oss-20b-6cee5e81-f32-reference.bundle/reference.json
+cd38799625f1c5901e68df54b7ca8887becdc803c9ede6e93000b86b362c736e  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/bfloat16-cached-logits.f32le
+c84aa9bc69b26358a41dedbbfd5394452d733284a77bc7cc03143c79cbe55ea4  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/bfloat16-prompt-logits.f32le
+b888d62713d068185e26a35c9e82a6b77f3a141f6045dd812483ec32130d4633  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/bfloat16-teacher-logits.f32le
+d01d94bbbdce744e6621c717707f5a527a9870459115c91557e69104c772c7f6  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/float16-cached-logits.f32le
+d9fd6aee0ed30f0252b7141fd951e90cd2cb5aacd034c5422f833b3a949ac21f  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/float16-prompt-logits.f32le
+6dc5e0a295f9bb47c01f65b52a1026855b1866332a94d845e463545b2107f867  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/float16-teacher-logits.f32le
+5b1dd446712ca764bf655fe324776e4468579e83f1b719e3437af96d817224f0  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/float32-cached-logits.f32le
+568f634d35d1e3a88fde59ee80a9c26caf5d59c2ac5eefbed6350acf16f8e588  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/float32-prompt-logits.f32le
+981f2f984f807012786103510ff8caaba79def48201bd0736bcdf38b48c62c88  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/float32-teacher-logits.f32le
+5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9  nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle/reference.json

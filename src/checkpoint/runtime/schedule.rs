@@ -14,7 +14,8 @@
 //!
 //! The module has no crate or Burn dependencies so that Verus can check it in
 //! place through `verus/checkpoint.rs`; the caller assigns the classes and
-//! orders the groups by physical source location.
+//! orders the groups: outsized groups first in plan order, then the rest by
+//! physical source location.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;

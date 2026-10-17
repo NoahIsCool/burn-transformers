@@ -4432,7 +4432,10 @@ fn quantize_pinned_muse_glimmer(scheme: SymmetricQuantization, output_environmen
         outcome.execution.delivered_tensor_bytes,
         LANGUAGE_PARAMETER_BYTES
     );
-    assert_eq!(outcome.execution.source.shard_opens, SHARDS.len() as u64);
+    // Both vocabulary matrices exceed the loader's 1 GiB hoisting threshold and
+    // are read first in sorted-target order (`lm_head` in shard 2, then
+    // `embed_tokens` in shard 1) before the physical schedule reopens shard 2.
+    assert_eq!(outcome.execution.source.shard_opens, 3);
     assert_eq!(
         outcome.execution.source.tensor_reads,
         CONSUMED_TENSOR_COUNT as u64
@@ -4708,6 +4711,8 @@ fn load_authenticated_muse_burnpack(
         execution.peak_host_staging_bytes,
         LARGEST_TARGET_PAYLOAD_BYTES
     );
+    // Only the retained `embed_tokens` (shard 1) reaches the loader's 1 GiB
+    // hoisting threshold, so hoisting it leaves the physical shard order intact.
     assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
     assert_eq!(
         execution.source.tensor_reads,
@@ -5209,7 +5214,11 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
         execution.peak_host_staging_bytes,
         LARGEST_TARGET_PAYLOAD_BYTES
     );
-    assert_eq!(execution.source.shard_opens, 2);
+    // The loader installs groups of at least 1 GiB before the physical schedule
+    // so Metal's first-fit pools stay packed. Muse's two vocabulary matrices
+    // qualify and are read in sorted-target order: `lm_head` (shard 2), then
+    // `embed_tokens` (shard 1); the physical schedule then reopens shard 2.
+    assert_eq!(execution.source.shard_opens, 3);
     assert_eq!(execution.source.tensor_reads, CONSUMED_TENSOR_COUNT as u64);
     assert_eq!(
         execution.source.payload_bytes_read,
@@ -5218,10 +5227,7 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
     assert_eq!(execution.source.max_open_shards, 1);
     assert_eq!(
         execution.source.shard_open_order,
-        SHARDS
-            .iter()
-            .map(|(name, _, _)| (*name).to_owned())
-            .collect::<Vec<_>>()
+        [SHARDS[1].0, SHARDS[0].0, SHARDS[1].0]
     );
 
     let generation = loaded.generation_defaults();

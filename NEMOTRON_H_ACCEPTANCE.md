@@ -7,11 +7,12 @@ full-payload authentication, strict source-ordered F16 application, and a short
 Burn Metal base-model smoke. That smoke is internal-consistency evidence. The
 path-safe ignored Burn-versus-official gate first ran on source `4f9502a`
 ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json))
-and **failed**: the cached path matched all 32 official cached rows, but two of
-the 32 teacher-forced rows fell below the gate's 0.999 cosine floor (see
-[the first official comparison](#first-official-comparison)). Real-weight MTP
-parity and the remaining release gates are also incomplete, so the model is
-not advertised as supported. The committed machine-readable state remains
+and failed two teacher-forced rows against a `0.999` floor that the official F16
+oracle itself cannot reach. Judged against the official class's F32 rows with
+floors set by the official F16 evaluations, it passes on source `9a9c730`
+([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json); see [the official comparison](#first-official-comparison)). Real-weight
+MTP parity and the remaining release gates are incomplete, so the model is not
+advertised as supported. The committed machine-readable state remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
 An external, authenticated seven-file base-model oracle now proves the official
 Transformers graph can load and execute the complete language tower. It does
@@ -286,35 +287,52 @@ comparison.
 
 The gate's first real run (source `4f9502a`, Metal/F16, recorded in the
 [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json))
-passed the dedicated stateless prompt row and its 54-boundary hidden trace,
-then failed at teacher-forced decision 18 with cosine `0.994340` (floor
-`0.999`). The gate stops at its first failing row, so the diagnostic above
-profiles every decision against both official streams (source `1b48b81`):
+compared Burn with the MPS/F16 oracle at a `0.999` floor. It passed the
+stateless prompt row and its hidden trace, then failed at teacher-forced
+decision 18 with cosine `0.994340`. The diagnostic above profiled every
+decision (source `1b48b81`): Burn's teacher rows had two rows below `0.999`
+(decision 18 at `0.994340`, decision 30 at `0.997652`), its cached rows none,
+with 32/32 top-1 on both paths.
 
-- Burn teacher versus official teacher: 30 of 32 rows at least `0.999123`;
-  decision 18 at `0.994340` and decision 30 at `0.997652`; 32/32 top-1.
-- Burn cached versus official cached: every row at least `0.999299`
-  (decision 25); 32/32 top-1.
-- The crossed comparisons reproduce the official split (Burn teacher versus
-  official cached `0.921665` at decision 22, against the oracle's own
-  `0.921505`).
+To separate the oracle's rounding from Burn's, the
+[precision tool](scripts/generate_nemotron_h_precision_reference.py) evaluated
+the same official class and checkout on the CPU, on the oracle's prompt and
+greedy tokens, in F32 (BF16-resident blocks widened only while they run,
+which is exact; a built-in self-check on a tiny model of the official class
+proves it bitwise, resident and with blocks offloaded to disk), BF16, and F16
+([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)). Against those official F32 rows:
 
-No implementation defect has been found. The failing rows are this model's
-F16-sensitive rows: Burn's own chunked teacher pass and its one-token path with
-the clamp enabled compute the same recurrence, yet differ by up to cosine
-`0.994053` (decision 24), below the failing official row. Every MoE block's gap
-between its sixth and seventh router selection scores lies between `7.6e-6`
-and `1.9e-3` on the teacher sequence (`8.7e-4` at decision 18's position),
-comparable to F16 rounding (`2^-11`), so an expert choice can differ between
-two faithful F16 implementations. The oracle records no expert IDs, so a
-flipped selection is consistent with, not proven by, this evidence.
+| official evaluation | prompt | teacher (worst row) | cached (worst row) |
+| --- | --- | --- | --- |
+| MPS/F16 (the oracle) | `0.999195` | `0.994466` (decision 18) | `0.998635` (decision 22) |
+| CPU/F16 | `0.999194` | `0.998632` (decision 27) | `0.999097` (decision 26) |
+| CPU/BF16 | `0.998238` | `0.966629` (decision 30) | `0.996507` (decision 16) |
 
-The 0.999 per-row floor therefore sits above the F16 floor at sensitive rows.
-It is not relaxed here. Resolving the gate needs a reviewed decision: qualify
-the teacher stream against a higher-precision oracle (an F32 Transformers run
-needs about 126 GB, beyond this host), calibrate each row's floor from
-measured F16 self-consistency, or record expert selections in a new oracle.
-Until then the gate is a recorded failure, not acceptance evidence.
+The oracle's own teacher row 18 is `0.994466` from F32, and the two official
+F16 evaluations disagree with each other there by `0.994336`, the size of the
+failing Burn row. The `0.999` floor against the F16 oracle was therefore
+unreachable even for the oracle; the failure measured the reference's F16
+rounding on this sparse hybrid, consistent with the router margins above. The
+official F32 teacher and cached rows still split to `0.930777` at decision 22,
+so the clamp asymmetry, not precision, drives the official path split.
+
+The gate now judges Burn's logit rows against the official F32 rows of the same
+path, from the authenticated precision bundle. Each path's floor is the worst
+cosine any official F16 evaluation reaches against F32 on that path, computed
+in the test from authenticated rows and required to stay at or above `0.99`:
+prompt `0.999194`, teacher `0.994466`, cached `0.998635`. Burn passes exactly
+when its F16 rows are at least as faithful to F32 as the official F16 rows are,
+with exact top-1 everywhere. The three hidden traces exist only at F16 and keep
+the `0.999` floor against the oracle.
+
+On source `9a9c730` the gate passes: against F32, Burn reaches `0.999224` on
+the prompt row, at least `0.997612` on every teacher-forced row (decision 30),
+and at least `0.998777` on every cached row (decision 22), with 32/32 top-1 on
+both paths. At teacher decision 18 Burn is closer to F32 than the oracle is.
+Against the F16 oracle its rows stay at the earlier values (teacher minimum
+`0.994340`, cached `0.999299`), and its hidden traces at least `0.999802`. The
+prompt and cached margins over their floors are small (`3e-5` and `1.4e-4`):
+both F16 implementations sit near the same distance from F32 there.
 
 The exact official cache has physical batch one while `DynamicCache.batch_size`
 reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution
@@ -455,18 +473,16 @@ reading any bundle because none of its independent anchors is populated.
 ## Remaining release gates
 
 This base oracle satisfies only the official-reference side of the numerical
-contract. The recorded Metal smoke also predates later runtime changes: the
-shared Mamba-2 mixer's vectorized chunk scan, PyTorch's thresholded `dt`
-softplus, batched cached execution with padded queries pinned to their row's
-last readable position, and one-pass MTP verification. Its stateless,
-cached-prefill, and one-token decode gates must therefore be replayed on the
-integrated source. Before this checkpoint can be advertised as supported:
+contract. The stateless, cached-prefill, and one-token decode smoke was replayed
+on the integrated source after the Mamba-2 scan, `dt` softplus, batched cached
+execution, and MTP verification changes
+([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)),
+and the official base gate passes against the official F32 rows
+([official comparison](#first-official-comparison)). Before this checkpoint can
+be advertised as supported:
 
-1. Execute the implemented ignored Metal gate and record Burn cached execution
-   against the official cached rows and Burn stateless execution against the
-   official stateless/teacher-forced rows at cosine at least 0.999, with exact
-   top-1 throughout. The gate already keeps the two official Mamba paths
-   distinct; compile-only validation is not a numerical pass.
+1. Record official F32 hidden traces too, so the hidden-trace checks can use
+   the same F32 truth and F16-envelope floors as the logit rows.
 2. Generate the MTP evidence with pinned vLLM and independently review and pin
    every combined-bundle hash; do not reuse the base loader as MTP evidence.
 3. Exercise real-weight MTP draft/verification state handling, padding,
