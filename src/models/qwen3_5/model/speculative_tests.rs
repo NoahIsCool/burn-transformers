@@ -16,6 +16,7 @@ use crate::{
     models::qwen3_5::{
         Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5LayerType, Qwen3_5TextConfig,
     },
+    models::shared::test_support::deterministic_parameters,
 };
 
 /// CPU Flex backend with F32 activations and portable I32 indices.
@@ -651,12 +652,16 @@ fn stochastic_cycles_with_equal_seeds_are_reproducible() {
 ///
 /// Six tokens make the random MTP head agree with the target often enough
 /// that cycles exercise rejections, partial acceptance, and full acceptance.
+/// The weights come from `seed` alone ([`deterministic_parameters`]), not
+/// from Burn's process-wide generator, which tests running in parallel
+/// share: a drafter that accepts no drafts is common among random models, so
+/// weights that depended on test scheduling made assertions about acceptance
+/// flaky.
 fn random_hybrid_model(
     seed: u64,
     device: &<TestBackend as BackendTypes>::Device,
 ) -> Qwen3_5ForCausalLm<TestBackend> {
-    TestBackend::seed(device, seed);
-    Qwen3_5ForCausalLm::init(
+    let model = Qwen3_5ForCausalLm::init(
         Qwen3_5TextConfig {
             vocab_size: 6,
             hidden_size: 16,
@@ -684,7 +689,8 @@ fn random_hybrid_model(
         },
         device,
     )
-    .unwrap()
+    .unwrap();
+    deterministic_parameters(model, seed)
 }
 
 /// Returns the first greatest logit of a `[1, 1, V]` tensor.
@@ -822,7 +828,9 @@ fn greedy_speculation_reproduces_plain_greedy_decoding() {
     let prompt = [1, 4, 2, 5, 3];
     let count = 20;
     let (mut accepted, mut drafted) = (0, 0);
-    for seed in [3, 17, 29, 41] {
+    // Each seed and draft length both accepts and rejects drafts (62 of 168
+    // accepted in total), so the assertions below hold with a wide margin.
+    for seed in [109, 36, 41, 83] {
         let model = random_hybrid_model(seed, &device);
         let reference = plain_greedy(&model, &prompt, count);
         for max_draft_tokens in [1, 3] {
