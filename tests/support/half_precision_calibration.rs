@@ -49,6 +49,27 @@
 //! deviate no more than the prompt does, as the F32 and gpt-oss gates assume
 //! for their own tolerances.
 //!
+//! # Decoding
+//!
+//! The argmax comparison alone would leave the decode path unread wherever
+//! no step is decisive (wrong rotary offsets, a bad cache append, or even
+//! non-finite logits would pass), so a half-precision run bounds the logits
+//! of decoding independently of the margins, in two ways:
+//!
+//! * every decode step of the cached greedy continuation must agree with the
+//!   same run's stateless pass over the prompt and the teacher-forced tokens,
+//!   at the same position, within the self-consistency tolerance
+//!   ([`HalfPrecisionGate::check_decode_steps`]). The truth holds no logits
+//!   beyond the prompt; the stateless pass is judged against it at every
+//!   prompt position by the prompt-logits test;
+//! * a prompt decoded token by token after a prefill of its first quarter,
+//!   as gpt-oss's cached long-prompt test does, assembles logits for every
+//!   position of the prompt (the prefill's own and one per decode step),
+//!   which must meet both bounds of the rule like a stateless pass
+//!   ([`HalfPrecisionGate::check_prompt`]).
+//!
+//! Both checks reject non-finite logits ([`Deviation::measure`]).
+//!
 //! # Slack
 //!
 //! The factor `s` covers the difference between two BF16 implementations of
@@ -94,9 +115,9 @@
 //!
 //! # Self-consistency
 //!
-//! Independently of the truth, a cached prefill and every row of a
-//! left-padded batch must agree with the same run's stateless pass within
-//! [`SELF_CONSISTENCY_TOLERANCE`] for the run's dtype.
+//! Independently of the truth, a cached prefill, every cached decode step,
+//! and every row of a left-padded batch must agree with the same run's
+//! stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for the run's dtype.
 //!
 //! # Pairing
 //!
@@ -130,7 +151,9 @@ pub(crate) const SLACK: f64 = 1.2;
 /// and `0.41` (F16) on four real blocks on Flex, and by `0.3125` on Flex/BF16
 /// and `0` on Metal/F16 on the full model
 /// (`acceptance/measurements/reference-precision-followups-20261016.json`).
-/// They are not calibrated on the Llama-family or Gemma checkpoints.
+/// They are not calibrated on the Llama-family or Gemma checkpoints, and
+/// gpt-oss measured them on batched rows only; cached prefills and decode
+/// steps reuse them.
 pub(crate) const SELF_CONSISTENCY_TOLERANCE: [(TensorDType, f64); 2] =
     [(TensorDType::F16, 0.5), (TensorDType::BF16, 0.5)];
 
@@ -904,22 +927,31 @@ impl HalfPrecisionGate {
 
     /// Checks every position of prompt `prompt` against both bounds; prints and returns the deviation.
     ///
+    /// `label` names the pass that produced `actual` (a stateless pass, or a
+    /// prompt decoded token by token) in the printed line and in panics.
+    ///
     /// # Panics
     ///
     /// If `actual` and `truth` do not hold the prompt's `[tokens, vocabulary]`
     /// logits, hold a non-finite value, or exceed a bound.
-    pub(crate) fn check_prompt(&self, prompt: usize, actual: &[f32], truth: &[f32]) -> Deviation {
+    pub(crate) fn check_prompt(
+        &self,
+        label: &str,
+        prompt: usize,
+        actual: &[f32],
+        truth: &[f32],
+    ) -> Deviation {
         let calibration = &self.calibration.prompts[prompt];
         let vocabulary = self.calibration.truth.vocabulary;
         assert_eq!(
             truth.len(),
             calibration.tokens * vocabulary,
-            "prompt {prompt}: the reference logits must cover every position"
+            "{label}: the reference logits must cover every position of prompt {prompt}"
         );
-        let observed = Deviation::measure(&format!("prompt {prompt}"), actual, truth);
+        let observed = Deviation::measure(label, actual, truth);
         let bound = calibration.bound;
         eprintln!(
-            "prompt {prompt}: {} tokens, max |Δ| = {:e} at position {} (bound {:e}), mean |Δ| = {:e} (bound {:e})",
+            "{label}: {} tokens, max |Δ| = {:e} at position {} (bound {:e}), mean |Δ| = {:e} (bound {:e})",
             calibration.tokens,
             observed.maximum,
             observed.index / vocabulary,
@@ -929,13 +961,13 @@ impl HalfPrecisionGate {
         );
         assert!(
             bound.admits_rows(&observed),
-            "prompt {prompt}: max |Δ| = {:e} exceeds the half-precision bound {:e}",
+            "{label}: max |Δ| = {:e} exceeds the half-precision bound {:e} of prompt {prompt}",
             observed.maximum,
             bound.maximum
         );
         assert!(
             bound.admits(&observed),
-            "prompt {prompt}: mean |Δ| = {:e} exceeds the half-precision bound {:e}",
+            "{label}: mean |Δ| = {:e} exceeds the half-precision bound {:e} of prompt {prompt}",
             observed.mean,
             bound.mean
         );
@@ -994,6 +1026,66 @@ impl HalfPrecisionGate {
             self.dtype
         );
         observed
+    }
+
+    /// Checks every cached decode step against the same run's stateless pass; prints and returns the worst step's deviation.
+    ///
+    /// `decoded[s]` holds the logits that decode step `s` returned for
+    /// sequence position `first + s`; `stateless` holds the stateless pass's
+    /// rows at positions `first, first + 1, …` in that order, one
+    /// vocabulary-wide row per step. Each step must lie within the dtype's
+    /// [`SELF_CONSISTENCY_TOLERANCE`] whatever its truth margin, so a decode
+    /// path that loses or misplaces a cached key, rotates with a wrong
+    /// position, or returns non-finite logits fails although no greedy step
+    /// is decisive (see [Decoding](self#decoding)). One line names the worst
+    /// step; a failing step is named in the panic.
+    ///
+    /// # Panics
+    ///
+    /// If there is no step, `stateless` does not hold one row per step, a
+    /// row has another width, a value is not finite, or a step exceeds the
+    /// tolerance.
+    pub(crate) fn check_decode_steps(
+        &self,
+        label: &str,
+        first: usize,
+        decoded: &[Vec<f32>],
+        stateless: &[f32],
+    ) -> Deviation {
+        let vocabulary = self.calibration.truth.vocabulary;
+        assert!(!decoded.is_empty(), "{label}: no decode step to check");
+        assert_eq!(
+            stateless.len(),
+            decoded.len() * vocabulary,
+            "{label}: the stateless pass must hold one {vocabulary}-wide row per decode step"
+        );
+        let tolerance = self_consistency_tolerance(self.dtype);
+        let mut worst: Option<(usize, Deviation)> = None;
+        for (step, (actual, expected)) in decoded
+            .iter()
+            .zip(stateless.chunks_exact(vocabulary))
+            .enumerate()
+        {
+            let position = first + step;
+            let name = format!("{label} step {step} at position {position}");
+            let observed = Deviation::measure(&name, actual, expected);
+            assert!(
+                observed.maximum <= tolerance,
+                "{name}: max |Δ| = {:e} to the stateless pass exceeds the {:?} self-consistency tolerance {tolerance:e}",
+                observed.maximum,
+                self.dtype
+            );
+            if worst.is_none_or(|(_, largest)| observed.maximum > largest.maximum) {
+                worst = Some((step, observed));
+            }
+        }
+        let (step, deviation) = worst.expect("at least one decode step was measured");
+        eprintln!(
+            "{label}: {} decode steps from position {first}: max |Δ| = {:e} to the stateless pass, at step {step} (tolerance {tolerance:e})",
+            decoded.len(),
+            deviation.maximum
+        );
+        deviation
     }
 
     /// Whether a greedy step of prompt 0 with truth `margin` is compared.
@@ -1670,20 +1762,40 @@ mod tests {
         let gate = HalfPrecisionGate::new(TensorDType::BF16, &truth, &official);
         // M = 1 and μ = 0.375, so the bounds are 1.2 and 0.45.
         let reference = [1.0, 2.0, 3.0, 4.0];
-        let observed = gate.check_prompt(0, &[1.0, 2.0, 3.0, 5.0], &reference);
+        let observed = gate.check_prompt("prompt 0", 0, &[1.0, 2.0, 3.0, 5.0], &reference);
         assert_eq!((observed.maximum, observed.index), (1.0, 3));
         let gate_ = gate.clone();
-        refuses("a maximum beyond the bound", move || {
-            gate_.check_prompt(0, &[1.0, 2.0, 3.0, 5.25], &reference);
-        });
+        refuses_with(
+            "a maximum beyond the bound",
+            "decoded: max |Δ| = 1.25e0 exceeds the half-precision bound 1.2e0 of prompt 0",
+            move || {
+                gate_.check_prompt("decoded", 0, &[1.0, 2.0, 3.0, 5.25], &reference);
+            },
+        );
         let gate_ = gate.clone();
-        refuses("a mean beyond the bound", move || {
-            gate_.check_prompt(0, &[1.5, 2.5, 3.5, 5.0], &reference);
-        });
+        refuses_with(
+            "a mean beyond the bound",
+            "decoded: mean |Δ| = 6.25e-1 exceeds the half-precision bound",
+            move || {
+                gate_.check_prompt("decoded", 0, &[1.5, 2.5, 3.5, 5.0], &reference);
+            },
+        );
         let gate_ = gate.clone();
-        refuses("a partial prompt", move || {
-            gate_.check_prompt(0, &[1.0, 2.0], &reference[..2]);
-        });
+        refuses_with(
+            "a partial prompt",
+            "decoded: the reference logits must cover every position of prompt 0",
+            move || {
+                gate_.check_prompt("decoded", 0, &[1.0, 2.0], &reference[..2]);
+            },
+        );
+        let gate_ = gate.clone();
+        refuses_with(
+            "a non-finite decoded logit",
+            "decoded: the compared logits hold a non-finite value",
+            move || {
+                gate_.check_prompt("decoded", 0, &[1.0, f32::NAN, 3.0, 4.0], &reference);
+            },
+        );
         gate.check_rows("row", 0, &[4.5, 1.0], &[3.5, 0.0]);
         let gate_ = gate.clone();
         refuses("a row beyond the maximum bound", move || {
@@ -1702,5 +1814,70 @@ mod tests {
                 mean: SLACK * 0.375
             }
         );
+    }
+
+    /// Every decode step is held to the self-consistency tolerance at its own position, whatever the greedy margins.
+    #[test]
+    fn decode_steps_are_each_checked_against_the_stateless_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let truth = write_bundle(root.path(), "truth", "float32", &[&[1.0, 2.0]]);
+        let official = write_bundle(root.path(), "official", "bfloat16", &[&[1.0, 2.5]]);
+        // M = 0.5, so no greedy margin of the synthetic bundle (3 and 0.5) is
+        // decisive above 1.2: the decode check must not depend on them.
+        for dtype in [TensorDType::BF16, TensorDType::F16] {
+            let gate = HalfPrecisionGate::new(dtype, &truth, &official);
+            assert!(!gate.is_decisive(0.5));
+            let stateless = [1.25, 2.0, 3.0, 4.0, -1.0, 0.0];
+            let decoded = vec![vec![1.0, 2.0], vec![3.0, 4.5], vec![-1.0, 0.0]];
+            let worst = gate.check_decode_steps("decode", 6, &decoded, &stateless);
+            assert_eq!(
+                (worst.maximum, worst.index),
+                (0.5, 1),
+                "step 1 is the worst, at the tolerance"
+            );
+            for (what, expected, decoded, stateless) in [
+                (
+                    "a step beyond the tolerance",
+                    "decode step 1 at position 7: max |Δ| = 7.5e-1 to the stateless pass exceeds",
+                    vec![vec![1.0, 2.0], vec![3.0, 4.75]],
+                    vec![1.0, 2.0, 3.0, 4.0],
+                ),
+                (
+                    "a non-finite step",
+                    "decode step 0 at position 6: the compared logits hold a non-finite value",
+                    vec![vec![f32::NAN, 2.0]],
+                    vec![1.0, 2.0],
+                ),
+                (
+                    "an infinite step",
+                    "decode step 1 at position 7: the compared logits hold a non-finite value",
+                    vec![vec![1.0, 2.0], vec![f32::INFINITY, 2.0]],
+                    vec![1.0, 2.0, 1.0, 2.0],
+                ),
+                (
+                    "a missing stateless row",
+                    "one 2-wide row per decode step",
+                    vec![vec![1.0, 2.0], vec![1.0, 2.0]],
+                    vec![1.0, 2.0],
+                ),
+                (
+                    "a narrow step",
+                    "decode step 0 at position 6: compared logits differ in length",
+                    vec![vec![1.0], vec![2.0, 3.0, 4.0]],
+                    vec![1.0, 2.0, 3.0, 4.0],
+                ),
+                (
+                    "no step",
+                    "decode: no decode step to check",
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ] {
+                let gate = gate.clone();
+                refuses_with(what, expected, move || {
+                    gate.check_decode_steps("decode", 6, &decoded, &stateless);
+                });
+            }
+        }
     }
 }

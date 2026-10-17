@@ -112,7 +112,12 @@
 //! prompt's chunk ends must lie within their prompt's `1.2 M`; the cached
 //! prefill and batched rows also within `0.5` of the stateless pass. The
 //! teacher-forced greedy continuations are compared at every step whose F32
-//! margin exceeds `2.4 M` of their prompt. `TRANSFORMERS_GEMMA_TOLERANCE` and
+//! margin exceeds `2.4 M` of their prompt. Whatever the margins, the short
+//! cached greedy test also checks the decode path: every decode step must lie
+//! within `0.5` of the same run's stateless pass at its position, and the
+//! longest short prompt, prefilled for its first quarter and then decoded
+//! token by token, must meet both bounds of its prompt at every position, as
+//! gpt-oss's cached long-prompt test does. `TRANSFORMERS_GEMMA_TOLERANCE` and
 //! `TRANSFORMERS_GEMMA_LONG_TOLERANCE` are refused, because they would
 //! replace the calibration; `TRANSFORMERS_GEMMA_MIN_GREEDY` still applies.
 //!
@@ -438,7 +443,7 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
         };
         let logits = host(model.forward(input, &options).unwrap().logits);
         if let Some(half) = &half {
-            half.check_prompt(index, &logits, &prompt.logits);
+            half.check_prompt(&format!("prompt {index}"), index, &logits, &prompt.logits);
             continue;
         }
         let largest = gap(&logits, &prompt.logits);
@@ -457,7 +462,11 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
 ///
 /// An F32 run stops at the first tie. A half-precision run also checks the
 /// prefill against the stateless pass and, the continuation being
-/// teacher-forced, compares every decisive step.
+/// teacher-forced, compares every decisive step. Because few or no steps may
+/// be decisive, it then checks the decode path regardless of the margins:
+/// every decode step against the same run's stateless pass over prompt 0 and
+/// the greedy tokens, and the longest prompt decoded token by token against
+/// the bundle ([`check_cached_prompt_decode`]).
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance, half) = load::<B>(device);
     let prompt = &reference.prompts[0];
@@ -490,6 +499,8 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         }
     }
     let mut compared = 0;
+    // Half precision keeps every decode step's logits for the checks below.
+    let mut decoded = Vec::new();
     for (step, &(expected, margin)) in reference.greedy.iter().enumerate() {
         match &half {
             None if margin <= 2.0 * tolerance => {
@@ -517,16 +528,104 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
                 .unwrap()
                 .logits,
         );
+        if half.is_some() {
+            decoded.push(logits.clone());
+        }
     }
     eprintln!(
         "greedy: {compared} of {} tokens match",
         reference.greedy.len()
     );
+    if let Some(half) = &half {
+        // Decode step s fed greedy token s at position T + s, so its logits
+        // are the stateless pass's at that position.
+        assert!(
+            !decoded.is_empty(),
+            "the bundle's greedy continuation is empty, so no decode step can be checked"
+        );
+        let continued = continued_prompt(&reference);
+        let positions: Vec<usize> = (prompt.tokens.len()..continued.len()).collect();
+        let stateless = logits_at(&model, &continued, &positions, device);
+        half.check_decode_steps("cached decode", prompt.tokens.len(), &decoded, &stateless);
+        check_cached_prompt_decode(&model, &reference, half, device);
+    }
     let minimum = minimum_greedy().min(reference.greedy.len());
     assert!(
         compared >= minimum,
         "only {compared} decisive greedy tokens were compared (minimum {minimum}); \
          regenerate the bundle with another first prompt or lower TRANSFORMERS_GEMMA_MIN_GREEDY"
+    );
+}
+
+/// Returns prompt 0 followed by the bundle's teacher-forced greedy tokens.
+fn continued_prompt(reference: &Reference) -> Vec<i64> {
+    reference.prompts[0]
+        .tokens
+        .iter()
+        .copied()
+        .chain(reference.greedy.iter().map(|&(token, _)| token))
+        .collect()
+}
+
+/// Decodes the longest prompt token by token after a prefill of its first quarter and judges it by the half-precision rule.
+///
+/// The prefill returns the logits of each of its positions and every later
+/// position comes from one cached decode step, so the assembled
+/// `[tokens, V]` logits cover the whole prompt and must meet both of its
+/// bounds, as a stateless pass must. This bounds the decode path against
+/// the reference bundle itself, whatever the greedy margins, as gpt-oss's
+/// `check_cached_long_prompt` does. The short prompts stay below the sliding
+/// window, so no ring wraps here (the long-context test covers that).
+fn check_cached_prompt_decode<B: Backend>(
+    model: &AutoCausalLm<B>,
+    reference: &Reference,
+    half: &HalfPrecisionGate,
+    device: &B::Device,
+) {
+    let (index, prompt) = reference
+        .prompts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, prompt)| prompt.tokens.len())
+        .unwrap();
+    let length = prompt.tokens.len();
+    let prefill = (length / 4).max(1);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, length).unwrap(), 1, device)
+        .unwrap();
+    let every_position = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let input = CausalLmInput {
+        token_ids: row::<B>(&prompt.tokens[..prefill], device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut logits = host(
+        model
+            .prefill(input, &mut state, &every_position)
+            .unwrap()
+            .logits,
+    );
+    for position in prefill..length {
+        let next = DecodeInput {
+            token_ids: row::<B>(&prompt.tokens[position..=position], device),
+            position_ids: None,
+            token_mask: None,
+        };
+        logits.extend(host(
+            model
+                .decode(next, &mut state, &ForwardOptions::default())
+                .unwrap()
+                .logits,
+        ));
+    }
+    half.check_prompt(
+        &format!("prompt {index} decoded after a {prefill}-token prefill"),
+        index,
+        &logits,
+        &prompt.logits,
     );
 }
 
@@ -729,7 +828,7 @@ fn check_long_context_logits<B: Backend>(device: &B::Device) {
             );
         }
         Some(half) => {
-            half.check_prompt(0, &logits, &reference.prompts[0].logits);
+            half.check_prompt("long prompt", 0, &logits, &reference.prompts[0].logits);
         }
     }
 

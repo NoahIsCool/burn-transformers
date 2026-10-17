@@ -594,7 +594,10 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   mean deviation, the slack being the largest Burn/official ratio measured on
   gpt-oss-20b, rounded up. These bounds calibrate BF16 runs; a Metal/F16 run
   reuses them as an upper limit, since no official F16 bundle can be
-  generated. The shared logic and its unit tests are in
+  generated. Every cached decode step is checked against the same run's
+  stateless pass, and a prompt decoded token by token against both bounds,
+  whether or not any greedy step is decisive. The shared logic and its unit
+  tests are in
   `tests/support/half_precision_calibration.rs`; F32 runs are unchanged. The
   seven official BF16 bundles and their calibration are recorded
   ([record](acceptance/measurements/half-precision-calibration-20261017.json));

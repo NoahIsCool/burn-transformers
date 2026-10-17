@@ -194,7 +194,12 @@ to `0.874` of the official BF16 statistics), so an F16 pass is weaker
 evidence than a BF16 pass. Cached prefills and batched rows
 must also agree with the stateless pass within gpt-oss's self-consistency
 tolerance (`0.5` for F16 and BF16), and the teacher-forced greedy continuation
-is compared at every step whose F32 margin exceeds `2.4 M`. The F32 tolerance
+is compared at every step whose F32 margin exceeds `2.4 M`. Whatever the
+margins, the cached greedy tests also check the decode path: every decode
+step must agree with the same run's stateless pass at its position within
+that tolerance, and the longest prompt, prefilled for its first quarter and
+decoded token by token, must meet both bounds of its prompt, as gpt-oss's
+cached long-prompt test does. The F32 tolerance
 overrides are refused in half precision; the F32 gates are unchanged. The
 seven official bundles and their calibration are recorded in the
 [half-precision calibration record](acceptance/measurements/half-precision-calibration-20261017.json):
@@ -211,7 +216,8 @@ seven official bundles and their calibration are recorded in the
 
 Where no greedy step is decisive, the cached greedy test needs
 `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0` or `TRANSFORMERS_GEMMA_MIN_GREEDY=0`,
-as the gpt-oss half-precision greedy tests do. On the long Gemma prompt the
+as the gpt-oss half-precision greedy tests do; that drops only the argmax
+floor, not the decode checks. On the long Gemma prompt the
 maximum bound (`9.7`) exceeds what a missing sliding window moves at the
 window's first positions, so a half-precision run requires only that the run
 without the window fails the rule; the F32 run keeps the tenfold check. The
