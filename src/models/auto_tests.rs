@@ -365,6 +365,16 @@ fn tiny_modular() -> crate::architecture::DecoderSpec {
 /// two tokens) keep their two best logits at least `0.0199` apart (OLMo 2),
 /// over 30,000 times the largest path difference. Of 1,000 seeds, 25 kept
 /// every family above `0.01` and none above `0.02`.
+///
+/// The mixture-of-experts fixtures also choose experts by top-k, which
+/// rounding could flip at a near tie and so change the logits. With this
+/// seed, over every routed token (each valid prompt token and the first
+/// generated token, in every sparse layer), the last selected and first
+/// unselected router logits stay at least `2.8e-3` apart (Qwen3-MoE;
+/// DeepSeek-V2 `4.4e-2`, gpt-oss `4.3e-2`), and Nemotron-H's two expert
+/// groups differ by at least `2.9e-2` in summed sigmoid score. The one-shot
+/// and chunked router logits differ by at most `1.2e-7`. All of these
+/// margins and differences were measured on aarch64 Flex.
 const PREFILL_SEED: u64 = 147;
 
 /// Committed tiny-golden configurations of [`every_causal_family_matches_bounded_and_one_shot_prefill`].
@@ -420,7 +430,8 @@ const PREFILL_GOLDENS: [(&str, &str); 10] = [
 /// never started, which every implementation must accept as a no-op. The test
 /// covers every registered family (each Llama-family alias included) and the
 /// modular reference model, and fails if a registered family is left out.
-/// Weights come from [`PREFILL_SEED`], which keeps every greedy step decisive.
+/// Weights come from [`PREFILL_SEED`], which keeps every greedy step and
+/// every expert choice decisive.
 #[test]
 fn every_causal_family_matches_bounded_and_one_shot_prefill() {
     let device = Default::default();
@@ -854,13 +865,17 @@ fn cache_sliding_window_never_changes_model_family_retention() {
 }
 
 /// Automatic dispatch preserves the same fresh-state fallback and parity contract.
+///
+/// The wrapped model is the Qwen3-MoE fixture of
+/// [`every_causal_family_matches_bounded_and_one_shot_prefill`], with the
+/// same [`PREFILL_SEED`] weights, so the margins recorded there hold here.
 #[test]
 fn auto_causal_dispatch_matches_bounded_and_one_shot_prefill() {
     let device = Default::default();
-    TestBackend::seed(&device, 10_005);
-    let model = AutoCausalLm::from(
+    let model = AutoCausalLm::from(deterministic_parameters(
         Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).expect("tiny auto Qwen MoE"),
-    );
+        PREFILL_SEED,
+    ));
     assert_bounded_prefill_contract(
         "AutoCausalLm<Qwen3-MoE>",
         &model,
