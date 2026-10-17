@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import unittest
 
+from repository_evidence import repository_evidence
+
 
 CRATE = Path(__file__).resolve().parents[2]
 
@@ -18,10 +20,6 @@ class PublicExampleRecordTests(unittest.TestCase):
         self.assertFalse(record["standardized_benchmark"])
         self.assertFalse(record["final_candidate_replay"])
         self.assertFalse(record["network_access"])
-        # Authenticate the measured dependency graph. New optional features may
-        # change the current lock without rewriting historical execution claims.
-        historical_lock = CRATE / "acceptance/measurements/public-examples-20260909/Cargo.lock"
-        self.assertEqual(record["cargo_lock_sha256"], hashlib.sha256(historical_lock.read_bytes()).hexdigest())
         self.assertEqual(len(record["runs"]), 2)
         for run in record["runs"]:
             with self.subTest(example=run["example"]):
@@ -29,8 +27,6 @@ class PublicExampleRecordTests(unittest.TestCase):
                 self.assertEqual(run["repository"], primary["repository"])
                 self.assertEqual(run["revision"], primary["revision"])
                 self.assertEqual(run["exit_code"], 0)
-                historical_example = historical_lock.parent / run["example"]
-                self.assertEqual(run["example_sha256"], hashlib.sha256(historical_example.read_bytes()).hexdigest())
                 self.assertEqual(run["stdout_sha256"], hashlib.sha256(run["stdout"].encode()).hexdigest())
                 self.assertIn("--offline", run["command"])
                 self.assertIn("--locked", run["command"])
@@ -38,6 +34,15 @@ class PublicExampleRecordTests(unittest.TestCase):
                 self.assertEqual(run["command"][1], "+stable")
                 self.assertTrue(run["stdout"].endswith("\n"))
                 self.assertGreater(run["process_wall_seconds"], run["compile_seconds"])
+        # Authenticate the measured dependency graph and example sources. New
+        # optional features may change the current lock without rewriting
+        # historical execution claims. Only a Git checkout carries these copies.
+        historical_lock = repository_evidence(CRATE / "acceptance/measurements/public-examples-20260909/Cargo.lock")
+        self.assertEqual(record["cargo_lock_sha256"], hashlib.sha256(historical_lock.read_bytes()).hexdigest())
+        for run in record["runs"]:
+            with self.subTest(example=run["example"]):
+                historical_example = repository_evidence(historical_lock.parent / run["example"])
+                self.assertEqual(run["example_sha256"], hashlib.sha256(historical_example.read_bytes()).hexdigest())
 
     def test_integrated_functional_replay_is_authenticated_and_scoped(self):
         """Four numerical/API tests and two examples cannot imply a release promotion."""

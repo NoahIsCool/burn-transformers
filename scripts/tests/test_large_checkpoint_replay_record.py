@@ -1,10 +1,13 @@
 """Validate the October 16 large-checkpoint replay record without checkpoints or a GPU."""
 
+import functools
 import hashlib
 import json
 from pathlib import Path
 import re
 import unittest
+
+from repository_evidence import repository_evidence
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,9 +20,13 @@ class LargeCheckpointReplayRecordTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Read only the committed record and its log, never the external model paths."""
+        """Read only the committed record, never the external model paths."""
         cls.record = json.loads(RECORD.read_text())
-        cls.log = (MEASUREMENTS / cls.record["log"]).read_text()
+
+    @functools.cached_property
+    def log(self):
+        """The committed replay log, which only a Git checkout carries."""
+        return repository_evidence(MEASUREMENTS / self.record["log"]).read_text()
 
     def test_record_is_evidence_not_a_support_declaration(self):
         """The replay names its exact sources and advertises nothing."""
@@ -49,7 +56,7 @@ class LargeCheckpointReplayRecordTests(unittest.TestCase):
 
     def test_log_identity_matches_the_committed_bytes(self):
         """The recorded SHA-256 authenticates the exact log that the summaries quote."""
-        digest = hashlib.sha256((MEASUREMENTS / self.record["log"]).read_bytes()).hexdigest()
+        digest = hashlib.sha256(repository_evidence(MEASUREMENTS / self.record["log"]).read_bytes()).hexdigest()
         self.assertEqual(digest, self.record["log_sha256"])
 
     def test_every_process_is_accounted_for(self):
