@@ -144,10 +144,19 @@
 //! precision both chunk ends and all 8 decode steps after the wrap must
 //! instead lie within `0.5` of the same run's stateless sliding-window pass
 //! at their positions, the pass that the long logits test ties to the
-//! bundle. No half-precision run of this crate has
-//! been measured against these bounds yet. To run the Flex/BF16 gates, run
-//! every test but the long cached one with the default minimum, then that
-//! test alone with the minimum lowered:
+//! bundle. The first runs of this crate against these bounds are recorded in
+//! `acceptance/measurements/mac-validation-20261017.json`. At `c2936fe`,
+//! which evaluates half-precision tanh GELU in F32, Flex/BF16 passes the
+//! prompt-logit (maxima `0.346`, `0.514`, `0.582`), batched, long-logit, and
+//! long cached tests, and the short cached greedy test fails one decode step
+//! (`0.75` from the stateless pass against `0.5`), a tolerance that
+//! Transformers' own SDPA and MPS BF16 decodes exceed as well. Every Metal/F16
+//! test fails on non-finite logits: gemma-3-4b-it's residual stream reaches
+//! `5.1e4` after block 4 and turns non-finite in block 5 in Transformers' own
+//! CPU and MPS F16 evaluations too, so the Metal/F16 profile cannot pass as
+//! specified. To run the Flex/BF16 gates, run every test but the long cached
+//! one with the default minimum, then that test alone with the minimum
+//! lowered:
 //!
 //! ```text
 //! export TRANSFORMERS_GEMMA_DTYPE=bf16 \

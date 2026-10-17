@@ -233,12 +233,13 @@ the F32 run catches such a ring through its `5e-3` tolerance. The
 ignored tests `official_bf16_reference_calibrates_the_half_precision_bounds`
 (Llama family) and `official_bf16_references_calibrate_the_half_precision_bounds`
 (Gemma) reproduce the figures from the bundles alone; they evaluate no Burn
-model, so their passes are not gate passes. No Burn half-precision run of
-these two gates exists yet.
+model, so their passes are not gate passes. The first Burn half-precision
+runs of these two gates are recorded in the
+[Mac validation round](#mac-validation-round-october-17) below.
 
 These gates establish experimental validation only; none promotes a
-checkpoint. The Flex and Metal F32 runs at `f4c56c4` (below) are experimental
-evidence on the same terms.
+checkpoint. The Flex and Metal F32 runs at `f4c56c4` and the runs of the Mac
+validation round (below) are experimental evidence on the same terms.
 
 ### Artifact-gated tokenizer and chat-template parity
 
@@ -419,9 +420,72 @@ explains why).
   Qwen2-7B (2.18 GB). Only the full gpt-oss gates were rerun at `c15f24e`.
   The `f4c56c4` F32 gates of the others and of the truncated gpt-oss bundles
   used the previous order and were not rerun (the record's `not_run`); their
-  footprints were not re-measured.
+  footprints were not re-measured. The Mac validation round below reruns
+  them.
 
-Still open after these replays and follow-ups:
+### Mac validation round (October 17)
+
+The [Mac validation record](acceptance/measurements/mac-validation-20261017.json)
+collects four groups of runs on this Mac. Each gate ran in its own process
+from a release binary named by SHA-256, and every log, diagnostic, summary,
+and copied harness script is committed in its campaign directory and
+authenticated by digest. The Llama-family gates and the first Gemma pass ran
+at `53f167b` (the half-precision gate fixes); everything after ran at
+`c2936fe`, which evaluates half-precision tanh GELU in F32 (below). Controls
+ran from a verified export of `c15f24e`'s parent `9a9c730`.
+`scripts/tests/test_mac_validation_record.py` ties every quoted figure,
+status, and identity to the committed logs and to the earlier records the
+round repeats. The record promotes no checkpoint.
+
+- F32 under `c15f24e`'s install order: all 30 Llama-family gates (at
+  `53f167b`), all 10 gemma-3-4b-it gates (at both sources), all 16 truncated
+  gpt-oss gates and FLAN-T5-small on Flex and Metal (at `c2936fe`) pass, with
+  every deviation, greedy, and cached-decode line identical to `f4c56c4`.
+  Peak footprints fall by 1.9 to 2.2 GB for Qwen2-7B and Llama-3.1-8B, and for
+  truncated gpt-oss by about 2.0 GB on Flex and 4.9 GB (one block) or 8.8 GB
+  (four blocks) on Metal; a control at `9a9c730` reproduces the `f4c56c4`
+  peaks within 22 MB, which attributes the drop to `c15f24e`.
+- First Burn half-precision runs of the Llama-family gates (at `53f167b`): all
+  15 Metal/F16 runs pass, held to the BF16 bounds as an upper limit, and 10 of
+  15 Flex/BF16 runs pass. Flex/BF16 fails SmolLM-135M's prompt-logit and
+  cached greedy tests (prompt 1, position 0: `1.436` against `1.322`),
+  SmolLM3-3B's prompt-logit test (prompt 1 mean `0.0971` against `0.0947`),
+  and the cached decode steps of Qwen3-4B (`0.5625`) and SmolLM3-3B (`0.516`)
+  against the `0.5` self-consistency tolerance.
+- Gemma half precision: at `53f167b` Flex/BF16 failed its prompt logits
+  (`0.770` against `0.711`). The cause was the crate's tanh GELU, which
+  Burn composes from operations that each round to BF16; `c2936fe` evaluates
+  F16 and BF16 tanh GELU in F32 and rounds once, as Gemma's
+  `gelu_pytorch_tanh` does (F32 is unchanged). At `c2936fe` Flex/BF16 passes
+  4 of 5 gates (prompt maxima `0.346`, `0.514`, `0.582`), and the short cached
+  greedy test fails one decode step (`0.75` against `0.5`). Every Metal/F16
+  run fails on non-finite logits: gemma-3-4b-it's residual reaches `5.1e4`
+  after block 4 and turns non-finite in block 5, in Transformers' own CPU and
+  MPS F16 evaluations as well.
+- Quantized (at `c2936fe`): the Muse-Glimmer-30B and Qwen3-30B-A3B Q8 and Q4
+  conversions reproduce their authenticated Burnpacks byte for byte (Muse's
+  with the three-open shard order of `c15f24e` now exercised on real
+  weights); the Muse packed Metal smokes and the Qwen3-30B-A3B smokes and
+  kernel audits pass, the latter with logit, trace, and decode digests
+  identical to the large replay; the packed-kernel and lib Metal tests pass.
+  An alternating A/B against `9a9c730` shows `c15f24e` raising the packed Muse
+  Q8 smoke's peak footprint by about 1.6 GB (45.7 against 44.1 GB) in two of
+  three rounds.
+- Diagnostics: Transformers 5.2.0's own BF16 graphs other than the
+  calibrating CPU eager one fail the same `1.2` rule on SmolLM-135M, Qwen3-4B,
+  SmolLM3-3B, and gemma-3-4b-it, and its own BF16 cached decode departs from
+  its stateless pass by up to `1.75` (Qwen2-7B), while F32 decode stays within
+  `2.6e-4` in both implementations. Burn's half-precision SiLU
+  (`x * sigmoid(x)` with the sigmoid rounded first) alone accounts for
+  SmolLM-135M's prompt-1 maximum; evaluating it in F32 turns no gate green,
+  so it was not changed. No bound, tolerance, or slack was changed.
+
+The round did not run the Qwen3.5-0.8B and DeepSeek-V2-Lite gates (last at
+`f4c56c4`), the full gpt-oss gates (last at `c15f24e`), the Muse official
+gate, the Qwen3.8, Nemotron, and FLAN-T5-XXL gates, quantized quality, or the
+CUDA and ROCm checks; the record's `not_run` gives each reason.
+
+Still open after these replays, the follow-ups, and the Mac validation round:
 
 - real-weight Nemotron MTP parity, and official F32 hidden traces for its
   base gate;
@@ -431,12 +495,18 @@ Still open after these replays and follow-ups:
   F16 row;
 - Q8/Q4 quantized-reference and quality gates (Qwen3.8, Qwen3-30B-A3B, Muse),
   and an official reference for Qwen3-30B-A3B (no bundle exists);
-- Flex/BF16 and Metal/F16 runs of the new half-precision Llama-family and
-  Gemma gates (their official BF16 bundles and calibration exist; no Burn
-  half-precision run has been measured against them), and real Mistral and
-  OLMo 2 checkpoints (tiny goldens only);
-- reruns of the F32 Llama-family, Gemma, and truncated gpt-oss gates under
-  `c15f24e`'s install order.
+- the failing Flex/BF16 Llama-family and Gemma half-precision gates: a
+  reviewed decision on the prompt-bound rule (its `1.2` slack over one
+  official evaluation is narrower than Transformers' own BF16 spread), on
+  the decode self-consistency tolerance (gpt-oss's batched-row `0.5`, never
+  calibrated on decode steps), and on evaluating half-precision SiLU in F32,
+  followed by a rerun of every half-precision gate those decisions touch;
+- the Gemma Metal/F16 profile, which cannot pass because gemma-3-4b-it
+  overflows F16: refuse F16 for Gemma 3 with a contextual error, drop the
+  profile, or qualify Metal in BF16;
+- the packed Muse Q8 smoke's higher peak footprint under `c15f24e` (no bound
+  applies);
+- real Mistral and OLMo 2 checkpoints (tiny goldens only).
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.

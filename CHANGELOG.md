@@ -606,8 +606,24 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   tests are in
   `tests/support/half_precision_calibration.rs`; F32 runs are unchanged. The
   seven official BF16 bundles and their calibration are recorded
-  ([record](acceptance/measurements/half-precision-calibration-20261017.json));
-  no Burn half-precision run of these gates has been made yet.
+  ([record](acceptance/measurements/half-precision-calibration-20261017.json)).
+  Their first Burn runs are in the Mac validation record below.
+- A Mac validation round records 173 single-process test runs with their
+  logs, diagnostics, and harness, each named by source commit and binary
+  digest, and checked by `scripts/tests/test_mac_validation_record.py`
+  ([record](acceptance/measurements/mac-validation-20261017.json)). Under
+  `c15f24e`'s install order the Llama-family, gemma-3-4b-it, truncated
+  gpt-oss, and FLAN-T5-small F32 gates repeat every `f4c56c4` line, with
+  lower peak footprints for Qwen2-7B, Llama-3.1-8B, and truncated gpt-oss. The
+  Muse-Glimmer-30B and Qwen3-30B-A3B Q8/Q4 conversions reproduce their
+  authenticated Burnpacks byte for byte, and their packed Metal smokes and
+  audits pass. The first Burn half-precision runs of the Llama-family gates
+  pass on Metal/F16 and in 10 of 15 cases on Flex/BF16; Gemma's pass 4 of 5
+  on Flex/BF16 after the tanh GELU fix and cannot pass on Metal/F16, because
+  gemma-3-4b-it overflows F16 in Transformers too. The failures, which the
+  record traces to the calibration rule's width, the decode tolerance, and
+  the twice-rounded half-precision SiLU, remain open; no bound was changed
+  and no checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

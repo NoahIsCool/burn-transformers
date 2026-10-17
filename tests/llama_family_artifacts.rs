@@ -117,8 +117,17 @@
 //! Only the cached greedy test reads the variable, so for SmolLM-135M,
 //! SmolLM3-3B, and Qwen2-7B it can be added to the whole command below.
 //! Qwen2-7B's official BF16 run already picks another first token than its
-//! F64 bundle. No half-precision run of this crate has been measured against
-//! these bounds yet. To run the Flex/BF16 gate (set `f16`,
+//! F64 bundle. The first runs of this crate against these bounds (source
+//! `53f167b`, `acceptance/measurements/mac-validation-20261017.json`) pass
+//! every Metal/F16 test of all five checkpoints and every Flex/BF16 test of
+//! Qwen2-7B and Llama-3.1-8B. Flex/BF16 fails SmolLM-135M's prompt-logit and
+//! cached greedy tests (prompt 1, position 0: `1.436` against `1.322`),
+//! SmolLM3-3B's prompt-logit test (prompt 1 mean `0.0971` against `0.0947`),
+//! and the cached decode steps of Qwen3-4B (`0.5625`) and SmolLM3-3B
+//! (`0.516`) against the `0.5` self-consistency tolerance; the record traces
+//! these to the rule's width (Transformers' own SDPA and MPS BF16 graphs fail
+//! it too) and to the twice-rounded half-precision SiLU of
+//! `feed_forward::apply_activation`. To run the Flex/BF16 gate (set `f16`,
 //! `--features metal`, and the `metal::` tests for Metal/F16):
 //!
 //! ```text

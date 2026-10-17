@@ -64,7 +64,10 @@
 //! 78 GiB and does not fit a 96 GiB host beside the operating system. The
 //! reference generator holds the BF16 model (about 39 GiB) plus the
 //! checkpoint's MXFP4 tensors while converting, so it needs about 55 GiB. A
-//! one-block truncation needs about 9 GiB in F32 on either side.
+//! one-block truncation holds about 9 GiB of F32 weights on either side. At
+//! `c2936fe` the one-block gates peaked at up to 15.1 GB on Flex and 22.6 GB
+//! on Metal, and the four-block gates at up to 25.5 GB and 30.4 GB
+//! (`acceptance/measurements/mac-validation-20261017.json`).
 //!
 //! # Dtype and tolerance
 //!
@@ -222,7 +225,9 @@ const HALF_MEAN_TOLERANCE: f32 = 0.15;
 /// alone, so it also absorbs any shape dependence of half-precision kernels.
 /// On four real blocks on Flex the largest gaps were `3.6e-5` (F32), `0.125`
 /// (BF16), and `0.41` (F16): Flex's F16 matmul accumulates in F16, so F16
-/// runs there are noisier than BF16 ones.
+/// runs there are noisier than BF16 ones. The F32 gaps measured at `f4c56c4`
+/// and again at `c2936fe` reach `4.8e-5` on four blocks and `5.3e-5` on one
+/// (`acceptance/measurements/mac-validation-20261017.json`), far inside `1e-3`.
 const SELF_CONSISTENCY_TOLERANCE: [(TensorDType, f32); 3] = [
     (TensorDType::F32, 1e-3),
     (TensorDType::F16, 0.5),
