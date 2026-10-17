@@ -1,9 +1,12 @@
 //! Transformer normalization variants with explicit checkpoint conventions.
 //!
 //! RMS normalization rescales a vector without subtracting its mean:
-//! `y = x / sqrt(mean(x^2) + epsilon) * scale`. Computing the reduction in
-//! FP32 is important for F16 inference because squaring and summing a wide
-//! residual stream otherwise loses significant dynamic range. Some recent
+//! `y = x / sqrt(mean(x^2) + epsilon) * scale`. The reduction, inverse root,
+//! and learned scaling evaluate in [`at_least_f32`] of the input dtype.
+//! Promoting F16/BF16 to F32 is important for reduced-precision inference
+//! because squaring and summing a wide residual stream otherwise loses
+//! significant dynamic range; F32 inputs stay F32, and F64 inputs are never
+//! narrowed, so a double-precision model normalizes in F64. Some recent
 //! checkpoints store a zero-centered learned parameter and define
 //! `scale = 1 + weight`; older checkpoints store `scale` directly. Although
 //! `x / sqrt(m)`, `x * pow(m, -0.5)`, and `x * reciprocal(sqrt(m))` are
@@ -12,10 +15,10 @@
 
 use burn::{
     module::{Initializer, Module, Param},
-    tensor::{DType, Tensor, backend::Backend},
+    tensor::{Tensor, backend::Backend},
 };
 
-use crate::{Error, Result};
+use crate::{Error, Result, precision::at_least_f32};
 
 /// Floating-point operation graph used to apply an inverse RMS denominator.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -50,7 +53,8 @@ pub struct RmsNormConfig {
     /// Some architectures, including DeepSeek V2, Qwen3-MoE, and Nemotron-H,
     /// cast the unit-RMS activation back to the residual dtype before
     /// multiplying by the learned parameter. Others, including Qwen3.5/Qwen3.8,
-    /// keep both operations in FP32 and round only the final result.
+    /// keep both operations in the evaluation dtype (FP32 for reduced
+    /// precision) and round only the final result.
     #[serde(default)]
     pub round_before_scale: bool,
     /// Inverse-root operation graph required by the checkpoint implementation.
@@ -131,7 +135,7 @@ impl RmsNormConfig {
 pub struct RmsNorm<B: Backend> {
     /// Learned scale, or learned scale minus one for zero-centered checkpoints.
     pub weight: Param<Tensor<B, 1>>,
-    /// Stabilizer added to the FP32 mean square.
+    /// Stabilizer added to the mean square in the evaluation dtype.
     pub epsilon: f64,
     /// Whether to add one to the learned parameter before scaling.
     pub zero_centered: bool,
@@ -145,20 +149,25 @@ pub struct RmsNorm<B: Backend> {
 impl<B: Backend> RmsNorm<B> {
     /// Normalizes the last axis of a tensor of arbitrary rank.
     ///
-    /// The input dtype is restored after the FP32 reduction so this method
-    /// remains compatible with F16 Metal execution while preserving an FP32
-    /// variance estimate. By default, normalization and learned scaling remain
-    /// in FP32 until the final cast; this matches zero-centered Qwen RMSNorm.
+    /// The reduction evaluates in [`at_least_f32`] of the input dtype: F16/BF16
+    /// promote to F32, F32 stays F32, and F64 stays F64. The input dtype is
+    /// restored afterwards, so this method remains compatible with F16 Metal
+    /// execution while preserving an FP32 variance estimate, and an F64 model
+    /// keeps every normalization operation in F64. The learned weight is cast
+    /// to the same evaluation dtype. By default, normalization and learned
+    /// scaling remain in the evaluation dtype until the final cast; this
+    /// matches zero-centered Qwen RMSNorm.
     /// [`RmsNormConfig::with_round_before_scale`] instead reproduces
     /// architectures that round the normalized activation first.
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let dtype = input.dtype();
-        let input = input.cast(DType::F32);
+        let evaluation = at_least_f32(dtype);
+        let input = input.cast(evaluation);
         let mean_square = input.clone().square().mean_dim(D - 1) + self.epsilon;
         let scale = if self.zero_centered {
-            self.weight.val().cast(DType::F32) + 1.0
+            self.weight.val().cast(evaluation) + 1.0
         } else {
-            self.weight.val().cast(DType::F32)
+            self.weight.val().cast(evaluation)
         };
         let normalized = match self.root_mode {
             RmsNormRootMode::DivideBySqrt => input / mean_square.sqrt(),

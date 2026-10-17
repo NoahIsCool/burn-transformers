@@ -6,7 +6,10 @@ use burn::{
     tensor::{DType, Tensor, TensorData, Tolerance, f16},
 };
 
-use super::{RmsNormConfig, RmsNormRootMode};
+use super::{RmsNorm, RmsNormConfig, RmsNormRootMode};
+use crate::precision::test_support::{
+    assert_bitwise_eq, assert_f32_path_is_distinguishable, assert_matches_f64_reference,
+};
 
 /// Conventional and zero-centered initialization both begin with unit scale.
 #[test]
@@ -175,4 +178,186 @@ fn invalid_config_is_rejected() {
         .validate()
         .expect_err("NaN epsilon must fail");
     assert!(error.to_string().contains("rms_norm.epsilon"));
+}
+
+/// Width of the normalized axis in the precision-rule fixtures.
+const PRECISION_WIDTH: usize = 5;
+
+/// Direct learned scales; zero-centered fixtures store these values minus one.
+const PRECISION_SCALES: [f64; PRECISION_WIDTH] = [0.731, 1.337, -0.419, 2.25, -1.5];
+
+/// Every inverse-root graph, parameter convention, and rounding order.
+fn every_operation_graph() -> Vec<RmsNormConfig> {
+    let mut configs = Vec::new();
+    for root_mode in [
+        RmsNormRootMode::DivideBySqrt,
+        RmsNormRootMode::MultiplyByPower,
+        RmsNormRootMode::MultiplyByReciprocalSqrt,
+    ] {
+        for zero_centered in [false, true] {
+            for round_before_scale in [false, true] {
+                configs.push(
+                    RmsNormConfig::new(PRECISION_WIDTH)
+                        .with_epsilon(1e-5)
+                        .with_zero_centered(zero_centered)
+                        .with_round_before_scale(round_before_scale)
+                        .with_root_mode(root_mode),
+                );
+            }
+        }
+    }
+    configs
+}
+
+/// Stored checkpoint parameters for a configuration: the scale or the scale minus one.
+fn stored_weight(config: &RmsNormConfig) -> Vec<f64> {
+    PRECISION_SCALES
+        .iter()
+        .map(|scale| {
+            if config.zero_centered {
+                scale - 1.0
+            } else {
+                *scale
+            }
+        })
+        .collect()
+}
+
+/// Non-dyadic `[2, 3, 5]` activations, including one row dominated by epsilon.
+///
+/// Values such as `sin(0.731 k)` are not representable in F32, so any F32
+/// intermediate leaves a relative error near `1e-8` in the normalized output.
+fn precision_input() -> Vec<f64> {
+    (0..2 * 3 * PRECISION_WIDTH)
+        .map(|index| {
+            let value = ((index as f64 + 1.0) * 0.731).sin() * (1.0 + (index % 7) as f64 / 3.0);
+            if index / PRECISION_WIDTH == 4 {
+                value * 1e-4
+            } else {
+                value
+            }
+        })
+        .collect()
+}
+
+/// Host F64 RMSNorm, `x_i / sqrt(mean(x^2) + epsilon) * scale_i`, applied per row.
+fn host_rms_norm(input: &[f64], weight: &[f64], epsilon: f64, zero_centered: bool) -> Vec<f64> {
+    input
+        .chunks_exact(weight.len())
+        .flat_map(|row| {
+            let mean_square = row.iter().map(|value| value * value).sum::<f64>() / row.len() as f64;
+            let inverse_root = (mean_square + epsilon).sqrt().recip();
+            row.iter().zip(weight).map(move |(value, weight)| {
+                let scale = if zero_centered { 1.0 + weight } else { *weight };
+                value * inverse_root * scale
+            })
+        })
+        .collect()
+}
+
+/// Creates a tensor with explicit storage dtype from host doubles.
+fn tensor_from_f64<const D: usize>(
+    values: Vec<f64>,
+    shape: [usize; D],
+    dtype: DType,
+) -> Tensor<Flex, D> {
+    Tensor::<Flex, D>::from_data(
+        TensorData::new(values, shape),
+        (&Default::default(), DType::F64),
+    )
+    .cast(dtype)
+}
+
+/// Frozen copy of the RMSNorm forward graph before the evaluation-precision rule.
+///
+/// It promoted every input to F32 unconditionally. Keeping it verbatim proves
+/// that F16, BF16, and F32 activations execute the identical operation sequence
+/// and shows that F64 activations used to be narrowed.
+fn historical_forward<const D: usize>(
+    norm: &RmsNorm<Flex>,
+    input: Tensor<Flex, D>,
+) -> Tensor<Flex, D> {
+    let dtype = input.dtype();
+    let input = input.cast(DType::F32);
+    let mean_square = input.clone().square().mean_dim(D - 1) + norm.epsilon;
+    let scale = if norm.zero_centered {
+        norm.weight.val().cast(DType::F32) + 1.0
+    } else {
+        norm.weight.val().cast(DType::F32)
+    };
+    let normalized = match norm.root_mode {
+        RmsNormRootMode::DivideBySqrt => input / mean_square.sqrt(),
+        RmsNormRootMode::MultiplyByPower => input * mean_square.powf_scalar(-0.5),
+        RmsNormRootMode::MultiplyByReciprocalSqrt => input * mean_square.sqrt().recip(),
+    };
+    if norm.round_before_scale {
+        normalized.cast(dtype) * scale.cast(dtype).unsqueeze()
+    } else {
+        (normalized * scale.unsqueeze()).cast(dtype)
+    }
+}
+
+/// F64 activations normalize in F64 for every graph, matching a host F64 reference.
+///
+/// The frozen historical graph narrows the same input through F32 and misses
+/// that reference by more than F32 rounding, so this fails if F64 is downcast.
+#[test]
+fn f64_operation_graphs_match_an_independent_f64_reference() {
+    let device = Default::default();
+    let input = precision_input();
+    for config in every_operation_graph() {
+        for weight_dtype in [DType::F64, DType::F32] {
+            let mut norm = config.init::<Flex>(&device).expect("valid norm");
+            let weight = tensor_from_f64(stored_weight(&config), [PRECISION_WIDTH], weight_dtype);
+            // An F32 checkpoint scale is exactly widened; the reference sees those values.
+            let reference_weight =
+                crate::precision::test_support::widened_values(&weight.to_data());
+            norm.weight = Param::from_tensor(weight);
+            let activation = tensor_from_f64(input.clone(), [2, 3, PRECISION_WIDTH], DType::F64);
+            let expected = host_rms_norm(
+                &input,
+                &reference_weight,
+                config.epsilon,
+                config.zero_centered,
+            );
+            let context = format!("{config:?} with {weight_dtype:?} weights");
+
+            let actual = norm.forward(activation.clone()).into_data();
+            assert_eq!(actual.dtype, DType::F64, "{context}");
+            assert_matches_f64_reference(&actual, &expected, 1e-6, &context);
+            assert_f32_path_is_distinguishable(
+                &historical_forward(&norm, activation).into_data(),
+                &expected,
+                1e-6,
+                &context,
+            );
+        }
+    }
+}
+
+/// F16, BF16, and F32 activations keep the historical FP32-promotion graph bit for bit.
+#[test]
+fn reduced_and_single_precision_match_the_historical_graph_bitwise() {
+    let device = Default::default();
+    let input = precision_input();
+    for config in every_operation_graph() {
+        for dtype in [DType::F16, DType::BF16, DType::F32] {
+            for weight_dtype in [dtype, DType::F32] {
+                let mut norm = config.init::<Flex>(&device).expect("valid norm");
+                norm.weight = Param::from_tensor(tensor_from_f64(
+                    stored_weight(&config),
+                    [PRECISION_WIDTH],
+                    weight_dtype,
+                ));
+                let activation = tensor_from_f64(input.clone(), [2, 3, PRECISION_WIDTH], dtype);
+                let actual = norm.forward(activation.clone()).into_data();
+                assert_eq!(actual.dtype, dtype);
+                assert_bitwise_eq(
+                    &actual,
+                    &historical_forward(&norm, activation).into_data(),
+                    &format!("{config:?} with {dtype:?} input and {weight_dtype:?} weights"),
+                );
+            }
+        }
+    }
 }

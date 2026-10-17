@@ -15,6 +15,13 @@
 //! `[batch, sequence]`, hidden tensors use `[batch, sequence, hidden]`, and
 //! attention tensors use `[batch, heads, query, key]`. Boolean token masks use
 //! `true` for a real token and `false` for padding.
+//!
+//! # Numerical precision
+//!
+//! Parameters and activations keep their runtime dtype. Shared rounding-sensitive
+//! operations (RMS normalization and explicit eager attention softmax) evaluate in
+//! [`precision::at_least_f32`] of the activation dtype: F16/BF16 promote to F32,
+//! F32 stays F32, and F64 is never narrowed.
 
 pub mod architecture;
 pub mod attention;
@@ -33,6 +40,7 @@ pub mod moe;
 pub mod normalization;
 pub mod operations;
 pub mod position;
+pub mod precision;
 #[cfg(feature = "tokenizers")]
 pub mod tokenization;
 pub mod training;

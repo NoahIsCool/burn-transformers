@@ -3,7 +3,7 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    tensor::{DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;

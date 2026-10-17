@@ -11,7 +11,9 @@
 //! prefix, another use NoPE layers, and T5 provide an additive relative bias
 //! without duplicating projection code. Backend-native attention is the default.
 //! Architectures whose pinned eager graphs materialize reduced-precision scores
-//! before an explicit F32 softmax can opt into that exact operation order; the
+//! before an explicit F32 softmax can opt into that exact operation order. The
+//! explicit softmax evaluates in [`at_least_f32`] of the score dtype: F16/BF16
+//! scores promote to F32, F32 stays F32, and F64 scores are never narrowed. The
 //! unfused path can be paired with [`AttentionExecutionPolicy`] to cap every
 //! score-like plane by evaluating complete attention rows in synchronized query
 //! chunks. This is a storage bound, not a linear-time attention approximation:
@@ -37,6 +39,7 @@ use burn::{
 
 use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
+use crate::precision::at_least_f32;
 use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
 
 /// Borrowed structural edit applied to materialized attention probabilities.
@@ -62,12 +65,15 @@ pub enum AttentionPrecisionMode {
     /// Delegate arithmetic and kernel selection to the active Burn backend.
     #[default]
     BackendDefault,
-    /// Materialize scores in the query dtype, run softmax in F32, then cast back.
+    /// Materialize scores in the query dtype, run softmax in at least F32, then cast back.
     ///
     /// This matches eager reference graphs that explicitly call an FP32 softmax
     /// on reduced-precision scores. It deliberately uses an `O(query * key)`
     /// score tensor because flash kernels with strict-F32 QK accumulation omit
-    /// the observable reduced-precision boundary.
+    /// the observable reduced-precision boundary. The softmax dtype follows
+    /// [`at_least_f32`]: F16/BF16/F32 scores use F32, while F64 scores stay F64
+    /// rather than being narrowed. The variant name records the reduced-precision
+    /// reference graph it reproduces.
     EagerFp32Softmax,
 }
 
@@ -734,9 +740,10 @@ impl<B: Backend> GroupedQueryAttention<B> {
     /// Dispatches projected attention while preserving hook order and exclusion masks.
     ///
     /// Native kernels retain Q/K/V and head-context access without allocating scores.
-    /// Score hooks or a structural pattern transform require eager F32 softmax and
-    /// materialize `[batch, query_head, query_token, key_token]` planes. Edits cannot
-    /// restore excluded links; excluded pattern entries remain zero.
+    /// Score hooks or a structural pattern transform require explicit eager softmax
+    /// (F32, or F64 for F64 scores) and materialize
+    /// `[batch, query_head, query_token, key_token]` planes. Edits cannot restore
+    /// excluded links; excluded pattern entries remain zero.
     #[allow(clippy::too_many_arguments)]
     fn attend_with_transform(
         &self,
@@ -811,7 +818,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
             } else {
                 scores
             };
-            let pattern = fp32_softmax(scores, exclusion.clone());
+            let pattern = promoted_softmax(scores, exclusion.clone());
             let pattern = if let Some(transform) = transform {
                 let shape = pattern.dims();
                 let dtype = pattern.dtype();
@@ -904,9 +911,10 @@ impl<B: Backend> GroupedQueryAttention<B> {
 /// Dispatches either backend-native or explicitly ordered eager attention.
 ///
 /// The eager mode computes score scaling and optional softcapping in the input
-/// dtype, applies exclusions and additive bias, promotes only the softmax to
-/// F32, casts probabilities back, and multiplies by `V` in the original dtype.
-/// Callers must provide shape-compatible Q/K/V, mask, and bias tensors.
+/// dtype, applies exclusions and additive bias, evaluates only the softmax in
+/// [`at_least_f32`] of the score dtype (F32, or F64 for F64 scores), casts
+/// probabilities back, and multiplies by `V` in the original dtype. Callers
+/// must provide shape-compatible Q/K/V, mask, and bias tensors.
 pub(crate) fn dispatch_attention<B: Backend>(
     query: Tensor<B, 4>,
     key: Tensor<B, 4>,
@@ -957,19 +965,23 @@ pub(crate) fn dispatch_attention<B: Backend>(
     } else {
         scores
     };
-    let probabilities = fp32_softmax(scores, exclusion);
+    let probabilities = promoted_softmax(scores, exclusion);
     Ok(probabilities.matmul(value))
 }
 
-/// Applies FP32 softmax and defines fully excluded rows as exact zeros.
+/// Applies softmax over the key axis in at least F32 and defines fully excluded rows as zeros.
 ///
+/// Scores `[batch, head, query, key]` are cast to [`at_least_f32`] of their
+/// dtype: F16/BF16/F32 evaluate in F32, exactly as the historical FP32 graph,
+/// while F64 scores stay F64. Probabilities are cast back to the score dtype.
 /// Additive bias and score interventions can also remove all row support by
 /// producing only negative infinities, even without a boolean exclusion mask.
-pub(crate) fn fp32_softmax<B: Backend>(
+pub(crate) fn promoted_softmax<B: Backend>(
     scores: Tensor<B, 4>,
     exclusion: Option<Tensor<B, 4, Bool>>,
 ) -> Tensor<B, 4> {
     let dtype = scores.dtype();
+    let evaluation = at_least_f32(dtype);
     let shape = scores.dims();
     let unsupported_row = scores
         .clone()
@@ -978,7 +990,7 @@ pub(crate) fn fp32_softmax<B: Backend>(
         .expand(shape);
     let scores = scores.mask_fill(unsupported_row.clone(), 0.0);
     let Some(exclusion) = exclusion else {
-        return softmax(scores.cast(DType::F32), 3)
+        return softmax(scores.cast(evaluation), 3)
             .mask_fill(unsupported_row, 0.0)
             .cast(dtype);
     };
@@ -991,7 +1003,7 @@ pub(crate) fn fp32_softmax<B: Backend>(
         .expand(shape);
     softmax(
         scores
-            .cast(DType::F32)
+            .cast(evaluation)
             .mask_fill(row_has_key.bool_not(), 0.0),
         3,
     )
@@ -1300,3 +1312,7 @@ mod tests;
 #[cfg(test)]
 #[path = "attention_intervention_tests.rs"]
 mod intervention_tests;
+
+#[cfg(test)]
+#[path = "attention_precision_tests.rs"]
+mod precision_tests;

@@ -20,21 +20,24 @@
 //! `[batch, head, query_token, content_channel]`, and the shared rotary key has one
 //! head. Expanded score/pattern hooks require the reference path; absorbed decode
 //! prioritizes compact cached storage. Projection components share dtype/device,
-//! with F32 softmax normalization and explicit exclusion masks for padded rows.
+//! with explicit exclusion masks for padded rows. Softmax normalization evaluates
+//! in [`at_least_f32`] of the logit dtype: F32 for reduced and single precision,
+//! and F64 without narrowing for F64 logits.
 
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig, LinearLayout},
-    tensor::{Bool, DType, Int, Tensor, activation::softmax, backend::Backend},
+    tensor::{Bool, Int, Tensor, activation::softmax, backend::Backend},
 };
 
 use crate::{
     Error, Result,
-    attention::{bottom_right_causal_mask, fp32_softmax},
+    attention::{bottom_right_causal_mask, promoted_softmax},
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
     position::{RopeConfig, apply_rotary, rotary_angles},
+    precision::at_least_f32,
 };
 
 /// Shape-bearing configuration for one multi-head latent-attention layer.
@@ -571,7 +574,7 @@ impl<B: Backend> MultiLatentAttention<B> {
         } else {
             scores
         };
-        let pattern = fp32_softmax(scores, exclusion.clone());
+        let pattern = promoted_softmax(scores, exclusion.clone());
         let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
             Ok(if let Some(exclusion) = &exclusion {
                 pattern.mask_fill(exclusion.clone(), 0.0)
@@ -929,7 +932,11 @@ fn interleaved_to_split<B: Backend>(
         .reshape([batch, heads, sequence, width]))
 }
 
-/// Applies a true-means-masked attention mask and FP32 softmax reduction.
+/// Applies a true-means-masked attention mask and an at-least-F32 softmax reduction.
+///
+/// Logits `[batch, head, query, key]` evaluate in [`at_least_f32`] of their dtype,
+/// so F16/BF16/F32 keep the historical F32 graph and F64 logits stay F64.
+/// Probabilities are cast back to the logit dtype.
 fn attention_probabilities<B: Backend>(
     logits: Tensor<B, 4>,
     mask: Option<Tensor<B, 4, Bool>>,
@@ -943,6 +950,7 @@ fn attention_probabilities<B: Backend>(
             ));
         }
         let dtype = logits.dtype();
+        let evaluation = at_least_f32(dtype);
         let shape = logits.dims();
         let row_has_key = mask
             .clone()
@@ -953,7 +961,7 @@ fn attention_probabilities<B: Backend>(
             .expand(shape);
         let probabilities = softmax(
             logits
-                .cast(DType::F32)
+                .cast(evaluation)
                 .mask_fill(mask.clone(), f32::NEG_INFINITY)
                 .mask_fill(row_has_key.bool_not(), 0.0),
             3,
@@ -962,10 +970,14 @@ fn attention_probabilities<B: Backend>(
         Ok(probabilities.cast(dtype))
     } else {
         let dtype = logits.dtype();
-        Ok(softmax(logits.cast(DType::F32), 3).cast(dtype))
+        Ok(softmax(logits.cast(at_least_f32(dtype)), 3).cast(dtype))
     }
 }
 
 #[cfg(test)]
 #[path = "mla_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mla_precision_tests.rs"]
+mod precision_tests;
