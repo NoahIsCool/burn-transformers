@@ -56,11 +56,15 @@
 //! cargo test --locked --features cuda --test backend_parity -- --ignored --nocapture --test-threads 1
 //! ```
 //!
-//! With the `cpu` feature, `cpu::cpu_delta_rule_kernels_match_flex` is an
-//! ordinary test: Burn's CubeCL CPU backend shares the GPU backends' reshape,
-//! so it checks the DeltaNet reshape workaround without a GPU (it measured at
-//! most `6e-8` against Flex on an Apple M3 Max, and fails when
-//! `trailing_unit_axis` is reverted to `unsqueeze_dim(3)`):
+//! With the `cpu` feature, the `cpu` module runs the same cases on Burn's
+//! CubeCL CPU backend, which compiles the GPU backends' kernels to host code.
+//! Its delta-rule case, `cpu::cpu_delta_rule_kernels_match_flex`, is an
+//! ordinary test: the backend shares the GPU backends' reshape, so it checks
+//! the DeltaNet reshape workaround without a GPU (it fails when
+//! `trailing_unit_axis` is reverted to `unsqueeze_dim(3)`). The family cases
+//! are ignored for their run time, and two of them for a CubeCL CPU copy
+//! defect of Burn 0.21; the module documents both and the command that runs
+//! every passing case:
 //!
 //! ```text
 //! cargo test --locked --features cpu --test backend_parity cpu::
@@ -83,8 +87,8 @@
 //! ([`Bound`]). The tiny models' logits have magnitudes between about 0.2
 //! and 38.
 //!
-//! **F32 accumulation order** ([`F32_BOUND`]: Metal, and CUDA GPUs below
-//! compute capability 8.0). Both sides compute every operation in F32 but
+//! **F32 accumulation order** ([`F32_BOUND`]: Metal, the CubeCL CPU backend,
+//! and CUDA GPUs below compute capability 8.0). Both sides compute every operation in F32 but
 //! reduce in different orders (Flex's blocked GEMM versus a GPU's tiled one,
 //! another softmax and norm reduction tree, other `exp` and `tanh`
 //! implementations), so each output carries a few units in the last place of
@@ -127,6 +131,15 @@
 //! deviate by at most `6e-8`. CUDA has not been measured yet: record the first
 //! run's per-case output, and the probed matrix precision, in
 //! `RELEASE_GATES.md`.
+//!
+//! On the CubeCL CPU backend (the same machine, debug build), every case but
+//! the two the `cpu` module ignores for an upstream defect passes
+//! [`F32_BOUND`]: the largest absolute deviations are `6.7e-6` for SmolLM3
+//! and Gemma 3 text (scales `37.5` and `37.9`), `5.7e-6` for Gemma 2 and the
+//! tied Llama, `1.0e-6` for OLMo 2, `9.5e-7` for T5, and at most `4.8e-7` for
+//! every other family and attention mode; the largest relative deviation is
+//! `9.2e-7` (OLMo 2, scale `1.12`), and the gated delta rule's kernels deviate
+//! by at most `6e-8`.
 
 #![cfg(feature = "flex")]
 
@@ -2587,32 +2600,221 @@ mod cuda {
     }
 }
 
+/// The CubeCL CPU bound: the backend must multiply F32 matrices in F32, so [`F32_BOUND`] applies.
+#[cfg(feature = "cpu")]
+fn cpu_bound() -> Bound {
+    let precision = MatmulPrecision::probe::<burn::backend::Cpu>(&Default::default());
+    assert_eq!(
+        precision,
+        MatmulPrecision::F32,
+        "the CubeCL CPU backend is expected to multiply F32 matrices in F32"
+    );
+    F32_BOUND
+}
+
 #[cfg(feature = "cpu")]
 mod cpu {
-    //! Burn's CubeCL CPU backend against Flex/F32 for the gated delta rule's kernels.
+    //! Burn's CubeCL CPU backend against Flex/F32 with identical weights.
     //!
-    //! The CubeCL CPU backend decides reshapes with the same `burn-cubecl` code
-    //! as Metal, CUDA, and ROCm, so it reproduces on the CPU the reshape defect
-    //! that `trailing_unit_axis` in `src/delta_net.rs` works around (unsqueezing
-    //! a strided token slice behind its unit axis reads the wrong rows). This
-    //! test is therefore ordinary rather than ignored: wherever the `cpu`
-    //! feature builds, `cargo test --features cpu` fails if the workaround is
+    //! The CubeCL CPU backend lowers the same `burn-cubecl` kernels as Metal,
+    //! CUDA, and ROCm through MLIR and LLVM to host code, so it exercises the
+    //! accelerators' tensor layouts, reshapes, fused attention, cache
+    //! scatters, and routing kernels without a GPU. It multiplies F32 matrices
+    //! in F32 (each test probes that first), so every family is held to
+    //! [`super::F32_BOUND`], as on Metal.
+    //!
+    //! # The DeltaNet reshape guard
+    //!
+    //! The backend shares the GPU backends' reshape decisions, so it also
+    //! reproduces on the CPU the reshape defect that `trailing_unit_axis` in
+    //! `src/delta_net.rs` works around (unsqueezing a strided token slice
+    //! behind its unit axis reads the wrong rows):
+    //! [`cpu_delta_rule_kernels_match_flex`] fails if the workaround is
     //! reverted or a kernel reintroduces such a reshape.
+    //!
+    //! # A CubeCL CPU copy defect
+    //!
+    //! Burn 0.21's CubeCL CPU backend (cubecl-std 0.10) copies a reshape of a
+    //! view whose innermost stride is not one (a transposed or expanded view)
+    //! wrongly: its CPU-only copy kernel reads the input at the output's
+    //! coordinates, which is right only when the shapes agree. The GPU
+    //! backends take the general copy and are unaffected; cubecl-std 0.11
+    //! (Burn 0.22) fixes it. `docs/upstream/15-cubecl-cpu-reshape-copy.md`
+    //! records it; [`cpu_reshaped_strided_views_match_flex`] is its ignored
+    //! reproducer. It is not worked around in the crate: reshaping a permuted
+    //! or broadcast view is the ordinary way to materialize it, used
+    //! throughout the crate, and the defect is confined to an unsupported
+    //! backend. Two cases meet it and are ignored until the pin moves:
+    //! Nemotron-H ([`cpu_nemotron_h_matches_flex`]: its group-limited
+    //! router flattens an expanded group mask) and the modular causal
+    //! decoders ([`cpu_modular_causal_matches_flex`]: multi-head latent
+    //! attention de-interleaves rotary pairs, and the masked gated DeltaNet
+    //! with grouped key heads copies a strided view). With cubecl-std's fix
+    //! applied both pass the F32 bound.
+    //!
+    //! # Running
+    //!
+    //! Only [`cpu_delta_rule_kernels_match_flex`] is an ordinary test: wherever
+    //! the `cpu` feature builds, `cargo test --features cpu` runs it (60 to
+    //! 80 s in a debug build on the machine below). The family cases are
+    //! ignored for their run time: the backend compiles every kernel shape
+    //! with LLVM when it is first launched, and on an Apple M3 Max (debug
+    //! build, one test thread, other jobs running) the nine passing cases took
+    //! 420 s, 290 s of it the four hybrid families, and the CubeCL CPU modules
+    //! of the three tiny-golden suites another 73 s, far beyond a two-minute
+    //! budget for ordinary tests. Parallel test threads gave no speed-up (441 s
+    //! for the parity cases), since every test's CubeCL CPU runtime occupies
+    //! all cores, and a release build saved little (313 s on parallel
+    //! threads). Run every passing case, without the known failures:
+    //!
+    //! ```text
+    //! cargo test --locked --features cpu --test backend_parity cpu:: -- --include-ignored \
+    //!   --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex \
+    //!   --skip cpu_reshaped_strided_views_match_flex --nocapture --test-threads 1
+    //! ```
+    //!
+    //! CI runs the same selection on `ubuntu-latest` (`.github/workflows/ci.yml`).
 
-    use burn::backend::Cpu;
+    use burn::{
+        backend::{Cpu, Flex},
+        tensor::{Int, Tensor, TensorData, backend::Backend},
+    };
+    use transformers::position::interleaved_to_split_half;
 
-    use super::{F32_BOUND, MatmulPrecision};
+    use super::{RegistryConfig, cpu_bound, host};
+
+    /// The hybrid registry cases whose names satisfy `keep`; panics when none does.
+    fn hybrid_cases_where(keep: impl Fn(&str) -> bool) -> Vec<(&'static str, RegistryConfig)> {
+        let cases: Vec<_> = super::hybrid_registry_cases()
+            .into_iter()
+            .filter(|(name, _)| keep(name))
+            .collect();
+        assert!(!cases.is_empty(), "no hybrid registry case was selected");
+        cases
+    }
+
+    /// CubeCL CPU: every Llama-family variant.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_llama_family_matches_flex() {
+        super::llama_family_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: Gemma 2 and Gemma 3 text.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_gemma_matches_flex() {
+        super::gemma_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: gpt-oss.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_gpt_oss_matches_flex() {
+        super::gpt_oss_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: Qwen3.5, Qwen3-MoE, DeepSeek-V2, and Muse Glimmer.
+    ///
+    /// The hybrid families of `hybrid_registry_families_match_flex` other
+    /// than Nemotron-H, which [`cpu_nemotron_h_matches_flex`] covers.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_hybrid_registry_families_match_flex() {
+        super::check_registry::<Cpu>(
+            hybrid_cases_where(|name| name != "Nemotron-H"),
+            &Default::default(),
+            cpu_bound(),
+        );
+    }
+
+    /// CubeCL CPU: Nemotron-H; fails on Burn 0.21 through the CubeCL CPU copy defect.
+    ///
+    /// Group-limited routing flattens an expanded `[tokens, groups, 1]`
+    /// group mask to `[tokens, experts]`; the defective copy marks the wrong
+    /// experts eligible, so routing differs from Flex.
+    #[test]
+    #[ignore = "Burn 0.21's CubeCL CPU copies reshaped strided views wrongly; see docs/upstream/15-cubecl-cpu-reshape-copy.md"]
+    fn cpu_nemotron_h_matches_flex() {
+        super::check_registry::<Cpu>(
+            hybrid_cases_where(|name| name == "Nemotron-H"),
+            &Default::default(),
+            cpu_bound(),
+        );
+    }
+
+    /// CubeCL CPU: both modular causal decoders; fails on Burn 0.21 through the CubeCL CPU copy defect.
+    #[test]
+    #[ignore = "Burn 0.21's CubeCL CPU copies reshaped strided views wrongly; see docs/upstream/15-cubecl-cpu-reshape-copy.md"]
+    fn cpu_modular_causal_matches_flex() {
+        super::modular_causal_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: the modular encoder-decoder.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_modular_seq2seq_matches_flex() {
+        super::modular_seq2seq_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: T5.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_t5_matches_flex() {
+        super::t5_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: GPT-2.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_gpt2_matches_flex() {
+        super::gpt2_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// CubeCL CPU: GPT-NeoX.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_gpt_neox_matches_flex() {
+        super::gpt_neox_matches_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
 
     /// CubeCL CPU: the gated delta rule's recurrent, snapshot, and chunked kernels.
     #[test]
     fn cpu_delta_rule_kernels_match_flex() {
-        let device = Default::default();
-        let precision = MatmulPrecision::probe::<Cpu>(&device);
-        assert_eq!(
-            precision,
-            MatmulPrecision::F32,
-            "the CubeCL CPU backend is expected to multiply F32 matrices in F32"
-        );
-        super::delta_rule_kernels_match_flex::<Cpu>(&device, F32_BOUND);
+        super::delta_rule_kernels_match_flex::<Cpu>(&Default::default(), cpu_bound());
+    }
+
+    /// Three reshapes of strided views, each evaluated on `B`, row-major.
+    ///
+    /// A transposed `[2, 3]` matrix flattened to `[6]`; the crate's
+    /// [`interleaved_to_split_half`] of eight rotary channels (a reshape of a
+    /// swapped pair axis); and a `[2, 2, 1]` column expanded to `[2, 2, 3]`
+    /// and flattened to `[2, 6]`. Every input's innermost stride differs from
+    /// one, and every reshape changes the shape, so each needs a copy.
+    fn reshaped_strided_views<B: Backend>(device: &B::Device) -> [Vec<f32>; 3] {
+        let ramp = |count: usize| (0..count).map(|value| value as f32).collect::<Vec<_>>();
+        let matrix = Tensor::<B, 2>::from_data(TensorData::new(ramp(6), [2, 3]), device);
+        let pairs = Tensor::<B, 4>::from_data(TensorData::new(ramp(8), [1, 1, 1, 8]), device);
+        let column = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![0, 1, 1, 0], [4]), device)
+            .float()
+            .reshape([2, 2, 1]);
+        [
+            host(matrix.swap_dims(0, 1).reshape([6])),
+            host(interleaved_to_split_half(pairs).expect("an even rotary width")),
+            host(column.expand([2, 2, 3]).reshape([2, 6])),
+        ]
+    }
+
+    /// Reshaped strided views match Flex; the reproducer of the CubeCL CPU copy defect.
+    ///
+    /// Fails on Burn 0.21 (cubecl-std 0.10) and passes with cubecl-std
+    /// 0.11's fix; `docs/upstream/15-cubecl-cpu-reshape-copy.md` records the
+    /// measured outputs.
+    #[test]
+    #[ignore = "reproduces Burn 0.21's CubeCL CPU reshape-copy defect; see docs/upstream/15-cubecl-cpu-reshape-copy.md"]
+    fn cpu_reshaped_strided_views_match_flex() {
+        let expected = reshaped_strided_views::<Flex<f32, i32>>(&Default::default());
+        let actual = reshaped_strided_views::<Cpu>(&Default::default());
+        assert_eq!(actual, expected);
     }
 }

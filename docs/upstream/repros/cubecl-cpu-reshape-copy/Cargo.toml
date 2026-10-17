@@ -1,0 +1,13 @@
+[package]
+name = "cubecl-cpu-reshape-copy"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The CubeCL CPU backend; its build script downloads a prebuilt LLVM (see the
+# crate's SUPPORT.md, "Host requirement of the `cpu` feature").
+burn = { version = "=0.21.0", features = ["cpu"] }
+
+# Standalone: never join an enclosing workspace.
+[workspace]

@@ -10,11 +10,13 @@
 //!
 //! Every check here takes the backend as a type parameter and a [`Bound`],
 //! so the suites run one set of assertions on Flex (ordinary tests) and in
-//! ignored Metal and CUDA modules. Flex uses [`F32_TOLERANCE`];
-//! [`golden_bound`] picks an accelerator's bound from its measured matrix
-//! precision: [`ACCELERATOR_F32_TOLERANCE`] for an F32 device, the TF32
-//! bound of `backend_numerics` for a CUDA GPU that rounds F32 matrix inputs
-//! to TF32.
+//! ignored Metal, CUDA, and CubeCL CPU modules. Flex uses
+//! [`F32_TOLERANCE`]; [`golden_bound`] picks an accelerator's bound from its
+//! measured matrix precision: [`ACCELERATOR_F32_TOLERANCE`] for an F32
+//! device, the TF32 bound of `backend_numerics` for a CUDA GPU that rounds
+//! F32 matrix inputs to TF32. The CubeCL CPU backend must multiply in F32,
+//! so its modules use [`f32_golden_bound`], which fails rather than select
+//! the TF32 bound.
 //!
 //! # Tolerance
 //!
@@ -110,6 +112,21 @@ pub(crate) fn golden_bound<B: Backend>(device: &B::Device) -> Bound {
     let bound = precision.bound(ACCELERATOR_F32_TOLERANCE);
     eprintln!("F32 matrix products use {precision:?} inputs; golden bound {bound:?}");
     bound
+}
+
+/// Returns [`ACCELERATOR_F32_TOLERANCE`] after asserting that `backend` multiplies F32 matrices in F32.
+///
+/// For a backend that must never round F32 matrix inputs, such as Burn's
+/// CubeCL CPU backend: a TF32 probe fails the test instead of selecting the
+/// looser TF32 bound as [`golden_bound`] would.
+pub(crate) fn f32_golden_bound<B: Backend>(device: &B::Device, backend: &str) -> Bound {
+    let precision = MatmulPrecision::probe::<B>(device);
+    assert_eq!(
+        precision,
+        MatmulPrecision::F32,
+        "{backend} is expected to multiply F32 matrices in F32"
+    );
+    ACCELERATOR_F32_TOLERANCE
 }
 
 /// One parsed `golden.json`.

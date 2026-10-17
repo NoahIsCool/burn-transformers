@@ -83,14 +83,14 @@ run.
 
 ## Notes for this crate
 
-- Found while validating the CubeCL CPU backend: there, Nemotron-H's group mask came out
-  wrong (a separate, CPU-only reshape defect), which left rows whose eligible experts were
-  all `-inf`, and the
+- Found through report [15](15-cubecl-cpu-reshape-copy.md): on the CubeCL CPU backend,
+  Nemotron-H's wrong group mask left rows whose eligible experts were all `-inf`, and the
   router's `deterministic_top_k` returned expert ID `E` for them, which dispatch rejected
   ("expert ID 4 at flattened assignment 29"). The kernel promises in-range, distinct IDs
   for any input, including NaN router logits (`RouteDecision::non_finite_tokens` then flags
-  the token); on Metal, CUDA, ROCm, and the CubeCL CPU backend it broke that promise for
-  every row whose remaining keys were all `-inf` or NaN.
+  the token); on every CubeCL backend (measured on Metal and the CubeCL CPU backend; CUDA
+  and ROCm run the same kernel source) it broke that promise for every row whose remaining
+  keys were all `-inf` or NaN.
 - Fixed in the crate, exactly and for every backend: `deterministic_top_k` treats a row
   whose available keys are all `-inf` as one tie and picks the smallest available index,
   without consulting the maximum (`src/moe/router.rs`, "Exhausted rows"). Flex results

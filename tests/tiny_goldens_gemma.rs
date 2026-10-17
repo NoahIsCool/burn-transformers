@@ -40,12 +40,13 @@
 //!
 //! The checks are generic over the backend (shared helpers live in
 //! `tests/support/tiny_goldens.rs`). They run on Flex as ordinary tests and,
-//! ignored, on Metal (`--features metal`, macOS) and CUDA (`--features
-//! cuda`):
+//! ignored, on Metal (`--features metal`, macOS), CUDA (`--features cuda`),
+//! and Burn's CubeCL CPU backend (`--features cpu`):
 //!
 //! ```text
 //! cargo test --locked --features metal --test tiny_goldens_gemma -- --ignored --nocapture --test-threads 1
 //! cargo test --locked --features cuda --test tiny_goldens_gemma -- --ignored --nocapture --test-threads 1
+//! cargo test --locked --features cpu --test tiny_goldens_gemma cpu:: -- --ignored --nocapture --test-threads 1
 //! ```
 //!
 //! # Tolerance
@@ -69,9 +70,13 @@
 //! (`gemma2`; `8.9e-7` for `gemma3-text`) in the stateless, cached, and
 //! chunked checks, the saturated-cap logits by `1.8e-6`, and the hidden
 //! states by `1.14e-5` at magnitude `7.0`: a relative `1.6e-6`, the reason
-//! accelerators carry a relative term. A CUDA GPU that rounds F32 matrix
-//! inputs to TF32 (compute capability 8.0 or newer) is held to the TF32 bound
-//! of `tests/support/backend_numerics.rs`, `1e-2` plus `1e-2` of the compared
+//! accelerators carry a relative term. The CubeCL CPU backend also
+//! multiplies in F32 and meets the same tolerance: its logits deviate by at
+//! most `2.3e-6` (`gemma2`; `1.8e-6` chunked, `1.7e-6` cached), the
+//! saturated-cap logits by `8.3e-7`, and the hidden states by `5.7e-6` at
+//! magnitude `7.9`. A CUDA GPU that rounds F32 matrix inputs to TF32
+//! (compute capability 8.0 or newer) is held to the TF32 bound of
+//! `tests/support/backend_numerics.rs`, `1e-2` plus `1e-2` of the compared
 //! set's largest magnitude; an older GPU multiplies in F32 and meets the
 //! accelerator F32 tolerance. The bound is chosen by probing the device. Under the TF32 bound
 //! the near-linear cap-50 attention soft-cap is not resolved at all, and the
@@ -672,5 +677,85 @@ mod cuda {
     fn cuda_multimodal_wrappers_load_without_a_final_soft_cap() {
         let device = Default::default();
         super::multimodal_wrappers::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+}
+
+#[cfg(feature = "cpu")]
+mod cpu {
+    //! Burn's CubeCL CPU backend counterparts of the Flex checks, held to the F32 accelerator bound.
+    //!
+    //! The CubeCL CPU backend compiles the GPU backends' kernels to host code
+    //! and multiplies F32 matrices in F32, so every check asserts that with
+    //! the matrix-precision probe and uses the accelerator F32 tolerance of
+    //! `tests/support/tiny_goldens.rs`. The checks are ignored for their run
+    //! time, not for a failure: the backend compiles every kernel shape with
+    //! LLVM when it is first launched, and the first check of each suite
+    //! spends about 20 s in a debug build (the CubeCL CPU modules of all three
+    //! suites took 73 s on an Apple M3 Max, one test thread). Run them with
+    //! `-- --include-ignored`, as CI does on `ubuntu-latest`.
+
+    use burn::backend::Cpu;
+
+    use super::tiny_goldens::f32_golden_bound;
+
+    /// Probes the CubeCL CPU device and returns its golden bound.
+    fn bound() -> super::Bound {
+        f32_golden_bound::<Cpu>(&Default::default(), "the CubeCL CPU backend")
+    }
+
+    /// CubeCL CPU: stateless logits and hidden states.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_stateless_logits_and_hidden_states_match_transformers() {
+        super::stateless_logits_and_hidden_states::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: batched ragged prefill and decode.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_batched_cached_decode_matches_reference_logits() {
+        super::batched_cached_decode::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: multi-token ragged steps on a non-empty state.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_chunked_ragged_steps_match_the_reference() {
+        super::chunked_ragged_steps::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: the cached greedy continuation.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_cached_greedy_continuation_matches_transformers() {
+        super::cached_greedy_continuation::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: a hooked pass without actions.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_hooked_pass_without_actions_equals_the_plain_pass() {
+        super::hooked_pass_without_actions::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: the Transformers 5.2 mixed RoPE mapping.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_mixed_rope_mapping_reproduces_the_reference() {
+        super::mixed_rope_mapping::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: the saturated attention soft-cap.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_saturated_attention_soft_cap_matches_transformers() {
+        super::saturated_attention_soft_cap::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: the multimodal wrapper's text tower.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_multimodal_wrappers_load_without_a_final_soft_cap() {
+        super::multimodal_wrappers::<Cpu>(&Default::default(), bound());
     }
 }

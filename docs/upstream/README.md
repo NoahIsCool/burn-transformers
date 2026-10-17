@@ -36,6 +36,7 @@ Do not file (fixed in 0.22.0, measured unless noted): [04](04-flex-broadcast-bin
 [05](05-cubecl-flash-attention-causal-alignment.md) (source reading: cubek#406),
 [08](08-linear-col-layout-gradient.md), [09](09-param-mapper-valid.md),
 [11](11-softplus-overflow.md), [14](14-flex-quantized-layout-requantize.md),
+[15](15-cubecl-cpu-reshape-copy.md) (source reading: cubecl#1671),
 [16](16-cubecl-max-reduction-negative-infinity.md) (source reading: cubek#457).
 
 ## Index
@@ -56,6 +57,7 @@ Do not file (fixed in 0.22.0, measured unless noted): [04](04-flex-broadcast-bin
 | 12 | [Boolean `select`/`gather` tagged `U8`](12-flex-bool-select-dtype.md) | burn-flex | **Correctness** | 4 of 4 Boolean reads fail → 0, on 0.22.0 and 0.21.0 | **Open** | `architecture/types.rs::select_bool_tensor` integer round trip |
 | 13 | [`Flex32` tensors from `zeros`/`empty` on Flex](13-flex-flex32-dtype.md) | burn-flex | **Correctness** | 0.22.0: 9 of 18 operations panic → 0; 0.21.0: 9 of 9 → 0 | **Open** (narrower than 0.21.0) | Flex32 sort guard in `generation.rs` (and its test) |
 | 14 | [Block-quantized layout ops requantize on Flex](14-flex-quantized-layout-requantize.md) | burn-flex | **Correctness** | 0.21.0: transpose changes a small row by 39% (Q8) / 100% (Q4); no patch (design change) | **Fixed in 0.22.0** (exact, measured) | `packed_layout_is_exact` probe and `PackedLayoutPolicy` fallback in `checkpoint/runtime/packed_install.rs` |
+| 15 | [CubeCL CPU copies a reshaped strided view at the wrong coordinates](15-cubecl-cpu-reshape-copy.md) | cubecl-std (CPU runtime only) | **Correctness** | 0.21.0, CubeCL CPU: 5 of 7 reshapes wrong → 0; crate parity: Nemotron-H and modular causal decoders deviate by up to 5.8e-1 → ≤ 2.8e-7 | **Fixed in 0.22.0** (cubecl#1671, cubecl-std 0.11.0; source reading) | None (not worked around); re-enable the three ignored CubeCL CPU tests in `tests/backend_parity.rs` |
 | 16 | [`max_dim` of a row of `-inf` is `f32::MIN` on CubeCL](16-cubecl-max-reduction-negative-infinity.md) | cubek-reduce | **Correctness** | 0.21.0: 2 wrong values per backend on CubeCL CPU and Metal (and `argmax` -1); no patch (fixed upstream) | **Fixed in 0.22.0** (cubek#457, cubek-reduce 0.3.0; source reading) | "Exhausted rows" rule of `deterministic_top_k` in `moe/router.rs` |
 
 Figures are single runs on a shared Apple M3 Max unless a range is given; small timings
@@ -95,8 +97,9 @@ reports:
 - cubek#406 (bottom-right causal mask, 05) and burn#5262 (Flex block-dim permutation, 14).
 - burn#4725 and burn#4659 (reshaping sub-byte and block-quantized tensors; not this crate's
   path, which never reshapes packed weights).
-- For report 16, searched on 2026-10-17 (`gh search prs`, `infinity` in
-  `tracel-ai/cubek`): cubek#457 with burn#4814, merged before Burn 0.22.0.
+- For reports 15 and 16, searched on 2026-10-17 (`gh search prs`, `perpendicular` in
+  `tracel-ai/cubecl`, `infinity` in `tracel-ai/cubek`): cubecl#1670 / #1671 (15) and
+  cubek#457 with burn#4814 (16), both merged before Burn 0.22.0.
 
 ## Layout
 
@@ -110,8 +113,9 @@ reports:
   crate validated, copy the crate's `Cargo.lock` into the repro directory first.
 - `patches/NN-*.patch`: `git apply -p1` patches against the v0.21.0 sources (Burn patches
   relative to the burn repository root, `crates/<crate>/...`; the gemm patch relative to the
-  gemm repository root at 0.19.0, which is also gemm's `main`). Patches 02 and 03 apply
-  unchanged to v0.22.0 and `main`.
+  gemm repository root at 0.19.0, which is also gemm's `main`; the cubecl-std patch, 15,
+  relative to the cubecl repository root at 0.10.0). Patches 02 and 03 apply unchanged to
+  v0.22.0 and `main`.
 - `patches/v0.22.0/`: patches against v0.22.0 for the reports to file: 01, 10, 12, 13; the
   `-main` variants of 01 and 12 carry the same changed lines rebased onto `main` at
   `df0812e` (10 and 13 apply to `main` as they are).
@@ -135,13 +139,18 @@ cargo run --release --config 'patch.crates-io.burn-flex.path="/tmp/burn-src/crat
 
 Crates per v0.21.0 patch: 01, 03, 04, 12 `burn-flex`; 02 `burn-autodiff`; 05, 07
 `burn-cubecl`; 06 `gemm-common` (run the repro with `--features patched`); 08, 09
-`burn-core`; 10 `burn-backend`; 11 `burn-tensor`; 13 `burn-flex` and `burn-backend`. The
+`burn-core`; 10 `burn-backend`; 11 `burn-tensor`; 13 `burn-flex` and `burn-backend`; 15
+`cubecl-std`, relative to the cubecl repository root at its 0.10.0 sources (copy
+`cubecl-std-0.10.0` to `/tmp/cubecl-src/crates/cubecl-std` and point
+`patch.crates-io.cubecl-std.path` at it). The
 patches in `patches/v0.22.0/` are all `burn-flex`; on 0.22.0, reports 02 (`burn-autodiff`)
 and 03 (`burn-flex`) use their v0.21.0 patch unchanged. Report 07's repros run twice, with
 and without `--features autotune`.
 
 Every v0.21.0 patch applies alone to pristine sources and all together (01-13 in order), and
-every patched Burn file passes `rustfmt --edition 2024` with Burn's `max_width = 100`.
+every patched Burn file passes `rustfmt --edition 2024` with Burn's `max_width = 100`. Patch
+15 applies alone to pristine cubecl-std 0.10.0 sources, and its file passes
+`rustfmt --edition 2024`.
 
 ## Verification environment
 
@@ -152,10 +161,10 @@ every patched Burn file passes `rustfmt --edition 2024` with Burn's `max_width =
   dependencies were built offline in node-local scratch (`/scratch/nover/tfm-upstream-gemm`),
   not in the home quota. Not re-run in this round: SSH to the SCC needs an interactive Duo
   login, and the gemm patch and repro did not change.
-- Report 16 (2026-10-17): the same Mac, Rust 1.94.0-nightly, burn 0.21.0 with the `cpu`
-  feature (tracel-llvm 20.1.4-7) and on Metal. Its 0.22.0 status was checked by reading the
-  cubek-reduce 0.3.0 sources: Burn 0.22's `cpu` feature builds against tracel-llvm 23,
-  which was not downloaded for this round.
+- Reports 15 and 16 (2026-10-17): the same Mac, Rust 1.94.0-nightly, burn 0.21.0 with the
+  `cpu` feature (tracel-llvm 20.1.4-7); report 16 also on Metal. Their 0.22.0 status was
+  checked by reading the cubecl-std 0.11.0 and cubek-reduce 0.3.0 sources: Burn 0.22's
+  `cpu` feature builds against tracel-llvm 23, which was not downloaded for this round.
 - Not run: CUDA, ROCm and Vulkan (reports 05 and 07 were measured on Metal only), and
   Burn's own backend test suite (`burn-backend-tests`, not in the crates.io packages); the
   425 burn-flex unit tests were run with all v0.22.0 burn-flex patches applied.

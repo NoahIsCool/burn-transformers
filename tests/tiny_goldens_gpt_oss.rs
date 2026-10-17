@@ -34,12 +34,13 @@
 //!
 //! The checks are generic over the backend (shared helpers live in
 //! `tests/support/tiny_goldens.rs`). They run on Flex as ordinary tests and,
-//! ignored, on Metal (`--features metal`, macOS) and CUDA (`--features
-//! cuda`):
+//! ignored, on Metal (`--features metal`, macOS), CUDA (`--features cuda`),
+//! and Burn's CubeCL CPU backend (`--features cpu`):
 //!
 //! ```text
 //! cargo test --locked --features metal --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
 //! cargo test --locked --features cuda --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+//! cargo test --locked --features cpu --test tiny_goldens_gpt_oss cpu:: -- --ignored --nocapture --test-threads 1
 //! ```
 //!
 //! # Tolerance
@@ -56,8 +57,11 @@
 //! `tests/support/tiny_goldens.rs` (`1e-5` plus `1e-5` of the compared
 //! magnitude); on an Apple M3 Max its logits deviate by at most `1.07e-6`
 //! (`7.8e-7` eager, `7.3e-7` cached at both capacities), its hidden states by
-//! `2.1e-6`, and its load-balancing loss by `2.4e-7`. A CUDA
-//! GPU that rounds F32 matrix inputs to TF32 (compute capability 8.0 or
+//! `2.1e-6`, and its load-balancing loss by `2.4e-7`. The CubeCL CPU backend
+//! also multiplies in F32 and meets the same tolerance: its logits deviate by
+//! at most `1.13e-6` (fused and eager; `6.9e-7` cached at both capacities),
+//! its hidden states by `2.4e-6`, and its load-balancing loss by `2.4e-7`. A
+//! CUDA GPU that rounds F32 matrix inputs to TF32 (compute capability 8.0 or
 //! newer) is held to the TF32 bound of `tests/support/backend_numerics.rs`,
 //! `1e-2` plus `1e-2` of the compared set's largest magnitude; an older GPU
 //! multiplies in F32 and meets the accelerator F32 tolerance. The bound is
@@ -408,5 +412,64 @@ mod cuda {
             &device,
             golden_bound::<Cuda>(&device),
         );
+    }
+}
+
+#[cfg(feature = "cpu")]
+mod cpu {
+    //! Burn's CubeCL CPU backend counterparts of the Flex checks, held to the F32 accelerator bound.
+    //!
+    //! The CubeCL CPU backend compiles the GPU backends' kernels to host code
+    //! and multiplies F32 matrices in F32, so every check asserts that with
+    //! the matrix-precision probe and uses the accelerator F32 tolerance of
+    //! `tests/support/tiny_goldens.rs`. The checks are ignored for their run
+    //! time, not for a failure: the backend compiles every kernel shape with
+    //! LLVM when it is first launched, and the first check of each suite
+    //! spends about 20 s in a debug build (the CubeCL CPU modules of all three
+    //! suites took 73 s on an Apple M3 Max, one test thread). Run them with
+    //! `-- --include-ignored`, as CI does on `ubuntu-latest`.
+
+    use burn::backend::Cpu;
+
+    use super::tiny_goldens::f32_golden_bound;
+
+    /// Probes the CubeCL CPU device and returns its golden bound.
+    fn bound() -> super::Bound {
+        f32_golden_bound::<Cpu>(&Default::default(), "the CubeCL CPU backend")
+    }
+
+    /// CubeCL CPU: stateless logits and hidden states.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_stateless_logits_and_hidden_states_match_transformers() {
+        super::stateless_logits_and_hidden_states::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: the eager sink graph.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_eager_sink_attention_matches_transformers() {
+        super::eager_sink_attention::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: batched ragged prefill and decode at two capacities.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_batched_cached_decode_matches_reference_logits() {
+        super::batched_cached_decode::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: the cached greedy continuation.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_cached_greedy_continuation_matches_transformers() {
+        super::cached_greedy_continuation::<Cpu>(&Default::default(), bound());
+    }
+
+    /// CubeCL CPU: router diagnostics and the load-balancing objective.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_router_logits_and_load_balancing_loss_are_reported() {
+        super::router_logits_and_load_balancing_loss::<Cpu>(&Default::default(), bound());
     }
 }
