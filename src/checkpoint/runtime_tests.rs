@@ -3531,6 +3531,91 @@ fn shared_slice_keys_require_exactly_one_slice_source() {
     assert_eq!(shared_slice_key(&identity), None);
 }
 
+/// Builds a planned F32 identity target of `elements` values from one physical source.
+fn sized_tensor(target: &str, shard: &str, start: u64, elements: u64) -> PlannedTensor {
+    PlannedTensor {
+        shape: vec![elements],
+        ..scheduled_tensor(
+            target,
+            vec![scheduled_source(target, shard, start)],
+            PlannedTransform::Identity,
+        )
+    }
+}
+
+/// Groups of at least [`LARGE_GROUP_BYTES`] run first in plan order; the rest keep physical order.
+#[test]
+fn large_groups_precede_the_physical_schedule_in_plan_order() {
+    let gib_elements = LARGE_GROUP_BYTES / 4;
+    let tensors = [
+        sized_tensor("a.small_late", "b.safetensors", 64, 8),
+        sized_tensor("b.large_late_shard", "b.safetensors", 128, gib_elements),
+        sized_tensor("c.small_early", "a.safetensors", 0, 8),
+        sized_tensor("d.just_below", "a.safetensors", 32, gib_elements - 1),
+        sized_tensor("e.large_early_shard", "a.safetensors", 16, gib_elements + 1),
+        sized_tensor("f.small_middle", "b.safetensors", 0, 8),
+    ];
+    let order = execution_groups(&tensors)
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|index| tensors[index].target.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        [
+            vec!["b.large_late_shard"],
+            vec!["e.large_early_shard"],
+            vec!["c.small_early"],
+            vec!["d.just_below"],
+            vec!["f.small_middle"],
+            vec!["a.small_late"],
+        ]
+    );
+}
+
+/// A fused source's slices are sized as one group, and an unrepresentable size counts as large.
+#[test]
+fn group_sizes_sum_fused_slices_and_saturate() {
+    let half = LARGE_GROUP_BYTES / 8;
+    let slice = |start: u64| PlannedTransform::Slice {
+        axis: 0,
+        start,
+        length: half,
+    };
+    let fused = scheduled_source("fused", "z.safetensors", 0);
+    let first = PlannedTensor {
+        shape: vec![half],
+        ..scheduled_tensor("q", vec![fused.clone()], slice(0))
+    };
+    let second = PlannedTensor {
+        shape: vec![half],
+        ..scheduled_tensor("k", vec![fused], slice(half))
+    };
+    let small = sized_tensor("small", "a.safetensors", 0, 8);
+    let tensors = [small, first, second];
+    let groups = execution_groups(&tensors);
+    assert_eq!(
+        groups,
+        [vec![1, 2], vec![0]],
+        "the fused pair totals 1 GiB and runs first"
+    );
+    assert_eq!(group_output_bytes(&tensors, &[1, 2]), LARGE_GROUP_BYTES);
+    let overflowing = PlannedTensor {
+        shape: vec![u64::MAX, 2],
+        ..scheduled_tensor("huge", Vec::new(), PlannedTransform::Identity)
+    };
+    assert_eq!(group_output_bytes(&[overflowing], &[0]), u64::MAX);
+    assert_eq!(
+        group_output_bytes(&tensors, &[7]),
+        0,
+        "indices outside the plan add nothing"
+    );
+}
+
 /// Group ordering is total: real sources first, then empty or sourceless groups.
 #[test]
 fn execution_group_order_places_missing_descriptors_last() {

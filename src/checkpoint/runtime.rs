@@ -1124,6 +1124,18 @@ fn shared_slice_key(tensor: &PlannedTensor) -> Option<SharedSourceKey<'_>> {
 /// payload. Target name and original plan index are total-order tie breakers for
 /// hand-authored plans whose source descriptors happen to compare equally.
 ///
+/// One exception precedes the physical order: groups whose outputs total at
+/// least [`LARGE_GROUP_BYTES`] are installed first, in plan order. Installation
+/// order is also device allocation order, and Burn's CubeCL backends pack
+/// tensors first-fit into sliced memory pages. Allocating the outsized
+/// vocabulary matrices last, after per-layer tensors have filled the pages,
+/// stranded several gigabytes: on Metal the strict F16 loads of Qwen3.8-27B and
+/// Muse-Glimmer-30B settled 7.4 and 5.4 GB above the hoisted schedule (62.35
+/// against 54.92 GB, 64.78 against 59.40 GB), with peaks 5.2 and 8.1 GB higher.
+/// Each hoisted group costs at most one extra shard open, and checkpoints
+/// without such a group keep the pure physical schedule; Nemotron-H,
+/// Qwen3-30B-A3B, and FLAN-T5-XXL footprints were unchanged by either order.
+///
 /// Each distinct shared-source descriptor is numbered by first appearance, and
 /// the verified [`execution_group_indices`] forms the groups: they partition
 /// the plan, so every primary target is installed exactly once.
@@ -1139,8 +1151,42 @@ fn execution_groups(tensors: &[PlannedTensor]) -> Vec<Vec<usize>> {
         })
         .collect::<Vec<_>>();
     let mut groups = execution_group_indices(&classes, class_of_source.len());
-    groups.sort_by(|left, right| execution_group_order(tensors, left, right));
+    groups.sort_by(|left, right| {
+        let large = |group: &[usize]| group_output_bytes(tensors, group) >= LARGE_GROUP_BYTES;
+        match (large(left), large(right)) {
+            // Large groups keep plan order among themselves; the verified groups
+            // are already emitted in plan order, so their leaders compare it.
+            (true, true) => left.first().cmp(&right.first()),
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => execution_group_order(tensors, left, right),
+        }
+    });
     groups
+}
+
+/// Total output bytes from which an execution group is installed before physical order.
+///
+/// The threshold separates vocabulary-sized matrices (2.5 to 2.8 GB in the
+/// measured Qwen3.8 and Muse checkpoints) from per-layer tensors, none of
+/// which reached 1 GB in any measured checkpoint (see [`execution_groups`]).
+pub(crate) const LARGE_GROUP_BYTES: u64 = 1 << 30;
+
+/// Total target storage of one execution group, saturating on overflow.
+///
+/// Shapes and dtypes were validated before scheduling; an unrepresentable
+/// size cannot occur there and is treated as large, which is conservative.
+fn group_output_bytes(tensors: &[PlannedTensor], group: &[usize]) -> u64 {
+    group
+        .iter()
+        .filter_map(|&index| tensors.get(index))
+        .map(|tensor| {
+            tensor
+                .dtype
+                .tensor_storage_bytes(&tensor.shape)
+                .unwrap_or(u64::MAX)
+        })
+        .fold(0_u64, u64::saturating_add)
 }
 
 /// Compares two indivisible execution groups by their first physical source.
