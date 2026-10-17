@@ -76,8 +76,23 @@ python3 -m unittest discover -s scripts/tests -v
 **Tiny reference goldens** run inside `cargo test`:
 `tiny_goldens_llama` (seven Llama-family cases), `tiny_goldens_gemma`, and
 `tiny_goldens_gpt_oss`, each against Transformers 5.2.0 / PyTorch 2.10.0 at an
-F32 tolerance of `1e-5`. Regenerate fixtures only deliberately, with those exact
-package versions:
+F32 tolerance of `1e-5`. The same checks run, ignored, on Metal and CUDA:
+
+```sh
+cargo test --locked --features metal --test tiny_goldens_llama --test tiny_goldens_gemma \
+  --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+cargo test --locked --features cuda --test tiny_goldens_llama --test tiny_goldens_gemma \
+  --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+```
+
+An accelerator that multiplies F32 matrices in F32 (Metal, CUDA below
+compute capability 8.0) is held to `1e-5 + 1e-5 · magnitude`, because hidden
+states reach magnitude 8 where an absolute `1e-5` is below F32 noise: on an
+Apple M3 Max the largest deviations are `3.6e-6` for logits and `1.14e-5` for
+a `gemma2` hidden state of magnitude `7.0`. A CUDA GPU that rounds F32 matrix
+inputs to TF32 is held to `1e-2 + 1e-2 · magnitude` and skips greedy steps
+whose margin lies within it. No CUDA run has been recorded yet. Regenerate
+fixtures only deliberately, with those exact package versions:
 
 ```sh
 python3 -I scripts/generate_tiny_goldens.py --output tests/fixtures/tiny_goldens [--case NAME ...]

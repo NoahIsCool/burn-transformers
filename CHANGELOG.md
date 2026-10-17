@@ -555,7 +555,8 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
 
 - Tiny Transformers 5.2.0 goldens for the Llama family (seven cases), Gemma
   (two), and gpt-oss, and HF-generated goldens for the shared router, RoPE
-  rules, sinks, and differential attention.
+  rules, sinks, and differential attention. The tiny-golden checks are
+  backend-generic and also run, ignored, on Metal and CUDA.
 - Batched-versus-stateless and batched-versus-row-by-row parity suites in every
   family, with ragged and padded rows, ring wraparound, and rollback, reorder,
   and truncation.

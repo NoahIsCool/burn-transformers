@@ -27,8 +27,9 @@
 //!    the sliding layers' ring (window 4 below capacity 16) wraps;
 //! 4. chunked ragged steps: multi-token prefills on a non-empty state with
 //!    the rows' new tokens at different offsets, then decode steps;
-//! 5. the cached greedy continuation, compared token by token only while
-//!    our top-2 logit margin exceeds the tolerance;
+//! 5. the cached greedy continuation, compared at every step whose top-2
+//!    logit margin exceeds the tolerance (the reference's tokens are fed
+//!    back, so a tie is skipped), at least two steps per case;
 //! 6. a hooked pass with no actions, which must equal the plain pass.
 //!
 //! Two further checks reuse the fixtures with one changed field:
@@ -37,32 +38,62 @@
 //! Transformers), and `gemma2` with a saturating attention soft-cap, against
 //! reference logits embedded below ([`SATURATED_CAP_LOGITS`]).
 //!
+//! The checks are generic over the backend (shared helpers live in
+//! `tests/support/tiny_goldens.rs`). They run on Flex as ordinary tests and,
+//! ignored, on Metal (`--features metal`, macOS) and CUDA (`--features
+//! cuda`):
+//!
+//! ```text
+//! cargo test --locked --features metal --test tiny_goldens_gemma -- --ignored --nocapture --test-threads 1
+//! cargo test --locked --features cuda --test tiny_goldens_gemma -- --ignored --nocapture --test-threads 1
+//! ```
+//!
 //! # Tolerance
 //!
 //! Both sides run F32 with different matmul and reduction orders. The
 //! largest observed logit deviation is printed by the stateless test with
 //! `--nocapture`: `1.5e-6` for `gemma2` and `7.5e-7` for `gemma3-text` on
-//! Flex. [`TOLERANCE`] is `1e-5`, as for the Llama family: over six times
-//! that noise. Most mechanisms move the fixture logits far more than that
-//! (the final soft-cap alone by `1.7e-3`), but the fixture's attention
-//! soft-cap is nearly linear: its raw scores stay below `0.8`, so `50 ·
-//! tanh(s / 50)` differs from `s` by under `1e-4` and removing the cap moves
-//! the reference logits by only `1.4e-5`. The attention soft-cap is therefore
-//! validated separately in its saturated regime (`c = 0.25`, `s / c` up to
-//! `3.2`), where removing it moves the reference logits by `1.6e-1`.
+//! Flex. The F32 tolerance is `1e-5` absolute, as for the Llama family: over
+//! six times that noise. Most mechanisms move the fixture logits far more
+//! than that (the final soft-cap alone by `1.7e-3`), but the fixture's
+//! attention soft-cap is nearly linear: its raw scores stay below `0.8`, so
+//! `50 · tanh(s / 50)` differs from `s` by under `1e-4` and removing the cap
+//! moves the reference logits by only `1.4e-5`. The attention soft-cap is
+//! therefore validated separately in its saturated regime (`c = 0.25`,
+//! `s / c` up to `3.2`), where removing it moves the reference logits by
+//! `1.6e-1`.
+//!
+//! Metal multiplies in F32 and is held to the accelerator F32 tolerance of
+//! `tests/support/tiny_goldens.rs`, `1e-5` plus `1e-5` of the compared
+//! magnitude. On an Apple M3 Max its logits deviate by at most `3.6e-6`
+//! (`gemma2`; `8.9e-7` for `gemma3-text`) in the stateless, cached, and
+//! chunked checks, the saturated-cap logits by `1.8e-6`, and the hidden
+//! states by `1.14e-5` at magnitude `7.0`: a relative `1.6e-6`, the reason
+//! accelerators carry a relative term. A CUDA GPU that rounds F32 matrix
+//! inputs to TF32 (compute capability 8.0 or newer) is held to the TF32 bound
+//! of `tests/support/backend_numerics.rs`, `1e-2` plus `1e-2` of the compared
+//! set's largest magnitude; an older GPU multiplies in F32 and meets the
+//! accelerator F32 tolerance. The bound is chosen by probing the device. Under the TF32 bound
+//! the near-linear cap-50 attention soft-cap is not resolved at all, and the
+//! saturated-cap check relies on the run being nearer the cap-0.25 reference
+//! than the cap-50 logits rather than on the bound alone.
 
 #![cfg(feature = "flex")]
 
-use std::path::{Path, PathBuf};
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
+#[path = "support/tiny_goldens.rs"]
+mod tiny_goldens;
 
-use burn::{
-    backend::Flex,
-    tensor::{Int, Tensor, TensorData},
-};
+use backend_numerics::{Bound, Gap, host};
+use burn::{backend::Flex, tensor::backend::Backend};
 use serde_json::Value;
+use tiny_goldens::{
+    F32_TOLERANCE, Golden, all_logits, check_all_logits, check_cached, check_greedy,
+    check_stateless, fixture, load, load_options,
+};
 use transformers::{
-    AutoCausalConfig, AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions,
-    LogitsSelection, TokenMask,
+    AutoCausalConfig, AutoCausalLm, CausalLmInput, ForwardOptions,
     attention::AttentionPrecisionMode,
     cache::CacheConfig,
     checkpoint::LoadOptions,
@@ -77,13 +108,7 @@ use transformers::{
 /// Deterministic F32 CPU backend.
 type B = Flex<f32, i32>;
 
-/// Absolute tolerance on logits and hidden states; see the module documentation.
-const TOLERANCE: f32 = 1e-5;
-
-/// Columns prefilled before cached single-token decoding.
-const PREFILL: usize = 6;
-
-/// The saturating attention soft-cap of [`saturated_attention_soft_cap_matches_transformers`].
+/// The saturating attention soft-cap of [`saturated_attention_soft_cap`].
 const SATURATED_CAP: f64 = 0.25;
 
 /// Transformers 5.2.0 / PyTorch 2.10.0 logits of the `gemma2` fixture with `attn_logit_softcapping = 0.25`.
@@ -130,324 +155,75 @@ const SATURATED_CAP_LOGITS: [[f32; 96]; 2] = [
 /// Every Gemma fixture case and its text `model_type`.
 const CASES: [(&str, &str); 2] = [("gemma2", "gemma2"), ("gemma3-text", "gemma3_text")];
 
-/// One parsed `golden.json`.
-struct Golden {
-    /// `[2, 12]` token IDs.
-    input_ids: Vec<Vec<i64>>,
-    /// `[2, 12]` validity (1 = token).
-    attention_mask: Vec<Vec<i64>>,
-    /// `[2, 12]` explicit positions.
-    position_ids: Vec<Vec<i64>>,
-    /// Row-major `[2, 12, V]` logits.
-    logits: Vec<f32>,
-    /// Vocabulary size `V`.
-    vocabulary: usize,
-    /// Row-major `[L + 1, 12, d]` hidden states of row 0.
-    hidden_states: Vec<f32>,
-    /// `[L + 1, 12, d]`.
-    hidden_shape: [usize; 3],
-    /// Greedy prompt tokens.
-    greedy_prompt: Vec<i64>,
-    /// Reference greedy continuation.
-    greedy_tokens: Vec<i64>,
+/// A fresh directory for one modified copy of a fixture, removed when dropped.
+///
+/// Each call gets its own directory under Cargo's per-target temporary
+/// directory, so the Flex and accelerator variants of a test never share
+/// files.
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(name)
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("create a fixture copy directory")
 }
 
-impl Golden {
-    /// Reads `<root>/golden.json`.
-    fn read(root: &Path) -> Self {
-        let text = std::fs::read_to_string(root.join("golden.json")).expect("read golden.json");
-        let value: Value = serde_json::from_str(&text).expect("parse golden.json");
-        let matrix = |key: &str| -> Vec<Vec<i64>> {
-            serde_json::from_value(value[key].clone()).expect("integer matrix")
-        };
-        let floats = |key: &str| -> Vec<f32> {
-            serde_json::from_value::<Vec<f64>>(value[key].clone())
-                .expect("float list")
-                .into_iter()
-                .map(|value| value as f32)
-                .collect()
-        };
-        let shape: Vec<usize> = serde_json::from_value(value["logits_shape"].clone()).unwrap();
-        let hidden_shape: Vec<usize> =
-            serde_json::from_value(value["hidden_states_row0_shape"].clone()).unwrap();
-        Self {
-            input_ids: matrix("input_ids"),
-            attention_mask: matrix("attention_mask"),
-            position_ids: matrix("position_ids"),
-            logits: floats("logits"),
-            vocabulary: shape[2],
-            hidden_states: floats("hidden_states_row0"),
-            hidden_shape: hidden_shape.try_into().unwrap(),
-            greedy_prompt: serde_json::from_value(value["greedy_prompt"].clone()).unwrap(),
-            greedy_tokens: serde_json::from_value(value["greedy_tokens"].clone()).unwrap(),
-        }
-    }
-
-    /// Returns the number of columns per row.
-    fn columns(&self) -> usize {
-        self.input_ids[0].len()
-    }
-
-    /// Returns the reference logits of `(row, column)`.
-    fn logits_at(&self, row: usize, column: usize) -> &[f32] {
-        let start = (row * self.columns() + column) * self.vocabulary;
-        &self.logits[start..start + self.vocabulary]
-    }
-
-    /// Returns whether `(row, column)` is a real token.
-    fn valid(&self, row: usize, column: usize) -> bool {
-        self.attention_mask[row][column] != 0
-    }
-}
-
-/// Returns the fixture directory of `case`.
-fn fixture(case: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/tiny_goldens/{case}"))
-}
-
-/// Loads `case` through the strict automatic loader.
-fn load(case: &str) -> AutoCausalLm<B> {
-    load_directory(&fixture(case))
-}
-
-/// Loads a checkpoint directory through the strict automatic loader.
-fn load_directory(directory: &Path) -> AutoCausalLm<B> {
-    let options = AutoLoadOptions {
-        load_tokenizer: false,
-        ..AutoLoadOptions::default()
-    };
-    AutoCausalLm::<B>::load_local(directory, &options, &Default::default())
-        .unwrap_or_else(|error| panic!("{}: strict load failed: {error}", directory.display()))
-        .into_model()
-}
-
-/// Returns the golden's `[2, 12]` stateless input with explicit positions.
-fn golden_input(golden: &Golden) -> CausalLmInput<B> {
-    CausalLmInput {
-        token_ids: ints(&golden.input_ids),
-        token_mask: Some(mask(&golden.attention_mask)),
-        position_ids: Some(ints(&golden.position_ids)),
-    }
-}
-
-/// Uploads a row-major integer matrix.
-fn ints(rows: &[Vec<i64>]) -> Tensor<B, 2, Int> {
-    let shape = [rows.len(), rows[0].len()];
-    Tensor::from_data(TensorData::new(rows.concat(), shape), &Default::default())
-}
-
-/// Uploads a validity matrix as a token mask.
-fn mask(rows: &[Vec<i64>]) -> TokenMask<B> {
-    TokenMask::new(ints(rows).equal_elem(1))
-}
-
-/// Returns columns `range` of every row.
-fn slice(matrix: &[Vec<i64>], range: std::ops::Range<usize>) -> Vec<Vec<i64>> {
-    matrix
-        .iter()
-        .map(|row| row[range.clone()].to_vec())
-        .collect()
-}
-
-/// Reads an F32 tensor to the host.
-fn host<const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
-    tensor.into_data().to_vec::<f32>().unwrap()
-}
-
-/// Asserts `|actual - expected| <= TOLERANCE` elementwise and returns the largest gap.
-fn assert_close(actual: &[f32], expected: &[f32], context: &str) -> f32 {
-    assert_eq!(actual.len(), expected.len(), "{context}: length");
-    let gap = actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).abs())
-        .fold(0.0_f32, f32::max);
-    assert!(gap <= TOLERANCE, "{context}: max |Δ| = {gap:e}");
-    gap
-}
-
-/// Index and margin of the largest logit.
-fn top_two(logits: &[f32]) -> (usize, f32) {
-    let mut order: Vec<usize> = (0..logits.len()).collect();
-    order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
-    (order[0], logits[order[0]] - logits[order[1]])
-}
-
-/// Checks `[2, 12, V]` logits at every valid position against the golden.
-fn check_all_logits(golden: &Golden, logits: &[f32], context: &str) -> f32 {
-    let (columns, vocabulary) = (golden.columns(), golden.vocabulary);
-    let mut largest = 0.0_f32;
-    for row in 0..2 {
-        for column in (0..columns).filter(|&column| golden.valid(row, column)) {
-            let start = (row * columns + column) * vocabulary;
-            largest = largest.max(assert_close(
-                &logits[start..start + vocabulary],
-                golden.logits_at(row, column),
-                &format!("{context} logits[{row}, {column}]"),
-            ));
-        }
-    }
-    largest
-}
-
-/// The fixtures load into the Gemma registry entry with their own `model_type`.
-#[test]
-fn fixtures_load_as_the_gemma_family() {
-    for (case, model_type) in CASES {
-        let model = load(case);
-        assert_eq!(model.family(), AutoCausalConfig::Gemma, "{case}");
-        let AutoCausalConfigRef::Gemma(config) = model.config() else {
-            panic!("{case}: not registered as the Gemma family");
-        };
-        assert_eq!(config.model_type, model_type);
-        assert_eq!(model.config().vocabulary_size(), 96);
-    }
-}
-
-/// Stateless logits and hidden states match the reference at every valid position.
-#[test]
-fn stateless_logits_and_hidden_states_match_transformers() {
+/// Stateless logits and hidden states match the reference, with explicit and implicit positions.
+fn stateless_logits_and_hidden_states<A: Backend>(device: &A::Device, bound: Bound) {
     for (case, _) in CASES {
-        let golden = Golden::read(&fixture(case));
-        let model = load(case);
-        let options = ForwardOptions {
-            logits: LogitsSelection::All,
-            hidden_states: true,
-            ..ForwardOptions::default()
-        };
-        let output = model
-            .forward(
-                CausalLmInput {
-                    token_ids: ints(&golden.input_ids),
-                    token_mask: Some(mask(&golden.attention_mask)),
-                    position_ids: Some(ints(&golden.position_ids)),
-                },
-                &options,
-            )
-            .unwrap();
-        let largest = check_all_logits(&golden, &host(output.logits), case);
-        eprintln!("{case}: largest stateless logit gap {largest:e}");
-        let columns = golden.columns();
-        let [entries, _, width] = golden.hidden_shape;
-        let layers = entries - 1;
-        assert_eq!(output.hidden_states.len(), layers + 2, "{case}");
-        let reference_index = |ours: usize| if ours == layers + 1 { layers } else { ours };
-        for (ours, state) in output.hidden_states.into_iter().enumerate() {
-            if ours == layers {
-                continue; // Transformers replaces the last block output by the final norm.
-            }
-            let row0 = host(state.narrow(0, 0, 1));
-            let reference = reference_index(ours);
-            let expected = &golden.hidden_states
-                [reference * columns * width..(reference + 1) * columns * width];
-            assert_close(&row0, expected, &format!("{case} hidden_states[{ours}]"));
-        }
+        let golden = Golden::case(case);
+        let model = load::<A>(&fixture(case), device);
+        check_stateless(&model, &golden, bound, device, case);
         // Implicit positions are the same valid-token ordinals.
         let implicit = model
             .forward(
                 CausalLmInput {
-                    token_ids: ints(&golden.input_ids),
-                    token_mask: Some(mask(&golden.attention_mask)),
                     position_ids: None,
+                    ..golden.input(device)
                 },
-                &ForwardOptions {
-                    logits: LogitsSelection::All,
-                    ..ForwardOptions::default()
-                },
+                &all_logits(),
             )
             .unwrap();
-        check_all_logits(&golden, &host(implicit.logits), &format!("{case} implicit"));
+        check_all_logits(
+            &golden,
+            &host(implicit.logits),
+            bound,
+            &format!("{case} implicit"),
+        );
     }
 }
 
 /// Batched ragged prefill and decode reproduce the stateless and reference logits.
-#[test]
-fn batched_cached_decode_matches_stateless_and_reference_logits() {
+fn batched_cached_decode<A: Backend>(device: &A::Device, bound: Bound) {
     for (case, _) in CASES {
-        let golden = Golden::read(&fixture(case));
-        let model = load(case);
-        let columns = golden.columns();
-        let device = Default::default();
-        let mut state = model
-            .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, &device)
-            .unwrap();
-        let prefill = model
-            .prefill(
-                CausalLmInput {
-                    token_ids: ints(&slice(&golden.input_ids, 0..PREFILL)),
-                    token_mask: Some(mask(&slice(&golden.attention_mask, 0..PREFILL))),
-                    position_ids: None,
-                },
-                &mut state,
-                &ForwardOptions::default(),
-            )
-            .unwrap();
-        let mut steps = vec![host(prefill.logits)];
-        for column in PREFILL..columns {
-            let output = model
-                .decode(
-                    DecodeInput {
-                        token_ids: ints(&slice(&golden.input_ids, column..column + 1)),
-                        position_ids: None,
-                        token_mask: None,
-                    },
-                    &mut state,
-                    &ForwardOptions::default(),
-                )
-                .unwrap();
-            steps.push(host(output.logits));
-        }
-        let v = golden.vocabulary;
-        for (step, logits) in steps.iter().enumerate() {
-            let column = PREFILL - 1 + step;
-            for row in 0..2 {
-                assert_close(
-                    &logits[row * v..(row + 1) * v],
-                    golden.logits_at(row, column),
-                    &format!("{case} cached logits[{row}, {column}]"),
-                );
-            }
-        }
-        assert_eq!(
-            transformers::DecodeState::lengths(&state),
-            [columns, columns - 4],
-            "{case}: cached lengths count valid tokens only"
-        );
+        let golden = Golden::case(case);
+        let model = load::<A>(&fixture(case), device);
+        check_cached(&model, &golden, 16, bound, device, case);
     }
 }
 
 /// Multi-token ragged steps on a non-empty state reproduce the reference.
 ///
-/// Row 0 prefills three tokens, then five, then decodes; row 1 (left-padded
-/// by four) prefills only padding plus its first token, then the next five
-/// tokens with its padding columns interleaved differently, so the two
-/// rows' new tokens sit at different offsets of each step's block and the
-/// sliding layers' history plus fresh segment exceed the window.
-#[test]
-fn chunked_ragged_steps_match_the_reference() {
+/// Row 0 prefills five tokens, then five more, then decodes; row 1
+/// (left-padded by four) prefills only padding plus its first token, then
+/// its next five tokens, so the two rows' new tokens sit at different
+/// offsets of each step's block and the sliding layers' history plus fresh
+/// segment exceed the window. Padding positions must return zero logits.
+fn chunked_ragged_steps<A: Backend>(device: &A::Device, bound: Bound) {
     for (case, _) in CASES {
-        let golden = Golden::read(&fixture(case));
-        let model = load(case);
+        let golden = Golden::case(case);
+        let model = load::<A>(&fixture(case), device);
         let columns = golden.columns();
-        let device = Default::default();
         let mut state = model
-            .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, &device)
+            .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, device)
             .unwrap();
-        let all = ForwardOptions {
-            logits: LogitsSelection::All,
-            ..ForwardOptions::default()
-        };
         let v = golden.vocabulary;
+        let mut largest = Gap::default();
         for range in [0..5, 5..10] {
             let output = model
                 .prefill(
-                    CausalLmInput {
-                        token_ids: ints(&slice(&golden.input_ids, range.clone())),
-                        token_mask: Some(mask(&slice(&golden.attention_mask, range.clone()))),
-                        position_ids: None,
-                    },
+                    golden.columns_input(range.clone(), device),
                     &mut state,
-                    &all,
+                    &all_logits(),
                 )
                 .unwrap();
             let logits = host(output.logits);
@@ -456,11 +232,11 @@ fn chunked_ragged_steps_match_the_reference() {
                 for (offset, column) in range.clone().enumerate() {
                     let at = &logits[(row * width + offset) * v..(row * width + offset + 1) * v];
                     if golden.valid(row, column) {
-                        assert_close(
+                        largest = largest.max(bound.assert_close(
                             at,
                             golden.logits_at(row, column),
                             &format!("{case} chunk logits[{row}, {column}]"),
-                        );
+                        ));
                     } else {
                         assert!(at.iter().all(|&value| value == 0.0), "{case}: padding");
                     }
@@ -470,74 +246,33 @@ fn chunked_ragged_steps_match_the_reference() {
         for column in 10..columns {
             let output = model
                 .decode(
-                    DecodeInput {
-                        token_ids: ints(&slice(&golden.input_ids, column..column + 1)),
-                        position_ids: None,
-                        token_mask: None,
-                    },
+                    golden.step(column, device),
                     &mut state,
                     &ForwardOptions::default(),
                 )
                 .unwrap();
             let logits = host(output.logits);
             for row in 0..2 {
-                assert_close(
+                largest = largest.max(bound.assert_close(
                     &logits[row * v..(row + 1) * v],
                     golden.logits_at(row, column),
                     &format!("{case} decode logits[{row}, {column}]"),
-                );
+                ));
             }
         }
+        eprintln!(
+            "{case}: largest chunked-step logit gap {:.2e}",
+            largest.deviation
+        );
     }
 }
 
-/// The cached greedy continuation matches the reference while the choice is decisive.
-#[test]
-fn cached_greedy_continuation_matches_transformers() {
+/// The cached greedy continuation matches the reference for at least two decisive tokens.
+fn cached_greedy_continuation<A: Backend>(device: &A::Device, bound: Bound) {
     for (case, _) in CASES {
-        let golden = Golden::read(&fixture(case));
-        let model = load(case);
-        let device = Default::default();
-        let mut state = model
-            .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
-            .unwrap();
-        let mut logits = host(
-            model
-                .prefill(
-                    CausalLmInput {
-                        token_ids: ints(std::slice::from_ref(&golden.greedy_prompt)),
-                        token_mask: None,
-                        position_ids: None,
-                    },
-                    &mut state,
-                    &ForwardOptions::default(),
-                )
-                .unwrap()
-                .logits,
-        );
-        let mut compared = 0;
-        for (step, &expected) in golden.greedy_tokens.iter().enumerate() {
-            let (token, margin) = top_two(&logits);
-            if margin <= TOLERANCE {
-                break; // A tie at F32 precision; later tokens may legitimately differ.
-            }
-            assert_eq!(token as i64, expected, "{case}: greedy token {step}");
-            compared += 1;
-            logits = host(
-                model
-                    .decode(
-                        DecodeInput {
-                            token_ids: ints(&[vec![expected]]),
-                            position_ids: None,
-                            token_mask: None,
-                        },
-                        &mut state,
-                        &ForwardOptions::default(),
-                    )
-                    .unwrap()
-                    .logits,
-            );
-        }
+        let golden = Golden::case(case);
+        let model = load::<A>(&fixture(case), device);
+        let compared = check_greedy(&model, &golden, bound, device, case);
         assert!(
             compared >= 2,
             "{case}: only {compared} decisive greedy tokens"
@@ -546,19 +281,13 @@ fn cached_greedy_continuation_matches_transformers() {
 }
 
 /// A hooked pass without actions exposes the catalog and equals the plain pass.
-#[test]
-fn hooked_pass_without_actions_equals_the_plain_pass() {
+fn hooked_pass_without_actions<A: Backend>(device: &A::Device, bound: Bound) {
     for (case, _) in CASES {
-        let golden = Golden::read(&fixture(case));
-        let model = load(case);
-        let input = || CausalLmInput {
-            token_ids: ints(&golden.input_ids),
-            token_mask: Some(mask(&golden.attention_mask)),
+        let golden = Golden::case(case);
+        let model = load::<A>(&fixture(case), device);
+        let input = CausalLmInput {
             position_ids: None,
-        };
-        let options = ForwardOptions {
-            logits: LogitsSelection::All,
-            ..ForwardOptions::default()
+            ..golden.input(device)
         };
         // Embedding, final norm, and twelve points per block.
         assert_eq!(
@@ -567,9 +296,14 @@ fn hooked_pass_without_actions_equals_the_plain_pass() {
             "{case}"
         );
         let hooked = model
-            .forward_with_hooks(input(), &options, &mut Hooks::new())
+            .forward_with_hooks(input, &all_logits(), &mut Hooks::new())
             .unwrap();
-        check_all_logits(&golden, &host(hooked.logits), &format!("{case} hooked"));
+        check_all_logits(
+            &golden,
+            &host(hooked.logits),
+            bound,
+            &format!("{case} hooked"),
+        );
     }
 }
 
@@ -578,35 +312,28 @@ fn hooked_pass_without_actions_equals_the_plain_pass() {
 /// `save_pretrained` adds `"rope_type": "default"` and `"rope_theta": null`
 /// beside the per-type objects whenever `layer_types` uses one attention
 /// kind. Transformers reads only the per-type objects; its logits for this
-/// rewritten `gemma3-text` copy equal the golden bit for bit. The copy lives
-/// in Cargo's per-target temporary directory.
-#[test]
-fn transformers_5_2_mixed_rope_mapping_reproduces_the_reference() {
+/// rewritten `gemma3-text` copy equal the golden bit for bit.
+fn mixed_rope_mapping<A: Backend>(device: &A::Device, bound: Bound) {
     let source = fixture("gemma3-text");
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemma3-text-mixed-rope");
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = scratch("gemma3-text-mixed-rope");
     let mut config: Value =
         serde_json::from_str(&std::fs::read_to_string(source.join("config.json")).unwrap())
             .unwrap();
     config["rope_parameters"]["rope_type"] = "default".into();
     config["rope_parameters"]["rope_theta"] = Value::Null;
-    std::fs::write(directory.join("config.json"), config.to_string()).unwrap();
+    std::fs::write(directory.path().join("config.json"), config.to_string()).unwrap();
     std::fs::copy(
         source.join("model.safetensors"),
-        directory.join("model.safetensors"),
+        directory.path().join("model.safetensors"),
     )
     .unwrap();
     let golden = Golden::read(&source);
-    let model = load_directory(&directory);
-    let options = ForwardOptions {
-        logits: LogitsSelection::All,
-        ..ForwardOptions::default()
-    };
+    let model = load::<A>(directory.path(), device);
     let logits = model
-        .forward(golden_input(&golden), &options)
+        .forward(golden.input(device), &all_logits())
         .unwrap()
         .logits;
-    check_all_logits(&golden, &host(logits), "mixed RoPE mapping");
+    check_all_logits(&golden, &host(logits), bound, "mixed RoPE mapping");
 }
 
 /// The attention soft-cap matches Transformers where tanh saturates.
@@ -616,23 +343,21 @@ fn transformers_5_2_mixed_rope_mapping_reproduces_the_reference() {
 /// `3.2`. Both the fused and the eager attention graphs must reproduce
 /// [`SATURATED_CAP_LOGITS`], which differ from the cap-50 golden by at least
 /// `1.7e-2` at the compared positions (`1.6e-1` at worst over all valid
-/// positions), over a thousand times the tolerance.
-#[test]
-fn saturated_attention_soft_cap_matches_transformers() {
+/// positions), over a thousand times the F32 tolerance. The run must also be
+/// nearer the saturated reference than the cap-50 logits: its gap must stay
+/// below half that difference, which keeps the check decisive under the
+/// looser TF32 bound.
+fn saturated_attention_soft_cap<A: Backend>(device: &A::Device, bound: Bound) {
     let source = fixture("gemma2");
     let golden = Golden::read(&source);
     let mut config =
         GemmaConfig::from_json_str(&std::fs::read_to_string(source.join("config.json")).unwrap())
             .unwrap();
     config.attn_logit_softcapping = Some(SATURATED_CAP);
-    let mut model = GemmaForCausalLm::<B>::init(config, &Default::default()).unwrap();
+    let mut model = GemmaForCausalLm::<A>::init(config, device).unwrap();
     model
         .load_checkpoint(&source, &LoadOptions::default())
         .expect("strict load with the changed cap");
-    let options = ForwardOptions {
-        logits: LogitsSelection::All,
-        ..ForwardOptions::default()
-    };
     let eager = model
         .clone()
         .with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
@@ -640,40 +365,41 @@ fn saturated_attention_soft_cap_matches_transformers() {
     for (graph, model) in [("fused", model), ("eager", eager)] {
         let logits = host(
             model
-                .forward(golden_input(&golden), &options)
+                .forward(golden.input(device), &all_logits())
                 .unwrap()
                 .logits,
         );
         for (row, expected) in SATURATED_CAP_LOGITS.iter().enumerate() {
             let start = (row * columns + columns - 1) * vocabulary;
             let actual = &logits[start..start + vocabulary];
-            let gap = assert_close(actual, expected, &format!("{graph} row {row}"));
-            let moved = actual
-                .iter()
-                .zip(golden.logits_at(row, columns - 1))
-                .map(|(a, e)| (a - e).abs())
-                .fold(0.0_f32, f32::max);
-            eprintln!("{graph} row {row}: max |Δ| = {gap:e}; cap 50 vs 0.25 = {moved:e}");
+            let gap = bound.assert_close(actual, expected, &format!("{graph} row {row}"));
+            let moved = Gap::measure(expected, golden.logits_at(row, columns - 1)).deviation;
+            eprintln!(
+                "{graph} row {row}: max |Δ| = {:e}; cap 50 vs 0.25 = {moved:e}",
+                gap.deviation
+            );
             assert!(
                 moved > 1e-2,
                 "{graph} row {row}: the saturated cap is decisive"
+            );
+            assert!(
+                2.0 * gap.deviation < moved,
+                "{graph} row {row}: the run is nearer the cap-50 logits than the saturated reference"
             );
         }
     }
 }
 
-/// Writes the `gemma3-text` fixture as a multimodal `gemma3` checkpoint named `name`.
+/// Writes the `gemma3-text` fixture as a multimodal `gemma3` checkpoint into a fresh directory.
 ///
 /// The config becomes `{"model_type": "gemma3", "text_config": …}` with the
 /// text config's `final_logit_softcapping` set to `cap`; every tensor moves
 /// from `model.` to the current multimodal prefix `model.language_model.`,
-/// and a one-tensor stand-in vision tower is added. The copy lives in
-/// Cargo's per-target temporary directory.
-fn multimodal_copy(name: &str, cap: Option<f64>) -> PathBuf {
+/// and a one-tensor stand-in vision tower is added.
+fn multimodal_copy(name: &str, cap: Option<f64>) -> tempfile::TempDir {
     use safetensors::{SafeTensors, tensor::TensorView};
     let source = fixture("gemma3-text");
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = scratch(name);
     let mut text: Value =
         serde_json::from_str(&std::fs::read_to_string(source.join("config.json")).unwrap())
             .unwrap();
@@ -684,7 +410,7 @@ fn multimodal_copy(name: &str, cap: Option<f64>) -> PathBuf {
         "text_config": text,
         "vision_config": {"model_type": "siglip_vision_model"},
     });
-    std::fs::write(directory.join("config.json"), wrapper.to_string()).unwrap();
+    std::fs::write(directory.path().join("config.json"), wrapper.to_string()).unwrap();
     let bytes = std::fs::read(source.join("model.safetensors")).unwrap();
     let tensors = SafeTensors::deserialize(&bytes).unwrap();
     let vision = [0_u8; 8];
@@ -704,7 +430,7 @@ fn multimodal_copy(name: &str, cap: Option<f64>) -> PathBuf {
         TensorView::new(safetensors::Dtype::F32, vec![2], &vision).unwrap(),
     ));
     std::fs::write(
-        directory.join("model.safetensors"),
+        directory.path().join("model.safetensors"),
         safetensors::serialize(views, None).unwrap(),
     )
     .unwrap();
@@ -721,32 +447,234 @@ const VISION_STAND_IN: &str = "model.vision_tower.vision_model.post_layernorm.we
 /// the load fails before any payload is read: `Gemma3ForConditionalGeneration`
 /// never applies the final soft-cap, so executing it would silently diverge
 /// from the checkpoint's own reference.
-#[test]
-fn multimodal_wrappers_load_through_the_registry_without_a_final_soft_cap() {
-    let golden = Golden::read(&fixture("gemma3-text"));
-    let options = AutoLoadOptions {
-        load_tokenizer: false,
-        ..AutoLoadOptions::default()
-    };
+fn multimodal_wrappers<A: Backend>(device: &A::Device, bound: Bound) {
+    let golden = Golden::case("gemma3-text");
     let directory = multimodal_copy("gemma3-multimodal", None);
-    let loaded = AutoCausalLm::<B>::load_local(&directory, &options, &Default::default())
+    let loaded = AutoCausalLm::<A>::load_local(directory.path(), &load_options(), device)
         .expect("strict multimodal load");
     assert_eq!(loaded.load_report().allowlisted_ignored, [VISION_STAND_IN]);
     let model = loaded.into_model();
     assert_eq!(model.family(), AutoCausalConfig::Gemma);
-    let all = ForwardOptions {
-        logits: LogitsSelection::All,
-        ..ForwardOptions::default()
-    };
-    let logits = model.forward(golden_input(&golden), &all).unwrap().logits;
-    check_all_logits(&golden, &host(logits), "multimodal wrapper");
+    let logits = model
+        .forward(golden.input(device), &all_logits())
+        .unwrap()
+        .logits;
+    check_all_logits(&golden, &host(logits), bound, "multimodal wrapper");
 
     let capped = multimodal_copy("gemma3-multimodal-capped", Some(30.0));
-    let Err(error) = AutoCausalLm::<B>::load_local(&capped, &options, &Default::default()) else {
+    let Err(error) = AutoCausalLm::<A>::load_local(capped.path(), &load_options(), device) else {
         panic!("a multimodal final soft-cap must be refused");
     };
     assert!(
         error.to_string().contains("final_logit_softcapping"),
         "{error}"
     );
+}
+
+/// The fixtures load into the Gemma registry entry with their own `model_type`.
+#[test]
+fn fixtures_load_as_the_gemma_family() {
+    for (case, model_type) in CASES {
+        let model = load::<B>(&fixture(case), &Default::default());
+        assert_eq!(model.family(), AutoCausalConfig::Gemma, "{case}");
+        let AutoCausalConfigRef::Gemma(config) = model.config() else {
+            panic!("{case}: not registered as the Gemma family");
+        };
+        assert_eq!(config.model_type, model_type);
+        assert_eq!(model.config().vocabulary_size(), 96);
+    }
+}
+
+/// Stateless logits and hidden states match the reference at every valid position.
+#[test]
+fn stateless_logits_and_hidden_states_match_transformers() {
+    stateless_logits_and_hidden_states::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// Batched ragged prefill and decode reproduce the stateless and reference logits.
+#[test]
+fn batched_cached_decode_matches_stateless_and_reference_logits() {
+    batched_cached_decode::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// Multi-token ragged steps on a non-empty state reproduce the reference.
+#[test]
+fn chunked_ragged_steps_match_the_reference() {
+    chunked_ragged_steps::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// The cached greedy continuation matches the reference at every decisive step.
+#[test]
+fn cached_greedy_continuation_matches_transformers() {
+    cached_greedy_continuation::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// A hooked pass without actions exposes the catalog and equals the plain pass.
+#[test]
+fn hooked_pass_without_actions_equals_the_plain_pass() {
+    hooked_pass_without_actions::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// The RoPE mapping Transformers 5.2 writes for single-kind `layer_types` reproduces the reference.
+#[test]
+fn transformers_5_2_mixed_rope_mapping_reproduces_the_reference() {
+    mixed_rope_mapping::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// The attention soft-cap matches Transformers where tanh saturates.
+#[test]
+fn saturated_attention_soft_cap_matches_transformers() {
+    saturated_attention_soft_cap::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// The registry loads a multimodal wrapper's text tower and refuses a final soft-cap it would skip.
+#[test]
+fn multimodal_wrappers_load_through_the_registry_without_a_final_soft_cap() {
+    multimodal_wrappers::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod metal {
+    //! Metal/F32 counterparts of the Flex checks, held to the probed bound.
+
+    use burn::backend::Metal;
+
+    use super::tiny_goldens::golden_bound;
+
+    /// Metal/F32: stateless logits and hidden states.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_stateless_logits_and_hidden_states_match_transformers() {
+        let device = Default::default();
+        super::stateless_logits_and_hidden_states::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: batched ragged prefill and decode.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_batched_cached_decode_matches_reference_logits() {
+        let device = Default::default();
+        super::batched_cached_decode::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: multi-token ragged steps on a non-empty state.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_chunked_ragged_steps_match_the_reference() {
+        let device = Default::default();
+        super::chunked_ragged_steps::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: the cached greedy continuation.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_cached_greedy_continuation_matches_transformers() {
+        let device = Default::default();
+        super::cached_greedy_continuation::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: a hooked pass without actions.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_hooked_pass_without_actions_equals_the_plain_pass() {
+        let device = Default::default();
+        super::hooked_pass_without_actions::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: the Transformers 5.2 mixed RoPE mapping.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_mixed_rope_mapping_reproduces_the_reference() {
+        let device = Default::default();
+        super::mixed_rope_mapping::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: the saturated attention soft-cap.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_saturated_attention_soft_cap_matches_transformers() {
+        let device = Default::default();
+        super::saturated_attention_soft_cap::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: the multimodal wrapper's text tower.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_multimodal_wrappers_load_without_a_final_soft_cap() {
+        let device = Default::default();
+        super::multimodal_wrappers::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    //! CUDA counterparts of the Flex checks, held to the probed bound (F32 or TF32).
+
+    use burn::backend::Cuda;
+
+    use super::tiny_goldens::golden_bound;
+
+    /// CUDA: stateless logits and hidden states.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_stateless_logits_and_hidden_states_match_transformers() {
+        let device = Default::default();
+        super::stateless_logits_and_hidden_states::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: batched ragged prefill and decode.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_batched_cached_decode_matches_reference_logits() {
+        let device = Default::default();
+        super::batched_cached_decode::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: multi-token ragged steps on a non-empty state.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_chunked_ragged_steps_match_the_reference() {
+        let device = Default::default();
+        super::chunked_ragged_steps::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: the cached greedy continuation.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_cached_greedy_continuation_matches_transformers() {
+        let device = Default::default();
+        super::cached_greedy_continuation::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: a hooked pass without actions.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_hooked_pass_without_actions_equals_the_plain_pass() {
+        let device = Default::default();
+        super::hooked_pass_without_actions::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: the Transformers 5.2 mixed RoPE mapping.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_mixed_rope_mapping_reproduces_the_reference() {
+        let device = Default::default();
+        super::mixed_rope_mapping::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: the saturated attention soft-cap.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_saturated_attention_soft_cap_matches_transformers() {
+        let device = Default::default();
+        super::saturated_attention_soft_cap::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: the multimodal wrapper's text tower.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_multimodal_wrappers_load_without_a_final_soft_cap() {
+        let device = Default::default();
+        super::multimodal_wrappers::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
 }

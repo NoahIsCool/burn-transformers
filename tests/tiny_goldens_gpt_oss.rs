@@ -26,49 +26,65 @@
 //!    and 2 cached tokens, so the sliding layers' ring caches wrap and the
 //!    rows' windows differ), which also match the golden logits, at two
 //!    cache capacities;
-//! 4. the cached greedy continuation, compared token by token while our
-//!    top-2 logit margin exceeds the tolerance;
+//! 4. the cached greedy continuation, compared at every step whose top-2
+//!    logit margin exceeds the tolerance (the reference's tokens are fed
+//!    back, so a tie is skipped);
 //! 5. router diagnostics, and the load-balancing objective against
 //!    Transformers' pinned `aux_loss` for the same padded batch.
+//!
+//! The checks are generic over the backend (shared helpers live in
+//! `tests/support/tiny_goldens.rs`). They run on Flex as ordinary tests and,
+//! ignored, on Metal (`--features metal`, macOS) and CUDA (`--features
+//! cuda`):
+//!
+//! ```text
+//! cargo test --locked --features metal --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+//! cargo test --locked --features cuda --test tiny_goldens_gpt_oss -- --ignored --nocapture --test-threads 1
+//! ```
 //!
 //! # Tolerance
 //!
 //! Both sides run F32 with different matmul and reduction orders. Through
 //! four blocks of width 32 with routing, the largest observed logit
-//! deviation is printed with `--nocapture` (about `1e-6`); [`TOLERANCE`] is
-//! `1e-5`, far below any architectural error (a wrong sink, clamp, bias,
-//! router order, rotary layout, or window moves logits by `1e-2` or more). A
-//! flipped expert selection would also move logits by far more than the
-//! tolerance, so passing proves every routing decision matches.
+//! deviation is printed with `--nocapture` (about `1e-6`); the F32 tolerance
+//! is `1e-5` absolute, far below any architectural error (a wrong sink,
+//! clamp, bias, router order, rotary layout, or window moves logits by `1e-2`
+//! or more). A flipped expert selection would also move logits by far more
+//! than the tolerance, so passing proves every routing decision matches.
+//!
+//! Metal multiplies in F32 and is held to the accelerator F32 tolerance of
+//! `tests/support/tiny_goldens.rs` (`1e-5` plus `1e-5` of the compared
+//! magnitude); on an Apple M3 Max its logits deviate by at most `1.07e-6`
+//! (`7.8e-7` eager, `7.3e-7` cached at both capacities), its hidden states by
+//! `2.1e-6`, and its load-balancing loss by `2.4e-7`. A CUDA
+//! GPU that rounds F32 matrix inputs to TF32 (compute capability 8.0 or
+//! newer) is held to the TF32 bound of `tests/support/backend_numerics.rs`,
+//! `1e-2` plus `1e-2` of the compared set's largest magnitude; an older GPU
+//! multiplies in F32 and meets the accelerator F32 tolerance. The bound is
+//! chosen by probing the device. A flipped expert choice moves logits by
+//! more than either bound, so routing parity holds on every backend.
 
 #![cfg(feature = "flex")]
 
-use std::path::{Path, PathBuf};
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
+#[path = "support/tiny_goldens.rs"]
+mod tiny_goldens;
 
-use burn::{
-    backend::Flex,
-    tensor::{Int, Tensor, TensorData},
+use backend_numerics::{Bound, Gap, host};
+use burn::{backend::Flex, tensor::backend::Backend};
+use tiny_goldens::{
+    F32_TOLERANCE, Golden, PREFILL, cached_logits, check_all_logits, check_greedy, check_stateless,
+    fixture, load,
 };
-use serde_json::Value;
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection,
-    TokenMask,
+    AutoCausalLm, CausalLmInput, ForwardOptions, LogitsSelection,
     attention::AttentionPrecisionMode,
-    cache::CacheConfig,
-    models::{
-        AutoCausalConfigRef,
-        gpt_oss::{GptOssConfig, GptOssForCausalLm},
-    },
+    models::{AutoCausalConfigRef, gpt_oss::GptOssConfig},
 };
 
 /// Deterministic F32 CPU backend.
 type B = Flex<f32, i32>;
-
-/// Absolute tolerance on logits and hidden states; see the module documentation.
-const TOLERANCE: f32 = 1e-5;
-
-/// Columns prefilled before cached single-token decoding.
-const PREFILL: usize = 6;
 
 /// Transformers' unscaled `aux_loss` for the golden batch (padding-masked, all four layers).
 ///
@@ -93,204 +109,42 @@ const REFERENCE_LOAD_BALANCING_LOSS: f32 = 2.020_416_7;
 /// The fixture case.
 const CASE: &str = "gpt-oss";
 
-/// One parsed `golden.json`.
-struct Golden {
-    /// `[2, 12]` token IDs.
-    input_ids: Vec<Vec<i64>>,
-    /// `[2, 12]` validity (1 = token).
-    attention_mask: Vec<Vec<i64>>,
-    /// `[2, 12]` explicit positions.
-    position_ids: Vec<Vec<i64>>,
-    /// Row-major `[2, 12, V]` logits.
-    logits: Vec<f32>,
-    /// Vocabulary size `V`.
-    vocabulary: usize,
-    /// Row-major `[L + 1, 12, d]` hidden states of row 0.
-    hidden_states: Vec<f32>,
-    /// `[L + 1, 12, d]`.
-    hidden_shape: [usize; 3],
-    /// Greedy prompt tokens.
-    greedy_prompt: Vec<i64>,
-    /// Reference greedy continuation.
-    greedy_tokens: Vec<i64>,
+/// Reads the fixture's golden, which must be a gpt-oss one.
+fn golden() -> Golden {
+    let golden = Golden::case(CASE);
+    assert_eq!(golden.model_type, "gpt_oss");
+    golden
 }
 
-impl Golden {
-    /// Reads `<root>/golden.json`.
-    fn read(root: &Path) -> Self {
-        let text = std::fs::read_to_string(root.join("golden.json")).expect("read golden.json");
-        let value: Value = serde_json::from_str(&text).expect("parse golden.json");
-        assert_eq!(value["model_type"], "gpt_oss");
-        let matrix = |key: &str| -> Vec<Vec<i64>> {
-            serde_json::from_value(value[key].clone()).expect("integer matrix")
-        };
-        let floats = |key: &str| -> Vec<f32> {
-            serde_json::from_value::<Vec<f64>>(value[key].clone())
-                .expect("float list")
-                .into_iter()
-                .map(|value| value as f32)
-                .collect()
-        };
-        let shape: Vec<usize> = serde_json::from_value(value["logits_shape"].clone()).unwrap();
-        let hidden_shape: Vec<usize> =
-            serde_json::from_value(value["hidden_states_row0_shape"].clone()).unwrap();
-        Self {
-            input_ids: matrix("input_ids"),
-            attention_mask: matrix("attention_mask"),
-            position_ids: matrix("position_ids"),
-            logits: floats("logits"),
-            vocabulary: shape[2],
-            hidden_states: floats("hidden_states_row0"),
-            hidden_shape: hidden_shape.try_into().unwrap(),
-            greedy_prompt: serde_json::from_value(value["greedy_prompt"].clone()).unwrap(),
-            greedy_tokens: serde_json::from_value(value["greedy_tokens"].clone()).unwrap(),
-        }
-    }
-
-    /// Returns the reference logits of `(row, column)`.
-    fn logits_at(&self, row: usize, column: usize) -> &[f32] {
-        let columns = self.input_ids[0].len();
-        let start = (row * columns + column) * self.vocabulary;
-        &self.logits[start..start + self.vocabulary]
-    }
-
-    /// Returns whether `(row, column)` is a real token.
-    fn valid(&self, row: usize, column: usize) -> bool {
-        self.attention_mask[row][column] != 0
-    }
-}
-
-/// Returns the fixture directory.
-fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/tiny_goldens/{CASE}"))
-}
-
-/// Loads the fixture through the strict automatic loader.
-fn load() -> AutoCausalLm<B> {
-    let options = AutoLoadOptions {
-        load_tokenizer: false,
-        ..AutoLoadOptions::default()
-    };
-    AutoCausalLm::<B>::load_local(fixture(), &options, &Default::default())
-        .unwrap_or_else(|error| panic!("strict load failed: {error}"))
-        .into_model()
-}
-
-/// Loads the fixture as the concrete family model.
-fn load_concrete() -> GptOssForCausalLm<B> {
-    match load() {
-        AutoCausalLm::GptOss(model) => model,
-        _ => panic!("gpt_oss is not registered as the gpt-oss family"),
-    }
-}
-
-/// Uploads a row-major integer matrix.
-fn ints(rows: &[Vec<i64>]) -> Tensor<B, 2, Int> {
-    let shape = [rows.len(), rows[0].len()];
-    Tensor::from_data(TensorData::new(rows.concat(), shape), &Default::default())
-}
-
-/// Uploads a validity matrix as a token mask.
-fn mask(rows: &[Vec<i64>]) -> TokenMask<B> {
-    TokenMask::new(ints(rows).equal_elem(1))
-}
-
-/// Reads an F32 tensor to the host.
-fn host<const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
-    tensor.into_data().to_vec::<f32>().unwrap()
-}
-
-/// Asserts `|actual - expected| <= TOLERANCE` elementwise and returns the largest gap.
-fn assert_close(actual: &[f32], expected: &[f32], context: &str) -> f32 {
-    assert_eq!(actual.len(), expected.len(), "{context}: length");
-    let gap = actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).abs())
-        .fold(0.0_f32, f32::max);
-    assert!(gap <= TOLERANCE, "{context}: max |Δ| = {gap:e}");
-    gap
-}
-
-/// Index and margin of the largest logit.
-fn top_two(logits: &[f32]) -> (usize, f32) {
-    let mut order: Vec<usize> = (0..logits.len()).collect();
-    order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
-    (order[0], logits[order[0]] - logits[order[1]])
-}
-
-/// The full golden input with explicit positions.
-fn golden_input(golden: &Golden) -> CausalLmInput<B> {
-    CausalLmInput {
-        token_ids: ints(&golden.input_ids),
-        token_mask: Some(mask(&golden.attention_mask)),
-        position_ids: Some(ints(&golden.position_ids)),
-    }
-}
-
-/// Compares stateless logits at every valid position and returns the largest gap.
-fn assert_logits_match(golden: &Golden, logits: Vec<f32>, context: &str) -> f32 {
-    let columns = golden.input_ids[0].len();
-    let mut largest = 0.0_f32;
-    for row in 0..2 {
-        for column in (0..columns).filter(|&column| golden.valid(row, column)) {
-            let start = (row * columns + column) * golden.vocabulary;
-            largest = largest.max(assert_close(
-                &logits[start..start + golden.vocabulary],
-                golden.logits_at(row, column),
-                &format!("{context} logits[{row}, {column}]"),
-            ));
-        }
-    }
-    largest
+/// Loads the fixture through the strict automatic loader on `device`.
+fn load_model<A: Backend>(device: &A::Device) -> AutoCausalLm<A> {
+    load::<A>(&fixture(CASE), device)
 }
 
 /// Stateless logits and hidden states match the reference at every valid position.
-#[test]
-fn stateless_logits_and_hidden_states_match_transformers() {
-    let golden = Golden::read(&fixture());
-    let model = load();
+fn stateless_logits_and_hidden_states<A: Backend>(device: &A::Device, bound: Bound) {
+    let golden = golden();
+    let model = load_model::<A>(device);
     let AutoCausalConfigRef::GptOss(config) = model.config() else {
         panic!("not registered as the gpt-oss family");
     };
     assert_eq!(config.model_type, "gpt_oss");
     assert_eq!(model.config().vocabulary_size(), golden.vocabulary);
-    let output = model
-        .forward(
-            golden_input(&golden),
-            &ForwardOptions {
-                logits: LogitsSelection::All,
-                hidden_states: true,
-                ..ForwardOptions::default()
-            },
-        )
-        .unwrap();
-    let largest = assert_logits_match(&golden, host(output.logits), "fused");
-    eprintln!("gpt-oss: largest stateless logit gap {largest:e}");
-    let [entries, columns, width] = golden.hidden_shape;
-    let layers = entries - 1;
-    assert_eq!(output.hidden_states.len(), layers + 2);
-    let reference_index = |ours: usize| if ours == layers + 1 { layers } else { ours };
-    for (ours, state) in output.hidden_states.into_iter().enumerate() {
-        if ours == layers {
-            continue; // Transformers replaces the last block output by the final norm.
-        }
-        let row0 = host(state.narrow(0, 0, 1));
-        let reference = reference_index(ours);
-        let expected =
-            &golden.hidden_states[reference * columns * width..(reference + 1) * columns * width];
-        assert_close(&row0, expected, &format!("hidden_states[{ours}]"));
-    }
+    check_stateless(&model, &golden, bound, device, "gpt-oss fused");
 }
 
 /// The eager F32-softmax graph (explicit sink column) matches the reference too.
-#[test]
-fn eager_sink_attention_matches_transformers() {
-    let golden = Golden::read(&fixture());
-    let model = load_concrete().with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+///
+/// With sinks every attention-pattern row sums to `1 - p_sink`, in `[0, 1)`.
+fn eager_sink_attention<A: Backend>(device: &A::Device, bound: Bound) {
+    let golden = golden();
+    let AutoCausalLm::GptOss(model) = load_model::<A>(device) else {
+        panic!("gpt_oss is not registered as the gpt-oss family");
+    };
+    let model = model.with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
     let output = model
         .forward(
-            golden_input(&golden),
+            golden.input(device),
             &ForwardOptions {
                 logits: LogitsSelection::All,
                 attentions: true,
@@ -298,9 +152,8 @@ fn eager_sink_attention_matches_transformers() {
             },
         )
         .unwrap();
-    let largest = assert_logits_match(&golden, host(output.logits), "eager");
-    eprintln!("gpt-oss: largest eager logit gap {largest:e}");
-    // With sinks every pattern row sums to 1 - p_sink < 1, and never below zero.
+    let largest = check_all_logits(&golden, &host(output.logits), bound, "eager");
+    eprintln!("gpt-oss: largest eager logit gap {:.2e}", largest.deviation);
     assert_eq!(output.attentions.len(), golden.hidden_shape[0] - 1);
     for pattern in output.attentions {
         let [batch, heads, queries, keys] = pattern.dims();
@@ -314,134 +167,55 @@ fn eager_sink_attention_matches_transformers() {
     }
 }
 
-/// Runs a batched prefill of the first six columns and six one-token decode steps.
-fn cached_logits(model: &AutoCausalLm<B>, golden: &Golden, capacity: usize) -> Vec<Vec<f32>> {
-    let columns = golden.input_ids[0].len();
-    let device = Default::default();
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, capacity).unwrap(), 2, &device)
-        .unwrap();
-    let prefix = |matrix: &[Vec<i64>], range: std::ops::Range<usize>| {
-        matrix
-            .iter()
-            .map(|row| row[range.clone()].to_vec())
-            .collect::<Vec<_>>()
-    };
-    let prefill = model
-        .prefill(
-            CausalLmInput {
-                token_ids: ints(&prefix(&golden.input_ids, 0..PREFILL)),
-                token_mask: Some(mask(&prefix(&golden.attention_mask, 0..PREFILL))),
-                position_ids: None,
-            },
-            &mut state,
-            &ForwardOptions::default(),
-        )
-        .unwrap();
-    let mut steps = vec![host(prefill.logits)];
-    for column in PREFILL..columns {
-        let output = model
-            .decode(
-                DecodeInput {
-                    token_ids: ints(&prefix(&golden.input_ids, column..column + 1)),
-                    position_ids: None,
-                    token_mask: None,
-                },
-                &mut state,
-                &ForwardOptions::default(),
-            )
-            .unwrap();
-        steps.push(host(output.logits));
-    }
-    assert_eq!(
-        transformers::DecodeState::lengths(&state),
-        [columns, columns - 4],
-        "cached lengths count valid tokens only"
-    );
-    steps
-}
-
 /// Batched ragged prefill and decode reproduce the reference logits, with ring and full caches.
-#[test]
-fn batched_cached_decode_matches_reference_logits() {
-    let golden = Golden::read(&fixture());
-    let model = load();
-    // Both capacities exceed the window, so the window-4 layers use a
-    // wrapping ring; capacity 12 is exactly filled by the longer row.
+///
+/// Both capacities exceed the window, so the window-4 layers use a wrapping
+/// ring; capacity 12 is exactly filled by the longer row.
+fn batched_cached_decode<A: Backend>(device: &A::Device, bound: Bound) {
+    let golden = golden();
+    let model = load_model::<A>(device);
+    let v = golden.vocabulary;
     for capacity in [16, 12] {
-        let steps = cached_logits(&model, &golden, capacity);
-        let v = golden.vocabulary;
-        for (step, logits) in steps.iter().enumerate() {
+        let mut largest = Gap::default();
+        for (step, logits) in cached_logits(&model, &golden, capacity, device)
+            .iter()
+            .enumerate()
+        {
             let column = PREFILL - 1 + step;
             for row in 0..2 {
-                assert_close(
+                largest = largest.max(bound.assert_close(
                     &logits[row * v..(row + 1) * v],
                     golden.logits_at(row, column),
                     &format!("capacity {capacity}: cached logits[{row}, {column}]"),
-                );
+                ));
             }
         }
+        eprintln!(
+            "gpt-oss: largest cached logit gap {:.2e} (capacity {capacity})",
+            largest.deviation
+        );
     }
 }
 
-/// The cached greedy continuation matches the reference while the choice is decisive.
-#[test]
-fn cached_greedy_continuation_matches_transformers() {
-    let golden = Golden::read(&fixture());
-    let model = load();
-    let device = Default::default();
-    let mut state = model
-        .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
-        .unwrap();
-    let mut logits = host(
-        model
-            .prefill(
-                CausalLmInput {
-                    token_ids: ints(std::slice::from_ref(&golden.greedy_prompt)),
-                    token_mask: None,
-                    position_ids: None,
-                },
-                &mut state,
-                &ForwardOptions::default(),
-            )
-            .unwrap()
-            .logits,
-    );
-    for (step, &expected) in golden.greedy_tokens.iter().enumerate() {
-        let (token, margin) = top_two(&logits);
-        if margin <= TOLERANCE {
-            break; // A tie at F32 precision; later tokens may legitimately differ.
-        }
-        assert_eq!(token as i64, expected, "greedy token {step}");
-        logits = host(
-            model
-                .decode(
-                    DecodeInput {
-                        token_ids: ints(&[vec![expected]]),
-                        position_ids: None,
-                        token_mask: None,
-                    },
-                    &mut state,
-                    &ForwardOptions::default(),
-                )
-                .unwrap()
-                .logits,
-        );
-    }
+/// The cached greedy continuation matches the reference at every decisive step.
+fn cached_greedy_continuation<A: Backend>(device: &A::Device, bound: Bound) {
+    check_greedy(&load_model::<A>(device), &golden(), bound, device, CASE);
 }
 
 /// Router diagnostics are returned on request and the load-balancing objective equals the reference's.
 ///
 /// The objective concatenates every layer's router logits over the valid
 /// tokens only, so a wrong padding mask, layer order, routing rule, or
-/// softmax moves it far beyond [`TOLERANCE`].
-#[test]
-fn router_logits_and_load_balancing_loss_are_reported() {
-    let golden = Golden::read(&fixture());
-    let model = load();
+/// softmax moves it far beyond the tolerance. Without the mask the padding
+/// tokens join the averages: that loss must differ from the reference by
+/// over `1e-3`, and by more than twice our masked gap, so the comparison
+/// resolves the mask under any bound that admits the masked loss.
+fn router_logits_and_load_balancing_loss<A: Backend>(device: &A::Device, bound: Bound) {
+    let golden = golden();
+    let model = load_model::<A>(device);
     let output = model
         .forward(
-            golden_input(&golden),
+            golden.input(device),
             &ForwardOptions {
                 router_logits: true,
                 auxiliary_losses: true,
@@ -457,19 +231,17 @@ fn router_logits_and_load_balancing_loss_are_reported() {
     }
     let loss = host(output.load_balancing_loss.expect("load-balancing loss"));
     assert_eq!(loss.len(), 1);
-    let gap = (loss[0] - REFERENCE_LOAD_BALANCING_LOSS).abs();
-    assert!(
-        gap <= TOLERANCE,
-        "load-balancing loss {} differs from the reference {REFERENCE_LOAD_BALANCING_LOSS} by {gap:e}",
-        loss[0]
+    let gap = bound.assert_close(
+        &loss,
+        &[REFERENCE_LOAD_BALANCING_LOSS],
+        "load-balancing loss",
     );
-    // Without the mask, padding tokens would join the averages and move it.
     let unmasked = host(
         model
             .forward(
                 CausalLmInput {
                     token_mask: None,
-                    ..golden_input(&golden)
+                    ..golden.input(device)
                 },
                 &ForwardOptions {
                     auxiliary_losses: true,
@@ -480,16 +252,52 @@ fn router_logits_and_load_balancing_loss_are_reported() {
             .load_balancing_loss
             .expect("load-balancing loss"),
     );
-    assert!(
-        (unmasked[0] - REFERENCE_LOAD_BALANCING_LOSS).abs() > 100.0 * TOLERANCE,
-        "the padding mask must matter: {unmasked:?}"
+    let moved = (unmasked[0] - REFERENCE_LOAD_BALANCING_LOSS).abs();
+    eprintln!(
+        "gpt-oss: load-balancing loss gap {:.2e}; unmasked loss moves by {moved:.2e}",
+        gap.deviation
     );
+    assert!(moved > 1e-3, "the padding mask must matter: {unmasked:?}");
+    assert!(
+        moved > 2.0 * gap.deviation,
+        "the masked loss must be nearer the reference than the unmasked one: {unmasked:?}"
+    );
+}
+
+/// Stateless logits and hidden states match the reference at every valid position.
+#[test]
+fn stateless_logits_and_hidden_states_match_transformers() {
+    stateless_logits_and_hidden_states::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// The eager F32-softmax graph (explicit sink column) matches the reference too.
+#[test]
+fn eager_sink_attention_matches_transformers() {
+    eager_sink_attention::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// Batched ragged prefill and decode reproduce the reference logits, with ring and full caches.
+#[test]
+fn batched_cached_decode_matches_reference_logits() {
+    batched_cached_decode::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// The cached greedy continuation matches the reference at every decisive step.
+#[test]
+fn cached_greedy_continuation_matches_transformers() {
+    cached_greedy_continuation::<B>(&Default::default(), F32_TOLERANCE);
+}
+
+/// Router diagnostics are returned on request and the load-balancing objective equals the reference's.
+#[test]
+fn router_logits_and_load_balancing_loss_are_reported() {
+    router_logits_and_load_balancing_loss::<B>(&Default::default(), F32_TOLERANCE);
 }
 
 /// The fixture's configuration round-trips through the schema.
 #[test]
 fn fixture_config_round_trips() {
-    let text = std::fs::read_to_string(fixture().join("config.json")).unwrap();
+    let text = std::fs::read_to_string(fixture(CASE).join("config.json")).unwrap();
     let config: GptOssConfig = serde_json::from_str(&text).unwrap();
     let again: GptOssConfig =
         serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -497,4 +305,108 @@ fn fixture_config_round_trips() {
     let architecture = config.architecture().unwrap();
     assert_eq!(architecture.sliding_window(), Some(4));
     assert_eq!(architecture.num_layers(), 4);
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod metal {
+    //! Metal/F32 counterparts of the Flex checks, held to the probed bound.
+
+    use burn::backend::Metal;
+
+    use super::tiny_goldens::golden_bound;
+
+    /// Metal/F32: stateless logits and hidden states.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_stateless_logits_and_hidden_states_match_transformers() {
+        let device = Default::default();
+        super::stateless_logits_and_hidden_states::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: the eager sink graph.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_eager_sink_attention_matches_transformers() {
+        let device = Default::default();
+        super::eager_sink_attention::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: batched ragged prefill and decode at two capacities.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_batched_cached_decode_matches_reference_logits() {
+        let device = Default::default();
+        super::batched_cached_decode::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: the cached greedy continuation.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_cached_greedy_continuation_matches_transformers() {
+        let device = Default::default();
+        super::cached_greedy_continuation::<Metal>(&device, golden_bound::<Metal>(&device));
+    }
+
+    /// Metal/F32: router diagnostics and the load-balancing objective.
+    #[test]
+    #[ignore = "requires a Metal device"]
+    fn metal_router_logits_and_load_balancing_loss_are_reported() {
+        let device = Default::default();
+        super::router_logits_and_load_balancing_loss::<Metal>(
+            &device,
+            golden_bound::<Metal>(&device),
+        );
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    //! CUDA counterparts of the Flex checks, held to the probed bound (F32 or TF32).
+
+    use burn::backend::Cuda;
+
+    use super::tiny_goldens::golden_bound;
+
+    /// CUDA: stateless logits and hidden states.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_stateless_logits_and_hidden_states_match_transformers() {
+        let device = Default::default();
+        super::stateless_logits_and_hidden_states::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: the eager sink graph.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_eager_sink_attention_matches_transformers() {
+        let device = Default::default();
+        super::eager_sink_attention::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: batched ragged prefill and decode at two capacities.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_batched_cached_decode_matches_reference_logits() {
+        let device = Default::default();
+        super::batched_cached_decode::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: the cached greedy continuation.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_cached_greedy_continuation_matches_transformers() {
+        let device = Default::default();
+        super::cached_greedy_continuation::<Cuda>(&device, golden_bound::<Cuda>(&device));
+    }
+
+    /// CUDA: router diagnostics and the load-balancing objective.
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_router_logits_and_load_balancing_loss_are_reported() {
+        let device = Default::default();
+        super::router_logits_and_load_balancing_loss::<Cuda>(
+            &device,
+            golden_bound::<Cuda>(&device),
+        );
+    }
 }
