@@ -6,51 +6,74 @@
 //! tiny GPT-2 shows that a family `AutoCausalLm` does not dispatch runs
 //! through the same sweep as a concrete model type.
 //!
-//! The random weights must be the same on every run. Flex keeps one
-//! process-wide random generator, `Backend::seed` resets it, and parameters
-//! are drawn lazily on their first use inside a forward pass. Tests run on
-//! parallel threads, so without coordination one test's draws interleave with
-//! another's seed and the model changes from run to run; about 1% of runs then
-//! built a model whose two prompts scored alike. Each test therefore holds
-//! [`RNG_LOCK`] from seeding to its last forward pass.
-
-use std::sync::{Mutex, MutexGuard};
+//! The identities need only a logit gap the sweep accepts (at least `1e-3`),
+//! but which random weights give one is a matter of the draw: re-seeding
+//! Burn's generator, 0.76% of draws scored both prompts alike on the Llama
+//! model and 0.5% on GPT-2, and the Llama gap's median was only `0.063`.
+//! Burn Flex keeps one process-wide generator and draws parameters lazily, on
+//! first use, so tests on parallel threads used to interleave their draws; a
+//! lock then made each test's draw repeatable, but the weights still depended
+//! on Burn's generator and initializers. The weights now come from a fixed
+//! seed alone ([`deterministic_parameters`]), chosen for a wide gap, so no test
+//! needs to coordinate with another.
 
 use super::*;
-use burn::tensor::{Device, Int, backend::Backend};
+use burn::tensor::{Device, Int};
 use transformers::models::gpt2::{Gpt2Config, Gpt2ForCausalLm};
 
-/// Serializes the tests that seed and draw from Flex's process-wide random generator.
-static RNG_LOCK: Mutex<()> = Mutex::new(());
+#[path = "../../tests/support/deterministic_parameters.rs"]
+mod deterministic_parameters;
 
-/// Builds a model from freshly seeded random weights while holding [`RNG_LOCK`].
+use deterministic_parameters::deterministic_parameters;
+
+/// Seed of both tiny models' weights.
 ///
-/// The returned guard keeps every other test away from the shared random
-/// generator. Bind it to a named variable such as `_rng`, not `_`, so it lives
-/// until the end of the test: the weights are only drawn during the first
-/// forward pass. A test that panicked while holding the lock leaves nothing
-/// half-initialized behind, so a poisoned lock is simply taken over.
-fn seeded<M>(build: impl FnOnce(&Device<Cpu>) -> M) -> (MutexGuard<'static, ()>, M) {
-    let guard = RNG_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let device = Default::default();
-    Cpu::seed(&device, 7);
-    (guard, build(&device))
-}
+/// It gives logit gaps of `0.96` (Llama family) and `1.06` (GPT-2), ten
+/// times the `0.1` that [`seeded_model_is_reproducible_and_separates_the_prompts`]
+/// requires. Over seeds 0 to 1,999 the median gaps were `0.21` and `0.081`,
+/// and 4 and 13 seeds fell below the sweep's `1e-3` threshold.
+const SEED: u64 = 1896;
 
 /// Two-block random Llama-family model selected from its configuration, as for a checkpoint.
-fn tiny_model() -> (MutexGuard<'static, ()>, AutoCausalLm<Cpu>) {
-    seeded(|device| {
-        AutoCausalLm::<Cpu>::from_config_json(
-            r#"{"model_type": "llama", "vocab_size": 16, "hidden_size": 8,
-                "intermediate_size": 16, "num_hidden_layers": 2,
-                "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
-                "max_position_embeddings": 16}"#,
-            device,
-        )
-        .expect("valid tiny configuration")
-    })
+///
+/// Its weights come from [`SEED`] alone, whatever Burn's generator holds.
+fn tiny_model() -> AutoCausalLm<Cpu> {
+    tiny_llama(SEED)
+}
+
+/// The two-block Llama-family model of [`tiny_model`] with weights from `seed`.
+fn tiny_llama(seed: u64) -> AutoCausalLm<Cpu> {
+    let device: Device<Cpu> = Default::default();
+    let model = AutoCausalLm::<Cpu>::from_config_json(
+        r#"{"model_type": "llama", "vocab_size": 16, "hidden_size": 8,
+            "intermediate_size": 16, "num_hidden_layers": 2,
+            "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
+            "max_position_embeddings": 16}"#,
+        &device,
+    )
+    .expect("valid tiny configuration");
+    deterministic_parameters(model, seed)
+}
+
+/// A two-block GPT-2 of the same widths as [`tiny_llama`], with weights from `seed`.
+///
+/// Every random parameter is replaced, so the configured initializer range
+/// does not matter; LayerNorm scales and zero biases keep their constants.
+fn tiny_gpt2(seed: u64) -> Gpt2ForCausalLm<Cpu> {
+    let model = Gpt2ForCausalLm::<Cpu>::init(
+        Gpt2Config {
+            vocab_size: 16,
+            n_embd: 8,
+            n_head: 2,
+            n_layer: 2,
+            n_positions: 16,
+            n_inner: Some(16),
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .expect("valid tiny GPT-2 configuration");
+    deterministic_parameters(model, seed)
 }
 
 /// One unpadded five-token prompt with axes `[batch = 1, token]`.
@@ -65,7 +88,7 @@ fn prompt(ids: [i32; 5]) -> CausalLmInput<Cpu> {
 /// After the last block the readout sees only the final token, so patches there recover 0 or 1 exactly.
 #[test]
 fn final_block_patches_recover_exactly_zero_or_one() {
-    let (_rng, model) = tiny_model();
+    let model = tiny_model();
     let sweep = patching_sweep(
         &model,
         prompt([1, 2, 3, 4, 5]),
@@ -84,7 +107,7 @@ fn final_block_patches_recover_exactly_zero_or_one() {
 /// Tokens before the first difference carry identical residuals in both runs and recover nothing.
 #[test]
 fn tokens_before_the_change_recover_exactly_nothing() {
-    let (_rng, model) = tiny_model();
+    let model = tiny_model();
     let sweep = patching_sweep(
         &model,
         prompt([1, 2, 3, 4, 5]),
@@ -102,7 +125,7 @@ fn tokens_before_the_change_recover_exactly_nothing() {
 /// Identical prompts leave no logit difference to recover, which is reported instead of dividing by zero.
 #[test]
 fn identical_prompts_are_rejected() {
-    let (_rng, model) = tiny_model();
+    let model = tiny_model();
     let error = patching_sweep(
         &model,
         prompt([1, 2, 3, 4, 5]),
@@ -124,9 +147,9 @@ fn logit_difference_reads_the_two_named_logits() {
     assert_eq!(logit_difference(logits, 2, 0), -1.5);
 }
 
-/// Runs the two-block sweep over the changed token and every later one on a freshly seeded model.
+/// Runs the two-block sweep over the changed token and every later one on a freshly built model.
 fn seeded_sweep() -> Sweep {
-    let (_rng, model) = tiny_model();
+    let model = tiny_model();
     patching_sweep(
         &model,
         prompt([1, 2, 3, 4, 5]),
@@ -141,15 +164,15 @@ fn seeded_sweep() -> Sweep {
 /// The seeded weights are reproducible and separate the prompts far beyond the 1e-3 rejection threshold.
 ///
 /// The exactness tests above depend on both properties. Pinning them here
-/// means a future change to initialization or to the seed handling fails with
-/// this test's message instead of an intermittent "nothing to recover".
+/// means a future change to the deterministic weights or to the model's
+/// numerics fails with this test's message instead of "nothing to recover".
 #[test]
 fn seeded_model_is_reproducible_and_separates_the_prompts() {
     let first = seeded_sweep();
     let second = seeded_sweep();
     assert_eq!((first.clean, first.corrupt), (second.clean, second.corrupt));
     assert_eq!(first.recovered, second.recovered);
-    // Seed 7 gives a gap of about 0.23 on this configuration.
+    // SEED gives a gap of about 0.96 on this configuration.
     let gap = (first.clean - first.corrupt).abs();
     assert!(
         gap > 0.1,
@@ -164,25 +187,7 @@ fn seeded_model_is_reproducible_and_separates_the_prompts() {
 /// reproduces the clean logits exactly and the other tokens recover nothing.
 #[test]
 fn concrete_gpt2_runs_through_the_same_sweep() {
-    let (_rng, model) = seeded(|device| {
-        Gpt2ForCausalLm::<Cpu>::init(
-            Gpt2Config {
-                vocab_size: 16,
-                n_embd: 8,
-                n_head: 2,
-                n_layer: 2,
-                n_positions: 16,
-                n_inner: Some(16),
-                // GPT-2's default 0.02 leaves this random model's logit gap
-                // near the sweep's 1e-3 rejection threshold; unit-scale
-                // weights separate the prompts clearly.
-                initializer_range: 1.0,
-                ..Default::default()
-            },
-            device,
-        )
-        .expect("valid tiny GPT-2 configuration")
-    });
+    let model = tiny_gpt2(SEED);
     let sweep = patching_sweep(
         &model,
         prompt([1, 2, 3, 4, 5]),
@@ -192,7 +197,7 @@ fn concrete_gpt2_runs_through_the_same_sweep() {
         7,
     )
     .unwrap();
-    // Seed 7 gives a gap of about 1.1 on this configuration.
+    // SEED gives a gap of about 1.06 on this configuration.
     assert!((sweep.clean - sweep.corrupt).abs() > 0.1);
     assert_eq!(sweep.recovered[1], [0.0, 0.0, 1.0]);
 }
