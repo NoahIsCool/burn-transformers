@@ -14,10 +14,11 @@
 //! prefix whose probability mass reaches `p`; equivalently, a sorted item is
 //! retained when the cumulative mass *before* it is less than `p`. All filtering
 //! happens before the final softmax, with rejected scores set to negative
-//! infinity. Probability sums promote F16/BF16 scores to F32 to retain interior
-//! random thresholds and small categorical masses; native F64 scores remain
-//! F64. Penalties and returned scores retain their input runtime dtype, which
-//! need not equal the backend's default float element type.
+//! infinity. Probability sums follow the crate's [`at_least_f32`] rule: F16/BF16
+//! scores promote to F32 to retain interior random thresholds and small
+//! categorical masses, and native F64 scores remain F64. Penalties and returned
+//! scores retain their input runtime dtype, which need not equal the backend's
+//! default float element type.
 //! Flex32 requests F32 probability arithmetic, but a backend may retain its
 //! compatible F32 storage alias. Flex32 top-k and active top-p filters fail
 //! contextually: Burn 0.21's fallback sort cannot safely read that storage tag.
@@ -44,7 +45,7 @@ use burn::tensor::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, TokenMask};
+use crate::{Error, Result, TokenMask, precision::at_least_f32};
 
 /// Selects deterministic greedy decoding or stochastic categorical sampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -511,12 +512,10 @@ impl<B: Backend> LogitsProcessor<B> {
 /// Half-precision cumulative sums can lose small masses or reach one early.
 /// F32 also exactly represents every seeded uniform; F64 scores are never
 /// narrowed, so backends with native double precision keep that precision.
+/// This is the crate-wide [`at_least_f32`] rule applied to floating scores.
 /// CubeCL may retain the Flex32 storage tag when casting its F32-backed alias.
 fn probability_accumulation_dtype(dtype: DType) -> DType {
-    match dtype {
-        DType::F16 | DType::BF16 | DType::Flex32 => DType::F32,
-        _ => dtype,
-    }
+    at_least_f32(dtype)
 }
 
 /// Maps one SplitMix64 output to a strictly interior 23-bit uniform value.
