@@ -81,10 +81,11 @@
 //! its accumulated terms: a relative error near `n · 2^-24` for a reduction of
 //! `n` terms (`2^-24 ≈ 6.0e-8`). Through at most five blocks of width 8 to 32
 //! that stays near `1e-6` of the logit scale; "Measured" below records Metal.
-//! The bound, `2e-5` absolute plus `2e-5` of the scale, is about twice the
-//! largest Metal deviation (`9.5e-6` at scale `25.6`) and ten to a hundred
-//! times the typical one, leaving room for other GPUs' reduction orders, while
-//! staying three orders of magnitude below any real kernel fault (a wrong
+//! The bound is `2e-5` absolute plus `2e-5` of the scale: its relative part
+//! is about seventeen times the largest relative Metal deviation (`1.2e-6`),
+//! and its absolute floor alone twice the largest absolute one (`9.5e-6` at
+//! scale `25.6`), leaving room for other GPUs' reduction orders while staying
+//! three orders of magnitude below any real kernel fault (a wrong
 //! mask, cache slot, ring offset, rotary layout, or routing decision moves
 //! logits by `1e-2` of their scale or more; the DeltaNet reshape defect moved
 //! them by `0.5`).
