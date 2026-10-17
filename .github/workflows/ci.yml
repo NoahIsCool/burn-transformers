@@ -207,19 +207,63 @@ jobs:
             ~/.cache/tracel
             ~/.local/share/tracel
           key: ${{ steps.llvm.outputs.cache-primary-key }}
-      # The family cases are #[ignore]d for their run time (the backend
-      # compiles every kernel shape with LLVM at first launch), so
-      # --include-ignored selects them. The three skipped tests fail on Burn
-      # 0.21 through a CubeCL CPU copy defect
-      # (docs/upstream/15-cubecl-cpu-reshape-copy.md). One test thread,
-      # because each test's CubeCL CPU runtime occupies every core.
-      # --nocapture keeps each passing case's measured deviation in the log.
+      # Every test whose name contains `cpu` in those targets runs in its own
+      # process, so a case that crashes the process (DeepSeek-V2 dies of
+      # SIGFPE on x86-64, docs/upstream/17-cubecl-cpu-x86-sigfpe.md) cannot
+      # hide the others' results. The family cases are #[ignore]d for their
+      # run time (the backend compiles every kernel shape with LLVM at first
+      # launch), so --include-ignored selects them. SKIPPED fail on Burn 0.21
+      # through a CubeCL CPU copy defect (docs/upstream/15-cubecl-cpu-reshape-copy.md)
+      # and are not run. EXPECTED_FAILURES run, but only report: the job
+      # fails on any other failure, and announces an expected failure that
+      # starts passing. --nocapture keeps each case's measured deviation in
+      # the log; each process uses every core, so tests run one at a time.
       - name: CubeCL CPU against Flex and the tiny goldens
-        run: >-
-          cargo test --locked --no-fail-fast $CPU_TESTS cpu --
-          --include-ignored --nocapture --test-threads 1
-          --skip cpu_nemotron_h_matches_flex --skip cpu_modular_causal_matches_flex
-          --skip cpu_reshaped_strided_views_match_flex
+        env:
+          SKIPPED: >-
+            cpu_nemotron_h_matches_flex cpu_modular_causal_matches_flex
+            cpu_reshaped_strided_views_match_flex
+          EXPECTED_FAILURES: cpu_deepseek_v2_matches_flex
+        run: |
+          set -u
+          binaries="$(cargo test --locked --no-run $CPU_TESTS --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')"
+          test -n "$binaries" || { echo "no test binaries were built"; exit 1; }
+          failed="" expected="" passed=0
+          # One path per line on descriptor 3, so a path may hold spaces and a
+          # test binary cannot read the list from standard input.
+          while IFS= read -r binary <&3; do
+            for test in $("$binary" --list --include-ignored | sed -n 's/: test$//p' | grep cpu); do
+              name="${test##*::}"
+              case " $SKIPPED " in *" $name "*) echo "skipped (known CubeCL CPU copy defect): $test"; continue;; esac
+              echo "::group::$test"
+              if "$binary" --exact "$test" --include-ignored --nocapture --test-threads 1; then
+                status=0
+              else
+                status=$?
+              fi
+              echo "::endgroup::"
+              case " $EXPECTED_FAILURES " in
+                *" $name "*)
+                  if [ "$status" -eq 0 ]; then
+                    echo "::notice::$test was expected to fail on this host but passed"
+                  else
+                    echo "expected failure: $test (exit status $status)"
+                    expected="$expected $test"
+                  fi;;
+                *)
+                  if [ "$status" -eq 0 ]; then
+                    passed=$((passed + 1))
+                  else
+                    echo "::error::$test failed (exit status $status)"
+                    failed="$failed $test"
+                  fi;;
+              esac
+            done
+          done 3<<< "$binaries"
+          echo "passed: $passed; expected failures:${expected:- none}; failed:${failed:- none}"
+          test "$passed" -gt 0 || { echo "::error::no CubeCL CPU test ran"; exit 1; }
+          test -z "$failed"
       # Disk headroom after the third feature set's build, for RELEASE_GATES.md.
       - name: Disk use
         if: always()

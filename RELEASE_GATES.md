@@ -155,7 +155,8 @@ test thread, the parity cases took 405 to 420 s over two runs, the golden
 modules 73 s, and the delta-rule guard alone about 70 s). CI's `cpu-parity`
 job runs every passing case on `ubuntu-latest`, apart from the ordinary test
 job so that this build and run cannot time out or fill the disk of the other
-Linux tests; it builds (`--no-run`) and runs in separate steps:
+Linux tests; it builds (`--no-run`) and runs in separate steps, each test in
+its own process. Locally, the same selection is:
 
 ```sh
 cargo test --locked --no-default-features --features std,flex,cpu \
@@ -187,9 +188,19 @@ cubecl-std 0.11 (Burn 0.22) fixes it, and with that fix applied both pass at
 `cpu_reshaped_strided_views_match_flex` is the reproducer. These numbers are
 from the Mac at `93cef3c` (two runs, identical deviations), and the second
 timed run above, at `430e0d4` with `--nocapture`, reproduced each of them.
-The job has not run on GitHub's runners yet, so its first run records Linux's
-deviations, its build and test step times, and its disk headroom (the job's
-last step).
+On GitHub's x86-64 `ubuntu-latest` runner, at `76ae7ab` and again at
+`04d9881`, the router tests, the delta-rule kernels, Gemma, GPT-2, GPT-NeoX,
+gpt-oss, Qwen3.5, Qwen3-MoE, and the three golden modules (17 tests) passed
+with the Mac's deviations to within a few F32 units, and then the DeepSeek-V2
+case killed the test process with SIGFPE. The Llama family, Muse Glimmer, the
+modular encoder-decoder, and T5 therefore did not run there. SIGFPE from
+generated x86-64 code is an integer division by zero, which arm64 does not
+trap; the case matches Flex on the Mac
+([docs/upstream/17](docs/upstream/17-cubecl-cpu-x86-sigfpe.md) records what
+has been ruled out). Since then the job runs each test in its own process and
+DeepSeek-V2 as an expected failure, so the other families still report. That
+run took 4 min to build with warm caches and 13.6 min to test, and left 96 GB
+of the runner's 145 GB free.
 
 **Property suites** honor `PROPTEST_CASES`; release qualification runs them
 with a larger budget:

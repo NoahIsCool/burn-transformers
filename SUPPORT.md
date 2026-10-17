@@ -84,9 +84,15 @@ group-limited router, the rotary de-interleave of multi-head latent attention,
 and a masked gated DeltaNet whose key heads are shared by several value heads
 meet it, and those cases deviate from Flex by up to `0.58`; any other graph
 that reshapes such a view can return wrong values on this backend. The crate
-does not work around it. CI's `cpu-parity` job runs the passing cases on
-`ubuntu-latest`; until it has completed a run, the measurements above are this
-Mac's only.
+does not work around it.
+
+CI's `cpu-parity` job runs the passing cases on x86-64 `ubuntu-latest`. There
+17 of them have passed with the Mac's deviations, but the DeepSeek-V2 case
+dies of SIGFPE, an integer division by zero in generated code that arm64 does
+not trap (it passes on arm64 macOS); the cause is not yet isolated
+([docs/upstream/17](docs/upstream/17-cubecl-cpu-x86-sigfpe.md)). The Llama
+family, Muse Glimmer, the modular encoder-decoder, and T5 ran after it in the
+same process and have not yet completed on Linux.
 
 ## Checkpoint support
 

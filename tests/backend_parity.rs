@@ -2659,9 +2659,9 @@ mod cpu {
     //! 80 s in a debug build on the machine below). The family cases are
     //! ignored for their run time: the backend compiles every kernel shape
     //! with LLVM when it is first launched, and on an Apple M3 Max (debug
-    //! build, one test thread, other jobs running) the nine passing cases took
+    //! build, one test thread, other jobs running) the passing cases took
     //! 405 to 420 s over two runs, 277 to 290 s of it the four hybrid
-    //! families, and the CubeCL CPU modules of the three tiny-golden suites
+    //! families (then one test, now one per family), and the CubeCL CPU modules of the three tiny-golden suites
     //! another 73 s, far beyond a two-minute budget for ordinary tests.
     //! Parallel test threads gave no speed-up (441 s for the parity cases),
     //! since every test's CubeCL CPU runtime occupies all cores, and a release
@@ -2674,7 +2674,11 @@ mod cpu {
     //!   --skip cpu_reshaped_strided_views_match_flex --nocapture --test-threads 1
     //! ```
     //!
-    //! CI runs the same selection on `ubuntu-latest` (`.github/workflows/ci.yml`).
+    //! CI runs the same selection on `ubuntu-latest` (`.github/workflows/ci.yml`),
+    //! each test in its own process, with [`cpu_deepseek_v2_matches_flex`] as an
+    //! expected failure: on x86-64 it dies of SIGFPE
+    //! (`docs/upstream/17-cubecl-cpu-x86-sigfpe.md`). On an x86-64 host, add
+    //! `--skip cpu_deepseek_v2_matches_flex` to the command above.
 
     use burn::{
         backend::{Cpu, Flex},
@@ -2715,18 +2719,52 @@ mod cpu {
         super::gpt_oss_matches_flex::<Cpu>(&Default::default(), cpu_bound());
     }
 
-    /// CubeCL CPU: Qwen3.5, Qwen3-MoE, DeepSeek-V2, and Muse Glimmer.
+    /// Checks the one hybrid registry case called `name` on the CubeCL CPU backend.
     ///
-    /// The hybrid families of `hybrid_registry_families_match_flex` other
-    /// than Nemotron-H, which [`cpu_nemotron_h_matches_flex`] covers.
-    #[test]
-    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
-    fn cpu_hybrid_registry_families_match_flex() {
+    /// Each hybrid family has its own test, so a family that fails, or that
+    /// crashes the process as DeepSeek-V2 does on x86-64 (see
+    /// [`cpu_deepseek_v2_matches_flex`]), cannot hide the others' results.
+    fn check_hybrid_case(name: &str) {
         super::check_registry::<Cpu>(
-            hybrid_cases_where(|name| name != "Nemotron-H"),
+            hybrid_cases_where(|case| case == name),
             &Default::default(),
             cpu_bound(),
         );
+    }
+
+    /// CubeCL CPU: Qwen3.5.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_qwen3_5_matches_flex() {
+        check_hybrid_case("Qwen3.5");
+    }
+
+    /// CubeCL CPU: Qwen3-MoE.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_qwen3_moe_matches_flex() {
+        check_hybrid_case("Qwen3-MoE");
+    }
+
+    /// CubeCL CPU: DeepSeek-V2; passes on arm64, but the process dies of SIGFPE on x86-64.
+    ///
+    /// On GitHub's `ubuntu-latest` runner this case killed the test process
+    /// with SIGFPE in two consecutive runs, right after Qwen3-MoE passed.
+    /// SIGFPE from generated code on x86-64 is an integer division by zero;
+    /// arm64 does not trap on one, and this case matches Flex there.
+    /// `docs/upstream/17-cubecl-cpu-x86-sigfpe.md` records the evidence and
+    /// what has been ruled out. CI runs it as an expected failure.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_deepseek_v2_matches_flex() {
+        check_hybrid_case("DeepSeek-V2");
+    }
+
+    /// CubeCL CPU: Muse Glimmer.
+    #[test]
+    #[ignore = "slow: the CubeCL CPU backend compiles every kernel at run time; run with --include-ignored (module documentation)"]
+    fn cpu_muse_glimmer_matches_flex() {
+        check_hybrid_case("Muse Glimmer");
     }
 
     /// CubeCL CPU: Nemotron-H; fails on Burn 0.21 through the CubeCL CPU copy defect.
