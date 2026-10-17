@@ -114,6 +114,8 @@
 //! Where no greedy step is decisive, the cached greedy test needs
 //! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0`, as gpt-oss's half-precision
 //! greedy tests do; that drops only the argmax floor, not the decode checks.
+//! Only the cached greedy test reads the variable, so for SmolLM-135M,
+//! SmolLM3-3B, and Qwen2-7B it can be added to the whole command below.
 //! Qwen2-7B's official BF16 run already picks another first token than its
 //! F64 bundle. No half-precision run of this crate has been measured against
 //! these bounds yet. To run the Flex/BF16 gate (set `f16`,

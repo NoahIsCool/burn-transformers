@@ -126,10 +126,13 @@
 //! deviate from their F32 twins by `0.384` (position 5), `0.592` (1), and
 //! `0.748` (3) at most and `0.038`, `0.052`, and `0.063` on average on the
 //! short prompts, where 26 of 32 greedy steps are decisive. On the 1237-token
-//! prompt the maximum is `8.07`, at position 855 (before the window, where
-//! five logits move by more than 7), and the mean `0.066`; no long greedy
-//! step is decisive, so the long cached test needs
-//! `TRANSFORMERS_GEMMA_MIN_GREEDY=0`. At half precision the long logits test
+//! prompt the maximum is `8.07`, at position 855 (before the window), and the
+//! mean `0.066`; no long greedy step is decisive, so the long cached test
+//! needs `TRANSFORMERS_GEMMA_MIN_GREEDY=0`, which drops only its argmax floor.
+//! The variable applies to the whole process, so that test runs alone: in the
+//! same invocation it would also drop the floor of the short cached greedy
+//! test, whose 26 decisive steps the default minimum of 2 must keep checking.
+//! At half precision the long logits test
 //! reads every position, so its mean is defined as the official one. Its
 //! maximum bound, `9.7`, exceeds what a missing window moves at the window's
 //! first positions (`1.7` in F32), so the tenfold decisiveness check above
@@ -142,18 +145,27 @@
 //! instead lie within `0.5` of the same run's stateless sliding-window pass
 //! at their positions, the pass that the long logits test ties to the
 //! bundle. No half-precision run of this crate has
-//! been measured against these bounds yet. To run the Flex/BF16 gates (set
-//! `f16`, `--features metal`, and the `metal::` tests for Metal/F16):
+//! been measured against these bounds yet. To run the Flex/BF16 gates, run
+//! every test but the long cached one with the default minimum, then that
+//! test alone with the minimum lowered:
 //!
 //! ```text
-//! TRANSFORMERS_GEMMA_DTYPE=bf16 \
-//! TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it \
-//! TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38 \
-//! TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 \
-//! TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long \
-//! TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16 \
-//! cargo test --release --test gemma_artifacts -- --ignored --nocapture --test-threads 1
+//! export TRANSFORMERS_GEMMA_DTYPE=bf16 \
+//!   TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it \
+//!   TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38 \
+//!   TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 \
+//!   TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long \
+//!   TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+//! cargo test --release --test gemma_artifacts -- --ignored --nocapture --test-threads 1 \
+//!   --skip long_context_cached_decode_wraps_the_rings
+//! TRANSFORMERS_GEMMA_MIN_GREEDY=0 cargo test --release --test gemma_artifacts -- \
+//!   --ignored --exact flex_long_context_cached_decode_wraps_the_rings --nocapture
 //! ```
+//!
+//! For Metal/F16, export `TRANSFORMERS_GEMMA_DTYPE=f16`, add
+//! `--features metal`, filter the first command to `metal::` (otherwise it
+//! also runs the Flex tests in F16), and name
+//! `metal::metal_long_context_cached_decode_wraps_the_rings` in the second.
 //!
 //! `official_bf16_references_calibrate_the_half_precision_bounds` prints
 //! these figures from the four bundles alone (no checkpoint, no Burn model,

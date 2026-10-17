@@ -217,7 +217,11 @@ seven official bundles and their calibration are recorded in the
 Where no greedy step is decisive, the cached greedy test needs
 `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0` or `TRANSFORMERS_GEMMA_MIN_GREEDY=0`,
 as the gpt-oss half-precision greedy tests do; that drops only the argmax
-floor, not the decode checks. On the long Gemma prompt the
+floor, not the decode checks. The Gemma variable is read by both cached
+tests, so its long cached test runs alone (`--exact`) with the minimum at
+`0`, while the short one keeps the default minimum of 2 over its 26 decisive
+steps; the Llama-family variable is read by its cached greedy test only. On
+the long Gemma prompt the
 maximum bound (`9.7`) exceeds what a missing sliding window moves at the
 window's first positions, so a half-precision run requires only that the run
 without the window fails the rule; the F32 run keeps the tenfold check. That
