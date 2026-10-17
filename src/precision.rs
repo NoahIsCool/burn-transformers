@@ -15,6 +15,11 @@
 //!   grows in proportion to the position `p`. Model families pass their
 //!   query/key dtype to these builders.
 //!
+//! Family-specific copies follow the same rule, including Muse's scale-free
+//! embedding and Q/K RMS norms. Vocabulary logits that reference implementations
+//! return as FP32 (DeepSeek-V2 and Nemotron-H) are promoted with it rather than
+//! cast unconditionally to F32.
+//!
 //! [`at_least_f32`] is the single rule that selects that evaluation dtype:
 //!
 //! | activation dtype | evaluation dtype |
@@ -32,12 +37,12 @@
 //! output dtype, usually the activation dtype, using its checkpoint-specific
 //! rounding order.
 //!
-//! The rule selects a dtype only. It never changes operation order, masks,
-//! epsilon placement, or the dtype returned to callers. Non-floating dtypes map
-//! to F32, matching the historical unconditional promotion; callers remain
-//! responsible for rejecting non-floating activations where that matters.
+//! The rule selects a dtype only; operation order, masks, and epsilon placement
+//! are unchanged. Non-floating dtypes map to F32, matching the historical
+//! unconditional promotion; callers remain responsible for rejecting
+//! non-floating activations where that matters.
 
-use burn::tensor::DType;
+use burn::tensor::{DType, Tensor, backend::Backend};
 
 /// Returns the dtype in which a rounding-sensitive operation is evaluated.
 ///
@@ -51,6 +56,17 @@ pub const fn at_least_f32(dtype: DType) -> DType {
         DType::F64 => DType::F64,
         _ => DType::F32,
     }
+}
+
+/// Casts a floating tensor to [`at_least_f32`] of its dtype.
+///
+/// Reduced-precision tensors are promoted to F32; F32 and F64 tensors are
+/// returned unchanged. Model families use this where a reference implementation
+/// returns full-precision outputs, such as FP32 vocabulary logits, so F64
+/// models are not narrowed at that boundary.
+pub(crate) fn promote<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, D> {
+    let dtype = at_least_f32(tensor.dtype());
+    tensor.cast(dtype)
 }
 
 #[cfg(test)]

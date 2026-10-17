@@ -481,9 +481,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             })
             .collect::<Result<Vec<_>>>()?;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self
-            .project_logits(selected)?
-            .cast(burn::tensor::DType::F32);
+        let logits = crate::precision::promote(self.project_logits(selected)?);
         pending.commit(self, state, &prepared.token_counts)?;
         Ok(CausalLmOutput {
             logits,

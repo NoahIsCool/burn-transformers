@@ -6,7 +6,10 @@
 //! zero-centered checkpoint scales, `scale = 1 + weight`; the two post norms
 //! intentionally use the smaller `post_norm_eps` stabilizer. Token embeddings
 //! are RMS-normalized without a learned scale, while the final norm stores an
-//! ordinary (non-centered) learned scale.
+//! ordinary (non-centered) learned scale. Every RMS reduction, including the
+//! scale-free embedding and Q/K norms, evaluates in
+//! [`crate::precision::at_least_f32`] of its input: FP32 for reduced precision
+//! and F64 without narrowing for F64 models.
 //!
 //! Attention is grouped-query attention with a distinct gate projection. After
 //! scale-free per-head Q/K normalization, queries are multiplied by
@@ -52,6 +55,7 @@ use crate::{
         DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
         rotary_angles_for_dtype,
     },
+    precision::at_least_f32,
 };
 
 use super::{MuseGlimmerLayerType, MuseGlimmerTextConfig};
@@ -1059,13 +1063,17 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
     }
 }
 
-/// Applies a learned-scale-free RMS norm in FP32 and restores the input dtype.
+/// Applies a learned-scale-free RMS norm and restores the input dtype.
+///
+/// Computes `x * pow(mean(x^2) + epsilon, -0.5)` over the last axis in
+/// [`at_least_f32`] of the input dtype: F16/BF16/F32 evaluate in FP32 exactly as
+/// Muse's reference, while F64 inputs are never narrowed.
 fn scale_free_rms_norm<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     epsilon: f64,
 ) -> Tensor<B, D> {
     let dtype = input.dtype();
-    let input = input.cast(DType::F32);
+    let input = input.cast(at_least_f32(dtype));
     let inverse_rms = (input.clone().square().mean_dim(D - 1) + epsilon).powf_scalar(-0.5);
     (input * inverse_rms).cast(dtype)
 }

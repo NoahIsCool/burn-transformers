@@ -27,6 +27,7 @@ use crate::{
     normalization::{RmsNorm, RmsNormConfig},
     operations,
     position::{DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig},
+    precision,
 };
 
 use super::{
@@ -558,15 +559,17 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
     }
 
     /// Applies the independent or tied vocabulary projection.
+    ///
+    /// Logits are promoted to at least FP32, matching the reference's float
+    /// logits for reduced-precision modules while keeping F64 modules in F64.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
-            Some(head) => operations::linear(hidden, head).map(|logits| logits.cast(DType::F32)),
-            None => Ok(burn::tensor::module::linear(
+            Some(head) => operations::linear(hidden, head).map(precision::promote),
+            None => Ok(precision::promote(burn::tensor::module::linear(
                 hidden,
                 self.model.embed_tokens.weight.val().transpose(),
                 None,
-            )
-            .cast(DType::F32)),
+            ))),
         }
     }
 }

@@ -970,3 +970,103 @@ fn cached_attention_mask<B: Backend>(
         )
     })
 }
+
+/// F64 stateless and cached Muse logits keep F64 rotary phases under a position shift.
+///
+/// Muse's sliding windows count valid tokens and its global layers use no
+/// positions, so a common `2^22` shift preserves the exact function. Stateless
+/// logits and cached prefill/decode logits of the F64 model must reproduce
+/// their unshifted counterparts to F64 accuracy, requiring F64 rotary tables
+/// and F64 scale-free norms on both paths; the F32 model visibly resolves the
+/// same shift.
+#[test]
+fn f64_stateless_and_cached_logits_are_rotary_shift_invariant() {
+    use crate::{
+        LogitsSelection,
+        precision::test_support::{
+            CastParameters, ROTARY_SHIFT, assert_rotary_shift_invariant,
+            assert_rotary_shift_sensitive,
+        },
+    };
+    use burn::{module::Module, tensor::DType};
+
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.max_position_embeddings = ROTARY_SHIFT as usize + 8;
+    let single = initialized_model::<TestBackend>(config, &device);
+    let double = single.clone().map(&mut CastParameters(DType::F64));
+    let positions = |offset: i32, count: usize| {
+        let values = (0..count as i32)
+            .map(|index| offset + index)
+            .collect::<Vec<_>>();
+        Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(values, [1, count]), &device)
+    };
+    let all = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let stateless = |model: &MuseGlimmerForCausalLm<TestBackend>, offset: i32| {
+        model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset, 5)),
+                },
+                &all,
+            )
+            .expect("stateless forward")
+            .logits
+            .into_data()
+    };
+    let cached = |model: &MuseGlimmerForCausalLm<TestBackend>, offset: i32| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).expect("cache config"), 1, &device)
+            .expect("decode state");
+        let prefill = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3, 4]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset, 4)),
+                },
+                &mut state,
+                &all,
+            )
+            .expect("prefill")
+            .logits;
+        let decoded = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[5]], &device),
+                    token_mask: None,
+                    position_ids: Some(positions(offset + 4, 1)),
+                },
+                &mut state,
+                &all,
+            )
+            .expect("decode")
+            .logits;
+        Tensor::cat(vec![prefill, decoded], 1).into_data()
+    };
+    assert_rotary_shift_invariant(
+        &stateless(&double, 0),
+        &stateless(&double, ROTARY_SHIFT),
+        "stateless F64",
+    );
+    assert_rotary_shift_sensitive(
+        &stateless(&single, 0),
+        &stateless(&single, ROTARY_SHIFT),
+        "stateless F32",
+    );
+    assert_rotary_shift_invariant(
+        &cached(&double, 0),
+        &cached(&double, ROTARY_SHIFT),
+        "cached F64",
+    );
+    assert_rotary_shift_sensitive(
+        &cached(&single, 0),
+        &cached(&single, ROTARY_SHIFT),
+        "cached F32",
+    );
+}

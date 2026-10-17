@@ -329,15 +329,58 @@ fn yarn_beta_overrides_are_resolved_independently() {
 }
 
 /// DeepSeek returns vocabulary logits in FP32 even for reduced-precision modules.
+///
+/// Both the independent and tied heads promote F16/BF16 logits to FP32, keep
+/// F32 logits F32, and keep F64 logits F64 rather than narrowing them.
 #[test]
-fn vocabulary_projection_always_returns_fp32() {
-    let (mut model, device) = tiny_model();
-    let head = model.lm_head.as_mut().unwrap();
-    head.weight = Param::from_tensor(head.weight.val().cast(DType::F16));
-    let hidden = Tensor::<TestBackend, 3>::zeros([1, 2, 8], (&device, DType::F16));
+fn vocabulary_projection_returns_at_least_fp32() {
+    for (dtype, expected) in [
+        (DType::F16, DType::F32),
+        (DType::BF16, DType::F32),
+        (DType::F32, DType::F32),
+        (DType::F64, DType::F64),
+    ] {
+        for tied in [false, true] {
+            let (mut model, device) = tiny_model();
+            if tied {
+                model.lm_head = None;
+                let embedding = model.model.embed_tokens.weight.val();
+                model.model.embed_tokens.weight = Param::from_tensor(embedding.cast(dtype));
+            } else {
+                let head = model.lm_head.as_mut().unwrap();
+                head.weight = Param::from_tensor(head.weight.val().cast(dtype));
+            }
+            let hidden = Tensor::<TestBackend, 3>::ones([1, 2, 8], (&device, dtype));
 
-    let logits = model.project_logits(hidden).unwrap();
-    assert_eq!(logits.dtype(), DType::F32);
+            let logits = model.project_logits(hidden).unwrap();
+            assert_eq!(logits.dtype(), expected, "{dtype:?} tied={tied}");
+        }
+    }
+}
+
+/// An F64 DeepSeek model returns F64 logits from its public stateless forward.
+#[test]
+fn f64_stateless_forward_returns_f64_logits() {
+    use crate::precision::test_support::CastParameters;
+
+    let (model, device) = tiny_model();
+    let model = model.map(&mut CastParameters(DType::F64));
+    let logits = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(logits.dims(), [1, 3, 32]);
+    assert_eq!(logits.dtype(), DType::F64);
 }
 
 /// Invalid token IDs and selective logits return errors rather than panics.

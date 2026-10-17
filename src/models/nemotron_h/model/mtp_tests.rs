@@ -467,3 +467,66 @@ fn speculative_state_truncate_is_atomic_and_reusable() {
     assert_eq!(state.tensor_state().lengths(), &[3]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
 }
+
+/// Every Nemotron-H logits boundary promotes to at least FP32 and never narrows F64.
+///
+/// Stateless, cached target, stateless MTP, and cached MTP logits are F32 for an
+/// F32 model and F64 for the same model widened to F64.
+#[test]
+fn logits_boundaries_keep_f64_and_promote_lower_precision() {
+    use crate::precision::test_support::CastParameters;
+    use burn::{module::Module, tensor::DType};
+
+    let device = Default::default();
+    let single = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device)
+        .unwrap()
+        .map(&mut CastParameters(DType::F32));
+    let double = single.clone().map(&mut CastParameters(DType::F64));
+    for (model, expected) in [(&single, DType::F32), (&double, DType::F64)] {
+        let stateless = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(stateless.dtype(), expected, "stateless");
+
+        let mut state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+            .unwrap();
+        let target = prefill_target(model, &mut state, &device);
+        assert_eq!(target.dtype(), expected, "target hidden state");
+        let decoded = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(decoded.dtype(), expected, "cached target");
+
+        let shifted_tokens = Tensor::from_ints([[2, 3]], &device);
+        let shifted_hidden = target.narrow(1, 0, 2);
+        let predicted = model
+            .predict_next_token_logits(shifted_tokens.clone(), shifted_hidden.clone())
+            .unwrap();
+        assert_eq!(predicted.dtype(), expected, "stateless MTP");
+        let cached = model
+            .forward_mtp_cached(shifted_tokens, shifted_hidden, None, &mut state)
+            .unwrap();
+        assert_eq!(cached.logits.dtype(), expected, "cached MTP");
+    }
+}

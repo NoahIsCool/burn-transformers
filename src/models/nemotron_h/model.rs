@@ -32,7 +32,7 @@ use crate::{
     feed_forward::apply_activation,
     moe::group_selected_experts,
     normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
-    operations,
+    operations, precision,
 };
 
 use super::{NemotronHBlockType, NemotronHConfig};
@@ -850,7 +850,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         let backbone = self.model.forward(&input, options)?;
         let hidden = backbone.hidden;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self.project_logits(selected)?.cast(DType::F32);
+        let logits = precision::promote(self.project_logits(selected)?);
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -887,7 +887,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         validate_token_ids(shifted_token_ids.clone(), self.config().vocab_size)?;
         let embedding = self.model.embed_tokens.forward(shifted_token_ids);
         let (hidden, _) = head.forward(embedding, base_hidden)?;
-        Ok(self.project_logits(hidden)?.cast(DType::F32))
+        Ok(precision::promote(self.project_logits(hidden)?))
     }
 
     /// Applies the independent or tied vocabulary projection.

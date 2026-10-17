@@ -1869,3 +1869,59 @@ impl<B: Backend> MuseGlimmerAttention<B> {
         })
     }
 }
+
+/// Frozen copy of the scale-free norm before the evaluation-precision rule.
+///
+/// It promoted every input to F32 unconditionally, so it proves reduced-precision
+/// bit identity and shows that F64 inputs used to be narrowed.
+fn historical_scale_free_rms_norm<B: Backend, const D: usize>(
+    input: Tensor<B, D>,
+    epsilon: f64,
+) -> Tensor<B, D> {
+    let dtype = input.dtype();
+    let input = input.cast(DType::F32);
+    let inverse_rms = (input.clone().square().mean_dim(D - 1) + epsilon).powf_scalar(-0.5);
+    (input * inverse_rms).cast(dtype)
+}
+
+/// Scale-free norms evaluate F64 in F64 and keep the historical FP32 graph otherwise.
+///
+/// F64 output matches a host F64 reference at `1e-12`, which the frozen FP32
+/// graph misses on the same non-dyadic input; F16, BF16, and F32 outputs are
+/// bit-identical to that frozen graph.
+#[test]
+fn scale_free_norm_keeps_f64_and_historical_reduced_precision_bits() {
+    use crate::precision::test_support::{
+        assert_bitwise_eq, assert_f32_path_is_distinguishable, assert_matches_f64_reference,
+        host_rms_norm,
+    };
+
+    let device = Default::default();
+    let values = (0..2 * 3 * 5)
+        .map(|index| ((index as f64 + 1.0) * 0.731).sin() * (1.0 + (index % 7) as f64 / 3.0))
+        .collect::<Vec<_>>();
+    let tensor = |dtype: DType| {
+        Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(values.clone(), [2, 3, 5]),
+            (&device, DType::F64),
+        )
+        .cast(dtype)
+    };
+    let expected = host_rms_norm(&values, &[1.0; 5], 1e-5);
+    let actual = scale_free_rms_norm(tensor(DType::F64), 1e-5).into_data();
+    assert_eq!(actual.dtype, DType::F64);
+    assert_matches_f64_reference(&actual, &expected, 1e-6, "F64 scale-free norm");
+    assert_f32_path_is_distinguishable(
+        &historical_scale_free_rms_norm(tensor(DType::F64), 1e-5).into_data(),
+        &expected,
+        1e-6,
+        "historical F32 graph",
+    );
+    for dtype in [DType::F16, DType::BF16, DType::F32] {
+        assert_bitwise_eq(
+            &scale_free_rms_norm(tensor(dtype), 1e-5).into_data(),
+            &historical_scale_free_rms_norm(tensor(dtype), 1e-5).into_data(),
+            &format!("{dtype:?} scale-free norm"),
+        );
+    }
+}

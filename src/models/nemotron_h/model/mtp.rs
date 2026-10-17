@@ -12,11 +12,12 @@
 //! recurrent terminal states cannot be reconstructed by deleting a rejected
 //! token after the fact.
 
-use burn::tensor::{DType, ElementConversion, Int, Tensor, backend::Backend};
+use burn::tensor::{ElementConversion, Int, Tensor, backend::Backend};
 
 use crate::{
     Error, Result,
     cache::{CacheConfig, DecodeStateError, TensorCacheError, TensorDecodeState},
+    precision,
 };
 
 use super::{
@@ -197,7 +198,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         )?;
         let attention = head.attention.attend(projection, Some(mask), None, false)?;
         let (hidden_state, _) = head.finish(residual + attention)?;
-        let logits = self.project_logits(hidden_state.clone())?.cast(DType::F32);
+        let logits = precision::promote(self.project_logits(hidden_state.clone())?);
         commit_mtp_kv(&mut state.tensors, baseline, new_keys, new_values, sequence)?;
         Ok(NemotronHMtpPrediction {
             logits,
