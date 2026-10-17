@@ -49,7 +49,10 @@
 //! gates share (`tests/support/backend_numerics.rs`, "Greedy ties") with the
 //! tolerance `s M`; the gates apply that shared rule at
 //! [`Bound::greedy_tolerance`], the F32 tolerance at which it decides exactly
-//! these steps. It assumes that decoding steps deviate no more than the
+//! these steps whenever `2^-126 <= s M < 2^127` (F32's normal range, short of
+//! overflow when doubled), which every recorded bound satisfies; below that
+//! range the two can differ on a margin within `2^-149` of the threshold.
+//! It assumes that decoding steps deviate no more than the
 //! prompt does, as the F32 and gpt-oss gates assume for their own
 //! tolerances.
 //!
@@ -741,18 +744,33 @@ impl Bound {
         f64::from(margin) > self.greedy_threshold()
     }
 
-    /// Returns the F32 tolerance `t` at which the shared greedy rule decides exactly the steps [`Self::is_decisive`] decides.
+    /// Returns the F32 tolerance `t` at which the shared greedy rule decides the steps [`Self::is_decisive`] decides (exactly when `2^-126 <= s M < 2^127`).
     ///
     /// The gates compare greedy continuations through
     /// `tests/support/backend_numerics.rs`, whose rule calls an F32 margin `m`
     /// decisive when `m > 2 t` in F32. Here `t` is the maximum bound `s M`
     /// rounded toward zero to F32, the largest F32 value not above it.
-    /// Doubling is exact in F32 (short of overflow), so `2 t` is the largest
-    /// F32 value not above `2 s M`. For every F32 margin, `m > 2 s M` then
-    /// implies `m > 2 t`, and `m > 2 t` means `m` is at least the F32
-    /// successor of `2 t`, which lies above `2 s M`. The two rules therefore
-    /// agree on every margin, including one exactly at either threshold,
-    /// which both call a tie.
+    ///
+    /// The two rules agree on every F32 margin when `s M` lies in F32's
+    /// normal range (at least `2^-126`, [`f32::MIN_POSITIVE`]) and below
+    /// `2^127`, so that `2 t` is finite. There `t` is a normal F32 value:
+    /// doubling it is exact and maps its binade onto the next one, whose F32
+    /// values are spaced twice as far apart, so the F32 successor of `2 t` is
+    /// twice the successor of `t`. That successor lies above `s M`, so `2 t`
+    /// is the largest F32 value not above `2 s M`. Then `m > 2 s M` implies
+    /// `m > 2 t`, and `m > 2 t` means `m` is at least the successor of `2 t`,
+    /// which lies above `2 s M`; a margin exactly at either threshold is a tie
+    /// under both rules.
+    ///
+    /// Below `2^-126`, `t` is subnormal or zero, and F32 values are `2^-149`
+    /// apart both at `t` and at `2 t`, so the successor of `2 t` is
+    /// `2 t + 2^-149`, which need not lie above `2 s M`: for `s M` in
+    /// `[t + 2^-150, t + 2^-149)` the margin `2 t + 2^-149` is decisive under
+    /// `m > 2 t` but not under `m > 2 s M`. From `2^127` on, `2 t` overflows to
+    /// infinity; neither rule calls a finite margin decisive, but
+    /// `m > 2 s M` still calls an infinite one decisive. Every prompt-0 bound in
+    /// `acceptance/measurements/half-precision-calibration-20261017.json` lies
+    /// between `0.16` and `10.2`, inside the range where the rules agree.
     pub(crate) fn greedy_tolerance(&self) -> f32 {
         let nearest = self.maximum as f32;
         if f64::from(nearest) > self.maximum {
@@ -1122,7 +1140,8 @@ impl HalfPrecisionGate {
     /// Returns the F32 tolerance at which the shared greedy rule compares prompt 0's continuation.
     ///
     /// See [`Bound::greedy_tolerance`]: at it the rule decides exactly the
-    /// steps [`Self::is_decisive`] does.
+    /// steps [`Self::is_decisive`] does whenever prompt 0's maximum bound lies
+    /// in `[2^-126, 2^127)`, as every recorded bound does.
     pub(crate) fn greedy_tolerance(&self) -> f32 {
         self.bound(0).greedy_tolerance()
     }
@@ -1656,13 +1675,21 @@ mod tests {
         assert!(decisive_steps(&[], &bound).is_empty());
     }
 
+    /// Returns `2^exponent` exactly, for an exponent in F64's normal range.
+    fn two_to(exponent: i32) -> f64 {
+        f64::from_bits(u64::try_from(1023 + exponent).unwrap() << 52)
+    }
+
     /// The F32 greedy tolerance makes the shared rule `m > 2 t` decide exactly the decisive steps.
     ///
-    /// The bounds include exact F32 values, values between two F32 values
-    /// (among them the SmolLM-135M and Gemma long-prompt bounds of the 2026-10-17
-    /// calibration), and values near both ends of F32's normal range. Every
-    /// F32 margin within eight units in the last place of each threshold is
-    /// decided both ways.
+    /// The bounds span the documented range `[2^-126, 2^127)`: exact F32
+    /// values, values between two F32 values (among them the SmolLM-135M and
+    /// Gemma long-prompt bounds of the 2026-10-17 calibration), F32's smallest
+    /// normal value `2^-126` itself, values between F32 values of its binade
+    /// (where F32 values are as close as subnormals), and values near the top
+    /// of the range, up to ones whose doubled tolerance is [`f32::MAX`].
+    /// Every F32 margin within eight units in the last place of each
+    /// threshold is decided both ways.
     #[test]
     fn greedy_tolerance_decides_exactly_the_decisive_steps() {
         for maximum in [
@@ -1671,7 +1698,12 @@ mod tests {
             SLACK * 1.463_715_076_446_533_2,
             SLACK * 8.071_844_696_998_596,
             1e-30,
+            f64::from(f32::MIN_POSITIVE),
+            f64::from(f32::MIN_POSITIVE) + two_to(-150),
+            two_to(-125) - two_to(-151),
             f64::from(f32::MAX) / 4.0,
+            f64::from(f32::MAX) / 2.0,
+            f64::from(f32::MAX) / 2.0 + two_to(100),
         ] {
             let bound = Bound { maximum, mean: 0.1 };
             let tolerance = bound.greedy_tolerance();
@@ -1704,6 +1736,53 @@ mod tests {
         assert!(
             f64::from(between.greedy_tolerance()) < 1.0 / 3.0,
             "a bound between two F32 values rounds down"
+        );
+    }
+
+    /// Outside `[2^-126, 2^127)` the two greedy rules can disagree, as [`Bound::greedy_tolerance`] documents.
+    ///
+    /// Below F32's normal range the tolerance is subnormal or zero, and for a
+    /// bound in `[t + 2^-150, t + 2^-149)` the margin `2 t + 2^-149` is
+    /// decisive under `m > 2 t` only. From `2^127` on, `2 t` overflows:
+    /// neither rule calls a finite margin decisive, and only `m > 2 s M` calls
+    /// an infinite one decisive.
+    #[test]
+    fn greedy_tolerance_can_disagree_outside_the_normal_range() {
+        for maximum in [
+            two_to(-150),
+            two_to(-127) + two_to(-150),
+            two_to(-126) - two_to(-151),
+        ] {
+            let bound = Bound { maximum, mean: 0.1 };
+            let tolerance = bound.greedy_tolerance();
+            assert!(
+                f64::from(tolerance) <= maximum && f64::from(tolerance.next_up()) > maximum,
+                "{tolerance:e} is the largest F32 value not above {maximum:e}"
+            );
+            assert!(!tolerance.is_normal(), "{tolerance:e} is subnormal or zero");
+            let margin = (2.0 * tolerance).next_up();
+            assert_eq!(f64::from(margin), 2.0 * f64::from(tolerance) + two_to(-149));
+            assert!(
+                margin > 2.0 * tolerance && !bound.is_decisive(margin),
+                "margin {margin:e} is decisive only under the F32 rule at the bound {maximum:e}"
+            );
+        }
+        let overflowing = Bound {
+            maximum: two_to(127),
+            mean: 0.1,
+        };
+        let tolerance = overflowing.greedy_tolerance();
+        assert_eq!(f64::from(tolerance), two_to(127));
+        assert_eq!(2.0 * tolerance, f32::INFINITY);
+        for margin in [f32::MAX.next_down(), f32::MAX] {
+            assert!(
+                margin <= 2.0 * tolerance && !overflowing.is_decisive(margin),
+                "finite margin {margin:e} is decisive under neither rule"
+            );
+        }
+        assert!(
+            f32::INFINITY <= 2.0 * tolerance && overflowing.is_decisive(f32::INFINITY),
+            "an infinite margin is decisive only under the F64 rule"
         );
     }
 

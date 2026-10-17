@@ -325,7 +325,9 @@ tolerance (`0.5` for F16 and BF16). The greedy continuation follows the
 shared teacher-forced rule above with prompt 0's `1.2 M` as its tolerance:
 every step whose reference margin exceeds `2.4 M` is compared and every other
 step is skipped as a tie (`Bound::greedy_tolerance` is the F32 tolerance at
-which `check_teacher_forced_greedy` decides exactly those steps). Whatever the
+which `check_teacher_forced_greedy` decides exactly those steps whenever
+`1.2 M` lies in F32's normal range and below `2^127`; every recorded prompt-0
+bound lies between `0.16` and `10.2`). Whatever the
 margins, the cached greedy tests also check the decode path: every decode
 step must agree with the same run's stateless pass at its position within
 the self-consistency tolerance, and the longest prompt, prefilled for its first quarter and
