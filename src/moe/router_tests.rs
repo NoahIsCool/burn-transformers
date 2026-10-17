@@ -664,36 +664,74 @@ fn legacy_top_k(
 /// NaN, infinite, and fully masked rows still yield distinct in-range IDs and are flagged.
 #[test]
 fn top_k_is_total_for_non_finite_rows() {
-    let values = [
-        f32::NAN,
-        f32::NAN,
-        f32::NAN,
-        f32::NAN,
-        // A single NaN among finite scores ranks last.
-        0.2,
-        f32::NAN,
-        0.5,
-        0.1,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-        f32::INFINITY,
-        1.0,
-        f32::INFINITY,
-        2.0,
-    ];
-    let (selected, ids) = deterministic_top_k(logits(&values, 4).unsqueeze_dim::<3>(0), 3);
-    let ids = ids.into_data().to_vec::<i32>().unwrap();
-    assert_eq!(ids, [0, 1, 2, 2, 0, 3, 0, 1, 2, 0, 2, 3]);
-    let selected = selected.into_data().to_vec::<f32>().unwrap();
+    check_top_k_is_total_for_non_finite_rows::<TestBackend>(&Default::default());
+}
+
+/// Rows of NaN, `-inf`, and `+inf` keys for [`check_top_k_is_total_for_non_finite_rows`], `[4, 4]`.
+const NON_FINITE_ROWS: [f32; 16] = [
+    f32::NAN,
+    f32::NAN,
+    f32::NAN,
+    f32::NAN,
+    // A single NaN among finite scores ranks last.
+    0.2,
+    f32::NAN,
+    0.5,
+    0.1,
+    f32::NEG_INFINITY,
+    f32::NEG_INFINITY,
+    f32::NEG_INFINITY,
+    f32::NEG_INFINITY,
+    f32::INFINITY,
+    1.0,
+    f32::INFINITY,
+    2.0,
+];
+
+/// Uploads row-major F32 values as `[rows, 4]` on any backend.
+fn four_columns<B: Backend>(values: &[f32], device: &B::Device) -> Tensor<B, 2> {
+    Tensor::from_data(
+        TensorData::new(values.to_vec(), [values.len() / 4, 4]),
+        device,
+    )
+}
+
+/// Reads integer IDs or Boolean flags (as 0/1) of any backend to the host.
+fn host_ints<B: Backend, const D: usize>(tensor: Tensor<B, D, Int>) -> Vec<i64> {
+    tensor
+        .into_data()
+        .convert::<i64>()
+        .to_vec::<i64>()
+        .expect("I64 host values")
+}
+
+/// Top-k over [`NON_FINITE_ROWS`] picks every index once per row, NaN and `-inf` last.
+///
+/// The all-NaN and all-`-inf` rows are exhausted from their first selection:
+/// every index ties and the smallest available one wins. The router flags
+/// the NaN rows. Generic so the CubeCL CPU backend runs the same assertions
+/// as Flex (see "Exhausted rows" in [`deterministic_top_k`]).
+fn check_top_k_is_total_for_non_finite_rows<B: Backend>(device: &B::Device) {
+    let (selected, ids) = deterministic_top_k(
+        four_columns::<B>(&NON_FINITE_ROWS, device).unsqueeze_dim::<3>(0),
+        3,
+    );
+    assert_eq!(host_ints(ids), [0, 1, 2, 2, 0, 3, 0, 1, 2, 0, 2, 3]);
+    let selected = selected
+        .into_data()
+        .convert::<f32>()
+        .to_vec::<f32>()
+        .expect("F32 host values");
     assert!(selected[..3].iter().all(|value| value.is_nan()));
 
     let mut router = RouterConfig::new(4, 2);
     router.policy.scoring = RouterScoring::Sigmoid;
     router.renormalize_selected = false;
-    let (_, _, flags) = host(router.route(logits(&values, 4), None).unwrap());
-    assert_eq!(flags, [true, true, false, false]);
+    let decision = router
+        .route(four_columns::<B>(&NON_FINITE_ROWS, device), None)
+        .unwrap();
+    assert_eq!(host_ints(decision.non_finite_tokens.int()), [1, 1, 0, 0]);
+    assert_eq!(host_ints(decision.experts), [0, 1, 2, 0, 0, 1, 0, 2]);
 }
 
 /// Tokens whose final weights are not finite are flagged even when no score is NaN.
@@ -1065,5 +1103,47 @@ proptest::proptest! {
             proptest::prop_assert_eq!(unique.len(), k);
             proptest::prop_assert!(row_ids.iter().all(|&id| (0..8).contains(&id)));
         }
+    }
+}
+
+#[cfg(feature = "cpu")]
+mod cubecl_cpu {
+    //! Routing on Burn's CubeCL CPU backend, which shares the GPU backends' reductions.
+    //!
+    //! These tests run wherever the `cpu` feature builds (`cargo test
+    //! --features cpu --lib cubecl_cpu`). The CubeCL CPU backend compiles the
+    //! same `cubek-reduce` kernels as Metal, CUDA, and ROCm, so it reproduces
+    //! their maximum reduction without a GPU.
+
+    use burn::{backend::Cpu, tensor::Tensor};
+
+    /// [`super::deterministic_top_k`] stays total on CubeCL, where a row of `-inf` has maximum `f32::MIN`.
+    #[test]
+    fn cubecl_cpu_top_k_is_total_for_non_finite_rows() {
+        super::check_top_k_is_total_for_non_finite_rows::<Cpu>(&Default::default());
+    }
+
+    /// Burn 0.21's CubeCL maximum of a row of `-inf` is `f32::MIN`, not `-inf`.
+    ///
+    /// `cubek-reduce` 0.2 seeds `Max` with the lowest finite value
+    /// (`docs/upstream/16-cubecl-max-reduction-negative-infinity.md`), which is
+    /// why [`super::deterministic_top_k`] decides exhausted rows explicitly.
+    /// Flex returns `-inf`. When a Burn upgrade fixes the reduction, this test
+    /// fails and the rule can be revisited.
+    #[test]
+    fn cubecl_max_reduction_of_negative_infinities_justifies_the_exhausted_row_rule() {
+        let row = || [[f32::NEG_INFINITY; 4]];
+        let cubecl = Tensor::<Cpu, 2>::from_floats(row(), &Default::default())
+            .max_dim(1)
+            .into_data()
+            .to_vec::<f32>()
+            .expect("F32 host values");
+        assert_eq!(cubecl, [f32::MIN]);
+        let flex = Tensor::<super::TestBackend, 2>::from_floats(row(), &Default::default())
+            .max_dim(1)
+            .into_data()
+            .to_vec::<f32>()
+            .expect("F32 host values");
+        assert_eq!(flex, [f32::NEG_INFINITY]);
     }
 }

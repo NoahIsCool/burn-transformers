@@ -1,0 +1,16 @@
+[package]
+name = "cubecl-max-reduction-negative-infinity"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+# Also run the reductions on Metal (macOS).
+metal = ["burn/metal"]
+
+[dependencies]
+# The CubeCL CPU backend runs everywhere its LLVM builds; Flex is the control.
+burn = { version = "=0.21.0", features = ["cpu", "flex"] }
+
+# Standalone: never join an enclosing workspace.
+[workspace]

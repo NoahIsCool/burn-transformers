@@ -35,7 +35,8 @@ File, in this order (all still reproduce on 0.22.0):
 Do not file (fixed in 0.22.0, measured unless noted): [04](04-flex-broadcast-binary-fast-paths.md),
 [05](05-cubecl-flash-attention-causal-alignment.md) (source reading: cubek#406),
 [08](08-linear-col-layout-gradient.md), [09](09-param-mapper-valid.md),
-[11](11-softplus-overflow.md), [14](14-flex-quantized-layout-requantize.md).
+[11](11-softplus-overflow.md), [14](14-flex-quantized-layout-requantize.md),
+[16](16-cubecl-max-reduction-negative-infinity.md) (source reading: cubek#457).
 
 ## Index
 
@@ -55,6 +56,7 @@ Do not file (fixed in 0.22.0, measured unless noted): [04](04-flex-broadcast-bin
 | 12 | [Boolean `select`/`gather` tagged `U8`](12-flex-bool-select-dtype.md) | burn-flex | **Correctness** | 4 of 4 Boolean reads fail → 0, on 0.22.0 and 0.21.0 | **Open** | `architecture/types.rs::select_bool_tensor` integer round trip |
 | 13 | [`Flex32` tensors from `zeros`/`empty` on Flex](13-flex-flex32-dtype.md) | burn-flex | **Correctness** | 0.22.0: 9 of 18 operations panic → 0; 0.21.0: 9 of 9 → 0 | **Open** (narrower than 0.21.0) | Flex32 sort guard in `generation.rs` (and its test) |
 | 14 | [Block-quantized layout ops requantize on Flex](14-flex-quantized-layout-requantize.md) | burn-flex | **Correctness** | 0.21.0: transpose changes a small row by 39% (Q8) / 100% (Q4); no patch (design change) | **Fixed in 0.22.0** (exact, measured) | `packed_layout_is_exact` probe and `PackedLayoutPolicy` fallback in `checkpoint/runtime/packed_install.rs` |
+| 16 | [`max_dim` of a row of `-inf` is `f32::MIN` on CubeCL](16-cubecl-max-reduction-negative-infinity.md) | cubek-reduce | **Correctness** | 0.21.0: 2 wrong values per backend on CubeCL CPU and Metal (and `argmax` -1); no patch (fixed upstream) | **Fixed in 0.22.0** (cubek#457, cubek-reduce 0.3.0; source reading) | "Exhausted rows" rule of `deterministic_top_k` in `moe/router.rs` |
 
 Figures are single runs on a shared Apple M3 Max unless a range is given; small timings
 vary by about 20% between runs, and every before/after contrast held in every run.
@@ -93,6 +95,8 @@ reports:
 - cubek#406 (bottom-right causal mask, 05) and burn#5262 (Flex block-dim permutation, 14).
 - burn#4725 and burn#4659 (reshaping sub-byte and block-quantized tensors; not this crate's
   path, which never reshapes packed weights).
+- For report 16, searched on 2026-10-17 (`gh search prs`, `infinity` in
+  `tracel-ai/cubek`): cubek#457 with burn#4814, merged before Burn 0.22.0.
 
 ## Layout
 
@@ -148,6 +152,10 @@ every patched Burn file passes `rustfmt --edition 2024` with Burn's `max_width =
   dependencies were built offline in node-local scratch (`/scratch/nover/tfm-upstream-gemm`),
   not in the home quota. Not re-run in this round: SSH to the SCC needs an interactive Duo
   login, and the gemm patch and repro did not change.
+- Report 16 (2026-10-17): the same Mac, Rust 1.94.0-nightly, burn 0.21.0 with the `cpu`
+  feature (tracel-llvm 20.1.4-7) and on Metal. Its 0.22.0 status was checked by reading the
+  cubek-reduce 0.3.0 sources: Burn 0.22's `cpu` feature builds against tracel-llvm 23,
+  which was not downloaded for this round.
 - Not run: CUDA, ROCm and Vulkan (reports 05 and 07 were measured on Metal only), and
   Burn's own backend test suite (`burn-backend-tests`, not in the crates.io packages); the
   425 burn-flex unit tests were run with all v0.22.0 burn-flex patches applied.

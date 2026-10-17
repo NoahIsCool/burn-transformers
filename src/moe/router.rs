@@ -586,6 +586,26 @@ pub fn router_logits<B: Backend, const D: usize>(
 /// distinct within a row even when all remaining keys are `-inf` or NaN. The
 /// gathered values come from the original tensor and may therefore be NaN.
 /// For finite inputs the result equals the historical implementation.
+///
+/// # Exhausted rows
+///
+/// A row is *exhausted* when every key is `-inf` (retired keys are `-inf`, so
+/// then every available key is too); all of them tie, and the smallest
+/// available index is chosen. That is decided by an explicit test rather than
+/// by comparing keys with the row maximum, because Burn 0.21's CubeCL
+/// backends start their maximum reduction from the lowest *finite* value
+/// (cubek-reduce 0.2; measured on the CubeCL CPU backend and Metal, and the
+/// same kernel source serves CUDA and ROCm): `max_dim` of a row of `-inf`
+/// returns `f32::MIN`, which equals none of the row's keys. Without the test
+/// such a row matched no index, and the `min_dim` over an all-masked row
+/// returned the sentinel `columns`, an out-of-range expert ID that dispatch
+/// then rejected. On Flex, which returns `-inf`, the test changes no result.
+/// It costs three launches per selected index (a comparison, an `all_dim`,
+/// and a disjunction) and is exact: no finite key is conflated with `-inf`.
+/// `cubecl_max_reduction_of_negative_infinities_justifies_the_exhausted_row_rule`
+/// (`router_tests.rs`) pins the CubeCL behavior on the CPU, so a Burn upgrade
+/// that fixes it fails `cargo test --features cpu` and the rule can be
+/// revisited (`docs/upstream/16-cubecl-max-reduction-negative-infinity.md`).
 pub(crate) fn deterministic_top_k<B: Backend>(
     values: Tensor<B, 3>,
     k: usize,
@@ -604,7 +624,14 @@ pub(crate) fn deterministic_top_k<B: Backend>(
     let mut selected_indices = Vec::with_capacity(k);
     for _ in 0..k {
         let maximum = keys.clone().max_dim(2);
-        let tied = keys.clone().equal(maximum).bool_and(available.clone());
+        // `[batch, rows, 1]`: every key is `-inf`. Retired keys are `-inf`
+        // too, so then every available key ties (see "Exhausted rows").
+        let exhausted = keys.clone().equal_elem(f32::NEG_INFINITY).all_dim(2);
+        let tied = keys
+            .clone()
+            .equal(maximum)
+            .bool_or(exhausted.expand([batch, rows, columns]))
+            .bool_and(available.clone());
         let index = ids
             .clone()
             .mask_fill(tied.bool_not(), columns as i64)
