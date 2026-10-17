@@ -284,8 +284,10 @@ fn decode_rows(label: &str, bytes: &[u8], rows: usize) -> Vec<f32> {
         "{label} must hold {rows} full-vocabulary rows"
     );
     let values = bytes
-        .chunks_exact(4)
-        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
         .collect::<Vec<_>>();
     assert!(
         values.iter().all(|value| value.is_finite()),
@@ -428,6 +430,8 @@ pub(super) fn load_and_validate_precision_bundle(
 
 #[cfg(test)]
 mod tests {
+    //! Synthetic tests for row families, payload decoding, and fail-closed manifest validation.
+
     use super::*;
 
     /// Row families map to the official streams and carry their decision counts.
