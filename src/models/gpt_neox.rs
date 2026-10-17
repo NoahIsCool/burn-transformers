@@ -18,17 +18,31 @@
 //! required; this graph does not infer activations or rotary choices from weights.
 //! The historical Pythia checkpoint and reference equations are pinned in
 //! `examples/mechanistic/tuned_lens/README.md`.
+//!
+//! [`GptNeoXForCausalLm`] owns its vocabulary head, so it follows the crate's
+//! `…ForCausalLm` naming (`…Model` names headless backbones elsewhere); the
+//! pre-release alias `GptNeoXModel` was removed. It implements
+//! [`crate::architecture::HookedModel`] and
+//! [`crate::architecture::StagedModel`], so generic activation caches and
+//! residual patching run on it unchanged. Random initialization follows
+//! Hugging Face ([`GptNeoXConfig::init_policy`]).
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
+    initialization::{InitPolicy, ParameterInit},
+    models::{
+        config::{ConfigError, ModelConfig, Validate, layer_count, model_type, positive_finite},
+        gpt2::extents::{first_invalid_extent, product_fits},
+    },
     position::{RopeConfig, RopeScaling},
 };
 
 mod model;
-pub use model::{GptNeoXLayer, GptNeoXModel};
+pub use model::{GptNeoXForCausalLm, GptNeoXLayer};
 mod load;
+mod widths;
 pub use load::{GptNeoXCheckpointContract, GptNeoXCheckpointLoadError, GptNeoXLoadError};
 
 // Source topology, rotary dimensions, and allocation preflight.
@@ -91,92 +105,140 @@ impl Default for GptNeoXConfig {
 
 impl GptNeoXConfig {
     /// Checks supported mathematical choices and dimensions before allocation.
+    ///
+    /// The same checks as [`Validate::validate`], reported as a crate error at
+    /// `gpt_neox.<field>`.
     pub fn validate(&self) -> Result<()> {
-        if self.model_type != "gpt_neox" {
-            return Err(Error::configuration(
-                "gpt_neox.model_type",
-                "expected gpt_neox",
-            ));
-        }
-        for (field, value) in [
-            ("vocab_size", self.vocab_size),
-            ("hidden_size", self.hidden_size),
-            ("num_hidden_layers", self.num_hidden_layers),
-            ("num_attention_heads", self.num_attention_heads),
-            ("intermediate_size", self.intermediate_size),
-            ("max_position_embeddings", self.max_position_embeddings),
-        ] {
-            if value == 0 || value > i32::MAX as usize {
-                return Err(Error::configuration(
-                    format!("gpt_neox.{field}"),
-                    "must be nonzero and fit a signed 32-bit tensor index",
-                ));
-            }
-        }
-        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
-            return Err(Error::configuration(
-                "gpt_neox.hidden_size",
-                "must be divisible by num_attention_heads",
-            ));
-        }
-        for (field, value) in [
-            ("layer_norm_eps", self.layer_norm_eps),
-            ("initializer_range", self.initializer_range),
-        ] {
-            if !value.is_finite() || value <= 0.0 {
-                return Err(Error::configuration(
-                    format!("gpt_neox.{field}"),
-                    "must be finite and positive",
-                ));
-            }
-        }
-        if self.hidden_act != "gelu" {
-            return Err(Error::configuration(
-                "gpt_neox.hidden_act",
-                "this recipe requires exact gelu",
-            ));
-        }
-        if self.tie_word_embeddings {
-            return Err(Error::configuration(
-                "gpt_neox.tie_word_embeddings",
-                "tied GPT-NeoX embeddings are not implemented",
-            ));
-        }
-        if self.hidden_size.checked_mul(self.vocab_size).is_none()
-            || self
-                .hidden_size
-                .checked_mul(self.intermediate_size)
-                .is_none()
-            || self
-                .hidden_size
-                .checked_mul(self.hidden_size)
-                .and_then(|n| n.checked_mul(3))
-                .is_none()
-        {
-            return Err(Error::configuration(
-                "gpt_neox",
-                "parameter dimensions overflow usize",
-            ));
-        }
-        self.rope()?;
-        Ok(())
+        Validate::validate(self).map_err(Error::from)
+    }
+
+    /// GPT-NeoX's random-initialization scheme as an explicit, auditable policy.
+    ///
+    /// Following Hugging Face `GPTNeoXPreTrainedModel._init_weights`: the
+    /// input embedding and every linear weight (including the untied
+    /// vocabulary projection) draw `N(0, initializer_range^2)` and projection
+    /// biases are zero. GPT-NeoX applies no depth scaling.
+    /// [`GptNeoXForCausalLm::init`] constructs parameters lazily with exactly
+    /// these distributions, and builds every LayerNorm with scale one and
+    /// shift zero as Hugging Face does.
+    ///
+    /// The policy itself covers embeddings, projections, and projection biases
+    /// only, so it applies to any module rooted anywhere: a LayerNorm's scale
+    /// and shift both have the role
+    /// [`ParameterRole::Other`](crate::initialization::ParameterRole::Other),
+    /// so no role rule can set the scale to one and the shift to zero, and the
+    /// policy keeps them. Applying it to a trained or edited model therefore
+    /// re-samples the embeddings and projections and zeroes the biases but
+    /// leaves the LayerNorm parameters as they are. [`Self::reinit_policy`]
+    /// adds the per-path [`ParameterInit::Ones`] and [`ParameterInit::Zeros`]
+    /// overrides that complete a Hugging Face-style re-initialization.
+    #[must_use]
+    pub fn init_policy(&self) -> InitPolicy {
+        InitPolicy::normal(self.initializer_range)
+    }
+
+    /// [`Self::init_policy`] plus LayerNorm resets: Hugging Face's complete `_init_weights`.
+    ///
+    /// Hugging Face also sets every LayerNorm scale to one and shift to zero.
+    /// This policy adds one path override per parameter for the input and
+    /// post-attention norms of all `num_hidden_layers` blocks and for the
+    /// final norm: [`ParameterInit::Ones`] for each scale (`gamma`) and
+    /// [`ParameterInit::Zeros`] for each shift (`beta`). The paths are rooted
+    /// at [`GptNeoXForCausalLm`] (`layers.{l}.input_layernorm.gamma`, ...),
+    /// so apply it to that type; [`InitPolicy::apply`] rejects it, unchanged,
+    /// for a module where those paths do not exist.
+    #[must_use]
+    pub fn reinit_policy(&self) -> InitPolicy {
+        let norms = (0..self.num_hidden_layers)
+            .flat_map(|layer| {
+                ["input_layernorm", "post_attention_layernorm"]
+                    .map(|norm| format!("layers.{layer}.{norm}"))
+            })
+            .chain(["final_layer_norm".to_owned()]);
+        norms.fold(self.init_policy(), |policy, norm| {
+            policy
+                .with_override(format!("{norm}.gamma"), ParameterInit::Ones)
+                .with_override(format!("{norm}.beta"), ParameterInit::Zeros)
+        })
     }
 
     /// Returns the width of one attention head after validation.
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads.max(1)
     }
+}
 
-    /// Builds the validated even partial rotary width from the configured head width and fraction.
-    pub(super) fn rope(&self) -> Result<RopeConfig> {
+impl Validate for GptNeoXConfig {
+    /// Checks dimensions, head divisibility, numerics, activation, tying, and rotary width.
+    fn validate(&self) -> std::result::Result<(), ConfigError> {
+        /// Family label attached to configuration validation errors.
+        const FAMILY: &str = "gpt_neox";
+        model_type(FAMILY, &self.model_type, &["gpt_neox"])?;
+        let fields = [
+            ("vocab_size", self.vocab_size),
+            ("hidden_size", self.hidden_size),
+            ("num_hidden_layers", self.num_hidden_layers),
+            ("num_attention_heads", self.num_attention_heads),
+            ("intermediate_size", self.intermediate_size),
+            ("max_position_embeddings", self.max_position_embeddings),
+        ];
+        if let Some(position) = first_invalid_extent(&fields.map(|(_, value)| value)) {
+            return Err(ConfigError::new(
+                FAMILY,
+                fields[position].0,
+                "must be nonzero and fit a signed 32-bit tensor index",
+            ));
+        }
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
+            return Err(ConfigError::new(
+                FAMILY,
+                "hidden_size",
+                "must be divisible by num_attention_heads",
+            ));
+        }
+        positive_finite(FAMILY, "layer_norm_eps", self.layer_norm_eps)?;
+        positive_finite(FAMILY, "initializer_range", self.initializer_range)?;
+        if self.hidden_act != "gelu" {
+            return Err(ConfigError::new(
+                FAMILY,
+                "hidden_act",
+                "this recipe requires exact gelu",
+            ));
+        }
+        if self.tie_word_embeddings {
+            return Err(ConfigError::new(
+                FAMILY,
+                "tie_word_embeddings",
+                "tied GPT-NeoX embeddings are not implemented",
+            ));
+        }
+        if !product_fits(&[self.hidden_size, self.vocab_size])
+            || !product_fits(&[self.hidden_size, self.intermediate_size])
+            || !product_fits(&[self.hidden_size, self.hidden_size, 3])
+        {
+            return Err(ConfigError::new(
+                FAMILY,
+                "hidden_size",
+                "parameter dimensions overflow usize",
+            ));
+        }
         RopeConfig::from_partial_factor(
             self.head_dim(),
             self.rotary_pct,
             self.rotary_emb_base,
             RopeScaling::None,
         )
-        .map_err(|error| Error::configuration("gpt_neox.rotary", error.to_string()))
+        .map_err(|error| ConfigError::new(FAMILY, "rotary_pct", error.to_string()))?;
+        Ok(())
     }
+}
+
+impl ModelConfig for GptNeoXConfig {
+    /// Family label used by generic configuration dispatch and diagnostics.
+    const FAMILY: &'static str = "gpt_neox";
+    /// Serialized model discriminators supported by this GPT-NeoX schema.
+    const MODEL_TYPES: &'static [&'static str] = &["gpt_neox"];
 }
 
 #[cfg(test)]

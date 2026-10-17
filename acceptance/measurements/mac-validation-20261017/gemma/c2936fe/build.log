@@ -1,0 +1,12 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== cmd cargo test --locked --release --features metal,tokenizers --test gemma_artifacts --no-run
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-polish-half)
+    Finished `release` profile [optimized] target(s) in 59.05s
+  Executable tests/gemma_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979)
+== exit=0
+== cmd cargo test --locked --release --no-default-features --features std,flex,metal,tokenizers --test flan_t5_small --no-run
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-polish-half)
+    Finished `release` profile [optimized] target(s) in 1m 19s
+  Executable tests/flan_t5_small.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/flan_t5_small-232db8ac4818ebad)
+== exit=0
+2026-10-17T08:43:14Z

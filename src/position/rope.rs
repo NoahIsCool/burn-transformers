@@ -1,16 +1,80 @@
 //! Validated host configuration for rotary embeddings and context extension.
 //!
 //! A rotary prefix of even width `d <= head_dim` defines `d/2` complex coordinate
-//! pairs with base frequencies `omega_i = theta^(-2i/d)`. Linear scaling divides
-//! positions by an extension factor; dynamic NTK adjusts the base beyond the
-//! trained context; YaRN blends frequency regimes and scales cosine/sine amplitude.
+//! pairs with base frequencies `omega_i = theta^(-2i/d)`. Pairs use the
+//! Hugging Face *split-half* layout: channel `i` is the real part and channel
+//! `i + d/2` the imaginary part of pair `i`. Checkpoints that interleave pairs
+//! (`[re_0, im_0, re_1, im_1, ...]`) must be permuted with
+//! [`super::interleaved_to_split_half`] (or have their projection rows permuted
+//! once at load time) before these tables apply. Channels beyond `d` pass
+//! through unrotated.
 //!
-//! Configuration uses host F64 scalars with finite-domain checks; tensor dtype and
-//! device conversion occur separately in the rotary tensor module. Dynamic NTK
-//! needs `d > 2` because its exponent contains `d/(d-2)`. Pair layout and partial
-//! rotation must be chosen explicitly to preserve checkpoint tensor semantics.
+//! [`RopeScaling`] selects how frequencies and the cosine/sine amplitude change
+//! for context extension:
+//!
+//! | Policy | Frequency rule | Amplitude |
+//! | --- | --- | --- |
+//! | none | `omega_i` | 1 |
+//! | linear | `omega_i / factor` | 1 |
+//! | dynamic NTK | base `theta * (f * c / L - (f - 1))^(d/(d-2))` once `c > L` | 1 |
+//! | YaRN | ramp between `omega_i` and `omega_i / factor` over a rotation-count band | `attention_factor` |
+//! | Llama 3 | wavelength-banded smooth interpolation | 1 |
+//! | LongRoPE | `omega_i / r_i`, short or long table by context | `attention_factor` |
+//! | proportional | `omega_i / factor` for leading pairs, zero for the rest | 1 |
+//!
+//! `c` is the evaluated context (largest position plus one) and `L` the
+//! original training context. Formulas follow Hugging Face Transformers 5.2
+//! `modeling_rope_utils.py`; proportional RoPE follows Transformers 5.8.0.
+//! Configuration uses host F64 scalars with finite-domain checks; tensor dtype
+//! and device conversion occur separately in the rotary tensor module. Dynamic
+//! NTK needs `d > 2` because its exponent contains `d/(d-2)`.
+//!
+//! # Precision envelope
+//!
+//! Frequencies are rounded once to `f32`, angles are formed in `f32`, and the
+//! amplitude multiplies `f32` cosine/sine tables, so validation guarantees
+//! finite tables for every accepted configuration at every integer position,
+//! not only finite `f64` parameters:
+//!
+//! - `theta >= 1` keeps every base frequency `omega_i = theta^(-2i/d)` in
+//!   `(0, 1]` (a base below one makes them grow geometrically: `theta =
+//!   1e-300` gives `omega_1 = 1e150` for `d = 4`, which is infinite in `f32`).
+//!   Every published checkpoint uses `theta >= 10^4`.
+//! - Every policy except LongRoPE divides `omega_i` by a factor of at least
+//!   one or blends it with such a quotient, so it stays in `[0, 1]`.
+//! - LongRoPE divides by searched per-pair factors, which must round to `f32`
+//!   values of at least [`LongRopeScaling::MIN_FACTOR`] (`2^-64`); then
+//!   `omega_i / r_i <= 2^64`. A subnormal factor such as `1e-45` would
+//!   overflow the frequency itself, and GPU kernels may flush it to zero.
+//! - The device forms each angle `p * omega_i` in `f32`. Integer positions
+//!   satisfy `|p| <= 2^63`, so with every frequency at most `2^64` the angle
+//!   stays below `2^127 < f32::MAX`, and its cosine and sine are finite at
+//!   every position, not only at small ones (a LongRoPE factor of
+//!   `f32::MIN_POSITIVE` keeps `omega_i / r_i` finite but overflows the angle
+//!   from position 4 on, and `cos(inf)` is NaN).
+//! - Amplitudes (YaRN and LongRoPE `attention_factor`) must be normal positive
+//!   `f32` values too: an amplitude above `f32::MAX` turns `sin(0) = 0` at
+//!   position zero into `0 * inf = NaN`.
+//!
+//! # Verified width checks
+//!
+//! The integer validation is checked in place by Verus through
+//! `verus/position.rs`: [`validate_dimensions`] accepts exactly a positive,
+//! even rotary width no wider than a non-empty head (so it splits into
+//! `rotary / 2` complex pairs and leaves a `head - rotary` suffix) and
+//! otherwise reports the first failed check; [`check_scaling_width`] adds
+//! exactly the width each scaling policy requires (dynamic NTK above two,
+//! LongRoPE one factor per pair, proportional RoPE the whole head); and
+//! [`validate_original_context`] accepts exactly a non-zero trained context.
+//! Floating-point validation (theta, factors, amplitudes, betas) is covered by
+//! the unit tests.
 
 use core::fmt;
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
+
+use super::rope_scaling::{Llama3RopeScaling, LongRopeScaling, ProportionalRopeScaling};
 
 /// Rotation-count threshold above which YaRN retains original frequencies.
 const DEFAULT_YARN_BETA_FAST: f64 = 32.0;
@@ -101,6 +165,13 @@ impl DynamicNtkScaling {
 /// applied to the computed cosine and sine tables—not directly to logits. If a
 /// model specifies `mscale`/`mscale_all_dim`, its config adapter must resolve
 /// those fields to this final amplitude before constructing [`YarnConfig`].
+///
+/// The ramp runs over frequency indices `i in 0..d/2` between correction
+/// dimensions `low` and `high`, where a correction dimension for `beta`
+/// rotations is `d * ln(L / (2 pi beta)) / (2 ln theta)`. With `truncate`
+/// (the reference default) `low` is floored and `high` ceiled; then
+/// `low = max(low, 0)` and `high = min(high, d - 1)`. The upper clamp uses the
+/// full rotary width `d`, not `d/2`, exactly as the reference does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct YarnConfig {
     /// Finite requested context-extension multiplier, at least one.
@@ -113,6 +184,8 @@ pub struct YarnConfig {
     beta_fast: f64,
     /// Lower positive rotation-count boundary, strictly below `beta_fast`.
     beta_slow: f64,
+    /// Whether correction dimensions are rounded outward to integers (`floor`/`ceil`).
+    truncate: bool,
 }
 
 impl YarnConfig {
@@ -138,7 +211,18 @@ impl YarnConfig {
             attention_factor: 1.0 + 0.1 * factor.ln(),
             beta_fast: DEFAULT_YARN_BETA_FAST,
             beta_slow: DEFAULT_YARN_BETA_SLOW,
+            truncate: true,
         })
+    }
+
+    /// Chooses whether correction dimensions are floored/ceiled before clamping.
+    ///
+    /// The reference default is `true`; gpt-oss checkpoints set
+    /// `"truncate": false`, which keeps fractional ramp bounds.
+    #[must_use]
+    pub const fn with_truncate(mut self, truncate: bool) -> Self {
+        self.truncate = truncate;
+        self
     }
 
     /// Replaces the cosine/sine amplitude multiplier named `attention_factor`.
@@ -146,9 +230,12 @@ impl YarnConfig {
     /// # Errors
     ///
     /// Returns [`RopeConfigError::InvalidYarnAttentionFactor`] unless the value
-    /// is finite and strictly positive.
+    /// rounds to a normal positive `f32` (from [`f32::MIN_POSITIVE`] to
+    /// [`f32::MAX`]), the precision of the cosine/sine tables it scales.
     pub fn with_attention_factor(mut self, attention_factor: f64) -> Result<Self, RopeConfigError> {
-        validate_positive_finite_attention_factor(attention_factor)?;
+        if !is_normal_positive_f32(attention_factor) {
+            return Err(RopeConfigError::InvalidYarnAttentionFactor { attention_factor });
+        }
         self.attention_factor = attention_factor;
         Ok(self)
     }
@@ -226,10 +313,23 @@ impl YarnConfig {
     pub const fn beta_slow(self) -> f64 {
         self.beta_slow
     }
+
+    /// Returns whether the ramp bounds are rounded outward to integers.
+    #[must_use]
+    pub const fn truncate(self) -> bool {
+        self.truncate
+    }
 }
 
 /// A validated choice of RoPE context-scaling algorithm.
+///
+/// The LongRoPE variant stores its factor tables inline so that this enum and
+/// [`RopeConfig`] remain `Copy`; see [`LongRopeScaling`].
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "RopeConfig is Copy and passed by value per layer; boxing LongRoPE tables would remove Copy"
+)]
 pub enum RopeScaling {
     /// Uses the checkpoint's original positions and frequency base.
     #[default]
@@ -249,6 +349,81 @@ pub enum RopeScaling {
         /// Validated frequency-transition and amplitude parameters.
         YarnConfig,
     ),
+    /// Interpolates frequencies by wavelength band as in Llama 3.1.
+    Llama3(
+        /// Validated factor, band multipliers, and original context.
+        Llama3RopeScaling,
+    ),
+    /// Divides each frequency by a searched per-pair factor (Phi-3 LongRoPE).
+    LongRope(
+        /// Validated short/long factor tables and amplitude.
+        LongRopeScaling,
+    ),
+    /// Rotates only a leading fraction of full-head split-half pairs.
+    Proportional(
+        /// Validated rotated fraction and position divisor.
+        ProportionalRopeScaling,
+    ),
+}
+
+impl RopeScaling {
+    /// Returns whether frequencies depend on the evaluated context.
+    ///
+    /// Only dynamic NTK and LongRoPE do. For every other policy any non-zero
+    /// `evaluated_context` yields identical tables, so callers can skip
+    /// computing the largest position (often a device-to-host read).
+    #[must_use]
+    pub const fn is_context_dependent(&self) -> bool {
+        matches!(self, Self::DynamicNtk(_) | Self::LongRope(_))
+    }
+
+    /// Returns the largest evaluated context that keeps cached keys valid.
+    ///
+    /// Keys stored in a decode cache were rotated with the frequencies of the
+    /// context at the time they were written. A context-dependent policy changes
+    /// those frequencies once the context exceeds its original training length,
+    /// so a cache must not be extended past this limit without re-rotating
+    /// keys. `None` means the policy never invalidates cached keys.
+    #[must_use]
+    pub const fn cached_context_limit(&self) -> Option<usize> {
+        match self {
+            Self::DynamicNtk(dynamic) => Some(dynamic.original_max_position_embeddings()),
+            Self::LongRope(long) => Some(long.original_max_position_embeddings()),
+            Self::None
+            | Self::Linear(_)
+            | Self::Yarn(_)
+            | Self::Llama3(_)
+            | Self::Proportional(_) => None,
+        }
+    }
+
+    /// Returns the integer width requirement this policy adds to the rotary dimension.
+    const fn width_rule(&self) -> ScalingWidthRule {
+        match self {
+            Self::DynamicNtk(_) => ScalingWidthRule::DynamicNtk,
+            Self::LongRope(long) => ScalingWidthRule::LongRope {
+                factor_count: long.frequency_count(),
+            },
+            Self::Proportional(_) => ScalingWidthRule::FullHead,
+            Self::None | Self::Linear(_) | Self::Yarn(_) | Self::Llama3(_) => {
+                ScalingWidthRule::Unconstrained
+            }
+        }
+    }
+
+    /// Returns the cosine/sine amplitude multiplier this policy applies.
+    #[must_use]
+    pub const fn amplitude(&self) -> f64 {
+        match self {
+            Self::Yarn(yarn) => yarn.attention_factor(),
+            Self::LongRope(long) => long.attention_factor(),
+            Self::None
+            | Self::Linear(_)
+            | Self::DynamicNtk(_)
+            | Self::Llama3(_)
+            | Self::Proportional(_) => 1.0,
+        }
+    }
 }
 
 impl From<LinearRopeScaling> for RopeScaling {
@@ -272,12 +447,34 @@ impl From<YarnConfig> for RopeScaling {
     }
 }
 
+impl From<Llama3RopeScaling> for RopeScaling {
+    /// Wraps already validated Llama 3 band interpolation in the shared RoPE policy.
+    fn from(value: Llama3RopeScaling) -> Self {
+        Self::Llama3(value)
+    }
+}
+
+impl From<LongRopeScaling> for RopeScaling {
+    /// Wraps already validated LongRoPE factor tables in the shared RoPE policy.
+    fn from(value: LongRopeScaling) -> Self {
+        Self::LongRope(value)
+    }
+}
+
+impl From<ProportionalRopeScaling> for RopeScaling {
+    /// Wraps already validated proportional RoPE in the shared RoPE policy.
+    fn from(value: ProportionalRopeScaling) -> Self {
+        Self::Proportional(value)
+    }
+}
+
 /// Validated rotary-position dimensions and scaling policy.
 ///
-/// RoPE interprets adjacent feature coordinates as the real and imaginary
-/// components of a complex number, hence `rotary_dimension` must be even. A
-/// partial rotary dimension may be smaller than `head_dimension`; untouched
-/// suffix features pass through attention without rotation.
+/// RoPE treats channel `i` and channel `i + rotary_dimension / 2` of the rotary
+/// prefix as the real and imaginary components of complex pair `i` (split-half
+/// layout), hence `rotary_dimension` must be even. A partial rotary dimension
+/// may be smaller than `head_dimension`; untouched suffix features pass through
+/// attention without rotation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RopeConfig {
     /// Total channels per attention head, including any unrotated suffix.
@@ -296,8 +493,12 @@ impl RopeConfig {
     /// # Errors
     ///
     /// Returns an error for zero dimensions, an odd rotary dimension, a rotary
-    /// subspace wider than the head, a non-positive/non-finite base, or scaling
-    /// constraints that depend on the rotary dimension and base.
+    /// subspace wider than the head, a base that is not finite and at least
+    /// one (see the module's precision envelope), or scaling constraints that
+    /// depend on the rotary dimension and base: dynamic NTK needs a rotary
+    /// width above two, YaRN a base above one, LongRoPE exactly
+    /// `rotary_dimension / 2` factors, and proportional RoPE a full-head
+    /// rotary width.
     pub fn new(
         head_dimension: usize,
         rotary_dimension: usize,
@@ -305,19 +506,17 @@ impl RopeConfig {
         scaling: RopeScaling,
     ) -> Result<Self, RopeConfigError> {
         validate_dimensions(head_dimension, rotary_dimension)?;
-        if !theta.is_finite() || theta <= 0.0 {
+        // `!(theta >= 1)` also rejects NaN.
+        if !(theta.is_finite() && theta >= 1.0) {
             return Err(RopeConfigError::InvalidTheta { theta });
         }
-        match scaling {
-            RopeScaling::DynamicNtk(_) if rotary_dimension <= 2 => {
-                return Err(RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension });
-            }
-            // The YaRN correction-dimension formula divides by ln(theta).
-            RopeScaling::Yarn(_) if theta <= 1.0 => {
-                return Err(RopeConfigError::YarnThetaTooSmall { theta });
-            }
-            _ => {}
+        // The YaRN correction-dimension formula divides by ln(theta). YaRN
+        // adds no width rule, so checking it before the width rule keeps the
+        // original single-policy error.
+        if matches!(scaling, RopeScaling::Yarn(_)) && theta <= 1.0 {
+            return Err(RopeConfigError::YarnThetaTooSmall { theta });
         }
+        check_scaling_width(head_dimension, rotary_dimension, scaling.width_rule())?;
 
         Ok(Self {
             head_dimension,
@@ -417,6 +616,41 @@ pub fn rotary_dimension_from_partial_factor(
 }
 
 /// Requires a positive, even rotary prefix that fits inside a nonempty attention head.
+///
+/// Verified: `Ok` exactly when `head > 0`, `0 < rotary <= head`, and `rotary`
+/// is even, so the prefix holds `rotary / 2` complex pairs and the suffix
+/// `head - rotary` channels; otherwise the first failed check in the order
+/// zero head, zero rotary, rotary wider than head, odd rotary.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(()) => {
+                &&& head_dimension > 0
+                &&& 0 < rotary_dimension <= head_dimension
+                &&& rotary_dimension % 2 == 0
+                &&& 2 * (rotary_dimension / 2) == rotary_dimension
+                &&& rotary_dimension / 2 >= 1
+            },
+            Err(RopeConfigError::ZeroHeadDimension) => head_dimension == 0,
+            Err(RopeConfigError::ZeroRotaryDimension) => head_dimension > 0 && rotary_dimension == 0,
+            Err(RopeConfigError::RotaryDimensionExceedsHead {
+                rotary_dimension: rotary,
+                head_dimension: head,
+            }) => {
+                &&& head_dimension > 0 && rotary_dimension > 0
+                &&& rotary_dimension > head_dimension
+                &&& rotary == rotary_dimension && head == head_dimension
+            },
+            Err(RopeConfigError::OddRotaryDimension { rotary_dimension: rotary }) => {
+                &&& head_dimension > 0
+                &&& 0 < rotary_dimension <= head_dimension
+                &&& rotary_dimension % 2 == 1
+                &&& rotary == rotary_dimension
+            },
+            Err(_) => false,
+        }
+))]
 fn validate_dimensions(
     head_dimension: usize,
     rotary_dimension: usize,
@@ -439,8 +673,89 @@ fn validate_dimensions(
     Ok(())
 }
 
+/// Integer width requirement a scaling policy places on the rotary dimension.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScalingWidthRule {
+    /// No requirement beyond [`validate_dimensions`] (none, linear, YaRN, Llama 3).
+    Unconstrained,
+    /// Dynamic NTK's exponent `d / (d - 2)` needs `d > 2`.
+    DynamicNtk,
+    /// LongRoPE needs one factor per complex pair, `rotary / 2` factors.
+    LongRope {
+        /// Number of factors in each LongRoPE table.
+        factor_count: usize,
+    },
+    /// Proportional RoPE pairs span the whole head, so `rotary == head`.
+    FullHead,
+}
+
+/// Checks the width requirement of a scaling policy after [`validate_dimensions`].
+///
+/// Verified: `Ok` exactly when the rule holds (no requirement, `rotary > 2`,
+/// `factor_count == rotary / 2`, or `rotary == head`), and otherwise the
+/// rule's own error carrying the offending values.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(()) => match rule {
+                ScalingWidthRule::Unconstrained => true,
+                ScalingWidthRule::DynamicNtk => rotary_dimension > 2,
+                ScalingWidthRule::LongRope { factor_count } => factor_count == rotary_dimension / 2,
+                ScalingWidthRule::FullHead => rotary_dimension == head_dimension,
+            },
+            Err(RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension: rotary }) => {
+                &&& rule == ScalingWidthRule::DynamicNtk
+                &&& rotary_dimension <= 2
+                &&& rotary == rotary_dimension
+            },
+            Err(RopeConfigError::LongRopeFactorCount { expected, actual }) => {
+                &&& rule == ScalingWidthRule::LongRope { factor_count: actual }
+                &&& expected == rotary_dimension / 2
+                &&& actual != expected
+            },
+            Err(RopeConfigError::ProportionalRequiresFullRotation {
+                rotary_dimension: rotary,
+                head_dimension: head,
+            }) => {
+                &&& rule == ScalingWidthRule::FullHead
+                &&& rotary_dimension != head_dimension
+                &&& rotary == rotary_dimension && head == head_dimension
+            },
+            Err(_) => false,
+        }
+))]
+fn check_scaling_width(
+    head_dimension: usize,
+    rotary_dimension: usize,
+    rule: ScalingWidthRule,
+) -> Result<(), RopeConfigError> {
+    match rule {
+        ScalingWidthRule::DynamicNtk if rotary_dimension <= 2 => {
+            Err(RopeConfigError::DynamicNtkDimensionTooSmall { rotary_dimension })
+        }
+        ScalingWidthRule::LongRope { factor_count } if factor_count != rotary_dimension / 2 => {
+            Err(RopeConfigError::LongRopeFactorCount {
+                expected: rotary_dimension / 2,
+                actual: factor_count,
+            })
+        }
+        ScalingWidthRule::FullHead if rotary_dimension != head_dimension => {
+            Err(RopeConfigError::ProportionalRequiresFullRotation {
+                rotary_dimension,
+                head_dimension,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Requires a finite context-extension factor of at least one; one preserves the original scale.
-fn validate_scaling_factor(kind: &'static str, factor: f64) -> Result<(), RopeConfigError> {
+pub(super) fn validate_scaling_factor(
+    kind: &'static str,
+    factor: f64,
+) -> Result<(), RopeConfigError> {
     if factor.is_finite() && factor >= 1.0 {
         Ok(())
     } else {
@@ -449,7 +764,21 @@ fn validate_scaling_factor(kind: &'static str, factor: f64) -> Result<(), RopeCo
 }
 
 /// Requires a nonzero trained context length before evaluating an extension formula.
-fn validate_original_context(
+///
+/// Verified: `Ok` exactly when the context is non-zero, and otherwise
+/// [`RopeConfigError::ZeroOriginalContext`] naming `kind`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(()) => original_max_position_embeddings > 0,
+            Err(RopeConfigError::ZeroOriginalContext { kind: name }) => {
+                original_max_position_embeddings == 0 && name == kind
+            },
+            Err(_) => false,
+        }
+))]
+pub(super) fn validate_original_context(
     kind: &'static str,
     original_max_position_embeddings: usize,
 ) -> Result<(), RopeConfigError> {
@@ -460,13 +789,17 @@ fn validate_original_context(
     }
 }
 
-/// Requires a finite positive YaRN cosine/sine amplitude multiplier.
-fn validate_positive_finite_attention_factor(attention_factor: f64) -> Result<(), RopeConfigError> {
-    if attention_factor.is_finite() && attention_factor > 0.0 {
-        Ok(())
-    } else {
-        Err(RopeConfigError::InvalidYarnAttentionFactor { attention_factor })
-    }
+/// Whether `value` rounds to a normal positive `f32`, in `[f32::MIN_POSITIVE, f32::MAX]`.
+///
+/// This is the representable range for a RoPE divisor or amplitude that is
+/// applied in `f32`: rounding must neither overflow to infinity nor reach a
+/// subnormal or zero, whose reciprocal overflows (and which GPU kernels may
+/// flush to zero). The check rounds exactly as the tables do (`value as f32`),
+/// so a value a hair above `f32::MAX` that rounds down to it is accepted.
+/// NaN fails both comparisons.
+pub(super) fn is_normal_positive_f32(value: f64) -> bool {
+    let rounded = value as f32;
+    rounded.is_finite() && rounded >= f32::MIN_POSITIVE
 }
 
 /// Requires a finite positive YaRN rotation-count bound before logarithmic interpolation.
@@ -479,6 +812,7 @@ fn validate_yarn_beta(name: &'static str, value: f64) -> Result<(), RopeConfigEr
 }
 
 /// Invalid rotary dimensions or context-scaling parameters.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RopeConfigError {
     /// Attention head width must be non-zero.
@@ -497,7 +831,10 @@ pub enum RopeConfigError {
         /// Invalid odd prefix width.
         rotary_dimension: usize,
     },
-    /// The inverse-frequency base must be finite and positive.
+    /// The inverse-frequency base must be finite and at least one.
+    ///
+    /// A base below one makes `theta^(-2i/d)` grow with `i` and can overflow
+    /// the `f32` frequency table; no checkpoint uses one.
     InvalidTheta {
         /// Invalid base.
         theta: f64,
@@ -538,7 +875,7 @@ pub enum RopeConfigError {
         /// Invalid base.
         theta: f64,
     },
-    /// YaRN attention correction must be finite and positive.
+    /// YaRN attention correction must be a normal positive `f32` value.
     InvalidYarnAttentionFactor {
         /// Invalid correction factor.
         attention_factor: f64,
@@ -556,6 +893,60 @@ pub enum RopeConfigError {
         beta_fast: f64,
         /// Invalid slow bound.
         beta_slow: f64,
+    },
+    /// Llama 3 band multipliers must be finite, positive, and strictly ordered.
+    InvalidLlama3FrequencyFactors {
+        /// Multiplier defining the long-wavelength boundary.
+        low_freq_factor: f64,
+        /// Multiplier defining the short-wavelength boundary.
+        high_freq_factor: f64,
+    },
+    /// LongRoPE short and long tables must describe the same pairs.
+    LongRopeFactorLengthMismatch {
+        /// Short-table length.
+        short: usize,
+        /// Long-table length.
+        long: usize,
+    },
+    /// LongRoPE needs between one and the inline capacity of factors.
+    LongRopeFactorCountOutOfRange {
+        /// Supplied factor count.
+        count: usize,
+        /// Inline table capacity.
+        maximum: usize,
+    },
+    /// Every LongRoPE factor must be a normal positive `f32` value.
+    InvalidLongRopeFactor {
+        /// Table containing the value (`short_factor` or `long_factor`).
+        table: &'static str,
+        /// Zero-based pair index.
+        index: usize,
+        /// Invalid factor as supplied.
+        value: f64,
+    },
+    /// LongRoPE tables must provide one factor per rotary pair.
+    LongRopeFactorCount {
+        /// `rotary_dimension / 2`.
+        expected: usize,
+        /// Supplied factor count.
+        actual: usize,
+    },
+    /// A LongRoPE amplitude must be a normal positive `f32` value.
+    InvalidLongRopeAttentionFactor {
+        /// Invalid amplitude.
+        attention_factor: f64,
+    },
+    /// The proportional rotated fraction must be finite and within `[0, 1]`.
+    InvalidProportionalFraction {
+        /// Invalid fraction.
+        fraction: f64,
+    },
+    /// Proportional RoPE pairs span the whole head, so the rotary width must equal it.
+    ProportionalRequiresFullRotation {
+        /// Configured rotary width.
+        rotary_dimension: usize,
+        /// Attention head width.
+        head_dimension: usize,
     },
 }
 
@@ -581,7 +972,7 @@ impl fmt::Display for RopeConfigError {
             Self::InvalidTheta { theta } => {
                 write!(
                     formatter,
-                    "RoPE theta must be finite and positive, got {theta}"
+                    "RoPE theta must be finite and at least 1 (a smaller base overflows the f32 frequencies), got {theta}"
                 )
             }
             Self::InvalidPartialRotaryFactor { factor } => write!(
@@ -612,7 +1003,9 @@ impl fmt::Display for RopeConfigError {
             }
             Self::InvalidYarnAttentionFactor { attention_factor } => write!(
                 formatter,
-                "YaRN attention factor must be finite and positive, got {attention_factor}"
+                "YaRN attention factor must be a normal positive f32 value ({:e}..={:e}), got {attention_factor}",
+                f32::MIN_POSITIVE,
+                f32::MAX
             ),
             Self::InvalidYarnBeta { name, value } => write!(
                 formatter,
@@ -624,6 +1017,52 @@ impl fmt::Display for RopeConfigError {
             } => write!(
                 formatter,
                 "YaRN beta_fast ({beta_fast}) must be greater than beta_slow ({beta_slow})"
+            ),
+            Self::InvalidLlama3FrequencyFactors {
+                low_freq_factor,
+                high_freq_factor,
+            } => write!(
+                formatter,
+                "Llama 3 low_freq_factor ({low_freq_factor}) and high_freq_factor ({high_freq_factor}) must be finite, positive, and strictly increasing"
+            ),
+            Self::LongRopeFactorLengthMismatch { short, long } => write!(
+                formatter,
+                "LongRoPE short_factor has {short} entries but long_factor has {long}"
+            ),
+            Self::LongRopeFactorCountOutOfRange { count, maximum } => write!(
+                formatter,
+                "LongRoPE needs 1..={maximum} factors per table, got {count}"
+            ),
+            Self::InvalidLongRopeFactor {
+                table,
+                index,
+                value,
+            } => write!(
+                formatter,
+                "LongRoPE {table}[{index}] must round to an f32 value in {:e}..={:e} (2^-64 to f32::MAX), got {value}",
+                LongRopeScaling::MIN_FACTOR,
+                f32::MAX
+            ),
+            Self::LongRopeFactorCount { expected, actual } => write!(
+                formatter,
+                "LongRoPE needs one factor per rotary pair ({expected}), got {actual}"
+            ),
+            Self::InvalidLongRopeAttentionFactor { attention_factor } => write!(
+                formatter,
+                "LongRoPE attention factor must be a normal positive f32 value ({:e}..={:e}), got {attention_factor}",
+                f32::MIN_POSITIVE,
+                f32::MAX
+            ),
+            Self::InvalidProportionalFraction { fraction } => write!(
+                formatter,
+                "proportional RoPE rotated fraction must be finite and in [0, 1], got {fraction}"
+            ),
+            Self::ProportionalRequiresFullRotation {
+                rotary_dimension,
+                head_dimension,
+            } => write!(
+                formatter,
+                "proportional RoPE rotates the full head ({head_dimension}), got rotary dimension {rotary_dimension}"
             ),
         }
     }

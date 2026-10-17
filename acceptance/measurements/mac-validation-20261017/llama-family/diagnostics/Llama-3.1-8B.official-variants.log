@@ -1,0 +1,35 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:51:05Z load { 2.53 2.58 3.86 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/official_variants.py /Volumes/T9/models/meta-llama/Llama-3.1-8B /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/Llama-3.1-8B-official cpu-bfloat16-eager cpu-bfloat16-sdpa mps-bfloat16-eager mps-bfloat16-sdpa
+cpu-bfloat16-eager prompt 0: 6 tokens, max |d| = 1.374116e-01 at position 4 token 56704, mean |d| = 1.716964e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 1: 14 tokens, max |d| = 2.121736e-01 at position 5 token 18217, mean |d| = 2.211787e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-eager prompt 2: 9 tokens, max |d| = 1.818595e-01 at position 7 token 29532, mean |d| = 2.322500e-02; identical to the official BF16 bundle: True
+cpu-bfloat16-sdpa prompt 0: 6 tokens, max |d| = 1.247149e-01 at position 4 token 93573, mean |d| = 1.697314e-02
+cpu-bfloat16-sdpa prompt 1: 14 tokens, max |d| = 1.522827e-01 at position 3 token 279, mean |d| = 1.996935e-02
+cpu-bfloat16-sdpa prompt 2: 9 tokens, max |d| = 1.765528e-01 at position 4 token 86542, mean |d| = 1.964730e-02
+mps-bfloat16-eager prompt 0: 6 tokens, max |d| = 1.440244e-01 at position 4 token 102847, mean |d| = 1.946254e-02
+mps-bfloat16-eager prompt 1: 14 tokens, max |d| = 1.636968e-01 at position 12 token 88174, mean |d| = 2.000372e-02
+mps-bfloat16-eager prompt 2: 9 tokens, max |d| = 1.663680e-01 at position 4 token 60285, mean |d| = 2.132878e-02
+mps-bfloat16-sdpa prompt 0: 6 tokens, max |d| = 1.415024e-01 at position 4 token 118963, mean |d| = 1.880256e-02
+mps-bfloat16-sdpa prompt 1: 14 tokens, max |d| = 1.587619e-01 at position 13 token 11, mean |d| = 1.953476e-02
+mps-bfloat16-sdpa prompt 2: 9 tokens, max |d| = 1.843033e-01 at position 1 token 269, mean |d| = 1.846428e-02
+torch 2.10.0 transformers 5.2.0; official bundle /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 bfloat16
+       21.81 real        27.20 user        10.44 sys
+         15540109312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1582296  page reclaims
+              305249  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  98  voluntary context switches
+              254364  involuntary context switches
+        520271224270  instructions retired
+        132601982723  cycles elapsed
+         16796681752  peak memory footprint
+== exit=0 wall=22s

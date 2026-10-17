@@ -1,7 +1,8 @@
 //! Tests exact source, plan, payload, and manifest provenance binding.
 
-use std::io::Write;
+use std::{io::Write, sync::atomic::AtomicUsize};
 
+use super::super::hash_workers::MAX_HASH_WORKERS;
 use super::*;
 use crate::checkpoint::{
     ExpectedTensor, LoadOptions, LoadReport, MappingPlan, MemoryEstimate, PlannedTensorEquivalence,
@@ -240,6 +241,10 @@ fn canonical_digest_binds_every_executable_field_but_not_memory_estimates() {
         },
         PlannedTransform::Concatenate { axis: 0 },
         PlannedTransform::Concatenate { axis: 1 },
+        PlannedTransform::DequantizeMxfp4,
+        PlannedTransform::Alias {
+            source_target: String::new(),
+        },
     ] {
         let mut changed = plan.clone();
         changed.tensors[0].transform = transform;
@@ -371,9 +376,14 @@ fn audited_hash_failure_preserves_prefix_and_rejects_duplicate_shards() {
     assert_eq!(failure.stats.shards_hashed, 1);
     assert_eq!(failure.stats.bytes_hashed, manifest.shards[0].file_bytes);
     assert_eq!(failure.stats.passes_completed, 0);
+    // Only the worker that read shard 0 allocated its share of the budget.
+    let workers = hash_worker_count(
+        2,
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+    );
     assert_eq!(
         failure.stats.peak_buffer_bytes,
-        PROVENANCE_HASH_BUFFER_BYTES
+        PROVENANCE_HASH_BUFFER_BYTES / workers
     );
 
     manifest.shards[1] = manifest.shards[0].clone();
@@ -588,7 +598,14 @@ fn checkpoint_standards_provenance_counter_overflow_retains_precise_progress() {
             shards_hashed: if byte_overflow { 0 } else { usize::MAX },
             ..Default::default()
         };
-        let error = hash_shard(&manifest, shard, &mut stats).unwrap_err();
+        let error = hash_shard(
+            &manifest,
+            shard,
+            &mut HashBuffer::new(PROVENANCE_HASH_BUFFER_BYTES),
+            never_cancelled(&AtomicUsize::new(usize::MAX)),
+            &mut stats,
+        )
+        .unwrap_err();
         assert!(
             matches!(error, QuantizationError::ByteLengthOverflow { context }
             if context == if byte_overflow {
@@ -607,4 +624,417 @@ fn checkpoint_standards_provenance_counter_overflow_retains_precise_progress() {
             assert_eq!(stats.shards_hashed, usize::MAX);
         }
     }
+}
+
+/// Writes `shards` single-tensor shards plus an index and returns its manifest and plan.
+fn sharded_fixture(
+    shards: usize,
+    elements: usize,
+) -> (tempfile::TempDir, CheckpointManifest, LoadPlan) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut weight_map = serde_json::Map::new();
+    let mut expected = Vec::new();
+    for shard in 0..shards {
+        let name = format!("layer{shard}.weight");
+        let file_name = format!("model-{shard:05}.safetensors");
+        let header = serde_json::to_vec(&serde_json::json!({
+            name.clone(): {"dtype": "F32", "shape": [elements], "data_offsets": [0, elements * 4]}
+        }))
+        .unwrap();
+        let mut file = File::create(directory.path().join(&file_name)).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header).unwrap();
+        let bytes = (0..elements)
+            .flat_map(|index| ((index * (shard + 1)) as f32).to_le_bytes())
+            .collect::<Vec<_>>();
+        file.write_all(&bytes).unwrap();
+        weight_map.insert(name.clone(), file_name.into());
+        expected.push(ExpectedTensor::new(name, [elements as u64]));
+    }
+    std::fs::write(
+        directory.path().join("model.safetensors.index.json"),
+        serde_json::to_vec(&serde_json::json!({ "weight_map": weight_map })).unwrap(),
+    )
+    .unwrap();
+    let manifest = discover_checkpoint(directory.path(), &LoadOptions::default()).unwrap();
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    (directory, manifest, plan)
+}
+
+/// A cancellation for shard zero, which no earlier failure can ever cancel.
+fn never_cancelled(first_failure: &AtomicUsize) -> Cancellation<'_> {
+    Cancellation {
+        first_failure,
+        index: 0,
+    }
+}
+
+/// Hashes one shard alone with a full-budget buffer and no cancellation.
+fn hash_one_shard(
+    manifest: &CheckpointManifest,
+    shard: &crate::checkpoint::ShardInventory,
+    stats: &mut ProvenanceHashStats,
+) -> Result<Option<BurnpackShardProvenance>> {
+    hash_shard(
+        manifest,
+        shard,
+        &mut HashBuffer::new(PROVENANCE_HASH_BUFFER_BYTES),
+        never_cancelled(&AtomicUsize::new(usize::MAX)),
+        stats,
+    )
+}
+
+/// Concurrent hashing yields the digests of a sequential per-shard pass.
+#[test]
+fn concurrent_shard_hashing_matches_sequential_digests() {
+    let (_directory, manifest, plan) = sharded_fixture(11, 1_000);
+    let (provenance, stats) = hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+    assert_eq!(stats.passes_completed, 1);
+    assert_eq!(stats.shards_hashed, 11);
+    assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
+    // Workers that never claim a tiny shard never allocate their share.
+    assert!(stats.peak_buffer_bytes > 0);
+    assert!(stats.peak_buffer_bytes <= PROVENANCE_HASH_BUFFER_BYTES);
+    for shard in &manifest.shards {
+        let mut sequential = ProvenanceHashStats::default();
+        let digest = hash_one_shard(&manifest, shard, &mut sequential)
+            .unwrap()
+            .unwrap();
+        assert_eq!(provenance.checkpoint_shards[&shard.relative_path], digest);
+        let bytes = std::fs::read(&shard.path).unwrap();
+        assert_eq!(digest.sha256, packed_payload_sha256(&bytes));
+    }
+}
+
+/// Every worker count returns the same digests and stays within the buffer budget.
+#[test]
+fn every_worker_count_shares_one_buffer_budget() {
+    let (_directory, manifest, _plan) = sharded_fixture(8, 1_000);
+    let mut reference = None;
+    for workers in [1, 2, 4, 8] {
+        let outcomes = hash_shards_concurrently(&manifest, workers)
+            .into_iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.len(), 8, "{workers} workers");
+        let share = PROVENANCE_HASH_BUFFER_BYTES / workers;
+        let mut allocated = 0;
+        for (_, stats) in &outcomes {
+            assert!(
+                stats.peak_buffer_bytes == 0 || stats.peak_buffer_bytes == share,
+                "{workers} workers charged {}",
+                stats.peak_buffer_bytes
+            );
+            allocated += stats.peak_buffer_bytes;
+        }
+        assert!(allocated > 0 && allocated <= PROVENANCE_HASH_BUFFER_BYTES);
+        if workers == 1 {
+            assert_eq!(allocated, PROVENANCE_HASH_BUFFER_BYTES);
+        }
+        let digests = outcomes
+            .into_iter()
+            .map(|(digest, _)| digest.unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(reference.get_or_insert_with(|| digests.clone()), &digests);
+    }
+}
+
+/// The first failing shard in manifest order is reported, whatever the worker count.
+#[test]
+fn concurrent_hash_failure_reports_the_first_shard_in_order() {
+    let (_directory, mut manifest, plan) = sharded_fixture(5, 64);
+    let removed = manifest.shards[1].path.clone();
+    let length_changed = manifest.shards[3].path.clone();
+    std::fs::remove_file(&removed).unwrap();
+    std::fs::write(&length_changed, b"short").unwrap();
+    let is_removed_shard_error = |error: &QuantizationError| {
+        matches!(
+            error,
+            QuantizationError::ArtifactIo {
+                operation: "canonicalize checkpoint shard for provenance",
+                path,
+                ..
+            } if *path == removed
+        )
+    };
+    for workers in [1, 2, 4] {
+        let outcomes = hash_shards_concurrently(&manifest, workers);
+        // Shards before the first failure are never cancelled.
+        assert!(
+            matches!(&outcomes[0], Some((Ok(Some(_)), stats)) if stats.shards_hashed == 1),
+            "{workers} workers"
+        );
+        let first_error = outcomes
+            .iter()
+            .flatten()
+            .find_map(|(digest, _)| digest.as_ref().err())
+            .unwrap();
+        assert!(is_removed_shard_error(first_error), "{workers} workers");
+    }
+    let failure = hash_local_checkpoint_provenance_audited(&manifest, &plan).unwrap_err();
+    assert!(is_removed_shard_error(&failure.error));
+    let first = manifest.shards[0].file_bytes;
+    let intact = [0, 2, 4]
+        .iter()
+        .map(|&index| manifest.shards[index].file_bytes)
+        .sum::<u64>();
+    // The prefix before the failure is complete; later shards may have run.
+    assert!((1..=3).contains(&failure.stats.shards_hashed));
+    assert!((first..=intact).contains(&failure.stats.bytes_hashed));
+    assert_eq!(failure.stats.passes_completed, 0);
+    manifest.shards.truncate(1);
+    assert!(hash_local_checkpoint_provenance_audited(&manifest, &plan).is_ok());
+}
+
+/// One worker stops at the first failure and never opens a later shard.
+#[test]
+fn sequential_hashing_fails_fast_at_the_first_broken_shard() {
+    let (_directory, manifest, _plan) = sharded_fixture(5, 64);
+    std::fs::remove_file(&manifest.shards[1].path).unwrap();
+    let outcomes = hash_shards_concurrently(&manifest, 1);
+    assert!(matches!(&outcomes[0], Some((Ok(Some(_)), stats)) if stats.shards_hashed == 1));
+    assert!(matches!(&outcomes[1], Some((Err(_), stats)) if stats.bytes_hashed == 0));
+    assert!(
+        outcomes[2..].iter().all(Option::is_none),
+        "a shard after the failure was attempted"
+    );
+}
+
+/// Cancellation stops before the next read but still reports file faults.
+#[test]
+fn cancelled_shard_stops_reading_but_still_reports_file_faults() {
+    let (_directory, manifest, _plan) = sharded_fixture(2, 64);
+    // Shard 0 has failed, so shard 1 is cancelled; shard 0 itself never is.
+    let first_failure = AtomicUsize::new(0);
+    assert!(!never_cancelled(&first_failure).is_cancelled());
+    let cancelled = Cancellation {
+        first_failure: &first_failure,
+        index: 1,
+    };
+    assert!(cancelled.is_cancelled());
+    let mut buffer = HashBuffer::new(PROVENANCE_HASH_BUFFER_BYTES / 2);
+    let mut stats = ProvenanceHashStats::default();
+    let outcome = hash_shard(
+        &manifest,
+        &manifest.shards[0],
+        &mut buffer,
+        cancelled,
+        &mut stats,
+    );
+    assert!(matches!(outcome, Ok(None)));
+    assert_eq!(stats.bytes_hashed, 0);
+    assert_eq!(stats.shards_hashed, 0);
+    assert_eq!(stats.peak_buffer_bytes, PROVENANCE_HASH_BUFFER_BYTES / 2);
+
+    // The buffer is reused, so a second shard charges nothing more.
+    std::fs::write(&manifest.shards[1].path, b"short").unwrap();
+    let mut stats = ProvenanceHashStats::default();
+    let outcome = hash_shard(
+        &manifest,
+        &manifest.shards[1],
+        &mut buffer,
+        cancelled,
+        &mut stats,
+    );
+    assert!(matches!(
+        outcome,
+        Err(QuantizationError::CheckpointProvenanceLengthMismatch { .. })
+    ));
+    assert_eq!(stats, ProvenanceHashStats::default());
+}
+
+/// Worker counts are powers of two that divide the buffer budget exactly.
+#[test]
+fn hash_worker_count_is_a_bounded_power_of_two() {
+    for (shards, parallelism, expected) in [
+        (0, 8, 1),
+        (1, 8, 1),
+        (3, 8, 2),
+        (5, 14, 4),
+        (11, 14, 8),
+        (100, 6, 4),
+        (100, 1, 1),
+        (100, 0, 1),
+    ] {
+        assert_eq!(
+            hash_worker_count(shards, parallelism),
+            expected,
+            "{shards} shards on {parallelism} threads"
+        );
+    }
+}
+
+proptest::proptest! {
+    /// The worker count never exceeds its limits and loses at most half of them.
+    #[test]
+    fn hash_worker_count_respects_every_limit(shards in 0_usize..1_000, parallelism in 0_usize..256) {
+        let workers = hash_worker_count(shards, parallelism);
+        let usable = parallelism.min(MAX_HASH_WORKERS).min(shards).max(1);
+        proptest::prop_assert!(workers.is_power_of_two());
+        proptest::prop_assert!(workers <= usable && 2 * workers > usable);
+        proptest::prop_assert_eq!(PROVENANCE_HASH_BUFFER_BYTES % workers, 0);
+    }
+}
+
+/// Times concurrent against one-shard-at-a-time hashing of a page-cached checkpoint.
+///
+/// Run with `cargo test --release --lib concurrent_hash_throughput -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run explicitly in release mode"]
+fn concurrent_hash_throughput_against_sequential_hashing() {
+    use std::time::Instant;
+
+    let (_directory, manifest, plan) = sharded_fixture(8, 32 << 20);
+    hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+    let started = Instant::now();
+    hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+    let concurrent = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    hash_shards_concurrently(&manifest, 1);
+    let sequential = started.elapsed().as_secs_f64();
+    let gib = manifest.artifact_bytes as f64 / f64::from(1_u32 << 30);
+    println!(
+        "provenance hashing of {gib:.2} GiB: concurrent {:.2} GiB/s, sequential {:.2} GiB/s",
+        gib / concurrent,
+        gib / sequential
+    );
+}
+
+/// The staging digest covers exactly the bytes the destination accepted.
+///
+/// A short write hashes only its accepted prefix, so retrying the remainder
+/// yields the digest of the complete payload; flushing forwards to the
+/// destination without changing the digest.
+#[test]
+fn digesting_writer_hashes_accepted_prefixes_and_forwards_flushes() {
+    use std::io::Write as _;
+
+    /// Destination accepting at most three bytes per call and counting flushes.
+    struct Trickle {
+        /// Every accepted byte, in order.
+        accepted: Vec<u8>,
+        /// Number of flush requests received.
+        flushes: usize,
+    }
+
+    impl std::io::Write for Trickle {
+        /// Accepts a prefix of at most three bytes.
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            let accepted = buffer.len().min(3);
+            self.accepted.extend_from_slice(&buffer[..accepted]);
+            Ok(accepted)
+        }
+
+        /// Records the flush request.
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    let mut trickle = Trickle {
+        accepted: Vec::new(),
+        flushes: 0,
+    };
+    let payload = b"packed codes then scales";
+    let digest = {
+        let mut writer = DigestingWriter::new(&mut trickle);
+        assert_eq!(writer.write(payload).unwrap(), 3);
+        writer.write_all(&payload[3..]).unwrap();
+        writer.flush().unwrap();
+        writer.finish()
+    };
+    assert_eq!(trickle.accepted, payload);
+    assert_eq!(trickle.flushes, 1);
+    assert_eq!(digest, packed_payload_sha256(payload));
+}
+
+/// Pass totals reject each counter's overflow with its own context.
+#[test]
+fn hash_stat_accumulation_names_the_overflowing_counter() {
+    let one = ProvenanceHashStats {
+        bytes_hashed: 1,
+        shards_hashed: 1,
+        peak_buffer_bytes: 1,
+        ..ProvenanceHashStats::default()
+    };
+    for (total, context) in [
+        (
+            ProvenanceHashStats {
+                bytes_hashed: u64::MAX,
+                ..ProvenanceHashStats::default()
+            },
+            "provenance checkpoint byte count",
+        ),
+        (
+            ProvenanceHashStats {
+                shards_hashed: usize::MAX,
+                ..ProvenanceHashStats::default()
+            },
+            "provenance shard count",
+        ),
+        (
+            ProvenanceHashStats {
+                peak_buffer_bytes: usize::MAX,
+                ..ProvenanceHashStats::default()
+            },
+            "provenance hash buffer bytes",
+        ),
+    ] {
+        let mut accumulated = total;
+        assert!(matches!(
+            accumulate_hash_stats(&mut accumulated, one),
+            Err(QuantizationError::ByteLengthOverflow { context: actual }) if actual == context
+        ));
+    }
+    let mut total = one;
+    accumulate_hash_stats(&mut total, one).unwrap();
+    assert_eq!(
+        (
+            total.bytes_hashed,
+            total.shards_hashed,
+            total.peak_buffer_bytes
+        ),
+        (2, 2, 2)
+    );
+}
+
+/// An unreadable shard fails the hash pass at open, before any buffer is charged.
+///
+/// Canonicalization and the no-follow inspection both succeed on a mode-000
+/// file, so the open is the first failing step. A privileged process can
+/// still open it; the shard must then hash completely.
+#[cfg(unix)]
+#[test]
+fn unreadable_shard_fails_provenance_hashing_at_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_root, manifest, _plan) = local_fixture(4);
+    let shard = &manifest.shards[0];
+    std::fs::set_permissions(&shard.path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let privileged = File::open(&shard.path).is_ok();
+    let mut stats = ProvenanceHashStats::default();
+    let result = hash_one_shard(&manifest, shard, &mut stats);
+    std::fs::set_permissions(&shard.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    if privileged {
+        assert!(result.unwrap().is_some());
+        assert_eq!(stats.bytes_hashed, shard.file_bytes);
+        return;
+    }
+    assert!(matches!(
+        result,
+        Err(QuantizationError::ArtifactIo {
+            operation: "open checkpoint shard for provenance",
+            ref path,
+            ref source,
+        }) if *path == shard.path && source.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert_eq!(stats, ProvenanceHashStats::default());
 }

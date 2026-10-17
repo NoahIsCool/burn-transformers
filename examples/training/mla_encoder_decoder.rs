@@ -12,7 +12,7 @@
 #[path = "support.rs"]
 mod support;
 
-use super::experiment::EncoderDecoder;
+use super::EncoderDecoder;
 use burn::{
     backend::Autodiff,
     module::{AutodiffModule, Module},
@@ -94,6 +94,7 @@ fn train(root: &Path, steps: usize) -> Result<()> {
     let reloaded =
         EncoderDecoder::<Cpu>::init(&device)?.load_file(root.join("model"), &recorder, &device)?;
     let (source, queries, _) = batch::<Cpu>(&held_out);
+    let reload_logit_scale = support::max_abs(logits.clone());
     let reload_logit_error = support::max_error(logits, reloaded.training_logits(source, queries)?);
     Report {
         task: "Bidirectional MLA category counting",
@@ -109,6 +110,7 @@ fn train(root: &Path, steps: usize) -> Result<()> {
         final_train_scores,
         parameter_changes,
         reload_logit_error,
+        reload_logit_scale,
         seconds: started.elapsed().as_secs_f64(),
     }
     .save(root)

@@ -48,6 +48,28 @@ pub enum Error {
         crate::cache::TensorCacheError,
     ),
 
+    /// Invalid decode-cache dimensions passed to [`crate::cache::CacheConfig`].
+    ///
+    /// Converted automatically, so `CacheConfig::new(batch, capacity)?` works
+    /// in any function returning [`Result`].
+    #[error("cache configuration error: {0}")]
+    CacheConfig(
+        /// Typed dimension or window failure retained for programmatic inspection.
+        #[from]
+        crate::cache::CacheConfigError,
+    ),
+
+    /// Invalid rotary-embedding dimensions or context-scaling parameters.
+    ///
+    /// Converted automatically, so `RopeConfig::new(..)?` and the scaling
+    /// constructors compose with `?` in any function returning [`Result`].
+    #[error("rope configuration error: {0}")]
+    Rope(
+        /// Typed rotary failure retained for programmatic inspection.
+        #[from]
+        crate::position::RopeConfigError,
+    ),
+
     /// A local model directory or one of its files is invalid.
     #[error("artifact error at {path}: {reason}")]
     Artifact {
@@ -58,11 +80,49 @@ pub enum Error {
     },
 
     /// Checkpoint tensors fail strict validation or application.
+    ///
+    /// Checkpoint discovery and planning failures with a typed cause are
+    /// [`Error::CheckpointPlan`]; failures while streaming tensors into a model
+    /// are [`Error::CheckpointExecution`]. This variant carries the remaining
+    /// checkpoint diagnostics, such as load-report audit violations.
     #[error("checkpoint error: {0}")]
     Checkpoint(
         /// Checkpoint validation or application failure with tensor context.
         String,
     ),
+
+    /// Checkpoint discovery, header validation, or strict planning failed
+    /// before any parameter was written (pass one).
+    ///
+    /// Converted automatically, so `CheckpointManifest::discover(..)?` and
+    /// `build_load_plan(..)?` work in any function returning [`Result`].
+    /// Automatic loading returns this variant for every typed planning failure,
+    /// for example [`crate::checkpoint::CheckpointError::ArtifactNotFound`] for a
+    /// directory without SafeTensors files.
+    #[error("checkpoint error: {0}")]
+    CheckpointPlan(
+        /// Typed discovery, namespace, mapping, or strict-validation failure.
+        #[from]
+        crate::checkpoint::CheckpointError,
+    ),
+
+    /// Streaming a planned checkpoint into a model failed after zero or more
+    /// audited parameter writes (pass two).
+    ///
+    /// `report.applied` lists exactly the writes that succeeded; discard the
+    /// partially loaded model rather than continue inference.
+    #[error("checkpoint error: {message}")]
+    CheckpointExecution {
+        /// Complete diagnostic, naming the failed target when known and the
+        /// checkpoint-side or model-side cause.
+        message: String,
+        /// Target being materialized or written, or `None` for plan or source failures.
+        failed_target: Option<String>,
+        /// Finalized partial load report.
+        report: Box<crate::checkpoint::LoadReport>,
+        /// Runtime I/O and staging counters observed before the failure.
+        stats: Box<crate::checkpoint::ExecutionStats>,
+    },
 
     /// Tokenizer files or operations are invalid.
     #[error("tokenizer error: {0}")]
@@ -84,6 +144,24 @@ pub enum Error {
         /// Invalid generation configuration, state, or model boundary result.
         String,
     ),
+
+    /// An activation hook, edit callback, or model constraint failed while a
+    /// model was executing inside a hook scope.
+    ///
+    /// Registration mistakes found before execution (unknown points, impossible
+    /// axes) remain [`Error::Configuration`]. The message includes the cause's
+    /// text; `cause` keeps the original error for matching. It is deliberately
+    /// not exposed through [`std::error::Error::source`], so chain printers do
+    /// not repeat it.
+    #[error("intervention at {point} failed: {reason}")]
+    Intervention {
+        /// Semantic activation point, such as `decoder.layers.3.mlp.activation`.
+        point: String,
+        /// What failed at that point, including the cause's message when present.
+        reason: String,
+        /// Original error returned by a user callback or model constraint.
+        cause: Option<Box<Error>>,
+    },
 
     /// No compiled architecture matches a checkpoint model type.
     #[error("unsupported architecture: {0}")]
@@ -135,6 +213,31 @@ impl Error {
         }
     }
 
+    /// Constructs a runtime intervention failure at a semantic activation point.
+    pub fn intervention(point: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Intervention {
+            point: point.into(),
+            reason: reason.into(),
+            cause: None,
+        }
+    }
+
+    /// Constructs an intervention failure that wraps the error a callback returned.
+    ///
+    /// The cause's message is appended to `reason` so the failure reads fully
+    /// on one line; the cause itself stays available for matching.
+    pub fn intervention_caused_by(
+        point: impl Into<String>,
+        reason: impl Into<String>,
+        cause: Error,
+    ) -> Self {
+        Self::Intervention {
+            point: point.into(),
+            reason: format!("{}: {cause}", reason.into()),
+            cause: Some(Box::new(cause)),
+        }
+    }
+
     /// Wraps a filesystem error with the path that gave it meaning.
     pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
@@ -148,6 +251,45 @@ impl Error {
         Self::Json {
             path: path.into(),
             source,
+        }
+    }
+
+    /// Converts a pass-two execution failure into [`Error::CheckpointExecution`].
+    ///
+    /// The sink error type `E` is family-specific, so its text is kept in the
+    /// message while the partial report and counters stay structured.
+    pub(crate) fn checkpoint_execution<E: core::fmt::Display>(
+        failure: Box<crate::checkpoint::ExecutionFailure<E>>,
+    ) -> Self {
+        let message = failure.to_string();
+        let crate::checkpoint::ExecutionFailure {
+            failed_target,
+            report,
+            stats,
+            ..
+        } = *failure;
+        Self::CheckpointExecution {
+            message,
+            failed_target,
+            report: Box::new(report),
+            stats: Box::new(stats),
+        }
+    }
+
+    /// Converts a packed (Burnpack sidecar) execution failure into [`Error::CheckpointExecution`].
+    ///
+    /// The SafeTensors counters are kept; the packed-sidecar and provenance
+    /// counters are available only from the checkpoint module's own API.
+    pub(crate) fn quantized_checkpoint_execution<E: core::fmt::Display>(
+        failure: Box<crate::checkpoint::quantization::AuditedQuantizedExecutionFailure<E>>,
+    ) -> Self {
+        let message = failure.to_string();
+        let execution = failure.into_execution();
+        Self::CheckpointExecution {
+            message,
+            failed_target: execution.failed_target,
+            report: Box::new(execution.report),
+            stats: Box::new(execution.execution),
         }
     }
 }

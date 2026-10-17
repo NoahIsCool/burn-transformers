@@ -7,10 +7,11 @@ use burn::{
     tensor::{Int, Tensor},
 };
 
-use super::{T5BeamSearchOptions, generate_t5_beam_search, one_token};
+use super::{T5BeamSearchOptions, generate_t5_beam_search, one_token, token_to_u32};
 use crate::{
-    CausalLmInput, FinishReason,
+    CausalLmInput, Error, FinishReason,
     checkpoint::LoadOptions,
+    generation::EarlyStopping,
     models::{
         config::{ModelConfig, TokenIds},
         t5::{T5Config, T5FeedForwardProjection, T5ForConditionalGeneration},
@@ -73,6 +74,95 @@ fn family_helper_runs_a_tiny_real_t5_graph() {
     }));
 }
 
+/// An exactly sized cache (`max_new_tokens` slots) suffices for every length and stopping flag.
+///
+/// The decoder-start token takes one slot and the final selected token is
+/// never decoded, so a run writes at most `1 + max_new_tokens - 1` slots;
+/// the shared preflight rejects smaller caches and the decode state rejects
+/// writes beyond its capacity, so success proves the size is sufficient.
+#[test]
+fn family_helper_sizes_the_cache_exactly_for_every_length() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(tiny_config(), &device)
+        .expect("tiny T5 model");
+    for max_new_tokens in 1..=4 {
+        for early_stopping in [
+            EarlyStopping::Eager,
+            EarlyStopping::Heuristic,
+            EarlyStopping::Never,
+        ] {
+            let output = generate_t5_beam_search(
+                &model,
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[3, 4, 5], [6, 7, 8]],
+                        &device,
+                    ),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                T5BeamSearchOptions {
+                    max_new_tokens,
+                    num_beams: 3,
+                    num_return_sequences: 2,
+                    early_stopping,
+                    ..T5BeamSearchOptions::default()
+                },
+            )
+            .expect("exactly sized T5 beam search");
+            assert_eq!(output.sequences.len(), 2);
+            assert!(
+                output
+                    .sequences
+                    .iter()
+                    .flatten()
+                    .all(|sequence| { (1..=max_new_tokens).contains(&sequence.token_ids.len()) })
+            );
+        }
+    }
+}
+
+/// The default stopping rule is Transformers' heuristic, as FLAN-T5's generation config selects.
+#[test]
+fn default_options_use_the_transformers_heuristic() {
+    assert_eq!(
+        T5BeamSearchOptions::default().early_stopping,
+        EarlyStopping::Heuristic
+    );
+}
+
+/// Options keep Transformers' `early_stopping` encoding, so former Boolean options still load.
+#[test]
+fn early_stopping_serializes_like_transformers() {
+    for (json, rule) in [
+        ("true", EarlyStopping::Eager),
+        ("false", EarlyStopping::Heuristic),
+        ("\"never\"", EarlyStopping::Never),
+    ] {
+        let options: T5BeamSearchOptions =
+            serde_json::from_str(&format!("{{\"early_stopping\": {json}}}")).unwrap();
+        assert_eq!(
+            options,
+            T5BeamSearchOptions {
+                early_stopping: rule,
+                ..T5BeamSearchOptions::default()
+            }
+        );
+        let written = serde_json::to_value(&options).unwrap();
+        assert_eq!(
+            written["early_stopping"],
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+    }
+    let error = serde_json::from_str::<T5BeamSearchOptions>(r#"{"early_stopping": "sometimes"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("early_stopping must be true, false, or \"never\""),
+        "{error}"
+    );
+}
+
 /// PAD is intentionally singular because inactive beam rows need one ID.
 #[test]
 fn family_token_defaults_reject_missing_empty_and_ambiguous_pad() {
@@ -83,6 +173,61 @@ fn family_token_defaults_reject_missing_empty_and_ambiguous_pad() {
         one_token(Some(&TokenIds::One(7)), "pad_token_id").unwrap(),
         7
     );
+}
+
+/// Token IDs beyond the `u32` generation domain are rejected with the field name.
+#[test]
+fn token_ids_beyond_u32_are_rejected() {
+    assert_eq!(
+        token_to_u32(u32::MAX as usize, "eos_token_id").unwrap(),
+        u32::MAX
+    );
+    let error = token_to_u32(u32::MAX as usize + 1, "eos_token_id").unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason)
+            if *reason == format!("T5 config eos_token_id token {} exceeds the u32 token-ID domain", u32::MAX as usize + 1)),
+        "{error:?}"
+    );
+}
+
+/// Missing start or EOS tokens, and an edited empty EOS list, stop generation before any work.
+#[test]
+fn missing_or_empty_generation_tokens_are_rejected() {
+    let device = Default::default();
+    let source = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3, 4, 1]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = || T5BeamSearchOptions {
+        max_new_tokens: 2,
+        num_beams: 2,
+        num_return_sequences: 1,
+        length_penalty: 1.0,
+        early_stopping: EarlyStopping::Heuristic,
+    };
+    let mut model =
+        T5ForConditionalGeneration::<TestBackend>::init(tiny_config(), &device).unwrap();
+    let reason = |model: &T5ForConditionalGeneration<TestBackend>| match generate_t5_beam_search(
+        model,
+        source(),
+        options(),
+    )
+    .unwrap_err()
+    {
+        Error::Generation(reason) => reason,
+        other => panic!("expected a generation error, found {other:?}"),
+    };
+    // The public config may be edited after validation; generation re-checks what it reads.
+    model.config.eos_token_id = Some(TokenIds::Many(Vec::new()));
+    assert_eq!(
+        reason(&model),
+        "T5 config eos_token_id list must not be empty"
+    );
+    model.config.eos_token_id = None;
+    assert_eq!(reason(&model), "T5 config has no eos_token_id");
+    model.config.decoder_start_token_id = None;
+    assert_eq!(reason(&model), "T5 config has no decoder_start_token_id");
 }
 
 /// Pinned FLAN-Small beam output matches Transformers 5.2.0 token-for-token.
@@ -121,7 +266,7 @@ fn pinned_flan_small_beam_search_matches_reference_tokens() {
             num_beams: 4,
             num_return_sequences: 1,
             length_penalty: 1.0,
-            early_stopping: false,
+            early_stopping: EarlyStopping::Heuristic,
         },
     )
     .expect("run cached FLAN beam search");

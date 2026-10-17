@@ -75,6 +75,38 @@ impl NemotronHCheckpointOptions {
         self.provenance = Some(provenance);
         self
     }
+
+    /// Discovers headers under the artifact policy these options select.
+    ///
+    /// Equal to [`NemotronHCheckpointContract::discover_checkpoint`] for a
+    /// contract built from these options, because the policy depends only on
+    /// the provenance; automatic loading uses it to discover (and bound the
+    /// configuration against the discovered tensors) before it builds the
+    /// contract.
+    pub(crate) fn discover_checkpoint(
+        &self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+    ) -> crate::checkpoint::Result<CheckpointManifest> {
+        discover_with_policy(root, options, self.total_size_policy().as_ref())
+    }
+
+    /// Returns the pinned index-accounting policy the provenance selects, if any.
+    fn total_size_policy(&self) -> Option<PinnedIndexTotalSizePolicy> {
+        self.provenance.as_ref().map(lightning_total_size_policy)
+    }
+}
+
+/// Discovers with the generic strict policy, or with `policy` when one is pinned.
+fn discover_with_policy(
+    root: impl AsRef<Path>,
+    options: &LoadOptions,
+    policy: Option<&PinnedIndexTotalSizePolicy>,
+) -> crate::checkpoint::Result<CheckpointManifest> {
+    match policy {
+        Some(policy) => discover_checkpoint_with_index_total_size_policy(root, options, policy),
+        None => discover_checkpoint(root, options),
+    }
 }
 
 /// Complete internal tensor inventory plus explicit source renames.
@@ -111,10 +143,7 @@ impl NemotronHCheckpointContract {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> crate::checkpoint::Result<CheckpointManifest> {
-        match &self.total_size_policy {
-            Some(policy) => discover_checkpoint_with_index_total_size_policy(root, options, policy),
-            None => discover_checkpoint(root, options),
-        }
+        discover_with_policy(root, options, self.total_size_policy.as_ref())
     }
 
     /// Strictly compares a discovered artifact with this complete contract.
@@ -137,14 +166,63 @@ impl NemotronHCheckpointContract {
 }
 
 impl NemotronHConfig {
+    /// Returns the exact length of [`Self::checkpoint_contract`]'s inventory, or `None` on overflow.
+    ///
+    /// Every block lists its norm and its mixer: a Mamba-2 mixer `7` tensors
+    /// (`+2` projection biases with `use_bias`, `+1` with `use_conv_bias`),
+    /// attention `4` (`+4` with `attention_bias`), a dense MLP `d = 2`
+    /// (`+2` with `mlp_bias`), and an MoE `2 + d·E + d` (router, correction
+    /// bias, `E` routed experts, the shared expert; `+d` latent projections
+    /// with `moe_latent_size`). The embedding, final norm, and LM head add
+    /// `3`, and an enabled MTP stage adds five norms, its fusion projection,
+    /// one attention mixer, and one MoE mixer. Validation bounds the total by
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)
+    /// with checked arithmetic before any contract or graph is built.
+    pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
+        let dense = 2 + 2 * usize::from(self.mlp_bias);
+        let attention = 4 + 4 * usize::from(self.attention_bias);
+        let mamba = 7 + 2 * usize::from(self.use_bias) + usize::from(self.use_conv_bias);
+        let latent = if self.moe_latent_size.is_some() {
+            dense
+        } else {
+            0
+        };
+        // Evaluated only where an MoE mixer exists: without one, the expert
+        // fields are unused (and unvalidated) metadata.
+        let moe = self
+            .n_routed_experts
+            .checked_mul(dense)
+            .and_then(|routed| routed.checked_add(2 + dense + latent));
+        let mut total: usize = 3;
+        for kind in &self.layers_block_type {
+            let mixer = match kind {
+                NemotronHBlockType::LinearAttention => mamba,
+                NemotronHBlockType::FullAttention => attention,
+                NemotronHBlockType::Mlp => dense,
+                NemotronHBlockType::Moe => moe?,
+            };
+            total = total.checked_add(mixer)?.checked_add(1)?;
+        }
+        if self.num_nextn_predict_layers > 0 {
+            total = total.checked_add(6 + attention)?.checked_add(moe?)?;
+        }
+        Some(total)
+    }
+
     /// Derives the exact base and optional MTP parameter contract.
+    ///
+    /// Validation first bounds the inventory (see
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)),
+    /// so an absurd block or expert count is an error rather than an
+    /// allocation proportional to it.
     pub fn checkpoint_contract(
         &self,
         options: NemotronHCheckpointOptions,
     ) -> Result<NemotronHCheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
-        let mut expected = Vec::new();
+        // Validation proved the count fits the artifact limit.
+        let mut expected = Vec::with_capacity(self.checkpoint_tensor_count().unwrap_or(0));
         let mut mappings = MappingPlan::new();
         add_mapped(
             &mut expected,
@@ -219,7 +297,7 @@ impl NemotronHConfig {
         if self.num_nextn_predict_layers > 0 {
             add_mtp(&mut expected, &mut mappings, dimensions, self)?;
         }
-        let total_size_policy = options.provenance.as_ref().map(lightning_total_size_policy);
+        let total_size_policy = options.total_size_policy();
         Ok(NemotronHCheckpointContract {
             expected,
             mappings,
@@ -288,103 +366,34 @@ fn lightning_total_size_policy(
     }
 }
 
-/// Checked dimensions reused by contract sections.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Vocabulary rows in the embedding and output projection.
-    vocab: u64,
-    /// Residual-stream width.
-    hidden: u64,
-    /// Expanded width of each dense feed-forward block.
-    intermediate: u64,
-    /// Query projection width, `num_attention_heads * head_dim`.
-    attention_query: u64,
-    /// Key/value projection width, `num_key_value_heads * head_dim`.
-    attention_kv: u64,
-    /// Mamba value channels, `mamba_num_heads * mamba_head_dim`.
-    mamba_intermediate: u64,
-    /// Convolved channels: Mamba values plus both grouped B/C state projections.
-    mamba_convolution: u64,
-    /// Fused Mamba gate, convolution-input, and per-head timestep width.
-    mamba_projection: u64,
-    /// Independent Mamba heads with learned timestep, decay, and skip scalars.
-    mamba_heads: u64,
-    /// Temporal width of the depthwise convolution kernel.
-    mamba_kernel: u64,
-    /// Routed experts and router output channels.
-    routed_experts: u64,
-    /// Expanded width inside each routed expert.
-    moe_intermediate: u64,
-    /// Expanded width inside the shared expert.
-    shared_intermediate: u64,
-    /// Routed expert input/output width, using latent width when configured.
-    expert_input: u64,
-}
+mod dimensions; // Verified fused-width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&NemotronHConfig> for Dimensions {
-    /// Invalid or overflowing checkpoint geometry.
+    /// Contextual dimension sum or product failure.
     type Error = ConfigError;
 
-    /// Converts runtime dimensions and rejects every overflowing product/sum.
+    /// Computes every contract width with the verified [`checkpoint_dimensions`].
     fn try_from(config: &NemotronHConfig) -> Result<Self, Self::Error> {
-        let mamba_heads = dimension("mamba_num_heads", config.mamba_num_heads)?;
-        let mamba_intermediate = product(
-            "mamba_num_heads * mamba_head_dim",
-            config.mamba_num_heads,
-            config.mamba_head_dim,
-        )?;
-        let state_group = product(
-            "n_groups * ssm_state_size",
-            config.n_groups,
-            config.ssm_state_size,
-        )?;
-        let convolution = mamba_intermediate
-            .checked_add(state_group.checked_mul(2).ok_or_else(|| {
-                ConfigError::new(
-                    FAMILY,
-                    "mamba convolution",
-                    "dimension product overflows u64",
-                )
-            })?)
-            .ok_or_else(|| {
-                ConfigError::new(FAMILY, "mamba convolution", "dimension sum overflows u64")
-            })?;
-        let projection = mamba_intermediate
-            .checked_add(convolution)
-            .and_then(|value| value.checked_add(mamba_heads))
-            .ok_or_else(|| {
-                ConfigError::new(FAMILY, "mamba projection", "dimension sum overflows u64")
-            })?;
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            attention_query: product(
-                "num_attention_heads * head_dim",
-                config.num_attention_heads,
-                config.head_dim,
-            )?,
-            attention_kv: product(
-                "num_key_value_heads * head_dim",
-                config.num_key_value_heads,
-                config.head_dim,
-            )?,
-            mamba_intermediate,
-            mamba_convolution: convolution,
-            mamba_projection: projection,
-            mamba_heads,
-            mamba_kernel: dimension("conv_kernel", config.conv_kernel)?,
-            routed_experts: dimension("n_routed_experts", config.n_routed_experts)?,
-            moe_intermediate: dimension("moe_intermediate_size", config.moe_intermediate_size)?,
-            shared_intermediate: dimension(
-                "moe_shared_expert_intermediate_size",
-                config.moe_shared_expert_intermediate_size,
-            )?,
-            expert_input: dimension(
-                "moe_latent_size",
-                config.moe_latent_size.unwrap_or(config.hidden_size),
-            )?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            attention_heads: config.num_attention_heads,
+            key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+            mamba_heads: config.mamba_num_heads,
+            mamba_head_dim: config.mamba_head_dim,
+            groups: config.n_groups,
+            state_size: config.ssm_state_size,
+            conv_kernel: config.conv_kernel,
+            routed_experts: config.n_routed_experts,
+            moe_intermediate: config.moe_intermediate_size,
+            shared_intermediate: config.moe_shared_expert_intermediate_size,
+            latent: config.moe_latent_size,
         })
+        .map_err(|error| ConfigError::new(FAMILY, error.field(), error.reason()))
     }
 }
 
@@ -642,6 +651,9 @@ fn add_mtp(
             "v1 checkpoint loading supports one [attention, moe] Lightning MTP stage",
         ));
     }
+    let double_hidden = dimensions.double_hidden.ok_or_else(|| {
+        ConfigError::new(FAMILY, "hidden_size", "dimension product overflows u64")
+    })?;
     for (source, target) in [
         (
             "mtp.layers.0.enorm.weight",
@@ -671,7 +683,7 @@ fn add_mtp(
         mappings,
         "mtp.layers.0.eh_proj.weight",
         "next_token_head.eh_proj.weight",
-        vec![dimensions.hidden, dimensions.hidden * 2],
+        vec![dimensions.hidden, double_hidden],
     );
     add_attention(
         expected,
@@ -702,24 +714,6 @@ fn add_mapped(
 ) {
     expected.push(ExpectedTensor::new(target, shape));
     mappings.map(source, target);
-}
-
-/// Converts one runtime extent to SafeTensors' portable dimension type.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Multiplies two runtime extents without truncation or overflow.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]

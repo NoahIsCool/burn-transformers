@@ -1,0 +1,252 @@
+[
+ {
+  "log": "ab-9a9c730/muse-q4-smoke.r1-control.log",
+  "source": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 487.6,
+  "peak_footprint_bytes": 29486064616,
+  "max_rss_bytes": 25888899072
+ },
+ {
+  "log": "ab-9a9c730/muse-q4-smoke.r1-head.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 484.8,
+  "peak_footprint_bytes": 29273580328,
+  "max_rss_bytes": 26801242112
+ },
+ {
+  "log": "ab-9a9c730/muse-q8-smoke.r1-control.log",
+  "source": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1125.4,
+  "peak_footprint_bytes": 44091205616,
+  "max_rss_bytes": 35504898048
+ },
+ {
+  "log": "ab-9a9c730/muse-q8-smoke.r1-head.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 665.8,
+  "peak_footprint_bytes": 31873484288,
+  "max_rss_bytes": 28987392000
+ },
+ {
+  "log": "ab-9a9c730/muse-q8-smoke.r2-control.log",
+  "source": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 666.0,
+  "peak_footprint_bytes": 44081620928,
+  "max_rss_bytes": 39323926528
+ },
+ {
+  "log": "ab-9a9c730/muse-q8-smoke.r2-head.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 669.1,
+  "peak_footprint_bytes": 45678672664,
+  "max_rss_bytes": 35058663424
+ },
+ {
+  "log": "lib-metal-2bit-rejected.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1.0,
+  "peak_footprint_bytes": 16843544,
+  "max_rss_bytes": 30425088
+ },
+ {
+  "log": "lib-metal-packed-transpose.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1.0,
+  "peak_footprint_bytes": 175293208,
+  "max_rss_bytes": 41467904
+ },
+ {
+  "log": "lib-metal-q4-multirow.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1.0,
+  "peak_footprint_bytes": 179209032,
+  "max_rss_bytes": 43696128
+ },
+ {
+  "log": "lib-metal-q4-qwen35-shapes.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1.0,
+  "peak_footprint_bytes": 403686312,
+  "max_rss_bytes": 202014720
+ },
+ {
+  "log": "lib-ordinary.checkpointruntime.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 173 passed; 0 failed",
+  "exit": null,
+  "wall_s": null,
+  "peak_footprint_bytes": 41501224,
+  "max_rss_bytes": 53788672
+ },
+ {
+  "log": "lib-ordinary.operationstests.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 29 passed; 0 failed",
+  "exit": null,
+  "wall_s": null,
+  "peak_footprint_bytes": 6357568,
+  "max_rss_bytes": 15958016
+ },
+ {
+  "log": "muse-q4-conversion.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 501.9,
+  "peak_footprint_bytes": 6765302920,
+  "max_rss_bytes": 15112028160
+ },
+ {
+  "log": "muse-q4-smoke.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 465.6,
+  "peak_footprint_bytes": 29275972440,
+  "max_rss_bytes": 26972307456
+ },
+ {
+  "log": "muse-q8-conversion.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 719.5,
+  "peak_footprint_bytes": 7584945912,
+  "max_rss_bytes": 28479799296
+ },
+ {
+  "log": "muse-q8-smoke.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 637.5,
+  "peak_footprint_bytes": 45678639968,
+  "max_rss_bytes": 29130997760
+ },
+ {
+  "log": "packed-metal-kernels.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1.0,
+  "peak_footprint_bytes": 177423128,
+  "max_rss_bytes": 42057728
+ },
+ {
+  "log": "packed-metal-kernels.ordinary.build-A.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": null,
+  "wall_s": null,
+  "peak_footprint_bytes": 177111832,
+  "max_rss_bytes": 41697280
+ },
+ {
+  "log": "packed-metal-kernels.ordinary.build-B.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 0 passed; 0 failed",
+  "exit": null,
+  "wall_s": null,
+  "peak_footprint_bytes": 1376640,
+  "max_rss_bytes": 2260992
+ },
+ {
+  "log": "qwen-q4-audit.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 787.6,
+  "peak_footprint_bytes": 18736461240,
+  "max_rss_bytes": 19661520896
+ },
+ {
+  "log": "qwen-q4-conversion.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 667.7,
+  "peak_footprint_bytes": 1949278968,
+  "max_rss_bytes": 17193549824
+ },
+ {
+  "log": "qwen-q4-smoke.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 858.5,
+  "peak_footprint_bytes": 20609612584,
+  "max_rss_bytes": 19988217856
+ },
+ {
+  "log": "qwen-q8-audit.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1240.2,
+  "peak_footprint_bytes": 34555749000,
+  "max_rss_bytes": 34768142336
+ },
+ {
+  "log": "qwen-q8-conversion.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 918.6,
+  "peak_footprint_bytes": 1756090400,
+  "max_rss_bytes": 32310853632
+ },
+ {
+  "log": "qwen-q8-smoke.log",
+  "source": "c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5",
+  "dirty": 0,
+  "result": "test result: ok. 1 passed; 0 failed",
+  "exit": 0,
+  "wall_s": 1288.6,
+  "peak_footprint_bytes": 35451970808,
+  "max_rss_bytes": 34899853312
+ }
+]

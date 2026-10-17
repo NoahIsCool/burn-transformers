@@ -23,18 +23,28 @@ pub use model::{
 use serde::{Deserialize, Serialize};
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
-    positive_finite, probability, token_ids,
+    ConfigError, ModelConfig, MropeHandling, RopeContext, RopeParameters, TokenIds, Validate,
+    divisible, layer_count, model_type, nonzero, positive_finite, probability, token_ids,
 };
+use crate::position::RopeConfig;
+
+/// Fraction of each full-attention head that Qwen3.5 rotates when no config states one.
+///
+/// Transformers' `Qwen3_5TextConfig.__post_init__` applies it with
+/// `kwargs.setdefault("partial_rotary_factor", 0.25)`, so it is the weakest
+/// source: a nested `rope_parameters.partial_rotary_factor` and then a
+/// top-level `partial_rotary_factor` both take precedence.
+pub const QWEN3_5_DEFAULT_PARTIAL_ROTARY_FACTOR: f64 = 0.25;
 
 mod checkpoint;
 mod load;
+pub(crate) mod plan;
 mod recipe;
 
 pub use checkpoint::{
     Qwen3_5CheckpointContract, Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource,
 };
-pub use load::Qwen3_5LoadError;
+pub use load::{Qwen3_5CheckpointLoadError, Qwen3_5LoadError};
 pub use recipe::{
     LoadedQwen3_5Backbone, Qwen3_5BackboneRecipe, Qwen3_5LayerRecipe, Qwen3_5RecipeLoadOptions,
 };
@@ -88,6 +98,13 @@ pub struct Qwen3_5TextConfig {
     /// Legacy top-level RoPE theta used when the nested object omits it.
     pub rope_theta: Option<f64>,
     /// Legacy top-level fraction of each head to rotate.
+    ///
+    /// `None` means "not serialized". Resolution follows Transformers: the
+    /// nested `rope_parameters.partial_rotary_factor` wins, then this field,
+    /// then [`QWEN3_5_DEFAULT_PARTIAL_ROTARY_FACTOR`]. A JSON `null` is
+    /// indistinguishable from an absent key and therefore also resolves to the
+    /// default (Transformers would rotate whole heads for an explicit `null`;
+    /// no released checkpoint serializes one).
     pub partial_rotary_factor: Option<f64>,
     /// Whether attention projections contain biases.
     pub attention_bias: bool,
@@ -158,7 +175,7 @@ impl Default for Qwen3_5TextConfig {
             tie_word_embeddings: false,
             rope_parameters: None,
             rope_theta: None,
-            partial_rotary_factor: Some(0.25),
+            partial_rotary_factor: None,
             attention_bias: false,
             attention_dropout: 0.0,
             attn_output_gate: true,
@@ -184,14 +201,18 @@ impl Default for Qwen3_5TextConfig {
 impl Qwen3_5TextConfig {
     /// Returns an explicit schedule, deriving it from `full_attention_interval`
     /// when an older config omitted `layer_types`.
+    ///
+    /// The derived schedule (`plan::derived_full_attention`, verified in
+    /// `verus/qwen.rs`) places full attention exactly at layers `i` with
+    /// `(i + 1) mod interval = 0`, `floor(num_hidden_layers / interval)` of them.
     pub fn resolved_layer_types(&self) -> Vec<Qwen3_5LayerType> {
         if !self.layer_types.is_empty() {
             return self.layer_types.clone();
         }
-        let interval = self.full_attention_interval.max(1);
-        (0..self.num_hidden_layers)
-            .map(|index| {
-                if (index + 1).is_multiple_of(interval) {
+        plan::derived_full_attention(self.num_hidden_layers, self.full_attention_interval)
+            .into_iter()
+            .map(|full| {
+                if full {
                     Qwen3_5LayerType::FullAttention
                 } else {
                     Qwen3_5LayerType::LinearAttention
@@ -200,13 +221,65 @@ impl Qwen3_5TextConfig {
             .collect()
     }
 
+    /// Returns the top-level partial rotary factor the RoPE translator should see.
+    ///
+    /// The Qwen default fills only a gap left by *both* sources, mirroring
+    /// Transformers' `setdefault`: a nested value with no top-level value is
+    /// used as is, instead of being compared against a synthetic default.
+    fn top_level_partial_rotary_factor(&self) -> Option<f64> {
+        let nested = self
+            .rope_parameters
+            .as_ref()
+            .and_then(|parameters| parameters.partial_rotary_factor);
+        self.partial_rotary_factor.or_else(|| {
+            nested
+                .is_none()
+                .then_some(QWEN3_5_DEFAULT_PARTIAL_ROTARY_FACTOR)
+        })
+    }
+
+    /// Translates the serialized RoPE metadata into the executable rotary configuration.
+    ///
+    /// This is the one place Qwen3.5 resolves `rope_parameters`, the legacy
+    /// top-level `rope_theta` and `partial_rotary_factor`, and the family
+    /// default above, through the shared
+    /// [`RopeParameters::to_rope_config`] translator. Multimodal section
+    /// metadata is accepted because the text runtime feeds identical temporal,
+    /// height, and width positions, for which sectioned MRoPE equals ordinary
+    /// one-dimensional RoPE.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error at `qwen3_5.rope.<field>` (or
+    /// `qwen3_5.head_dim`) for a missing, out-of-range, conflicting, or unused
+    /// RoPE field.
+    pub fn rope_config(&self) -> crate::Result<RopeConfig> {
+        self.rope_parameters
+            .clone()
+            .unwrap_or_default()
+            .to_rope_config(
+                &RopeContext::new("qwen3_5", self.head_dim, self.max_position_embeddings)
+                    .with_rope_theta(self.rope_theta)
+                    .with_partial_rotary_factor(self.top_level_partial_rotary_factor())
+                    .with_mrope(MropeHandling::TextPositions),
+            )
+    }
+
     /// Returns the number of channels produced by a full-attention Q projection.
     ///
     /// Output-gated Qwen packs an equally sized gate beside Q, hence the factor of
-    /// two. For Qwen3.8-27B this is `24 * 256 * 2 = 12_288` channels.
+    /// two. For Qwen3.8-27B this is `24 * 256 * 2 = 12_288` channels. The
+    /// product is `plan::gated_query_width`, verified in `verus/qwen.rs`:
+    /// it is exact for every configuration that passes validation, which
+    /// rejects an unrepresentable width; an unvalidated configuration whose
+    /// width overflows saturates at `usize::MAX` instead of wrapping.
     pub fn query_projection_width(&self) -> usize {
-        let gate_factor = if self.attn_output_gate { 2 } else { 1 };
-        self.num_attention_heads * self.head_dim * gate_factor
+        plan::gated_query_width(
+            self.num_attention_heads,
+            self.head_dim,
+            self.attn_output_gate,
+        )
+        .unwrap_or(usize::MAX)
     }
 }
 
@@ -230,6 +303,9 @@ impl Validate for Qwen3_5TextConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before `resolved_layer_types` derives one entry per layer;
+        // `mtp_num_hidden_layers` is bounded by this depth below.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         divisible(
             FAMILY,
             "num_attention_heads",
@@ -298,7 +374,9 @@ impl Validate for Qwen3_5TextConfig {
         }
 
         let mut rope = self.rope_parameters.clone().unwrap_or_default();
-        if let Some(factor) = self.partial_rotary_factor {
+        // Only a serialized top-level value can disagree with the nested one;
+        // the family default never does (see `top_level_partial_rotary_factor`).
+        if let Some(factor) = self.top_level_partial_rotary_factor() {
             if let Some(nested) = rope.partial_rotary_factor
                 && (nested - factor).abs() > f64::EPSILON
             {
@@ -350,6 +428,20 @@ impl Validate for Qwen3_5TextConfig {
             self.eos_token_id.as_ref(),
             self.vocab_size,
         )?;
+        // Verified: `None` exactly when the gated query width overflows.
+        if plan::gated_query_width(
+            self.num_attention_heads,
+            self.head_dim,
+            self.attn_output_gate,
+        )
+        .is_none()
+        {
+            return Err(ConfigError::new(
+                FAMILY,
+                "num_attention_heads",
+                "num_attention_heads * head_dim, doubled by attn_output_gate, overflows usize",
+            ));
+        }
         Ok(())
     }
 }

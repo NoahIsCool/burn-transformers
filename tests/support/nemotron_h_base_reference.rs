@@ -2212,10 +2212,12 @@ fn read_descriptor(
         fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     assert_eq!(payload.len(), elements * 4);
     payload
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            let value = f32::from_le_bytes(bytes.try_into().unwrap());
+            let value = f32::from_le_bytes(*bytes);
             assert!(
                 value.is_finite(),
                 "{} scalar {index} is non-finite",

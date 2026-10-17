@@ -1,0 +1,50 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Flex/BF16 flex_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM-135M-1d461723
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 flex_prompt_logits_match_the_reference
+== start 2026-10-17T07:18:26+00:00 load 10.04 9.74 11.45
+
+running 1 test
+test flex_prompt_logits_match_the_reference ... BF16 bounds of prompt 0: max 1.7564580917358399e0, mean 2.283324482324453e-1 (1.2 × official BF16 1.4637150764465332e0, 1.9027704019370442e-1; /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16)
+BF16 bounds of prompt 1: max 1.321504783630371e0, mean 9.058183002097439e-2 (1.2 × official BF16 1.1012539863586426e0, 7.548485835081199e-2; /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16)
+BF16 bounds of prompt 2: max 1.9828147888183594e0, mean 8.464016019030864e-2 (1.2 × official BF16 1.6523456573486328e0, 7.05334668252572e-2; /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16)
+prompt 0: 5 tokens, max |Δ| = 1.1665282249450684e0 at position 0 (bound 1.7564580917358399e0), mean |Δ| = 1.5909925353384358e-1 (bound 2.283324482324453e-1)
+prompt 1: 18 tokens, max |Δ| = 1.4355907440185547e0 at position 0 (bound 1.321504783630371e0), mean |Δ| = 7.91999231624649e-2 (bound 9.058183002097439e-2)
+
+thread 'flex_prompt_logits_match_the_reference' (34487893) panicked at tests/support/half_precision_calibration.rs:963:9:
+prompt 1: max |Δ| = 1.4355907440185547e0 exceeds the half-precision bound 1.321504783630371e0 of prompt 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    flex_prompt_logits_match_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.47s
+
+        0.47 real         0.53 user         0.27 sys
+           507985920  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               31271  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   4  voluntary context switches
+                9322  involuntary context switches
+          5087428143  instructions retired
+          2928121305  cycles elapsed
+           498566080  peak memory footprint
+== exit=101 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

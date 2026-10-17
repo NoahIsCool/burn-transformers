@@ -1,0 +1,24 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:55:37Z load { 2.55 2.88 3.68 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump flex bf16 /Volumes/T9/models/HuggingFaceTB/SmolLM3-3B 755\,76798\,1471\,997\,262\,4304\,5715\,279\,308\,7716\,80783\,1396\,14781 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-burn-longest-decode/flex-bf16-fused fused 3
+wrote 38 points for 13 tokens (eager=false, prefill=3) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-burn-longest-decode/flex-bf16-fused
+       25.60 real        17.22 user        12.52 sys
+          7984463872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              494481  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  92  voluntary context switches
+              153033  involuntary context switches
+        331495120356  instructions retired
+        104457011155  cycles elapsed
+          7978883288  peak memory footprint
+== exit=0 wall=26s
+SmolLM3-3B-burn-longest-decode/flex-bf16-fused: prompt 1 decoded after a 3-token prefill (prefill rows from the stateless pass): max 6.6712 at pos 0 (bound 8.0055), mean 0.09218 (bound 0.09465)

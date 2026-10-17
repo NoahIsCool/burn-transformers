@@ -23,7 +23,10 @@ pub struct MemoryEstimate {
     pub target_parameter_bytes: u64,
     /// Logical model bytes when tied aliases are counted independently.
     pub logical_model_bytes: u64,
-    /// Largest complete shard mapping/open-file window.
+    /// Largest complete shard file size.
+    ///
+    /// This is an artifact metric, not loader staging: the local source reads
+    /// one tensor interval at a time and never maps or buffers a whole shard.
     pub largest_shard_bytes: u64,
     /// Largest source tensor payload.
     pub largest_source_tensor_bytes: u64,
@@ -34,10 +37,21 @@ pub struct MemoryEstimate {
     pub largest_equivalence_pair_bytes: u64,
     /// Conservative pass-two host bound for transforms and equivalence preflight.
     ///
-    /// Memory mapping can make physical RSS lower than this value, while backend
-    /// transfer queues can make process-wide usage higher. The bound is the
-    /// greater of largest-shard-plus-output and the largest simultaneously held
-    /// physical alias/owner pair.
+    /// [`crate::checkpoint::build_load_plan`] sets it to the maximum of three
+    /// terms: the largest shard plus the largest materialized output, the
+    /// largest alias/owner payload pair compared for exact equivalence, and the
+    /// largest MXFP4 decode (`blocks + scales + output`). It over-approximates
+    /// what the executor stages for any single operation: one source and its
+    /// output, only the source for an in-place equal-width cast, both MXFP4
+    /// sources and the output, or one equivalence pair.
+    /// [`crate::checkpoint::LoadPlan::required_host_staging_bytes`] computes
+    /// that per-operation figure exactly. The runtime checks every planned
+    /// operation against this field before reading any payload and fails with
+    /// [`crate::checkpoint::CheckpointError::MemoryEstimateExceeded`] when an
+    /// operation needs more. Architecture loaders may raise it to budget for
+    /// staging inside their sinks, such as splitting a packed projection into
+    /// components. Backend transfer queues and activations are excluded, so
+    /// process-wide usage can be higher.
     pub peak_host_staging_bytes: u64,
 }
 
@@ -72,14 +86,31 @@ pub struct DTypeConversion {
     pub target_dtype: TensorDType,
 }
 
-/// Records runtime quantization applied while streaming a parameter.
+/// Records one parameter carried in a packed quantized artifact form.
+///
+/// Two producers write these records: the Burnpack quantizer, for each payload
+/// it stages into a sidecar, and a packed load, for each sidecar payload that
+/// the architecture sink accepted. Either way the record describes the
+/// artifact, not the model's in-memory storage. A packed load may install a
+/// weight as its exact dequantized float values instead (see
+/// [`install_packed_parameter`](super::install_packed_parameter) and
+/// [`PackedInstall::Dequantized`](super::PackedInstall::Dequantized)); the
+/// certified packed families do so wherever
+/// [`packed_layout_is_exact`](super::packed_layout_is_exact) is `false`, as on
+/// Burn Flex 0.21.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationRecord {
     /// Target model parameter.
     pub target: String,
-    /// Stable scheme name, such as `symmetric-q4-g64-axis0`.
+    /// Stable scheme name of the packed artifact form, such as
+    /// `symmetric-q4-g64-axis0`.
     pub scheme: String,
-    /// Quantized byte count written to the target store.
+    /// Packed payload bytes (quantized values plus scales) of the artifact form.
+    ///
+    /// The records of a successful packed load sum to the Burnpack's decoded
+    /// payload counters, which [`crate::loaded`] cross-checks. This is not a
+    /// model memory figure: a weight installed as exact dequantized float
+    /// values occupies its float size instead.
     pub bytes: u64,
 }
 
@@ -129,7 +160,12 @@ pub struct LoadReport {
     pub equivalence_verified: Vec<CheckpointEquivalenceRecord>,
     /// Dtype conversions planned or performed.
     pub dtype_converted: Vec<DTypeConversion>,
-    /// Weight-only quantization performed by the runtime loader.
+    /// Parameters carried in a packed quantized artifact form: staged into a
+    /// Burnpack sidecar, or read from one and accepted by the sink.
+    ///
+    /// Each record names the artifact's scheme and payload size; the installed
+    /// storage may instead be exact dequantized float values (see
+    /// [`QuantizationRecord`]).
     pub quantized: Vec<QuantizationRecord>,
     /// Unexpected source tensors accepted by an explicit allowlist.
     pub allowlisted_ignored: Vec<String>,
@@ -154,6 +190,27 @@ impl LoadReport {
     #[must_use]
     pub fn is_strictly_valid(&self) -> bool {
         self.missing.is_empty() && self.unexpected.is_empty()
+    }
+
+    /// Returns a planned report with every execution-progress category cleared.
+    ///
+    /// Execution starts from this state: `applied`, `quantized`, and
+    /// `equivalence_verified` record only work that actually completes, while the
+    /// planned categories are retained. The result is finalized.
+    #[must_use]
+    pub fn without_progress(&self) -> Self {
+        let mut report = self.clone();
+        report.applied.clear();
+        report.quantized.clear();
+        report.equivalence_verified.clear();
+        report.finalize();
+        report
+    }
+
+    /// Records quantized targets and restores deterministic ordering.
+    pub fn extend_quantized(&mut self, records: impl IntoIterator<Item = QuantizationRecord>) {
+        self.quantized.extend(records);
+        self.finalize();
     }
 
     /// Records a parameter after the runtime has applied it.

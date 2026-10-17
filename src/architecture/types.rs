@@ -7,7 +7,7 @@
 //! indicators instead of assuming a specific byte encoding. These wrappers define
 //! shape and semantic contracts; execution validates concrete geometry and devices.
 
-use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{Error, Result};
 
@@ -46,29 +46,19 @@ pub(crate) fn select_bool_tensor<B: Backend, const D: usize>(
 /// Copies a small Boolean metadata tensor to the host without assuming its storage encoding.
 ///
 /// Burn backends may expose logical booleans as native bits, `u8`, or another backend-selected
-/// representation. Converting through the backend's integer element type avoids asking
-/// [`TensorData`] to reinterpret one Boolean representation as another;
-/// every nonzero integer retains the public `true == valid token` convention.
+/// representation. Converting to an integer tensor avoids asking [`TensorData`] to
+/// reinterpret one Boolean representation as another, and reading that integer
+/// data element by element accepts whichever integer dtype the conversion produced
+/// (the backend's `IntElem` or a device's configured default); every nonzero
+/// integer retains the public `true == valid token` convention.
 pub(crate) fn tensor_bool_values<B: Backend, const D: usize>(
     tensor: Tensor<B, D, Bool>,
     label: &str,
 ) -> Result<Vec<bool>> {
-    tensor
-        .int()
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })?
-        .to_vec::<B::IntElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<i64>() != 0)
-                .collect()
-        })
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })
+    let data = tensor.int().try_into_data().map_err(|error| {
+        Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+    })?;
+    Ok(data.iter::<i64>().map(|value| value != 0).collect())
 }
 
 /// A token-validity mask with the unambiguous convention `true == real token`.

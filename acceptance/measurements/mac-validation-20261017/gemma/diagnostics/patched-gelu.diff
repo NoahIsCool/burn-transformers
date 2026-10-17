@@ -1,0 +1,12 @@
+362c362,370
+<         Activation::GeluTanh => activation::gelu_approximate(input),
+---
+>         Activation::GeluTanh => {
+>             // SCRATCH DIAGNOSTIC (never committed): evaluate in F32 and round once for half dtypes.
+>             let dtype = input.dtype();
+>             if dtype == burn::tensor::DType::F32 || dtype == burn::tensor::DType::F64 {
+>                 activation::gelu_approximate(input)
+>             } else {
+>                 activation::gelu_approximate(input.cast(burn::tensor::DType::F32)).cast(dtype)
+>             }
+>         }

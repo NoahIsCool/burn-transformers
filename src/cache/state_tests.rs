@@ -1,6 +1,7 @@
 //! Atomic logical-length updates, invalid inputs, and sequence lifecycle boundaries.
 
 use super::*;
+use crate::cache::TransactionalCache;
 
 /// Builds a three-row logical cache fixture with capacity eight.
 fn config() -> CacheConfig {
@@ -244,5 +245,62 @@ fn display_messages_are_actionable() {
             capacity: 1,
         })
         .is_none()
+    );
+}
+
+/// Committed lengths stay at the baseline while the working cursor absorbs proposals.
+#[test]
+fn transactions_separate_committed_and_working_lengths() {
+    let mut state = DecodeState::from_lengths(config(), vec![2, 5, 7]).expect("valid state");
+    assert_eq!(state.committed_lengths(), state.working_lengths());
+    assert_eq!(state.proposal_lengths(), vec![0, 0, 0]);
+    let mark = state.mark().expect("begin");
+    let transition = state.advance(1, 2).expect("proposal");
+    assert_eq!(transition.appended_range(), 5..7);
+    state.advance_all(&[1, 0, 1]).expect("proposal");
+    assert_eq!(state.lengths(), &[2, 5, 7]);
+    assert_eq!(state.committed_lengths(), &[2, 5, 7]);
+    assert_eq!(state.working_lengths(), &[3, 7, 8]);
+    assert_eq!(state.proposal_lengths(), vec![1, 2, 1]);
+    assert_eq!(state.length(1), Ok(5));
+    assert_eq!(state.remaining_capacity(2), Ok(0));
+    assert_eq!(
+        state.advance(2, 1),
+        Err(DecodeStateError::CapacityExceeded {
+            sequence: 2,
+            requested: 9,
+            capacity: 8,
+        })
+    );
+    state
+        .commit_prefix_per_sequence(mark, &[1, 1, 0])
+        .expect("commit");
+    assert_eq!(state.lengths(), &[3, 6, 7]);
+    assert_eq!(state.working_lengths(), &[3, 6, 7]);
+}
+
+/// The legacy name and the canonical name denote the same type.
+#[test]
+fn legacy_decode_state_name_aliases_sequence_lengths() {
+    let state: SequenceLengths = DecodeState::new(config());
+    assert_eq!(state, SequenceLengths::new(config()));
+}
+
+/// Ledger transaction violations map to the lifecycle errors callers match on.
+///
+/// Topology operations check the transaction before consulting the ledger,
+/// so these two arms are the ledger's own defense; the mapping must still
+/// name the rejected operation and the missing transaction exactly.
+#[test]
+fn ledger_transaction_violations_map_to_lifecycle_errors() {
+    assert_eq!(
+        length_error(LengthViolation::TransactionActive, "truncate"),
+        DecodeStateError::TransactionActive {
+            operation: "truncate"
+        }
+    );
+    assert_eq!(
+        length_error(LengthViolation::TransactionInactive, "commit"),
+        DecodeStateError::Transaction(crate::cache::TransactionError::NoActiveTransaction)
     );
 }

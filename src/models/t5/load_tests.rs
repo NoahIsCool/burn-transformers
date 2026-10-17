@@ -365,6 +365,57 @@ fn planning_failures_precede_all_model_parameter_writes() {
     assert!(!wrong_shape_model.shared.weight.is_initialized());
 }
 
+/// Direct planning and loading reject a checkpoint with fewer tensors than blocks before the contract.
+///
+/// The tiny configuration has two encoder and one decoder block, so a
+/// one-tensor checkpoint fails the tensor budget with its exact bound in both
+/// [`T5Config::plan_checkpoint`] and `load_checkpoint`, before any write. A
+/// missing-tensor allowlist voids the bound, so strict planning reports the
+/// missing tensors instead.
+#[test]
+fn too_few_tensors_fail_direct_planning_before_the_contract() {
+    let device = Default::default();
+    let config = tiny(T5FeedForwardProjection::GatedGelu, false);
+    let contract = config.checkpoint_contract().unwrap();
+    let root = TempDir::new().unwrap();
+    write_checkpoint(root.path(), &contract, |tensors| {
+        tensors.retain(|(name, _)| name == "shared.weight");
+    });
+    let budget = |error: &T5CheckpointLoadError| {
+        matches!(
+            error,
+            T5CheckpointLoadError::Checkpoint(CheckpointError::TooFewTensors {
+                required: 3,
+                available: 1,
+            })
+        )
+    };
+
+    let planned = config
+        .plan_checkpoint(root.path(), &LoadOptions::default())
+        .expect_err("one tensor cannot hold three blocks");
+    assert!(budget(&planned), "{planned}");
+    let mut model =
+        T5ForConditionalGeneration::<TestBackend>::init(config.clone(), &device).unwrap();
+    let loaded = model
+        .load_checkpoint(root.path(), &LoadOptions::default())
+        .unwrap_err();
+    assert!(budget(&loaded), "{loaded}");
+    assert!(!model.shared.weight.is_initialized());
+
+    let lenient = LoadOptions {
+        allow_missing: vec![crate::checkpoint::KeyMatcher::Prefix("encoder.".into())],
+        ..LoadOptions::default()
+    };
+    let strict = config
+        .plan_checkpoint(root.path(), &lenient)
+        .expect_err("the decoder blocks are still missing");
+    assert!(
+        matches!(&strict, T5CheckpointLoadError::Checkpoint(error) if !matches!(error, CheckpointError::TooFewTensors { .. })),
+        "{strict}"
+    );
+}
+
 /// A corrupted topology yields a sink error with the failed target and partial application report.
 #[test]
 fn execution_failure_preserves_partial_report_and_sink_cause() {
@@ -618,4 +669,133 @@ fn pinned_flan_t5_small_loads_strictly_and_runs_forward() {
             Tolerance::absolute(1e-4),
         );
     assert_eq!(state.lengths(), [2]);
+}
+
+/// Malformed block targets and unknown parameters name the precise sink failure.
+#[test]
+fn malformed_targets_and_missing_components_are_specific() {
+    let device = Default::default();
+    let mut gated = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny(T5FeedForwardProjection::GatedSilu, false),
+        &device,
+    )
+    .unwrap();
+    let vector = || TensorData::zeros::<f32, _>([4]);
+    let invalid_block =
+        |model: &mut T5ForConditionalGeneration<TestBackend>, target: &str| match model
+            .write_tensor(target, vector())
+            .unwrap_err()
+        {
+            T5LoadError::InvalidBlock { target: t, reason } => {
+                assert_eq!(t, target);
+                reason
+            }
+            other => panic!("expected an invalid block for {target}, found {other:?}"),
+        };
+    assert_eq!(
+        invalid_block(&mut gated, "encoder.block.0"),
+        "expected `<stack>.block.<index>.<parameter>`"
+    );
+    assert_eq!(
+        invalid_block(&mut gated, "encoder.block..layer.0.layer_norm.weight"),
+        "block index and parameter suffix must be non-empty"
+    );
+    assert_eq!(
+        invalid_block(&mut gated, "decoder.block.0."),
+        "block index and parameter suffix must be non-empty"
+    );
+    for target in [
+        "encoder.block.0.layer.9.layer_norm.weight",
+        "encoder.block.0.layer.1.EncDecAttention.q.weight",
+        "decoder.block.0.layer.0.SelfAttention.bias",
+        "decoder.block.0.layer.2.DenseReluDense.wx.weight",
+    ] {
+        assert_eq!(
+            gated.write_tensor(target, vector()),
+            Err(T5LoadError::UnknownTarget {
+                target: target.into()
+            }),
+            "{target}"
+        );
+    }
+
+    // Edited public modules no longer match the validated checkpoint topology.
+    gated.lm_head = None;
+    gated.decoder.block[0].cross_attention = None;
+    gated.decoder.block[0].feed_forward.gated = None;
+    gated.encoder.block[0].feed_forward.gated = None;
+    for (target, component) in [
+        (
+            "lm_head.weight",
+            "independent LM head for an untied checkpoint",
+        ),
+        (
+            "decoder.block.0.layer.1.EncDecAttention.k.weight",
+            "decoder encoder-decoder attention",
+        ),
+        (
+            "decoder.block.0.layer.1.layer_norm.weight",
+            "decoder encoder-decoder attention",
+        ),
+        (
+            "encoder.block.0.layer.1.DenseReluDense.wi_1.weight",
+            "gated `wi_1` feed-forward projection",
+        ),
+        (
+            "encoder.block.0.layer.1.DenseReluDense.wo.weight",
+            "feed-forward output projection matching the configured topology",
+        ),
+    ] {
+        assert_eq!(
+            gated.write_tensor(target, vector()),
+            Err(T5LoadError::MissingComponent {
+                target: target.into(),
+                component,
+            }),
+            "{target}"
+        );
+    }
+}
+
+/// A sink failure during streaming surfaces through `load_checkpoint` with its partial report.
+#[test]
+fn load_checkpoint_returns_execution_failures_with_partial_reports() {
+    let device = Default::default();
+    let config = tiny(T5FeedForwardProjection::Relu, false);
+    let contract = config.checkpoint_contract().unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(config, &device).unwrap();
+    model.lm_head = None;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap_err();
+    let failure = error
+        .execution_failure()
+        .expect("planning succeeded, so execution reports the failure");
+    assert_eq!(failure.failed_target.as_deref(), Some("lm_head.weight"));
+    assert!(matches!(
+        failure.cause,
+        ExecutionFailureCause::Sink(T5LoadError::MissingComponent { .. })
+    ));
+    assert!(matches!(error, T5CheckpointLoadError::Execution(_)));
+}
+
+/// Packed sidecar payloads install exactly the artifact, never a requantized approximation.
+///
+/// The sink's one installer must keep a packed column-layout weight exact on
+/// every backend (as exact dequantized values on Burn Flex, whose quantized
+/// transpose requantizes) and leave float payloads unchanged, as the
+/// certified Qwen3-MoE and Muse sinks do.
+#[test]
+fn packed_payloads_install_the_artifact_exactly() {
+    crate::checkpoint::packed_sink_support::assert_install_keeps_packed_weights_exact(
+        |parameter, data| {
+            install(
+                "encoder.block.0.layer.0.SelfAttention.q.weight",
+                parameter,
+                data,
+            )
+        },
+    );
 }

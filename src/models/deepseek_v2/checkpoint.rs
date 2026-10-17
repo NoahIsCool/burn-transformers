@@ -4,6 +4,9 @@
 //! linear mapper consumes that checkpoint orientation directly. The contract
 //! keeps every expert independent, maps the single widened shared expert to its
 //! own three matrices, and never treats expert-bank tensors as fused storage.
+//! `noaux_tc` routers additionally require the gate's F32
+//! `e_score_correction_bias` (`[n_routed_experts]`), which selects experts
+//! but never weights them.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +14,8 @@ use crate::checkpoint::{
     CheckpointManifest, ExpectedTensor, LoadOptions, LoadPlan, MappingPlan, build_load_plan,
 };
 
-use super::{ConfigError, DeepseekV2Config, Validate};
+use super::{ConfigError, DeepseekTopKMethod, DeepseekV2Config, Validate};
+use crate::models::config::{MoeInventory, moe_inventory};
 
 /// Family identifier retained in checked checkpoint-dimension errors.
 const FAMILY: &str = "deepseek_v2";
@@ -53,6 +57,42 @@ impl DeepseekV2CheckpointContract {
 }
 
 impl DeepseekV2Config {
+    /// Returns the exact length of [`Self::checkpoint_contract`]'s inventory, or `None` on overflow.
+    ///
+    /// With `L` layers of which `S` are sparse, `E` routed experts, and `b = 1`
+    /// when `attention_bias` (else `0`), each layer lists two norms, a query
+    /// path (`1` tensor without `q_lora_rank`, `3 + b` with it), the latent
+    /// key/value path and output projection (`4 + 2b`), and either a router
+    /// (`1`, plus the `noaux_tc` correction bias), `3E` routed and `3` shared
+    /// expert matrices, or a `3`-matrix dense MLP; the embedding, final norm,
+    /// and LM head add `3`. Validation bounds the total by
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)
+    /// with checked arithmetic before any contract or graph is built.
+    pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
+        let layers = self.num_hidden_layers;
+        let sparse_layers = (0..layers)
+            .filter(|&layer| self.is_moe_layer(layer))
+            .count();
+        let bias = usize::from(self.attention_bias);
+        let query = if self.q_lora_rank.is_some() {
+            3 + bias
+        } else {
+            1
+        };
+        let router = 1 + usize::from(self.topk_method == DeepseekTopKMethod::NoAuxTc);
+        // The Verus-verified total is exact or `None` on overflow.
+        moe_inventory(MoeInventory {
+            fixed: 3,
+            layers,
+            per_layer: 2 + query + 4 + 2 * bias,
+            sparse_layers,
+            per_sparse_layer: router + 3,
+            experts: self.n_routed_experts,
+            per_expert: 3,
+            per_dense_layer: 3,
+        })
+    }
+
     /// Derives the exact tensor contract from validated architecture metadata.
     pub fn checkpoint_contract(
         &self,
@@ -60,7 +100,8 @@ impl DeepseekV2Config {
     ) -> Result<DeepseekV2CheckpointContract, ConfigError> {
         self.validate()?;
         let d = Dimensions::try_from(self)?;
-        let mut expected = Vec::new();
+        // Validation proved the count fits the artifact limit.
+        let mut expected = Vec::with_capacity(self.checkpoint_tensor_count().unwrap_or(0));
         let mut mappings = MappingPlan::new();
         add(
             &mut expected,
@@ -165,6 +206,16 @@ impl DeepseekV2Config {
                     &format!("{layer}.sparse_mlp.routed.router.weight"),
                     vec![d.experts, d.hidden],
                 );
+                // `noaux_tc` routers ship their selection-only bias with the gate.
+                if self.topk_method == DeepseekTopKMethod::NoAuxTc {
+                    add_mapped(
+                        &mut expected,
+                        &mut mappings,
+                        &format!("{source_mlp}.gate.e_score_correction_bias"),
+                        &format!("{layer}.sparse_mlp.routed.correction_bias"),
+                        vec![d.experts],
+                    );
+                }
                 for expert in 0..self.n_routed_experts {
                     add_gated_mlp_mapped(
                         &mut expected,
@@ -213,91 +264,32 @@ impl DeepseekV2Config {
     }
 }
 
-/// Checked dimensions used by the contract builder.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Token embedding and LM-head row count.
-    vocab: u64,
-    /// Residual-stream width.
-    hidden: u64,
-    /// Dense-prefix SwiGLU width.
-    intermediate: u64,
-    /// One routed expert's SwiGLU width.
-    moe_intermediate: u64,
-    /// Concatenated width of the checkpoint's shared-expert network.
-    shared_intermediate: u64,
-    /// Routed expert count.
-    experts: u64,
-    /// Concatenated per-head query width.
-    query: u64,
-    /// Optional low-rank query bottleneck width.
-    query_rank: Option<u64>,
-    /// Cacheable normalized-latent width.
-    kv_rank: u64,
-    /// Joint KV-A latent-plus-rotary output width.
-    compressed: u64,
-    /// Concatenated content-key and value expansion width.
-    expanded_kv: u64,
-    /// Concatenated value-head width consumed by the output projection.
-    output_heads: u64,
-}
+mod dimensions; // Verified latent-attention width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&DeepseekV2Config> for Dimensions {
-    /// Configuration failure from a dimension conversion, sum, or product.
+    /// Configuration failure from a dimension sum or product.
     type Error = ConfigError;
 
-    /// Converts all host dimensions to checked checkpoint extents.
+    /// Converts all host dimensions to checked checkpoint extents with the
+    /// verified [`checkpoint_dimensions`].
     fn try_from(config: &DeepseekV2Config) -> Result<Self, Self::Error> {
-        let qk = sum(
-            "qk_nope_head_dim + qk_rope_head_dim",
-            config.qk_nope_head_dim,
-            config.qk_rope_head_dim,
-        )?;
-        let kv_per_head = sum(
-            "qk_nope_head_dim + v_head_dim",
-            config.qk_nope_head_dim,
-            config.v_head_dim,
-        )?;
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            moe_intermediate: dimension("moe_intermediate_size", config.moe_intermediate_size)?,
-            shared_intermediate: product(
-                "moe_intermediate_size * n_shared_experts",
-                config.moe_intermediate_size,
-                config.n_shared_experts,
-            )?,
-            experts: dimension("n_routed_experts", config.n_routed_experts)?,
-            query: product(
-                "num_attention_heads * qk_head_dim",
-                config.num_attention_heads,
-                qk,
-            )?,
-            query_rank: config
-                .q_lora_rank
-                .map(|rank| dimension("q_lora_rank", rank))
-                .transpose()?,
-            kv_rank: dimension("kv_lora_rank", config.kv_lora_rank)?,
-            compressed: dimension(
-                "kv_lora_rank + qk_rope_head_dim",
-                sum(
-                    "kv_lora_rank + qk_rope_head_dim",
-                    config.kv_lora_rank,
-                    config.qk_rope_head_dim,
-                )?,
-            )?,
-            expanded_kv: product(
-                "num_attention_heads * expanded_kv_head_dim",
-                config.num_attention_heads,
-                kv_per_head,
-            )?,
-            output_heads: product(
-                "num_attention_heads * v_head_dim",
-                config.num_attention_heads,
-                config.v_head_dim,
-            )?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            moe_intermediate: config.moe_intermediate_size,
+            shared_experts: config.n_shared_experts,
+            routed_experts: config.n_routed_experts,
+            attention_heads: config.num_attention_heads,
+            qk_nope: config.qk_nope_head_dim,
+            qk_rope: config.qk_rope_head_dim,
+            value_head_dim: config.v_head_dim,
+            query_rank: config.q_lora_rank,
+            kv_rank: config.kv_lora_rank,
         })
+        .map_err(|error| ConfigError::new(FAMILY, error.field(), error.reason()))
     }
 }
 
@@ -346,30 +338,6 @@ fn add_mapped(
 ) {
     expected.push(ExpectedTensor::new(target, shape));
     mappings.map(source, target);
-}
-
-/// Converts one dimension without truncation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Adds two dimensions with overflow checking.
-fn sum(field: &'static str, left: usize, right: usize) -> Result<usize, ConfigError> {
-    left.checked_add(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension sum overflows usize"))
-}
-
-/// Multiplies two dimensions with overflow checking.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]

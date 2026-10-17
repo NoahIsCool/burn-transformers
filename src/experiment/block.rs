@@ -7,9 +7,17 @@
 //! explicit bias-free projections, so heterogeneous stages remain ordinary Burn
 //! modules with visible parameters and connected full-precision gradients.
 //!
-//! Attention policy, positions, and padding come from the execution context.
-//! Callbacks expose intermediate computation without owning optimizer parameters;
-//! any trainable inserted module belongs to the surrounding module tree.
+//! Attention policy, positions, and padding come from the execution context;
+//! each transform uses what its mathematics needs. The built-in
+//! [`crate::attention::GroupedQueryAttention`] transform is position-free (NoPE)
+//! and reads only padding and policy, while [`super::RotaryAttention`] also
+//! rotates queries and keys by the context's positions. Callbacks expose
+//! intermediate computation without owning optimizer parameters; any trainable
+//! inserted module belongs to the surrounding module tree.
+//!
+//! Block `forward` calls check tensor layouts only, which never synchronizes the
+//! device; the public `run`/`run_with_hooks` entry points validate position
+//! values once per call.
 
 use burn::{
     module::{Module, ModuleDisplay},
@@ -62,6 +70,11 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
     }
 
     /// Executes this composition in a scope containing its declared inner points.
+    ///
+    /// This entry point validates position values once (one device
+    /// synchronization) inside the hook scope, so a rejected context fails the
+    /// run like any other error and leaves no stale captures; nested blocks then
+    /// check only tensor layouts.
     pub fn run_with_hooks(
         &self,
         hidden: Tensor<B, 3>,
@@ -69,7 +82,11 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
+        // Validating inside the scope keeps the scope contract: a failed run
+        // still clears the previous run's captures.
         hooks.run(self.activation_points(layer), |hooks| {
+            validate_width(&hidden, self.hidden_size, "residual_block.input")?;
+            context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
             self.forward(hidden, context, layer, hooks)
         })
     }
@@ -129,9 +146,9 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
 {
     /// Lists residual and branch boundaries together with points exposed by the composed modules.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
-        let mut points = vec![layer.residual_pre().info(), layer.attention_input().info()];
+        let mut points = vec![layer.residual_pre().info(), layer.mixer_input().info()];
         points.extend(self.mixer.activation_points(layer));
-        points.extend([layer.attention_output().info(), layer.mlp_input().info()]);
+        points.extend([layer.mixer_output().info(), layer.mlp_input().info()]);
         points.extend(self.feed_forward.activation_points(layer));
         points.extend([layer.mlp_output().info(), layer.residual_post().info()]);
         points
@@ -149,13 +166,13 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
         validate_width(&hidden, self.hidden_size, "residual_block.input")?;
-        context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
+        context.validate_layout([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
         let hidden = hooks.apply(layer.residual_pre(), hidden)?;
         let residual = hidden.clone();
-        let prepared = hooks.apply(layer.attention_input(), self.mixer_norm.prepare(hidden)?)?;
+        let prepared = hooks.apply(layer.mixer_input(), self.mixer_norm.prepare(hidden)?)?;
         let mixed = self.mixer.forward(prepared, context, layer, hooks)?;
         validate_same_shape(&mixed, &residual, "residual_block.mixer")?;
-        let mixed = hooks.apply(layer.attention_output(), mixed)?;
+        let mixed = hooks.apply(layer.mixer_output(), mixed)?;
         let hidden = self.mixer_norm.finish(residual, mixed)?;
         let residual = hidden.clone();
         let prepared = hooks.apply(layer.mlp_input(), self.feed_forward_norm.prepare(hidden)?)?;
@@ -203,6 +220,11 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
     }
 
     /// Executes this composition in a scope containing its declared inner points.
+    ///
+    /// This entry point validates position values once (one device
+    /// synchronization) inside the hook scope, so a rejected context fails the
+    /// run like any other error and leaves no stale captures; nested blocks then
+    /// check only tensor layouts.
     pub fn run_with_hooks(
         &self,
         hidden: Tensor<B, 3>,
@@ -210,7 +232,11 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
+        // Validating inside the scope keeps the scope contract: a failed run
+        // still clears the previous run's captures.
         hooks.run(self.activation_points(layer), |hooks| {
+            validate_width(&hidden, self.input_size, "width_adapter.input")?;
+            context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
             self.forward(hidden, context, layer, hooks)
         })
     }
@@ -271,7 +297,7 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> HiddenTransform<B> for W
         let [batch, tokens, _] = hidden.dims();
         let device = hidden.device();
         let dtype = hidden.dtype();
-        context.validate([batch, tokens], &device)?;
+        context.validate_layout([batch, tokens], &device)?;
         let hidden = match &self.input_projection {
             Some(projection) => operations::linear(hidden, projection)?,
             None => hidden,
@@ -399,21 +425,13 @@ impl<B: Backend> HiddenTransform<B> for crate::feed_forward::GatedFeedForward<B>
 impl<B: Backend> HiddenTransform<B> for crate::attention::GroupedQueryAttention<B> {
     /// Advertises score/pattern points only when eager attention can materialize their tensor graph.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
-        let points = layer.self_attention();
-        if self.precision_mode == crate::attention::AttentionPrecisionMode::EagerFp32Softmax {
-            points.all()
-        } else {
-            vec![
-                points.query().info(),
-                points.key().info(),
-                points.value().info(),
-                points.head_context().info(),
-            ]
-        }
+        self_attention_points(self, layer)
     }
 
-    /// Projects self-attention under the selected layer policy and token-validity mask.
+    /// Projects position-free (NoPE) self-attention under the layer policy and padding.
     ///
+    /// This implementation reads no positions: its scores depend on token order
+    /// only through causality. Use [`super::RotaryAttention`] for RoPE.
     /// Decoder stacks default to causal attention; an explicit policy may override it.
     /// Padding exclusions remain in force, and additive bias must match the input dtype.
     fn forward(
@@ -423,12 +441,62 @@ impl<B: Backend> HiddenTransform<B> for crate::attention::GroupedQueryAttention<
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
+        let plan = SelfAttentionPlan::resolve(self, &hidden, context, layer)?;
+        let projection = self.project_self(hidden)?;
+        plan.attend(self, projection, layer, hooks)
+    }
+}
+
+/// Lists the attention points a grouped-query module can expose at `layer`.
+///
+/// Score and pattern planes exist only in the eager FP32-softmax graph; fused
+/// backend kernels never materialize them.
+pub(super) fn self_attention_points<B: Backend>(
+    attention: &crate::attention::GroupedQueryAttention<B>,
+    layer: Layer,
+) -> Vec<crate::intervention::PointInfo> {
+    let points = layer.self_attention();
+    if attention.precision_mode == crate::attention::AttentionPrecisionMode::EagerFp32Softmax {
+        points.all()
+    } else {
+        vec![
+            points.query().info(),
+            points.key().info(),
+            points.value().info(),
+            points.head_context().info(),
+        ]
+    }
+}
+
+/// Exclusion mask, additive bias, and causality resolved for one self-attention call.
+///
+/// Resolution happens before projection, so an invalid policy fails before any
+/// parameter is used. The mask uses the kernel convention **true = excluded** and
+/// already combines the policy's allowed links with key/query padding.
+pub(super) struct SelfAttentionPlan<B: Backend> {
+    /// `[batch, head, query, key]` exclusions, or `None` when every link is allowed.
+    mask: Option<Tensor<B, 4, burn::tensor::Bool>>,
+    /// Additive score bias expanded to `[batch, head, query, key]`.
+    bias: Option<Tensor<B, 4>>,
+    /// Whether keys after the aligned query position are excluded.
+    causal: bool,
+}
+
+impl<B: Backend> SelfAttentionPlan<B> {
+    /// Resolves the layer's policy against the context's padding for `hidden`.
+    pub(super) fn resolve(
+        attention: &crate::attention::GroupedQueryAttention<B>,
+        hidden: &Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+    ) -> Result<Self> {
         let [batch, tokens, _] = hidden.dims();
-        context.validate([batch, tokens], &hidden.device())?;
+        let device = hidden.device();
+        context.validate_layout([batch, tokens], &device)?;
         let policy =
             context.attention_for(layer, layer.stack() == crate::intervention::Stack::Decoder);
-        let shape = [batch, self.query_heads, tokens, tokens];
-        policy.validate(shape, &hidden.device())?;
+        let shape = [batch, attention.query_heads, tokens, tokens];
+        policy.validate(shape, &device)?;
         if policy
             .bias
             .as_ref()
@@ -443,19 +511,32 @@ impl<B: Backend> HiddenTransform<B> for crate::attention::GroupedQueryAttention<
             context.token_mask.as_ref(),
             context.token_mask.as_ref(),
             batch,
-            self.query_heads,
+            attention.query_heads,
             tokens,
             tokens,
         )?;
-        let mask = policy
-            .exclusion_mask(padding, shape, &hidden.device())?
-            .map(|mask| mask.expand(shape));
-        let bias = policy.expanded_bias(shape, &hidden.device())?;
-        self.attend_with_hooks(
-            self.project_self(hidden)?,
-            mask,
-            bias,
-            policy.causal,
+        Ok(Self {
+            mask: policy
+                .exclusion_mask(padding, shape, &device)?
+                .map(|mask| mask.expand(shape)),
+            bias: policy.expanded_bias(shape, &device)?,
+            causal: policy.causal,
+        })
+    }
+
+    /// Dispatches attention over an already projected (and possibly rotated) Q/K/V.
+    pub(super) fn attend(
+        self,
+        attention: &crate::attention::GroupedQueryAttention<B>,
+        projection: crate::attention::AttentionProjection<B>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        attention.attend_with_hooks(
+            projection,
+            self.mask,
+            self.bias,
+            self.causal,
             layer.self_attention(),
             hooks,
         )

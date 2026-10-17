@@ -1,0 +1,105 @@
+== prompt 0 (5 tokens): logits against the truth bundle
+  burn:flex-bf16-eager                          max 1.166528 (pos 0) mean 0.116599 max excluding pos 0 0.307704
+  burn:flex-bf16-fused                          max 1.166528 (pos 0) mean 0.159099 max excluding pos 0 0.366564
+  burn:flex-f32-fused                           max 0.000071 (pos 0) mean 0.000007 max excluding pos 0 0.000031
+  burn:metal-f16-fused                          max 0.277832 (pos 0) mean 0.026225 max excluding pos 0 0.042196
+  torch:cpu-bfloat16-eager                      max 1.463715 (pos 0) mean 0.190277 max excluding pos 0 0.351983
+  torch:cpu-bfloat16-sdpa                       max 1.463715 (pos 0) mean 0.191528 max excluding pos 0 0.313496
+  torch:cpu-float16-eager                       max 0.125968 (pos 0) mean 0.018752 max excluding pos 0 0.040817
+  torch:cpu-float32-eager                       max 0.000000 (pos 0) mean 0.000000 max excluding pos 0 0.000000
+  torch:mps-bfloat16-eager                      max 1.419013 (pos 0) mean 0.178172 max excluding pos 0 0.347983
+  torch:mps-bfloat16-sdpa                       max 1.419013 (pos 0) mean 0.191082 max excluding pos 0 0.391867
+  torch:mps-float16-eager                       max 0.277832 (pos 0) mean 0.020615 max excluding pos 0 0.038240
+  torch:cpu-bfloat16-eager-burnsilu             max 1.380739 (pos 0) mean 0.125442 max excluding pos 0 0.331421
+  torch:cpu-bfloat16-sdpa-burnsilu              max 1.380739 (pos 0) mean 0.212201 max excluding pos 0 0.424401
+  torch:mps-bfloat16-eager-burnsilu             max 1.166528 (pos 0) mean 0.138113 max excluding pos 0 0.332359
+  distance of burn:flex-bf16-eager: burn:flex-bf16-fused 0.3750; torch:mps-bfloat16-eager-burnsilu 0.3750; torch:cpu-bfloat16-eager-burnsilu 0.7500; torch:cpu-bfloat16-sdpa-burnsilu 0.7500; torch:cpu-bfloat16-eager 0.8125; torch:cpu-bfloat16-sdpa 0.8125
+  distance of burn:flex-bf16-fused: burn:flex-bf16-eager 0.3750; torch:mps-bfloat16-eager-burnsilu 0.3750; torch:cpu-bfloat16-eager-burnsilu 0.7500; torch:cpu-bfloat16-sdpa-burnsilu 0.7500; torch:cpu-bfloat16-eager 0.8125; torch:cpu-bfloat16-sdpa 0.8125
+  distance of burn:flex-f32-fused: torch:cpu-float32-eager 0.0001; torch:cpu-float16-eager 0.1260; burn:metal-f16-fused 0.2779; torch:mps-float16-eager 0.2779; burn:flex-bf16-eager 1.1665; burn:flex-bf16-fused 1.1665
+  distance of burn:metal-f16-fused: torch:mps-float16-eager 0.0430; torch:cpu-float16-eager 0.1641; torch:cpu-float32-eager 0.2778; burn:flex-f32-fused 0.2779; burn:flex-bf16-eager 1.2578; burn:flex-bf16-fused 1.2578
+== prompt 0: residual at position 0, max |delta| from torch:cpu-float32-eager per block
+                                                     L0       L3       L6       L9      L12      L15      L18      L21      L24      L27      L29     norm
+  burn:flex-bf16-eager                            0.061    3.239    5.113    8.002   33.748    7.130   11.070   23.211   28.394   48.928   43.650    1.340
+  burn:flex-bf16-fused                            0.061    3.239    5.113    8.002   33.748    7.130   11.070   23.211   28.394   48.928   43.650    1.340
+  burn:flex-f32-fused                             0.000    0.000    0.000    0.000    0.004    0.004    0.004    0.004    0.004    0.004    0.003    0.000
+  burn:metal-f16-fused                            0.033    0.239    0.613    0.627   17.748   21.727   36.930   42.453   37.154   32.928    7.650    0.132
+  torch:cpu-bfloat16-eager                        0.061    3.239    5.113    5.002  161.748  133.727  116.930  122.453  133.154  176.928   59.650    1.840
+  torch:cpu-bfloat16-sdpa                         0.061    3.239    5.113    5.002  161.748  133.727  116.930  122.453  133.154  176.928   59.650    1.840
+  torch:cpu-float16-eager                         0.033    0.239    0.613    0.377    1.748    5.727   20.930   26.453   21.154   16.928    3.681    0.171
+  torch:cpu-float32-eager                         0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000
+  torch:mps-bfloat16-eager                        0.061    3.239    5.113    4.002  161.748  133.727  116.930  122.453  133.154  176.928   59.650    1.715
+  torch:mps-bfloat16-sdpa                         0.061    3.239    5.113    4.002  161.748  133.727  116.930  122.453  133.154  176.928   59.650    1.715
+  torch:mps-float16-eager                         0.033    0.239    0.613    0.377   17.748   21.727   36.930   42.453   37.154   32.928    7.650    0.133
+  torch:cpu-bfloat16-eager-burnsilu               0.061    3.239    5.113    8.002   33.748    9.785   11.070   23.211   28.394   48.928   27.650    1.528
+  torch:cpu-bfloat16-sdpa-burnsilu                0.061    3.239    5.113    8.002   33.748    9.785   11.070   23.211   28.394   48.928   27.650    1.528
+  torch:mps-bfloat16-eager-burnsilu               0.061    3.239    5.113    8.002   33.748    7.130   11.070   23.211   28.394   48.928   43.650    1.340
+== prompt 1 (18 tokens): logits against the truth bundle
+  burn:flex-bf16-eager                          max 1.435591 (pos 0) mean 0.094448 max excluding pos 0 0.383221
+  burn:flex-bf16-fused                          max 1.435591 (pos 0) mean 0.079200 max excluding pos 0 0.391309
+  burn:flex-f32-fused                           max 0.000056 (pos 0) mean 0.000007 max excluding pos 0 0.000055
+  burn:metal-f16-fused                          max 0.158635 (pos 0) mean 0.011295 max excluding pos 0 0.060721
+  torch:cpu-bfloat16-eager                      max 1.101254 (pos 0) mean 0.075485 max excluding pos 0 0.428231
+  torch:cpu-bfloat16-sdpa                       max 1.101254 (pos 0) mean 0.096629 max excluding pos 0 0.735953
+  torch:cpu-float16-eager                       max 0.221135 (pos 0) mean 0.011735 max excluding pos 0 0.066664
+  torch:cpu-float32-eager                       max 0.000000 (pos 0) mean 0.000000 max excluding pos 0 0.000000
+  torch:mps-bfloat16-eager                      max 1.080326 (pos 0) mean 0.085532 max excluding pos 0 0.479292
+  torch:mps-bfloat16-sdpa                       max 1.080326 (pos 0) mean 0.091971 max excluding pos 0 0.534609
+  torch:mps-float16-eager                       max 0.161492 (pos 0) mean 0.009733 max excluding pos 0 0.050647
+  torch:cpu-bfloat16-eager-burnsilu             max 1.591841 (pos 0) mean 0.109207 max excluding pos 0 0.515233
+  torch:cpu-bfloat16-sdpa-burnsilu              max 1.591841 (pos 0) mean 0.124973 max excluding pos 0 0.478520
+  torch:mps-bfloat16-eager-burnsilu             max 1.435591 (pos 0) mean 0.105218 max excluding pos 0 0.629084
+  distance of burn:flex-bf16-eager: burn:flex-bf16-fused 0.4219; torch:mps-bfloat16-eager-burnsilu 0.4531; torch:cpu-bfloat16-eager-burnsilu 0.7188; torch:cpu-bfloat16-sdpa-burnsilu 0.7188; torch:cpu-bfloat16-eager 0.7812; torch:cpu-bfloat16-sdpa 0.7812
+  distance of burn:flex-bf16-fused: burn:flex-bf16-eager 0.4219; torch:mps-bfloat16-eager-burnsilu 0.6562; torch:cpu-bfloat16-eager-burnsilu 0.7188; torch:cpu-bfloat16-sdpa-burnsilu 0.7188; torch:cpu-bfloat16-eager 0.7812; torch:cpu-bfloat16-sdpa 0.7812
+  distance of burn:flex-f32-fused: torch:cpu-float32-eager 0.0001; burn:metal-f16-fused 0.1587; torch:mps-float16-eager 0.1615; torch:cpu-float16-eager 0.2212; torch:mps-bfloat16-eager 1.0804; torch:mps-bfloat16-sdpa 1.0804
+  distance of burn:metal-f16-fused: torch:mps-float16-eager 0.0664; torch:cpu-float16-eager 0.0977; torch:cpu-float32-eager 0.1586; burn:flex-f32-fused 0.1587; torch:mps-bfloat16-eager 1.0312; torch:mps-bfloat16-sdpa 1.0312
+== prompt 1: residual at position 0, max |delta| from torch:cpu-float32-eager per block
+                                                     L0       L3       L6       L9      L12      L15      L18      L21      L24      L27      L29     norm
+  burn:flex-bf16-eager                            0.245    0.620    0.489    1.256  207.736  235.926  252.611  246.863  236.150  192.365   42.100    1.151
+  burn:flex-bf16-fused                            0.245    0.620    0.489    1.256  207.736  235.926  252.611  246.863  236.150  192.365   42.100    1.151
+  burn:flex-f32-fused                             0.000    0.000    0.000    0.000    0.016    0.016    0.016    0.016    0.016    0.016    0.002    0.000
+  burn:metal-f16-fused                            0.010    0.120    0.489    0.343    1.095    4.074   19.389   25.137   19.850   15.635    5.900    0.201
+  torch:cpu-bfloat16-eager                        0.245    1.380    1.511    0.756   48.264   20.074   19.436   33.146   38.424   63.635   16.347    0.979
+  torch:cpu-bfloat16-sdpa                         0.245    1.380    1.511    0.756   48.264   20.074   19.436   33.146   38.424   63.635   16.347    0.979
+  torch:cpu-float16-eager                         0.010    0.120    0.239    0.256    1.095    4.074   19.389   25.137   19.850   15.635    5.900    0.268
+  torch:cpu-float32-eager                         0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000
+  torch:mps-bfloat16-eager                        0.245    1.380    1.511    0.756   48.264   20.074   19.436   33.146   38.424   63.635   16.326    0.916
+  torch:mps-bfloat16-sdpa                         0.245    1.380    1.511    0.756   48.264   20.074   19.436   33.146   38.424   63.635   16.326    0.916
+  torch:mps-float16-eager                         0.010    0.120    0.489    0.343    1.095    4.074   19.389   25.137   19.850   15.635    5.900    0.197
+  torch:cpu-bfloat16-eager-burnsilu               0.245    0.620    0.489    1.256  207.736  235.926  252.611  246.863  236.150  192.365   74.100    1.545
+  torch:cpu-bfloat16-sdpa-burnsilu                0.245    0.620    0.489    1.256  207.736  235.926  252.611  246.863  236.150  192.365   74.100    1.545
+  torch:mps-bfloat16-eager-burnsilu               0.245    0.620    0.489    1.256  207.736  235.926  252.611  246.863  236.150  192.365   42.100    1.151
+== prompt 2 (8 tokens): logits against the truth bundle
+  burn:flex-bf16-eager                          max 2.215239 (pos 0) mean 0.191542 max excluding pos 0 0.597891
+  burn:flex-bf16-fused                          max 2.215239 (pos 0) mean 0.161235 max excluding pos 0 0.303026
+  burn:flex-f32-fused                           max 0.000091 (pos 5) mean 0.000013 max excluding pos 0 0.000091
+  burn:metal-f16-fused                          max 0.281088 (pos 0) mean 0.015863 max excluding pos 0 0.040629
+  torch:cpu-bfloat16-eager                      max 1.652346 (pos 0) mean 0.070533 max excluding pos 0 0.235275
+  torch:cpu-bfloat16-sdpa                       max 1.652346 (pos 0) mean 0.128900 max excluding pos 0 0.525889
+  torch:cpu-float16-eager                       max 0.185140 (pos 0) mean 0.015019 max excluding pos 0 0.038075
+  torch:cpu-float32-eager                       max 0.000000 (pos 0) mean 0.000000 max excluding pos 0 0.000000
+  torch:mps-bfloat16-eager                      max 1.718082 (pos 0) mean 0.154789 max excluding pos 0 0.503074
+  torch:mps-bfloat16-sdpa                       max 1.718082 (pos 0) mean 0.105972 max excluding pos 0 0.613516
+  torch:mps-float16-eager                       max 0.269798 (pos 0) mean 0.021686 max excluding pos 0 0.052973
+  torch:cpu-bfloat16-eager-burnsilu             max 2.121096 (pos 0) mean 0.179300 max excluding pos 0 0.540628
+  torch:cpu-bfloat16-sdpa-burnsilu              max 2.121096 (pos 0) mean 0.178933 max excluding pos 0 0.649263
+  torch:mps-bfloat16-eager-burnsilu             max 1.662742 (pos 0) mean 0.176837 max excluding pos 0 1.122549
+  distance of burn:flex-bf16-eager: torch:cpu-bfloat16-sdpa-burnsilu 0.4062; torch:cpu-bfloat16-eager-burnsilu 0.5000; burn:flex-bf16-fused 0.8906; torch:mps-bfloat16-eager-burnsilu 0.9375; torch:cpu-bfloat16-eager 1.2812; torch:cpu-bfloat16-sdpa 1.2812
+  distance of burn:flex-bf16-fused: torch:cpu-bfloat16-eager-burnsilu 0.7969; burn:flex-bf16-eager 0.8906; torch:cpu-bfloat16-sdpa-burnsilu 0.9219; torch:cpu-bfloat16-eager 1.2812; torch:cpu-bfloat16-sdpa 1.2812; torch:mps-bfloat16-eager-burnsilu 1.3516
+  distance of burn:flex-f32-fused: torch:cpu-float32-eager 0.0001; torch:cpu-float16-eager 0.1851; torch:mps-float16-eager 0.2698; burn:metal-f16-fused 0.2811; torch:cpu-bfloat16-eager 1.6524; torch:cpu-bfloat16-sdpa 1.6524
+  distance of burn:metal-f16-fused: torch:mps-float16-eager 0.0781; torch:cpu-float16-eager 0.1953; torch:cpu-float32-eager 0.2811; burn:flex-f32-fused 0.2811; torch:mps-bfloat16-eager 1.6953; torch:mps-bfloat16-sdpa 1.6953
+== prompt 2: residual at position 0, max |delta| from torch:cpu-float32-eager per block
+                                                     L0       L3       L6       L9      L12      L15      L18      L21      L24      L27      L29     norm
+  burn:flex-bf16-eager                            0.236    0.755    1.764    4.217  153.684  181.723  198.727  192.934  182.422  140.867   40.452    2.385
+  burn:flex-bf16-fused                            0.236    0.755    1.764    4.217  153.684  181.723  198.727  192.934  182.422  140.867   40.452    2.385
+  burn:flex-f32-fused                             0.000    0.000    0.000    0.000    0.008    0.008    0.008    0.008    0.008    0.008    0.001    0.000
+  burn:metal-f16-fused                            0.014    0.755    0.764    0.533    6.316   21.723   38.727   32.934   22.422   12.867   11.548    0.312
+  torch:cpu-bfloat16-eager                        0.236    4.755    5.764    4.217  102.316   74.277   57.273   63.066   73.578  115.133   40.452    1.963
+  torch:cpu-bfloat16-sdpa                         0.236    4.755    5.764    4.217  102.316   74.277   57.273   63.066   73.578  115.133   40.452    1.963
+  torch:cpu-float16-eager                         0.018    0.255    0.264    0.041    6.316   21.723   38.727   32.934   22.422   12.867    3.548    0.332
+  torch:cpu-float32-eager                         0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000    0.000
+  torch:mps-bfloat16-eager                        0.236    4.755    5.764    4.217  102.316   74.277   57.273   63.066   73.578  115.133   40.452    1.474
+  torch:mps-bfloat16-sdpa                         0.236    4.755    5.764    4.217  102.316   74.277   57.273   63.066   73.578  115.133   40.452    1.474
+  torch:mps-float16-eager                         0.018    0.255    0.264    0.114   25.684   53.723   70.727   64.934   54.422   44.867   11.548    0.318
+  torch:cpu-bfloat16-eager-burnsilu               0.236    0.755    1.764    4.217  153.684  181.723  198.727  192.934  182.422  140.867   40.452    2.213
+  torch:cpu-bfloat16-sdpa-burnsilu                0.236    0.755    1.764    4.217  153.684  181.723  198.727  192.934  182.422  140.867   40.452    2.213
+  torch:mps-bfloat16-eager-burnsilu               0.236    4.755    5.764    4.217  102.316   74.277   57.273   63.066   73.578  115.133   40.452    2.822

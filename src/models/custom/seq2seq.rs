@@ -1,45 +1,59 @@
 //! Modular encoder-decoder transformer assembly.
 //!
 //! Source blocks use bidirectional self-attention. Target blocks use causal self-attention,
-//! then an independently parameterized cross-attention branch, then their configured dense or
-//! routed feed-forward branch. Every cross-attention block uses the decoder layer's mixer-side
-//! normalization convention because [`crate::architecture::Seq2SeqSpec`] has no separate cross-norm
-//! field.
+//! then an independently parameterized cross-attention branch ([`CrossAttentionSpec`]), then
+//! their configured feed-forward branch. Every cross-attention block uses the decoder layer's
+//! mixer-side normalization convention because [`Seq2SeqSpec`] has no separate cross-norm
+//! field. Both stacks run their blocks through the shared [`ModularLayer`] path over one
+//! [`StackPass`] per stack execution.
+//!
+//! Staged experiments address each stack through [`EncoderStages`] and [`DecoderStages`],
+//! which implement [`StagedModel`]; the model itself implements [`HookedModel`].
+//!
+//! [`CrossAttentionSpec`]: crate::architecture::CrossAttentionSpec
 
 use std::ops::Range;
 
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{ElementConversion, Tensor, backend::Backend},
+    tensor::{Tensor, backend::Backend},
 };
 
 use crate::{
     ArchitectureConfig, CausalLmInput, DecodeInput, EncoderOutput, Error, ForwardOptions, Result,
     Seq2SeqInput, Seq2SeqLanguageModel, Seq2SeqOutput,
-    architecture::Seq2SeqSpec,
+    architecture::{HookedModel, Seq2SeqSpec, StagedModel},
     attention::AttentionPrecisionMode,
     cache::CacheConfig,
-    experiment::{EncoderContext, ExecutionContext, HiddenState, HiddenTransform},
+    experiment::{EncoderContext, HiddenState},
+    initialization::InitPolicy,
     intervention::{Hooks, Layer, PointInfo, Stack},
+};
+
+use crate::models::shared::{
+    check_nonempty_mask, ensure_grid, ensure_same_device, scaling::soft_cap,
 };
 
 use super::{
     common::{
-        AttentionDirection, BackboneOutput, ModularLayer, ModularNorm, causal_output,
-        evaluated_context, has_moe, router_diagnostics, select_hidden, tied_projection,
-        validate_and_resolve_input, validate_decoder_execution, validate_forward_options,
-        validate_positions,
+        BackboneOutput, causal_output, embed_tokens, embedded_state, has_moe, router_diagnostics,
+        select_hidden, tied_projection, validate_and_resolve_input,
+        validate_and_resolve_input_with, validate_forward_options, validate_stack_execution,
+        validate_staged_positions,
     },
+    layer::ModularLayer,
+    norm::ModularNorm,
+    pass::StackPass,
     state::{ModularDecodeState, StatePurpose},
 };
 
 /// A modular bidirectional encoder and causal cross-attending decoder.
 #[derive(Module, Debug)]
 pub struct ModularSeq2SeqLm<B: Backend> {
-    /// Source token embedding table.
+    /// Source token embedding table; lookups use the encoder spec's optional `embedding_scale`.
     pub encoder_embed_tokens: Embedding<B>,
-    /// Target token embedding table.
+    /// Target token embedding table; lookups use the decoder spec's optional `embedding_scale`.
     pub decoder_embed_tokens: Embedding<B>,
     /// Bidirectional source layers.
     encoder_layers: Vec<ModularLayer<B>>,
@@ -58,23 +72,27 @@ pub struct ModularSeq2SeqLm<B: Backend> {
 
 impl<B: Backend> ModularSeq2SeqLm<B> {
     /// Validates both stacks and allocates the complete encoder-decoder parameter graph.
+    ///
+    /// Parameters use Burn's default initializers; see [`Self::init_with`] and
+    /// [`Self::scaled_init_policy`] for training from scratch.
     pub fn init(spec: Seq2SeqSpec, device: &B::Device) -> Result<Self> {
         validate_seq2seq_execution(&spec)?;
+        let cross_attention = spec.cross_attention();
         let encoder_layers = spec
             .encoder
             .layers
             .iter()
-            .map(|layer| ModularLayer::init(layer, spec.encoder.hidden_size, None, device))
+            .map(|layer| ModularLayer::build(layer, spec.encoder.hidden_size, None, device))
             .collect::<Result<Vec<_>>>()?;
         let decoder_layers = spec
             .decoder
             .layers
             .iter()
             .map(|layer| {
-                ModularLayer::init(
+                ModularLayer::build(
                     layer,
                     spec.decoder.hidden_size,
-                    Some((spec.cross_attention_heads, spec.cross_attention_head_dim)),
+                    Some(&cross_attention),
                     device,
                 )
             })
@@ -114,14 +132,28 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         })
     }
 
+    /// Builds both stacks and initializes their parameters with an explicit policy.
+    pub fn init_with(spec: Seq2SeqSpec, policy: &InitPolicy, device: &B::Device) -> Result<Self> {
+        Ok(policy.apply(Self::init(spec, device)?)?.0)
+    }
+
+    /// The recommended random-initialization policy for this topology.
+    ///
+    /// The same policy as [`Seq2SeqSpec::scaled_init_policy`], which needs no
+    /// backend type parameter: `spec.scaled_init_policy(0.02)`.
+    #[must_use]
+    pub fn scaled_init_policy(spec: &Seq2SeqSpec, std: f64) -> InitPolicy {
+        spec.scaled_init_policy(std)
+    }
+
     /// Selects numerical execution for conventional encoder, decoder, and cross-attention branches.
     ///
     /// [`AttentionPrecisionMode::EagerFp32Softmax`] enables score and probability
     /// capture/edit points, listed by [`Self::activation_points`]. This reference path
     /// materializes attention matrices with quadratic sequence memory cost; select
     /// it explicitly for experiments that need those points. Initialization keeps
-    /// [`AttentionPrecisionMode::BackendDefault`]. Any decoder DeltaNet mixers
-    /// retain their recurrent computation; their cross-attention uses the chosen mode.
+    /// [`AttentionPrecisionMode::BackendDefault`]. Any decoder DeltaNet or Mamba-2
+    /// mixers retain their recurrent computation; their cross-attention uses the chosen mode.
     /// MLA self-attention retains its explicit eager graph.
     #[must_use]
     pub fn with_attention_precision(mut self, mode: AttentionPrecisionMode) -> Self {
@@ -149,22 +181,18 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
     /// branch. All residual points use `[batch, token, hidden]` axes.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let mut points = self.encoder_activation_points();
-        points.push(Stack::Decoder.embedding().info());
-        for (index, layer) in self.decoder_layers.iter().enumerate() {
-            points.extend(layer.activation_points(Layer::decoder(index)));
-        }
-        points.push(Stack::Decoder.final_norm().info());
+        points.extend(self.decoder_activation_points());
         points
     }
 
     /// Lists only points visited by [`Self::encode_with_hooks`].
     pub fn encoder_activation_points(&self) -> Vec<PointInfo> {
-        let mut points = vec![Stack::Encoder.embedding().info()];
-        for (index, layer) in self.encoder_layers.iter().enumerate() {
-            points.extend(layer.activation_points(Layer::encoder(index)));
-        }
-        points.push(Stack::Encoder.final_norm().info());
-        points
+        stack_points(&self.encoder_layers, Stack::Encoder)
+    }
+
+    /// Lists only points visited by the decoder half of [`Self::forward_with_hooks`].
+    fn decoder_activation_points(&self) -> Vec<PointInfo> {
+        stack_points(&self.decoder_layers, Stack::Decoder)
     }
 
     /// Borrows independently executable source blocks.
@@ -175,6 +203,24 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
     /// Borrows independently executable target blocks.
     pub fn decoder_layers(&self) -> &[ModularLayer<B>] {
         &self.decoder_layers
+    }
+
+    /// A staged view of the encoder stack implementing [`StagedModel`].
+    #[must_use]
+    pub fn encoder_stages(&self) -> EncoderStages<'_, B> {
+        EncoderStages { model: self }
+    }
+
+    /// A staged view of the decoder stack reading `encoder` through cross-attention.
+    ///
+    /// The encoder context typically comes from
+    /// `encoder_stages().run_stack(source)?.into_encoder_context()`.
+    #[must_use]
+    pub fn decoder_stages(&self, encoder: EncoderContext<B>) -> DecoderStages<'_, B> {
+        DecoderStages {
+            model: self,
+            encoder,
+        }
     }
 
     /// Embeds source tokens before encoder block zero, retaining positions and padding.
@@ -212,8 +258,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
 
     /// Validates tokens and creates `[batch, token, hidden]` state for one selected stack.
     ///
-    /// Decoder state retains the supplied encoder representation separately
-    /// from its own positions and padding; hooks see only that embedding point.
+    /// Token, mask, and position values cost one device read; an attached encoder's
+    /// layout is checked without reading values (its positions are checked when blocks
+    /// run). Decoder state retains the supplied encoder representation separately from
+    /// its own positions and padding; hooks see only that embedding point.
     fn embed_stack(
         &self,
         input: CausalLmInput<B>,
@@ -226,16 +274,23 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 Stack::Encoder => (&self.spec.encoder, &self.encoder_embed_tokens),
                 Stack::Decoder => (&self.spec.decoder, &self.decoder_embed_tokens),
             };
-            let positions = validate_and_resolve_input(
+            let (positions, evaluated_context) = validate_and_resolve_input(
                 &input,
                 spec.vocabulary_size,
                 spec.max_position_embeddings,
                 "custom.seq2seq.embed",
             )?;
-            let mut context = ExecutionContext::new(positions, input.token_mask)?;
-            context.encoder = encoder;
-            let hidden = hooks.apply(stack.embedding(), embeddings.forward(input.token_ids))?;
-            HiddenState::new(hidden, context)
+            let hidden = hooks.apply(
+                stack.embedding(),
+                embed_tokens(embeddings, input.token_ids, spec.embedding_scale),
+            )?;
+            embedded_state(
+                hidden,
+                positions,
+                input.token_mask,
+                evaluated_context,
+                encoder,
+            )
         })
     }
 
@@ -280,7 +335,8 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
     /// Runs a contiguous unnormalized block range and advances the continuation cursor.
     ///
     /// All selected contexts are validated before the first block or callback,
-    /// and only points belonging to the selected stack/range enter the hook scope.
+    /// position values are read once, and only points belonging to the selected
+    /// stack/range enter the hook scope.
     fn run_stack_layers(
         &self,
         mut state: HiddenState<B>,
@@ -292,45 +348,43 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
             Stack::Encoder => (&self.spec.encoder, &self.encoder_layers),
             Stack::Decoder => (&self.spec.decoder, &self.decoder_layers),
         };
-        let address = |index| match stack {
-            Stack::Encoder => Layer::encoder(index),
-            Stack::Decoder => Layer::decoder(index),
-        };
         let points = layers
             .iter()
             .enumerate()
             .filter(|(index, _)| range.contains(index))
-            .flat_map(|(index, layer)| layer.activation_points(address(index)))
+            .flat_map(|(index, layer)| layer.activation_points(stack.layer(index)))
             .collect();
         hooks.run(points, |hooks| {
             self.validate_execution_state(&state, stack)?;
             state.validate_range(range.clone(), layers.len())?;
-            validate_positions(
-                state.context.positions.clone(),
+            validate_staged_positions(
+                &state.context,
                 spec.max_position_embeddings,
                 "custom.seq2seq.run_layers.positions",
             )?;
             for index in range.clone() {
-                layers[index].validate_context(&state.hidden, &state.context, address(index))?;
-            }
-            for index in range.clone() {
-                state.hidden = HiddenTransform::forward(
-                    &layers[index],
-                    state.hidden,
+                layers[index].validate_prevalidated(
+                    &state.hidden,
                     &state.context,
-                    address(index),
-                    hooks,
+                    stack.layer(index),
                 )?;
+            }
+            let pass = StackPass::from_context(&state.context, stack, state.hidden.dtype());
+            for index in range.clone() {
+                let layer = stack.layer(index);
+                // Hooks may replace hidden states between blocks; re-check them sync-free.
+                layers[index].validate_prevalidated(&state.hidden, &state.context, layer)?;
+                state.hidden = layers[index].forward(state.hidden, &pass, layer, hooks)?.0;
             }
             state.next_layer = range.end;
             Ok(state)
         })
     }
 
-    /// Checks stack width, dtype/device, cursor, and self/cross-attention addresses.
+    /// Checks stack width, dtype/device, layout, cursor, and self/cross-attention addresses.
     ///
     /// Encoder and decoder states have distinct topology contracts even when
-    /// their residual widths happen to match.
+    /// their residual widths happen to match. No device value is read.
     fn validate_execution_state(&self, state: &HiddenState<B>, stack: Stack) -> Result<()> {
         let (spec, embeddings, total) = match stack {
             Stack::Encoder => (
@@ -344,7 +398,17 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 self.decoder_layers.len(),
             ),
         };
-        state.validate(spec.hidden_size)?;
+        let [batch, tokens, width] = state.hidden.dims();
+        if width != spec.hidden_size || batch == 0 || tokens == 0 {
+            return Err(Error::shape(
+                "execution.hidden",
+                format!("nonempty [batch, token, {}]", spec.hidden_size),
+                format!("{:?}", state.hidden.dims()),
+            ));
+        }
+        state
+            .context
+            .validate_layout([batch, tokens], &state.hidden.device())?;
         let embedding = embeddings.weight.val();
         if state.hidden.dtype() != embedding.dtype() || state.hidden.device() != embedding.device()
         {
@@ -481,14 +545,25 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                     .into(),
             ));
         }
-        let positions = validate_and_resolve_input(
+        let (positions, evaluated_context) = validate_and_resolve_input(
             &source,
             self.spec.encoder.vocabulary_size,
             self.spec.encoder.max_position_embeddings,
             "custom.seq2seq.encoder",
         )?;
-        let context = evaluated_context(positions.clone())?;
-        let hidden = self.encoder_embed_tokens.forward(source.token_ids.clone());
+        let hidden = embed_tokens(
+            &self.encoder_embed_tokens,
+            source.token_ids.clone(),
+            self.spec.encoder.embedding_scale,
+        );
+        let pass = StackPass::new(
+            positions,
+            source.token_mask.as_ref(),
+            evaluated_context,
+            Stack::Encoder,
+            hidden.dtype(),
+        )
+        .with_row_invariant_positions(source.position_ids.is_none() && source.token_mask.is_none());
         let mut hidden = hooks.apply(Stack::Encoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.encoder_layers.len() + 2
@@ -499,19 +574,9 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
             hidden_states.push(hidden.clone());
         }
         for (index, layer) in self.encoder_layers.iter().enumerate() {
-            let (next, _router) = layer.forward(
-                hidden,
-                positions.clone(),
-                source.token_mask.as_ref(),
-                AttentionDirection::Bidirectional,
-                context,
-                None,
-                Layer::encoder(index),
-                hooks,
-                None,
-                None,
-            )?;
-            hidden = next;
+            hidden = layer
+                .forward(hidden, &pass, Layer::encoder(index), hooks)?
+                .0;
             if options.hidden_states {
                 hidden_states.push(hidden.clone());
             }
@@ -554,20 +619,45 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         retain_hidden_states: bool,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<BackboneOutput<B>> {
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             decoder.token_ids.dims()[0],
             self.spec.encoder.hidden_size,
             &decoder.token_ids.device(),
         )?;
-        let positions = validate_and_resolve_input(
+        // The source mask's row counts share the decoder input's readback.
+        let (positions, evaluated_context) = validate_and_resolve_input_with(
             decoder,
             self.spec.decoder.vocabulary_size,
             self.spec.decoder.max_position_embeddings,
             "custom.seq2seq.decoder",
+            |checks| {
+                let [batch, source_sequence, _] = encoder.hidden_state.dims();
+                check_nonempty_mask(
+                    checks,
+                    encoder.token_mask.as_ref(),
+                    batch,
+                    source_sequence,
+                    ENCODER_MASK,
+                )
+            },
         )?;
-        let context = evaluated_context(positions.clone())?;
-        let hidden = self.decoder_embed_tokens.forward(decoder.token_ids.clone());
+        let hidden = embed_tokens(
+            &self.decoder_embed_tokens,
+            decoder.token_ids.clone(),
+            self.spec.decoder.embedding_scale,
+        );
+        let pass = StackPass::new(
+            positions,
+            decoder.token_mask.as_ref(),
+            evaluated_context,
+            Stack::Decoder,
+            hidden.dtype(),
+        )
+        .with_row_invariant_positions(
+            decoder.position_ids.is_none() && decoder.token_mask.is_none(),
+        )
+        .with_source(&encoder.hidden_state, encoder.token_mask.as_ref());
         let mut hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
             self.decoder_layers.len() + 2
@@ -579,22 +669,9 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
             hidden_states.push(hidden.clone());
         }
         for (index, layer) in self.decoder_layers.iter().enumerate() {
-            let (next, router) = layer.forward(
-                hidden,
-                positions.clone(),
-                decoder.token_mask.as_ref(),
-                AttentionDirection::Causal,
-                context,
-                Some((&encoder.hidden_state, encoder.token_mask.as_ref())),
-                Layer::decoder(index),
-                hooks,
-                None,
-                None,
-            )?;
+            let (next, router) = layer.forward(hidden, &pass, Layer::decoder(index), hooks)?;
             hidden = next;
-            if let Some(router) = router {
-                routers.push(router);
-            }
+            routers.extend(router);
             if retain_hidden_states {
                 hidden_states.push(hidden.clone());
             }
@@ -613,15 +690,17 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         })
     }
 
-    /// Applies an independent or target-embedding-tied vocabulary projection.
+    /// Applies an independent or target-embedding-tied vocabulary projection, then the decoder's soft cap.
+    ///
+    /// A tied projection reads the unscaled target table; the decoder spec's
+    /// `final_logit_softcap` `c` maps each logit `z` to `c · tanh(z / c)`
+    /// through the shared [`soft_cap`].
     pub(super) fn project_decoder(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
-        match &self.lm_head {
+        let logits = match &self.lm_head {
             Some(head) => crate::operations::linear(hidden, head),
-            None => Ok(tied_projection(
-                hidden,
-                self.decoder_embed_tokens.weight.val(),
-            )),
-        }
+            None => tied_projection(hidden, self.decoder_embed_tokens.weight.val()),
+        }?;
+        Ok(soft_cap(logits, self.spec.decoder.final_logit_softcap))
     }
 
     /// Evaluates a complete stateless encoder-decoder graph.
@@ -682,6 +761,140 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
             encoder,
             cross_attentions: Vec::new(),
         })
+    }
+}
+
+/// Lists one stack's embedding, block, and final-norm points in emission order.
+fn stack_points<B: Backend>(layers: &[ModularLayer<B>], stack: Stack) -> Vec<PointInfo> {
+    let mut points = vec![stack.embedding().info()];
+    for (index, layer) in layers.iter().enumerate() {
+        points.extend(layer.activation_points(stack.layer(index)));
+    }
+    points.push(stack.final_norm().info());
+    points
+}
+
+/// Staged execution of a [`ModularSeq2SeqLm`] encoder stack.
+///
+/// `run_stack(source)?.into_encoder_context()` produces the source for
+/// [`ModularSeq2SeqLm::decoder_stages`].
+#[derive(Clone, Copy, Debug)]
+pub struct EncoderStages<'a, B: Backend> {
+    /// The model whose encoder stack runs.
+    model: &'a ModularSeq2SeqLm<B>,
+}
+
+impl<B: Backend> StagedModel<B> for EncoderStages<'_, B> {
+    /// Number of encoder blocks.
+    fn num_layers(&self) -> usize {
+        self.model.encoder_layers.len()
+    }
+
+    /// The encoder stack.
+    fn stack(&self) -> Stack {
+        Stack::Encoder
+    }
+
+    /// Runs [`ModularSeq2SeqLm::embed_encoder_with_hooks`].
+    fn embed_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.embed_encoder_with_hooks(input, hooks)
+    }
+
+    /// Runs [`ModularSeq2SeqLm::run_encoder_layers_with_hooks`].
+    fn run_layers_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        range: Range<usize>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model
+            .run_encoder_layers_with_hooks(state, range, hooks)
+    }
+
+    /// Runs [`ModularSeq2SeqLm::normalize_encoder_with_hooks`].
+    fn normalize_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.normalize_encoder_with_hooks(state, hooks)
+    }
+}
+
+/// Staged execution of a [`ModularSeq2SeqLm`] decoder stack against one encoder context.
+#[derive(Clone, Debug)]
+pub struct DecoderStages<'a, B: Backend> {
+    /// The model whose decoder stack runs.
+    model: &'a ModularSeq2SeqLm<B>,
+    /// Normalized source states read by every cross-attention branch.
+    encoder: EncoderContext<B>,
+}
+
+impl<B: Backend> StagedModel<B> for DecoderStages<'_, B> {
+    /// Number of decoder blocks.
+    fn num_layers(&self) -> usize {
+        self.model.decoder_layers.len()
+    }
+
+    /// The decoder stack.
+    fn stack(&self) -> Stack {
+        Stack::Decoder
+    }
+
+    /// Runs [`ModularSeq2SeqLm::embed_decoder_with_hooks`] with this view's encoder context.
+    fn embed_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model
+            .embed_decoder_with_hooks(input, self.encoder.clone(), hooks)
+    }
+
+    /// Runs [`ModularSeq2SeqLm::run_decoder_layers_with_hooks`].
+    fn run_layers_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        range: Range<usize>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model
+            .run_decoder_layers_with_hooks(state, range, hooks)
+    }
+
+    /// Runs [`ModularSeq2SeqLm::normalize_decoder_with_hooks`].
+    fn normalize_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.normalize_decoder_with_hooks(state, hooks)
+    }
+}
+
+impl<B: Backend> HookedModel<B> for ModularSeq2SeqLm<B> {
+    /// Source and target inputs.
+    type Input = Seq2SeqInput<B>;
+    /// Encoder and decoder outputs.
+    type Output = Seq2SeqOutput<B>;
+
+    /// Every point of both stacks, encoder first, in emission order.
+    fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        Ok(ModularSeq2SeqLm::activation_points(self))
+    }
+
+    /// Runs [`ModularSeq2SeqLm::forward_with_hooks`].
+    fn forward_with_hooks(
+        &self,
+        input: Seq2SeqInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Seq2SeqOutput<B>> {
+        ModularSeq2SeqLm::forward_with_hooks(self, input, options, hooks)
     }
 }
 
@@ -784,20 +997,18 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
 /// Validates cross-stack topology and executable encoder/decoder capabilities.
 fn validate_seq2seq_execution(spec: &Seq2SeqSpec) -> Result<()> {
     spec.validate()?;
-    validate_decoder_execution(
-        &spec.encoder,
-        AttentionDirection::Bidirectional,
-        "custom.seq2seq.encoder",
-    )?;
-    validate_decoder_execution(
-        &spec.decoder,
-        AttentionDirection::Causal,
-        "custom.seq2seq.decoder",
-    )
+    validate_stack_execution(&spec.encoder, Stack::Encoder, "custom.seq2seq.encoder")?;
+    validate_stack_execution(&spec.decoder, Stack::Decoder, "custom.seq2seq.decoder")
 }
 
-/// Checks externally supplied encoder states before cross-attention projection.
-fn validate_encoder_output<B: Backend>(
+/// Name of a supplied encoder result's source mask in errors.
+const ENCODER_MASK: &str = "custom.seq2seq.encoder_mask";
+
+/// Checks a supplied encoder result's extents and devices without reading values.
+///
+/// The caller defers the source mask's non-empty-row check into the decoder
+/// input's readback with [`check_nonempty_mask`].
+fn validate_encoder_layout<B: Backend>(
     encoder: &EncoderOutput<B>,
     decoder_batch: usize,
     hidden_size: usize,
@@ -811,44 +1022,30 @@ fn validate_encoder_output<B: Backend>(
             format!("[{batch}, {source_sequence}, {width}]"),
         ));
     }
-    if encoder.hidden_state.device() != *decoder_device {
-        return Err(Error::BackendCapability(
-            "custom encoder output and decoder input must reside on the same device".into(),
-        ));
-    }
-    if let Some(mask) = &encoder.token_mask
-        && mask.as_tensor().dims() != [batch, source_sequence]
-    {
-        return Err(Error::shape(
-            "custom.seq2seq.encoder_mask",
-            format!("[{batch}, {source_sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
+    ensure_same_device(
+        "custom.seq2seq.encoder_output",
+        &encoder.hidden_state.device(),
+        decoder_device,
+        "the custom decoder input",
+    )?;
     if let Some(mask) = &encoder.token_mask {
-        if mask.as_tensor().device() != *decoder_device {
-            return Err(Error::BackendCapability(
-                "custom encoder mask and decoder input must reside on the same device".into(),
-            ));
-        }
-        let minimum = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("failed to validate custom encoder mask: {error}"))
-            })?
-            .elem::<i64>();
-        if minimum == 0 {
-            return Err(Error::shape(
-                "custom.seq2seq.encoder_mask",
-                "at least one valid source token in every row",
-                "a fully masked row",
-            ));
-        }
+        ensure_same_device(
+            ENCODER_MASK,
+            &mask.as_tensor().device(),
+            decoder_device,
+            "the custom decoder input",
+        )?;
+        ensure_grid(
+            mask.as_tensor().dims(),
+            batch,
+            source_sequence,
+            ENCODER_MASK,
+        )?;
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "seq2seq_tests.rs"]
+/// Hook propagation through both stacks, staged-state checks, and encoder-output contracts.
+mod tests;

@@ -6,7 +6,7 @@ use burn::{
 };
 
 use super::*;
-use crate::models::config::ModelConfig;
+use crate::{LogitsSelection, models::config::ModelConfig};
 
 /// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
@@ -267,18 +267,22 @@ fn last_selection_uses_semantic_mask() {
 #[test]
 fn input_validation_precedes_backend_indexing() {
     let device = Default::default();
-    assert!(
-        validate_token_ids(
-            Tensor::<TestBackend, 2, Int>::from_ints([[32]], &device),
-            32
-        )
-        .is_err()
+    let mut checks = DeferredChecks::new();
+    checks.values_below(
+        &Tensor::<TestBackend, 2, Int>::from_ints([[32]], &device),
+        32,
+        INPUT_NAMES.token_ids,
+        "token",
     );
+    assert!(checks.run("test").is_err());
     let empty = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
         [[false, false]].into(),
         &device,
     ));
-    assert!(validate_mask(Some(&empty), 1, 2).is_err());
+    let mut checks = DeferredChecks::new();
+    check_nonempty_mask(&mut checks, Some(&empty), 1, 2, INPUT_NAMES.token_mask)
+        .expect("mask extent matches");
+    assert!(checks.run("test").is_err());
     assert!(
         select_hidden(
             Tensor::<TestBackend, 3>::zeros([1, 2, 3], &device),
@@ -316,7 +320,7 @@ fn stateless_positions_fail_before_embedding_or_attention_outside_context() {
 /// Stateless device preflight identifies every independently supplied tensor.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("qwen.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("qwen.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "qwen.input_ids",
         "qwen.token_mask",
@@ -324,7 +328,7 @@ fn stateless_device_affinity_errors_are_contextual() {
         "qwen.mtp.target_hidden_state",
         "qwen.lm_head",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));
@@ -347,4 +351,214 @@ fn official_qwen38_topology_initializes_lazily() {
     );
     assert_eq!(model.config().vocab_size, 248_320);
     assert_eq!(model.model.rope.rotary_dimension(), 64);
+}
+
+/// Two full-attention blocks with distinct RoPE configurations each read their own shared table.
+///
+/// The fused forward builds one rotary table per distinct configuration and
+/// one padding plane per call; chaining the public per-block API, which
+/// builds its own tables, must give bit-identical hidden states.
+#[test]
+fn shared_position_tables_match_per_block_evaluation() {
+    let device = Default::default();
+    TestBackend::seed(&device, 23);
+    let mut config = tiny_config();
+    config.layer_types = vec![
+        Qwen3_5LayerType::FullAttention,
+        Qwen3_5LayerType::LinearAttention,
+        Qwen3_5LayerType::FullAttention,
+        Qwen3_5LayerType::FullAttention,
+    ];
+    let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    // A recipe may give one block another rotary configuration.
+    model.model.layer_rope[2] =
+        RopeConfig::from_partial_factor(4, 0.5, 500.0, crate::position::RopeScaling::None).unwrap();
+    let input = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4], [5, 6, 7, 8]], &device),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[false, true, true, true], [true, true, true, true]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let (fused, _) = model.model.forward(&input, false).unwrap();
+
+    let state = model.model.embed(&input).unwrap();
+    let mut hidden = state.hidden;
+    for (index, block) in model.model.layers.iter().enumerate() {
+        hidden = block
+            .forward(
+                hidden,
+                state.context.positions.clone(),
+                input.token_mask.as_ref(),
+                model.model.layer_rope[index],
+                state.context.evaluated_context,
+            )
+            .unwrap();
+    }
+    let chained = model.model.norm.forward(hidden);
+    assert_eq!(
+        fused.into_data().to_vec::<f32>().unwrap(),
+        chained.into_data().to_vec::<f32>().unwrap()
+    );
+}
+
+/// Generic experiment code drives Qwen3.5 through the hook and staged-execution traits.
+#[test]
+fn qwen_implements_hooked_and_staged_model_traits() {
+    use crate::architecture::{HookedModel, StagedModel};
+
+    /// Captures every activation point through the generic hook trait.
+    fn capture_count<M: HookedModel<TestBackend, Input = CausalLmInput<TestBackend>>>(
+        model: &M,
+        input: CausalLmInput<TestBackend>,
+    ) -> usize {
+        let mut hooks = crate::intervention::Hooks::new();
+        let handles = model
+            .activation_points()
+            .unwrap()
+            .into_iter()
+            .map(|point| hooks.capture_dynamic(point))
+            .collect::<Vec<_>>();
+        model
+            .forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)
+            .unwrap();
+        handles
+            .iter()
+            .filter(|handle| hooks.get_dynamic(handle).is_ok())
+            .count()
+    }
+
+    let device = Default::default();
+    TestBackend::seed(&device, 29);
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+    let input = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let points = Qwen3_5ForCausalLm::activation_points(&model).len();
+    assert_eq!(capture_count(&model, input.clone()), points);
+
+    let (expected, _) = model.model.forward(&input, false).unwrap();
+    for staged in [
+        StagedModel::run_stack(&model, input.clone()).unwrap(),
+        StagedModel::run_stack(&model.model, input.clone()).unwrap(),
+    ] {
+        assert!(staged.normalized);
+        assert_eq!(
+            staged.hidden.into_data().to_vec::<f32>().unwrap(),
+            expected.clone().into_data().to_vec::<f32>().unwrap()
+        );
+    }
+    assert_eq!(StagedModel::num_layers(&model), 4);
+    assert_eq!(StagedModel::stack(&model), Stack::Decoder);
+}
+
+/// Linear-attention-only calls build no padding plane; full-attention calls share one.
+///
+/// Gated DeltaNet reads the token mask directly, so a range without a
+/// full-attention block must not pay for the `[batch, 1, S, S]` plane.
+#[test]
+fn position_tables_build_the_padding_plane_only_for_full_attention() {
+    let device = Default::default();
+    let config = tiny_config();
+    let rope = config.rope_config().unwrap();
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 2], [0, 0, 1]], &device);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true, true], [false, true, true]].into(),
+        &device,
+    ));
+
+    let linear_only =
+        PositionTables::new(None, &positions, Some(&mask), 3, burn::tensor::DType::F32).unwrap();
+    assert!(linear_only.rotary.is_empty());
+    assert!(linear_only.padding.is_none());
+
+    let hybrid = PositionTables::new(
+        [rope, rope],
+        &positions,
+        Some(&mask),
+        3,
+        burn::tensor::DType::F32,
+    )
+    .unwrap();
+    assert_eq!(
+        hybrid.rotary.len(),
+        1,
+        "one table per distinct configuration"
+    );
+    let plane = hybrid
+        .padding
+        .expect("masked full attention needs the plane");
+    assert_eq!(plane.dims(), [2, 1, 3, 3]);
+    assert_eq!(
+        plane.into_data().to_vec::<bool>().unwrap()[9..12],
+        [true, true, true],
+        "the padded query row of the second sequence excludes every key"
+    );
+
+    let unmasked =
+        PositionTables::new([rope], &positions, None, 3, burn::tensor::DType::F32).unwrap();
+    assert!(unmasked.padding.is_none());
+}
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, burn::tensor::Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// Both tied readouts equal Burn's reshaping `linear(h, Eᵀ)` up to F32 reassociation.
+///
+/// They multiply by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_readouts_match_reshaping_linear_oracle() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.tie_word_embeddings = true;
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .expect("tied tiny model must initialize");
+    let hidden = readout_hidden(config.hidden_size, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        model.model.embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    // The tied view and the contiguous oracle may take different x86 GEMM kernels.
+    let tolerance = burn::tensor::Tolerance::rel_abs(1e-5, 1e-6);
+    model
+        .project_hidden(hidden.clone())
+        .expect("tied head")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, tolerance);
+    model
+        .model
+        .tied_vocabulary_projection(hidden)
+        .expect("tied projection")
+        .into_data()
+        .assert_approx_eq::<f32>(&oracle, tolerance);
+}
+
+/// A tied head reports a mismatched hidden width as a shape error instead of panicking.
+#[test]
+fn tied_head_rejects_mismatched_hidden_width() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.tie_word_embeddings = true;
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .expect("tied tiny model must initialize");
+    let result = model.project_hidden(readout_hidden(config.hidden_size + 1, &device));
+    assert!(
+        matches!(result, Err(Error::Shape { ref tensor, .. }) if tensor == "matmul_transposed.matrix"),
+        "{result:?}"
+    );
 }

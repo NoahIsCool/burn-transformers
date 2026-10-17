@@ -1,0 +1,41 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/flan_t5_small-232db8ac4818ebad sha256 751482fcf892129ec4e403109807fb4f2ce7a1261f94a3a7d832384d058d3f0f
+== Metal/F32 flan_t5_small_metal_matches_official_reference
+== env TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab
+== env TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/flan_t5_small-232db8ac4818ebad --ignored --exact --nocapture --test-threads 1 flan_t5_small_metal_matches_official_reference
+== start 2026-10-17T08:43:37+00:00 load 69.09 36.94 21.93
+
+running 1 test
+test flan_t5_small_metal_matches_official_reference ... FLAN-T5-small Metal/F32: load=0.130s stateless=0.352s cached32=0.598s teacher32=0.296s boundary512=0.095s beam=0.341s
+FLAN-T5-small Metal/F32 encoder: cosine=1.000000000000 max_abs=0.000000432 failures_1e-4=0 actual_f32le_sha256=0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26
+FLAN-T5-small Metal/F32 decoder: cosine=0.999999999999 max_abs=0.000010252 failures_1e-4=0 actual_f32le_sha256=c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83
+FLAN-T5-small Metal/F32 first: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d
+FLAN-T5-small Metal/F32 cached: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc
+FLAN-T5-small Metal/F32 teacher: cosine=1.000000000000 max_abs=0.000022888 failures_1e-4=0 actual_f32le_sha256=38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b
+FLAN-T5-small Metal/F32 padded: cosine=1.000000000000 max_abs=0.000030518 failures_1e-4=0 actual_f32le_sha256=cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1
+FLAN-T5-small Metal/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 2.75s
+
+        2.75 real         1.56 user         0.33 sys
+           585416704  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               46487  page reclaims
+                  78  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   1  voluntary context switches
+               14706  involuntary context switches
+         17252095832  instructions retired
+          6788080447  cycles elapsed
+          1006191792  peak memory footprint
+== exit=0 wall=3.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -83,16 +83,23 @@ fn assert_zero<const D: usize>(tensor: Tensor<TestBackend, D>) {
     );
 }
 
-/// Exact physical cache contents for one batch row across every group.
+/// Exact readable cache contents for one batch row across every group.
 #[derive(Debug, PartialEq)]
 struct CacheRowSnapshot {
-    /// Materialized main-cache keys, values, association matrices, and convolution history.
+    /// Readable main-cache keys and values, association matrices, and convolution history.
     tensors: Vec<TensorData>,
 }
 
-/// Materializes one row so failed/no-op calls can prove byte-exact isolation.
-fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> CacheRowSnapshot {
-    let bank = state.tensor_state().main();
+/// Copies one bank's readable KV slots `[0, length)` of `row` for every layer.
+///
+/// Slots at or beyond a row's working length are unreachable by any read:
+/// write-ahead and in-place staging may leave abandoned tokens there, which
+/// is the cache's documented logical (not byte-exact) atomicity.
+fn readable_kv(
+    bank: &crate::cache::TensorCacheBank<TestBackend>,
+    row: usize,
+    length: usize,
+) -> Vec<TensorData> {
     let mut tensors = Vec::new();
     for group in 0..bank.native_kv_count() {
         let cache = bank.native_kv(group).expect("native group");
@@ -101,16 +108,25 @@ fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> Ca
                 cache.keys(layer).expect("keys"),
                 cache.values(layer).expect("values"),
             ] {
-                let [_, heads, time, width] = tensor.dims();
-                tensors.push(
-                    tensor
-                        .clone()
-                        .slice([row..row + 1, 0..heads, 0..time, 0..width])
-                        .into_data(),
-                );
+                let [_, heads, _, width] = tensor.dims();
+                if length > 0 {
+                    tensors.push(
+                        tensor
+                            .clone()
+                            .slice([row..row + 1, 0..heads, 0..length, 0..width])
+                            .into_data(),
+                    );
+                }
             }
         }
     }
+    tensors
+}
+
+/// Materializes one row so failed/no-op calls can prove exact isolation of readable state.
+fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> CacheRowSnapshot {
+    let bank = state.tensor_state().main();
+    let mut tensors = readable_kv(bank, row, state.tensor_state().working_lengths()[row]);
     for group in 0..bank.recurrent_count() {
         let cache = bank.recurrent(group).expect("recurrent group");
         for layer in 0..cache.spec().layers() {
@@ -276,18 +292,25 @@ fn stateful_delta_net_rejects_unit_convolution_kernel() {
     assert!(matches!(error, Error::Configuration { .. }));
 }
 
-/// Context-dependent dynamic NTK cannot silently reuse stale rotated keys.
+/// A context-dependent rotary policy cannot silently reuse stale rotated keys.
+///
+/// LongRoPE switches from its short to its long frequency table once the
+/// evaluated context exceeds the original training context `L = 2`; keys
+/// cached under the short table would then disagree with new queries, so a
+/// three-token prefill must fail before any cache mutation.
 #[test]
-fn dynamic_ntk_extension_is_rejected_before_cache_mutation() {
+fn context_dependent_rope_extension_is_rejected_before_cache_mutation() {
     let device = Default::default();
     let mut config = tiny_config();
     config.rope_parameters = Some(RopeParameters {
-        rope_type: RopeType::Dynamic,
+        rope_type: RopeType::LongRope,
         factor: Some(2.0),
         original_max_position_embeddings: Some(2),
+        short_factor: Some(vec![1.0, 1.0]),
+        long_factor: Some(vec![1.5, 2.0]),
         ..Default::default()
     });
-    let model = Qwen3_5ForCausalLm::init(config, &device).expect("dynamic-NTK model");
+    let model = Qwen3_5ForCausalLm::init(config, &device).expect("LongRoPE model");
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 4).expect("cache config"), 1, &device)
         .expect("decode state");
@@ -301,10 +324,103 @@ fn dynamic_ntk_extension_is_rejected_before_cache_mutation() {
             &mut state,
             &ForwardOptions::default(),
         )
-        .expect_err("dynamic cache extension must fail");
+        .expect_err("a context beyond the original LongRoPE window must fail");
 
     assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("Qwen cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to 3 beyond 2"),
+        "{error}"
+    );
     assert_eq!(state.lengths(), &[0]);
+
+    // In a batch, the first active row past the limit is reported: row 0
+    // stays within it (context 2), row 1 evaluates context 3.
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(2, 4).expect("cache config"), 2, &device)
+        .expect("batched decode state");
+    let error = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                    [[1, 2, 0], [1, 2, 3]],
+                    &device,
+                ),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_data(
+                    TensorData::new(vec![true, true, false, true, true, true], [2, 3]),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut batched,
+            &ForwardOptions::default(),
+        )
+        .expect_err("row 1 passes the original LongRoPE window");
+    assert!(
+        error
+            .to_string()
+            .contains("extend the evaluated context to 3 beyond 2"),
+        "{error}"
+    );
+    assert_eq!(batched.lengths(), &[0, 0]);
+}
+
+/// Dynamic NTK scales against `max_position_embeddings`, which bounds the cache.
+///
+/// Under the Transformers rule the trained context of dynamic NTK is
+/// `max_position_embeddings`, and neither the cache capacity nor explicit
+/// positions may exceed it, so cached decoding never leaves the unscaled
+/// regime and must reproduce the stateless forward.
+#[test]
+fn dynamic_ntk_cached_decode_matches_stateless_within_trained_context() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.rope_parameters = Some(RopeParameters {
+        rope_type: RopeType::Dynamic,
+        factor: Some(2.0),
+        ..Default::default()
+    });
+    TestBackend::seed(&device, 211);
+    let model = Qwen3_5ForCausalLm::init(config, &device).expect("dynamic-NTK model");
+    let tokens = [[1, 2, 3, 4]];
+    let reference = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints(tokens, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &diagnostic_options(),
+        )
+        .expect("stateless dynamic-NTK forward");
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).expect("cache config"), 1, &device)
+        .expect("decode state");
+    let prefill = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .expect("cached dynamic-NTK prefill");
+    assert_close(prefill.logits, reference.logits.clone().narrow(1, 0, 3));
+    let decode = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .expect("cached dynamic-NTK decode");
+    assert_close(decode.logits, reference.logits.narrow(1, 3, 1));
 }
 
 /// Invalid explicit positions and logit selections fail before state changes.
@@ -903,23 +1019,6 @@ fn fully_masked_prefill_is_rejected_without_advancing_state() {
     assert_eq!(state.lengths(), &[0]);
 }
 
-/// The cached mask exposes every old key and only the causal current prefix.
-#[test]
-fn cached_causal_mask_uses_bottom_right_alignment() {
-    let device = Default::default();
-    let mask = cached_causal_mask::<TestBackend>(2, 3, 1, &device)
-        .expect("causal geometry")
-        .into_data();
-    assert_eq!(
-        mask.as_slice::<bool>().expect("bool mask"),
-        &[
-            false, false, false, true, true, // query at absolute position 2
-            false, false, false, false, true, // query at absolute position 3
-            false, false, false, false, false, // query at absolute position 4
-        ]
-    );
-}
-
 /// Scatter semantics preserve valid order and define padding outputs as zero.
 #[test]
 fn compact_scatter_restores_rectangular_positions() {
@@ -928,9 +1027,11 @@ fn compact_scatter_restores_rectangular_positions() {
         TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0], [1, 2, 2]),
         &device,
     );
-    let actual = scatter_compact(compact, 4, &[0, 2])
-        .expect("valid scatter")
-        .into_data();
+    let actual =
+        crate::models::shared::rows::CompactRow::<TestBackend>::new(0, &[0, 2], 4, &device)
+            .and_then(|row| row.scatter(compact))
+            .expect("valid scatter")
+            .into_data();
     assert_eq!(
         actual.as_slice::<f32>().expect("f32 output"),
         &[1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0]
@@ -1030,7 +1131,7 @@ fn mtp_full_and_incremental_paths_are_equivalent() {
     );
 }
 
-/// A rejected target/MTP suffix rolls both tensor banks back byte-exactly.
+/// A rejected target/MTP suffix restores every readable target and MTP cache slot.
 #[test]
 fn speculative_transaction_restores_target_and_mtp_bytes() {
     let device = Default::default();
@@ -1059,26 +1160,10 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
         .prefill_mtp_cache(prompt, target.clone(), &mut state)
         .unwrap();
     let main_before = cache_row_snapshot(&state, 0);
-    let mtp_before = state
-        .tensor_state()
-        .mtp()
-        .unwrap()
-        .native_kv(0)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    let mtp_values_before = state
-        .tensor_state()
-        .mtp()
-        .unwrap()
-        .native_kv(0)
-        .unwrap()
-        .values(0)
-        .unwrap()
-        .clone()
-        .into_data();
+    let mtp_readable = |state: &Qwen3_5DecodeState<TestBackend>| {
+        readable_kv(state.tensor_state().mtp().unwrap(), 0, 1)
+    };
+    let mtp_before = mtp_readable(&state);
     let mark = state.mark().unwrap();
     model
         .forward_mtp_cached(
@@ -1109,32 +1194,7 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
     assert_eq!(state.tensor_state().lengths(), &[2]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
     assert_eq!(cache_row_snapshot(&state, 0), main_before);
-    assert_eq!(
-        state
-            .tensor_state()
-            .mtp()
-            .unwrap()
-            .native_kv(0)
-            .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        mtp_before
-    );
-    assert_eq!(
-        state
-            .tensor_state()
-            .mtp()
-            .unwrap()
-            .native_kv(0)
-            .unwrap()
-            .values(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        mtp_values_before
-    );
+    assert_eq!(mtp_readable(&state), mtp_before);
 }
 
 /// Captures committed bytes, proposal cursors, and both logical cache timelines.
@@ -1142,7 +1202,7 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
 struct ContractSnapshot {
     /// Physical main-cache contents captured independently for every batch row.
     rows: Vec<CacheRowSnapshot>,
-    /// Full native-KV buffers from the main bank and optional MTP bank.
+    /// Readable MTP native-KV slots of every row (main-bank rows are in `rows`).
     auxiliary: Vec<TensorData>,
     /// Committed target-cache cursor for each sequence.
     lengths: Vec<usize>,
@@ -1163,12 +1223,15 @@ fn contract_snapshot(state: &Qwen3_5DecodeState<TestBackend>) -> ContractSnapsho
     let tensors = state.tensor_state();
     let mut auxiliary = Vec::new();
     let mut staged = Vec::new();
+    if let (Some(bank), Some(lengths)) = (tensors.mtp(), tensors.mtp_working_lengths()) {
+        for (row, &length) in lengths.iter().enumerate() {
+            auxiliary.extend(readable_kv(bank, row, length));
+        }
+    }
     for bank in std::iter::once(tensors.main()).chain(tensors.mtp()) {
         for group in 0..bank.native_kv_count() {
             let cache = bank.native_kv(group).unwrap();
             for layer in 0..cache.spec().layers() {
-                auxiliary.push(cache.keys(layer).unwrap().clone().into_data());
-                auxiliary.push(cache.values(layer).unwrap().clone().into_data());
                 for row in 0..state.batch_size() {
                     staged.push(cache.staged_length(layer, row).unwrap());
                 }
@@ -1195,48 +1258,6 @@ fn contract_snapshot(state: &Qwen3_5DecodeState<TestBackend>) -> ContractSnapsho
         staged,
         transaction: tensors.has_active_transaction(),
     }
-}
-
-/// Produces a complete, nonzero synthetic write set with the real cache geometry.
-fn contract_pending(
-    state: &Qwen3_5DecodeState<TestBackend>,
-    counts: &[usize],
-) -> PendingQwenCacheWrites<TestBackend> {
-    let mut pending = PendingQwenCacheWrites::new();
-    for (row, &count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
-        if let Some(spec) = state.layout.native_kv {
-            for layer in 0..spec.layers() {
-                let cache = state.tensors.main().native_kv(0).unwrap();
-                let keys = cache
-                    .keys(layer)
-                    .unwrap()
-                    .clone()
-                    .narrow(0, row, 1)
-                    .narrow(2, 0, count)
-                    + 1.0;
-                pending.native_kv.push(PendingNativeKvWrite {
-                    cache_layer: layer,
-                    sequence: row,
-                    start: state.tensors.working_lengths()[row],
-                    values: keys.clone() + 1.0,
-                    keys,
-                });
-            }
-        }
-        if let Some(spec) = state.layout.recurrent {
-            let cache = state.tensors.main().recurrent(0).unwrap();
-            for layer in 0..spec.layers() {
-                pending.recurrent.push(PendingRecurrentWrite {
-                    cache_layer: layer,
-                    sequence: row,
-                    token_count: count,
-                    matrix: cache.matrix(layer).unwrap().clone().narrow(0, row, 1) + 1.0,
-                    convolution: cache.convolution(layer).unwrap().clone().narrow(0, row, 1) + 1.0,
-                });
-            }
-        }
-    }
-    pending
 }
 
 /// Builds an MTP-enabled model without changing the ordinary hybrid fixture.
@@ -1328,156 +1349,108 @@ fn cache_contract_model_schedule_mismatch_is_atomic() {
     assert_eq!(contract_snapshot(&state), before);
 }
 
-/// Missing rows or layers cannot advance metadata despite otherwise well-shaped tensors.
+/// An incomplete step write set is rejected at publication without changing any readable state.
+///
+/// Every batched call records all of its layers in one step; publication
+/// requires each active row of every layer to be written exactly once. A
+/// family bug that skipped a layer would therefore fail atomically.
 #[test]
-fn cache_contract_pending_cardinality_is_atomic() {
+fn cache_contract_incomplete_step_is_atomic() {
     let device = Default::default();
     let model = tiny_model(&device);
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
         .unwrap();
     let before = contract_snapshot(&state);
-    for case in 0..3 {
-        let mut pending = contract_pending(&state, &[1]);
-        let counts: &[usize] = if case == 0 { &[] } else { &[1] };
-        if case == 1 {
-            pending.native_kv.clear();
-        }
-        if case == 2 {
-            pending.recurrent.pop();
-        }
-        let error = pending
-            .commit(&mut state.tensors, &state.layout, counts)
-            .unwrap_err();
-        assert!(error.to_string().contains(if case == 0 {
-            "describe 0 rows"
-        } else {
-            "coverage mismatch"
-        }));
-        assert_eq!(contract_snapshot(&state), before);
-    }
-}
-
-/// Native appends must have unique active coordinates, the working cursor, and exact time axes.
-#[test]
-fn cache_contract_pending_native_coordinates_are_atomic() {
-    let device = Default::default();
-    let model = tiny_model(&device);
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    for case in 0..7 {
-        let counts = if case == 6 { [1, 0] } else { [1, 1] };
-        let mut pending = contract_pending(&state, &counts);
-        let write = pending.native_kv.last_mut().unwrap();
-        match case {
-            0 => write.sequence = 2,
-            1 => write.cache_layer = 1,
-            2 => write.start = 1,
-            3 => write.keys = Tensor::zeros([1, 1, 2, 4], &device),
-            4 => write.values = Tensor::zeros([1, 1, 2, 4], &device),
-            5 => write.sequence = 0,
-            6 => write.sequence = 1,
-            _ => unreachable!(),
-        }
-        let error = pending
-            .commit(&mut state.tensors, &state.layout, &counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "outside 2"
-            } else {
-                "invalid or duplicate Qwen native write"
-            }),
-            "case {case}: {error}"
+    let mut writes = state.tensors.step(&[1]).unwrap();
+    let recurrent = state.tensors.main().recurrent(RECURRENT_GROUP).unwrap();
+    for layer in 0..recurrent.spec().layers() {
+        writes.push_recurrent_row(
+            RECURRENT_GROUP,
+            layer,
+            0,
+            recurrent.matrix(layer).unwrap().clone() + 1.0,
+            recurrent.convolution(layer).unwrap().clone() + 1.0,
         );
-        assert_eq!(contract_snapshot(&state), before, "case {case}");
     }
-}
-
-/// DeltaNet replacements cover every active row and layer exactly once at the declared token count.
-#[test]
-fn cache_contract_pending_recurrent_coordinates_are_atomic() {
-    let device = Default::default();
-    let model = tiny_model(&device);
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    for case in 0..5 {
-        let counts = if case == 4 { [1, 0] } else { [1, 1] };
-        let mut pending = contract_pending(&state, &counts);
-        let write = pending.recurrent.last_mut().unwrap();
-        match case {
-            0 => write.sequence = 2,
-            1 => write.cache_layer = 3,
-            2 => write.token_count = 2,
-            3 => write.cache_layer = 0,
-            4 => write.sequence = 1,
-            _ => unreachable!(),
-        }
-        let error = pending
-            .commit(&mut state.tensors, &state.layout, &counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "outside 2"
-            } else {
-                "invalid or duplicate Qwen recurrent write"
-            }),
-            "case {case}: {error}"
-        );
-        assert_eq!(contract_snapshot(&state), before, "case {case}");
-    }
-}
-
-/// Failure preparing a late recurrent tensor cannot publish earlier prepared KV appends.
-#[test]
-fn cache_contract_pending_tensor_geometry_is_atomic() {
-    let device = Default::default();
-    let model = tiny_model(&device);
-    let mut state = model
-        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    let mut pending = contract_pending(&state, &[1]);
-    pending.recurrent.last_mut().unwrap().matrix = Tensor::zeros([1, 2, 3, 4], &device);
-    let error = pending
-        .commit(&mut state.tensors, &state.layout, &[1])
-        .unwrap_err();
-    assert!(error.to_string().contains("shape"), "{error}");
+    // The full-attention layer is missing.
+    let error = state.tensors.publish_step(writes).unwrap_err();
+    assert!(error.to_string().contains("missing write"), "{error}");
     assert_eq!(contract_snapshot(&state), before);
-    contract_pending(&state, &[1])
-        .commit(&mut state.tensors, &state.layout, &[1])
-        .unwrap();
-    assert_eq!(state.lengths(), &[1]);
-    assert_ne!(contract_snapshot(&state), before);
 }
 
-/// Hybrid transactions need one post-token recurrent snapshot for each accepted prefix.
+/// A transaction decodes several tokens in one call and commits any accepted prefix exactly.
+///
+/// Full attention stages the tokens in place and DeltaNet keeps the state
+/// after each token, so committing a prefix of `a` tokens must equal having
+/// decoded exactly those `a` tokens: the next call's logits match a state that
+/// decoded the prefix one token at a time.
 #[test]
-fn cache_contract_transactional_hybrid_chunk_rejection_is_atomic() {
+fn transactional_multi_token_decode_commits_any_prefix() {
     let device = Default::default();
     let model = contract_mtp_model(&device);
-    let mut state = model
-        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
-        .unwrap();
-    let mark = state.mark().unwrap();
-    let before = contract_snapshot(&state);
-    let error = contract_pending(&state, &[2])
-        .commit(&mut state.tensors, &state.layout, &[2])
-        .unwrap_err();
-    assert!(error.to_string().contains("at most one token per row"));
-    assert_eq!(contract_snapshot(&state), before);
-    contract_pending(&state, &[1])
-        .commit(&mut state.tensors, &state.layout, &[1])
-        .unwrap();
-    assert_eq!(state.lengths(), &[0]);
-    assert_eq!(state.tensors.working_lengths(), &[1]);
-    state.rollback(mark).unwrap();
-    assert_eq!(state.tensors.working_lengths(), &[0]);
-    assert_eq!(cache_row_snapshot(&state, 0), before.rows[0]);
+    let prompt = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let tokens = [4, 5, 6];
+    let decode = |state: &mut Qwen3_5DecodeState<TestBackend>, ids: &[i32]| {
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 1, Int>::from_ints(ids, &device)
+                        .reshape([1, ids.len()]),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits
+    };
+    for accepted in 0..=tokens.len() {
+        let mut speculative = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 3, &device)
+            .unwrap();
+        model
+            .prefill(prompt.clone(), &mut speculative, &ForwardOptions::default())
+            .unwrap();
+        let before = cache_row_snapshot(&speculative, 0);
+        let mark = speculative.mark().unwrap();
+        let staged = decode(&mut speculative, &tokens);
+        assert_eq!(speculative.tensors.working_lengths(), &[6]);
+        speculative.commit_prefixes(mark, accepted, 0).unwrap();
+        assert_eq!(speculative.lengths(), &[3 + accepted]);
+
+        let mut sequential = model
+            .new_decode_state(CacheConfig::new(1, 12).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(prompt.clone(), &mut sequential, &ForwardOptions::default())
+            .unwrap();
+        let mut sequential_logits = Vec::new();
+        for &token in &tokens[..accepted] {
+            sequential_logits.push(decode(&mut sequential, &[token]));
+        }
+        if accepted > 0 {
+            assert_close(
+                staged.clone().narrow(1, 0, accepted),
+                Tensor::cat(sequential_logits, 1),
+            );
+        } else {
+            assert_eq!(cache_row_snapshot(&speculative, 0), before);
+        }
+        // The next token continues identically from both states.
+        assert_close(
+            decode(&mut speculative, &[7]),
+            decode(&mut sequential, &[7]),
+        );
+    }
 }
 
 /// MTP prompt alignment validates both tensors and the already-committed target cursor.
@@ -1562,7 +1535,11 @@ fn cache_contract_mtp_cached_shapes_are_atomic() {
     }
 }
 
-/// Auxiliary prefill and multi-token proposal calls are forbidden inside an open transaction.
+/// Auxiliary prefill is forbidden inside a transaction; staged MTP calls stop at staging capacity.
+///
+/// Multi-token MTP calls are allowed inside a transaction (speculative
+/// verification re-runs the MTP layer over the accepted target pairs), but a
+/// call that would exceed the staging capacity fails without staging anything.
 #[test]
 fn cache_contract_mtp_transaction_rejections_are_atomic() {
     let device = Default::default();
@@ -1581,7 +1558,19 @@ fn cache_contract_mtp_transaction_rejections_are_atomic() {
         .unwrap_err();
     assert!(error.to_string().contains("prefill Qwen MTP cache"));
     assert_eq!(contract_snapshot(&state), before);
+    // Staging capacity is max_draft_tokens + 1 = 3.
     let error = model
+        .forward_mtp_cached(
+            Tensor::from_ints([[1, 2, 3, 4]], &device),
+            Tensor::zeros([1, 4, 8], &device),
+            None,
+            0,
+            &mut state,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("staging"), "{error}");
+    assert_eq!(contract_snapshot(&state), before);
+    model
         .forward_mtp_cached(
             Tensor::from_ints([[1, 2]], &device),
             Tensor::zeros([1, 2, 8], &device),
@@ -1589,10 +1578,13 @@ fn cache_contract_mtp_transaction_rejections_are_atomic() {
             0,
             &mut state,
         )
-        .unwrap_err();
-    assert!(error.to_string().contains("exactly one token per call"));
-    assert_eq!(contract_snapshot(&state), before);
+        .unwrap();
+    assert_eq!(
+        state.tensor_state().mtp_working_lengths(),
+        Some([2].as_slice())
+    );
     state.rollback(mark).unwrap();
+    assert_eq!(contract_snapshot(&state).mtp_working, before.mtp_working);
 }
 
 /// Reordering and duplicating a ragged beam moves both DeltaNet history and full-attention KV.
@@ -1940,4 +1932,748 @@ fn release_contract_capacity_rejects_unrepresentable_indices_before_allocation()
             .to_string()
             .contains("portable signed position-index range")
     );
+}
+
+/// Host-token MTP calls equal device-token calls and reject out-of-vocabulary IDs atomically.
+#[test]
+fn host_token_mtp_calls_match_device_calls() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device);
+    let prepared = || {
+        let mut state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+            .unwrap();
+        let hidden = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt.clone(),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &diagnostic_options(),
+            )
+            .unwrap()
+            .final_hidden_state
+            .unwrap();
+        model
+            .prefill_mtp_cache(prompt.clone(), hidden.clone(), &mut state)
+            .unwrap();
+        (state, hidden.narrow(1, 1, 2))
+    };
+    let (mut device_state, hidden) = prepared();
+    let (mut host_state, _) = prepared();
+    let device_call = model
+        .forward_mtp_cached(
+            Tensor::<TestBackend, 2, Int>::from_ints([[4, 5]], &device),
+            hidden.clone(),
+            None,
+            0,
+            &mut device_state,
+        )
+        .unwrap();
+    let before = contract_snapshot(&host_state);
+    let error = model
+        .forward_mtp_host_tokens(&[4, 32], hidden.clone(), 0, &mut host_state)
+        .unwrap_err();
+    assert!(matches!(error, Error::Shape { .. }));
+    assert_eq!(contract_snapshot(&host_state), before);
+    let host_call = model
+        .forward_mtp_host_tokens(&[4, 5], hidden, 0, &mut host_state)
+        .unwrap();
+    assert_eq!(device_call.logits.to_data(), host_call.logits.to_data());
+    assert_eq!(
+        host_state.tensor_state().mtp_lengths(),
+        device_state.tensor_state().mtp_lengths()
+    );
+}
+
+/// A transactional call larger than the staging capacity fails before any model work.
+#[test]
+fn oversized_transactional_decode_is_rejected_up_front() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mark = state.mark().unwrap();
+    let decode = |state: &mut Qwen3_5DecodeState<TestBackend>, ids: [i32; 2]| {
+        model.decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([ids], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            state,
+            &ForwardOptions::default(),
+        )
+    };
+    // Staging capacity is max_draft_tokens + 1 = 3: two tokens fit, two more do not.
+    decode(&mut state, [3, 4]).unwrap();
+    let before = contract_snapshot(&state);
+    let error = decode(&mut state, [5, 6]).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::TensorCache(TensorCacheError::StagingCapacityExceeded {
+                requested: 4,
+                capacity: 3
+            })
+        ),
+        "{error}"
+    );
+    assert_eq!(contract_snapshot(&state), before);
+    state.rollback(mark).unwrap();
+}
+
+/// Each cache slot reports its dense group index and the mixer family it serves.
+#[test]
+fn layer_cache_slots_report_their_group_and_family() {
+    for (slot, group, family) in [
+        (
+            Qwen3_5LayerCache::DeltaNet(2),
+            2,
+            Qwen3_5LayerType::LinearAttention,
+        ),
+        (
+            Qwen3_5LayerCache::FullAttention(0),
+            0,
+            Qwen3_5LayerType::FullAttention,
+        ),
+    ] {
+        assert_eq!(slot.group_layer(), group);
+        assert_eq!(slot.layer_type(), family);
+    }
+}
+
+/// The wrapper's accessors and lifecycle calls delegate to the shared tensor state.
+#[test]
+fn state_accessors_and_reset_delegate_to_the_tensor_state() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 8).unwrap(), 1, 2, &device)
+        .unwrap();
+    assert_eq!(state.batch_size(), 1);
+    assert_eq!(state.capacity(), 8);
+    assert_eq!(state.device(), &device);
+    assert_eq!(state.mtp_layer_count(), 1);
+    assert_eq!(state.staging_capacity(), 3);
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2]);
+    state.reset().unwrap();
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+    let plain = tiny_model(&device)
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    assert_eq!(plain.mtp_layer_count(), 0);
+}
+
+/// Prefills one token so a stateful call must validate the state against the model.
+fn prefill_once(
+    model: &Qwen3_5ForCausalLm<TestBackend>,
+    state: &mut Qwen3_5DecodeState<TestBackend>,
+) -> Result<CausalLmOutput<TestBackend>> {
+    model.prefill(
+        CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1]], &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        },
+        state,
+        &ForwardOptions::default(),
+    )
+}
+
+/// Corrupted cache banks are rejected even when the recorded layout still matches.
+///
+/// The layout is checked first; the physical banks are checked next, so a
+/// bank with an extra group, foreign attention or DeltaNet geometry, or a
+/// missing MTP group cannot be used, and no length changes.
+#[test]
+fn stateful_calls_reject_corrupted_cache_banks() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let state = |model: &Qwen3_5ForCausalLm<TestBackend>| {
+        model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap()
+    };
+    let message = |state: &mut Qwen3_5DecodeState<TestBackend>| {
+        let error = prefill_once(&model, state).expect_err("corrupted bank");
+        assert_eq!(state.lengths(), &[0]);
+        error.to_string()
+    };
+
+    let mut extra = state(&model);
+    let spec = extra.layout.native_kv.unwrap();
+    extra.tensors.main_mut().add_native_kv(spec).unwrap();
+    assert!(message(&mut extra).contains("cache-group count"));
+
+    let variant = |edit: fn(&mut Qwen3_5TextConfig)| {
+        let mut config = model.config().clone();
+        edit(&mut config);
+        Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap()
+    };
+    let mut attention = state(&model);
+    attention.tensors = state(&variant(|config| config.num_key_value_heads = 2)).tensors;
+    assert!(message(&mut attention).contains("native-KV cache geometry"));
+
+    let mut recurrent = state(&model);
+    recurrent.tensors = state(&variant(|config| config.linear_value_head_dim = 2)).tensors;
+    assert!(message(&mut recurrent).contains("recurrent cache geometry"));
+
+    let mut no_mtp = state(&model);
+    no_mtp.tensors = state(&variant(|config| config.mtp_num_hidden_layers = 0)).tensors;
+    assert!(message(&mut no_mtp).contains("MTP cache geometry"));
+}
+
+/// Speculative allocation rejects zero drafts, multi-layer MTP, and an unrepresentable suffix.
+#[test]
+fn speculative_allocation_rejects_unsupported_requests() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let config = CacheConfig::new(1, 8).unwrap();
+    let error = model
+        .new_speculative_decode_state(config, 1, 0, &device)
+        .unwrap_err();
+    assert!(error.to_string().contains("greater than zero"), "{error}");
+    let error = model
+        .new_speculative_decode_state(config, 1, usize::MAX, &device)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("staging capacity overflows"),
+        "{error}"
+    );
+
+    let mut two_layer = model.config().clone();
+    two_layer.mtp_num_hidden_layers = 2;
+    let two_layer = Qwen3_5ForCausalLm::<TestBackend>::init(two_layer, &device).unwrap();
+    let error = two_layer
+        .new_speculative_decode_state(config, 1, 2, &device)
+        .unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)));
+    assert!(error.to_string().contains("single-layer"), "{error}");
+}
+
+/// Cached MTP requires its graph, room in the auxiliary cache, and the single-layer graph.
+#[test]
+fn cached_mtp_rejects_missing_graphs_full_caches_and_multiple_layers() {
+    let device = Default::default();
+    let hidden = |tokens: usize| Tensor::<TestBackend, 3>::zeros([1, tokens, 8], &device);
+    let tokens = |count: usize| {
+        Tensor::<TestBackend, 1, Int>::arange(1..count as i64 + 1, &device).reshape([1, count])
+    };
+
+    let base = tiny_model(&device);
+    let mut state = base
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let error = base
+        .forward_mtp_cached(tokens(1), hidden(1), None, 0, &mut state)
+        .unwrap_err();
+    assert!(error.to_string().contains("no configured MTP"), "{error}");
+
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .forward_mtp_cached(tokens(5), hidden(5), None, 0, &mut state)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::TensorCache(TensorCacheError::Metadata(
+                DecodeStateError::CapacityExceeded {
+                    requested: 5,
+                    capacity: 4,
+                    ..
+                }
+            ))
+        ),
+        "{error}"
+    );
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+
+    let mut two_layer = model.config().clone();
+    two_layer.mtp_num_hidden_layers = 2;
+    let two_layer = Qwen3_5ForCausalLm::<TestBackend>::init(two_layer, &device).unwrap();
+    let mut state = two_layer
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    assert_eq!(state.mtp_layer_count(), 2);
+    let error = two_layer
+        .forward_mtp_cached(tokens(1), hidden(1), None, 0, &mut state)
+        .unwrap_err();
+    assert!(error.to_string().contains("single-layer"), "{error}");
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
+
+/// A finished-only step without requested traces returns zero logits and no traces.
+#[test]
+fn all_inactive_decode_without_traces_returns_only_logits() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    prefill_once(&model, &mut state).unwrap();
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert!(output.hidden_states.is_empty());
+    assert!(output.final_hidden_state.is_none());
+    assert_zero(output.logits);
+    assert_eq!(state.lengths(), &[1]);
+}
+
+/// A staged multi-token step keeps per-token DeltaNet snapshots only for rows that advance.
+///
+/// Row 0 stages two tokens while row 1 is finished. Committing row 0's whole
+/// proposal and none of row 1 must equal decoding row 0 alone, and leave row
+/// 1's readable state untouched.
+#[test]
+fn transactional_ragged_step_snapshots_only_active_rows() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = Qwen3_5DecodeState::new_with_staging(
+        &model,
+        CacheConfig::new(2, 8).unwrap(),
+        2,
+        2,
+        &device,
+    )
+    .unwrap();
+    let prompt = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2], [3, 4]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    model
+        .prefill(prompt, &mut state, &ForwardOptions::default())
+        .unwrap();
+    let finished_before = cache_row_snapshot(&state, 1);
+    let mark = state.mark().unwrap();
+    let staged = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[5, 6], [0, 0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[true, true], [false, false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(state.tensors.working_lengths(), &[4, 2]);
+    state.tensors.commit_prefixes(mark, &[2, 0], None).unwrap();
+    assert_eq!(state.lengths(), &[4, 2]);
+    assert_eq!(cache_row_snapshot(&state, 1), finished_before);
+
+    let mut single = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut single,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let expected = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[5, 6]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut single,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    assert_close(staged.slice([0..1, 0..2]), expected);
+    let (batched, alone) = (
+        cache_row_snapshot(&state, 0),
+        cache_row_snapshot(&single, 0),
+    );
+    assert_eq!(batched.tensors.len(), alone.tensors.len());
+    for (left, right) in batched.tensors.iter().zip(&alone.tensors) {
+        left.assert_approx_eq::<f32>(right, Tolerance::rel_abs(2e-4, 2e-5));
+    }
+}
+
+/// A schedule whose DeltaNet blocks lost their modules cannot allocate recurrent state.
+#[test]
+fn delta_net_schedule_without_a_module_cannot_allocate_state() {
+    let device = Default::default();
+    let mut model = tiny_model(&device);
+    for layer in &mut model.model.layers {
+        layer.linear_attn = None;
+    }
+    let error = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap_err();
+    assert!(matches!(error, Error::Checkpoint(_)));
+    assert!(
+        error.to_string().contains("DeltaNet without a module"),
+        "{error}"
+    );
+}
+
+/// Without an MTP bank, truncation shortens only the target history.
+#[test]
+fn truncation_without_mtp_shortens_only_the_target_history() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    // DeltaNet keeps only its terminal state, so an unsnapshotted truncate is refused.
+    assert!(state.truncate(&[2]).is_err());
+    assert_eq!(state.lengths(), &[3]);
+    state.truncate(&[0]).unwrap();
+    assert_eq!(state.lengths(), &[0]);
+    assert!(state.tensors.mtp_lengths().is_none());
+}
+
+/// MTP prefill of a one-token prompt has no shifted pair and leaves the auxiliary cache empty.
+#[test]
+fn single_token_mtp_prefill_has_no_shifted_pair() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device);
+    let hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: prompt.clone(),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    model.prefill_mtp_cache(prompt, hidden, &mut state).unwrap();
+    assert_eq!(state.lengths(), &[1]);
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
+
+/// Shifted MTP prompt tokens are range-checked, and a failure leaves the auxiliary cache empty.
+///
+/// The prompt `[1, 32]` shifts to the single MTP token 32, one past the
+/// 32-token vocabulary, so the deferred range check reports a shape error at
+/// `qwen.input_ids` naming the bound `0..32` and the observed value 32. The
+/// target cache keeps its committed prompt and the MTP cache stays fresh.
+#[test]
+fn mtp_prefill_rejects_out_of_vocabulary_shifted_tokens() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    let hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    let error = model
+        .prefill_mtp_cache(
+            Tensor::<TestBackend, 2, Int>::from_ints([[1, 32]], &device),
+            hidden,
+            &mut state,
+        )
+        .unwrap_err();
+    match &error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => {
+            assert_eq!(tensor, "qwen.input_ids", "{error}");
+            assert_eq!(expected, "token values in 0..32", "{error}");
+            assert_eq!(actual, "observed range 32..=32", "{error}");
+        }
+        other => panic!("expected an out-of-vocabulary shape error, got {other:?}"),
+    }
+    assert_eq!(state.lengths(), &[2]);
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
+}
+
+/// Cached MTP requires one non-empty row matching the state's batch.
+#[test]
+fn cached_mtp_rejects_batch_mismatches_and_empty_rows() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut wide = model
+        .new_decode_state(CacheConfig::new(2, 6).unwrap(), 2, &device)
+        .unwrap();
+    let mut narrow = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, &device)
+        .unwrap();
+    for (state, tokens) in [
+        (
+            &mut wide,
+            Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device),
+        ),
+        (
+            &mut narrow,
+            Tensor::<TestBackend, 2, Int>::zeros([1, 0], &device),
+        ),
+    ] {
+        let sequence = tokens.dims()[1];
+        let error = model
+            .forward_mtp_cached(
+                tokens,
+                Tensor::zeros([1, sequence, 8], &device),
+                None,
+                0,
+                state,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.next_token_ids"),
+            "{error}"
+        );
+    }
+}
+
+/// An MTP bank whose attention geometry differs from the MTP layer is rejected.
+///
+/// The main bank matches the model, so only the auxiliary-bank comparison
+/// can catch the corruption.
+#[test]
+fn stateful_calls_reject_a_foreign_mtp_bank() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let base = tiny_model(&device);
+    let mut donor = base
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let foreign = NativeKvCacheSpec::new(1, 2, 4, KvCacheStorage::Full, DType::F32).unwrap();
+    donor
+        .tensors
+        .enable_mtp()
+        .unwrap()
+        .add_native_kv(foreign)
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    state.tensors = donor.tensors;
+    let error = prefill_once(&model, &mut state).expect_err("foreign MTP bank");
+    assert!(error.to_string().contains("MTP cache geometry"), "{error}");
+}
+
+/// The cached pass refuses schedules and slots that disagree with its blocks.
+///
+/// Public calls validate the state layout first, so these are the private
+/// invariants behind it: a schedule shorter than the stack must not silently
+/// skip blocks, a block must not read another family's cache slot, and a
+/// full-attention block needs both its module and the step's attention plan.
+#[test]
+fn cached_steps_reject_mismatched_schedules_and_slots() {
+    let device = Default::default();
+    let mut model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let layout = CompactBatch::<TestBackend>::new(&[vec![0]], 1, &[0], &device).unwrap();
+    let tokens = || Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device);
+    let schedule = state.layout.schedule.clone();
+    let error = model
+        .model
+        .run_cached(
+            tokens(),
+            Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+            1,
+            &layout,
+            &mut state.tensors,
+            &schedule[..3],
+            StatefulPhase::Prefill,
+            false,
+        )
+        .err()
+        .expect("a short schedule");
+    assert!(
+        error.to_string().contains("3 entries for 4 model layers"),
+        "{error}"
+    );
+
+    let hidden = model.model.embed_tokens.forward(tokens());
+    let mut writes = state.tensors.step(layout.counts()).unwrap();
+    let terminal = DeltaStep::Terminal(DeltaNetMode::Recurrent);
+    let mut step = |layer: &Qwen3_5DecoderLayer<TestBackend>, slot| {
+        layer
+            .cached_step(
+                hidden.clone(),
+                slot,
+                &layout,
+                &mut state.tensors,
+                &mut writes,
+                None,
+                terminal,
+            )
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        step(&model.model.layers[0], Qwen3_5LayerCache::FullAttention(0))
+            .contains("incompatible cache slot")
+    );
+    assert!(
+        step(&model.model.layers[3], Qwen3_5LayerCache::FullAttention(0))
+            .contains("no cached attention step")
+    );
+    model.model.layers[3].self_attn = None;
+    assert!(
+        step(&model.model.layers[3], Qwen3_5LayerCache::FullAttention(0))
+            .contains("no attention module")
+    );
+    assert_eq!(state.lengths(), &[0]);
+}
+
+/// Group-count corruption is detected in the main bank and in the auxiliary MTP bank.
+///
+/// Each case keeps every recorded geometry and only adds a group, so only
+/// the count comparisons can reject it: an extra recurrent group in the main
+/// bank, and an extra native or recurrent group beside the MTP layer's.
+#[test]
+fn stateful_calls_reject_extra_cache_groups() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let fresh = || {
+        model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap()
+    };
+
+    let mut recurrent = fresh();
+    let spec = recurrent.layout.recurrent.unwrap();
+    recurrent.tensors.main_mut().add_recurrent(spec).unwrap();
+    let error = prefill_once(&model, &mut recurrent).expect_err("extra recurrent group");
+    assert!(error.to_string().contains("cache-group count"), "{error}");
+
+    let base = tiny_model(&device);
+    let mtp_spec = fresh().layout.mtp_native_kv.unwrap();
+    let recurrent_spec = fresh().layout.recurrent.unwrap();
+    for extra_recurrent in [false, true] {
+        let mut donor = base
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let bank = donor.tensors.enable_mtp().unwrap();
+        bank.add_native_kv(mtp_spec).unwrap();
+        if extra_recurrent {
+            bank.add_recurrent(recurrent_spec).unwrap();
+        } else {
+            bank.add_native_kv(mtp_spec).unwrap();
+        }
+        let mut state = fresh();
+        state.tensors = donor.tensors;
+        let error = prefill_once(&model, &mut state).expect_err("extra MTP group");
+        assert!(error.to_string().contains("MTP cache geometry"), "{error}");
+        assert_eq!(state.lengths(), &[0]);
+    }
+}
+
+/// MTP prefill requires one non-empty prompt row whose hidden states match it.
+#[test]
+fn mtp_prefill_rejects_batched_or_empty_prompts() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 6).unwrap(), 1, 2, &device)
+        .unwrap();
+    for (tokens, hidden) in [
+        (
+            Tensor::<TestBackend, 2, Int>::from_ints([[1], [2]], &device),
+            Tensor::<TestBackend, 3>::zeros([2, 1, 8], &device),
+        ),
+        (
+            Tensor::<TestBackend, 2, Int>::zeros([1, 0], &device),
+            Tensor::<TestBackend, 3>::zeros([1, 0, 8], &device),
+        ),
+    ] {
+        let error = model
+            .prefill_mtp_cache(tokens, hidden, &mut state)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "qwen.mtp.prefill"),
+            "{error}"
+        );
+    }
+    assert_eq!(state.tensors.mtp_lengths(), Some([0].as_slice()));
 }

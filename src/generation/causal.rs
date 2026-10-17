@@ -5,8 +5,13 @@
 //! performs the expensive prompt pass once or in caller-bounded cache-backed
 //! chunks, then feeds only the previously selected token through
 //! [`CausalLanguageModel::decode`]. Model caches remain preallocated and
-//! architecture-owned; the only dynamically concatenated tensor is the compact
-//! integer history used by repetition penalties.
+//! architecture-owned.
+//!
+//! Each decode step costs one device-to-host synchronization: the selected
+//! IDs and their log probabilities are read back together. Penalty state is a
+//! [`TokenHistory`] updated with the new `[batch]` IDs, so no history tensor
+//! grows and no vocabulary-sized data leaves the device. Like Hugging Face,
+//! the coordinator promotes F16/BF16 logits to F32 before any processing.
 //!
 //! Batched rows may have different prompt and completion lengths. Every mask in
 //! this module follows the crate-wide `true == valid` rule. Once a row reaches
@@ -14,16 +19,23 @@
 //! calls carry a padding ID with a false mask entry, so that row neither changes
 //! its cache nor influences token penalties.
 
-use burn::tensor::{
-    Bool, DType, Element, ElementConversion, Int, Tensor, TensorData, backend::Backend, bf16, f16,
-};
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, DecodeInput, Error, ForwardOptions, LogitsSelection,
     Result, TokenMask, architecture::bool_tensor_from_values, cache::CacheConfig,
 };
 
-use super::{FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenSelection};
+use super::bookkeeping::{advance_active_positions, prefill_chunk_end, required_cache_capacity};
+use super::layout::{ChunkCall, chunk_activity, chunk_call};
+use super::metadata::{self, extract_last_logits};
+use super::{
+    FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenHistory,
+    upcast_half_precision,
+};
+
+/// Label used for model-logit shape errors raised by this coordinator.
+const MODEL_LOGITS: &str = "generation.model_logits";
 
 /// Complete controls and tensors for one cached causal-generation request.
 #[derive(Clone, Debug)]
@@ -38,7 +50,12 @@ pub struct CausalGenerationRequest<B: Backend> {
     ///
     /// Chunking bounds temporary attention masks and score tensors for long
     /// prompts while preserving one shared decode state. `None` evaluates the
-    /// complete prompt in one call. A value of zero is invalid.
+    /// complete prompt in one call. A value of zero is invalid. A chunk in
+    /// which every row holds a valid token is sent to `prefill`; a chunk in
+    /// which only some rows do, such as a left-padded prompt's first chunk,
+    /// is sent to `decode`, whose shared contract treats the other rows (even
+    /// rows that have not started) as no-ops; a chunk without any valid token
+    /// is skipped.
     pub prefill_chunk_size: Option<usize>,
     /// Number of output categories in the model language head.
     pub vocabulary_size: usize,
@@ -115,8 +132,21 @@ where
         mut next_positions,
     } = prepare_request(&request)?;
     let device = request.prompt.token_ids.device();
-    let mut history = request.prompt.token_ids.clone();
-    let mut history_mask = bool_tensor_from_values(prompt_valid.clone(), history.dims(), &device);
+    let vocabulary_size = request.vocabulary_size;
+    let processor =
+        LogitsProcessor::<B>::new(request.generation.clone(), vocabulary_size, &device)?;
+    // Built before any model call: it validates prompt IDs when penalties or
+    // n-gram constraints need them, so a bad prompt fails without a session.
+    let mut history = TokenHistory::from_prompt_values(
+        &request.generation,
+        vocabulary_size,
+        request.prompt.token_ids.clone(),
+        request.prompt.token_mask.clone(),
+        &prompt_valid,
+    )?;
+    let mut tracker = GenerationTracker::new(request.generation.clone(), vocabulary_size, batch)?;
+    let mut log_probabilities = metadata::empty_rows::<f64>(batch, "log-probability rows")?;
+    let padding = i64::from(request.generation.pad_token_id.unwrap_or(0));
     let mut state = model.new_decode_state(request.cache, batch, &device)?;
     let options = ForwardOptions {
         logits: LogitsSelection::Last,
@@ -129,94 +159,33 @@ where
         &options,
         &prompt_valid,
         request.prefill_chunk_size,
-        request.vocabulary_size,
+        vocabulary_size,
     )?;
-    let mut logits = extract_last_logits(prompt_logits, batch, request.vocabulary_size)?;
-    let processor =
-        LogitsProcessor::<B>::new(request.generation.clone(), request.vocabulary_size, &device)?;
-    let mut tracker =
-        GenerationTracker::new(request.generation.clone(), request.vocabulary_size, batch)?;
-    let mut log_probabilities = empty_rows::<f64>(batch, "generation log-probability")?;
-    let padding = i64::from(request.generation.pad_token_id.unwrap_or(0));
+    let mut logits = step_logits(prompt_logits, batch, vocabulary_size)?;
 
     loop {
-        let processed = processor.process_with_mask(
-            logits,
-            Some(history.clone()),
-            Some(TokenMask::new(history_mask.clone())),
+        let processed = processor.process_with_history(logits, &history)?;
+        let selection = processor.select_with_log_probs(processed)?;
+        let token_ids = selection.token_ids.clone();
+        // The step's only host synchronization.
+        let (selected_ids, selected_log_probabilities) =
+            metadata::read_token_selection(selection, vocabulary_size)?;
+        let rows = emit_step(
+            &mut tracker,
+            &selected_ids,
+            &selected_log_probabilities,
+            &mut log_probabilities,
+            &mut on_token,
         )?;
-        let TokenSelection {
-            token_ids,
-            log_probabilities: selected_log_probabilities,
-        } = processor.select_with_log_probs(processed)?;
-        let selected_ids = tensor_i64_values(token_ids.clone(), "selected token IDs")?;
-        let selected_log_probabilities =
-            tensor_f64_values(selected_log_probabilities, "selected log probabilities")?;
-        if selected_ids.len() != batch || selected_log_probabilities.len() != batch {
-            return Err(Error::Generation(format!(
-                "backend returned {} token IDs and {} log probabilities for batch size {batch}",
-                selected_ids.len(),
-                selected_log_probabilities.len()
-            )));
-        }
-
-        let mut still_active = Vec::new();
-        still_active.try_reserve_exact(batch).map_err(|_| {
-            Error::Generation(format!(
-                "failed to allocate active-row mask for batch size {batch}"
-            ))
-        })?;
-        for sequence in 0..batch {
-            if tracker.finish_reason(sequence)?.is_some() {
-                still_active.push(false);
-                continue;
-            }
-            let token = selected_ids
-                .get(sequence)
-                .copied()
-                .ok_or_else(|| Error::Generation("selected token batch became ragged".into()))?;
-            let token = u32::try_from(token).map_err(|_| {
-                Error::Generation(format!(
-                    "backend selected token {token} outside the u32 token-ID domain"
-                ))
-            })?;
-            let log_probability = selected_log_probabilities
-                .get(sequence)
-                .copied()
-                .ok_or_else(|| {
-                    Error::Generation("selected log-probability batch became ragged".into())
-                })?;
-            if !log_probability.is_finite() {
-                return Err(Error::Generation(format!(
-                    "sequence {sequence} produced non-finite selected log probability {log_probability}"
-                )));
-            }
-            let step = tracker.generated(sequence)?.len();
-            let finish_reason = tracker.push(sequence, token)?.cloned();
-            log_probabilities
-                .get_mut(sequence)
-                .ok_or_else(|| Error::Generation("log-probability batch became ragged".into()))?
-                .push(log_probability);
-            on_token(GenerationToken {
-                sequence,
-                step,
-                token_id: token,
-                log_probability,
-                finish_reason: finish_reason.clone(),
-            })?;
-            still_active.push(finish_reason.is_none());
-        }
-
+        history.record(&selected_ids, &rows.emitted)?;
         if tracker.all_finished() {
             break;
         }
 
-        let decode_mask = bool_tensor_from_values(still_active.clone(), [batch, 1], &device);
+        let decode_mask = bool_tensor_from_values(rows.still_active.clone(), [batch, 1], &device);
         let decode_ids = token_ids
             .reshape([batch, 1])
             .mask_fill(decode_mask.clone().bool_not(), padding);
-        history = Tensor::cat(vec![history, decode_ids.clone()], 1);
-        history_mask = Tensor::cat(vec![history_mask, decode_mask.clone()], 1);
         let position_ids = next_positions
             .as_ref()
             .map(|positions| position_column::<B>(positions, &device));
@@ -230,24 +199,108 @@ where
             &options,
         )?;
         if let Some(positions) = &mut next_positions {
-            advance_positions(positions, &still_active)?;
+            advance_positions(positions, &rows.still_active)?;
         }
         logits = neutralize_inactive_logits(
-            extract_last_logits(output.logits, batch, request.vocabulary_size)?,
-            &still_active,
+            step_logits(output.logits, batch, vocabulary_size)?,
+            &rows.still_active,
         )?;
     }
 
     finish_output(tracker, prompt_lengths, log_probabilities)
 }
 
+/// Extracts one step's `[batch, vocabulary]` logits and promotes half precision to F32.
+///
+/// See [`upcast_half_precision`] for why processing runs in at least F32.
+fn step_logits<B: Backend>(
+    logits: Tensor<B, 3>,
+    batch: usize,
+    vocabulary_size: usize,
+) -> Result<Tensor<B, 2>> {
+    let logits = extract_last_logits(logits, batch, vocabulary_size, MODEL_LOGITS)?;
+    Ok(upcast_half_precision(logits))
+}
+
+/// Rows that emitted a token in one step, and rows that remain active after it.
+struct StepRows {
+    /// Rows that were active before the step and therefore emitted a token.
+    emitted: Vec<bool>,
+    /// Rows still unfinished after the step; only these are decoded next.
+    still_active: Vec<bool>,
+}
+
+/// Records one step's selected tokens for every unfinished row and streams them.
+///
+/// Rows that finished earlier are skipped: their selections come from
+/// neutralized logits and carry no meaning. An active row with a non-finite
+/// selected log probability aborts generation before that token is emitted.
+fn emit_step<F>(
+    tracker: &mut GenerationTracker,
+    selected_ids: &[u32],
+    selected_log_probabilities: &[f64],
+    log_probabilities: &mut [Vec<f64>],
+    on_token: &mut F,
+) -> Result<StepRows>
+where
+    F: FnMut(GenerationToken) -> Result<()>,
+{
+    let batch = tracker.batch_size();
+    if selected_ids.len() != batch
+        || selected_log_probabilities.len() != batch
+        || log_probabilities.len() != batch
+    {
+        return Err(Error::Generation(format!(
+            "step metadata has {} token IDs, {} log probabilities, and {} output rows for batch size {batch}",
+            selected_ids.len(),
+            selected_log_probabilities.len(),
+            log_probabilities.len()
+        )));
+    }
+    let mut rows = StepRows {
+        emitted: metadata::vec_with_capacity(batch, "emitted-row flags")?,
+        still_active: metadata::vec_with_capacity(batch, "active-row flags")?,
+    };
+    for sequence in 0..batch {
+        if tracker.finish_reason(sequence)?.is_some() {
+            rows.emitted.push(false);
+            rows.still_active.push(false);
+            continue;
+        }
+        let token = selected_ids[sequence];
+        let log_probability = selected_log_probabilities[sequence];
+        if !log_probability.is_finite() {
+            return Err(Error::Generation(format!(
+                "sequence {sequence} produced non-finite selected log probability {log_probability}"
+            )));
+        }
+        let step = tracker.generated(sequence)?.len();
+        let finish_reason = tracker.push(sequence, token)?.cloned();
+        log_probabilities[sequence].push(log_probability);
+        on_token(GenerationToken {
+            sequence,
+            step,
+            token_id: token,
+            log_probability,
+            finish_reason: finish_reason.clone(),
+        })?;
+        rows.emitted.push(true);
+        rows.still_active.push(finish_reason.is_none());
+    }
+    Ok(rows)
+}
+
 /// Prefills a prompt in bounded physical-column chunks and retains each row's latest logits.
 ///
 /// Rectangular batches can place the final valid token in different chunks.
-/// Every chunk is therefore evaluated for validation and cache semantics, but
-/// an inactive row cannot overwrite logits produced by its most recent active
-/// chunk. The generation coordinator owns and drops `state` on any later error,
-/// so a multi-call prefill cannot expose a partially initialized session.
+/// A chunk in which every row is padding contributes nothing and is skipped:
+/// its logits would be discarded and its cache effect is a no-op. A chunk in
+/// which only some rows are active goes through `decode`, whose contract
+/// treats inactive rows as cache no-ops, while fully dense chunks keep each
+/// architecture's optimized `prefill`. An inactive row never overwrites the
+/// logits of its most recent active chunk. The coordinator owns and drops
+/// `state` on any later error, so a multi-call prefill cannot expose a
+/// partially initialized session.
 #[allow(clippy::too_many_arguments)]
 fn prefill_prompt<B, M>(
     model: &M,
@@ -274,9 +327,7 @@ where
     if chunk_size >= sequence {
         return Ok(model.prefill(prompt, state, options)?.logits);
     }
-    let expected_mask_values = batch
-        .checked_mul(sequence)
-        .ok_or_else(|| Error::Generation("prompt mask element count overflows usize".into()))?;
+    let expected_mask_values = metadata::rectangle_size(batch, sequence, "prompt mask")?;
     if prompt_valid.len() != expected_mask_values {
         return Err(Error::Generation(format!(
             "prompt mask contains {} entries, expected {expected_mask_values}",
@@ -288,7 +339,13 @@ where
     let mut latest_logits: Option<Tensor<B, 3>> = None;
     let mut start = 0;
     while start < sequence {
-        let end = start.saturating_add(chunk_size).min(sequence);
+        let end = prefill_chunk_end(start, chunk_size, sequence);
+        let active = chunk_activity(prompt_valid, batch, sequence, start, end);
+        let call = chunk_call(&active);
+        if call == ChunkCall::Skip {
+            start = end;
+            continue;
+        }
         let token_ids = prompt.token_ids.clone().slice([0..batch, start..end]);
         let token_mask = prompt
             .token_mask
@@ -298,30 +355,9 @@ where
             .position_ids
             .as_ref()
             .map(|positions| positions.clone().slice([0..batch, start..end]));
-        let mut active = Vec::new();
-        active.try_reserve_exact(batch).map_err(|_| {
-            Error::Generation(format!(
-                "failed to allocate active-row metadata for batch size {batch}"
-            ))
-        })?;
-        for row in 0..batch {
-            let row_start = row
-                .checked_mul(sequence)
-                .and_then(|offset| offset.checked_add(start))
-                .ok_or_else(|| Error::Generation("prompt row offset overflows usize".into()))?;
-            let row_end = row_start
-                .checked_add(end - start)
-                .ok_or_else(|| Error::Generation("prompt row end overflows usize".into()))?;
-            let row_mask = prompt_valid.get(row_start..row_end).ok_or_else(|| {
-                Error::Generation("prompt chunk mask falls outside its rectangular input".into())
-            })?;
-            active.push(row_mask.iter().any(|&valid| valid));
-        }
         // Architecture prefill contracts reject a completely inactive row,
-        // whereas decode explicitly treats it as a cache no-op. A ragged
-        // physical chunk therefore uses the decode entry point; dense chunks
-        // retain each architecture's optimized prefill implementation.
-        let output = if active.iter().all(|&row_active| row_active) {
+        // whereas decode explicitly treats it as a cache no-op.
+        let output = if call == ChunkCall::Prefill {
             model.prefill(
                 CausalLmInput {
                     token_ids,
@@ -344,7 +380,7 @@ where
         };
         if output.logits.dims() != [batch, 1, vocabulary_size] {
             return Err(Error::shape(
-                "generation.model_logits",
+                MODEL_LOGITS,
                 format!("[{batch}, 1, {vocabulary_size}] for prefill chunk {start}..{end}"),
                 format!("{:?}", output.logits.dims()),
             ));
@@ -397,39 +433,44 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
             request.cache.sequence_count()
         )));
     }
-
-    let prompt_valid = match &request.prompt.token_mask {
-        Some(mask) => {
-            if mask.as_tensor().dims() != [batch, sequence] {
-                return Err(Error::shape(
-                    "generation.prompt.token_mask",
-                    format!("[{batch}, {sequence}]"),
-                    format!("{:?}", mask.as_tensor().dims()),
-                ));
-            }
-            tensor_bool_values(mask.as_tensor().clone(), "prompt token mask")?
-        }
-        None => {
-            let count = batch.checked_mul(sequence).ok_or_else(|| {
-                Error::Generation("prompt mask element count overflows usize".into())
-            })?;
-            let mut valid = Vec::new();
-            valid.try_reserve_exact(count).map_err(|_| {
-                Error::Generation(format!(
-                    "failed to allocate implicit prompt mask with {count} entries"
-                ))
-            })?;
-            valid.resize(count, true);
-            valid
-        }
-    };
-    let prompt_lengths = prompt_lengths(&prompt_valid, batch, sequence)?;
-    let maximum_prompt = prompt_lengths.iter().copied().max().ok_or_else(|| {
-        Error::Generation("non-empty prompt unexpectedly had no batch rows".into())
-    })?;
-    let required_capacity = maximum_prompt
-        .checked_add(request.generation.max_new_tokens.saturating_sub(1))
-        .ok_or_else(|| Error::Generation("required cache capacity overflows usize".into()))?;
+    if let Some(mask) = &request.prompt.token_mask
+        && mask.as_tensor().dims() != [batch, sequence]
+    {
+        return Err(Error::shape(
+            "generation.prompt.token_mask",
+            format!("[{batch}, {sequence}]"),
+            format!("{:?}", mask.as_tensor().dims()),
+        ));
+    }
+    if let Some(positions) = &request.prompt.position_ids
+        && positions.dims() != [batch, sequence]
+    {
+        return Err(Error::shape(
+            "generation.prompt.position_ids",
+            format!("[{batch}, {sequence}]"),
+            format!("{:?}", positions.dims()),
+        ));
+    }
+    // One transfer reads the mask together with any explicit positions.
+    let metadata::HostGrid {
+        valid: prompt_valid,
+        values: prompt_positions,
+    } = metadata::read_grid(
+        request
+            .prompt
+            .token_mask
+            .as_ref()
+            .map(|mask| mask.as_tensor().clone()),
+        request.prompt.position_ids.clone(),
+        batch,
+        sequence,
+        "prompt mask and positions",
+    )?;
+    let prompt_lengths = metadata::nonempty_row_lengths(&prompt_valid, batch, sequence, "prompt")?;
+    let maximum_prompt = prompt_lengths.iter().copied().max().unwrap_or(0);
+    let required_capacity =
+        required_cache_capacity(maximum_prompt, request.generation.max_new_tokens)
+            .ok_or_else(|| Error::Generation("required cache capacity overflows usize".into()))?;
     if request.cache.capacity() < required_capacity {
         return Err(Error::Generation(format!(
             "cache capacity {} is smaller than the required {required_capacity} for a {maximum_prompt}-token prompt and {} generated tokens",
@@ -438,26 +479,18 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
         )));
     }
 
-    let next_positions = match &request.prompt.position_ids {
-        Some(positions) => {
-            if positions.dims() != [batch, sequence] {
-                return Err(Error::shape(
-                    "generation.prompt.position_ids",
-                    format!("[{batch}, {sequence}]"),
-                    format!("{:?}", positions.dims()),
-                ));
-            }
-            let values = tensor_i64_values(positions.clone(), "prompt position IDs")?;
-            Some(next_explicit_positions(
+    let next_positions = prompt_positions
+        .map(|values| {
+            metadata::next_positions(
                 &values,
                 &prompt_valid,
                 batch,
                 sequence,
                 request.generation.max_new_tokens,
-            )?)
-        }
-        None => None,
-    };
+                "prompt",
+            )
+        })
+        .transpose()?;
 
     Ok(PreparedRequest {
         batch,
@@ -467,207 +500,24 @@ fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<P
     })
 }
 
-/// Counts true entries in each rectangular prompt row and rejects empty rows.
-fn prompt_lengths(valid: &[bool], batch: usize, sequence: usize) -> Result<Vec<usize>> {
-    let expected = batch
-        .checked_mul(sequence)
-        .ok_or_else(|| Error::Generation("prompt element count overflows usize".into()))?;
-    if valid.len() != expected {
-        return Err(Error::Generation(format!(
-            "prompt mask contains {} entries, expected {expected}",
-            valid.len()
-        )));
-    }
-    let mut lengths = Vec::new();
-    lengths.try_reserve_exact(batch).map_err(|_| {
-        Error::Generation(format!(
-            "failed to allocate prompt lengths for batch size {batch}"
-        ))
-    })?;
-    for (row, values) in valid.chunks_exact(sequence).enumerate() {
-        let length = values.iter().filter(|&&value| value).count();
-        if length == 0 {
-            return Err(Error::Generation(format!(
-                "prompt row {row} has no valid tokens"
-            )));
-        }
-        lengths.push(length);
-    }
-    Ok(lengths)
-}
-
-/// Finds the next position after each row's last valid explicit position.
-fn next_explicit_positions(
-    positions: &[i64],
-    valid: &[bool],
-    batch: usize,
-    sequence: usize,
-    max_new_tokens: usize,
-) -> Result<Vec<i64>> {
-    let expected = batch
-        .checked_mul(sequence)
-        .ok_or_else(|| Error::Generation("position element count overflows usize".into()))?;
-    if positions.len() != expected || valid.len() != expected {
-        return Err(Error::Generation(format!(
-            "position metadata is not rectangular: {} positions and {} mask entries for {expected} prompt slots",
-            positions.len(),
-            valid.len()
-        )));
-    }
-    let additional = i64::try_from(max_new_tokens.saturating_sub(1)).map_err(|_| {
-        Error::Generation("max_new_tokens exceeds the signed position domain".into())
-    })?;
-    let mut next = Vec::new();
-    next.try_reserve_exact(batch).map_err(|_| {
-        Error::Generation(format!(
-            "failed to allocate explicit positions for batch size {batch}"
-        ))
-    })?;
-    for row in 0..batch {
-        let offset = row
-            .checked_mul(sequence)
-            .ok_or_else(|| Error::Generation("position row offset overflows usize".into()))?;
-        let row_positions = positions
-            .get(offset..offset + sequence)
-            .ok_or_else(|| Error::Generation("position rows became ragged".into()))?;
-        let row_valid = valid
-            .get(offset..offset + sequence)
-            .ok_or_else(|| Error::Generation("position-mask rows became ragged".into()))?;
-        let last = row_positions
-            .iter()
-            .zip(row_valid)
-            .rev()
-            .find_map(|(&position, &is_valid)| is_valid.then_some(position))
-            .ok_or_else(|| Error::Generation(format!("prompt row {row} has no valid position")))?;
-        if last < 0 {
-            return Err(Error::Generation(format!(
-                "prompt row {row} has negative last valid position {last}"
-            )));
-        }
-        let maximum = last.checked_add(additional).ok_or_else(|| {
-            Error::Generation(format!("explicit positions overflow for prompt row {row}"))
-        })?;
-        if maximum > i64::from(i32::MAX) {
-            return Err(Error::Generation(format!(
-                "explicit position {maximum} for prompt row {row} exceeds Burn's portable signed index range"
-            )));
-        }
-        next.push(last + 1);
-    }
-    Ok(next)
-}
-
-/// Converts model output `[batch, 1, vocabulary]` into processor input.
-fn extract_last_logits<B: Backend>(
-    logits: Tensor<B, 3>,
-    batch: usize,
-    vocabulary_size: usize,
-) -> Result<Tensor<B, 2>> {
-    let dimensions = logits.dims();
-    if dimensions != [batch, 1, vocabulary_size] {
-        return Err(Error::shape(
-            "generation.model_logits",
-            format!("[{batch}, 1, {vocabulary_size}]"),
-            format!("{dimensions:?}"),
-        ));
-    }
-    Ok(logits.squeeze_dim::<2>(1))
-}
-
 /// Replaces ignored rows with finite scores before backend-wide sampling math.
 ///
 /// Architecture implementations define inactive decode outputs as ignorable,
 /// not necessarily finite. Neutralizing those rows prevents a NaN produced by
-/// one finished sequence from contaminating fused batched reductions.
+/// one finished sequence from contaminating fused batched reductions. A step
+/// in which every row is active returns the logits untouched.
 fn neutralize_inactive_logits<B: Backend>(
     logits: Tensor<B, 2>,
     active: &[bool],
 ) -> Result<Tensor<B, 2>> {
-    let [batch, vocabulary] = logits.dims();
+    let [batch, _] = logits.dims();
     if active.len() != batch {
         return Err(Error::Generation(format!(
             "active-row count {} does not match logits batch {batch}",
             active.len()
         )));
     }
-    let device = logits.device();
-    let valid =
-        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
-    Ok(logits.mask_fill(valid.bool_not(), 0.0))
-}
-
-/// Copies a small Boolean metadata tensor to the host with error context.
-fn tensor_bool_values<B: Backend>(tensor: Tensor<B, 2, Bool>, label: &str) -> Result<Vec<bool>> {
-    crate::architecture::tensor_bool_values(tensor, label)
-}
-
-/// Copies a small integer metadata tensor to the host with error context.
-fn tensor_i64_values<B: Backend, const D: usize>(
-    tensor: Tensor<B, D, Int>,
-    label: &str,
-) -> Result<Vec<i64>> {
-    tensor
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })?
-        .to_vec::<B::IntElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<i64>())
-                .collect()
-        })
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })
-}
-
-/// Copies selected log probabilities using their runtime storage dtype.
-///
-/// Burn backends may execute F16/BF16 tensors even when their default
-/// `FloatElem` is F32. Reading with that associated type would reject valid
-/// mixed-precision output. Only the already-selected `[batch]` values cross
-/// the device boundary here; the vocabulary logits remain on the backend.
-fn tensor_f64_values<B: Backend>(tensor: Tensor<B, 1>, label: &str) -> Result<Vec<f64>> {
-    let data = tensor.try_into_data().map_err(|error| {
-        Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-    })?;
-    host_float_data_f64(data, label)
-}
-
-/// Converts floating host storage directly to F64 without a lower-precision stage.
-///
-/// F16, BF16, F32, and Flex32 storage have exact F64 representations; existing
-/// F64 values therefore retain their precision too. Typed borrowed slices validate byte
-/// alignment and length without allocating a second source buffer. Quantized
-/// or integer payloads are not log probabilities and fail contextually rather
-/// than being reinterpreted or dequantized.
-pub(super) fn host_float_data_f64(mut data: TensorData, label: &str) -> Result<Vec<f64>> {
-    // Burn's Flex32 is F32 host storage with a reduced-precision compute policy.
-    // Normalizing its tag is lossless and moves ownership without cloning bytes;
-    // unlike `iter`, the checked typed slice below reports malformed storage.
-    if data.dtype == DType::Flex32 {
-        data.dtype = DType::F32;
-    }
-    match data.dtype {
-        DType::F16 => float_slice_f64::<f16>(&data, label),
-        DType::BF16 => float_slice_f64::<bf16>(&data, label),
-        DType::F32 => float_slice_f64::<f32>(&data, label),
-        DType::F64 => float_slice_f64::<f64>(&data, label),
-        dtype => Err(Error::BackendCapability(format!(
-            "failed to read {label} from backend: unsupported probability dtype {dtype:?}"
-        ))),
-    }
-}
-
-/// Borrows a validated concrete float representation and promotes its values.
-fn float_slice_f64<E: Element>(data: &TensorData, label: &str) -> Result<Vec<f64>> {
-    data.as_slice::<E>()
-        .map(|values| values.iter().map(|&value| value.elem::<f64>()).collect())
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })
+    Ok(super::zero_inactive_rows(logits, active))
 }
 
 /// Creates one explicit decode-position column on the selected backend.
@@ -679,6 +529,11 @@ fn position_column<B: Backend>(positions: &[i64], device: &B::Device) -> Tensor<
 }
 
 /// Advances positions only for rows that committed a decode token.
+///
+/// The request preflight (`metadata::next_positions`) guarantees every
+/// position sent during `max_new_tokens - 1` decode steps fits `i32`, so the
+/// checked increment cannot fail for a validated request. The per-row update
+/// is the Verus-verified [`advance_active_positions`].
 fn advance_positions(positions: &mut [i64], active: &[bool]) -> Result<()> {
     if positions.len() != active.len() {
         return Err(Error::Generation(format!(
@@ -687,26 +542,8 @@ fn advance_positions(positions: &mut [i64], active: &[bool]) -> Result<()> {
             active.len()
         )));
     }
-    for (row, (position, is_active)) in positions.iter_mut().zip(active).enumerate() {
-        if *is_active {
-            *position = position.checked_add(1).ok_or_else(|| {
-                Error::Generation(format!("explicit position overflow for row {row}"))
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// Allocates a fallible vector of empty per-sequence rows.
-fn empty_rows<T>(batch: usize, label: &str) -> Result<Vec<Vec<T>>> {
-    let mut rows = Vec::new();
-    rows.try_reserve_exact(batch).map_err(|_| {
-        Error::Generation(format!(
-            "failed to allocate {label} rows for batch size {batch}"
-        ))
-    })?;
-    rows.resize_with(batch, Vec::new);
-    Ok(rows)
+    advance_active_positions(positions, active)
+        .map_err(|row| Error::Generation(format!("explicit position overflow for row {row}")))
 }
 
 /// Combines tracker tokens, probabilities, and prompt lengths into public output.
@@ -721,12 +558,7 @@ fn finish_output(
             "generation result metadata has inconsistent batch dimensions".into(),
         ));
     }
-    let mut sequences = Vec::new();
-    sequences.try_reserve_exact(batch).map_err(|_| {
-        Error::Generation(format!(
-            "failed to allocate completed output for batch size {batch}"
-        ))
-    })?;
+    let mut sequences = metadata::vec_with_capacity(batch, "completed output rows")?;
     for sequence in 0..batch {
         let token_ids = tracker.generated(sequence)?.to_vec();
         let probabilities = log_probabilities

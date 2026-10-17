@@ -29,6 +29,8 @@
 mod checkpoint;
 mod load;
 pub mod model;
+/// Dependency-free hybrid layer schedule and cache-slot planning (Verus-verified).
+pub(crate) mod schedule;
 
 pub use checkpoint::{
     MuseGlimmerCheckpointContract, MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource,
@@ -42,8 +44,8 @@ pub use model::{
 use serde::{Deserialize, Serialize};
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
-    positive_finite, probability, token_ids,
+    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, layer_count,
+    model_type, nonzero, positive_finite, probability, token_ids,
 };
 
 /// Attention implementation selected for a Muse Glimmer decoder layer.
@@ -82,11 +84,16 @@ pub struct MuseGlimmerTextConfig {
     pub hidden_activation: String,
     /// Maximum indexed context length.
     pub max_position_embeddings: usize,
-    /// New-weight initialization standard deviation.
+    /// Upstream initialization standard deviation; validated as positive and
+    /// finite, but never read.
+    ///
+    /// Fresh linear and embedding weights use Burn's default initializers,
+    /// and every RMS norm starts at unit effective scale: zero offsets for the
+    /// `1 + weight` sublayer norms and ones for the final norm.
     pub initializer_range: f64,
     /// Epsilon in pre-sublayer RMS normalization.
     pub rms_norm_eps: f64,
-    /// Whether generation maintains KV caches.
+    /// Hugging Face generation hint; ignored here, where callers own [`MuseGlimmerDecodeState`].
     pub use_cache: bool,
     /// Whether token embedding and LM head share parameters.
     pub tie_word_embeddings: bool,
@@ -95,7 +102,7 @@ pub struct MuseGlimmerTextConfig {
     pub rope_parameters: Option<RopeParameters>,
     /// Whether attention projections include bias.
     pub attention_bias: bool,
-    /// Attention probability dropout.
+    /// Attention probability dropout; inference rejects any nonzero value.
     pub attention_dropout: f64,
     /// Local receptive-field width of sliding layers.
     pub sliding_window: Option<usize>,
@@ -159,13 +166,18 @@ impl Default for MuseGlimmerTextConfig {
 
 impl MuseGlimmerTextConfig {
     /// Produces the documented backward-counted three-sliding/one-full schedule.
+    ///
+    /// The derived schedule (`schedule::derived_global_layers`, verified in
+    /// `verus/deepseek_muse.rs`) makes layer `i` global exactly when
+    /// `(n - 1 - i) mod 4 = 0`, `ceil(n / 4)` of the `n` layers.
     pub fn resolved_layer_types(&self) -> Vec<MuseGlimmerLayerType> {
         if !self.layer_types.is_empty() {
             return self.layer_types.clone();
         }
-        (0..self.num_hidden_layers)
-            .map(|index| {
-                if (self.num_hidden_layers - 1 - index).is_multiple_of(4) {
+        schedule::derived_global_layers(self.num_hidden_layers)
+            .into_iter()
+            .map(|global| {
+                if global {
                     MuseGlimmerLayerType::FullAttention
                 } else {
                     MuseGlimmerLayerType::SlidingAttention
@@ -174,16 +186,32 @@ impl MuseGlimmerTextConfig {
             .collect()
     }
 
+    /// Returns the global RoPE base: `rope_parameters.rope_theta`, else Transformers' default.
+    ///
+    /// The reference (`MuseGlimmerTextConfig.__post_init__` and its rotary
+    /// embedding) reads `rope_parameters["rope_theta"]`, which Transformers'
+    /// `RotaryEmbeddingConfigMixin` fills with its `default_theta` of
+    /// `10_000` when absent. Validation, the default per-layer schedule, and
+    /// the rotary translator all use this one resolver.
+    #[must_use]
+    pub fn global_rope_theta(&self) -> f64 {
+        self.rope_parameters
+            .as_ref()
+            .and_then(|rope| rope.rope_theta)
+            .unwrap_or(super::config::DEFAULT_ROPE_THETA)
+    }
+
     /// Produces per-layer theta, setting NoPE full-attention layers to zero.
+    ///
+    /// The reference uses each entry only as a RoPE/NoPE switch and rotates
+    /// every RoPE layer with [`Self::global_rope_theta`]; the derived default
+    /// schedule therefore repeats the global theta. Explicit nonzero entries
+    /// that differ from it are honored as an experiment extension.
     pub fn resolved_layer_rope_theta(&self) -> Vec<f64> {
         if !self.layer_rope_theta.is_empty() {
             return self.layer_rope_theta.clone();
         }
-        let global_theta = self
-            .rope_parameters
-            .as_ref()
-            .and_then(|rope| rope.rope_theta)
-            .unwrap_or(10_000.0);
+        let global_theta = self.global_rope_theta();
         self.resolved_layer_types()
             .iter()
             .map(|kind| match kind {
@@ -226,6 +254,9 @@ impl Validate for MuseGlimmerTextConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before `resolved_layer_types` and `resolved_layer_rope_theta`
+        // derive one entry per layer.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
         divisible(
             FAMILY,
             "num_attention_heads",
@@ -301,7 +332,7 @@ impl Validate for MuseGlimmerTextConfig {
                 FAMILY,
                 self.head_dim,
                 self.max_position_embeddings,
-                Some(500_000.0),
+                Some(self.global_rope_theta()),
             )?;
         token_ids(
             FAMILY,

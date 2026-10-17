@@ -1,0 +1,836 @@
+//! Standalone block construction, option wiring, connectivity, and encoder-direction contracts.
+
+use burn::{
+    module::Module,
+    tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+};
+
+use super::*;
+use crate::{
+    Error,
+    architecture::{
+        AttentionOptions, AttentionSpec, FeedForwardSpec, Mamba2Spec, MixerSpec, MlaSpec,
+        NormalizationSpec, OutputGateActivation, PositionEncodingSpec, RopeScaling, ScoreScale,
+        SlidingWindowSpec,
+    },
+    attention::{AttentionOutputGate, ProjectionBias, QueryKeyNormScope},
+    experiment::{AttentionPolicy, EncoderContext},
+    models::custom::test_support::{
+        DeterministicParameters, TestBackend, attention, layer as block, rms,
+    },
+};
+
+/// Device used by every block fixture.
+type Device = <TestBackend as BackendTypes>::Device;
+
+/// Deterministic `[1, tokens, 8]` hidden states.
+fn hidden(tokens: usize, device: &Device) -> Tensor<TestBackend, 3> {
+    let values = (0..tokens * 8)
+        .map(|index| ((index * 7 + 3) as f32 * 0.31).sin())
+        .collect::<Vec<_>>();
+    Tensor::from_data(TensorData::new(values, [1, tokens, 8]), device)
+}
+
+/// Builds a deterministic standalone block of width eight.
+fn built(spec: &DecoderLayerSpec, device: &Device) -> ModularLayer<TestBackend> {
+    ModularLayer::<TestBackend>::init(spec, 8, None, device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default())
+}
+
+/// Attention with every option, so tests can toggle one choice at a time.
+fn options_mixer(attention: AttentionSpec, options: AttentionOptions) -> MixerSpec {
+    MixerSpec::AttentionWithOptions { attention, options }
+}
+
+/// A two-head GQA topology with RoPE over the full head.
+fn rope_attention() -> AttentionSpec {
+    AttentionSpec {
+        query_heads: 2,
+        key_value_heads: 1,
+        head_dim: 4,
+        query_key_norm: true,
+        output_gate: true,
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 4,
+            scaling: RopeScaling::None,
+        },
+    }
+}
+
+/// Returns the grouped-query module of an attention block.
+fn grouped(layer: &ModularLayer<TestBackend>) -> &ModularAttention<TestBackend> {
+    match &layer.mixer {
+        ModularMixer::Attention(attention) => attention,
+        other => panic!("expected grouped-query attention, found {other:?}"),
+    }
+}
+
+/// CUS-6: an encoder-addressed sliding block errors instead of seeing future keys.
+///
+/// The past-only window would otherwise combine with bidirectional encoder
+/// attention into an asymmetric "future-unbounded" window. An explicit
+/// bidirectional policy replaces the structural window and is accepted.
+#[test]
+fn encoder_sliding_blocks_require_an_explicit_policy() {
+    let device = Default::default();
+    let spec = block(MixerSpec::SlidingAttention(SlidingWindowSpec {
+        attention: rope_attention(),
+        window: 2,
+    }));
+    let layer = built(&spec, &device);
+    let context = ExecutionContext::contiguous(1, 6, &device).unwrap();
+    let mut hooks = Hooks::new();
+    let probe = hooks.capture(Layer::encoder(0).residual_pre());
+    let error = layer
+        .run_with_hooks(hidden(6, &device), &context, Layer::encoder(0), &mut hooks)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("past-only")),
+        "{error:?}"
+    );
+    assert!(
+        hooks.get(&probe).is_err(),
+        "validation precedes every callback"
+    );
+    let explicit = context
+        .clone()
+        .with_attention(AttentionPolicy::bidirectional());
+    layer
+        .run(hidden(6, &device), &explicit, Layer::encoder(0))
+        .unwrap();
+    // The same block is ordinary causal sliding attention in a decoder stack.
+    layer
+        .run(hidden(6, &device), &context, Layer::decoder(0))
+        .unwrap();
+}
+
+/// Chunked-local attention is symmetric, so encoder blocks accept it and see future keys in-chunk.
+#[test]
+fn chunked_local_encoder_blocks_see_only_their_chunk() {
+    let device = Default::default();
+    let spec = block(options_mixer(
+        rope_attention(),
+        AttentionOptions {
+            connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+            ..AttentionOptions::default()
+        },
+    ));
+    let layer = built(&spec, &device);
+    let context = ExecutionContext::contiguous(1, 4, &device).unwrap();
+    let base = hidden(4, &device);
+    let clean = layer
+        .run(base.clone(), &context, Layer::encoder(0))
+        .unwrap();
+    // Changing token 1 (chunk 0) changes token 0 (same chunk, future key) but not tokens 2, 3.
+    let edited = base.clone().slice_assign(
+        [0..1, 1..2, 0..8],
+        Tensor::<TestBackend, 3>::ones([1, 1, 8], &device),
+    );
+    let changed = layer.run(edited, &context, Layer::encoder(0)).unwrap();
+    let delta = (changed - clean)
+        .abs()
+        .sum_dim(2)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(
+        delta[0] > 1e-6,
+        "future key inside the chunk is visible: {delta:?}"
+    );
+    assert!(
+        delta[2] < 1e-6 && delta[3] < 1e-6,
+        "other chunk is unaffected: {delta:?}"
+    );
+}
+
+/// Every attention option reaches the shared grouped-query module.
+#[test]
+fn attention_options_configure_the_shared_module() {
+    let device = Default::default();
+    let options = AttentionOptions {
+        score_scale: ScoreScale::Fixed { value: 0.25 },
+        logit_softcap: Some(30.0),
+        projection_bias: ProjectionBias::query_key_value_only(),
+        query_key_norm_scope: QueryKeyNormScope::FullWidth,
+        output_gate_activation: OutputGateActivation::Silu,
+        ..AttentionOptions::default()
+    };
+    let layer = built(&block(options_mixer(rope_attention(), options)), &device);
+    let module = &grouped(&layer).attention;
+    assert_eq!(module.scale, Some(0.25));
+    assert_eq!(module.softcap, Some(30.0));
+    assert_eq!(module.output_gate, AttentionOutputGate::Silu);
+    assert_eq!(module.query_key_norm_scope, QueryKeyNormScope::FullWidth);
+    assert!(module.q_proj.bias.is_some() && module.k_proj.bias.is_some());
+    assert!(module.v_proj.bias.is_some() && module.o_proj.bias.is_none());
+    assert_eq!(module.query_norm.as_ref().unwrap().weight.dims(), [8]);
+    assert!(module.sinks.is_none());
+
+    let sinks = AttentionOptions {
+        attention_sinks: true,
+        ..AttentionOptions::default()
+    };
+    let layer = built(&block(options_mixer(rope_attention(), sinks)), &device);
+    assert_eq!(
+        grouped(&layer).attention.sinks.as_ref().unwrap().dims(),
+        [2]
+    );
+    let output = layer
+        .run(
+            hidden(3, &device),
+            &ExecutionContext::contiguous(1, 3, &device).unwrap(),
+            Layer::decoder(0),
+        )
+        .unwrap();
+    assert_eq!(output.dims(), [1, 3, 8]);
+}
+
+/// CUS-7: the score scale is explicit, and the legacy `Auto` keeps old specs unchanged.
+#[test]
+fn score_scales_resolve_per_mixer_and_position() {
+    let device = Default::default();
+    let t5 = PositionEncodingSpec::T5RelativeBias {
+        buckets: 8,
+        max_distance: 16,
+        bidirectional: false,
+    };
+    let with_t5 = AttentionSpec {
+        position: t5.clone(),
+        ..rope_attention()
+    };
+    let scale_of = |mixer: MixerSpec| grouped(&built(&block(mixer), &device)).attention.scale;
+    // Compact T5 specs keep their historical unscaled logits.
+    assert_eq!(scale_of(MixerSpec::Attention(with_t5.clone())), Some(1.0));
+    // Explicit choices are independent of the position encoding.
+    for (scale, expected) in [
+        (ScoreScale::InverseSqrtHeadDim, None),
+        (ScoreScale::Unscaled, Some(1.0)),
+        (ScoreScale::Fixed { value: 0.5 }, Some(0.5)),
+    ] {
+        let options = AttentionOptions {
+            score_scale: scale,
+            ..AttentionOptions::default()
+        };
+        assert_eq!(scale_of(options_mixer(with_t5.clone(), options)), expected);
+        assert_eq!(scale_of(options_mixer(rope_attention(), options)), expected);
+    }
+    assert_eq!(scale_of(MixerSpec::Attention(rope_attention())), None);
+
+    let mla = |score_scale| MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 4,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: None,
+        position: t5.clone(),
+        score_scale,
+        connectivity: AttentionConnectivity::Global,
+    };
+    let latent_scale =
+        |score_scale| match &built(&block(MixerSpec::Mla(mla(score_scale))), &device).mixer {
+            ModularMixer::Mla(mla) => mla.attention.config.softmax_scale,
+            other => panic!("expected MLA, found {other:?}"),
+        };
+    assert!((latent_scale(ScoreScale::Auto) - 8f64.sqrt().recip()).abs() < 1e-15);
+    assert_eq!(latent_scale(ScoreScale::Unscaled), 1.0);
+    assert_eq!(latent_scale(ScoreScale::Fixed { value: 0.2 }), 0.2);
+}
+
+/// Attention-only blocks compute `x + mixer(x)` and expose no MLP point or parameter.
+#[test]
+fn attention_only_blocks_skip_the_feed_forward_branch() {
+    let device = Default::default();
+    let mut spec = block(attention(PositionEncodingSpec::None));
+    spec.feed_forward = FeedForwardSpec::None;
+    let layer = built(&spec, &device);
+    assert!(layer.feed_forward.is_absent());
+    let points = layer.activation_points(Layer::decoder(0));
+    assert!(!points.contains(&Layer::decoder(0).mlp_input().info()));
+    assert!(points.contains(&Layer::decoder(0).residual_post().info()));
+    let mut with_mlp = block(attention(PositionEncodingSpec::None));
+    with_mlp.feed_forward = FeedForwardSpec::Dense(crate::architecture::DenseFeedForwardSpec {
+        intermediate_size: 4,
+        activation: crate::architecture::Activation::Silu,
+        bias: false,
+    });
+    assert!(built(&with_mlp, &device).num_params() > layer.num_params());
+
+    let context = ExecutionContext::contiguous(1, 3, &device).unwrap();
+    let input = hidden(3, &device);
+    let mut hooks = Hooks::new();
+    let mixed = hooks.capture(Layer::decoder(0).attention_output());
+    let output = layer
+        .run_with_hooks(input.clone(), &context, Layer::decoder(0), &mut hooks)
+        .unwrap();
+    output.into_data().assert_approx_eq::<f32>(
+        &(input + hooks.get(&mixed).unwrap()).into_data(),
+        Tolerance::absolute(1e-6),
+    );
+}
+
+/// Standalone errors name the block's own fields, not a fictitious `layers[0]`.
+#[test]
+fn standalone_block_errors_name_block_fields() {
+    let device: Device = Default::default();
+    let mut invalid = block(attention(PositionEncodingSpec::None));
+    invalid.mixer = MixerSpec::Attention(AttentionSpec {
+        key_value_heads: 3,
+        ..rope_attention()
+    });
+    let error = ModularLayer::<TestBackend>::init(&invalid, 8, None, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "layer.mixer.key_value_heads"),
+        "{error:?}"
+    );
+    let error = ModularLayer::<TestBackend>::init(
+        &block(attention(PositionEncodingSpec::None)),
+        0,
+        None,
+        &device,
+    )
+    .unwrap_err();
+    assert!(matches!(&error, Error::Configuration { field, .. } if field == "layer.hidden_size"));
+    let cross = CrossAttentionSpec::new(0, 4);
+    let error = ModularLayer::<TestBackend>::init(
+        &block(attention(PositionEncodingSpec::None)),
+        8,
+        Some(&cross),
+        &device,
+    )
+    .unwrap_err();
+    assert!(matches!(&error, Error::Configuration { field, .. } if field == "cross_attention"));
+}
+
+/// Unexecutable mechanisms fail before allocation; a Mamba-2 block builds from the shared kernel.
+#[test]
+fn unexecutable_blocks_report_capabilities() {
+    let device: Device = Default::default();
+    let mut gated = block(attention(PositionEncodingSpec::None));
+    gated.residual = ResidualTopology::Gated;
+    let error = ModularLayer::<TestBackend>::init(&gated, 8, None, &device).unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)), "{error:?}");
+
+    let mamba = |convolution_kernel| {
+        block(MixerSpec::Mamba2(Mamba2Spec {
+            heads: 2,
+            head_dim: 4,
+            state_dim: 4,
+            convolution_kernel,
+            group_size: 1,
+        }))
+    };
+    ModularLayer::<TestBackend>::init(&mamba(4), 8, None, &device)
+        .expect("Mamba-2 blocks execute through the shared kernel");
+    // The spec accepts a width-one convolution, which the Mamba-2 kernel cannot run.
+    let error = ModularLayer::<TestBackend>::init(&mamba(1), 8, None, &device).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "layer.mixer.mamba2"),
+        "{error:?}"
+    );
+}
+
+/// A standalone decoder block with cross-attention reads the context's encoder source.
+#[test]
+fn standalone_cross_attention_reads_the_context_source() {
+    let device = Default::default();
+    let spec = block(attention(PositionEncodingSpec::None));
+    let cross = CrossAttentionSpec {
+        options: AttentionOptions {
+            projection_bias: ProjectionBias::uniform(true),
+            ..AttentionOptions::default()
+        },
+        ..CrossAttentionSpec::new(2, 4)
+    };
+    let layer = ModularLayer::<TestBackend>::init(&spec, 8, Some(&cross), &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    assert!(
+        layer
+            .cross_attention
+            .as_ref()
+            .unwrap()
+            .attention
+            .o_proj
+            .bias
+            .is_some()
+    );
+    let context = ExecutionContext::contiguous(1, 2, &device).unwrap();
+    let missing = layer
+        .run(hidden(2, &device), &context, Layer::decoder(0))
+        .unwrap_err();
+    assert!(missing.to_string().contains("context.encoder"));
+    let source = EncoderContext {
+        hidden: hidden(3, &device),
+        positions: Tensor::<TestBackend, 1, Int>::arange(0..3, &device).reshape([1, 3]),
+        token_mask: None,
+    };
+    let with_source = context.with_encoder(source).unwrap();
+    let mut hooks = Hooks::new();
+    let read = hooks.capture(Layer::decoder(0).cross_attention_output());
+    layer
+        .run_with_hooks(
+            hidden(2, &device),
+            &with_source,
+            Layer::decoder(0),
+            &mut hooks,
+        )
+        .unwrap();
+    assert_eq!(hooks.get(&read).unwrap().dims(), [1, 2, 8]);
+}
+
+/// Zero-centered RMS norms reach both the block norm and the Q/K norm.
+#[test]
+fn zero_centered_norms_reach_query_key_normalization() {
+    let device = Default::default();
+    let mut spec = block(MixerSpec::Attention(rope_attention()));
+    spec.mixer_norm = NormalizationSpec::Rms {
+        epsilon: 1e-5,
+        zero_centered: true,
+    };
+    spec.feed_forward_norm = rms();
+    let layer = ModularLayer::<TestBackend>::init(&spec, 8, None, &device).unwrap();
+    let norm = grouped(&layer).attention.query_norm.as_ref().unwrap();
+    assert!(norm.zero_centered);
+    assert_eq!(norm.epsilon, 1e-5);
+}
+
+/// A two-pair differential-attention topology with full-head RoPE.
+fn differential() -> crate::architecture::DifferentialAttentionSpec {
+    crate::architecture::DifferentialAttentionSpec {
+        query_heads: 4,
+        key_value_heads: 2,
+        head_dim: 2,
+        lambda_init: crate::attention::depth_lambda_init(1),
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 2,
+            scaling: RopeScaling::None,
+        },
+        connectivity: AttentionConnectivity::Global,
+        bias: false,
+    }
+}
+
+/// The differential mixer equals the shared kernel applied to the rotated normalized input.
+#[test]
+fn differential_attention_blocks_run_the_shared_kernel() {
+    use crate::position::{RopeConfig, apply_rotary, rotary_angles};
+
+    let device = Default::default();
+    let layer = built(
+        &block(MixerSpec::DifferentialAttention(differential())),
+        &device,
+    );
+    let ModularMixer::Differential(mixer) = &layer.mixer else {
+        panic!("expected differential attention");
+    };
+    assert_eq!(
+        mixer.attention.lambda_init,
+        crate::attention::depth_lambda_init(1)
+    );
+    assert_eq!(mixer.attention.norm_epsilon, 1e-6);
+    let context = ExecutionContext::contiguous(1, 5, &device).unwrap();
+    let mut hooks = Hooks::new();
+    let normalized = hooks.capture(Layer::decoder(0).attention_input());
+    let mixed = hooks.capture(Layer::decoder(0).attention_output());
+    layer
+        .run_with_hooks(hidden(5, &device), &context, Layer::decoder(0), &mut hooks)
+        .unwrap();
+    let mut projection = mixer
+        .attention
+        .project_self(hooks.get(&normalized).unwrap())
+        .unwrap();
+    let rope = RopeConfig::new(2, 2, 10_000.0, crate::position::RopeScaling::None).unwrap();
+    let angles = rotary_angles(rope, context.positions.clone(), 5).unwrap();
+    (projection.query, projection.key) =
+        apply_rotary(projection.query, projection.key, &angles).unwrap();
+    let expected = mixer.attention.attend(projection, None, true).unwrap();
+    hooks
+        .get(&mixed)
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+    assert!(
+        !layer
+            .activation_points(Layer::decoder(0))
+            .contains(&Layer::decoder(0).self_attention().scores().info())
+    );
+}
+
+/// Differential attention rejects additive biases and encoder sliding windows, but accepts chunks.
+#[test]
+fn differential_attention_reports_unsupported_connectivity() {
+    let device = Default::default();
+    let layer = built(
+        &block(MixerSpec::DifferentialAttention(differential())),
+        &device,
+    );
+    let context = ExecutionContext::contiguous(1, 4, &device).unwrap();
+    let biased = context
+        .clone()
+        .with_attention(AttentionPolicy::causal().with_bias(Tensor::zeros([1, 1, 4, 4], &device)));
+    let error = layer
+        .run(hidden(4, &device), &biased, Layer::decoder(0))
+        .unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)), "{error:?}");
+    let sliding = built(
+        &block(MixerSpec::DifferentialAttention(
+            crate::architecture::DifferentialAttentionSpec {
+                connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+                ..differential()
+            },
+        )),
+        &device,
+    );
+    assert!(
+        sliding
+            .run(hidden(4, &device), &context, Layer::encoder(0))
+            .is_err()
+    );
+    sliding
+        .run(hidden(4, &device), &context, Layer::decoder(0))
+        .unwrap();
+    let chunked = built(
+        &block(MixerSpec::DifferentialAttention(
+            crate::architecture::DifferentialAttentionSpec {
+                connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+                ..differential()
+            },
+        )),
+        &device,
+    );
+    chunked
+        .run(hidden(4, &device), &context, Layer::encoder(0))
+        .unwrap();
+}
+
+/// The mixer enum as recorded before differential attention existed.
+#[derive(Module, Debug)]
+#[allow(clippy::large_enum_variant)]
+enum LegacyMixer<B: burn::tensor::backend::Backend> {
+    /// Grouped-query attention.
+    Attention(
+        /// Attention parameters.
+        ModularAttention<B>,
+    ),
+    /// Latent attention.
+    Mla(
+        /// Latent-attention parameters.
+        crate::models::custom::mixer::ModularMla<B>,
+    ),
+    /// Gated DeltaNet.
+    DeltaNet(
+        /// Recurrent parameters.
+        crate::delta_net::GatedDeltaNet<B>,
+    ),
+}
+
+/// The feed-forward enum as recorded before ungated, clamped, and absent branches existed.
+#[derive(Module, Debug)]
+#[allow(clippy::large_enum_variant)]
+enum LegacyFeedForward<B: burn::tensor::backend::Backend> {
+    /// Gated MLP.
+    Dense(
+        /// Gated MLP parameters.
+        crate::feed_forward::GatedFeedForward<B>,
+    ),
+    /// Routed experts.
+    MixtureOfExperts(
+        /// Expert parameters.
+        crate::moe::SparseMoe<B>,
+    ),
+}
+
+/// The block layout recorded by earlier releases.
+#[derive(Module, Debug)]
+struct LegacyLayer<B: burn::tensor::backend::Backend> {
+    /// Sequence mixer.
+    mixer: LegacyMixer<B>,
+    /// Feed-forward branch.
+    feed_forward: LegacyFeedForward<B>,
+    /// Mixer-side norms.
+    mixer_norm: NormLayout<B>,
+    /// Feed-forward-side norms.
+    feed_forward_norm: NormLayout<B>,
+    /// Cross-attention branch.
+    cross_attention: Option<ModularAttention<B>>,
+    /// Cross-attention norms.
+    cross_attention_norm: Option<NormLayout<B>>,
+    /// Residual width.
+    #[module(skip)]
+    hidden_size: usize,
+}
+
+/// Binary records written with the earlier enum layout load into today's blocks.
+///
+/// Binary recorders store enum variants by index, so the DeltaNet mixer and
+/// the expert branch (whose indices would shift if new variants were
+/// inserted before them) are the cases that matter.
+#[test]
+fn legacy_binary_block_records_still_load() {
+    use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+
+    let device: Device = Default::default();
+    let mut spec = block(MixerSpec::DeltaNet {
+        key_heads: 1,
+        value_heads: 2,
+        key_head_dim: 4,
+        value_head_dim: 4,
+        convolution_kernel: 2,
+    });
+    spec.feed_forward =
+        FeedForwardSpec::MixtureOfExperts(crate::architecture::MixtureOfExpertsSpec {
+            routed_experts: 2,
+            experts_per_token: 1,
+            shared_experts: 1,
+            expert_intermediate_size: 4,
+            activation: crate::architecture::Activation::Silu,
+            renormalize_selected: true,
+            routed_scale: 1.0,
+            routing: crate::moe::RoutingPolicy::default(),
+            shared_expert_gate: false,
+            expert_bias: false,
+        });
+    let source = built(&spec, &device);
+    let context = ExecutionContext::contiguous(1, 3, &device).unwrap();
+    let expected = source
+        .run(hidden(3, &device), &context, Layer::decoder(0))
+        .unwrap();
+    let ModularLayer {
+        mixer: ModularMixer::DeltaNet(delta),
+        feed_forward: ModularFeedForward::MixtureOfExperts(experts),
+        mixer_norm,
+        feed_forward_norm,
+        cross_attention,
+        cross_attention_norm,
+        hidden_size,
+    } = source
+    else {
+        panic!("expected a DeltaNet block with experts");
+    };
+    let legacy = LegacyLayer {
+        mixer: LegacyMixer::DeltaNet(delta),
+        feed_forward: LegacyFeedForward::MixtureOfExperts(experts),
+        mixer_norm,
+        feed_forward_norm,
+        cross_attention,
+        cross_attention_norm,
+        hidden_size,
+    };
+    let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+    let bytes = recorder.record(legacy.into_record(), ()).unwrap();
+    let fresh = ModularLayer::<TestBackend>::init(&spec, 8, None, &device).unwrap();
+    let loaded = fresh.load_record(recorder.load(bytes, &device).unwrap());
+    // The record restores identical values, but a loaded projection can be a
+    // transposed view where the source was contiguous. x86 AVX GEMM kernels
+    // then sum in another order and differ by an F32 unit in the last place
+    // (about 1e-7 relative); a lost or misassigned variant differs at O(1).
+    loaded
+        .run(hidden(3, &device), &context, Layer::decoder(0))
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-6, 1e-7));
+}
+
+/// A latent-attention block with full-head RoPE over its rotary channels.
+fn mla_block() -> DecoderLayerSpec {
+    block(MixerSpec::Mla(MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 4,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: None,
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 4,
+            scaling: RopeScaling::None,
+        },
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::Global,
+    }))
+}
+
+/// Standalone blocks reject foreign widths and self-attention biases of another dtype.
+#[test]
+fn standalone_blocks_check_width_and_self_attention_bias_dtype() {
+    use burn::tensor::DType;
+    let device = Default::default();
+    let layer = built(&block(MixerSpec::Attention(rope_attention())), &device);
+    assert_eq!(layer.hidden_size(), 8);
+    let context = ExecutionContext::contiguous(1, 3, &device).unwrap();
+    let narrow = Tensor::<TestBackend, 3>::zeros([1, 3, 7], &device);
+    match layer.run(narrow, &context, Layer::decoder(0)).unwrap_err() {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => assert_eq!(
+            (tensor.as_str(), expected.as_str(), actual.as_str()),
+            ("custom.layer.hidden", "[batch, token, 8]", "[1, 3, 7]")
+        ),
+        other => panic!("expected a width error, found {other:?}"),
+    }
+    let half_bias =
+        context
+            .clone()
+            .with_attention(AttentionPolicy::causal().with_bias(
+                Tensor::<TestBackend, 4>::zeros([1, 1, 3, 3], &device).cast(DType::F16),
+            ));
+    let error = layer
+        .run(hidden(3, &device), &half_bias, Layer::decoder(0))
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, reason }
+            if field == "custom.attention.bias" && reason == "score bias must use the hidden-state dtype"),
+        "{error:?}"
+    );
+}
+
+/// Latent attention validates hidden states against its compressed key/value projection.
+#[test]
+fn standalone_latent_attention_blocks_validate_their_projection_dtype() {
+    use burn::tensor::DType;
+    let device = Default::default();
+    let layer = built(&mla_block(), &device);
+    let context = ExecutionContext::contiguous(1, 3, &device).unwrap();
+    let output = layer
+        .run(hidden(3, &device), &context, Layer::decoder(0))
+        .unwrap();
+    assert_eq!(output.dims(), [1, 3, 8]);
+    // Global latent attention is a valid bidirectional encoder block.
+    let encoded = layer
+        .run(hidden(3, &device), &context, Layer::encoder(0))
+        .unwrap();
+    assert_eq!(encoded.dims(), [1, 3, 8]);
+    let error = layer
+        .run(
+            hidden(3, &device).cast(DType::F16),
+            &context,
+            Layer::decoder(0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "custom.layer.hidden"),
+        "{error:?}"
+    );
+}
+
+/// Cross-attention policies and sources are checked against the block before any callback.
+#[test]
+fn standalone_cross_attention_checks_policy_and_source_contracts() {
+    use burn::tensor::DType;
+    let device = Default::default();
+    let spec = block(attention(PositionEncodingSpec::None));
+    let cross = CrossAttentionSpec::new(2, 4);
+    let layer = ModularLayer::<TestBackend>::init(&spec, 8, Some(&cross), &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    let source = |width: usize| EncoderContext {
+        hidden: Tensor::<TestBackend, 3>::ones([1, 3, width], &device),
+        positions: Tensor::<TestBackend, 1, Int>::arange(0..3, &device).reshape([1, 3]),
+        token_mask: None,
+    };
+    let context = ExecutionContext::contiguous(1, 2, &device)
+        .unwrap()
+        .with_encoder(source(8))
+        .unwrap();
+    let run = |context: &ExecutionContext<TestBackend>| {
+        layer
+            .run(hidden(2, &device), context, Layer::decoder(0))
+            .unwrap_err()
+    };
+    // A bias plane that cannot broadcast to `[1, 2, 2, 3]` cross scores.
+    let misshapen = context.clone().with_cross_attention(
+        AttentionPolicy::bidirectional().with_bias(Tensor::zeros([1, 1, 2, 4], &device)),
+    );
+    assert!(
+        matches!(&run(&misshapen), Error::Shape { tensor, .. } if tensor == "attention.bias"),
+        "{:?}",
+        run(&misshapen)
+    );
+    let half = context.clone().with_layer_cross_attention(
+        Layer::decoder(0),
+        AttentionPolicy::bidirectional()
+            .with_bias(Tensor::<TestBackend, 4>::zeros([1, 1, 2, 3], &device).cast(DType::F16)),
+    );
+    assert!(
+        matches!(&run(&half), Error::Configuration { field, .. } if field == "custom.cross_attention.bias"),
+        "{:?}",
+        run(&half)
+    );
+    let wide = ExecutionContext::contiguous(1, 2, &device)
+        .unwrap()
+        .with_encoder(source(6))
+        .unwrap();
+    assert!(
+        matches!(&run(&wide), Error::Configuration { field, reason }
+            if field == "custom.cross_attention" && reason.contains("source adapter")),
+        "{:?}",
+        run(&wide)
+    );
+}
+
+/// Precision changes reach every attention kind and leave recurrent mixers untouched.
+#[test]
+fn attention_precision_reaches_differential_and_cross_attention_only() {
+    let device = Default::default();
+    let mut differential_layer = built(
+        &block(MixerSpec::DifferentialAttention(differential())),
+        &device,
+    );
+    differential_layer.set_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+    match &differential_layer.mixer {
+        ModularMixer::Differential(differential) => assert_eq!(
+            differential.attention.precision_mode,
+            AttentionPrecisionMode::EagerFp32Softmax
+        ),
+        other => panic!("expected differential attention, found {other:?}"),
+    }
+    let mut cross_layer = ModularLayer::<TestBackend>::init(
+        &mla_block(),
+        8,
+        Some(&CrossAttentionSpec::new(2, 4)),
+        &device,
+    )
+    .unwrap();
+    let before = cross_layer.activation_points(Layer::decoder(0));
+    cross_layer.set_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+    assert_eq!(
+        cross_layer
+            .cross_attention
+            .as_ref()
+            .unwrap()
+            .attention
+            .precision_mode,
+        AttentionPrecisionMode::EagerFp32Softmax
+    );
+    let after = cross_layer.activation_points(Layer::decoder(0));
+    let cross = Layer::decoder(0).cross_attention();
+    assert!(!before.contains(&cross.scores().info()));
+    assert!(after.contains(&cross.scores().info()));
+    for recurrent in [
+        MixerSpec::DeltaNet {
+            key_heads: 1,
+            value_heads: 2,
+            key_head_dim: 4,
+            value_head_dim: 4,
+            convolution_kernel: 2,
+        },
+        MixerSpec::Mamba2(Mamba2Spec {
+            heads: 2,
+            head_dim: 4,
+            state_dim: 8,
+            convolution_kernel: 2,
+            group_size: 1,
+        }),
+    ] {
+        let mut layer = built(&block(recurrent), &device);
+        let points = layer.activation_points(Layer::decoder(0));
+        layer.set_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+        assert_eq!(layer.activation_points(Layer::decoder(0)), points);
+    }
+}

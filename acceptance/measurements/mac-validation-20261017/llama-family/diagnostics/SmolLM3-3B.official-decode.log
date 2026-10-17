@@ -1,0 +1,42 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:49:44Z load { 1.55 2.48 3.96 }
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/official_decode.py /Volumes/T9/models/HuggingFaceTB/SmolLM3-3B /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/SmolLM3-3B-official-decode cpu-float32-eager cpu-bfloat16-eager cpu-bfloat16-sdpa mps-bfloat16-eager mps-bfloat16-sdpa
+cpu-float32-eager: 32 decode steps from position 5: cached vs stateless max |d| = 2.393723e-04 at step 28; steps above 0.5: 0; median 1.0538e-04
+cpu-float32-eager: per-step cached-vs-stateless 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0002 0.0002 0.0001 0.0001 0.0001 0.0002 0.0001 0.0001 0.0002 0.0001 0.0001 0.0001 0.0001 0.0002 0.0001 0.0001 0.0001
+cpu-float32-eager: per-step max |d| to F32, cached 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0001 0.0002 0.0002 0.0001 0.0001 0.0001 0.0002 0.0001 0.0001 0.0002 0.0001 0.0001 0.0001 0.0001 0.0002 0.0001 0.0001 0.0001
+cpu-float32-eager: per-step max |d| to F32, stateless 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000
+cpu-bfloat16-eager: 32 decode steps from position 5: cached vs stateless max |d| = 8.750000e-01 at step 7; steps above 0.5: 9; median 4.2969e-01
+cpu-bfloat16-eager: per-step cached-vs-stateless 0.0000 0.0000 0.0000 0.0000 0.0000 0.3125 0.2656 0.8750 0.3438 0.2695 0.5000 0.5156 0.6875 0.3281 0.6562 0.4375 0.5000 0.5000 0.4062 0.3203 0.3750 0.5000 0.6875 0.6250 0.5000 0.6250 0.4219 0.6016 0.3750 0.7500 0.5000 0.3750
+cpu-bfloat16-eager: per-step max |d| to F32, cached 0.2377 0.2049 0.2454 0.3353 0.3744 0.2754 0.4433 0.2646 0.3120 0.3603 0.3166 0.3224 0.4301 0.3680 0.6011 0.4183 0.4170 0.4182 0.6019 0.5267 0.3636 0.3765 0.3507 0.6120 0.4867 0.4733 0.4271 0.2825 0.3358 0.5108 0.4472 0.4156
+cpu-bfloat16-eager: per-step max |d| to F32, stateless 0.2377 0.2049 0.2454 0.3353 0.3744 0.2149 0.4290 0.7262 0.3201 0.3586 0.2879 0.2964 0.6304 0.4033 0.5231 0.4018 0.3332 0.3791 0.5840 0.5836 0.3765 0.5437 0.5736 0.4939 0.3977 0.5533 0.4139 0.6050 0.4145 0.5349 0.3365 0.3008
+cpu-bfloat16-sdpa: 32 decode steps from position 5: cached vs stateless max |d| = 8.125000e-01 at step 23; steps above 0.5: 8; median 4.3750e-01
+cpu-bfloat16-sdpa: per-step cached-vs-stateless 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.1875 0.3281 0.2812 0.4375 0.3125 0.6250 0.5000 0.6250 0.5625 0.4688 0.5000 0.5938 0.4688 0.5000 0.3916 0.4375 0.8125 0.6250 0.5000 0.3750 0.3350 0.5625 0.6250 0.3750 0.4375
+cpu-bfloat16-sdpa: per-step max |d| to F32, cached 0.2963 0.3203 0.3430 0.1647 0.2427 0.2185 0.4879 0.3106 0.3377 0.2414 0.3370 0.2590 0.4596 0.4960 0.4289 0.4130 0.3805 0.4463 0.4050 0.4314 0.4577 0.3935 0.4140 0.5781 0.4493 0.4522 0.5591 0.3452 0.7410 0.5077 0.4524 0.4069
+cpu-bfloat16-sdpa: per-step max |d| to F32, stateless 0.2963 0.3203 0.3430 0.1647 0.2427 0.2185 0.4879 0.2796 0.2794 0.3507 0.4767 0.2552 0.5064 0.5808 0.6173 0.4521 0.4289 0.6179 0.5861 0.2951 0.3309 0.3133 0.5009 0.5364 0.3839 0.4991 0.4310 0.3491 0.4066 0.5021 0.4010 0.3394
+mps-bfloat16-eager: 32 decode steps from position 5: cached vs stateless max |d| = 7.500000e-01 at step 16; steps above 0.5: 15; median 5.0000e-01
+mps-bfloat16-eager: per-step cached-vs-stateless 0.3750 0.4375 0.2207 0.3750 0.3125 0.3281 0.5625 0.4062 0.2969 0.2861 0.5625 0.4531 0.6250 0.4375 0.4375 0.5156 0.7500 0.4688 0.5493 0.6250 0.3750 0.5938 0.5625 0.5000 0.6250 0.7500 0.6250 0.5391 0.6562 0.5625 0.5000 0.3750
+mps-bfloat16-eager: per-step max |d| to F32, cached 0.2700 0.1977 0.2164 0.3978 0.3007 0.3727 0.4771 0.2733 0.2077 0.2257 0.4767 0.2964 0.4596 0.6845 0.4442 0.3983 0.4994 0.3705 0.5432 0.4289 0.3127 0.4536 0.5761 0.7031 0.6015 0.4358 0.5560 0.5928 0.5165 0.5060 0.4009 0.3500
+mps-bfloat16-eager: per-step max |d| to F32, stateless 0.2488 0.5205 0.3038 0.2121 0.3962 0.3476 0.3808 0.3129 0.3342 0.2849 0.3311 0.4046 0.5992 0.6721 0.5231 0.4854 0.4290 0.4427 0.3546 0.4558 0.3702 0.3384 0.3935 0.5865 0.5042 0.5805 0.4235 0.3011 0.3820 0.5719 0.4414 0.3426
+mps-bfloat16-sdpa: 32 decode steps from position 5: cached vs stateless max |d| = 7.500000e-01 at step 22; steps above 0.5: 7; median 4.8438e-01
+mps-bfloat16-sdpa: per-step cached-vs-stateless 0.3438 0.2812 0.1953 0.3750 0.2812 0.3125 0.2812 0.3750 0.4062 0.3438 0.5000 0.5000 0.4375 0.3750 0.4688 0.4375 0.5312 0.5625 0.6562 0.6250 0.5000 0.5000 0.7500 0.5000 0.5000 0.5000 0.5000 0.3828 0.6250 0.5312 0.5000 0.3750
+mps-bfloat16-sdpa: per-step max |d| to F32, cached 0.3073 0.3652 0.2455 0.2249 0.3090 0.2339 0.4771 0.3086 0.3657 0.3371 0.3214 0.3039 0.4706 0.4835 0.6407 0.3910 0.4935 0.4551 0.3999 0.4416 0.4931 0.4371 0.4810 0.6554 0.3910 0.4485 0.3982 0.4123 0.4053 0.4691 0.3824 0.3120
+mps-bfloat16-sdpa: per-step max |d| to F32, stateless 0.2377 0.2909 0.1906 0.4163 0.3067 0.2678 0.3919 0.3572 0.2891 0.2873 0.4142 0.3564 0.4596 0.4268 0.5715 0.3743 0.3919 0.3834 0.6712 0.3735 0.3526 0.3959 0.4946 0.4636 0.4521 0.4070 0.6185 0.3688 0.5823 0.4662 0.3867 0.3892
+       23.24 real        57.11 user        14.79 sys
+         18767429632  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1950714  page reclaims
+                  44  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 124  voluntary context switches
+              681216  involuntary context switches
+        612445490209  instructions retired
+        249048680300  cycles elapsed
+         12724103272  peak memory footprint
+== exit=0 wall=23s

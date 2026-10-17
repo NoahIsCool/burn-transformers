@@ -1,0 +1,792 @@
+//! Real Llama-family checkpoints against locally generated Transformers references.
+//!
+//! The reference bundle comes from `scripts/generate_causal_lm_reference.py`
+//! (Transformers `AutoModelForCausalLM`, F32 or F64, CPU, eager attention): token IDs
+//! of a few fixed prompts, every prompt position's full-vocabulary logits as
+//! raw little-endian F32, and a 32-token cached greedy continuation of the
+//! first prompt with each step's top-2 margin. These tests are ignored by
+//! default and need two local directories:
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_DIR=/path/to/checkpoint \
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/path/to/reference-bundle \
+//! cargo test --release --test llama_family_artifacts -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! Weights are loaded with the strict automatic loader and cast to F32 while
+//! streaming (BF16 to F32 is exact, as in the reference), unless
+//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects half precision (see
+//! [Half precision](#half-precision)). Each test runs on Flex; with the
+//! `metal` feature the same checks also run on Metal, and with the `cuda`
+//! feature on CUDA (see [CUDA](#cuda)). The pairing of checkpoint and bundle
+//! is verified through the bundle's SHA-256 of `config.json`.
+//!
+//! # Tolerance
+//!
+//! Both sides compute in F32 with different GEMM blockings, so logits drift
+//! by accumulated rounding through every layer. Measured on Flex/F32 over
+//! every prompt position (logits of magnitude 10 to 30): SmolLM-135M at
+//! `1d461723` deviates by at most `9.1e-5`, Qwen3-4B at `531c80e2` by at most
+//! `1.4e-4`, and both reproduce all 32 greedy tokens. The default absolute
+//! tolerance, [`DEFAULT_TOLERANCE`] = `1e-3`, leaves about seven times that
+//! drift for deeper checkpoints; set `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` to
+//! override it for other checkpoints or backends. The greedy check feeds the
+//! reference's tokens back, so every step continues the reference's prefix,
+//! and compares each step whose reference top-2 margin exceeds twice the
+//! tolerance; a closer race is a tie at that tolerance and is skipped rather
+//! than ending the comparison (`tests/support/backend_numerics.rs`, "Greedy
+//! ties"). At least [`DEFAULT_MIN_GREEDY`] = 2 tokens must be compared, so a
+//! bundle whose continuation is all ties fails instead of passing vacuously;
+//! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` overrides the minimum.
+//!
+//! # Checkpoints with massive activations
+//!
+//! An F32 reference carries its own rounding error, so a deviation measures
+//! the sum of two implementations' errors. Generate the bundle with
+//! `--dtype float64` to measure this crate's error alone. Qwen2-7B at
+//! `453ed157` is the case that needs it: its first-position hidden states
+//! reach magnitudes near 7,000, where one F32 unit in the last place is about
+//! `5e-4`. Against an F64 bundle (checked against an independent
+//! layer-streamed F64 forward, agreeing within `2.1e-5`), the largest
+//! first-position deviations on its third prompt are `1.6e-3` for F32
+//! Transformers itself, `1.8e-4` for Flex, and `1.9e-3` for Metal; every other
+//! position stays below `3e-4` on both backends, and both reproduce all 32
+//! greedy tokens. The Metal figure is ordinary F32 accumulation order,
+//! comparable to (slightly above) the reference implementation's own `1.6e-3`,
+//! so that checkpoint's Metal run uses
+//! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. `meta-llama/Llama-3.1-8B` at
+//! `d04e592bb4f6aa9cfee91e2e20afa771667e1d4b` (Llama 3 RoPE scaling; bundle
+//! `config.json` SHA-256
+//! `54acfad3cffe057640904ca8a1e83525e6551c70c7a04c641f5a9eda0bbf64bd`) stays
+//! within `7.6e-5` on both backends against an F32 bundle.
+//!
+//! # Half precision
+//!
+//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects the stored dtype: `f32` (the
+//! default; everything above), `bf16` (the Flex profile), or `f16` (the Metal
+//! profile); any other value panics. A half-precision run is judged against
+//! the same F32 bundle (the F64 one for Qwen2-7B): against a half-precision
+//! bundle the two implementations' roundings would add, as the gpt-oss gate
+//! found. Its bounds are not chosen here but measured from the official
+//! implementation: `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR` names the
+//! bundle's BF16 twin, written by the same script with `--dtype bfloat16` from
+//! the same checkpoint, prompts, and greedy length, and
+//! `tests/support/half_precision_calibration.rs` validates the pairing fail
+//! closed (configuration and weight digests, versions, vocabulary,
+//! truncation, prompts and token IDs, dtype labels) before the checkpoint
+//! loads. Per prompt, Transformers' own BF16 logits deviate from the F32
+//! bundle by at most `M` and on average by `μ`; this crate's logits must stay
+//! within `1.2 M` at every position and `1.2 μ` on average. The factor `1.2`
+//! is the largest ratio of a Burn half-precision statistic to the official
+//! one measured on gpt-oss-20b (`1.1725`), rounded up; that module documents
+//! its derivation and fixes it for every checkpoint. The bounds are BF16's in
+//! both profiles: no official F16 bundle can be generated, so the Metal/F16
+//! run reuses them as an upper limit that does not reflect F16's eightfold
+//! smaller rounding unit, and its pass is weaker evidence than a Flex/BF16
+//! pass (that module's F16 runs section). The cached prefill and
+//! each batched row must lie within their prompt's `1.2 M` of the bundle and
+//! within `0.5` of the stateless pass (the gpt-oss self-consistency
+//! tolerance for F16 and BF16). The greedy continuation is judged by the
+//! same teacher-forced rule as an F32 run, with prompt 0's maximum bound
+//! `1.2 M` as the tolerance: every step whose reference margin exceeds
+//! `2.4 M` is compared and every other step is skipped as a tie. Whatever
+//! the margins, the cached greedy test also checks the decode path: every
+//! decode step must lie within `0.5` of the same run's stateless pass over
+//! prompt 0 and the greedy tokens at its position, and the longest prompt,
+//! prefilled for its first quarter and then decoded token by token, must
+//! meet both bounds of its prompt at every position, as gpt-oss's cached
+//! long-prompt test does.
+//! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` is refused, because it would replace
+//! the calibration; `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` still applies.
+//!
+//! The official BF16 bundles were generated on 2026-10-17 (Transformers
+//! 5.2.0, PyTorch 2.10.0) and are recorded with their SHA-256s in
+//! `acceptance/measurements/half-precision-calibration-20261017.json`. Per
+//! prompt, they deviate from their twins by:
+//!
+//! | checkpoint | max \|Δ\| (position) | mean \|Δ\| | decisive greedy steps |
+//! | --- | --- | --- | --- |
+//! | SmolLM-135M | `1.46` (0), `1.10` (0), `1.65` (0) | `0.190`, `0.075`, `0.071` | 0 of 32 |
+//! | Qwen3-4B | `0.700` (0), `0.701` (0), `0.880` (0) | `0.078`, `0.043`, `0.054` | 26 of 32 |
+//! | SmolLM3-3B | `6.28` (0), `6.67` (0), `5.33` (0) | `0.156`, `0.079`, `0.177` | 0 of 32 |
+//! | Qwen2-7B (F64 bundle) | `8.49` (0), `6.85` (0), `10.7` (0) | `0.421`, `0.312`, `0.675` | 0 of 32 |
+//! | Llama-3.1-8B | `0.137` (4), `0.212` (5), `0.182` (7) | `0.017`, `0.022`, `0.023` | 27 of 32 |
+//!
+//! Except on Llama-3.1-8B, the largest official deviation lies at the first
+//! position, whose massive activations round worst in BF16, so the maximum
+//! bound is loose at later positions and the mean is the sharper check.
+//! Where no greedy step is decisive, the cached greedy test needs
+//! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0`, as gpt-oss's half-precision
+//! greedy tests do; that drops only the argmax floor, not the decode checks.
+//! Only the cached greedy test reads the variable, so for SmolLM-135M,
+//! SmolLM3-3B, and Qwen2-7B it can be added to the whole command below.
+//! Qwen2-7B's official BF16 run already picks another first token than its
+//! F64 bundle. The first runs of this crate against these bounds (source
+//! `53f167b`, `acceptance/measurements/mac-validation-20261017.json`) pass
+//! every Metal/F16 test of all five checkpoints and every Flex/BF16 test of
+//! Qwen2-7B and Llama-3.1-8B. Flex/BF16 fails SmolLM-135M's prompt-logit and
+//! cached greedy tests (prompt 1, position 0: `1.436` against `1.322`),
+//! SmolLM3-3B's prompt-logit test (prompt 1 mean `0.0971` against `0.0947`),
+//! and the cached decode steps of Qwen3-4B (`0.5625`) and SmolLM3-3B
+//! (`0.516`) against the `0.5` self-consistency tolerance; the record traces
+//! these to the rule's width (some of Transformers' own SDPA and MPS BF16
+//! graphs fail it too) and to the twice-rounded half-precision SiLU of
+//! `feed_forward::apply_activation`. To run the Flex/BF16 gate (set `f16`,
+//! `--features metal`, and the `metal::` tests for Metal/F16):
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16 \
+//! TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B \
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b \
+//! TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//! cargo test --release --test llama_family_artifacts -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! The official BF16 bundle takes the twin's prompts (`--prompt`, repeated in
+//! order) and greedy length; for the default prompts:
+//!
+//! ```text
+//! python3 -I scripts/generate_causal_lm_reference.py --dtype bfloat16 \
+//!   --model-dir /Volumes/T9/models/meta-llama/Llama-3.1-8B \
+//!   --output /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//!   --repository meta-llama/Llama-3.1-8B --revision d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
+//! ```
+//!
+//! `official_bf16_reference_calibrates_the_half_precision_bounds` reproduces
+//! the table from the two bundles alone. It loads no checkpoint and runs no
+//! Burn model, so its pass qualifies no Burn run:
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b \
+//! TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//! cargo test --test llama_family_artifacts -- --ignored --exact \
+//!   official_bf16_reference_calibrates_the_half_precision_bounds --nocapture
+//! ```
+//!
+//! # CUDA
+//!
+//! The `cuda` module repeats the three checks on Burn's `Cuda` backend
+//! (device 0; `CUDA_VISIBLE_DEVICES` selects the GPU), built and run on the
+//! GPU host with the CUDA toolkit available (`nvcc` at build time,
+//! `$CUDA_PATH/include` for run-time kernel compilation):
+//!
+//! ```text
+//! TRANSFORMERS_LLAMA_FAMILY_DIR=/path/to/checkpoint \
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/path/to/reference-bundle \
+//! cargo test --release --features cuda --test llama_family_artifacts cuda_ -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! Each load first probes how the device multiplies F32 matrices
+//! (`tests/support/backend_numerics.rs`). A GPU below compute capability 8.0
+//! multiplies in F32, and the defaults above apply. From compute capability
+//! 8.0 Burn 0.21 rounds F32 matrix inputs to TF32 (10-bit mantissas), which
+//! no measured default covers: an F32 run then requires
+//! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` and qualifies TF32 execution, not
+//! F32 numerics.
+//!
+//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE`, the BF16 twin, and the official
+//! calibration select and judge a half-precision run on CUDA exactly as on
+//! Flex and Metal ([Half precision](#half-precision)): `bf16` is held to the
+//! official evaluation in its own precision, `f16` to the same bounds as an
+//! upper limit. Such a run refuses `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` on
+//! every device and prints the probe's finding without acting on it: TF32
+//! rounds F32 operands, while the matrix products of these graphs take the
+//! stored F16 or BF16 tensors as operands (F32 appears only in elementwise
+//! steps and reductions such as normalization, softmax, and activation
+//! functions). That is read from the source, not measured: no CUDA run, in
+//! any dtype, has been recorded yet.
+
+#![cfg(feature = "flex")]
+
+#[path = "support/backend_numerics.rs"]
+mod backend_numerics;
+#[path = "support/half_precision_calibration.rs"]
+mod half_precision_calibration;
+
+use std::path::{Path, PathBuf};
+
+use backend_numerics::{Gap, MatmulPrecision, check_teacher_forced_greedy, checkpoint_tolerance};
+use burn::{
+    backend::Flex,
+    tensor::{Int, Tensor, TensorData, backend::Backend},
+};
+use half_precision_calibration::{
+    Calibration, HalfPrecisionGate, is_half_precision, reject_overrides, required_directory,
+    run_dtype,
+};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use transformers::{
+    AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection,
+    TokenMask,
+    cache::CacheConfig,
+    checkpoint::{DTypePolicy, LoadOptions},
+    models::AutoCausalDecodeState,
+};
+
+/// Default absolute logit tolerance; see the module documentation.
+const DEFAULT_TOLERANCE: f32 = 1e-3;
+
+/// Default minimum number of decisive greedy tokens that must be compared.
+const DEFAULT_MIN_GREEDY: usize = 2;
+
+/// One prompt of the reference bundle.
+struct Prompt {
+    /// Token IDs of the unpadded prompt.
+    tokens: Vec<i64>,
+    /// Row-major `[tokens, vocabulary]` logits.
+    logits: Vec<f32>,
+}
+
+/// A parsed reference bundle.
+struct Reference {
+    /// Vocabulary size `V`.
+    vocabulary: usize,
+    /// Prompts in bundle order.
+    prompts: Vec<Prompt>,
+    /// Greedy continuation of prompt 0 as `(token, margin)`.
+    greedy: Vec<(i64, f32)>,
+    /// SHA-256 of the configuration the bundle was generated from.
+    config_sha256: String,
+}
+
+impl Reference {
+    /// Reads and checks a bundle directory.
+    fn read(root: &Path) -> Self {
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("reference.json")).unwrap())
+                .unwrap();
+        let vocabulary = manifest["vocabulary_size"].as_u64().unwrap() as usize;
+        let prompts = manifest["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|prompt| {
+                let tokens: Vec<i64> = serde_json::from_value(prompt["token_ids"].clone()).unwrap();
+                let file = root.join(prompt["logits_file"].as_str().unwrap());
+                let bytes = std::fs::read(&file).unwrap();
+                assert_eq!(
+                    hex(&Sha256::digest(&bytes)),
+                    prompt["logits_sha256"].as_str().unwrap(),
+                    "{} is corrupted",
+                    file.display()
+                );
+                let logits: Vec<f32> = bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| f32::from_le_bytes(*chunk))
+                    .collect();
+                assert_eq!(logits.len(), tokens.len() * vocabulary);
+                Prompt { tokens, logits }
+            })
+            .collect();
+        let greedy = manifest["greedy"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| {
+                (
+                    step["token"].as_i64().unwrap(),
+                    step["margin"].as_f64().unwrap() as f32,
+                )
+            })
+            .collect();
+        Self {
+            vocabulary,
+            prompts,
+            greedy,
+            config_sha256: manifest["provenance"]["config_sha256"]
+                .as_str()
+                .unwrap()
+                .into(),
+        }
+    }
+}
+
+/// Lower-case hexadecimal digest.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Returns the checkpoint directory and the bundle directory.
+fn directories() -> (PathBuf, PathBuf) {
+    (
+        required_directory("TRANSFORMERS_LLAMA_FAMILY_DIR"),
+        required_directory("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR"),
+    )
+}
+
+/// Returns an F32 run's absolute tolerance: `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` or [`DEFAULT_TOLERANCE`].
+///
+/// [`DEFAULT_TOLERANCE`] applies only to a device of F32 `precision`; a TF32
+/// device requires `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`.
+fn f32_tolerance(precision: MatmulPrecision) -> f32 {
+    checkpoint_tolerance(
+        "TRANSFORMERS_LLAMA_FAMILY_TOLERANCE",
+        DEFAULT_TOLERANCE,
+        precision,
+    )
+}
+
+/// Returns how many decisive greedy tokens a run must compare.
+fn minimum_greedy() -> usize {
+    std::env::var("TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY")
+        .map(|value| value.parse().expect("minimum must be an integer"))
+        .unwrap_or(DEFAULT_MIN_GREEDY)
+}
+
+/// A loaded checkpoint, its bundle, its greedy tolerance, and the gate of an F16 or BF16 run.
+///
+/// The tolerance decides greedy steps ([`check_teacher_forced_greedy`]). In
+/// an F32 run it is the absolute logit tolerance and also judges every
+/// logit; in a half-precision run it is prompt 0's maximum bound
+/// ([`HalfPrecisionGate::greedy_tolerance`]), and the gate judges the logits.
+type Loaded<B> = (AutoCausalLm<B>, Reference, f32, Option<HalfPrecisionGate>);
+
+/// Loads the checkpoint in `TRANSFORMERS_LLAMA_FAMILY_DTYPE` after checking it matches the bundle.
+///
+/// The device is probed first. An F32 run (the default) resolves its
+/// tolerance from the probe ([`f32_tolerance`]), so a TF32 device without an
+/// explicit `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` fails before loading. An
+/// F16 or BF16 run refuses that variable on every device and is judged by
+/// the official calibration from `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR`,
+/// which is validated before the checkpoint loads.
+fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
+    let dtype = run_dtype("TRANSFORMERS_LLAMA_FAMILY_DTYPE");
+    let precision = MatmulPrecision::probe::<B>(device);
+    let (model_dir, reference_dir) = directories();
+    let (tolerance, half) = if is_half_precision(dtype) {
+        reject_overrides(&["TRANSFORMERS_LLAMA_FAMILY_TOLERANCE"]);
+        let official = required_directory("TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR");
+        let half = HalfPrecisionGate::new(dtype, &reference_dir, &official);
+        let tolerance = half.greedy_tolerance();
+        eprintln!(
+            "F32 matrix products use {precision:?} inputs; the {dtype:?} run is judged by the official calibration, greedy steps at {tolerance:e}"
+        );
+        (tolerance, Some(half))
+    } else {
+        let tolerance = f32_tolerance(precision);
+        eprintln!("F32 matrix products use {precision:?} inputs; tolerance {tolerance:e}");
+        (tolerance, None)
+    };
+    let reference = Reference::read(&reference_dir);
+    let config = std::fs::read(model_dir.join("config.json")).unwrap();
+    assert_eq!(
+        hex(&Sha256::digest(&config)),
+        reference.config_sha256,
+        "the bundle was generated from another config.json"
+    );
+    let options = AutoLoadOptions {
+        checkpoint: LoadOptions {
+            dtype_policy: DTypePolicy::Cast(dtype),
+            ..LoadOptions::default()
+        },
+        load_tokenizer: false,
+        ..AutoLoadOptions::default()
+    };
+    let model = AutoCausalLm::<B>::load_local(&model_dir, &options, device)
+        .expect("strict load")
+        .into_model();
+    assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
+    (model, reference, tolerance, half)
+}
+
+/// Uploads one row of token IDs.
+fn row<B: Backend>(tokens: &[i64], device: &B::Device) -> Tensor<B, 2, Int> {
+    Tensor::from_data(TensorData::new(tokens.to_vec(), [1, tokens.len()]), device)
+}
+
+/// Reads logits to the host as F32.
+fn host<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
+    tensor
+        .cast(burn::tensor::DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()
+}
+
+/// Returns the stateless last-position logits of one unpadded prompt.
+fn last_logits<B: Backend>(
+    model: &AutoCausalLm<B>,
+    tokens: &[i64],
+    device: &B::Device,
+) -> Vec<f32> {
+    let input = CausalLmInput {
+        token_ids: row::<B>(tokens, device),
+        token_mask: None,
+        position_ids: None,
+    };
+    host(
+        model
+            .forward(input, &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    )
+}
+
+/// Returns the stateless logits of one unpadded sequence at `positions`, one vocabulary-wide row per position.
+fn logits_at<B: Backend>(
+    model: &AutoCausalLm<B>,
+    tokens: &[i64],
+    positions: &[usize],
+    device: &B::Device,
+) -> Vec<f32> {
+    let input = CausalLmInput {
+        token_ids: row::<B>(tokens, device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::Positions(positions.to_vec()),
+        ..ForwardOptions::default()
+    };
+    host(model.forward(input, &options).unwrap().logits)
+}
+
+/// Returns prompt 0 followed by the bundle's teacher-forced greedy tokens.
+fn continued_prompt(reference: &Reference) -> Vec<i64> {
+    reference.prompts[0]
+        .tokens
+        .iter()
+        .copied()
+        .chain(reference.greedy.iter().map(|&(token, _)| token))
+        .collect()
+}
+
+/// Appends one token to `state` and returns the logits of its position.
+fn decode_one<B: Backend>(
+    model: &AutoCausalLm<B>,
+    state: &mut AutoCausalDecodeState<B>,
+    token: i64,
+    device: &B::Device,
+) -> Vec<f32> {
+    let next = DecodeInput {
+        token_ids: row::<B>(&[token], device),
+        position_ids: None,
+        token_mask: None,
+    };
+    host(
+        model
+            .decode(next, state, &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    )
+}
+
+/// Decodes the longest prompt token by token after a prefill of its first quarter and judges it by the half-precision rule.
+///
+/// The prefill returns the logits of each of its positions and every later
+/// position comes from one cached decode step, so the assembled
+/// `[tokens, V]` logits cover the whole prompt and must meet both of its
+/// bounds, as a stateless pass must. This bounds the decode path against
+/// the reference bundle itself, whatever the greedy margins, as gpt-oss's
+/// `check_cached_long_prompt` does.
+fn check_cached_prompt_decode<B: Backend>(
+    model: &AutoCausalLm<B>,
+    reference: &Reference,
+    half: &HalfPrecisionGate,
+    device: &B::Device,
+) {
+    let (index, prompt) = reference
+        .prompts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, prompt)| prompt.tokens.len())
+        .unwrap();
+    let length = prompt.tokens.len();
+    let prefill = (length / 4).max(1);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, length).unwrap(), 1, device)
+        .unwrap();
+    let every_position = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let input = CausalLmInput {
+        token_ids: row::<B>(&prompt.tokens[..prefill], device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut logits = host(
+        model
+            .prefill(input, &mut state, &every_position)
+            .unwrap()
+            .logits,
+    );
+    for &token in &prompt.tokens[prefill..] {
+        logits.extend(decode_one(model, &mut state, token, device));
+    }
+    half.check_prompt(
+        &format!("prompt {index} decoded after a {prefill}-token prefill"),
+        index,
+        &logits,
+        &prompt.logits,
+    );
+}
+
+/// Returns the largest absolute difference of two equally long sets of logits.
+///
+/// A non-finite value on either side counts as an infinite difference, so a
+/// NaN or infinite logit fails every tolerance (see [`Gap::measure`], which
+/// also rejects a length mismatch).
+fn gap(actual: &[f32], expected: &[f32]) -> f32 {
+    Gap::measure(actual, expected).deviation
+}
+
+/// Stateless logits at every prompt position match the reference.
+fn check_prompt_logits<B: Backend>(device: &B::Device) {
+    let (model, reference, tolerance, half) = load::<B>(device);
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    for (index, prompt) in reference.prompts.iter().enumerate() {
+        let input = CausalLmInput {
+            token_ids: row::<B>(&prompt.tokens, device),
+            token_mask: None,
+            position_ids: None,
+        };
+        let logits = host(model.forward(input, &options).unwrap().logits);
+        if let Some(half) = &half {
+            half.check_prompt(&format!("prompt {index}"), index, &logits, &prompt.logits);
+            continue;
+        }
+        let largest = gap(&logits, &prompt.logits);
+        eprintln!(
+            "prompt {index}: {} tokens, max |Δ| = {largest:e}",
+            prompt.tokens.len()
+        );
+        assert!(
+            largest <= tolerance,
+            "prompt {index}: max |Δ| = {largest:e}"
+        );
+    }
+}
+
+/// The cached greedy continuation of prompt 0 matches at every decisive step.
+///
+/// The reference's tokens are fed back, so ties are skipped rather than
+/// ending the comparison; see [`check_teacher_forced_greedy`], which decides
+/// an F32 run's steps at its tolerance and a half-precision run's at prompt
+/// 0's maximum bound. A half-precision run also checks the prefill against
+/// the stateless pass and, because few or no steps may be decisive, the
+/// decode path regardless of the margins: every decode step against the same
+/// run's stateless pass over prompt 0 and the greedy tokens, and the longest
+/// prompt decoded token by token against the bundle
+/// ([`check_cached_prompt_decode`]).
+fn check_cached_greedy<B: Backend>(device: &B::Device) {
+    let (model, reference, tolerance, half) = load::<B>(device);
+    let prompt = &reference.prompts[0];
+    let capacity = prompt.tokens.len() + reference.greedy.len();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, capacity).unwrap(), 1, device)
+        .unwrap();
+    let input = CausalLmInput {
+        token_ids: row::<B>(&prompt.tokens, device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let logits = host(
+        model
+            .prefill(input, &mut state, &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    );
+    let last = &prompt.logits[(prompt.tokens.len() - 1) * reference.vocabulary..];
+    match &half {
+        None => assert!(gap(&logits, last) <= tolerance, "cached prefill logits"),
+        Some(half) => {
+            half.check_rows("cached prefill", 0, &logits, last);
+            let stateless = last_logits(&model, &prompt.tokens, device);
+            half.check_consistency("cached prefill", &logits, &stateless);
+        }
+    }
+    // A half-precision run keeps every decode step's logits for the checks below.
+    let mut decoded = Vec::new();
+    let mut decode = |token| {
+        let logits = decode_one(&model, &mut state, token, device);
+        if half.is_some() {
+            decoded.push(logits.clone());
+        }
+        logits
+    };
+    check_teacher_forced_greedy(
+        "greedy",
+        &reference.greedy,
+        tolerance,
+        minimum_greedy(),
+        "TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY",
+        logits,
+        &mut decode,
+    );
+    let Some(half) = &half else {
+        return;
+    };
+    // The comparison decodes no token after its last step; decoding the last
+    // greedy token too gives every token of the continuation one decode step,
+    // and decode step s, fed greedy token s at position T + s, returns the
+    // stateless pass's logits at that position.
+    let Some(&(token, _)) = reference.greedy.last() else {
+        panic!("the bundle's greedy continuation is empty, so no decode step can be checked");
+    };
+    decode(token);
+    let continued = continued_prompt(&reference);
+    let positions: Vec<usize> = (prompt.tokens.len()..continued.len()).collect();
+    let stateless = logits_at(&model, &continued, &positions, device);
+    half.check_decode_steps("cached decode", prompt.tokens.len(), &decoded, &stateless);
+    check_cached_prompt_decode(&model, &reference, half, device);
+}
+
+/// All prompts in one left-padded batch reproduce each prompt's last logits.
+///
+/// A half-precision run also checks each row against the stateless pass.
+fn check_batched_prefill<B: Backend>(device: &B::Device) {
+    let (model, reference, tolerance, half) = load::<B>(device);
+    let width = reference
+        .prompts
+        .iter()
+        .map(|prompt| prompt.tokens.len())
+        .max()
+        .unwrap();
+    let rows = reference.prompts.len();
+    let mut tokens = Vec::with_capacity(rows * width);
+    let mut valid = Vec::with_capacity(rows * width);
+    for prompt in &reference.prompts {
+        let padding = width - prompt.tokens.len();
+        tokens.extend(std::iter::repeat_n(0, padding).chain(prompt.tokens.iter().copied()));
+        valid.extend(
+            std::iter::repeat_n(0_i64, padding).chain(std::iter::repeat_n(1, prompt.tokens.len())),
+        );
+    }
+    let token_mask =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(valid, [rows, width]), device).equal_elem(1);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(rows, width).unwrap(), rows, device)
+        .unwrap();
+    let input = CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(tokens, [rows, width]), device),
+        token_mask: Some(TokenMask::new(token_mask)),
+        position_ids: None,
+    };
+    let logits = host(
+        model
+            .prefill(input, &mut state, &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    );
+    for (index, prompt) in reference.prompts.iter().enumerate() {
+        let actual = &logits[index * reference.vocabulary..(index + 1) * reference.vocabulary];
+        let expected = &prompt.logits[(prompt.tokens.len() - 1) * reference.vocabulary..];
+        if let Some(half) = &half {
+            let label = format!("batched row {index}");
+            half.check_consistency(&label, actual, &last_logits(&model, &prompt.tokens, device));
+            half.check_rows(&label, index, actual, expected);
+            continue;
+        }
+        let largest = gap(actual, expected);
+        eprintln!("batched row {index}: max |Δ| = {largest:e}");
+        assert!(largest <= tolerance, "batched row {index}");
+    }
+}
+
+/// The official BF16 bundle's distance from the F32 (or F64) bundle, which sets the half-precision bounds.
+///
+/// Reads only the two bundles, validates their pairing, and prints each
+/// manifest's SHA-256, each prompt's official maximum (with its position and
+/// vocabulary entry) and mean deviation, the bounds the rule derives, and the
+/// greedy steps a half-precision run compares. No Burn model runs, so a pass
+/// qualifies no Burn run.
+#[test]
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR and _BF16_REFERENCE_DIR (bundles only)"]
+fn official_bf16_reference_calibrates_the_half_precision_bounds() {
+    let truth = required_directory("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR");
+    let official = required_directory("TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR");
+    Calibration::read(&truth, &official).report(&truth, &official);
+}
+
+/// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): every prompt position's logits.
+#[test]
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DIR and _REFERENCE_DIR"]
+fn flex_prompt_logits_match_the_reference() {
+    check_prompt_logits::<Flex<f32, i32>>(&Default::default());
+}
+
+/// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): the cached greedy continuation.
+#[test]
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DIR and _REFERENCE_DIR"]
+fn flex_cached_greedy_matches_the_reference() {
+    check_cached_greedy::<Flex<f32, i32>>(&Default::default());
+}
+
+/// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): a ragged left-padded batch of every prompt.
+#[test]
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DIR and _REFERENCE_DIR"]
+fn flex_batched_prefill_matches_the_reference() {
+    check_batched_prefill::<Flex<f32, i32>>(&Default::default());
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod metal {
+    //! Metal counterparts of the Flex checks, run serially by the integrator.
+    //!
+    //! They run in F32 unless `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects the
+    //! F16 profile (`f16`).
+
+    use burn::backend::Metal;
+
+    /// Metal: every prompt position's logits.
+    #[test]
+    #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn metal_prompt_logits_match_the_reference() {
+        super::check_prompt_logits::<Metal>(&Default::default());
+    }
+
+    /// Metal: the cached greedy continuation.
+    #[test]
+    #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn metal_cached_greedy_matches_the_reference() {
+        super::check_cached_greedy::<Metal>(&Default::default());
+    }
+
+    /// Metal: a ragged left-padded batch of every prompt.
+    #[test]
+    #[ignore = "needs Metal, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn metal_batched_prefill_matches_the_reference() {
+        super::check_batched_prefill::<Metal>(&Default::default());
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    //! CUDA counterparts of the Flex checks, run serially on the GPU host.
+    //!
+    //! They run in F32 unless `TRANSFORMERS_LLAMA_FAMILY_DTYPE` selects half
+    //! precision (`bf16` or `f16`). An F32 run on a GPU that rounds F32
+    //! matrix inputs to TF32 needs an explicit
+    //! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`; see the [module
+    //! documentation](super#cuda).
+
+    use burn::backend::Cuda;
+
+    /// CUDA: every prompt position's logits.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn cuda_prompt_logits_match_the_reference() {
+        super::check_prompt_logits::<Cuda>(&Default::default());
+    }
+
+    /// CUDA: the cached greedy continuation.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn cuda_cached_greedy_matches_the_reference() {
+        super::check_cached_greedy::<Cuda>(&Default::default());
+    }
+
+    /// CUDA: a ragged left-padded batch of every prompt.
+    #[test]
+    #[ignore = "needs CUDA, TRANSFORMERS_LLAMA_FAMILY_DIR, and _REFERENCE_DIR"]
+    fn cuda_batched_prefill_matches_the_reference() {
+        super::check_batched_prefill::<Cuda>(&Default::default());
+    }
+}

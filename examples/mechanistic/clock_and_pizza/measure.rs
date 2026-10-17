@@ -10,7 +10,9 @@ use super::model::P;
 /// Return argmax accuracy over all 59² rows of a complete `[a,b,class]` grid.
 pub fn accuracy(logits: &[f32]) -> f64 {
     let correct = logits
-        .chunks_exact(P)
+        .as_chunks::<P>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(pair, row)| {
             let prediction = row

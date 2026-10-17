@@ -11,6 +11,10 @@ use burn::tensor::DType;
 
 use crate::cache::{DecodeStateError, RingPlanError};
 
+use super::plan::{
+    AllocationViolation, PORTABLE_TENSOR_ELEMENT_LIMIT, StagedCommitViolation, WriteEndViolation,
+};
+
 /// Result returned by tensor-cache construction and mutation operations.
 pub type TensorCacheResult<T> = core::result::Result<T, TensorCacheError>;
 
@@ -53,6 +57,113 @@ pub enum TensorCacheError {
     SlidingWindowRequired {
         /// Human-readable storage mode.
         storage: &'static str,
+    },
+
+    /// A group-specific sliding window is incompatible with its storage or capacity.
+    #[error("invalid {storage} sliding window {window} for logical capacity {capacity}: {reason}")]
+    InvalidSlidingWindow {
+        /// Human-readable storage mode.
+        storage: &'static str,
+        /// Requested group window.
+        window: usize,
+        /// Logical capacity of the owning bank.
+        capacity: usize,
+        /// Violated rule.
+        reason: &'static str,
+    },
+
+    /// In-place staging was requested for storage that evicts positions.
+    #[error(
+        "in-place staging requires full storage; {storage} storage would overwrite visible slots"
+    )]
+    InPlaceStagingRequiresFullStorage {
+        /// Human-readable storage mode.
+        storage: &'static str,
+    },
+
+    /// A working read or staged write disagreed with the transaction's cursor.
+    #[error(
+        "sequence {sequence} {cursor} is {actual}, but the active transaction expects {expected}"
+    )]
+    TransactionCursorMismatch {
+        /// Affected sequence index.
+        sequence: usize,
+        /// Which cursor was checked (committed baseline or proposal start).
+        cursor: &'static str,
+        /// Value required by the active transaction.
+        expected: usize,
+        /// Value supplied by the caller.
+        actual: usize,
+    },
+
+    /// A batched append placed a row's tokens outside the input block.
+    #[error(
+        "sequence {sequence} places {count} tokens at column {column}, outside an input block of {block} columns"
+    )]
+    AppendOutsideBlock {
+        /// Affected sequence index.
+        sequence: usize,
+        /// First input column of the row.
+        column: usize,
+        /// Number of tokens of the row.
+        count: usize,
+        /// Token-axis extent of the input block.
+        block: usize,
+    },
+
+    /// A batched read plan does not describe the layer being read.
+    #[error("batched read plan cannot read layer {layer}: {reason}")]
+    BatchPlanMismatch {
+        /// Layer whose read was rejected.
+        layer: usize,
+        /// Violated plan precondition.
+        reason: &'static str,
+    },
+
+    /// A model step's write set does not cover each active row exactly once.
+    #[error("{kind} group {group}, layer {layer}, sequence {sequence}: {problem}")]
+    StepWriteCoverage {
+        /// Cache family.
+        kind: &'static str,
+        /// Cache group index.
+        group: usize,
+        /// Layer within the group.
+        layer: usize,
+        /// Batch row.
+        sequence: usize,
+        /// Violated coverage rule.
+        problem: &'static str,
+    },
+
+    /// A write-ahead was requested where it could expose unpublished tokens.
+    #[error("cannot write ahead into {storage} storage: {reason}")]
+    WriteAheadUnsupported {
+        /// Human-readable storage mode.
+        storage: &'static str,
+        /// Why the write is unsafe.
+        reason: &'static str,
+    },
+
+    /// A step write set no longer matches the decode state it is used with.
+    ///
+    /// Steps are bound to the state that created them and to that bank's
+    /// lifecycle version: any later length change, transaction transition,
+    /// reorder, truncate, reset, mutable bank access, or another step's
+    /// publication or write-ahead invalidates them, because their write-ahead
+    /// slots and token positions were derived from the old cursors.
+    #[error("{bank} step is stale: {reason}; start a new step from the current state")]
+    StaleStep {
+        /// Bank the step targets.
+        bank: &'static str,
+        /// Why the step no longer applies.
+        reason: &'static str,
+    },
+
+    /// Key/value inputs were given to a latent group, or a latent to a key/value group.
+    #[error("this cache group stores {expected}")]
+    PlaneKindMismatch {
+        /// What the group stores.
+        expected: &'static str,
     },
 
     /// Doubling a mirrored ring width overflowed `usize`.
@@ -299,6 +410,15 @@ pub enum TensorCacheError {
         requested: usize,
     },
 
+    /// A cache group was added after the owning state committed tokens.
+    #[error(
+        "cannot {operation} after tokens were committed: a new group would expose zero-filled history; reset the state first"
+    )]
+    TopologyAfterHistory {
+        /// Name of the rejected topology change.
+        operation: &'static str,
+    },
+
     /// An attached bank has incompatible config or device affinity.
     #[error("cannot attach {bank} bank: {reason}")]
     IncompatibleBank {
@@ -335,4 +455,76 @@ pub enum TensorCacheError {
         #[from]
         RingPlanError,
     ),
+}
+
+impl TensorCacheError {
+    /// Names a verified allocation-size violation for the tensor `tensor`.
+    pub(crate) const fn allocation(
+        tensor: &'static str,
+        violation: AllocationViolation,
+        element_size: usize,
+    ) -> Self {
+        match violation {
+            AllocationViolation::ShapeOverflow => Self::TensorShapeOverflow { tensor },
+            AllocationViolation::ElementLimitExceeded { elements } => {
+                Self::TensorElementLimitExceeded {
+                    tensor,
+                    elements,
+                    limit: PORTABLE_TENSOR_ELEMENT_LIMIT,
+                }
+            }
+            AllocationViolation::ByteOverflow { elements } => Self::AllocationSizeOverflow {
+                tensor,
+                elements,
+                element_size,
+            },
+        }
+    }
+
+    /// Names a verified write-end violation of appending `tokens` at `start`.
+    pub(crate) const fn write_end(
+        start: usize,
+        tokens: usize,
+        capacity: usize,
+        violation: WriteEndViolation,
+    ) -> Self {
+        match violation {
+            WriteEndViolation::Overflow => Self::WritePositionOverflow { start, tokens },
+            WriteEndViolation::ExceedsCapacity { end } => Self::WriteExceedsCapacity {
+                start,
+                end,
+                capacity,
+            },
+        }
+    }
+
+    /// Names a verified staged-commit violation of a `kind` cache group.
+    pub(crate) const fn staged_commit(
+        kind: &'static str,
+        violation: StagedCommitViolation,
+    ) -> Self {
+        match violation {
+            StagedCommitViolation::Incomplete {
+                layer,
+                sequence,
+                expected,
+                actual,
+            } => Self::IncompleteStaging {
+                kind,
+                layer,
+                sequence,
+                expected,
+                actual,
+            },
+            StagedCommitViolation::PrefixExceedsProposal {
+                sequence,
+                accepted,
+                proposed,
+            } => Self::AcceptedPrefixExceedsProposal {
+                sequence,
+                accepted,
+                proposed,
+            },
+        }
+    }
 }

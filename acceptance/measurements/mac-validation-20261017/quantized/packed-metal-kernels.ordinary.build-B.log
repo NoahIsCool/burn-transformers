@@ -1,0 +1,27 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-7de3d3302d9a9b49 sha256 d9de344e42b7fb96fb9d1f1590cb5544b563ad6a8774fe011414fa27e3357b8a (build B: default+metal (--features metal))
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/packed_metal_kernels-7de3d3302d9a9b49 --include-ignored --test-threads 1
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+        0.00 real         0.00 user         0.00 sys
+             2260992  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 337  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                   7  involuntary context switches
+            17715661  instructions retired
+             6960494  cycles elapsed
+             1376640  peak memory footprint
+== exit=0

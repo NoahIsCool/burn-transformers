@@ -6,6 +6,11 @@
 //! [`TensorData`] into the statically ranked Burn field. Matrix installation goes
 //! through Burn's layout-aware parameter mapper, preserving differentiability and
 //! converting official `[output, input]` records to runtime `[input, output]` once.
+//!
+//! Packed QFloat payloads from a certified Burnpack sidecar install exactly:
+//! packed where the backend keeps the artifact's blocks through that transpose,
+//! and as their exact dequantized values otherwise (see
+//! [`install_packed_parameter`]), never as a requantized approximation.
 
 use std::path::Path;
 
@@ -18,15 +23,16 @@ use thiserror::Error;
 
 use crate::{
     checkpoint::{
-        CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LanguageNamespace,
+        LoadOptions, PackedLayoutPolicy, ParameterInstallError, TensorSink,
+        execute_local_load_plan, install_packed_parameter,
     },
-    feed_forward::GatedFeedForward,
     normalization::RmsNorm,
 };
 
 use super::{
-    ConfigError, MuseGlimmerCheckpointOptions, MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm,
+    ConfigError, MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource,
+    MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm,
 };
 
 /// Architecture-specific failure while applying one planned parameter.
@@ -176,33 +182,77 @@ impl<B: Backend> TensorSink for MuseGlimmerForCausalLm<B> {
 }
 
 impl<B: Backend> MuseGlimmerForCausalLm<B> {
-    /// Strictly loads an official multimodal Muse artifact's language tower.
+    /// Strictly discovers, validates, and streams a local Muse checkpoint.
     ///
-    /// No network access occurs. Visual tensors are audited as explicit ignored
-    /// keys, while any unknown namespace remains a strict error.
+    /// The language namespace is detected from the tensor names with the
+    /// shared classifier automatic loading uses: an official multimodal
+    /// artifact (`model.language_model.*`, whose visual tensors are audited as
+    /// explicitly ignored keys) or a standalone text checkpoint
+    /// (`model.embed_tokens.weight`). A checkpoint with neither or both fails
+    /// with [`CheckpointError::LanguageNamespaceNotFound`] or
+    /// [`CheckpointError::AmbiguousLanguageNamespace`]; any unknown namespace
+    /// remains a strict error. No network access occurs. After an execution
+    /// failure the partially initialized model must be discarded.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MuseGlimmerCheckpointLoadError`] naming the failing stage.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
-        self.load_checkpoint_with_family_options(
-            root,
-            options,
-            MuseGlimmerCheckpointOptions::default(),
-        )
+        let manifest = CheckpointManifest::discover(root, options)?;
+        let source = match LanguageNamespace::of_manifest(&manifest, "Muse")? {
+            LanguageNamespace::Wrapped => MuseGlimmerCheckpointSource::Multimodal,
+            LanguageNamespace::TextOnly => MuseGlimmerCheckpointSource::TextOnly,
+        };
+        self.load_discovered(&manifest, options, MuseGlimmerCheckpointOptions { source })
     }
 
-    /// Loads a local artifact using an explicit multimodal or text-only namespace.
-    pub fn load_checkpoint_with_family_options(
+    /// Loads a local checkpoint with an explicit multimodal or text-only namespace.
+    ///
+    /// Use this to force the `source` layout; [`Self::load_checkpoint`]
+    /// detects it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`], without the namespace-detection errors.
+    pub fn load_checkpoint_with(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
         family_options: MuseGlimmerCheckpointOptions,
     ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
+        self.load_discovered(&manifest, options, family_options)
+    }
+
+    /// Former name of [`Self::load_checkpoint_with`], kept so 0.1.0 code compiles.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint_with`], to which it forwards unchanged.
+    #[deprecated(note = "use `load_checkpoint_with`, the name every family shares")]
+    pub fn load_checkpoint_with_family_options(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: MuseGlimmerCheckpointOptions,
+    ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
+        self.load_checkpoint_with(root, options, family_options)
+    }
+
+    /// Plans a discovered checkpoint under `family_options` and streams it into this model.
+    fn load_discovered(
+        &mut self,
+        manifest: &CheckpointManifest,
+        options: &LoadOptions,
+        family_options: MuseGlimmerCheckpointOptions,
+    ) -> Result<ExecutionOutcome, MuseGlimmerCheckpointLoadError> {
         let contract = self.config().checkpoint_contract(family_options)?;
-        let plan = contract.build_load_plan(&manifest, options)?;
-        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+        let plan = contract.build_load_plan(manifest, options)?;
+        Ok(execute_local_load_plan(manifest, &plan, self)?)
     }
 }
 
@@ -272,26 +322,9 @@ fn install_layer_tensor<B: Backend>(
         "self_attn.k_proj.bias" => install_linear_bias(target, &mut layer.self_attn.k_proj, data),
         "self_attn.v_proj.bias" => install_linear_bias(target, &mut layer.self_attn.v_proj, data),
         "self_attn.o_proj.bias" => install_linear_bias(target, &mut layer.self_attn.o_proj, data),
-        "mlp.gate_proj.weight" => install_mlp_weight(target, &mut layer.mlp, "gate", data),
-        "mlp.up_proj.weight" => install_mlp_weight(target, &mut layer.mlp, "up", data),
-        "mlp.down_proj.weight" => install_mlp_weight(target, &mut layer.mlp, "down", data),
-        _ => Err(MuseGlimmerLoadError::UnknownTarget {
-            target: target.into(),
-        }),
-    }
-}
-
-/// Installs one named SwiGLU projection.
-fn install_mlp_weight<B: Backend>(
-    target: &str,
-    mlp: &mut GatedFeedForward<B>,
-    projection: &str,
-    data: TensorData,
-) -> Result<(), MuseGlimmerLoadError> {
-    match projection {
-        "gate" => install_linear_weight(target, &mut mlp.gate_proj, data),
-        "up" => install_linear_weight(target, &mut mlp.up_proj, data),
-        "down" => install_linear_weight(target, &mut mlp.down_proj, data),
+        "mlp.gate_proj.weight" => install_linear_weight(target, &mut layer.mlp.gate_proj, data),
+        "mlp.up_proj.weight" => install_linear_weight(target, &mut layer.mlp.up_proj, data),
+        "mlp.down_proj.weight" => install_linear_weight(target, &mut layer.mlp.down_proj, data),
         _ => Err(MuseGlimmerLoadError::UnknownTarget {
             target: target.into(),
         }),
@@ -332,16 +365,28 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged, exactly as before packed loading existed.
+/// Packed (QFloat) data from a quantized Burnpack sidecar stays packed only when
+/// the backend reproduces the artifact's `[1, G]` blocks through the
+/// parameter's load mapper (for example Metal with column-major linear
+/// layouts). Otherwise, as on Burn Flex 0.21, whose quantized transpose
+/// requantizes, the exact dequantized values `q * s` are installed in float
+/// storage instead of a requantized approximation. The installed weight
+/// therefore always equals the certified artifact; only its memory footprint
+/// depends on the backend.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), MuseGlimmerLoadError> {
-    install_float_parameter(parameter, data).map_err(|source| MuseGlimmerLoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| MuseGlimmerLoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

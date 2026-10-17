@@ -36,6 +36,49 @@ def minimal_crate(crate: Path) -> None:
     (crate / "Cargo.lock").write_text("version = 4\n")
 
 
+VERUS_VERSION_OUTPUT = (
+    "Verus\n  Version: 0.2026.10.04.426d8b0\n  Profile: release\n"
+    "  Platform: macos_aarch64\n  Toolchain: 1.98.1-aarch64-apple-darwin\n"
+)
+
+
+def verus_crate(crate: Path, counts: dict[str, int]) -> None:
+    """Write one harness per entry, each including its own source, and their README table."""
+
+    (crate / "src").mkdir()
+    (crate / "verus").mkdir()
+    rows = []
+    for name in sorted(counts):
+        stem = name.removesuffix(".rs")
+        (crate / f"src/{stem}.rs").write_text(f"pub fn {stem}() -> u8 {{ 1 }}\n")
+        (crate / "verus" / name).write_text(f'//! Harness.\n#[path = "../src/{stem}.rs"]\nmod {stem};\n')
+        rows.append(f"| `{name}` | `src/{stem}.rs` | {counts[name]:,} | Proofs. |")
+    total = sum(counts.values())
+    (crate / "verus/README.md").write_text(
+        "# Proofs\n\n## Harnesses\n\nThe counts: **" + f"{total:,}" + " verified, 0 errors**.\n\n"
+        "| Harness | Verified sources | Verified | What |\n| --- | --- | ---: | --- |\n"
+        + "\n".join(rows) + "\n\n## Rules for proof code\n\n| Rejected | Why |\n| --- | --- |\n"
+        "| `admit(` | Assumes. |\n"
+    )
+
+
+def fake_verus(counts: dict[str, int], mutate=None):
+    """Return a subprocess.run stand-in that prints Verus output for the requested harness."""
+
+    def run(command, **kwargs):
+        """Write the version banner or one harness's result line into the gate's log."""
+
+        if command[1:] == ["--version"]:
+            kwargs["stdout"].write(VERUS_VERSION_OUTPUT)
+        else:
+            if mutate is not None:
+                mutate(Path(command[-1]))
+            kwargs["stdout"].write(f"verification results:: {counts[Path(command[-1]).name]} verified, 0 errors\n")
+        return subprocess.CompletedProcess(command, 0)
+
+    return run
+
+
 class ReleaseGateTests(unittest.TestCase):
     """Pin denominator policy, exact threshold comparisons, and safe command plans."""
 
@@ -582,7 +625,8 @@ class ReleaseGateTests(unittest.TestCase):
 
         for gate in GATES.GATES:
             with self.subTest(gate=gate):
-                commands = GATES.command_plan(gate, Path("/tmp/output with spaces"), "stable", "1.92.0", True)
+                commands = GATES.command_plan(gate, Path("/tmp/output with spaces"), "stable", "1.92.0", True,
+                                              verus="/opt/verus/verus")
                 self.assertTrue(commands)
                 self.assertTrue(all(isinstance(command, list) for command in commands))
                 for command in commands:
@@ -596,14 +640,41 @@ class ReleaseGateTests(unittest.TestCase):
                             self.assertIn("--offline", command)
 
     def test_offline_advisory_limits_are_explicit(self):
-        """Only two reviewed maintenance IDs are waived; stale DBs still fail."""
+        """Only the reviewed IDs are waived lockfile-wide; stale DBs still fail."""
 
         command = GATES.command_plan("dependencies", Path("/tmp/output"), "stable", "1.92.0", True)[0]
         self.assertIn("--no-fetch", command)
         self.assertIn("--no-yanked", command)
         self.assertNotIn("--stale", command)
-        self.assertEqual(command.count("--ignore"), 2)
+        waived = [command[index + 1] for index, part in enumerate(command) if part == "--ignore"]
+        self.assertEqual(waived, list(GATES.MAINTENANCE_NOTICES + GATES.UNREACHABLE_ADVISORIES))
         self.assertIn("--deny", command)
+
+    def test_unreachable_vulnerabilities_stay_denied_in_the_built_graph(self):
+        """Only cargo-audit waives unreachable vulnerabilities; deny.toml and CI agree."""
+
+        policy = (GATES.CRATE / "deny.toml").read_text()
+        workflow = (GATES.CRATE / ".github/workflows/ci.yml").read_text()
+        for advisory in GATES.UNREACHABLE_ADVISORIES:
+            self.assertNotIn(advisory, policy)
+            self.assertIn(f"--ignore {advisory}", workflow)
+        for advisory in GATES.MAINTENANCE_NOTICES:
+            self.assertIn(advisory, policy)
+            self.assertIn(f"--ignore {advisory}", workflow)
+
+    def test_built_graph_advisories_include_yanked_checks(self):
+        """cargo-deny judges advisories over the built graph, offline without fetching."""
+
+        for offline in (False, True):
+            deny = GATES.command_plan("dependencies", Path("/tmp/output"), "stable", "1.92.0", offline)[1]
+            self.assertEqual(deny[-3:], ["advisories", "licenses", "sources"])
+            self.assertEqual("--offline" in deny, offline)
+            audit = GATES.command_plan("dependencies", Path("/tmp/output"), "stable", "1.92.0", offline)[0]
+            self.assertIn("--no-yanked", audit)
+        policy = (GATES.CRATE / "deny.toml").read_text()
+        self.assertIn('yanked = "deny"', policy)
+        for advisory in GATES.MAINTENANCE_NOTICES:
+            self.assertIn(advisory, policy)
 
     def test_source_experiments_run_without_checkpoint_or_network_preparation(self):
         """Compilation alone cannot validate the public experiments' assertions."""
@@ -684,14 +755,502 @@ class ReleaseGateTests(unittest.TestCase):
             GATES.command_plan("typo", Path("/tmp/output"), "stable", "1.92.0", True)
 
     def test_package_patterns_are_root_anchored(self):
-        """Unanchored filename globs also select artifacts through model symlinks."""
+        """Unanchored filename globs also select artifacts through model symlinks.
+
+        Exclusions (``!`` patterns) are anchored the same way, so each removes
+        exactly the repository paths it names.
+        """
 
         manifest = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())
-        self.assertTrue(all(pattern.startswith("/") for pattern in manifest["package"]["include"]))
+        self.assertTrue(all(pattern.removeprefix("!").startswith("/") for pattern in manifest["package"]["include"]))
         self.assertIn("/scripts/COVERAGE_EVIDENCE.md", manifest["package"]["include"])
         self.assertTrue((GATES.CRATE / "scripts/COVERAGE_EVIDENCE.md").is_file())
         self.assertIn("/scripts/WHOLE_FILE_COVERAGE.md", manifest["package"]["include"])
         self.assertTrue((GATES.CRATE / "scripts/WHOLE_FILE_COVERAGE.md").is_file())
+
+    def test_package_ships_the_files_its_verus_harness_test_reads(self):
+        """tests/verus_harness.rs is packaged, so the harnesses and their guide must be too."""
+
+        include = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())["package"]["include"]
+        self.assertIn("/tests/**", include)
+        self.assertIn("/verus/*.rs", include)
+        self.assertIn("/verus/README.md", include)
+        base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
+        self.assertEqual(GATES.validate_package_listing(base + "verus/cache.rs\nverus/README.md\n"), 6)
+        for entry in ("verus/nested/cache.rs", "verus/notes.txt", "verus/.verus-log/root.air"):
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, "verus/"):
+                GATES.validate_package_listing(base + entry + "\n")
+
+    def test_package_gate_runs_the_archive_test_suite(self):
+        """Cargo's verification only builds the archive; the gate also runs its tests.
+
+        The tests reuse Cargo's normal target directory, as package verification
+        does: without it Cargo would build every dependency again inside the
+        extracted archive, which the next ``cargo package`` deletes.
+        """
+
+        # Read the stem from the manifest so a version bump or a package
+        # rename does not break this test; test_package_stem_is_name_and_version
+        # pins the format itself.
+        package_table = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())["package"]
+        stem = f"{package_table['name']}-{package_table['version']}"
+        for target, expected in ((None, GATES.CRATE / "target"), ("/explicit/target", Path("/explicit/target")),
+                                 ("relative-target", GATES.CRATE / "relative-target")):
+            environment = {} if target is None else {"CARGO_TARGET_DIR": target}
+            with self.subTest(target=target), mock.patch.dict(GATES.os.environ, environment, clear=True):
+                listing, package, archive_tests, archive_scripts = GATES.command_plan(
+                    "package", Path("/tmp/output"), "stable", "1.92.0", True)
+                archive = GATES.package_archive()
+            self.assertIn("--list", listing)
+            self.assertEqual(package[:3], ["cargo", "+stable", "package"])
+            self.assertEqual(archive, expected / "package" / f"{stem}.crate")
+            self.assertEqual(archive_tests[:3], ["cargo", "+stable", "test"])
+            manifest = Path(archive_tests[archive_tests.index("--manifest-path") + 1])
+            self.assertEqual(manifest, expected / "package" / stem / "Cargo.toml")
+            self.assertEqual(archive_tests.count("--target-dir"), 1)
+            self.assertEqual(Path(archive_tests[archive_tests.index("--target-dir") + 1]), expected)
+            self.assertIn("--locked", archive_tests)
+            self.assertIn("--offline", archive_tests)
+            self.assertTrue(GATES.command_compiles(archive_tests))
+            # The packaged Python tests run from the archive, not the checkout,
+            # so a record test that needs repository-only evidence must skip.
+            self.assertEqual(archive_scripts[:4], [GATES.sys.executable, "-m", "unittest", "discover"])
+            self.assertEqual(Path(archive_scripts[archive_scripts.index("-s") + 1]),
+                             expected / "package" / stem / "scripts/tests")
+            self.assertFalse(GATES.command_compiles(archive_scripts))
+
+    def test_package_stem_is_name_and_version(self):
+        """Cargo names the archive and its extraction NAME-VERSION from [package]."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            (crate / "Cargo.toml").write_text('[package]\nname = "renamed-crate"\nversion = "2.3.4-rc.1"\n\n'
+                                              '[lib]\nname = "transformers"\n')
+            with mock.patch.object(GATES, "CRATE", crate), \
+                    mock.patch.dict(GATES.os.environ, {"CARGO_TARGET_DIR": "/explicit/target"}, clear=True):
+                self.assertEqual(GATES.package_stem(), "renamed-crate-2.3.4-rc.1")
+                self.assertEqual(GATES.package_archive(), Path("/explicit/target/package/renamed-crate-2.3.4-rc.1.crate"))
+                self.assertEqual(GATES.package_directory(), Path("/explicit/target/package/renamed-crate-2.3.4-rc.1"))
+
+    def test_package_include_matches_the_evidence_policy(self):
+        """Cargo's include list publishes exactly the evidence package_contents.py allows."""
+
+        include = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())["package"]["include"]
+        acceptance = {pattern for pattern in include if pattern.removeprefix("!").startswith("/acceptance")}
+        self.assertEqual(acceptance, {
+            "/acceptance/*.json", "/acceptance/measurements/*.json", "/acceptance/measurements/README.md",
+            *(f"/acceptance/measurements/{campaign}/**" for campaign in GATES.package_contents.PUBLISHED_CAMPAIGNS),
+        })
+        self.assertIn("/examples/**", include)
+        self.assertEqual({pattern for pattern in include if pattern.startswith("!")}, {
+            "!/examples/mechanistic/**/*.png", "!/examples/mechanistic/**/*.svg",
+            "!/examples/mechanistic/**/result.json", "!/examples/mechanistic/**/*.result.json",
+            "!/examples/mechanistic/*/evidence/**", "!/examples/mechanistic/*/results/**",
+        })
+        for campaign in GATES.package_contents.PUBLISHED_CAMPAIGNS:
+            if not GATES.package_contents.is_packaged_archive(GATES.CRATE):
+                self.assertTrue((GATES.CRATE / "acceptance/measurements" / campaign).is_dir(), campaign)
+
+    def test_package_listing_rejects_repository_only_evidence(self):
+        """Unpublished campaign directories and study outputs fail the listing check."""
+
+        base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
+        published = ("acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json",
+                     "acceptance/measurements/v0_1-release-20260910.json",
+                     "acceptance/measurements/README.md",
+                     "acceptance/measurements/small-model-performance-20260910/manifest.json",
+                     "examples/mechanistic/greater_than/manifest.json",
+                     "examples/mechanistic/greater_than/fixture.json",
+                     "examples/mechanistic/grokking_training/study.rs",
+                     "examples/mechanistic/tuned_lens/plot.py")
+        for entry in published:
+            with self.subTest(entry=entry):
+                self.assertEqual(GATES.validate_package_listing(base + entry + "\n"), 5)
+        for entry in ("acceptance/measurements/coding-standards-coverage-20260910/final/coverage.json",
+                      "acceptance/measurements/large-checkpoint-replay-20261016/gates.log",
+                      "acceptance/measurements/public-examples-20260909/Cargo.lock",
+                      "acceptance/measurements/notes.txt",
+                      "acceptance/history/record.json",
+                      "acceptance/README.md",
+                      "examples/mechanistic/greater_than/result.json",
+                      "examples/mechanistic/v0_2_examples.result.json",
+                      "examples/mechanistic/tuned_lens/prediction_quality.png",
+                      "examples/mechanistic/grokking_training/training.svg",
+                      "examples/mechanistic/grokking_training/evidence/run.json",
+                      "examples/mechanistic/clock_and_pizza_training/results/alpha0-paper/protocol.json"):
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, "repository-only evidence"):
+                GATES.validate_package_listing(base + entry + "\n")
+
+    def run_package_fixture(self, crate, archive_bytes):
+        """Run the real package gate over a fixture crate whose archive has ``archive_bytes``.
+
+        Cargo is replaced by a stand-in that prints a valid listing and, for the
+        verified ``cargo package``, writes a sparse archive of the given size.
+        ``None`` writes no archive at all.
+        """
+
+        def run(command, **kwargs):
+            """Print the listing or create the archive that the real command would."""
+
+            if "--list" in command:
+                kwargs["stdout"].write("Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n")
+            elif command[2:3] == ["package"] and archive_bytes is not None:
+                archive = crate / "target/package/fixture-0.1.0.crate"
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open("wb") as handle:
+                    handle.truncate(archive_bytes)
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch.object(GATES, "CRATE", crate),
+            mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "package", "--offline"]),
+            mock.patch.dict(GATES.os.environ, {}, clear=True),
+            mock.patch.object(GATES.subprocess, "run", side_effect=run),
+            mock.patch("builtins.print"),
+        ):
+            status = GATES.main()
+        manifest, = (crate / "target/release-gates").glob("*/results.json")
+        return status, json.loads(manifest.read_text())
+
+    def test_package_gate_records_the_archive_within_its_budget(self):
+        """The verified archive's size and SHA-256 are kept; an oversized one fails."""
+
+        for archive_bytes, passed in ((1024, True), (GATES.PACKAGE_MAX_BYTES, True),
+                                      (GATES.PACKAGE_MAX_BYTES + 1, False), (None, False)):
+            with self.subTest(archive_bytes=archive_bytes), tempfile.TemporaryDirectory() as directory:
+                crate = Path(directory)
+                (crate / "Cargo.toml").write_text('[package]\nname = "fixture"\nversion = "0.1.0"\n')
+                status, result = self.run_package_fixture(crate, archive_bytes)
+                self.assertEqual((status, result["passed"]), (0 if passed else 1, passed))
+                listing, package = result["gates"][:2]
+                self.assertEqual(listing["package_files"], 4)
+                if passed:
+                    self.assertEqual(len(result["gates"]), 4)
+                    archive = package["package_archive"]
+                    self.assertEqual(archive["bytes"], archive_bytes)
+                    self.assertEqual(archive["maximum_bytes"], GATES.PACKAGE_MAX_BYTES)
+                    expected = hashlib.sha256(b"\0" * archive_bytes).hexdigest()
+                    self.assertEqual(archive["sha256"], expected)
+                    self.assertEqual(Path(archive["path"]), crate / "target/package/fixture-0.1.0.crate")
+                else:
+                    self.assertEqual(len(result["gates"]), 2)
+                    self.assertEqual(package["process_exit_code"], 0)
+                    self.assertNotIn("package_archive", package)
+                    self.assertRegex(package["validation_error"],
+                                     "budget below crates.io" if archive_bytes else "not a regular file")
+
+    def test_guide_fragments_compile_inside_their_hidden_context(self):
+        """A marked fragment is wrapped in its context as rustdoc hidden lines."""
+
+        markdown = (
+            "# Guide\n\n<!-- doctest-context model\nuse burn::tensor::backend::Backend;\n\n"
+            "fn fragment<B: Backend>(value: u8) {\n    __FRAGMENT__\n}\n-->\n"
+            "Prose.\n\n<!-- doctest model -->\n```rust\nlet doubled = value * 2;\n```\n"
+        )
+        rewritten, compiled = GATES.guide_doctests(markdown)
+        self.assertEqual(compiled, 1)
+        self.assertNotIn("doctest-context", rewritten)
+        self.assertIn(
+            "```rust\n# use burn::tensor::backend::Backend;\n#\n# fn fragment<B: Backend>(value: u8) {\n"
+            "let doubled = value * 2;\n# }\n```", rewritten)
+        self.assertTrue(rewritten.startswith("# Guide\n\nProse."))
+
+    def test_guide_blocks_outside_markers_keep_their_language(self):
+        """Complete Rust compiles as written, other languages never, and bare fences become text."""
+
+        markdown = ("```rust\nfn complete() {}\n```\n\n```sh\ncargo test\n```\n\n```\nplain\n```\n\n"
+                    "```rust,ignore\nnot compiled\n```\n\n- item\n\n  ```rust\n  fn nested() {}\n  ```\n")
+        rewritten, compiled = GATES.guide_doctests(markdown)
+        self.assertEqual(compiled, 2)
+        self.assertIn("```rust\nfn complete() {}\n```", rewritten)
+        self.assertIn("```sh\ncargo test\n```", rewritten)
+        self.assertIn("```text\nplain\n```", rewritten)
+        self.assertIn("```rust,ignore\nnot compiled\n```", rewritten)
+        self.assertIn("  ```rust\n  fn nested() {}\n  ```", rewritten)
+
+    def test_guide_doctest_markers_fail_closed(self):
+        """Unknown, unused, duplicate, or malformed contexts cannot hide a fragment."""
+
+        context = "<!-- doctest-context a\nfn f() {\n__FRAGMENT__\n}\n-->\n"
+        fragment = "<!-- doctest a -->\n```rust\nlet x = 1;\n```\n"
+        for markdown, message in (
+            ("<!-- doctest missing -->\n```rust\nlet x = 1;\n```\n", "unknown"),
+            (context, "unused"),
+            (context + context + fragment, "unique"),
+            ("<!-- doctest-context a\nfn f() {}\n-->\n" + fragment, "__FRAGMENT__"),
+            (context + "<!-- doctest a -->\n```sh\nls\n```\n", "non-Rust"),
+            (context + "<!-- doctest a -->\n```rust\nlet x = 1;\n", "unclosed"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                GATES.guide_doctests(markdown)
+
+    def test_repository_guides_mark_every_fragment_consistently(self):
+        """Every Rust block of every gated guide is compiled; markers and contexts match."""
+
+        for guide in GATES.GUIDES:
+            with self.subTest(guide=guide):
+                text = (GATES.CRATE / guide).read_text()
+                _, compiled = GATES.guide_doctests(text)
+                blocks = [line for line in text.split("\n") if line.strip().startswith("```rust")]
+                self.assertEqual(compiled, len([block for block in blocks if "ignore" not in block]))
+                self.assertGreater(compiled, 0)
+
+    def test_guide_doctest_crate_depends_on_this_crate_by_path(self):
+        """The scratch crate uses the source gate's features and this crate's lockfile."""
+
+        for package_name in ("transformers", "renamed-transformers"):
+            with self.subTest(package=package_name):
+                self.check_guide_doctest_crate(package_name)
+
+    def check_guide_doctest_crate(self, package_name):
+        """Generate the guide doctest crate for a crate whose package is ``package_name``.
+
+        The guides import the library as ``transformers``, so the dependency
+        keeps that key and names the package explicitly; a renamed package
+        with ``[lib] name = "transformers"`` then needs no tooling change.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate, scratch = Path(directory) / "crate", Path(directory) / "out/guides"
+            crate.mkdir()
+            (crate / "Cargo.toml").write_text(f'[package]\nname = "{package_name}"\n\n[dependencies]\n'
+                                             'burn = { version = "=0.21.0", default-features = false }\n')
+            (crate / "Cargo.lock").write_text("version = 4\n")
+            for guide in GATES.GUIDES:
+                (crate / guide).write_text("```rust\nfn complete() {}\n```\n")
+            with mock.patch.object(GATES.subprocess, "run") as run:
+                summary = GATES.write_guide_doctests(crate, scratch, True)
+            self.assertEqual(summary["compiled_blocks"], len(GATES.GUIDES))
+            manifest = tomllib.loads((scratch / "Cargo.toml").read_text())
+            dependency = manifest["dependencies"]["transformers"]
+            self.assertEqual(dependency["package"], package_name)
+            self.assertEqual(dependency["path"], str(crate.resolve()))
+            self.assertFalse(dependency["default-features"])
+            self.assertEqual(dependency["features"], [*GATES.FEATURES.split(","), "train"])
+            self.assertEqual(manifest["dependencies"]["burn"]["version"], "=0.21.0")
+            self.assertIn("workspace", manifest)
+            self.assertEqual((scratch / "Cargo.lock").read_text(), "version = 4\n")
+            library = (scratch / "lib.rs").read_text()
+            for guide in GATES.GUIDES:
+                self.assertIn(f'include_str!("guides/{guide}")', library)
+                self.assertTrue((scratch / "guides" / guide).is_file())
+            command = run.call_args.args[0]
+            self.assertEqual(command[:2], ["cargo", "metadata"])
+            self.assertIn("--offline", command)
+            self.assertNotIn("--locked", command)
+
+    def test_guides_gate_tests_the_generated_crate_with_the_shared_target(self):
+        """The doctest command is locked and reuses Cargo's normal target directory."""
+
+        with mock.patch.dict(GATES.os.environ, {"CARGO_TARGET_DIR": "/explicit/target"}, clear=True):
+            command, = GATES.command_plan("guides", Path("/tmp/output"), "stable", "1.92.0", True)
+        self.assertEqual(command[:4], ["cargo", "+stable", "test", "--doc"])
+        self.assertEqual(command[command.index("--manifest-path") + 1], "/tmp/output/guide-doctests/Cargo.toml")
+        self.assertEqual(command[command.index("--target-dir") + 1], "/explicit/target")
+        self.assertIn("--locked", command)
+        self.assertIn("--offline", command)
+        self.assertTrue(GATES.command_compiles(command))
+
+    def test_guides_gate_writes_the_crate_before_running_its_doctests(self):
+        """The runner prepares the scratch crate, records its block counts, then runs cargo."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            observed = []
+
+            def run(command, **kwargs):
+                """Observe that the scratch crate exists when the doctests run."""
+
+                observed.append(Path(command[command.index("--manifest-path") + 1]).is_file())
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "guides"]),
+                mock.patch.object(GATES, "write_guide_doctests", side_effect=lambda crate, directory, offline: (
+                    directory.mkdir(parents=True), (directory / "Cargo.toml").write_text(""),
+                    {"guides": {}, "compiled_blocks": 25})[-1]) as write,
+                mock.patch.object(GATES.subprocess, "run", side_effect=run),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 0)
+            self.assertEqual(observed, [True])
+            write.assert_called_once()
+            result = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())
+            self.assertEqual(result["gates"][0]["guide_doctests"]["compiled_blocks"], 25)
+
+    def test_verus_gate_requires_the_executable(self):
+        """An unset VERUS fails before any evidence directory exists."""
+
+        with self.assertRaisesRegex(ValueError, "VERUS"):
+            GATES.command_plan("verus", Path("/tmp/output"), "stable", "1.92.0", True)
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "verus"]),
+                mock.patch.dict(GATES.os.environ, {}, clear=True),
+                mock.patch.object(GATES.subprocess, "run") as process,
+                self.assertRaisesRegex(ValueError, "VERUS"),
+            ):
+                GATES.main()
+            process.assert_not_called()
+            self.assertFalse((crate / "target").exists())
+
+    def test_verus_gate_checks_the_version_then_every_harness_without_cheating(self):
+        """One version probe, then each verus/*.rs in order with the pinned flags."""
+
+        commands = GATES.command_plan("verus", Path("/tmp/output"), "stable", "1.92.0", True, verus="/opt/verus")
+        self.assertEqual(commands[0], ["/opt/verus", "--version"])
+        harnesses = sorted((GATES.CRATE / "verus").glob("*.rs"))
+        self.assertEqual(len(commands), 1 + len(harnesses))
+        for command, harness in zip(commands[1:], harnesses):
+            self.assertEqual(command, ["/opt/verus", "--crate-type", "lib", "--no-cheating",
+                                       "--triggers-mode", "silent", str(harness)])
+            self.assertFalse(GATES.command_compiles(command))
+
+    def test_verus_result_lines_must_report_zero_errors(self):
+        """Only one clean result line is a pass; errors and missing results fail."""
+
+        self.assertEqual(GATES.parse_verus_result("note: x\nverification results:: 199 verified, 0 errors\n"), 199)
+        self.assertEqual(GATES.parse_verus_result("verification results:: 3 verified, 0 errors"), 3)
+        for log in ("", "verification results:: 198 verified, 1 errors\n", "verification results:: 2 verified, 0 errors\n" * 2,
+                    "error: aborting due to 1 previous error\n"):
+            with self.subTest(log=log), self.assertRaises(ValueError):
+                GATES.parse_verus_result(log)
+        GATES.require_pinned_verus(VERUS_VERSION_OUTPUT)
+        for output in ("", VERUS_VERSION_OUTPUT.replace("426d8b0", "1234567"), "Version: 0.2026.10.04.426d8b0-dirty\n"):
+            with self.subTest(output=output), self.assertRaisesRegex(ValueError, "pinned"):
+                GATES.require_pinned_verus(output)
+
+    def test_recorded_verus_counts_cover_every_repository_harness(self):
+        """The real verus/README.md table names each harness once and sums to its total."""
+
+        counts, total = GATES.recorded_verus_counts((GATES.CRATE / "verus/README.md").read_text())
+        self.assertEqual(sorted(counts), [path.name for path in sorted((GATES.CRATE / "verus").glob("*.rs"))])
+        self.assertEqual(sum(counts.values()), total)
+        for readme in ("# Proofs\n", "## Harnesses\n| `a.rs` | x | many | y |\n**1 verified, 0 errors**\n",
+                       "## Harnesses\n| `a.rs` | x | 1 | y |\n| `a.rs` | x | 1 | y |\n**2 verified, 0 errors**\n",
+                       "## Harnesses\n| `a.rs` | x |\n**1 verified, 0 errors**\n",
+                       "## Harnesses\n| `a.rs` | x | 1 | y |\n"):
+            with self.subTest(readme=readme), self.assertRaises(ValueError):
+                GATES.recorded_verus_counts(readme)
+
+    def run_verus_fixture(self, crate, run):
+        """Run the real runner over a fixture crate with a fake Verus executable."""
+
+        with (
+            mock.patch.object(GATES, "CRATE", crate),
+            mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "verus"]),
+            mock.patch.dict(GATES.os.environ, {"VERUS": "/opt/verus"}, clear=True),
+            mock.patch.object(GATES.subprocess, "run", side_effect=run) as process,
+            mock.patch("builtins.print"),
+        ):
+            status = GATES.main()
+        manifest, = (crate / "target/release-gates").glob("*/results.json")
+        return status, json.loads(manifest.read_text()), manifest.parent, process.call_count
+
+    def test_verus_gate_records_matching_counts_and_input_hashes(self):
+        """A run that reproduces the README table passes and records its evidence."""
+
+        counts = {"alpha.rs": 1200, "beta.rs": 677}
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+            status, result, output, calls = self.run_verus_fixture(crate, fake_verus(counts))
+            self.assertEqual((status, calls), (0, 3))
+            self.assertTrue(result["passed"])
+            version, alpha, beta = result["gates"]
+            self.assertEqual(version["verus_version"], GATES.VERUS_VERSION)
+            self.assertNotIn("storage_preflight", version)
+            self.assertEqual((alpha["harness"], alpha["verified"]), ("alpha.rs", 1200))
+            self.assertEqual(beta["verus_evidence"], "verus.json")
+            evidence = json.loads((output / "verus.json").read_text())
+            self.assertEqual(evidence["harnesses"], counts)
+            self.assertEqual((evidence["verified"], evidence["errors"]), (1877, 0))
+            self.assertIn("--no-cheating", evidence["flags"])
+            self.assertEqual(set(evidence["inputs"]["alpha.rs"]["sources"]), {"src/alpha.rs"})
+            self.assertEqual(len(evidence["inputs"]["beta.rs"]["harness"]["sha256"]), 64)
+
+    def test_verus_gate_rejects_counts_that_drift_from_the_readme(self):
+        """A proof change without a table update fails and names the harness to update."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, {"alpha.rs": 10, "beta.rs": 5})
+            status, result, output, calls = self.run_verus_fixture(crate, fake_verus({"alpha.rs": 11, "beta.rs": 5}))
+            self.assertEqual((status, calls), (1, 2))
+            self.assertFalse(result["passed"])
+            row = result["gates"][-1]
+            self.assertEqual(row["process_exit_code"], 0)
+            self.assertIn("alpha.rs: Verus verified 11 items, but verus/README.md records 10", row["validation_error"])
+            self.assertFalse((output / "verus.json").exists())
+
+    def test_verus_gate_rejects_a_wrong_prover_or_a_failed_proof(self):
+        """A different release or a harness with errors never reaches the evidence file."""
+
+        counts = {"alpha.rs": 10}
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+
+            def other_release(command, **kwargs):
+                """Report a different Verus release."""
+
+                kwargs["stdout"].write(VERUS_VERSION_OUTPUT.replace("426d8b0", "0000000"))
+                return subprocess.CompletedProcess(command, 0)
+
+            status, result, _, calls = self.run_verus_fixture(crate, other_release)
+            self.assertEqual((status, calls), (1, 1))
+            self.assertIn("pinned", result["gates"][0]["validation_error"])
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+
+            def failing(command, **kwargs):
+                """Fail the proof with Verus's nonzero exit status."""
+
+                if command[1:] == ["--version"]:
+                    kwargs["stdout"].write(VERUS_VERSION_OUTPUT)
+                    return subprocess.CompletedProcess(command, 0)
+                kwargs["stdout"].write("verification results:: 9 verified, 1 errors\n")
+                return subprocess.CompletedProcess(command, 1)
+
+            status, result, output, _ = self.run_verus_fixture(crate, failing)
+            self.assertEqual(status, 1)
+            self.assertEqual(result["gates"][-1]["exit_code"], 1)
+            self.assertFalse((output / "verus.json").exists())
+
+    def test_verus_gate_rejects_inputs_edited_during_the_run(self):
+        """Counts are bound to the exact harness and source bytes the prover read."""
+
+        counts = {"alpha.rs": 10, "beta.rs": 5}
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, counts)
+
+            def edit(harness):
+                """Change an included source after its harness was verified."""
+
+                if harness.name == "beta.rs":
+                    (crate / "src/alpha.rs").write_text("pub fn alpha() -> u8 { 2 }\n")
+
+            status, result, output, _ = self.run_verus_fixture(crate, fake_verus(counts, edit))
+            self.assertEqual(status, 1)
+            self.assertIn("changed while the gate ran", result["gates"][-1]["validation_error"])
+            self.assertFalse((output / "verus.json").exists())
+
+    def test_verus_gate_rejects_a_table_that_omits_a_harness(self):
+        """A harness missing from the README table fails before the prover starts."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            verus_crate(crate, {"alpha.rs": 10})
+            (crate / "src/gamma.rs").write_text("pub fn gamma() {}\n")
+            (crate / "verus/gamma.rs").write_text('//! Harness.\n#[path = "../src/gamma.rs"]\nmod gamma;\n')
+            status, result, _, calls = self.run_verus_fixture(crate, fake_verus({"alpha.rs": 10, "gamma.rs": 1}))
+            self.assertEqual((status, calls), (1, 0))
+            self.assertIn("gamma.rs", result["gates"][0]["validation_error"])
 
     def test_package_listing_checks_the_actual_cargo_inventory(self):
         """Allow model source but reject artifact trees, weights, and bytecode."""
@@ -706,6 +1265,47 @@ class ReleaseGateTests(unittest.TestCase):
                 GATES.validate_package_listing(base + entry + "\n")
         with self.assertRaisesRegex(ValueError, "incomplete"):
             GATES.validate_package_listing("Cargo.toml\n")
+
+    def test_package_listing_accepts_only_small_tiny_golden_fixtures(self):
+        """Tiny random-weight goldens may ship; other or oversized weights may not."""
+
+        base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
+        fixture = "tests/fixtures/tiny_goldens/llama3/model.safetensors"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / fixture).parent.mkdir(parents=True)
+            (root / fixture).write_bytes(b"\0" * 1024)
+            self.assertEqual(GATES.validate_package_listing(base + fixture + "\n", root), 5)
+            for entry in ("tests/fixtures/tiny_goldens/qwen2/model.safetensors",  # absent
+                          "tests/fixtures/model.safetensors",
+                          "tests/fixtures/tiny_goldens/llama3/nested/model.safetensors",
+                          "tests/fixtures/tiny_goldens/llama3/model.bin",
+                          "tests/fixtures/tiny_goldens/llama3/model.bpk"):
+                (root / entry).parent.mkdir(parents=True, exist_ok=True)
+                if "qwen2" not in entry:
+                    (root / entry).write_bytes(b"\0" * 1024)
+                with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, "runtime artifact"):
+                    GATES.validate_package_listing(base + entry + "\n", root)
+            large = "tests/fixtures/tiny_goldens/gpt-oss/model.safetensors"
+            (root / large).parent.mkdir(parents=True)
+            with (root / large).open("wb") as handle:
+                handle.truncate(GATES.TINY_GOLDEN_MAX_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "runtime artifact"):
+                GATES.validate_package_listing(base + large + "\n", root)
+            linked = "tests/fixtures/tiny_goldens/olmo2/model.safetensors"
+            (root / linked).parent.mkdir(parents=True)
+            (root / linked).symlink_to(root / fixture)
+            with self.assertRaisesRegex(ValueError, "runtime artifact"):
+                GATES.validate_package_listing(base + linked + "\n", root)
+
+    def test_package_listing_accepts_the_repository_tiny_goldens(self):
+        """The committed goldens that the packaged tests read pass the listing check."""
+
+        fixtures = sorted(path.relative_to(GATES.CRATE).as_posix()
+                          for path in (GATES.CRATE / GATES.TINY_GOLDEN_FIXTURES).glob("*/*.safetensors"))
+        self.assertTrue(fixtures)
+        listing = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n" + "".join(f"{entry}\n" for entry in fixtures)
+        self.assertEqual(GATES.validate_package_listing(listing), 4 + len(fixtures))
 
 
 if __name__ == "__main__":

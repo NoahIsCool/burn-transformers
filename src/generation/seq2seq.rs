@@ -10,30 +10,74 @@
 //! decoder-start token as model output.
 //!
 //! Encoder computation runs once. Its output and the external decoder cache are
-//! expanded to a fixed `[source_batch * beams]` batch. At each later step,
-//! [`DecodeState::reorder`] gathers or duplicates parent rows before selected
-//! tokens enter [`Seq2SeqLanguageModel::decode`]. Finished source rows remain in
-//! that rectangle as false-masked PAD no-ops, preserving other rows' progress
-//! without mutating their cache lengths.
+//! expanded to a fixed `[source_batch * beams]` batch, with beam `k` of source
+//! `s` in row `s * beams + k`. At each later step,
+//! [`DecodeState::reorder_within_groups`] gathers or duplicates parent rows
+//! inside each source's group of `beams` rows before selected tokens enter
+//! [`Seq2SeqLanguageModel::decode`]. A reorder never moves a hypothesis to
+//! another source (the row arithmetic is verified with Verus), and the rows of
+//! one source start as identical copies of its encoder output, so the encoder
+//! output is expanded once and never re-gathered; a model may likewise keep
+//! per-source state such as projected cross-attention keys and values in
+//! place (T5 does, directly or through
+//! [`crate::models::AutoSeq2SeqDecodeState`], which forwards the call).
+//! Finished source rows remain
+//! in the rectangle as false-masked PAD no-ops, preserving other rows'
+//! progress without mutating their cache lengths.
 //!
-//! This portable reference coordinator transfers log probabilities to the host
-//! to perform an exact stable ordering over every beam-vocabulary pair. Model
-//! tensors and caches stay on the backend. Backend-specific fused top-k search
-//! can implement the same public semantics later without changing model code.
+//! Each step reads the active rows' log probabilities to the host and keeps,
+//! per source, the best `beams * max(2, eos_count + 1)` candidates with a
+//! bounded heap: `O(beams * vocabulary * log frontier)` time and
+//! `O(frontier)` memory instead of materializing and sorting every
+//! beam-vocabulary pair. The order is total (score, then parent slot, then
+//! token ID), so the result is exactly the prefix a full stable sort would
+//! produce. Log probabilities are computed in at least F32 like Hugging Face.
+//!
+//! # Stopping rules
+//!
+//! [`EarlyStopping`] mirrors Transformers' `early_stopping` setting. Every
+//! rule first needs a full finished pool of `num_beams` hypotheses; let `c` be
+//! the best live beam's cumulative log probability, `lp` the length penalty,
+//! and `w` the worst finished score.
+//!
+//! - [`EarlyStopping::Eager`] (`true`) stops as soon as the pool is full.
+//! - [`EarlyStopping::Heuristic`] (`false`, the Transformers default) stops
+//!   once `c / n^lp <= w`, scoring the live beam at its current generated
+//!   length `n`. With a positive penalty a longer continuation can still
+//!   overtake `w`, so this is a heuristic, kept for parity.
+//! - [`EarlyStopping::Never`] (`"never"`) stops only when no live beam can
+//!   enter the pool at any reachable length: log probabilities are
+//!   non-positive, so a descendant scores at most
+//!   `max(c / L_min^lp, c / L_max^lp)` over the lengths `L_min..=L_max` it can
+//!   still reach. The result is identical to searching every source to the
+//!   length bound; only wasted steps disappear. The same exact bound also
+//!   ends heuristic searches early when it is tighter, without changing them.
 
-use burn::tensor::{
-    ElementConversion, Int, Tensor, TensorData, activation::log_softmax, backend::Backend,
-};
-use serde::{Deserialize, Serialize};
+use std::collections::BinaryHeap;
 
-use super::causal::host_float_data_f64;
+use burn::tensor::{Int, Tensor, TensorData, activation::log_softmax, backend::Backend};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     CausalLmInput, DecodeInput, DecodeState, EncoderOutput, Error, FinishReason, ForwardOptions,
     LogitsSelection, Result, Seq2SeqLanguageModel, TokenMask,
     architecture::{bool_tensor_from_values, select_bool_tensor},
     cache::CacheConfig,
+    models::shared::rows::index_tensor,
 };
+
+use super::bookkeeping::{
+    RowSpanError, beam_row, fill_beam_expansion, frontier_capacity, matrix_row_span,
+    partition_frontier, required_cache_capacity,
+};
+use super::metadata::{self, extract_last_logits};
+use super::probability_accumulation_dtype;
+
+/// Name reported when a beam row-gather index cannot be uploaded.
+const BEAM_ROWS: &str = "beam_search.row_indices";
+
+/// Label used for model-logit shape errors raised by beam search.
+const MODEL_LOGITS: &str = "beam_search.model_logits";
 
 /// Deterministic beam width, termination, and ranking controls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,15 +91,14 @@ pub struct BeamSearchConfig {
     pub num_return_sequences: usize,
     /// Exponent in `cumulative_log_probability / generated_length^penalty`.
     pub length_penalty: f64,
-    /// Stop a source row as soon as `num_beams` finished hypotheses exist.
+    /// When a source row stops searching (see [`EarlyStopping`]).
     ///
-    /// Following Transformers 5.2 eager semantics, only finished candidates
-    /// ranked within the current top `num_beams` may enter that pool; the rest
-    /// of the wider candidate frontier exists solely to find live successors.
-    /// When false, search continues to the configured length bound so an
-    /// unfinished prefix may still overtake an early EOS after length
-    /// normalization.
-    pub early_stopping: bool,
+    /// Serialized like Transformers' `early_stopping`: `true`, `false`, or
+    /// `"never"`. Under every rule, following Transformers 5.2, only finished
+    /// candidates ranked within the current top `num_beams` may enter the
+    /// finished pool; the rest of the wider candidate frontier exists solely
+    /// to find live successors.
+    pub early_stopping: EarlyStopping,
     /// Token IDs that finish a hypothesis after being appended.
     pub eos_token_ids: Vec<u32>,
     /// Token supplied with a false mask for inactive slots in rectangular calls.
@@ -70,9 +113,87 @@ impl Default for BeamSearchConfig {
             num_beams: 4,
             num_return_sequences: 1,
             length_penalty: 1.0,
-            early_stopping: false,
+            early_stopping: EarlyStopping::Heuristic,
             eos_token_ids: Vec::new(),
             pad_token_id: 0,
+        }
+    }
+}
+
+/// When beam search stops a source row, mirroring Transformers' `early_stopping`.
+///
+/// All three rules wait for a full finished pool of `num_beams` hypotheses
+/// and differ in how they decide that no live beam can still improve it. With
+/// `c` the best live beam's cumulative log probability, `lp` the length
+/// penalty, `w` the worst finished score, and `n` the live beam's generated
+/// length, the heuristic stops once `c / n^lp <= w`, while "never" stops only
+/// once `c / L^lp < w` for every reachable length `L`. Serializes exactly like
+/// Transformers' `GenerationConfig.early_stopping`: [`Self::Eager`] as `true`,
+/// [`Self::Heuristic`] as `false`, and [`Self::Never`] as `"never"`.
+///
+/// ```
+/// use transformers::generation::EarlyStopping;
+///
+/// let never: EarlyStopping = serde_json::from_str("\"never\"").unwrap();
+/// assert_eq!(never, EarlyStopping::Never);
+/// assert_eq!(EarlyStopping::from(false), EarlyStopping::Heuristic);
+/// assert_eq!(serde_json::to_string(&EarlyStopping::Eager).unwrap(), "true");
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum EarlyStopping {
+    /// `true`: stop as soon as `num_beams` finished hypotheses exist.
+    Eager,
+    /// `false` (the Transformers default): stop once the best live beam, scored
+    /// at its current generated length, cannot beat the worst finished score.
+    #[default]
+    Heuristic,
+    /// `"never"`: stop only when no live beam can beat the worst finished score
+    /// at any reachable length; identical to searching to the length bound.
+    Never,
+}
+
+impl From<bool> for EarlyStopping {
+    /// Maps Transformers' boolean setting: `true` is eager, `false` heuristic.
+    fn from(eager: bool) -> Self {
+        if eager { Self::Eager } else { Self::Heuristic }
+    }
+}
+
+impl Serialize for EarlyStopping {
+    /// Writes `true`, `false`, or `"never"`, as Transformers does.
+    fn serialize<S: Serializer>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Eager => serializer.serialize_bool(true),
+            Self::Heuristic => serializer.serialize_bool(false),
+            Self::Never => serializer.serialize_str("never"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EarlyStopping {
+    /// Reads `true`, `false`, or `"never"`; any other value is an error.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> core::result::Result<Self, D::Error> {
+        /// The two JSON shapes Transformers uses for the setting.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            /// `true` or `false`.
+            Flag(
+                /// `true` selects [`EarlyStopping::Eager`], `false` the heuristic rule.
+                bool,
+            ),
+            /// The only accepted string, `"never"`.
+            Text(
+                /// Raw string value; anything other than `"never"` is rejected.
+                String,
+            ),
+        }
+        match Representation::deserialize(deserializer)? {
+            Representation::Flag(eager) => Ok(eager.into()),
+            Representation::Text(text) if text == "never" => Ok(Self::Never),
+            Representation::Text(text) => Err(serde::de::Error::custom(format!(
+                "early_stopping must be true, false, or \"never\", found \"{text}\""
+            ))),
         }
     }
 }
@@ -195,8 +316,26 @@ where
     B: Backend,
     M: Seq2SeqLanguageModel<B>,
 {
+    run_beam_search(model, request, true)
+}
+
+/// Runs beam search, optionally stopping sources whose finished pool is final.
+///
+/// `prune` only removes decode steps that cannot change the result; tests run
+/// both settings to check that claim.
+fn run_beam_search<B, M>(
+    model: &M,
+    request: Seq2SeqBeamSearchRequest<B>,
+    prune: bool,
+) -> Result<Seq2SeqBeamSearchOutput>
+where
+    B: Backend,
+    M: Seq2SeqLanguageModel<B>,
+{
     let prepared = PreparedRequest::new(&request)?;
     let device = request.source.token_ids.device();
+    let beams = request.search.num_beams;
+    let vocabulary_size = request.vocabulary_size;
     let options = ForwardOptions {
         logits: LogitsSelection::Last,
         ..ForwardOptions::default()
@@ -204,7 +343,7 @@ where
 
     let encoded = model.encode(request.source, &options)?;
     validate_encoder_batch(&encoded, prepared.source_batch)?;
-    let expansion = beam_expansion_indices(prepared.source_batch, request.search.num_beams)?;
+    let expansion = beam_expansion_indices(prepared.source_batch, beams)?;
     let mut encoder = select_encoder(encoded, &expansion)?;
     let decoder_prompt = select_input(request.decoder_prompt, &expansion)?;
     let mut state = model.new_decode_state(request.cache, prepared.expanded_batch, &device)?;
@@ -214,157 +353,39 @@ where
     let mut logits = extract_last_logits(
         prefill.decoder.logits,
         prepared.expanded_batch,
-        request.vocabulary_size,
+        vocabulary_size,
+        MODEL_LOGITS,
     )?;
 
-    let mut active = initial_beams(&prepared)?;
-    let mut completed = empty_completed(prepared.source_batch)?;
-    let mut done = vec![false; prepared.source_batch];
-    let mut ordinal = 0_usize;
-
+    let mut search = BeamSearch::new(&prepared, &request.search, vocabulary_size, prune)?;
     for step in 0..request.search.max_new_tokens {
-        let active_rows = active
-            .iter()
-            .enumerate()
-            .map(|(row, beam)| {
-                let source = row / request.search.num_beams;
-                beam.is_some() && !done[source]
-            })
-            .collect::<Vec<_>>();
         let probabilities = host_log_probabilities(
             logits,
-            &active_rows,
+            &search.active_rows(),
             prepared.expanded_batch,
-            request.vocabulary_size,
+            vocabulary_size,
         )?;
-        let at_length_limit = step + 1 == request.search.max_new_tokens;
-        let mut next_active = vec![None; prepared.expanded_batch];
-        let mut parent_indices = (0..prepared.expanded_batch).collect::<Vec<_>>();
-        let mut next_tokens = vec![i64::from(request.search.pad_token_id); prepared.expanded_batch];
-        let mut next_valid = vec![false; prepared.expanded_batch];
-        let mut decode_positions = prepared
-            .has_explicit_decoder_positions
-            .then(|| vec![0_i64; prepared.expanded_batch]);
-
-        for (source, source_done) in done.iter_mut().enumerate() {
-            if *source_done {
-                continue;
-            }
-            let candidates = candidates_for_source(
-                source,
-                request.search.num_beams,
-                request.vocabulary_size,
-                &active,
-                &probabilities,
-            )?;
-            if candidates.is_empty() {
-                return Err(Error::Generation(format!(
-                    "beam-search source row {source} has no finite candidate"
-                )));
-            }
-
-            let mut selected = Vec::with_capacity(request.search.num_beams);
-            let frontier = candidate_frontier_size(
-                request.search.num_beams,
-                request.search.eos_token_ids.len(),
-                candidates.len(),
-            )?;
-            for (candidate_rank, candidate) in candidates.into_iter().take(frontier).enumerate() {
-                let is_eos = request.search.eos_token_ids.contains(&candidate.token_id);
-                if is_eos || at_length_limit {
-                    // Transformers 5.2 masks finished candidates below the
-                    // current beam width. Those extra frontier rows are only
-                    // backups for selecting enough non-finished successors.
-                    if candidate_rank >= request.search.num_beams {
-                        continue;
-                    }
-                    let reason = if is_eos {
-                        FinishReason::EndOfSequence {
-                            token_id: candidate.token_id,
-                        }
-                    } else {
-                        FinishReason::Length
-                    };
-                    let hypothesis = extend_candidate(&active, &candidate, Some(reason), ordinal)?;
-                    ordinal = ordinal.checked_add(1).ok_or_else(|| {
-                        Error::Generation("beam-search hypothesis ordinal overflow".into())
-                    })?;
-                    completed
-                        .get_mut(source)
-                        .ok_or_else(|| {
-                            Error::Generation("completed beam batch became ragged".into())
-                        })?
-                        .push(hypothesis);
-                } else if selected.len() < request.search.num_beams {
-                    selected.push(candidate);
-                }
-            }
-            rank_and_prune(
-                completed.get_mut(source).ok_or_else(|| {
-                    Error::Generation("completed beam batch became ragged".into())
-                })?,
-                request.search.num_beams,
-                request.search.length_penalty,
-            );
-
-            if at_length_limit
-                || (request.search.early_stopping
-                    && completed
-                        .get(source)
-                        .ok_or_else(|| {
-                            Error::Generation("completed beam batch became ragged".into())
-                        })?
-                        .len()
-                        >= request.search.num_beams)
-                || selected.is_empty()
-            {
-                *source_done = true;
-                continue;
-            }
-
-            for (slot, candidate) in selected.into_iter().enumerate() {
-                let destination = source
-                    .checked_mul(request.search.num_beams)
-                    .and_then(|offset| offset.checked_add(slot))
-                    .ok_or_else(|| Error::Generation("beam destination index overflow".into()))?;
-                let parent = active
-                    .get(candidate.parent_global)
-                    .and_then(Option::as_ref)
-                    .ok_or_else(|| Error::Generation("selected beam parent disappeared".into()))?;
-                if let Some(positions) = &mut decode_positions {
-                    positions[destination] = parent.next_position.ok_or_else(|| {
-                        Error::Generation("explicit beam position disappeared".into())
-                    })?;
-                }
-                parent_indices[destination] = candidate.parent_global;
-                next_tokens[destination] = i64::from(candidate.token_id);
-                next_valid[destination] = true;
-                next_active[destination] =
-                    Some(extend_candidate(&active, &candidate, None, ordinal)?);
-                ordinal = ordinal.checked_add(1).ok_or_else(|| {
-                    Error::Generation("beam-search hypothesis ordinal overflow".into())
-                })?;
-            }
-        }
-
-        if done.iter().all(|finished| *finished) {
+        let plan = search.advance(step, &probabilities)?;
+        if search.all_done() {
             break;
         }
 
-        state.reorder(&parent_indices)?;
-        encoder = select_encoder(encoder, &parent_indices)?;
+        // Parents and destinations both come from `beam_row(source, ..)`, so
+        // the reorder stays inside each source group, whose encoder rows are
+        // identical: neither the encoder output nor any per-source state a
+        // model binds needs a gather.
+        state.reorder_within_groups(&plan.parent_indices, beams)?;
         let token_ids = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(next_tokens, [prepared.expanded_batch, 1]),
+            TensorData::new(plan.tokens, [prepared.expanded_batch, 1]),
             &device,
         );
-        let valid = bool_tensor_from_values(next_valid, [prepared.expanded_batch, 1], &device);
-        let position_ids = decode_positions.map(|positions| {
+        let valid = bool_tensor_from_values(plan.valid, [prepared.expanded_batch, 1], &device);
+        let position_ids = plan.positions.map(|positions| {
             Tensor::<B, 2, Int>::from_data(
                 TensorData::new(positions, [prepared.expanded_batch, 1]),
                 &device,
             )
         });
-        active = next_active;
         let decoded = model.decode(
             &encoder,
             DecodeInput {
@@ -380,11 +401,16 @@ where
         logits = extract_last_logits(
             decoded.decoder.logits,
             prepared.expanded_batch,
-            request.vocabulary_size,
+            vocabulary_size,
+            MODEL_LOGITS,
         )?;
     }
 
-    finish_output(completed, &prepared.decoder_prompt_lengths, &request.search)
+    finish_output(
+        search.completed,
+        &prepared.decoder_prompt_lengths,
+        &request.search,
+    )
 }
 
 /// Validated dimensions and position metadata derived before model mutation.
@@ -397,8 +423,6 @@ struct PreparedRequest {
     decoder_prompt_lengths: Vec<usize>,
     /// Optional absolute position to assign after each decoder prompt.
     initial_next_positions: Option<Vec<i64>>,
-    /// Whether later decode calls must provide explicit decoder position IDs.
-    has_explicit_decoder_positions: bool,
 }
 
 impl PreparedRequest {
@@ -428,13 +452,22 @@ impl PreparedRequest {
             decoder_sequence,
             "decoder_prompt",
         )?;
-        let decoder_valid = mask_values(
-            request.decoder_prompt.token_mask.as_ref(),
+        // One transfer reads the decoder mask together with any explicit positions.
+        let metadata::HostGrid {
+            valid: decoder_valid,
+            values: decoder_positions,
+        } = metadata::read_grid(
+            request
+                .decoder_prompt
+                .token_mask
+                .as_ref()
+                .map(|mask| mask.as_tensor().clone()),
+            request.decoder_prompt.position_ids.clone(),
             decoder_batch,
             decoder_sequence,
-            "decoder prompt mask",
+            "decoder prompt mask and positions",
         )?;
-        let decoder_prompt_lengths = nonempty_row_lengths(
+        let decoder_prompt_lengths = metadata::nonempty_row_lengths(
             &decoder_valid,
             decoder_batch,
             decoder_sequence,
@@ -450,47 +483,35 @@ impl PreparedRequest {
                 request.search.num_beams
             )));
         }
-        let maximum_prompt = decoder_prompt_lengths
-            .iter()
-            .copied()
-            .max()
-            .ok_or_else(|| {
-                Error::Generation("decoder prompt lengths unexpectedly became empty".into())
-            })?;
-        let required_capacity = maximum_prompt
-            .checked_add(request.search.max_new_tokens)
-            .ok_or_else(|| {
-                Error::Generation("beam-search cache capacity overflows usize".into())
-            })?;
+        let maximum_prompt = decoder_prompt_lengths.iter().copied().max().unwrap_or(0);
+        let required_capacity =
+            required_cache_capacity(maximum_prompt, request.search.max_new_tokens).ok_or_else(
+                || Error::Generation("beam-search cache capacity overflows usize".into()),
+            )?;
         if request.cache.capacity() < required_capacity {
             return Err(Error::Generation(format!(
-                "beam-search cache capacity {} is smaller than required decoder prompt {maximum_prompt} + {} generated tokens = {required_capacity}",
+                "beam-search cache capacity {} is smaller than required decoder prompt {maximum_prompt} + {} - 1 fed-back tokens = {required_capacity}",
                 request.cache.capacity(),
                 request.search.max_new_tokens
             )));
         }
 
-        let initial_next_positions = request
-            .decoder_prompt
-            .position_ids
-            .clone()
-            .map(|positions| {
-                tensor_i64_values(positions, "decoder prompt positions").and_then(|values| {
-                    next_positions(
-                        &values,
-                        &decoder_valid,
-                        decoder_batch,
-                        decoder_sequence,
-                        request.search.max_new_tokens,
-                    )
-                })
+        let initial_next_positions = decoder_positions
+            .map(|values| {
+                metadata::next_positions(
+                    &values,
+                    &decoder_valid,
+                    decoder_batch,
+                    decoder_sequence,
+                    request.search.max_new_tokens,
+                    "decoder prompt",
+                )
             })
             .transpose()?;
         Ok(Self {
             source_batch,
             expanded_batch,
             decoder_prompt_lengths,
-            has_explicit_decoder_positions: initial_next_positions.is_some(),
             initial_next_positions,
         })
     }
@@ -528,72 +549,353 @@ struct Candidate {
     cumulative_log_probability: f64,
 }
 
-/// Creates one score-zero live prefix per source and dormant spare slots.
-fn initial_beams(prepared: &PreparedRequest) -> Result<Vec<Option<BeamHypothesis>>> {
-    let beams_per_source = prepared.expanded_batch / prepared.source_batch;
-    let mut active = vec![None; prepared.expanded_batch];
-    for source in 0..prepared.source_batch {
-        let row = source
-            .checked_mul(beams_per_source)
-            .ok_or_else(|| Error::Generation("initial beam index overflow".into()))?;
-        active[row] = Some(BeamHypothesis {
-            token_ids: Vec::new(),
-            log_probabilities: Vec::new(),
-            cumulative_log_probability: 0.0,
-            next_position: prepared
-                .initial_next_positions
-                .as_ref()
-                .and_then(|positions| positions.get(source).copied()),
-            finish_reason: None,
-            ordinal: source,
-        });
+/// Decoder inputs for the next step, built while selecting successors.
+struct StepPlan {
+    /// Parent row gathered into each destination row by the cache reorder.
+    parent_indices: Vec<usize>,
+    /// Next token for each row; PAD for inactive rows.
+    tokens: Vec<i64>,
+    /// Whether each row carries a real token this step.
+    valid: Vec<bool>,
+    /// Explicit next positions when the request supplies decoder positions.
+    positions: Option<Vec<i64>>,
+}
+
+/// Mutable search state: live beams, finished pools, and per-source status.
+struct BeamSearch<'a> {
+    /// Validated search controls.
+    config: &'a BeamSearchConfig,
+    /// Vocabulary extent of every probability row.
+    vocabulary_size: usize,
+    /// Live hypothesis for each expanded row, or `None` for an unused slot.
+    active: Vec<Option<BeamHypothesis>>,
+    /// Ranked finished hypotheses for each source, at most `num_beams` long.
+    completed: Vec<Vec<BeamHypothesis>>,
+    /// Whether each source has stopped searching.
+    done: Vec<bool>,
+    /// Next creation ordinal, the last tie breaker between equal hypotheses.
+    ordinal: usize,
+    /// Whether decode calls carry explicit positions.
+    has_positions: bool,
+    /// Whether sources stop once no live beam can enter their finished pool.
+    prune: bool,
+}
+
+impl<'a> BeamSearch<'a> {
+    /// Starts one score-zero live prefix per source, with dormant spare slots.
+    fn new(
+        prepared: &PreparedRequest,
+        config: &'a BeamSearchConfig,
+        vocabulary_size: usize,
+        prune: bool,
+    ) -> Result<Self> {
+        let mut active = vec![None; prepared.expanded_batch];
+        for source in 0..prepared.source_batch {
+            let row = beam_row(source, config.num_beams, 0)
+                .ok_or_else(|| Error::Generation("initial beam index overflow".into()))?;
+            active[row] = Some(BeamHypothesis {
+                token_ids: Vec::new(),
+                log_probabilities: Vec::new(),
+                cumulative_log_probability: 0.0,
+                next_position: prepared
+                    .initial_next_positions
+                    .as_ref()
+                    .and_then(|positions| positions.get(source).copied()),
+                finish_reason: None,
+                ordinal: source,
+            });
+        }
+        Ok(Self {
+            config,
+            vocabulary_size,
+            active,
+            completed: empty_completed(prepared.source_batch)?,
+            done: vec![false; prepared.source_batch],
+            ordinal: prepared.source_batch,
+            has_positions: prepared.initial_next_positions.is_some(),
+            prune,
+        })
     }
-    Ok(active)
+
+    /// Rows whose live hypothesis belongs to an unfinished source.
+    fn active_rows(&self) -> Vec<bool> {
+        self.active
+            .iter()
+            .enumerate()
+            .map(|(row, beam)| beam.is_some() && !self.done[row / self.config.num_beams])
+            .collect()
+    }
+
+    /// Whether every source has stopped.
+    fn all_done(&self) -> bool {
+        self.done.iter().all(|&done| done)
+    }
+
+    /// Returns a fresh hypothesis ordinal.
+    fn next_ordinal(&mut self) -> Result<usize> {
+        let ordinal = self.ordinal;
+        self.ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| Error::Generation("beam-search hypothesis ordinal overflow".into()))?;
+        Ok(ordinal)
+    }
+
+    /// Ranks every unfinished source's candidates and plans the next decode.
+    fn advance(&mut self, step: usize, probabilities: &[f64]) -> Result<StepPlan> {
+        let expanded_batch = self.active.len();
+        let mut plan = StepPlan {
+            parent_indices: (0..expanded_batch).collect(),
+            tokens: vec![i64::from(self.config.pad_token_id); expanded_batch],
+            valid: vec![false; expanded_batch],
+            positions: self.has_positions.then(|| vec![0; expanded_batch]),
+        };
+        let mut next_active = vec![None; expanded_batch];
+        for source in 0..self.done.len() {
+            if !self.done[source] {
+                self.advance_source(source, step, probabilities, &mut plan, &mut next_active)?;
+            }
+        }
+        self.active = next_active;
+        Ok(plan)
+    }
+
+    /// Finalizes EOS/length candidates of one source and selects its live successors.
+    fn advance_source(
+        &mut self,
+        source: usize,
+        step: usize,
+        probabilities: &[f64],
+        plan: &mut StepPlan,
+        next_active: &mut [Option<BeamHypothesis>],
+    ) -> Result<()> {
+        let beams = self.config.num_beams;
+        let capacity =
+            frontier_capacity(beams, self.config.eos_token_ids.len()).ok_or_else(|| {
+                Error::Generation("beam-search candidate frontier overflows usize".into())
+            })?;
+        let candidates = candidates_for_source(
+            source,
+            beams,
+            self.vocabulary_size,
+            capacity,
+            &self.active,
+            probabilities,
+        )?;
+        if candidates.is_empty() {
+            return Err(Error::Generation(format!(
+                "beam-search source row {source} has no finite candidate"
+            )));
+        }
+
+        let at_length_limit = step + 1 == self.config.max_new_tokens;
+        let finished = candidates
+            .iter()
+            .map(|candidate| {
+                at_length_limit || self.config.eos_token_ids.contains(&candidate.token_id)
+            })
+            .collect::<Vec<_>>();
+        // Transformers 5.2 masks finished candidates below the current beam
+        // width. Those extra frontier rows are only backups for selecting
+        // enough non-finished successors; `partition_frontier` (verified)
+        // keeps finished ranks below `beams` and the `beams` best live ranks.
+        let frontier = partition_frontier(&finished, beams);
+        for &rank in &frontier.finalized {
+            let candidate = candidates[rank];
+            let reason = if self.config.eos_token_ids.contains(&candidate.token_id) {
+                FinishReason::EndOfSequence {
+                    token_id: candidate.token_id,
+                }
+            } else {
+                FinishReason::Length
+            };
+            let ordinal = self.next_ordinal()?;
+            let hypothesis = extend_candidate(&self.active, &candidate, Some(reason), ordinal)?;
+            self.completed[source].push(hypothesis);
+        }
+        let selected = frontier
+            .selected
+            .iter()
+            .map(|&rank| candidates[rank])
+            .collect::<Vec<_>>();
+        rank_and_prune(
+            &mut self.completed[source],
+            beams,
+            self.config.length_penalty,
+        );
+
+        let pool_full = self.completed[source].len() >= beams;
+        let best_live = selected.first().map(|best| best.cumulative_log_probability);
+        // Exact: no live descendant can enter the pool at any reachable length.
+        // Every rule may stop here without changing its result.
+        let no_live_beam_can_improve = self.prune
+            && best_live.is_some_and(|best| {
+                finished_pool_is_final(
+                    &self.completed[source],
+                    beams,
+                    best,
+                    step + 2,
+                    self.config.max_new_tokens,
+                    self.config.length_penalty,
+                )
+            });
+        let rule_stops = match self.config.early_stopping {
+            EarlyStopping::Eager => pool_full,
+            // Live beams now hold `step + 1` generated tokens.
+            EarlyStopping::Heuristic => best_live.is_some_and(|best| {
+                heuristic_pool_is_final(
+                    &self.completed[source],
+                    beams,
+                    best,
+                    step + 1,
+                    self.config.length_penalty,
+                )
+            }),
+            EarlyStopping::Never => false,
+        };
+        if at_length_limit || selected.is_empty() || rule_stops || no_live_beam_can_improve {
+            self.done[source] = true;
+            return Ok(());
+        }
+
+        for (slot, candidate) in selected.into_iter().enumerate() {
+            let destination = beam_row(source, beams, slot)
+                .ok_or_else(|| Error::Generation("beam destination index overflow".into()))?;
+            let parent = self.active[candidate.parent_global]
+                .as_ref()
+                .ok_or_else(|| Error::Generation("selected beam parent disappeared".into()))?;
+            if let Some(positions) = &mut plan.positions {
+                positions[destination] = parent.next_position.ok_or_else(|| {
+                    Error::Generation("explicit beam position disappeared".into())
+                })?;
+            }
+            plan.parent_indices[destination] = candidate.parent_global;
+            plan.tokens[destination] = i64::from(candidate.token_id);
+            plan.valid[destination] = true;
+            let ordinal = self.next_ordinal()?;
+            next_active[destination] =
+                Some(extend_candidate(&self.active, &candidate, None, ordinal)?);
+        }
+        Ok(())
+    }
+}
+
+/// Whether a full finished pool is final: no live descendant can enter it.
+///
+/// A live beam with cumulative log probability `c` finishes later with some
+/// length `L` in `shortest..=longest` and cumulative `c' <= c`, because every
+/// log probability is non-positive. Its score `c' / L^lp` is then at most
+/// `c / L^lp`, which is monotone in `L`, so the bound is the larger of the
+/// two endpoint values. The comparison is strict: a descendant that could
+/// merely tie the worst finished score might still win a tie breaker.
+fn finished_pool_is_final(
+    completed: &[BeamHypothesis],
+    beams: usize,
+    best_live_cumulative: f64,
+    shortest: usize,
+    longest: usize,
+    length_penalty: f64,
+) -> bool {
+    if completed.len() < beams || shortest > longest {
+        return false;
+    }
+    let Some(worst) = completed.last() else {
+        return false;
+    };
+    let score_at = |length: usize| best_live_cumulative / (length as f64).powf(length_penalty);
+    let bound = score_at(shortest).max(score_at(longest));
+    bound < normalized_score(worst, length_penalty)
+}
+
+/// Transformers' default stopping heuristic (`early_stopping=False`).
+///
+/// A full pool is final once the best live beam, scored at its *current*
+/// generated length `n`, does not exceed the worst finished score:
+/// `c / n^lp <= w` (Transformers' `_check_early_stop_heuristic` with
+/// `best_hypothetical_length = cur_len - decoder_prompt_len`). With a positive
+/// penalty a longer descendant could still score higher, so unlike
+/// [`finished_pool_is_final`] this may stop before the exhaustive optimum; it
+/// is kept for parity with Transformers' default results.
+fn heuristic_pool_is_final(
+    completed: &[BeamHypothesis],
+    beams: usize,
+    best_live_cumulative: f64,
+    generated: usize,
+    length_penalty: f64,
+) -> bool {
+    if completed.len() < beams || generated == 0 {
+        return false;
+    }
+    let Some(worst) = completed.last() else {
+        return false;
+    };
+    best_live_cumulative / (generated as f64).powf(length_penalty)
+        <= normalized_score(worst, length_penalty)
 }
 
 /// Allocates one empty finished-hypothesis pool per source row.
 fn empty_completed(batch: usize) -> Result<Vec<Vec<BeamHypothesis>>> {
-    let mut completed = Vec::new();
-    completed.try_reserve_exact(batch).map_err(|_| {
-        Error::Generation(format!(
-            "failed to allocate completed beam pools for batch size {batch}"
-        ))
-    })?;
-    completed.resize_with(batch, Vec::new);
-    Ok(completed)
+    metadata::empty_rows(batch, "completed beam pools")
 }
 
-/// Enumerates and stably ranks every finite beam-vocabulary continuation.
+/// Candidate wrapper whose heap order puts the *worst* retained candidate on top.
+///
+/// `candidate_order` ranks better candidates first (`Less`), so a max-heap of
+/// this wrapper exposes the candidate that the next better one should evict.
+#[derive(Clone, Copy, Debug)]
+struct WorstFirst(
+    /// Wrapped expansion ranked by cumulative log probability, then parent slot, then token ID.
+    Candidate,
+);
+
+impl PartialEq for WorstFirst {
+    /// Candidates are equal only when the total order ties, i.e. never for distinct pairs.
+    fn eq(&self, other: &Self) -> bool {
+        candidate_order(&self.0, &other.0).is_eq()
+    }
+}
+
+impl Eq for WorstFirst {}
+
+impl PartialOrd for WorstFirst {
+    /// Delegates to the total candidate order.
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WorstFirst {
+    /// Orders by rank, so the greatest element is the lowest-ranked candidate.
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        candidate_order(&self.0, &other.0)
+    }
+}
+
+/// Returns the best `capacity` finite continuations of one source, best first.
+///
+/// Scans every `(parent beam, token)` pair once and keeps a bounded heap, so
+/// memory is `O(capacity)` rather than `O(beams * vocabulary)`. Because
+/// `candidate_order` is a strict total order, the result equals the first
+/// `capacity` entries of a full stable sort. `-inf` scores (masked tokens) are
+/// skipped; NaN, `+inf`, or an overflowing cumulative score is an error.
 fn candidates_for_source(
     source: usize,
     beams: usize,
     vocabulary: usize,
+    capacity: usize,
     active: &[Option<BeamHypothesis>],
     probabilities: &[f64],
 ) -> Result<Vec<Candidate>> {
-    let start = source
-        .checked_mul(beams)
-        .ok_or_else(|| Error::Generation("beam source offset overflow".into()))?;
-    let mut candidates = Vec::new();
+    let mut frontier = BinaryHeap::new();
+    frontier
+        .try_reserve(capacity.saturating_add(1))
+        .map_err(|_| Error::Generation(format!("failed to allocate {capacity} beam candidates")))?;
     for parent_slot in 0..beams {
-        let parent_global = start
-            .checked_add(parent_slot)
+        let parent_global = beam_row(source, beams, parent_slot)
             .ok_or_else(|| Error::Generation("beam parent index overflow".into()))?;
         let Some(parent) = active.get(parent_global).and_then(Option::as_ref) else {
             continue;
         };
-        let probability_offset = parent_global
-            .checked_mul(vocabulary)
-            .ok_or_else(|| Error::Generation("beam probability offset overflow".into()))?;
-        let probability_end = probability_offset
-            .checked_add(vocabulary)
-            .ok_or_else(|| Error::Generation("beam probability row end overflow".into()))?;
-        let row = probabilities
-            .get(probability_offset..probability_end)
-            .ok_or_else(|| Error::Generation("beam probability matrix became ragged".into()))?;
-        candidates.try_reserve(vocabulary).map_err(|_| {
-            Error::Generation(format!("failed to allocate {vocabulary} beam candidates"))
-        })?;
+        let row = probability_row(probabilities, parent_global, vocabulary)?;
         for (token, &log_probability) in row.iter().enumerate() {
             if log_probability == f64::NEG_INFINITY {
                 continue;
@@ -614,17 +916,45 @@ fn candidates_for_source(
                     "beam {parent_global} token {token} overflowed cumulative log probability"
                 )));
             }
-            candidates.push(Candidate {
+            let candidate = WorstFirst(Candidate {
                 parent_global,
                 parent_slot,
                 token_id,
                 log_probability,
                 cumulative_log_probability,
             });
+            if frontier.len() < capacity {
+                frontier.push(candidate);
+            } else if let Some(mut worst) = frontier.peek_mut()
+                && candidate < *worst
+            {
+                *worst = candidate;
+            }
         }
     }
-    candidates.sort_by(candidate_order);
-    Ok(candidates)
+    Ok(frontier
+        .into_sorted_vec()
+        .into_iter()
+        .map(|ranked| ranked.0)
+        .collect())
+}
+
+/// Borrows the log-probability row of one expanded beam.
+///
+/// The span is the Verus-verified [`matrix_row_span`].
+fn probability_row(probabilities: &[f64], row: usize, vocabulary: usize) -> Result<&[f64]> {
+    match matrix_row_span(row, vocabulary, probabilities.len()) {
+        Ok((start, end)) => Ok(&probabilities[start..end]),
+        Err(RowSpanError::OffsetOverflow) => {
+            Err(Error::Generation("beam probability offset overflow".into()))
+        }
+        Err(RowSpanError::EndOverflow) => Err(Error::Generation(
+            "beam probability row end overflow".into(),
+        )),
+        Err(RowSpanError::OutOfBounds) => Err(Error::Generation(
+            "beam probability matrix became ragged".into(),
+        )),
+    }
 }
 
 /// Defines deterministic candidate order independently of backend sort rules.
@@ -634,21 +964,6 @@ fn candidate_order(left: &Candidate, right: &Candidate) -> core::cmp::Ordering {
         .total_cmp(&left.cumulative_log_probability)
         .then_with(|| left.parent_slot.cmp(&right.parent_slot))
         .then_with(|| left.token_id.cmp(&right.token_id))
-}
-
-/// Sizes the conventional top frontier examined for EOS and live prefixes.
-///
-/// One beam width supplies live children and each distinct EOS ID can consume
-/// another width. A minimum factor of two matches ordinary single-EOS search.
-fn candidate_frontier_size(beams: usize, eos_count: usize, available: usize) -> Result<usize> {
-    let multiplier = eos_count
-        .checked_add(1)
-        .ok_or_else(|| Error::Generation("beam-search EOS count overflows usize".into()))?
-        .max(2);
-    beams
-        .checked_mul(multiplier)
-        .map(|frontier| frontier.min(available))
-        .ok_or_else(|| Error::Generation("beam-search candidate frontier overflows usize".into()))
 }
 
 /// Materializes a candidate by extending its parent's token and score vectors.
@@ -733,10 +1048,7 @@ fn finish_output(
             "beam-search result batch does not match decoder prompt batch".into(),
         ));
     }
-    let mut sequences = Vec::new();
-    sequences
-        .try_reserve_exact(completed.len())
-        .map_err(|_| Error::Generation("failed to allocate beam-search output batch".into()))?;
+    let mut sequences = metadata::vec_with_capacity(completed.len(), "beam-search output rows")?;
     for (source, hypotheses) in completed.iter_mut().enumerate() {
         rank_and_prune(hypotheses, search.num_beams, search.length_penalty);
         if hypotheses.len() < search.num_return_sequences {
@@ -749,10 +1061,8 @@ fn finish_output(
         let prompt_length = *prompt_lengths
             .get(source)
             .ok_or_else(|| Error::Generation("decoder prompt lengths became ragged".into()))?;
-        let mut returned = Vec::new();
-        returned
-            .try_reserve_exact(search.num_return_sequences)
-            .map_err(|_| Error::Generation("failed to allocate returned beam hypotheses".into()))?;
+        let mut returned =
+            metadata::vec_with_capacity(search.num_return_sequences, "returned beam hypotheses")?;
         for hypothesis in hypotheses.drain(..search.num_return_sequences) {
             let score = normalized_score(&hypothesis, search.length_penalty);
             if !score.is_finite() {
@@ -783,7 +1093,7 @@ fn select_encoder<B: Backend>(
     encoder: EncoderOutput<B>,
     indices: &[usize],
 ) -> Result<EncoderOutput<B>> {
-    let selector = batch_selector::<B>(indices, &encoder.hidden_state.device())?;
+    let selector = index_tensor::<B>(indices, &encoder.hidden_state.device(), BEAM_ROWS)?;
     Ok(EncoderOutput {
         hidden_state: encoder.hidden_state.select(0, selector.clone()),
         token_mask: encoder.token_mask.map(|mask| {
@@ -807,7 +1117,7 @@ fn select_input<B: Backend>(
     input: CausalLmInput<B>,
     indices: &[usize],
 ) -> Result<CausalLmInput<B>> {
-    let selector = batch_selector::<B>(indices, &input.token_ids.device())?;
+    let selector = index_tensor::<B>(indices, &input.token_ids.device(), BEAM_ROWS)?;
     Ok(CausalLmInput {
         token_ids: input.token_ids.select(0, selector.clone()),
         token_mask: input.token_mask.map(|mask| {
@@ -819,37 +1129,17 @@ fn select_input<B: Backend>(
     })
 }
 
-/// Builds the initial repeated source-row selector in group-major order.
+/// Builds the initial group-major selector: row `i` copies source `i / beams`.
 fn beam_expansion_indices(batch: usize, beams: usize) -> Result<Vec<usize>> {
-    let count = batch
-        .checked_mul(beams)
-        .ok_or_else(|| Error::Generation("beam expansion count overflows usize".into()))?;
-    let mut indices = Vec::new();
-    indices.try_reserve_exact(count).map_err(|_| {
-        Error::Generation(format!("failed to allocate {count} beam expansion indices"))
-    })?;
-    for source in 0..batch {
-        indices.extend(std::iter::repeat_n(source, beams));
+    if beams == 0 {
+        return Err(Error::Generation(
+            "beam expansion requires at least one beam".into(),
+        ));
     }
+    let count = metadata::rectangle_size(batch, beams, "beam expansion")?;
+    let mut indices = metadata::vec_with_capacity(count, "beam expansion indices")?;
+    fill_beam_expansion(&mut indices, count, beams);
     Ok(indices)
-}
-
-/// Converts host indices to Burn's portable signed batch selector.
-fn batch_selector<B: Backend>(indices: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::Generation(format!(
-                    "beam batch index {index} exceeds the signed tensor-index domain"
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
 }
 
 /// Validates optional mask and position rectangles before model execution.
@@ -921,26 +1211,22 @@ fn validate_encoder_batch<B: Backend>(encoder: &EncoderOutput<B>, batch: usize) 
     Ok(())
 }
 
-/// Extracts `[beam_batch, vocabulary]` scores from last-logit model output.
-fn extract_last_logits<B: Backend>(
-    logits: Tensor<B, 3>,
-    batch: usize,
-    vocabulary: usize,
-) -> Result<Tensor<B, 2>> {
-    if logits.dims() != [batch, 1, vocabulary] {
-        return Err(Error::shape(
-            "beam_search.model_logits",
-            format!("[{batch}, 1, {vocabulary}]"),
-            format!("{:?}", logits.dims()),
-        ));
-    }
-    Ok(logits.squeeze_dim::<2>(1))
-}
-
-/// Computes row-wise log-softmax and transfers the existing beam candidate matrix.
+/// Computes row-wise log-softmax in at least F32 and copies it to the host.
 ///
-/// Host decoding follows the tensor's runtime float dtype, preserving F64 values
-/// and accepting F16/BF16 results from backends whose default element type is F32.
+/// Inactive rows are zeroed first so their arbitrary (possibly NaN) scores
+/// cannot reach the host ranking. F16/BF16 logits are promoted to F32 before
+/// the log-sum-exp, as Hugging Face does, so near-tied beams are not ranked
+/// by half-precision rounding; F64 stays F64.
+///
+/// A row whose every logit is `-inf` (every token excluded) has no
+/// distribution: `log_softmax` would compute `-inf - (-inf) = NaN` for it.
+/// Such rows stay `-inf` instead, so candidate selection skips them like
+/// masked tokens: a fully excluded parent beam contributes no candidates while
+/// its siblings expand, as `-inf` scores rank last in Hugging Face, and a
+/// source whose every live parent is fully excluded reports that it has no
+/// finite candidate rather than a spurious numerical failure. A row containing
+/// any NaN logit is not fully excluded and still yields NaN, which candidate
+/// selection rejects as non-finite. Every other row is unchanged.
 fn host_log_probabilities<B: Backend>(
     logits: Tensor<B, 2>,
     active: &[bool],
@@ -952,150 +1238,15 @@ fn host_log_probabilities<B: Backend>(
             "beam-search active metadata does not match model logits".into(),
         ));
     }
-    let device = logits.device();
-    let active_mask =
-        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
-    let data = log_softmax(logits.mask_fill(active_mask.bool_not(), 0.0), 1)
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to read beam-search log probabilities from backend: {error}"
-            ))
-        })?;
-    host_float_data_f64(data, "beam-search log probabilities")
-}
-
-/// Materializes a token mask or an all-valid rectangle on the host.
-fn mask_values<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    label: &str,
-) -> Result<Vec<bool>> {
-    match mask {
-        Some(mask) => mask
-            .as_tensor()
-            .clone()
-            .int()
-            .try_into_data()
-            .map_err(|error| Error::BackendCapability(format!("failed to read {label}: {error}")))?
-            .to_vec::<B::IntElem>()
-            .map(|values| {
-                values
-                    .into_iter()
-                    .map(|value| value.elem::<i64>() != 0)
-                    .collect()
-            })
-            .map_err(|error| Error::BackendCapability(format!("failed to read {label}: {error}"))),
-        None => batch
-            .checked_mul(sequence)
-            .map(|count| vec![true; count])
-            .ok_or_else(|| Error::Generation(format!("{label} size overflows usize"))),
-    }
-}
-
-/// Counts valid entries and rejects fully masked prompt rows.
-fn nonempty_row_lengths(
-    valid: &[bool],
-    batch: usize,
-    sequence: usize,
-    label: &str,
-) -> Result<Vec<usize>> {
-    let expected = batch
-        .checked_mul(sequence)
-        .ok_or_else(|| Error::Generation(format!("{label} size overflows usize")))?;
-    if valid.len() != expected {
-        return Err(Error::Generation(format!(
-            "{label} mask contains {} entries, expected {expected}",
-            valid.len()
-        )));
-    }
-    let mut lengths = Vec::with_capacity(batch);
-    for (row, values) in valid.chunks_exact(sequence).enumerate() {
-        let length = values.iter().filter(|&&value| value).count();
-        if length == 0 {
-            return Err(Error::Generation(format!(
-                "{label} row {row} has no valid tokens"
-            )));
-        }
-        lengths.push(length);
-    }
-    Ok(lengths)
-}
-
-/// Finds the next explicit decoder position and preflights signed overflow.
-fn next_positions(
-    positions: &[i64],
-    valid: &[bool],
-    batch: usize,
-    sequence: usize,
-    max_new_tokens: usize,
-) -> Result<Vec<i64>> {
-    let expected = batch
-        .checked_mul(sequence)
-        .ok_or_else(|| Error::Generation("decoder position size overflows usize".into()))?;
-    if positions.len() != expected || valid.len() != expected {
-        return Err(Error::Generation(
-            "decoder positions and token mask are not rectangular".into(),
-        ));
-    }
-    let additional = i64::try_from(max_new_tokens).map_err(|_| {
-        Error::Generation("beam-search length exceeds signed position domain".into())
-    })?;
-    let mut next = Vec::with_capacity(batch);
-    for row in 0..batch {
-        let offset = row
-            .checked_mul(sequence)
-            .ok_or_else(|| Error::Generation("decoder position offset overflow".into()))?;
-        let end = offset
-            .checked_add(sequence)
-            .ok_or_else(|| Error::Generation("decoder position row end overflow".into()))?;
-        let row_positions = positions
-            .get(offset..end)
-            .ok_or_else(|| Error::Generation("decoder position rows became ragged".into()))?;
-        let row_valid = valid
-            .get(offset..end)
-            .ok_or_else(|| Error::Generation("decoder mask rows became ragged".into()))?;
-        let last = row_positions
-            .iter()
-            .zip(row_valid)
-            .rev()
-            .find_map(|(&position, &is_valid)| is_valid.then_some(position))
-            .ok_or_else(|| Error::Generation(format!("decoder prompt row {row} is empty")))?;
-        if last < 0 {
-            return Err(Error::Generation(format!(
-                "decoder prompt row {row} has negative last position {last}"
-            )));
-        }
-        let maximum = last.checked_add(additional).ok_or_else(|| {
-            Error::Generation(format!("decoder prompt row {row} position overflow"))
-        })?;
-        if maximum > i64::from(i32::MAX) {
-            return Err(Error::Generation(format!(
-                "decoder prompt row {row} position {maximum} exceeds Burn's portable signed index range"
-            )));
-        }
-        next.push(last + 1);
-    }
-    Ok(next)
-}
-
-/// Copies an integer tensor into portable host values with context.
-fn tensor_i64_values<B: Backend, const D: usize>(
-    tensor: Tensor<B, D, Int>,
-    label: &str,
-) -> Result<Vec<i64>> {
-    tensor
-        .try_into_data()
-        .map_err(|error| Error::BackendCapability(format!("failed to read {label}: {error}")))?
-        .to_vec::<B::IntElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<i64>())
-                .collect()
-        })
-        .map_err(|error| Error::BackendCapability(format!("failed to read {label}: {error}")))
+    let dtype = probability_accumulation_dtype(logits.dtype());
+    let logits = super::zero_inactive_rows(logits.cast(dtype), active);
+    let fully_excluded = logits
+        .clone()
+        .equal_elem(f64::NEG_INFINITY)
+        .all_dim(1)
+        .expand([batch, vocabulary]);
+    let log_probabilities = log_softmax(logits, 1).mask_fill(fully_excluded, f64::NEG_INFINITY);
+    metadata::tensor_f64_values(log_probabilities, "beam-search log probabilities")
 }
 
 #[cfg(test)]

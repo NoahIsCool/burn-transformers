@@ -5,6 +5,11 @@
 //! one source tensor and one converted output tensor at a time. This family
 //! bridge installs statically ranked Burn parameters without materializing a
 //! checkpoint-sized host record or executing repository code.
+//!
+//! Packed QFloat payloads from a certified Burnpack sidecar install exactly:
+//! packed where the backend keeps the artifact's blocks through the
+//! column-layout transpose, and as their exact dequantized values otherwise
+//! (see [`install_packed_parameter`]), never as a requantized approximation.
 
 use std::path::Path;
 
@@ -18,7 +23,8 @@ use thiserror::Error;
 use crate::{
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        PackedLayoutPolicy, ParameterInstallError, TensorSink, execute_local_load_plan,
+        install_packed_parameter,
     },
     feed_forward::GatedFeedForward,
     normalization::RmsNorm,
@@ -185,10 +191,27 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, Qwen3MoeCheckpointLoadError> {
+        self.load_checkpoint_with(root, options, Qwen3MoeCheckpointOptions::default())
+    }
+
+    /// Loads a local checkpoint under explicit family checkpoint options.
+    ///
+    /// [`Qwen3MoeCheckpointOptions`] has no fields yet, so this equals
+    /// [`Self::load_checkpoint`]. It exists so every family offers the same
+    /// `load_checkpoint` / `load_checkpoint_with` pair; see
+    /// [concrete-family loading](crate::checkpoint#loading-a-concrete-family).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`].
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: Qwen3MoeCheckpointOptions,
+    ) -> Result<ExecutionOutcome, Qwen3MoeCheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
-        let contract = self
-            .config()
-            .checkpoint_contract(Qwen3MoeCheckpointOptions::default())?;
+        let contract = self.config().checkpoint_contract(family_options)?;
         let plan = contract.build_load_plan(&manifest, options)?;
         Ok(execute_local_load_plan(&manifest, &plan, self)?)
     }
@@ -290,7 +313,8 @@ fn install_layer_tensor<B: Backend>(
                         target: target.into(),
                         component: "routed MoE",
                     })?;
-            let (expert, projection) = parse_expert_target(target, suffix)?;
+            let (expert, projection) =
+                parse_expert_target(target, &suffix["sparse_mlp.routed.".len()..])?;
             let expert_count = moe.routed.len();
             let expert =
                 moe.routed
@@ -310,7 +334,7 @@ fn install_layer_tensor<B: Backend>(
                         target: target.into(),
                         component: "dense SwiGLU",
                     })?;
-            install_mlp_tensor(dense, target, &suffix[10..], data)
+            install_mlp_tensor(dense, target, &suffix["dense_mlp.".len()..], data)
         }
         _ => Err(Qwen3MoeLoadError::UnknownTarget {
             target: target.into(),
@@ -318,16 +342,11 @@ fn install_layer_tensor<B: Backend>(
     }
 }
 
-/// Parses `sparse_mlp.routed.<decimal>.<projection>`.
+/// Parses `<decimal>.<projection>`, the part of a target after `sparse_mlp.routed.`.
 fn parse_expert_target<'a>(
     target: &str,
-    suffix: &'a str,
+    remainder: &'a str,
 ) -> Result<(usize, &'a str), Qwen3MoeLoadError> {
-    let remainder = suffix.strip_prefix("sparse_mlp.routed.").ok_or_else(|| {
-        Qwen3MoeLoadError::UnknownTarget {
-            target: target.into(),
-        }
-    })?;
     let (index, projection) =
         remainder
             .split_once('.')
@@ -395,16 +414,28 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged, exactly as before packed loading existed.
+/// Packed (QFloat) data from a quantized Burnpack sidecar stays packed only when
+/// the backend reproduces the artifact's `[1, G]` blocks through the
+/// parameter's load mapper (for example Metal with column-major linear
+/// layouts). Otherwise, as on Burn Flex 0.21, whose quantized transpose
+/// requantizes, the exact dequantized values `q * s` are installed in float
+/// storage instead of a requantized approximation. The installed weight
+/// therefore always equals the certified artifact; only its memory footprint
+/// depends on the backend.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), Qwen3MoeLoadError> {
-    install_float_parameter(parameter, data).map_err(|source| Qwen3MoeLoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| Qwen3MoeLoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

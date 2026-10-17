@@ -225,6 +225,9 @@ fn lightning_shape_contract_matches_pinned_inventory_count() {
             TensorOperation::Concatenate { sources, .. } => {
                 source_names.extend(sources.iter().map(String::as_str));
             }
+            TensorOperation::DequantizeMxfp4 { blocks, scales, .. } => {
+                source_names.extend([blocks.as_str(), scales.as_str()]);
+            }
             TensorOperation::Alias { .. } => {}
         }
     }
@@ -479,4 +482,234 @@ fn unsupported_mtp_schedule_is_rejected() {
             .checkpoint_contract(NemotronHCheckpointOptions::default())
             .is_err()
     );
+}
+
+/// An unrepresentable MTP fusion width `2 h` is a configuration error, not an overflow.
+///
+/// Validation rejects it first; the contract's checked width is a second guard.
+#[test]
+fn overflowing_mtp_fusion_width_is_rejected() {
+    let mut config = tiny_config();
+    config.hidden_size = usize::MAX / 2 + 1;
+    let error = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap_err();
+    assert_eq!(error.field, "hidden_size");
+    config.num_nextn_predict_layers = 0;
+    assert!(
+        config
+            .checkpoint_contract(NemotronHCheckpointOptions::default())
+            .is_ok()
+    );
+}
+
+/// The MTP section reports `hidden_size` when its checked `2 h` width is absent.
+///
+/// Validation shadows this guard on the public path, so the section builder is
+/// called directly with dimensions whose fusion width overflowed `u64`; it
+/// must fail before recording any tensor or mapping.
+#[test]
+fn mtp_section_rejects_unrepresentable_fusion_width() {
+    let config = tiny_config();
+    let mut dimensions = Dimensions::try_from(&config).unwrap();
+    dimensions.double_hidden = None;
+    let mut expected = Vec::new();
+    let mut mappings = MappingPlan::new();
+    let error = add_mtp(&mut expected, &mut mappings, dimensions, &config).unwrap_err();
+    assert_eq!(error.architecture, FAMILY);
+    assert_eq!(error.field, "hidden_size");
+    assert_eq!(error.reason, "dimension product overflows u64");
+    assert!(expected.is_empty());
+    assert!(mappings.operations().is_empty());
+}
+
+/// The MTP section re-checks its stage topology when called on an unvalidated config.
+///
+/// Validation shadows this guard on the public path; the section must still
+/// refuse a stage it cannot map before recording any tensor or mapping.
+#[test]
+fn mtp_section_rejects_unsupported_stage_topologies() {
+    let reason = "v1 checkpoint loading supports one [attention, moe] Lightning MTP stage";
+    for config in [
+        NemotronHConfig {
+            num_nextn_predict_layers: 2,
+            ..tiny_config()
+        },
+        NemotronHConfig {
+            mtp_layers_block_type: vec![NemotronHBlockType::FullAttention],
+            ..tiny_config()
+        },
+    ] {
+        let dimensions = Dimensions::try_from(&tiny_config()).unwrap();
+        let mut expected = Vec::new();
+        let mut mappings = MappingPlan::new();
+        let error = add_mtp(&mut expected, &mut mappings, dimensions, &config).unwrap_err();
+        assert_eq!(
+            (error.architecture, error.field, error.reason.as_str()),
+            (FAMILY, "mtp_layers_block_type", reason)
+        );
+        assert!(expected.is_empty());
+        assert!(mappings.operations().is_empty());
+    }
+}
+
+/// Latent expert projections without MLP bias map exactly two unbiased matrices per MoE.
+#[test]
+fn unbiased_latent_projections_map_only_weights() {
+    let config = NemotronHConfig {
+        moe_latent_size: Some(4),
+        n_group: 1,
+        topk_group: 1,
+        ..tiny_config()
+    };
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let latent = contract
+        .expected_tensors()
+        .iter()
+        .filter(|tensor| tensor.name.contains("latent_proj"))
+        .map(|tensor| (tensor.name.as_str(), tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        latent,
+        [
+            ("model.layers.3.moe.fc1_latent_proj.weight", vec![4, 8]),
+            ("model.layers.3.moe.fc2_latent_proj.weight", vec![8, 4]),
+            ("next_token_head.moe.fc1_latent_proj.weight", vec![4, 8]),
+            ("next_token_head.moe.fc2_latent_proj.weight", vec![8, 4]),
+        ]
+    );
+    // Routed experts operate in the latent width.
+    let expert = contract
+        .expected_tensors()
+        .iter()
+        .find(|tensor| tensor.name == "model.layers.3.moe.routed.0.up_proj.weight")
+        .unwrap();
+    assert_eq!(expert.shape, [6, 4]);
+    contract
+        .build_load_plan(&manifest(&contract), &LoadOptions::default())
+        .unwrap();
+}
+
+/// A Mamba-2 block maps exactly the biases its config enables.
+///
+/// The released checkpoints use a biased depthwise convolution and unbiased
+/// projections; the reverse switches must drop `conv1d.bias` and add
+/// `in_proj.bias` (one entry per projected channel) and `out_proj.bias`
+/// (one per residual channel), and the strict plan must still consume every
+/// source exactly once.
+#[test]
+fn mamba_block_maps_exactly_the_enabled_biases() {
+    let config = NemotronHConfig {
+        use_conv_bias: false,
+        use_bias: true,
+        ..tiny_config()
+    };
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap();
+    let mamba = contract
+        .expected_tensors()
+        .iter()
+        .filter(|tensor| tensor.name.contains("layers.0."))
+        .map(|tensor| (tensor.name.as_str(), tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    // Projection width 2 * 8 + 2 * 2 * 3 + 4 = 32; convolution channels 8 + 2 * 2 * 3 = 20.
+    assert_eq!(
+        mamba,
+        [
+            ("model.layers.0.norm.weight", vec![8]),
+            ("model.layers.0.mamba.in_proj.weight", vec![32, 8]),
+            ("model.layers.0.mamba.conv1d.weight", vec![20, 1, 3]),
+            ("model.layers.0.mamba.dt_bias", vec![4]),
+            ("model.layers.0.mamba.a_log", vec![4]),
+            ("model.layers.0.mamba.d", vec![4]),
+            ("model.layers.0.mamba.norm.weight", vec![8]),
+            ("model.layers.0.mamba.out_proj.weight", vec![8, 8]),
+            ("model.layers.0.mamba.in_proj.bias", vec![32]),
+            ("model.layers.0.mamba.out_proj.bias", vec![8]),
+        ]
+    );
+    contract
+        .build_load_plan(&manifest(&contract), &LoadOptions::default())
+        .unwrap();
+}
+
+/// The validation-time count equals the contract's length for every optional branch.
+///
+/// Validation bounds the inventory with [`NemotronHConfig::checkpoint_tensor_count`]
+/// before building it, so the formula must track the builder exactly.
+#[test]
+fn tensor_count_matches_the_contract_for_every_branch() {
+    for (use_bias, conv_bias, attention_bias, mlp_bias, latent, mtp) in [
+        (false, true, false, false, None, 1),
+        (true, false, true, true, None, 1),
+        (true, true, false, true, Some(4), 0),
+        (false, false, true, false, Some(4), 1),
+    ] {
+        let config = NemotronHConfig {
+            use_bias,
+            use_conv_bias: conv_bias,
+            attention_bias,
+            mlp_bias,
+            moe_latent_size: latent,
+            num_nextn_predict_layers: mtp,
+            ..tiny_config()
+        };
+        let contract = config
+            .checkpoint_contract(NemotronHCheckpointOptions::default())
+            .unwrap();
+        assert_eq!(
+            config.checkpoint_tensor_count(),
+            Some(contract.expected_tensors().len()),
+            "{use_bias} {conv_bias} {attention_bias} {mlp_bias} {latent:?} {mtp}"
+        );
+    }
+}
+
+/// Oversized schedules and expert banks fail validation before any contract exists.
+///
+/// Regression for CFG-COUNT-1: `n_routed_experts = 2^40` passed validation,
+/// and a schedule string of a few megabytes became millions of blocks.
+#[test]
+fn oversized_schedules_and_expert_banks_are_rejected_before_listing() {
+    use crate::models::config::{MAX_CHECKPOINT_TENSORS, MAX_EXPERTS, MAX_LAYERS};
+
+    let mut deep = tiny_config();
+    deep.layers_block_type = vec![NemotronHBlockType::Mlp; MAX_LAYERS + 1];
+    deep.num_hidden_layers = None;
+    deep.num_nextn_predict_layers = 0;
+    assert_eq!(deep.validate().unwrap_err().field, "layers_block_type");
+
+    for experts in [MAX_EXPERTS + 1, 1 << 40, usize::MAX] {
+        let config = NemotronHConfig {
+            n_routed_experts: experts,
+            n_group: 1,
+            ..tiny_config()
+        };
+        assert_eq!(config.validate().unwrap_err().field, "n_routed_experts");
+    }
+    // Within both count bounds, the product still exceeds the artifact limit.
+    let mut wide = NemotronHConfig {
+        n_routed_experts: MAX_EXPERTS,
+        n_group: 1,
+        ..tiny_config()
+    };
+    wide.layers_block_type = vec![NemotronHBlockType::Moe; 8];
+    wide.num_hidden_layers = None;
+    assert!(wide.checkpoint_tensor_count().unwrap() > MAX_CHECKPOINT_TENSORS);
+    let error = wide
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .unwrap_err();
+    assert_eq!(error.field, "n_routed_experts");
+    // A dense schedule never evaluates the unused expert fields.
+    let dense = NemotronHConfig {
+        layers_block_type: vec![NemotronHBlockType::Mlp; 2],
+        num_hidden_layers: None,
+        num_nextn_predict_layers: 0,
+        n_routed_experts: usize::MAX,
+        ..tiny_config()
+    };
+    assert_eq!(dense.checkpoint_tensor_count(), Some(3 + 2 * 3));
 }

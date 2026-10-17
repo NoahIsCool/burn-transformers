@@ -14,14 +14,19 @@
 //! succeeds. These boundaries ensure a mismatched redundant payload cannot leak a
 //! partially initialized model and no model alias can reference a missing owner.
 
+mod convert;
+mod packed_install;
+#[cfg(test)]
+pub(crate) mod packed_sink_support;
+mod permutation;
+mod rounding;
+mod schedule;
 mod source;
+mod storage_order;
+mod tiles;
 mod transform;
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
-};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use burn::tensor::{DType, TensorData};
 use burn::{
@@ -32,7 +37,13 @@ use burn::{
     },
 };
 
+pub use packed_install::{
+    PackedInstall, PackedLayoutPolicy, install_packed_parameter, packed_layout_is_exact,
+};
+use schedule::execution_group_indices;
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
+#[cfg(test)]
+pub(super) use transform::dequantize_mxfp4;
 
 use super::{
     CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest, LoadPlan, LoadReport,
@@ -103,6 +114,14 @@ pub enum ParameterInstallError {
     InitializedQuantized,
     /// The shape and ordinary float dtype cannot describe a host-sized payload.
     PayloadSizeOverflow,
+    /// Packed data would not keep its exact blocks through the load mapper.
+    ///
+    /// Returned by [`install_packed_parameter`] under
+    /// [`PackedLayoutPolicy::RequireExact`]: either the parameter's load mapper
+    /// permutes axes and [`packed_layout_is_exact`] reports that the backend
+    /// re-derives block scales after such a permutation, or the mapper changes
+    /// values, dtype, or shape beyond an axis permutation.
+    InexactPackedLayout,
     /// Ordinary float bytes disagree with the declared shape and dtype.
     PayloadLength {
         /// Required bytes, computed without allocating or initializing the parameter.
@@ -145,6 +164,10 @@ impl fmt::Display for ParameterInstallError {
             Self::PayloadSizeOverflow => {
                 write!(formatter, "checkpoint float payload size overflows usize")
             }
+            Self::InexactPackedLayout => write!(
+                formatter,
+                "the parameter's load mapper would not preserve the packed weight's exact blocks on this backend (a requantizing axis permutation, or value or shape arithmetic); install dequantized values or use a backend with exact packed layout operations"
+            ),
             Self::PayloadLength { expected, actual } => {
                 write!(
                     formatter,
@@ -201,9 +224,45 @@ impl Error for ParameterInstallError {}
 /// The temporary parameter clone shares the incoming backend allocation; it is
 /// used solely to move the existing parameter out of `&mut` safely and is
 /// released after the mapped parameter is installed.
+///
+/// Packed data passes through the parameter's mapper unchanged, so on a backend
+/// whose quantized transpose requantizes (Burn Flex 0.21) a column-layout weight
+/// no longer equals the artifact. [`install_packed_parameter`] detects that case
+/// and can install the exact dequantized values instead.
+///
+/// # Storage order
+///
+/// The installed *values* always equal `mapper(data)`. Their *memory layout* is
+/// chosen for the backend's matrix products: on Burn Flex without autodiff, a
+/// dense rank-2 float matrix whose load mapper transposes (a column-layout
+/// projection weight) is transposed once on the host so the parameter ends up
+/// contiguous `[in, out]` instead of a strided view of the `[out, in]` buffer.
+/// Flex's GEMM ran single-row (decode) projections about twice as fast from
+/// contiguous storage; other backends keep the zero-copy view, which measured as
+/// fast or faster there. Detecting a transposing mapper loads a `[2, 3]` probe
+/// into a clone of the parameter; a mapper that panics on that shape is treated
+/// as non-transposing (the default panic hook still prints its message, and a
+/// `panic = "abort"` build aborts instead). The host transpose briefly holds a
+/// second host copy of this one tensor.
 pub fn install_float_parameter<B: Backend, const D: usize>(
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
+) -> std::result::Result<(), ParameterInstallError> {
+    validate_parameter_install(parameter, &data)?;
+    install_validated_parameter(parameter, data);
+    Ok(())
+}
+
+/// Checks every [`install_float_parameter`] precondition without mutating anything.
+///
+/// The order is part of the contract: rank, autodiff packed rejection, initialized
+/// QFloat rejection, checkpoint-facing shape, element kind, dense payload length,
+/// and finally backend storage support. Packed installers call this first so a
+/// rejected tensor never reaches a backend constructor; Burn 0.21 autodiff, for
+/// example, panics instead of returning an error when asked to build QFloat data.
+fn validate_parameter_install<B: Backend, const D: usize>(
+    parameter: &Param<Tensor<B, D>>,
+    data: &TensorData,
 ) -> std::result::Result<(), ParameterInstallError> {
     let actual = data.shape.to_vec();
     if actual.len() != D {
@@ -237,18 +296,42 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
         validate_float_payload_length(&actual, data.dtype, data.bytes.len())?;
     }
 
-    let device = parameter.lazy_device();
     let dtype = data.dtype;
-    if !B::dtype_usage(&device, dtype).contains(DTypeUsage::Storage) {
+    if !B::dtype_usage(&parameter.lazy_device(), dtype).contains(DTypeUsage::Storage) {
         return Err(ParameterInstallError::UnsupportedStorage {
             dtype: format!("{dtype:?}"),
         });
     }
-    let tensor = Tensor::<B, D>::from_data(data, (&device, dtype));
+    Ok(())
+}
+
+/// Installs data that already passed [`validate_parameter_install`].
+///
+/// The tensor is built at its checkpoint dtype on the parameter's device and loaded
+/// through Burn's record path, so the parameter's mapper, device, and gradient
+/// policy apply exactly as for any other record. Its physical storage order is
+/// chosen by [`storage_order::stored_for_mapper`], which never changes values.
+fn install_validated_parameter<B: Backend, const D: usize>(
+    parameter: &mut Param<Tensor<B, D>>,
+    data: TensorData,
+) {
+    let device = parameter.lazy_device();
+    let tensor = storage_order::stored_for_mapper(parameter, data, &device);
+    load_parameter_tensor(parameter, tensor);
+}
+
+/// Loads a checkpoint-facing tensor through the parameter's record path.
+///
+/// The parameter keeps its mapper, device, and gradient policy. The temporary
+/// record clone only moves the existing parameter out of `&mut`; it shares the
+/// incoming backend allocation and is dropped once the mapped value replaces it.
+fn load_parameter_tensor<B: Backend, const D: usize>(
+    parameter: &mut Param<Tensor<B, D>>,
+    tensor: Tensor<B, D>,
+) {
     let record = Param::initialized(ParamId::new(), tensor);
     let existing = std::mem::replace(parameter, record.clone());
     *parameter = existing.load_record(record);
-    Ok(())
 }
 
 /// Checks dense floating storage before a backend can retain malformed metadata.
@@ -261,12 +344,7 @@ fn validate_float_payload_length(
     dtype: DType,
     actual: usize,
 ) -> std::result::Result<(), ParameterInstallError> {
-    let elements = shape
-        .iter()
-        .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
-        .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
-    let expected = elements
-        .checked_mul(dtype.size())
+    let expected = super::layout::dense_byte_len(shape, dtype.size())
         .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
     if expected != actual {
         return Err(ParameterInstallError::PayloadLength { expected, actual });
@@ -408,9 +486,14 @@ impl<E: Error + 'static> Error for ExecutionFailure<E> {
 ///
 /// The complete mutable plan is preflighted before the first source read or sink
 /// call. Primary operations are then scheduled by source shard and byte offset,
-/// independently of the target-name order retained by [`LoadPlan`]. Consequently,
-/// a local source opens each shard once for the usual unary and fused-split model
-/// mappings even when architecture target names are interleaved across shards.
+/// independently of the target-name order retained by [`LoadPlan`], except that
+/// execution groups whose outputs total at least 1 GiB (vocabulary-sized
+/// matrices, and at F32 some per-layer tensors) are installed first, in plan
+/// order, so that first-fit device memory pools stay packed. When no such group
+/// exists, a local source therefore opens each shard once for the usual unary and
+/// fused-split model mappings, even when architecture target names are
+/// interleaved across shards; each hoisted group can cost at most one extra shard
+/// open (Muse-Glimmer-30B's F16 load opens three shard handles for two shards).
 /// Physical alias/owner pairs are first compared as exact raw payloads, before
 /// `TensorSink` receives any call. Targets slicing the same fused source are grouped at that source's physical
 /// position: the payload remains resident while each output is materialized and
@@ -456,7 +539,7 @@ pub(super) fn execute_load_plan_with_overrides<S, K, H, R>(
     source: &mut S,
     sink: &mut K,
     has_override: H,
-    mut read_override: R,
+    read_override: R,
 ) -> ExecutionResult<ExecutionOutcome, K::Error>
 where
     S: TensorSource,
@@ -464,39 +547,134 @@ where
     H: Fn(&K, &PlannedTensor) -> bool,
     R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
 {
-    let mut report = plan.report.clone();
-    report.applied.clear();
-    report.quantized.clear();
-    report.equivalence_verified.clear();
+    let mut report = plan.report.without_progress();
     let mut stats = ExecutionStats::default();
 
-    if let Err(error) = transform::validate_plan(plan) {
+    // Phase 1: preflight, equivalence checks, and every storage-owning write.
+    // Any failure releases the source exactly once, here.
+    let primary = install_primary_tensors(
+        plan,
+        source,
+        sink,
+        has_override,
+        read_override,
+        &mut report,
+        &mut stats,
+    );
+    if let Err((failed_target, cause)) = primary {
         let _ = source.close();
-        return Err(checkpoint_failure(None, error, report, stats, source));
+        return Err(execution_failure(
+            failed_target,
+            cause,
+            report,
+            stats,
+            source,
+        ));
     }
-
-    if let Err((failed_alias, error)) =
-        verify_checkpoint_equivalences(plan, source, &mut report, &mut stats)
-    {
-        let _ = source.close();
-        return Err(checkpoint_failure(
-            Some(failed_alias),
-            error,
+    // Phase 2: release source resources before any alias references an owner.
+    if let Err(error) = source.close() {
+        let cause = ExecutionFailureCause::Checkpoint(error);
+        return Err(execution_failure(None, cause, report, stats, source));
+    }
+    // Phase 3: tie aliases to their now-installed storage owners.
+    if let Err((failed_target, cause)) = install_aliases(plan, sink, &mut report, &mut stats) {
+        return Err(execution_failure(
+            failed_target,
+            cause,
             report,
             stats,
             source,
         ));
     }
 
-    // Freeze ownership before any source or sink mutation. Besides making the
-    // scheduling decision deterministic, this prevents a stateful predicate
-    // from selecting a target during group preflight and changing its answer at
-    // installation time.
+    report.finalize();
+    stats.source = source.stats();
+    Ok(ExecutionOutcome { report, stats })
+}
+
+/// A failed execution step: the target being processed, if any, and its cause.
+type StepFailure<E> = (Option<String>, ExecutionFailureCause<E>);
+
+/// Returns a mapper that attributes a checkpoint error to `target`.
+fn checkpoint_step<E>(target: &str) -> impl FnOnce(CheckpointError) -> StepFailure<E> + '_ {
+    move |error| {
+        (
+            Some(target.to_owned()),
+            ExecutionFailureCause::Checkpoint(error),
+        )
+    }
+}
+
+/// Validates the plan, verifies equivalences, and installs every primary target.
+///
+/// Override ownership is frozen before any source or sink mutation, so a stateful
+/// predicate cannot select a target during group preflight and change its answer
+/// at installation time. Groups run in physical source order, except that
+/// outsized groups run first (see [`execution_groups`]).
+#[allow(clippy::too_many_arguments)]
+fn install_primary_tensors<S, K, H, R>(
+    plan: &LoadPlan,
+    source: &mut S,
+    sink: &mut K,
+    has_override: H,
+    mut read_override: R,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> Result<(), StepFailure<K::Error>>
+where
+    S: TensorSource,
+    K: TensorSink,
+    H: Fn(&K, &PlannedTensor) -> bool,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
+    transform::validate_plan(plan)
+        .map_err(|error| (None, ExecutionFailureCause::Checkpoint(error)))?;
+    verify_checkpoint_equivalences(plan, source, report, stats)
+        .map_err(|(alias, error)| (Some(alias), ExecutionFailureCause::Checkpoint(error)))?;
+
     let overridden = plan
         .tensors
         .iter()
         .map(|tensor| has_override(sink, tensor))
         .collect::<Vec<_>>();
+    let can_skip_source = certified_source_bypasses(plan, source, &overridden)?;
+    let targets = TargetDisposition {
+        overridden: &overridden,
+        can_skip_source: &can_skip_source,
+    };
+    for group in execution_groups(&plan.tensors) {
+        install_group(
+            plan,
+            &group,
+            source,
+            sink,
+            &mut read_override,
+            &targets,
+            report,
+            stats,
+        )?;
+    }
+    Ok(())
+}
+
+/// Per-target override decisions frozen before the first sink mutation.
+struct TargetDisposition<'a> {
+    /// Whether the sink supplies the target's final data itself.
+    overridden: &'a [bool],
+    /// Whether the source certified every descriptor, so its payload is never read.
+    can_skip_source: &'a [bool],
+}
+
+/// Decides, per target, whether an override may bypass its source payload.
+///
+/// Only overridden targets whose every source descriptor the source certifies
+/// (see [`TensorSource::validate_tensor_descriptor`]) skip their reads; all
+/// others take the strict read-validate-discard fallback.
+fn certified_source_bypasses<S: TensorSource, E>(
+    plan: &LoadPlan,
+    source: &S,
+    overridden: &[bool],
+) -> Result<Vec<bool>, StepFailure<E>> {
     let mut can_skip_source = vec![false; plan.tensors.len()];
     for (index, tensor) in plan.tensors.iter().enumerate() {
         if !overridden[index] {
@@ -504,226 +682,180 @@ where
         }
         let mut descriptors_certified = true;
         for planned_source in &tensor.sources {
-            match source.validate_tensor_descriptor(planned_source) {
-                Ok(certified) => descriptors_certified &= certified,
-                Err(error) => {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-            }
+            let certified = source
+                .validate_tensor_descriptor(planned_source)
+                .map_err(checkpoint_step(&tensor.target))?;
+            descriptors_certified &= certified;
         }
         can_skip_source[index] = descriptors_certified;
     }
+    Ok(can_skip_source)
+}
 
-    for group in execution_groups(&plan.tensors) {
-        let source_target_index = group.iter().copied().find(|&index| !can_skip_source[index]);
-        let shared_payload =
-            if let (true, Some(source_target_index)) = (group.len() > 1, source_target_index) {
-                let tensor = &plan.tensors[source_target_index];
-                let Some(planned_source) = tensor.sources.first() else {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        CheckpointError::InvalidMapping {
-                            message: format!(
-                                "fused-split target `{}` has no source descriptor",
-                                tensor.target
-                            ),
-                        },
-                        report,
-                        stats,
-                        source,
-                    ));
-                };
-                match transform::read_verified(source, planned_source, &mut stats) {
-                    Ok(payload) => Some(payload),
-                    Err(error) => {
-                        let _ = source.close();
-                        return Err(checkpoint_failure(
-                            Some(tensor.target.clone()),
-                            error,
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                }
-            } else {
-                None
-            };
-
-        for index in group {
+/// Materializes and installs one indivisible execution group.
+///
+/// A multi-target group shares one fused source payload, read once by its
+/// first target that still needs the source and held while every output is
+/// materialized and handed off.
+#[allow(clippy::too_many_arguments)]
+fn install_group<S, K, R>(
+    plan: &LoadPlan,
+    group: &[usize],
+    source: &mut S,
+    sink: &mut K,
+    read_override: &mut R,
+    targets: &TargetDisposition<'_>,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> Result<(), StepFailure<K::Error>>
+where
+    S: TensorSource,
+    K: TensorSink,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
+    let reader = group
+        .iter()
+        .copied()
+        .find(|&index| !targets.can_skip_source[index]);
+    let shared_payload = match (group.len() > 1, reader) {
+        (true, Some(index)) => {
             let tensor = &plan.tensors[index];
-            let source_data = if can_skip_source[index] {
-                None
-            } else {
-                let materialized = match &shared_payload {
-                    Some(payload) => {
-                        transform::materialize_shared_slice(tensor, payload, &mut stats)
-                    }
-                    None => transform::materialize(tensor, source, &mut stats),
-                };
-                match materialized {
-                    Ok(data) => Some(data),
-                    Err(error) => {
-                        let _ = source.close();
-                        return Err(checkpoint_failure(
-                            Some(tensor.target.clone()),
-                            error,
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                }
-            };
-            let data = if overridden[index] {
-                // A non-certifying source reaches this branch only after its
-                // ordinary materialized value has been fully validated. Drop it
-                // before decoding the override so the fallback does not retain
-                // two output buffers at once.
-                drop(source_data);
-                let override_data = match read_override(sink, tensor) {
-                    Ok(Some(data)) => data,
-                    Ok(None) => {
-                        let _ = source.close();
-                        return Err(checkpoint_failure(
-                            Some(tensor.target.clone()),
-                            CheckpointError::InvalidMapping {
-                                message: format!(
-                                    "override predicate selected `{}` but its materializer returned no tensor",
-                                    tensor.target
-                                ),
-                            },
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = source.close();
-                        return Err(sink_failure(
-                            Some(tensor.target.clone()),
-                            error,
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                };
-                if let Err(error) = observe_override_peak(
-                    tensor,
-                    &override_data,
-                    shared_payload.as_ref(),
-                    plan.memory.peak_host_staging_bytes,
-                    &mut stats,
-                ) {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-                override_data
-            } else {
-                let Some(data) = source_data else {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        CheckpointError::InvalidMapping {
-                            message: format!(
-                                "non-overridden target `{}` unexpectedly bypassed its source",
-                                tensor.target
-                            ),
-                        },
-                        report,
-                        stats,
-                        source,
-                    ));
-                };
-                data
-            };
-            match install_tensor(tensor, data, sink, &mut report, &mut stats) {
-                Ok(()) => {}
-                Err(InstallError::Checkpoint(error)) => {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-                Err(InstallError::Sink(error)) => {
-                    let _ = source.close();
-                    return Err(sink_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-            }
+            let planned_source = tensor.sources.first().ok_or_else(|| {
+                checkpoint_step(&tensor.target)(CheckpointError::InvalidMapping {
+                    message: format!(
+                        "fused-split target `{}` has no source descriptor",
+                        tensor.target
+                    ),
+                })
+            })?;
+            Some(
+                transform::read_verified(source, planned_source, stats)
+                    .map_err(checkpoint_step(&tensor.target))?,
+            )
         }
-    }
+        _ => None,
+    };
 
-    if let Err(error) = source.close() {
-        return Err(checkpoint_failure(None, error, report, stats, source));
+    for &index in group {
+        let tensor = &plan.tensors[index];
+        let source_data = if targets.can_skip_source[index] {
+            None
+        } else {
+            let materialized = match &shared_payload {
+                Some(payload) => transform::materialize_shared_slice(tensor, payload, stats),
+                None => transform::materialize(tensor, source, stats),
+            };
+            Some(materialized.map_err(checkpoint_step(&tensor.target))?)
+        };
+        let data = if targets.overridden[index] {
+            // A non-certifying source reaches this branch only after its
+            // ordinary materialized value has been fully validated. Drop it
+            // before decoding the override so the fallback does not retain
+            // two output buffers at once.
+            drop(source_data);
+            read_validated_override(
+                plan,
+                tensor,
+                sink,
+                read_override,
+                shared_payload.as_ref(),
+                stats,
+            )?
+        } else {
+            source_data.ok_or_else(|| {
+                checkpoint_step(&tensor.target)(CheckpointError::InvalidMapping {
+                    message: format!(
+                        "non-overridden target `{}` unexpectedly bypassed its source",
+                        tensor.target
+                    ),
+                })
+            })?
+        };
+        install_tensor(tensor, data, sink, report, stats).map_err(|error| {
+            let cause = match error {
+                InstallError::Checkpoint(error) => ExecutionFailureCause::Checkpoint(error),
+                InstallError::Sink(error) => ExecutionFailureCause::Sink(error),
+            };
+            (Some(tensor.target.clone()), cause)
+        })?;
     }
+    Ok(())
+}
 
+/// Obtains an override's data and checks it against the plan and staging bound.
+fn read_validated_override<K, R>(
+    plan: &LoadPlan,
+    tensor: &PlannedTensor,
+    sink: &mut K,
+    read_override: &mut R,
+    shared_payload: Option<&SourceTensor>,
+    stats: &mut ExecutionStats,
+) -> Result<TensorData, StepFailure<K::Error>>
+where
+    K: TensorSink,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
+    let data = match read_override(sink, tensor) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return Err(checkpoint_step(&tensor.target)(
+                CheckpointError::InvalidMapping {
+                    message: format!(
+                        "override predicate selected `{}` but its materializer returned no tensor",
+                        tensor.target
+                    ),
+                },
+            ));
+        }
+        Err(error) => {
+            return Err((
+                Some(tensor.target.clone()),
+                ExecutionFailureCause::Sink(error),
+            ));
+        }
+    };
+    observe_override_peak(
+        tensor,
+        &data,
+        shared_payload,
+        plan.memory.peak_host_staging_bytes,
+        stats,
+    )
+    .map_err(checkpoint_step(&tensor.target))?;
+    Ok(data)
+}
+
+/// Ties every alias to its installed storage owner after sources are closed.
+fn install_aliases<K: TensorSink>(
+    plan: &LoadPlan,
+    sink: &mut K,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> Result<(), StepFailure<K::Error>> {
     for alias in &plan.aliases {
-        let super::PlannedTransform::Alias { source_target } = &alias.transform else {
-            return Err(checkpoint_failure(
-                Some(alias.target.clone()),
+        let PlannedTransform::Alias { source_target } = &alias.transform else {
+            return Err(checkpoint_step(&alias.target)(
                 CheckpointError::InvalidMapping {
                     message: format!("entry `{}` in alias list is not an alias", alias.target),
                 },
-                report,
-                stats,
-                source,
             ));
         };
-        let aliases_applied = match stats.aliases_applied.checked_add(1) {
-            Some(count) => count,
-            None => {
-                return Err(checkpoint_failure(
+        let aliases_applied = stats.aliases_applied.checked_add(1).ok_or_else(|| {
+            checkpoint_step(&alias.target)(CheckpointError::ArithmeticOverflow {
+                context: "counting applied aliases",
+            })
+        })?;
+        sink.alias_tensor(&alias.target, source_target)
+            .map_err(|error| {
+                (
                     Some(alias.target.clone()),
-                    CheckpointError::ArithmeticOverflow {
-                        context: "counting applied aliases",
-                    },
-                    report,
-                    stats,
-                    source,
-                ));
-            }
-        };
-        if let Err(error) = sink.alias_tensor(&alias.target, source_target) {
-            return Err(sink_failure(
-                Some(alias.target.clone()),
-                error,
-                report,
-                stats,
-                source,
-            ));
-        }
+                    ExecutionFailureCause::Sink(error),
+                )
+            })?;
         stats.aliases_applied = aliases_applied;
         report.record_applied(alias.target.clone());
     }
-
-    report.finalize();
-    stats.source = source.stats();
-    Ok(ExecutionOutcome { report, stats })
+    Ok(())
 }
 
 /// Verifies every redundant physical checkpoint tensor before the first write.
@@ -997,36 +1129,75 @@ fn shared_slice_key(tensor: &PlannedTensor) -> Option<SharedSourceKey<'_>> {
 /// bound. Fused slices are a single group because all outputs depend on one shared
 /// payload. Target name and original plan index are total-order tie breakers for
 /// hand-authored plans whose source descriptors happen to compare equally.
+///
+/// One exception precedes the physical order: groups whose outputs total at
+/// least [`LARGE_GROUP_BYTES`] are installed first, in plan order. Installation
+/// order is also device allocation order, and Burn's CubeCL backends pack
+/// tensors first-fit into sliced memory pages. Allocating the outsized
+/// vocabulary matrices last, after per-layer tensors have filled the pages,
+/// stranded several gigabytes: on Metal the strict F16 loads of Qwen3.8-27B and
+/// Muse-Glimmer-30B settled 7.4 and 5.4 GB above the hoisted schedule (62.35
+/// against 54.92 GB, 64.78 against 59.40 GB), with peaks 5.2 and 8.1 GB higher.
+/// Each hoisted group costs at most one extra shard open, and checkpoints
+/// without such a group keep the pure physical schedule; Nemotron-H,
+/// Qwen3-30B-A3B, and FLAN-T5-XXL footprints were unchanged by either order.
+///
+/// Each distinct shared-source descriptor is numbered by first appearance, and
+/// the verified [`execution_group_indices`] forms the groups: they partition
+/// the plan, so every primary target is installed exactly once.
 fn execution_groups(tensors: &[PlannedTensor]) -> Vec<Vec<usize>> {
-    let mut slices_by_source = BTreeMap::<SharedSourceKey<'_>, Vec<usize>>::new();
-    for (index, tensor) in tensors.iter().enumerate() {
-        if let Some(key) = shared_slice_key(tensor) {
-            slices_by_source.entry(key).or_default().push(index);
+    let mut class_of_source = BTreeMap::<SharedSourceKey<'_>, usize>::new();
+    let classes = tensors
+        .iter()
+        .map(|tensor| {
+            shared_slice_key(tensor).map(|key| {
+                let next = class_of_source.len();
+                *class_of_source.entry(key).or_insert(next)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut groups = execution_group_indices(&classes, class_of_source.len());
+    groups.sort_by(|left, right| {
+        let large = |group: &[usize]| group_output_bytes(tensors, group) >= LARGE_GROUP_BYTES;
+        match (large(left), large(right)) {
+            // Large groups keep plan order among themselves; the verified groups
+            // are already emitted in plan order, so their leaders compare it.
+            (true, true) => left.first().cmp(&right.first()),
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => execution_group_order(tensors, left, right),
         }
-    }
-
-    let mut emitted = BTreeSet::new();
-    let mut groups = Vec::with_capacity(tensors.len());
-    for (index, tensor) in tensors.iter().enumerate() {
-        let Some(key) = shared_slice_key(tensor) else {
-            groups.push(vec![index]);
-            continue;
-        };
-        let Some(indices) = slices_by_source.get(&key) else {
-            // `key` was inserted during the immutable collection pass above. Keep
-            // this internal logic invariant non-panicking if the grouping code is
-            // changed independently in the future.
-            groups.push(vec![index]);
-            continue;
-        };
-        if indices.len() == 1 {
-            groups.push(vec![index]);
-        } else if emitted.insert(key) {
-            groups.push(indices.clone());
-        }
-    }
-    groups.sort_by(|left, right| execution_group_order(tensors, left, right));
+    });
     groups
+}
+
+/// Total output bytes from which an execution group is installed before physical order.
+///
+/// The threshold targets vocabulary-sized matrices: 2.54 and 2.69 GB at F16
+/// in the measured Qwen3.8 and Muse checkpoints, and 1.09 to 1.34 GB at half
+/// precision in gpt-oss-20b, Qwen2-7B, and gemma-3-4b-it. At half precision
+/// no per-layer tensor of the pinned checkpoints reaches it; the largest,
+/// gpt-oss-20b's MXFP4-decoded expert `gate_up_proj`, is 1.06 GB. An F32 load
+/// doubles every size, so it also hoists smaller vocabularies (Qwen3-4B and
+/// Llama-3.1-8B, for example) and some per-layer tensors: gpt-oss-20b's
+/// decoded `gate_up_proj` is 2.12 GB in each block (see [`execution_groups`]).
+pub(crate) const LARGE_GROUP_BYTES: u64 = 1 << 30;
+
+/// Total target storage of one execution group, saturating on overflow.
+///
+/// Shapes and dtypes were validated before scheduling; an unrepresentable
+/// size cannot occur there and is treated as large, which is conservative.
+fn group_output_bytes(tensors: &[PlannedTensor], group: &[usize]) -> u64 {
+    group
+        .iter()
+        .filter_map(|&index| tensors.get(index))
+        .map(|tensor| {
+            tensor
+                .dtype
+                .tensor_storage_bytes(&tensor.shape)
+                .unwrap_or(u64::MAX)
+        })
+        .fold(0_u64, u64::saturating_add)
 }
 
 /// Compares two indivisible execution groups by their first physical source.
@@ -1087,10 +1258,10 @@ pub fn execute_local_load_plan<K: TensorSink>(
     execute_load_plan(plan, &mut source, sink)
 }
 
-/// Builds a checkpoint-side failure with finalized partial diagnostics.
-fn checkpoint_failure<S, E>(
+/// Builds a failure with finalized partial diagnostics and source counters.
+fn execution_failure<S, E>(
     failed_target: Option<String>,
-    error: CheckpointError,
+    cause: ExecutionFailureCause<E>,
     mut report: LoadReport,
     mut stats: ExecutionStats,
     source: &S,
@@ -1102,28 +1273,7 @@ where
     stats.source = source.stats();
     Box::new(ExecutionFailure {
         failed_target,
-        cause: ExecutionFailureCause::Checkpoint(error),
-        report,
-        stats,
-    })
-}
-
-/// Builds a sink-side failure with finalized partial diagnostics.
-fn sink_failure<S, E>(
-    failed_target: Option<String>,
-    error: E,
-    mut report: LoadReport,
-    mut stats: ExecutionStats,
-    source: &S,
-) -> Box<ExecutionFailure<E>>
-where
-    S: TensorSource,
-{
-    report.finalize();
-    stats.source = source.stats();
-    Box::new(ExecutionFailure {
-        failed_target,
-        cause: ExecutionFailureCause::Sink(error),
+        cause,
         report,
         stats,
     })

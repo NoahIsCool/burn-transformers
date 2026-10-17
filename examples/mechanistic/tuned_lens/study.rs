@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use transformers::{
     CausalLmInput,
     checkpoint::LoadOptions,
-    models::gpt_neox::{GptNeoXConfig, GptNeoXModel},
+    models::gpt_neox::{GptNeoXConfig, GptNeoXForCausalLm},
 };
 
 /// CPU backend for F32 released-lens evaluation and parity checks.
@@ -42,7 +42,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Module, Debug)]
 pub struct Experiment<B: Backend> {
     /// Pinned GPT-NeoX backbone supplying residuals and the shared final decoder.
-    pub backbone: GptNeoXModel<B>,
+    pub backbone: GptNeoXForCausalLm<B>,
     /// Released affine corrections; stage zero uses embeddings and stage i uses block i - 1 residuals.
     pub translators: Vec<Linear<B>>,
 }
@@ -87,7 +87,7 @@ impl Experiment<B> {
         let config: GptNeoXConfig =
             serde_json::from_slice(&fs::read(root.join("model/config.json"))?)?;
         let device = Default::default();
-        let mut backbone = GptNeoXModel::init(config.clone(), &device)?;
+        let mut backbone = GptNeoXForCausalLm::init(config.clone(), &device)?;
         backbone.load_checkpoint(root.join("model"), &LoadOptions::default())?;
         let lens = Tensors::load(&root.join("lens.safetensors"))?;
         let mut translators = Vec::new();
@@ -226,8 +226,10 @@ impl Tensors {
         }
         let values: Vec<_> = view
             .data()
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect();
         if values.iter().any(|value| !value.is_finite()) {
             return Err(format!("{name}: nonfinite reference or lens parameter").into());

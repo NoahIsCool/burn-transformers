@@ -1,0 +1,1246 @@
+{
+ "schema_version": 1,
+ "scope": "reference_precision_and_memory_followups_not_benchmark",
+ "date_utc": "2026-10-17",
+ "advertised_supported": false,
+ "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+ "sources": [
+  {
+   "commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "description": "installs execution groups of at least 1 GiB before the physical load schedule; Qwen3.8 fixed rounds, Qwen3.8 and Muse official references, Muse streaming audit, and the gpt-oss F32/BF16 bundle gates with the calibrated bound ran from this clean detached tree"
+  },
+  {
+   "commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "description": "judges the Nemotron corresponding-path gate against the official F32 rows with F16-envelope floors; the Nemotron gate and Qwen3.8 rounds 1-2 ran in this section"
+  },
+  {
+   "commit": "67db7e7d57a4cb20fca3f29d497bb60a4bbe9480",
+   "description": "adds the Nemotron precision tool's resident budget and disk offload (c269612) and calibrates the gpt-oss half-precision bound to 2.7; the Nemotron precision reference ran from this clean tree"
+  },
+  {
+   "commit": "eca73b9a7005435691187995bb6ca984db60f113",
+   "description": "adds scripts/generate_nemotron_h_precision_reference.py; its first, fully resident attempt was stopped by the watchdog"
+  },
+  {
+   "commit": "8d552027dd5e4dc3080f5da6d6f87123b8443823",
+   "description": "adds --bf16-resident to scripts/generate_causal_lm_reference.py; the full gpt-oss F32 reference and its first gate runs ran from this clean tree"
+  },
+  {
+   "commit": "55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c",
+   "dirty": true,
+   "log": "reference-precision-followups-20261016/gpt-oss-bf16-vs-f32-bundles.log",
+   "description": "the Transformers BF16-against-F32 bundle comparison ran from a working tree at this commit with uncommitted edits, among them the comparison test itself; its log names every uncommitted file by SHA-256 (tests/gpt_oss_artifacts.rs 6f021efe7c87c86d037ed023e179a46224351f90bdb9e8f00f2f89427400260b)"
+  }
+ ],
+ "cargo_lock_sha256": "119caecd2cf4ab40dcfb542314984045f3b2f0740d75e00494ecdec99c16dbc9",
+ "toolchain": {
+  "rustc": "1.94.0-nightly",
+  "commit_hash": "4f14395c37db4c1be874e6b0ace6721674223c22",
+  "host": "aarch64-apple-darwin",
+  "burn": "0.21.0",
+  "profile": "release",
+  "python": "3.11.9",
+  "torch": "2.10.0",
+  "transformers": "5.2.0 for gpt-oss; 5.17.0.dev0 (clean checkout cfa309cfa34b5497a32fd50af49aa97aac94c054) for the official Nemotron-H class"
+ },
+ "host": "Apple M3 Max, 96 GiB unified memory, macOS 27.0.1 (26A434), shared with desktop applications and other sessions' workflows; every heavy or timing-sensitive process took the shared /Users/nover/repos/transformers-worktrees/.heavy-model.lock",
+ "harness": "Each test ran in its own process from its prebuilt test binary (`TEST --ignored --exact --nocapture --test-threads 1`) under `/usr/bin/time -l`, so peak memory is per process. The runner appended every output line except libtest's 'running 1 test' and blank lines, kept only the wall-clock and peak-memory-footprint lines of the time summary, and closed each process with an `== exit=` line. Python reference generators ran the same way with `python3 -I`.",
+ "watchdog": {
+  "sampling": "once per second: vm.swapusage, vm_stat Swapins, memory_pressure -Q free percentage",
+  "policy": "kill on swap-ins above 1 GiB counted only while free memory is below 30%, free memory below 10%, or swap growth above 8 GiB (unchanged from the large-checkpoint replay)"
+ },
+ "compute_note": "The parent session offered a BU SCC node for these measurements. This session's permission classifier refused copying repository files to SCC, and then even a read-only ssh listing, as data exfiltration; because that approval reached this session only through a peer session, it was not worked around. Every measurement in this record ran on the Mac. Partial copies made before the refusal remain on SCC under /scratch/nover/models (Nemotron and gpt-oss checkpoints), with environments under /scratch/nover/envs and a checkout under /scratch/nover/replay.",
+ "notes": [
+  "Experimental validation only: no checkpoint below is advertised as supported by this record.",
+  "Timings come from a shared host. The Qwen3.8 rounds were taken under the lock and only once the 1-minute load average was below 4; each label records the load averages at its start.",
+  "Nemotron-H, Qwen3-30B-A3B, FLAN-T5-XXL and DeepSeek-V2-Lite have no checkpoint tensor of at least 1 GiB at their load dtypes (header scan of every local checkpoint), so c15f24e leaves their load schedules unchanged; their earlier gates stand without a rerun. Other pinned checkpoints do reach 1 GiB at the dtypes their gates load: gpt-oss-20b's embedding and head (1.16 GB each at F16/BF16, 2.32 GB at F32) and, at F32, each loaded block's decoded expert gate_up_proj [32, 2880, 5760] (2.12 GB); and, at F32, the vocabulary matrices of gemma-3-4b-it (tied, 2.69 GB), Qwen3-4B (tied, 1.56 GB), Llama-3.1-8B (2.10 GB each) and Qwen2-7B (2.18 GB each). Only the full gpt-oss gates were rerun at c15f24e (see not_run)."
+ ],
+ "log": "reference-precision-followups-20261016/gates.log",
+ "log_sha256": "60334039aaa1a9a8fee60301beff6f4694515ad7a5d78c19c53ddf5f0b172443",
+ "passed": true,
+ "aborted_attempts": [
+  {
+   "exit": -9,
+   "log_label": "Nemotron 3.5 Lightning official cfa309 class on CPU: BF16, F32 (BF16-resident blocks widened while running), F16; oracle prompt and greedy tokens",
+   "watchdog_reason": "swap grew by 8993 MiB",
+   "diagnosis": "Loading the 63 GB BF16 model fully resident on top of the desktop's working set grew swap by 8,993 MiB within 95 s, and the watchdog stopped it before any evaluation. c269612 added a resident budget with disk offload (Accelerate), with the widening hook on the innermost forward so offloaded blocks widen exactly; the retry at 67db7e7 stayed at 68% free or more with no pressured swap-ins."
+  },
+  {
+   "exit": 101,
+   "log_label": "Muse-Glimmer-30B Metal/F16 official reference (exactly std,metal,tokenizers; binary built at c15f24e)",
+   "test": "matches_pinned_muse_glimmer_official_f16_reference_on_metal",
+   "diagnosis": "Harness error, not a parity result: TRANSFORMERS_MUSE_GLIMMER_REFERENCE_DIR named the bundle directory itself, while the test expects its parent and appends the pinned bundle name, so it stopped before loading anything. The rerun with the parent directory is listed above."
+  }
+ ],
+ "runs": [
+  {
+   "name": "gpt-oss-20b-full-f32-reference",
+   "kind": "reference_generation",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8d552027dd5e4dc3080f5da6d6f87123b8443823",
+   "test_target": "scripts/generate_causal_lm_reference.py --dtype float32 --bf16-resident",
+   "features": "python3 -I (CPU, eager attention; MXFP4 experts dequantized to BF16 and kept resident; each decoder block widened to F32 only while it runs)",
+   "tests": [],
+   "log_label": "gpt-oss-20b full 24-block F32 reference, BF16-resident blocks cast to F32 while running (Transformers 5.2.0, PyTorch 2.10.0, CPU, eager)",
+   "command": [
+    "python3",
+    "-I",
+    "scripts/generate_causal_lm_reference.py",
+    "--dtype",
+    "float32",
+    "--bf16-resident",
+    "--model-dir",
+    "/Volumes/T9/models/openai/gpt-oss-20b",
+    "--output",
+    "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+    "--repository",
+    "openai/gpt-oss-20b",
+    "--revision",
+    "6cee5e81ee83917806bbde320786a8fb61efebee",
+    "--prompt",
+    "<four prompts of the BF16 bundle>"
+   ],
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+    "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+   },
+   "result": "Full 24-block F32 reference on the BF16 bundle's four prompts and greedy steps. BF16 to F32 widening is exact, so the block-by-block evaluation equals a fully F32-resident model; it peaked at 46.6 GB instead of the roughly 84 GB a resident F32 copy would need.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "Using MXFP4 quantized models requires a GPU, we will default to dequantizing the model to bf16",
+    "{\"bundle\": \"/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle\", \"prompts\": 4}"
+   ],
+   "peak_memory_footprint_bytes": {
+    "gpt-oss-20b-full-f32-reference": 46579150984
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-f32-metal-f16-uncalibrated",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8d552027dd5e4dc3080f5da6d6f87123b8443823",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16",
+   "tests": [
+    "metal::metal_prompt_logits_match_the_reference",
+    "metal::metal_cached_long_prompt_matches_the_reference",
+    "metal::metal_batched_prefill_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full F32 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; default half-precision tolerances)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+    "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+   },
+   "tolerances": "pre-calibration half-precision defaults: 2.5 max, 0.15 mean per prompt",
+   "binary_note": "built at 8d55202 (Rust sources identical to 69f8232); its digest was not retained because the calibration commit rebuilt the same path. The same three gates ran again with a retained binary at c15f24e (below).",
+   "result": "Metal/F16 against the full F32 reference: prompt logits within 1.148 (mean at most 0.025), the 183-token cached decode within 0.944, batched rows within 0.533 and bitwise equal to the stateless pass.",
+   "passed": 3,
+   "failed": 0,
+   "measurements": [
+    "test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 34.073432s",
+    "prompt 0: 5 tokens, max |\u0394| = 1.7961979e-2, mean |\u0394| = 2.8594930701156397e-3",
+    "prompt 1: 13 tokens, max |\u0394| = 1.8078518e-1, mean |\u0394| = 7.2562084062556785e-3",
+    "prompt 2: 8 tokens, max |\u0394| = 5.33165e-1, mean |\u0394| = 2.533850352676753e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.1478596e0, mean |\u0394| = 2.0401271856852733e-2",
+    "test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 46.238674042s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 9.4389546e-1",
+    "test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 51.105120625s",
+    "batched row 0: max |\u0394| = 1.4416218e-2 to the reference, 0e0 to the stateless pass",
+    "batched row 1: max |\u0394| = 3.6909103e-2 to the reference, 0e0 to the stateless pass",
+    "batched row 2: max |\u0394| = 5.33165e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 3: max |\u0394| = 1.8426684e-1 to the reference, 0e0 to the stateless pass"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_prompt_logits_match_the_reference": 51274897792,
+    "metal::metal_cached_long_prompt_matches_the_reference": 50599222088,
+    "metal::metal_batched_prefill_matches_the_reference": 50686761800
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-f32-flex-bf16-uncalibrated",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8d552027dd5e4dc3080f5da6d6f87123b8443823",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16",
+   "tests": [
+    "flex_prompt_logits_match_the_reference",
+    "flex_cached_long_prompt_matches_the_reference",
+    "flex_batched_prefill_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full F32 bundle, Flex/BF16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16; default half-precision tolerances)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+    "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+   },
+   "tolerances": "pre-calibration half-precision defaults: 2.5 max, 0.15 mean per prompt",
+   "binary_note": "same unretained binary as the Metal runs above; rerun at c15f24e (below).",
+   "result": "Flex/BF16 against the full F32 reference: prompt logits within 2.191 (mean at most 0.112), the cached decode within 1.587, batched rows within 0.683.",
+   "passed": 3,
+   "failed": 0,
+   "measurements": [
+    "test flex_prompt_logits_match_the_reference ... loaded all blocks as BF16 in 45.113264792s",
+    "prompt 0: 5 tokens, max |\u0394| = 2.1905198e0, mean |\u0394| = 1.1201361490284749e-1",
+    "prompt 1: 13 tokens, max |\u0394| = 1.2558413e0, mean |\u0394| = 4.5869092210264736e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 5.7128024e-1, mean |\u0394| = 3.399790924767457e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.6707368e0, mean |\u0394| = 4.884157500240779e-2",
+    "test flex_cached_long_prompt_matches_the_reference ... loaded all blocks as BF16 in 55.490808s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 1.5865326e0",
+    "test flex_batched_prefill_matches_the_reference ... loaded all blocks as BF16 in 52.306062916s",
+    "batched row 0: max |\u0394| = 8.2344055e-2 to the reference, 3.125e-1 to the stateless pass",
+    "batched row 1: max |\u0394| = 1.3420129e-1 to the reference, 1.25e-1 to the stateless pass",
+    "batched row 2: max |\u0394| = 2.3739195e-1 to the reference, 1.25e-1 to the stateless pass",
+    "batched row 3: max |\u0394| = 6.8287873e-1 to the reference, 6.25e-2 to the stateless pass"
+   ],
+   "peak_memory_footprint_bytes": {
+    "flex_prompt_logits_match_the_reference": 49373154800,
+    "flex_cached_long_prompt_matches_the_reference": 49310272960,
+    "flex_batched_prefill_matches_the_reference": 49500212840
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning-official-precision-reference",
+   "kind": "reference_generation",
+   "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+   "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "source_commit": "67db7e7d57a4cb20fca3f29d497bb60a4bbe9480",
+   "test_target": "scripts/generate_nemotron_h_precision_reference.py --max-resident-gib 16",
+   "features": "official NemotronHForCausalLM from the clean Transformers checkout cfa309 (5.17.0.dev0) in the authenticated oracle environment, python -I, CPU, eager; 16 GiB resident budget, 23 decoder blocks offloaded to disk for BF16 and F16",
+   "tests": [],
+   "log_label": "Nemotron 3.5 Lightning official cfa309 class on CPU, 16 GiB resident budget with disk offload: BF16, F32 (BF16 blocks widened while running), F16; oracle prompt and greedy tokens",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle",
+    "manifest_sha256": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9",
+    "oracle_reference_json_sha256": "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196"
+   },
+   "result": "Official F32, BF16 and F16 evaluations of the oracle's prompt, teacher-forced and cached rows. Against official F32 the MPS/F16 oracle reaches prompt 0.999195, teacher 0.994466 (decision 18) and cached 0.998635 (decision 22); CPU/F16 0.999194 / 0.998632 / 0.999097; CPU/BF16 0.998238 / 0.966629 / 0.996507. The two official F16 evaluations differ by 0.994336 at teacher decision 18. The widening self-check on a tiny official model was bitwise equal both resident and offloaded.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "[transformers] `causal_conv1d_fn` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.",
+    "[transformers] `mamba_chunk_scan_combined` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.",
+    "[transformers] `causal_conv1d_update` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.",
+    "[transformers] `selective_state_update` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.",
+    "Some parameters are on the meta device because they were offloaded to the cpu and disk.",
+    "Some parameters are on the meta device because they were offloaded to the cpu and disk.",
+    "Some parameters are on the meta device because they were offloaded to the cpu and disk.",
+    "{\"bundle\": \"/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle\", \"minimum_cosines\": {\"float16-mps-oracle\": {\"prompt\": [0.999194502, 0], \"teacher\": [0.994466421, 18], \"cached\": [0.998635047, 22]}, \"float16\": {\"prompt\": [0.999194145, 0], \"teacher\": [0.998632038, 27], \"cached\": [0.999096934, 26]}, \"bfloat16\": {\"prompt\": [0.998238482, 0], \"teacher\": [0.96662901, 30], \"cached\": [0.9965072, 16]}, \"float16-mps-oracle-vs-float16\": {\"prompt\": [0.999998998, 0], \"teacher\": [0.994335709, 18], \"cached\": [0.998541087, 22]}}}"
+   ],
+   "peak_memory_footprint_bytes": {
+    "nemotron-3.5-lightning-official-precision-reference": 23806951000
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning-official-f32-truth-gate",
+   "kind": "test",
+   "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+   "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "source_commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "test_target": "nemotron_h_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "compares_pinned_nemotron_f16_with_official_base_reference"
+   ],
+   "reference": {
+    "oracle_bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+    "oracle_reference_json_sha256": "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196",
+    "precision_bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle",
+    "precision_manifest_sha256": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9"
+   },
+   "gate_decision": "Logit rows are judged against the official F32 rows of the same path. Each path's floor is the worst cosine any official F16 evaluation (the MPS oracle or CPU/F16) reaches against F32 on that path, computed in the test from authenticated rows and required to stay at or above 0.99: prompt 0.999194, teacher 0.994466, cached 0.998635. Top-1 must match on every row. Hidden traces exist only at F16 and keep the 0.999 floor against the oracle.",
+   "result": "Passed: against F32 Burn reaches 0.999224 on the prompt, at least 0.997612 on teacher rows (decision 30) and at least 0.998777 on cached rows (decision 22), 32/32 top-1 on both paths; hidden traces at least 0.999802 against the oracle.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test compares_pinned_nemotron_f16_with_official_base_reference ... Nemotron 3.5 official corresponding-path parity: load_seconds=103.809, stateless_prompt_seconds=3.854, teacher_seconds=2.232, cached_seconds=8.473, f16_floors[prompt,teacher,cached]=[0.999194145, 0.994466421, 0.998635047], f32_truth_prompt_cosine=0.999223815858, f32_truth_teacher_minimum=0.997611898218@30, f32_truth_cached_minimum=0.998776735807@22, f16_oracle_prompt_cosine=0.999985150326, f16_oracle_teacher_minimum=0.994340101181, f16_oracle_cached_minimum=0.999299206381, stateless_hidden_minimum_cosine=0.999967369503@24, cached_prefill_hidden_minimum_cosine=0.999967369503@24, cached_decode_hidden_minimum_cosine=0.999802135405@35, stateless_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, cached_prefill_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, cached_decode_hidden_sha256=6622235da52e1865e6b479f4063ce80432cf78f9907570459c5d092a1da0d7f9, official_crossed_path_minimum_diagnostic=0.921504794757, decisions_per_path=32, total_seconds=293.573"
+   ],
+   "peak_memory_footprint_bytes": {
+    "compares_pinned_nemotron_f16_with_official_base_reference": 69194173320
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-1-base",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "binary_source_commit": "39bd8f7",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 1 base (load averages 3.89 9.17 27.48 at start; waited 600s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=84.514, stateless_seconds=1.703, prefill_seconds=0.298, mtp_seconds=0.116, decode_seconds=0.325"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 66505577248
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-1-current",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "binary_source_commit": "69f8232",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 1 current (load averages 2.06 7.28 25.02 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=79.705, stateless_seconds=0.990, prefill_seconds=0.284, mtp_seconds=0.084, decode_seconds=0.297"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 68235323712
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-2-base",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "binary_source_commit": "39bd8f7",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 2 base (load averages 1.46 5.81 22.76 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=80.635, stateless_seconds=1.178, prefill_seconds=0.285, mtp_seconds=0.086, decode_seconds=0.302"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 66506625776
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-2-current",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "binary_source_commit": "69f8232",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 2 current (load averages 1.77 4.83 20.77 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=83.497, stateless_seconds=2.125, prefill_seconds=0.294, mtp_seconds=0.060, decode_seconds=0.305"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 68149307664
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-3-first-bad-commit",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "ad992d7766ff87687e4815b546f2b7008c477633",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 3 base (load averages 3.71 5.10 7.26 at start; waited 30s)",
+   "note": "Labelled 'base' in the log but did not measure 39bd8f7: the bisection, which shared the base target directory, had rebuilt the same binary path at its final step (ad992d7, the first bad commit; digest 759a2af5..., retained). Its 74.4 GB peak and 8.851 s stateless pass reproduce that bisection step (74.3 GB, 7.544 s). Rounds 4 and 5 use a base rebuilt in a dedicated target directory.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=86.676, stateless_seconds=8.851, prefill_seconds=0.286, mtp_seconds=0.037, decode_seconds=0.255"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 74435455248
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-4-base",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "39bd8f7",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 4 base (load averages 3.31 7.06 7.54 at start; waited 330s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=84.038, stateless_seconds=2.274, prefill_seconds=0.298, mtp_seconds=0.118, decode_seconds=0.329"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 66593100576
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-4-fixed",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 4 fixed (load averages 3.22 6.14 7.14 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=78.376, stateless_seconds=1.173, prefill_seconds=0.288, mtp_seconds=0.088, decode_seconds=0.310"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 60607009736
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-5-base",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "39bd8f7",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 5 base (load averages 2.18 5.11 6.66 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=a3ae49dc10b7fbea, load_seconds=84.422, stateless_seconds=9.641, prefill_seconds=0.287, mtp_seconds=0.059, decode_seconds=0.303"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 66608288616
+   }
+  },
+  {
+   "name": "qwen3.8-27b-timing-round-5-fixed",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal"
+   ],
+   "log_label": "Qwen3.8 timing round 5 fixed (load averages 3.10 4.54 6.26 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=85.688, stateless_seconds=1.066, prefill_seconds=0.285, mtp_seconds=0.055, decode_seconds=0.311"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 60566639512
+   }
+  },
+  {
+   "name": "qwen3.8-27b-official-reference-after-fix",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "matches_pinned_qwen38_official_reference_on_metal"
+   ],
+   "log_label": "Qwen3.8-27B Metal/F16 official reference (std,metal,tokenizers,chat-templates; binary built at c15f24e)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2/qwen3.8-27b-1d4bf0f2-reference.bundle",
+    "reference_json_sha256": "1d4f7d3c02a996c72a1d767d672f933ce83792dea116c4964b794003ac345ce2",
+    "pinned_in": "acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json (official_f16_reference_acceptance.reference_bundle.json, qwen3.8-27b-1d4bf0f2-reference.json)"
+   },
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test matches_pinned_qwen38_official_reference_on_metal ... Qwen3.8 official F16 parity: prompt_cosine=0.999999873, top1=799, greedy_tokens=32"
+   ],
+   "peak_memory_footprint_bytes": {
+    "matches_pinned_qwen38_official_reference_on_metal": 64565912864
+   }
+  },
+  {
+   "name": "muse-glimmer-30b-streaming-audit-after-fix",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "std,metal,tokenizers (--no-default-features)",
+   "tests": [
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming"
+   ],
+   "log_label": "Muse-Glimmer-30B Metal/F16 strict streaming audit (exactly std,metal,tokenizers; binary built at c15f24e)",
+   "result": "Strict F16 streaming audit passes with the new three-open shard order [model-00002, model-00001, model-00002]: lm_head and embed_tokens are hoisted in sorted-target order before the physical schedule; every other count is unchanged.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming": 66168433488
+   }
+  },
+  {
+   "name": "muse-glimmer-30b-audit-round-1-pre-fix",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming"
+   ],
+   "log_label": "Muse-Glimmer-30B streaming audit round 1 pre-fix (load averages 1.99 2.33 3.46 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming": 68885148440
+   }
+  },
+  {
+   "name": "muse-glimmer-30b-audit-round-1-fixed",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "std,metal,tokenizers (--no-default-features)",
+   "tests": [
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming"
+   ],
+   "log_label": "Muse-Glimmer-30B streaming audit round 1 fixed (load averages 2.31 2.24 3.13 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming": 66188307256
+   }
+  },
+  {
+   "name": "muse-glimmer-30b-audit-round-2-pre-fix",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming"
+   ],
+   "log_label": "Muse-Glimmer-30B streaming audit round 2 pre-fix (load averages 2.34 2.15 2.86 at start; waited 0s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming": 68871516880
+   }
+  },
+  {
+   "name": "muse-glimmer-30b-audit-round-2-fixed",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "binary_source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "std,metal,tokenizers (--no-default-features)",
+   "tests": [
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming"
+   ],
+   "log_label": "Muse-Glimmer-30B streaming audit round 2 fixed (load averages 3.83 2.79 2.90 at start; waited 30s)",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok"
+   ],
+   "peak_memory_footprint_bytes": {
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming": 66176822120
+   }
+  },
+  {
+   "name": "muse-glimmer-30b-official-reference-after-fix",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "std,metal,tokenizers (--no-default-features)",
+   "tests": [
+    "matches_pinned_muse_glimmer_official_f16_reference_on_metal"
+   ],
+   "log_label": "Muse-Glimmer-30B Metal/F16 official reference, rerun with the reference parent directory (exactly std,metal,tokenizers; binary built at c15f24e)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-a4e59da-reference.bundle",
+    "reference_json_sha256": "cab22352cf833802b4e530b1ad6b6a223481f3a52378ce2c3bfb980e15543f10"
+   },
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test matches_pinned_muse_glimmer_official_f16_reference_on_metal ... muse_rust_acceptance_provenance={\"git_head\":\"c15f24e2be300515127a96b14fb2cc5796843b82\",\"git_tree\":\"d26bdca9276f06499e6f14aa866d2e5cf2600e70\",\"transformers_tree\":\"d26bdca9276f06499e6f14aa866d2e5cf2600e70\",\"transformers_tree_dirty\":false,\"test_source_sha256\":\"fa307ab7427ef3441b071427ba818e6e3731ffbe7654259103f19cc053c05ad9\",\"quantized_quality_source_sha256\":\"e5104d33e832a8cb8f5e137c68d29ffb853544aa8ed52d5dd5c0a79e5fc8dc1c\",\"cargo_package_rust_version\":\"1.92\",\"rustc_verbose\":\"rustc 1.94.0-nightly (4f14395c3 2025-12-22)\\nbinary: rustc\\ncommit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22\\ncommit-date: 2025-12-22\\nhost: aarch64-apple-darwin\\nrelease: 1.94.0-nightly\\nLLVM version: 21.1.8\",\"profile\":\"release\",\"target\":\"aarch64-macos\",\"features\":[\"std\",\"metal\",\"tokenizers\"]}",
+    "Muse-Glimmer-30B official F16 parity: prompt_cosine=0.999999616, cached_prompt_cosine=0.999999616, minimum_hidden_cosine=0.999943377, minimum_cached_prefill_hidden_cosine=0.999943377, minimum_burn_prefill_stateless_hidden_cosine=1.000000000, minimum_decode_hidden_cosine=0.999987445, minimum_cached_official_cosine=0.999999616, minimum_teacher_official_cosine=0.999999333, minimum_burn_cached_teacher_cosine=0.999999726, greedy_tokens=32"
+   ],
+   "peak_memory_footprint_bytes": {
+    "matches_pinned_muse_glimmer_official_f16_reference_on_metal": 66062576272
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-f32-metal-f16",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16",
+   "tests": [
+    "metal::metal_prompt_logits_match_the_reference",
+    "metal::metal_cached_long_prompt_matches_the_reference",
+    "metal::metal_batched_prefill_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full F32 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+    "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+   },
+   "tolerances": "calibrated half-precision defaults: 2.7 max, 0.15 mean per prompt",
+   "passed": 3,
+   "failed": 0,
+   "measurements": [
+    "test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 65.202597667s",
+    "prompt 0: 5 tokens, max |\u0394| = 1.7961979e-2, mean |\u0394| = 2.8594930701156397e-3",
+    "prompt 1: 13 tokens, max |\u0394| = 1.8078518e-1, mean |\u0394| = 7.2562084062556785e-3",
+    "prompt 2: 8 tokens, max |\u0394| = 5.33165e-1, mean |\u0394| = 2.533850352676753e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.1478596e0, mean |\u0394| = 2.0401271856852733e-2",
+    "test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 29.555599167s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 9.4389546e-1",
+    "test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 29.668025041s",
+    "batched row 0: max |\u0394| = 1.4416218e-2 to the reference, 0e0 to the stateless pass",
+    "batched row 1: max |\u0394| = 3.6909103e-2 to the reference, 0e0 to the stateless pass",
+    "batched row 2: max |\u0394| = 5.33165e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 3: max |\u0394| = 1.8426684e-1 to the reference, 0e0 to the stateless pass"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_prompt_logits_match_the_reference": 49171714920,
+    "metal::metal_cached_long_prompt_matches_the_reference": 48508163424,
+    "metal::metal_batched_prefill_matches_the_reference": 48703444224
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-f32-flex-bf16",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16",
+   "tests": [
+    "flex_prompt_logits_match_the_reference",
+    "flex_cached_long_prompt_matches_the_reference",
+    "flex_batched_prefill_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full F32 bundle, Flex/BF16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=bf16; calibrated half-precision tolerances; binary built at c15f24e)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+    "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+   },
+   "tolerances": "calibrated half-precision defaults: 2.7 max, 0.15 mean per prompt",
+   "passed": 3,
+   "failed": 0,
+   "measurements": [
+    "test flex_prompt_logits_match_the_reference ... loaded all blocks as BF16 in 28.107689667s",
+    "prompt 0: 5 tokens, max |\u0394| = 2.1905198e0, mean |\u0394| = 1.1201361490284749e-1",
+    "prompt 1: 13 tokens, max |\u0394| = 1.2558413e0, mean |\u0394| = 4.5869092210264736e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 5.7128024e-1, mean |\u0394| = 3.399790924767457e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.6707368e0, mean |\u0394| = 4.884157500240779e-2",
+    "test flex_cached_long_prompt_matches_the_reference ... loaded all blocks as BF16 in 27.773017792s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 1.5865326e0",
+    "test flex_batched_prefill_matches_the_reference ... loaded all blocks as BF16 in 27.786228292s",
+    "batched row 0: max |\u0394| = 8.2344055e-2 to the reference, 3.125e-1 to the stateless pass",
+    "batched row 1: max |\u0394| = 1.3420129e-1 to the reference, 1.25e-1 to the stateless pass",
+    "batched row 2: max |\u0394| = 2.3739195e-1 to the reference, 1.25e-1 to the stateless pass",
+    "batched row 3: max |\u0394| = 6.8287873e-1 to the reference, 6.25e-2 to the stateless pass"
+   ],
+   "peak_memory_footprint_bytes": {
+    "flex_prompt_logits_match_the_reference": 48310766320,
+    "flex_cached_long_prompt_matches_the_reference": 48245787328,
+    "flex_batched_prefill_matches_the_reference": 48437414760
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-bf16-metal-f16",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16",
+   "tests": [
+    "metal::metal_prompt_logits_match_the_reference",
+    "metal::metal_cached_long_prompt_matches_the_reference",
+    "metal::metal_batched_prefill_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full BF16 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; calibrated half-precision tolerances; binary built at c15f24e)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+    "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+   },
+   "tolerances": "calibrated half-precision defaults: 2.7 max, 0.15 mean per prompt. The maximum is Transformers' own full-model BF16 deviation from the full F32 reference (2.6646, run gpt-oss-20b-transformers-bf16-vs-f32-bundles), rounded up; the mean bound is the earlier 0.15, above that run's largest mean (0.108). Comparing two half-precision evaluations sums their roundings, which neither bound describes.",
+   "passed": 3,
+   "failed": 0,
+   "measurements": [
+    "test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 29.556034833s",
+    "prompt 0: 5 tokens, max |\u0394| = 2.6601563e0, mean |\u0394| = 1.0853238918968665e-1",
+    "prompt 1: 13 tokens, max |\u0394| = 1.234375e0, mean |\u0394| = 4.909117747119321e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 7.03125e-1, mean |\u0394| = 4.216956998858225e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.7373047e0, mean |\u0394| = 5.7520232734584044e-2",
+    "test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 29.637603917s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 1.3432617e0",
+    "test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 29.598317917s",
+    "batched row 0: max |\u0394| = 4.7265625e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 1: max |\u0394| = 1.40625e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 2: max |\u0394| = 7.03125e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 3: max |\u0394| = 7.421875e-1 to the reference, 0e0 to the stateless pass"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_prompt_logits_match_the_reference": 49171813272,
+    "metal::metal_cached_long_prompt_matches_the_reference": 48509080928,
+    "metal::metal_batched_prefill_matches_the_reference": 48562804088
+   },
+   "gate_role": "informational half-precision-against-half-precision comparison, not a gate pass; half-precision runs are qualified against the F32 bundle"
+  },
+  {
+   "name": "gpt-oss-20b-full-bf16-metal-f16-greedy",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; TRANSFORMERS_GPT_OSS_MIN_GREEDY=0",
+   "tests": [
+    "metal::metal_cached_greedy_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full BF16 bundle, Metal/F16 greedy (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; TRANSFORMERS_GPT_OSS_MIN_GREEDY=0; binary built at c15f24e)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+    "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+   },
+   "result": "Compares no tokens: the reference's first greedy margin (3.06) is below twice the half-precision tolerance, so MIN_GREEDY=0 is required, as in the large-checkpoint replay.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test metal::metal_cached_greedy_matches_the_reference ... loaded all blocks as F16 in 29.459721666s",
+    "greedy step 0: reference margin 3.0625e0 is a tie; stopping",
+    "greedy: 0 of 32 tokens match"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_cached_greedy_matches_the_reference": 48509244792
+   },
+   "gate_role": "informational half-precision-against-half-precision comparison, not a gate pass; half-precision runs are qualified against the F32 bundle"
+  },
+  {
+   "name": "gpt-oss-20b-transformers-bf16-vs-f32-bundles",
+   "kind": "reference_comparison",
+   "burn_gate": false,
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c",
+   "source_note": "dirty working tree at 55aeb6a: the comparison test was not yet committed, and other edits were in progress; the log lists every uncommitted file with its SHA-256",
+   "date_utc": "2026-10-17",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; debug test profile; reads no checkpoint and builds no Burn model",
+   "tests": [
+    "transformers_bf16_reference_stays_within_the_half_precision_bounds"
+   ],
+   "log": "reference-precision-followups-20261016/gpt-oss-bf16-vs-f32-bundles.log",
+   "log_sha256": "87a6920c22117b169b6a67b7f6ce440e9eea3a925d764921dae32dbe01d1242a",
+   "log_label": "gpt-oss-20b official BF16 bundle against the official F32 bundle (Transformers 5.2.0 evaluations; reads no checkpoint and runs no Burn model; debug test binary, default+metal,tokenizers)",
+   "command": "CARGO_TARGET_DIR=\"/Volumes/bag of holding/cargo-targets/fix-replay-b\" TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR=\"/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle\" TRANSFORMERS_GPT_OSS_F32_REFERENCE_DIR=\"/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle\" cargo test --locked --features metal,tokenizers --test gpt_oss_artifacts -- --ignored --exact transformers_bf16_reference_stays_within_the_half_precision_bounds --nocapture --test-threads 1",
+   "references": {
+    "bfloat16": {
+     "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+     "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+    },
+    "float32": {
+     "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle",
+     "reference_json_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+    }
+   },
+   "result": "Transformers' own full-model BF16 evaluation against its F32 evaluation, both official bundles on the same four prompts: largest deviation 2.6646 (prompt 0, position 3, token 17352), then 1.2402, 0.7022 and 1.6551; per-prompt means at most 0.10829. This is the calibration basis of the gpt-oss half-precision maximum bound (2.7, rounded up); the mean bound (0.15) is not derived from it. Both first greedy steps choose token 12650, with margins 3.0625 (BF16) and 3.0868 (F32).",
+   "gate_note": "Not a pass of any Burn gate: the test compares two Transformers bundles and evaluates no Burn model. It only checks that the official BF16 deviation lies within HALF_TOLERANCE and HALF_MEAN_TOLERANCE.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test transformers_bf16_reference_stays_within_the_half_precision_bounds ... /Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle: reference.json SHA-256 9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac",
+    "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-f32-reference.bundle: reference.json SHA-256 17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e",
+    "prompt 0: 5 tokens, max |\u0394| = 2.6646376e0 at position 3, token 17352, mean |\u0394| = 1.0828520369061805e-1",
+    "prompt 1: 13 tokens, max |\u0394| = 1.2402163e0 at position 0, token 38339, mean |\u0394| = 4.602463441235242e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 7.0220375e-1 at position 5, token 189150, mean |\u0394| = 2.8996130636696447e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.6551118e0 at position 11, token 193734, mean |\u0394| = 5.786204305934656e-2",
+    "greedy step 0: token 12650 margin 3.0625e0 (BF16), token 12650 margin 3.0868406e0 (F32)",
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.85s"
+   ]
+  }
+ ],
+ "binaries": [
+  {
+   "path": "local_artifacts (base)",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "39bd8f7",
+   "sha256": "ebef192202aa9dc598cc7de0f5e82db9dfed99b9864abac7bd368d63ec37c999",
+   "used_by": "Qwen3.8 rounds 1-2 base"
+  },
+  {
+   "path": "local_artifacts (current)",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "69f8232",
+   "sha256": "d24dbc2244c497fb2bceeb582dd01fda220c8b4af24252c3f3b4a07874b5226f",
+   "used_by": "Qwen3.8 rounds 1-2 current"
+  },
+  {
+   "path": "local_artifacts (base, rebuilt in a dedicated target directory)",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "39bd8f7",
+   "sha256": "f08c8525be892cabbd9a2e710a24660ae0b07d2b316fdc80630225b4b1ca9578",
+   "used_by": "Qwen3.8 rounds 4-5 base; same clean source and lockfile as the first base build, not bit-identical because the target path is embedded"
+  },
+  {
+   "path": "local_artifacts (bisection's final step)",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "ad992d7766ff87687e4815b546f2b7008c477633",
+   "sha256": "759a2af55fc0ea15deb902262665c2c79665b46d9b725990b42c13569f4961a4",
+   "used_by": "Qwen3.8 round 3"
+  },
+  {
+   "path": "muse_glimmer_artifacts-ceb6fd41880cfb1e",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "5247fae5bd60e1091d3a39818a5d03a840c6b8ba942ee4e86729dd4288c04fe1",
+   "used_by": "Muse audit pre-fix rounds; the large-checkpoint replay's streaming audit binary"
+  },
+  {
+   "path": "nemotron_h_artifacts-c4e121cf3cb148f7",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "9a9c7308cf233f90ccbee80c0156efdf4cceea27",
+   "sha256": "d1b99ede97f26a3f0566b7ee6060153d93420e73d00d7b63d6ee53412795fa1d",
+   "used_by": "Nemotron official F32-truth gate"
+  },
+  {
+   "path": "local_artifacts-2dfa43c9a5cd25fa",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "sha256": "d2409584562d4d4c7f2303b71f14f4e96c234de9fd6771bbab16e825c60c9a50",
+   "used_by": "Qwen3.8 rounds 4-5 fixed and official reference"
+  },
+  {
+   "path": "muse_glimmer_artifacts-3201ba78342214ef",
+   "features": "std,metal,tokenizers (--no-default-features)",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "sha256": "d44d0109aa80032b5f02e78869c3867870bb70c7d3b115d9ec464d0025e7ffbf",
+   "used_by": "Muse streaming audit and official reference"
+  },
+  {
+   "path": "gpt_oss_artifacts-98a177a8f6a4ce38",
+   "features": "default (std,flex) + metal,tokenizers",
+   "source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+   "sha256": "7276ec2d5b1cd8166bcef06d65cba4e41c9ebf2688d149ffa56cb789891ffe91",
+   "used_by": "gpt-oss F32 and BF16 bundle gates at c15f24e"
+  },
+  {
+   "path": "gpt_oss_artifacts-2bdfc7b809086c6f",
+   "features": "default (std,flex) + metal,tokenizers (debug test profile)",
+   "source_commit": "55aeb6aa08b8c4e82534c1c5c6273d3ba2096e9c",
+   "sha256": "292ce408dd44533f1d6893e2fc766385248b12bab26dd7a7ee37066fda050cf3",
+   "used_by": "the Transformers BF16-against-F32 bundle comparison, built from the dirty working tree its log describes"
+  }
+ ],
+ "not_run": [
+  {
+   "gates": "Qwen3.8-27B and Muse-Glimmer-30B create-only Q8/Q4 conversions at c15f24e",
+   "reason": "Each streams about 60 GB into a new 14-27 GB artifact. The conversion installs in the new order, but the Burnpack writer emits tensors and manifest entries in name order from BTreeMaps (src/checkpoint/quantization/burnpack.rs, manifest.rs), so install order cannot change artifact bytes. Muse's conversion test now expects three shard opens; that count is unverified on real weights at c15f24e."
+  },
+  {
+   "gates": "Qwen3.8-27B and Muse-Glimmer-30B packed Q8/Q4 Metal smokes at c15f24e",
+   "reason": "They install the retained F16 tensors from the source shards. For Muse only embed_tokens (shard 1) reaches 1 GiB, so the physical shard order is unchanged and the test keeps two opens; not re-executed."
+  },
+  {
+   "gates": "Nemotron-H, Qwen3-30B-A3B, FLAN-T5-XXL and DeepSeek-V2-Lite gates at c15f24e",
+   "reason": "A header scan of every local checkpoint finds no tensor of 1 GiB or more at their load dtypes, so their schedules are identical to 69f8232; the Nemotron gate above ran at 9a9c730."
+  },
+  {
+   "gates": "f4c56c4 Flex and Metal F32 gates of Qwen3-4B, Qwen2-7B, Llama-3.1-8B, gemma-3-4b-it and the truncated (one- and four-block) gpt-oss-20b bundles, at c15f24e",
+   "reason": "These gates cast every weight to F32 (real-checkpoint-replay-20261016.json), where their vocabulary matrices reach 1 GiB (Qwen3-4B 1.56 GB, Qwen2-7B 2.18 GB, Llama-3.1-8B 2.10 GB, gemma-3-4b-it 2.69 GB, gpt-oss-20b 2.32 GB) and so does each loaded gpt-oss block's decoded gate_up_proj (2.12 GB), so c15f24e installs those groups first and the f4c56c4 runs used the previous order. They were not re-executed, and their footprints were not re-measured. Where this record compares results across the change, the new order altered none: the Qwen3.8 smoke's logit digest and every gpt-oss deviation line are identical before and after c15f24e. SmolLM-135M (0.11 GB at F32) and SmolLM3-3B (1.05 GB at F32, just below the threshold) have no such group."
+  }
+ ],
+ "created_bundles": [
+  {
+   "path": "gpt-oss-20b-6cee5e81-f32-reference.bundle",
+   "location": "/Volumes/bag of holding/models/transformers-acceptance",
+   "manifest": "reference.json",
+   "manifest_sha256": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e",
+   "files_sha256": {
+    "logits-0.f32le": "f17350306ef8a04994e223d18660e6c2ca231f446ebf28553b58b094d0430b6c",
+    "logits-1.f32le": "d6a8e4924ec691cfcb3c1e69cc453441b352e9a2b4e842dc75eacb66f6c29046",
+    "logits-2.f32le": "ff8e115923d9afd13c140bb44fabe465519ff53e57fbf698524a6c74bf1813ff",
+    "logits-3.f32le": "7b666f7be3235844323b8c4e80a873dfbb0151c02aabf7e6d8a3a3ef2b5365c0",
+    "reference.json": "17607b51e1fe830f0d9d4897ed9704a248c619530954d706d14a7d7d5aaee94e"
+   },
+   "description": "Full 24-block F32 Transformers 5.2.0 reference for gpt-oss-20b on the BF16 bundle's four prompts and 32 greedy steps (scripts/generate_causal_lm_reference.py --dtype float32 --bf16-resident at 8d55202)."
+  },
+  {
+   "path": "nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle",
+   "location": "/Volumes/bag of holding/models/transformers-acceptance",
+   "manifest": "reference.json",
+   "manifest_sha256": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9",
+   "files_sha256": {
+    "bfloat16-cached-logits.f32le": "cd38799625f1c5901e68df54b7ca8887becdc803c9ede6e93000b86b362c736e",
+    "bfloat16-prompt-logits.f32le": "c84aa9bc69b26358a41dedbbfd5394452d733284a77bc7cc03143c79cbe55ea4",
+    "bfloat16-teacher-logits.f32le": "b888d62713d068185e26a35c9e82a6b77f3a141f6045dd812483ec32130d4633",
+    "float16-cached-logits.f32le": "d01d94bbbdce744e6621c717707f5a527a9870459115c91557e69104c772c7f6",
+    "float16-prompt-logits.f32le": "d9fd6aee0ed30f0252b7141fd951e90cd2cb5aacd034c5422f833b3a949ac21f",
+    "float16-teacher-logits.f32le": "6dc5e0a295f9bb47c01f65b52a1026855b1866332a94d845e463545b2107f867",
+    "float32-cached-logits.f32le": "5b1dd446712ca764bf655fe324776e4468579e83f1b719e3437af96d817224f0",
+    "float32-prompt-logits.f32le": "568f634d35d1e3a88fde59ee80a9c26caf5d59c2ac5eefbed6350acf16f8e588",
+    "float32-teacher-logits.f32le": "981f2f984f807012786103510ff8caaba79def48201bd0736bcdf38b48c62c88",
+    "reference.json": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9"
+   },
+   "description": "Official Nemotron-H class (Transformers cfa309) F32, BF16 and F16 prompt, teacher-forced and cached logit rows on the authenticated oracle's prompt and greedy tokens, with comparisons against F32 (scripts/generate_nemotron_h_precision_reference.py at 67db7e7). Its manifest digest is pinned in tests/support/nemotron_h_precision_reference.rs."
+  }
+ ],
+ "qwen38_memory_and_timing": {
+  "question": "The large-checkpoint replay recorded the Qwen3.8 Metal/F16 smoke at a 68.3 GB peak against the original record's 63.3 GB, and a 10.3 s stateless pass against 1.7 s. Re-measure base against current under the lock on an idle host; if real, find the cause and fix it.",
+  "method": "Rounds alternate the base binary (39bd8f7, 2026-09-04, which extended the Qwen3.8 acceptance gates; its smoke reproduces the original record's logit digest a3ae49dc10b7fbea) with current (69f8232) and later the fix (c15f24e). Each round waited for the heavy-model lock and a 1-minute load average below 4. Peaks are /usr/bin/time -l peak memory footprint. Current (rounds 1-2) and fixed (rounds 4-5) ran about two hours apart; the base binary alternated with each and measured 66.51/66.51 and 66.59/66.61 GB, so the two are compared through that anchor. The base for rounds 4-5 was rebuilt from the same clean source in a dedicated target directory after round 3 exposed the overwritten binary.",
+  "timing_finding": "No stateless regression: base 1.703 and 1.178 s, current 0.990 and 2.125 s at load averages near 2; the replay's 10.3 s came from a busy host. The stateless pass is the first Metal forward and varies with host activity (1.2 to 9.3 s across the bisection's runs).",
+  "memory_finding": "Current really is higher than base (68.2 against 66.5 GB, twice), but most of the recorded 63.3 to 68.3 GB rise is not code: the base source itself measures 66.5 GB on this host today. The 63.3 GB came from the original record at 0953040, a commit outside this history whose logit digest matches the base.",
+  "cause": "Bisection (sampled peak above 67.35 GB is bad) finds ad992d7, 'stream checkpoints in source order'. Installing in physical source order allocates the two 2.37 GiB vocabulary matrices (embed_tokens in shard 3, lm_head in shard 18) in CubeCL's sliced memory pages after the per-layer tensors had been packed; the measurements are consistent with first-fit packing stranding the partially used pages. The intermediate commits peak at about 74.3 GB; later commits recovered most of it, leaving 68.2 GB at 69f8232. A post-load probe isolates the load: Qwen3.8 settles at 62.35 GB in source order and 54.59 GB in the old target-name order; Muse at 64.78 against 59.40 GB; Qwen3-30B-A3B, Nemotron and FLAN-T5-XXL, which have no tensor of 1 GiB or more, are unchanged within 0.7 GB.",
+  "muse_audit_finding": "Muse-Glimmer-30B, the other memory-measured checkpoint with tensors of at least 1 GiB (gpt-oss-20b and the F32 Llama-family and Gemma loads also have such groups; see notes and not_run), alternated its strict F16 streaming audit between the pre-fix binary (8a4404a) and c15f24e: 68.89 and 68.87 GB pre-fix against 66.19 and 66.18 GB fixed. The same 8a4404a binary measured 63.45 GB in the large-checkpoint replay a day earlier, so only same-session comparisons are meaningful on this host.",
+  "fix": "c15f24e installs execution groups whose outputs total at least 1 GiB first, in plan order, and keeps the physical schedule for everything else, so streaming stays sequential per shard. The probe with that order settles Qwen3.8 at 54.92 GB (peak 57.13) and Muse at 59.40 GB (peak 60.55). Muse's conversion and F16 audit now open three shards instead of two.",
+  "rounds": [
+   {
+    "variant": "base",
+    "log_label": "Qwen3.8 timing round 1 base (load averages 3.89 9.17 27.48 at start; waited 600s)",
+    "binary_source_commit": "39bd8f7",
+    "load_seconds": 84.514,
+    "stateless_seconds": 1.703,
+    "stateless_logits_fnv1a64": "a3ae49dc10b7fbea",
+    "peak_memory_footprint_bytes": 66505577248
+   },
+   {
+    "variant": "current",
+    "log_label": "Qwen3.8 timing round 1 current (load averages 2.06 7.28 25.02 at start; waited 0s)",
+    "binary_source_commit": "69f8232",
+    "load_seconds": 79.705,
+    "stateless_seconds": 0.99,
+    "stateless_logits_fnv1a64": "4ac2bba6ac400095",
+    "peak_memory_footprint_bytes": 68235323712
+   },
+   {
+    "variant": "base",
+    "log_label": "Qwen3.8 timing round 2 base (load averages 1.46 5.81 22.76 at start; waited 0s)",
+    "binary_source_commit": "39bd8f7",
+    "load_seconds": 80.635,
+    "stateless_seconds": 1.178,
+    "stateless_logits_fnv1a64": "a3ae49dc10b7fbea",
+    "peak_memory_footprint_bytes": 66506625776
+   },
+   {
+    "variant": "current",
+    "log_label": "Qwen3.8 timing round 2 current (load averages 1.77 4.83 20.77 at start; waited 0s)",
+    "binary_source_commit": "69f8232",
+    "load_seconds": 83.497,
+    "stateless_seconds": 2.125,
+    "stateless_logits_fnv1a64": "4ac2bba6ac400095",
+    "peak_memory_footprint_bytes": 68149307664
+   },
+   {
+    "variant": "first-bad-commit",
+    "log_label": "Qwen3.8 timing round 3 base (load averages 3.71 5.10 7.26 at start; waited 30s)",
+    "binary_source_commit": "ad992d7766ff87687e4815b546f2b7008c477633",
+    "load_seconds": 86.676,
+    "stateless_seconds": 8.851,
+    "stateless_logits_fnv1a64": "a3ae49dc10b7fbea",
+    "peak_memory_footprint_bytes": 74435455248
+   },
+   {
+    "variant": "base",
+    "log_label": "Qwen3.8 timing round 4 base (load averages 3.31 7.06 7.54 at start; waited 330s)",
+    "binary_source_commit": "39bd8f7",
+    "load_seconds": 84.038,
+    "stateless_seconds": 2.274,
+    "stateless_logits_fnv1a64": "a3ae49dc10b7fbea",
+    "peak_memory_footprint_bytes": 66593100576
+   },
+   {
+    "variant": "fixed",
+    "log_label": "Qwen3.8 timing round 4 fixed (load averages 3.22 6.14 7.14 at start; waited 0s)",
+    "binary_source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+    "load_seconds": 78.376,
+    "stateless_seconds": 1.173,
+    "stateless_logits_fnv1a64": "4ac2bba6ac400095",
+    "peak_memory_footprint_bytes": 60607009736
+   },
+   {
+    "variant": "base",
+    "log_label": "Qwen3.8 timing round 5 base (load averages 2.18 5.11 6.66 at start; waited 0s)",
+    "binary_source_commit": "39bd8f7",
+    "load_seconds": 84.422,
+    "stateless_seconds": 9.641,
+    "stateless_logits_fnv1a64": "a3ae49dc10b7fbea",
+    "peak_memory_footprint_bytes": 66608288616
+   },
+   {
+    "variant": "fixed",
+    "log_label": "Qwen3.8 timing round 5 fixed (load averages 3.10 4.54 6.26 at start; waited 0s)",
+    "binary_source_commit": "c15f24e2be300515127a96b14fb2cc5796843b82",
+    "load_seconds": 85.688,
+    "stateless_seconds": 1.066,
+    "stateless_logits_fnv1a64": "4ac2bba6ac400095",
+    "peak_memory_footprint_bytes": 60566639512
+   }
+  ]
+ },
+ "auxiliary_files": [
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect.log",
+   "description": "git bisect run verdicts, 39bd8f7 (good) to 69f8232 (bad): bad when the sampled Qwen3.8 F16 smoke peak exceeds 67.35 GB; first bad commit ad992d7 (stream checkpoints in source order)",
+   "sha256": "f914deb0964f159ea65eeac3a1dd75d4404777dc83788b64aaa4dbbde7af311d",
+   "bytes": 3433
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect_step.sh",
+   "description": "the bisection step script",
+   "sha256": "e3814d5416a1a9d72785c7cdfbca71d0e856179cc442e9afd215f6d7d63f25d9",
+   "bytes": 2330
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-ae85564.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at ae85564",
+   "sha256": "fdb24f9308fb3d3bdaaa13ca296f178d182f57e8165430a40826c993cc202479",
+   "bytes": 35380
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-ab495c8.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at ab495c8",
+   "sha256": "ff41cbd7628859d726aabeace7f3c2a18754b5479677d21b13de2641e99fc0ed",
+   "bytes": 30703
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-c44b44f.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at c44b44f",
+   "sha256": "06dbee7a2456a61bd96fe2fa7e7f9ee45fa0a5fd3c5730af2d4bf5cb15543505",
+   "bytes": 30763
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-7df53f3.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at 7df53f3",
+   "sha256": "051621efbd5c235a16125e13f421492c62c79c4112abf366f3ec318e3347eed6",
+   "bytes": 31321
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-49101e9.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at 49101e9",
+   "sha256": "a76d57279c6832e70d819271e21bbdd50795bdadf12335b2e1fcbbf8d5f754cd",
+   "bytes": 31624
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-fa29557.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at fa29557",
+   "sha256": "5a893474da86a031f7499cce07cbff8ac655969b979a2f24caa532ae43f8d856",
+   "bytes": 32565
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-02b1a0f.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at 02b1a0f",
+   "sha256": "076c83df02fdfe3989e54e04fa8d66961446871fa2ddd36daec59c728a5b40b1",
+   "bytes": 30843
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-407a232.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at 407a232",
+   "sha256": "ecdae555b9016fbdc38f52db715475cfd146b8fde341524a3bec44d9488b942f",
+   "bytes": 29432
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-6256f96.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at 6256f96",
+   "sha256": "fbcb73721bc5b6b3867412dc7c52edebd1131ca5d2ced88d6657149ef4ebc6ee",
+   "bytes": 28345
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-bisect/bisect-ad992d7.tsv",
+   "description": "50 ms physical-footprint trace (seconds, bytes) of the Qwen3.8 smoke at ad992d7",
+   "sha256": "0d625d6f61c40160148b0fab6e0a17d96e8225a9bd5c3e2e3042d2861c41a630",
+   "bytes": 33171
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-footprint/footprint_trace.py",
+   "description": "sampler: proc_pid_rusage RUSAGE_INFO_V4 ri_phys_footprint every 50 ms",
+   "sha256": "5e6409ef8222e4bd57cfedb19e59ed1f9f6a9e1a6a7f1f562490f85b0e425e0f",
+   "bytes": 2052
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-footprint/footprint-base.tsv",
+   "description": "Qwen3.8 smoke at 39bd8f7 (peak 66.545 GB)",
+   "sha256": "83c9642f828d9643fe0f62372695f7ec42da46daba3dce72328407eb6ff61a67",
+   "bytes": 28725
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-footprint/footprint-current.tsv",
+   "description": "Qwen3.8 smoke at 69f8232 (peak 68.184 GB)",
+   "sha256": "7c715e9e752b53031e34b812a4ae3227c17a72889d4ece20286134b6f2ff128f",
+   "bytes": 28085
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-footprint/footprint-head-target-order.tsv",
+   "description": "69f8232 with the pre-ad992d7 target-name install order (experiment; peak 57.859 GB)",
+   "sha256": "5cb4f75c7c8c690fe32949b54c435c8c963acb39dbb73ccef10e1b047a4187b5",
+   "bytes": 28841
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-footprint/footprint-head-size-order.tsv",
+   "description": "69f8232 with groups installed largest first (experiment; peak 58.923 GB)",
+   "sha256": "852816aeb6fae7845893bfdd15f6e3f10da21486d85f682f4cabdf4860111ecc",
+   "bytes": 30100
+  },
+  {
+   "path": "reference-precision-followups-20261016/qwen38-footprint/footprint-head-shard-size-order.tsv",
+   "description": "69f8232 with largest first within each shard (experiment; peak 66.939 GB)",
+   "sha256": "7172ba8d5c118b3fc26c2e21122cf1a7e80b9ce5dbcd9bb9cadfd1bbfbf300f7",
+   "bytes": 27134
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/load_footprint_probe.rs",
+   "description": "uncommitted experiment test: load one checkpoint on Metal, synchronize, idle 3 s, report shard opens",
+   "sha256": "b43be57172fdde6de805f22aa57a611525553ff782e307e94b9023a100d45863",
+   "bytes": 2841
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/run_probes.sh",
+   "description": "alternating source-order and target-order probe runner",
+   "sha256": "ee569d86c10788ab076323dafc0d6f2fee60001c1794e10ac3de1a3432ccfd63",
+   "bytes": 2135
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/results.txt",
+   "description": "post-load plateau and peak for five checkpoints under the source-order (69f8232) and target-order schedules",
+   "sha256": "bf32dd662062122f0ee59f3f7f5805f05a57df8bb388fa03b5ca811302a21b58",
+   "bytes": 1806
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/hoist-results.txt",
+   "description": "the same probe for Qwen3.8 and Muse with outsized groups hoisted first (c15f24e's order)",
+   "sha256": "7ccb92cddefe8d4ac5316ebec9a5a835aeace1ca81e7cb82b76815620ed1a547",
+   "bytes": 635
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-qwen3.8-source.tsv",
+   "description": "post-load footprint trace, qwen3.8, source order",
+   "sha256": "8d28b8a1689092ea9d24f4f043e5dd3c8d320b7d0483574db90b4ebd40b25154",
+   "bytes": 28943
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-qwen3.8-target.tsv",
+   "description": "post-load footprint trace, qwen3.8, target order",
+   "sha256": "366afffc2a610eb427cbd23487fb85120a7758e48621580de409673ba3216426",
+   "bytes": 28265
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-qwen3-moe-source.tsv",
+   "description": "post-load footprint trace, qwen3-moe, source order",
+   "sha256": "1f4b7fd68893ae24c6941b9691f693a8fda317a1a3a5e892bf2408fd4755a8b0",
+   "bytes": 31444
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-qwen3-moe-target.tsv",
+   "description": "post-load footprint trace, qwen3-moe, target order",
+   "sha256": "dc8f91bacf08498a165610bbb3366e765c79c3bd1b96ce3695e3ceea1c36a70a",
+   "bytes": 34161
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-muse-source.tsv",
+   "description": "post-load footprint trace, muse, source order",
+   "sha256": "0ff4f817d6aa90c3917bffa0c2c9cb965a8d5b9a13ff1cc3e8b3361224dd6cff",
+   "bytes": 31986
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-muse-target.tsv",
+   "description": "post-load footprint trace, muse, target order",
+   "sha256": "7f2312d22cd10c8d3a1576e455f9b0eeba9272c3f2d72df0a66e3d64093d42f7",
+   "bytes": 30755
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-nemotron-source.tsv",
+   "description": "post-load footprint trace, nemotron, source order",
+   "sha256": "e3c1e0a0cfec762e04c77fed2a0ce8ebb91bab3aaa74bd6edd78d9ac2c605ad5",
+   "bytes": 39469
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-nemotron-target.tsv",
+   "description": "post-load footprint trace, nemotron, target order",
+   "sha256": "2ea663cfd4a692a96ca4daf6534730dfa10dd10070ca9abcba5919e356b1c888",
+   "bytes": 40443
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-flan-t5-xxl-source.tsv",
+   "description": "post-load footprint trace, flan-t5-xxl, source order",
+   "sha256": "3e50dff07ce64f971930f82e8c86701ce43ec7f7197613ba40274007376707c1",
+   "bytes": 20894
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-flan-t5-xxl-target.tsv",
+   "description": "post-load footprint trace, flan-t5-xxl, target order",
+   "sha256": "6f55b4cc0e83b5c1fd5267728678ab924d06e7b0dbdc4f677f36db95738a3b53",
+   "bytes": 11015
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-qwen3.8-hoist.tsv",
+   "description": "post-load footprint trace, qwen3.8, outsized groups hoisted",
+   "sha256": "f5eb7a43fcc51501702ee91e9830ec43211389427f6a5beb9e3c63992d4a47e5",
+   "bytes": 29200
+  },
+  {
+   "path": "reference-precision-followups-20261016/load-order-probe/trace-muse-hoist.tsv",
+   "description": "post-load footprint trace, muse, outsized groups hoisted",
+   "sha256": "b2ea11799f42a948a9e7f23aa972e4c339715e8ebcaf915c914c6a03968f1f30",
+   "bytes": 30605
+  }
+ ]
+}

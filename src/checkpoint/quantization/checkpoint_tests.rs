@@ -4,6 +4,7 @@ use std::{fs::File, io::Write, path::Path};
 
 use serde_json::{Map, Value, json};
 
+use super::super::SymmetricQuantization;
 use super::*;
 use crate::checkpoint::{
     ExpectedTensor, LoadOptions, MappingPlan, build_load_plan, discover_checkpoint,
@@ -482,9 +483,9 @@ fn checkpoint_failure_keeps_exact_partial_quantized_and_exclusion_reports() {
     assert!(!output.exists());
 }
 
-/// Binding limits fail only after both hash passes and retain excluded targets.
+/// A manifest limit the planned sidecar cannot meet fails before hashing or reading.
 #[test]
-fn provenance_binding_limit_preserves_complete_conversion_progress() {
+fn infeasible_manifest_limit_fails_before_any_source_read() {
     let root = tempfile::tempdir().unwrap();
     let (manifest, plan) = identity_fixture(root.path(), &["embed_tokens.weight"]);
     let output = root.path().join("bound-limit.bpk");
@@ -510,26 +511,57 @@ fn provenance_binding_limit_preserves_complete_conversion_progress() {
         })
     ));
     assert!(failure.failed_target.is_none());
-    assert_eq!(failure.report.applied, ["embed_tokens.weight"]);
-    assert!(failure.report.quantized.is_empty());
-    assert_eq!(
-        failure.excluded,
-        [QuantizationExclusionRecord {
-            target: "embed_tokens.weight".into(),
-            reason: QuantizationExclusion::Embedding
-        }]
-    );
-    assert_eq!(failure.execution.tensors_applied, 1);
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.excluded.is_empty());
+    assert_eq!(failure.execution.source_reads, 0);
     assert_eq!(failure.staging.tensor_count, 0);
-    for stats in [
-        failure.provenance.pre_execution.unwrap(),
-        failure.provenance.post_execution.unwrap(),
-    ] {
-        assert_eq!(stats.passes_completed, 1);
-        assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
-    }
+    assert!(failure.provenance.pre_execution.is_none());
+    assert!(failure.provenance.post_execution.is_none());
     assert!(!output.exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// Staged-payload and tensor-count limits are also checked against the whole plan.
+#[test]
+fn planned_payload_and_count_limits_fail_before_any_source_read() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(root.path(), &["a.weight", "b.weight"]);
+    for (kind, limits) in [
+        (
+            "staged payload",
+            BurnpackSessionLimits {
+                max_staged_bytes: 1,
+                ..BurnpackSessionLimits::default()
+            },
+        ),
+        (
+            "tensor count",
+            BurnpackSessionLimits {
+                max_tensors: 1,
+                ..BurnpackSessionLimits::default()
+            },
+        ),
+    ] {
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            root.path().join(format!("{kind}.bpk")),
+            QuantizedCheckpointOptions {
+                limits,
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&failure.cause,
+            CheckpointQuantizationFailureCause::Quantization(QuantizationError::SessionLimitExceeded { kind: actual, .. })
+            if *actual == kind),
+            "{kind}: {}",
+            failure.cause
+        );
+        assert_eq!(failure.execution.source_reads, 0);
+        assert!(failure.provenance.pre_execution.is_none());
+    }
 }
 
 /// Change diagnostics distinguish removed, added, modified, and plan-only state.
@@ -619,4 +651,379 @@ fn checkpoint_standards_finalize_limit_keeps_complete_audit_without_output() {
     }
     assert!(!output.exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// Writes one aligned and one group-unaligned projection with an identity plan.
+fn mixed_alignment_plan(root: &Path) -> (CheckpointManifest, LoadPlan) {
+    let tensors = [
+        FixtureTensor {
+            name: "model.layers.0.self_attn.k_proj.weight",
+            shape: vec![2, 64],
+            values: (0..128).map(|index| index as f32 / 8.0 - 8.0).collect(),
+        },
+        FixtureTensor {
+            name: "model.layers.0.self_attn.q_proj.weight",
+            shape: vec![4, 8],
+            values: (0..32).map(|index| index as f32 - 15.5).collect(),
+        },
+    ];
+    write_checkpoint(root, &tensors);
+    let manifest = discover_checkpoint(root, &LoadOptions::default()).unwrap();
+    let expected = tensors
+        .iter()
+        .map(|tensor| ExpectedTensor::new(tensor.name, tensor.shape.clone()))
+        .collect::<Vec<_>>();
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    (manifest, plan)
+}
+
+/// Group-unaligned matrices follow the configured policy; the summary reports packability.
+#[test]
+fn unaligned_matrices_follow_the_configured_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = mixed_alignment_plan(root.path());
+    let unaligned = "model.layers.0.self_attn.q_proj.weight";
+    let options = |unaligned| QuantizedCheckpointOptions {
+        unaligned,
+        ..QuantizedCheckpointOptions::default()
+    };
+
+    let reference = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        root.path().join("reference.bpk"),
+        options(UnalignedMatrixPolicy::ReferenceOnly),
+    )
+    .unwrap();
+    assert_eq!(reference.artifact.tensor_count, 2);
+    assert_eq!(
+        reference.artifact.packed_execution,
+        super::super::PackedExecutionSupport::Unavailable
+    );
+
+    let excluded = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        root.path().join("excluded.bpk"),
+        options(UnalignedMatrixPolicy::Exclude),
+    )
+    .unwrap();
+    assert_eq!(excluded.artifact.tensor_count, 1);
+    assert_eq!(
+        excluded.artifact.packed_execution,
+        super::super::PackedExecutionSupport::BurnQFloatMatmul
+    );
+    assert_eq!(
+        excluded.excluded,
+        [QuantizationExclusionRecord {
+            target: unaligned.into(),
+            reason: QuantizationExclusion::GroupUnaligned,
+        }]
+    );
+    assert_eq!(excluded.report.applied.len(), 2);
+
+    let output = root.path().join("rejected.bpk");
+    let failure = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        options(UnalignedMatrixPolicy::Reject),
+    )
+    .unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some(unaligned));
+    assert!(matches!(
+        &failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(QuantizationError::BurnQFloatIncompatible { reason })
+        if reason.contains("group size 64")
+    ));
+    assert_eq!(failure.execution.source_reads, 0);
+    assert!(failure.provenance.pre_execution.is_none());
+    assert!(!output.exists());
+}
+
+/// Flips one payload bit of the only shard while keeping its length and header.
+fn flip_last_payload_bit(manifest: &CheckpointManifest) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&manifest.shards[0].path)
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    file.seek(SeekFrom::End(-1)).unwrap();
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::End(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+}
+
+/// Asserts the complete staged-but-unpublished state shared by late failures.
+fn assert_unpublished_after_staging(
+    failure: &CheckpointQuantizationFailure,
+    manifest: &CheckpointManifest,
+    output: &Path,
+) {
+    assert!(failure.failed_target.is_none());
+    assert_eq!(failure.report.applied, ["weight"]);
+    assert_eq!(failure.report.quantized.len(), 1);
+    assert_eq!(failure.execution.tensors_applied, 1);
+    assert_eq!(failure.staging.tensor_count, 1);
+    let pre = failure.provenance.pre_execution.unwrap();
+    assert_eq!(pre.passes_completed, 1);
+    assert_eq!(pre.bytes_hashed, manifest.artifact_bytes);
+    assert!(!output.exists());
+}
+
+/// A checkpoint edited during execution is detected and blocks publication.
+///
+/// The edit keeps the shard's length and header, so only the second complete
+/// hash pass can observe it; the error names the changed shard.
+#[test]
+fn checkpoint_change_between_hash_passes_blocks_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(root.path(), &["weight"]);
+    let output = root.path().join("changed.bpk");
+    let failure = quantize_with_post_execution_hook(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions::default(),
+        || flip_last_payload_bit(&manifest),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        &failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(
+            QuantizationError::CheckpointChangedDuringQuantization { shard }
+        ) if shard == "model.safetensors"
+    ));
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "checkpoint quantization failed for `{}`: checkpoint changed while quantizing shard `model.safetensors`",
+            output.display()
+        )
+    );
+    assert_unpublished_after_staging(&failure, &manifest, &output);
+    let post = failure.provenance.post_execution.unwrap();
+    assert_eq!(post.passes_completed, 1);
+    assert_eq!(post.bytes_hashed, manifest.artifact_bytes);
+    // Only the checkpoint remains: the private staging file was removed.
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// A shard that disappears during execution fails the post-execution hash pass.
+#[test]
+fn post_execution_hash_failure_records_its_partial_pass() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(root.path(), &["weight"]);
+    let output = root.path().join("vanished.bpk");
+    let failure = quantize_with_post_execution_hook(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions::default(),
+        || std::fs::remove_file(&manifest.shards[0].path).unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(QuantizationError::ArtifactIo {
+            operation: "canonicalize checkpoint shard for provenance",
+            ..
+        })
+    ));
+    assert_unpublished_after_staging(&failure, &manifest, &output);
+    let post = failure.provenance.post_execution.unwrap();
+    assert_eq!(post, super::super::ProvenanceHashStats::default());
+}
+
+/// Staging counters of the one-tensor identity conversion around provenance binding.
+///
+/// Returns `(unbound, bound)`. `unbound` comes from a conversion that a
+/// checkpoint edit stops after execution but before provenance binding;
+/// `bound` comes from a conversion that binds provenance and publishes. Each
+/// runs on its own fresh fixture, so neither touches the caller's directory.
+fn one_tensor_reference_staging() -> (BurnpackStagingStats, BurnpackStagingStats) {
+    let unbound_root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(unbound_root.path(), &["weight"]);
+    let unbound = quantize_with_post_execution_hook(
+        &manifest,
+        &plan,
+        &unbound_root.path().join("changed.bpk"),
+        QuantizedCheckpointOptions::default(),
+        || flip_last_payload_bit(&manifest),
+    )
+    .unwrap_err()
+    .staging;
+
+    let bound_root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(bound_root.path(), &["weight"]);
+    let bound = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        bound_root.path().join("published.bpk"),
+        QuantizedCheckpointOptions::default(),
+    )
+    .unwrap()
+    .staging;
+    (unbound, bound)
+}
+
+/// Publication stays create-only when the output appears during execution.
+///
+/// Both hash passes agree and provenance binds, but the final create-only
+/// publication refuses to replace the path and leaves its bytes untouched.
+#[test]
+fn output_created_during_execution_is_never_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(root.path(), &["weight"]);
+    let output = root.path().join("claimed.bpk");
+    let failure = quantize_with_post_execution_hook(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions::default(),
+        || std::fs::write(&output, b"someone else's artifact").unwrap(),
+    )
+    .unwrap_err();
+    let canonical = std::fs::canonicalize(root.path())
+        .unwrap()
+        .join("claimed.bpk");
+    assert!(matches!(
+        &failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(QuantizationError::OutputAlreadyExists { path })
+            if *path == canonical
+    ));
+    assert!(failure.failed_target.is_none());
+    assert_eq!(failure.report.applied, ["weight"]);
+    // Publication fails after provenance binding, so the reported staging
+    // counters are the bound ones: equal to a published conversion's, and
+    // with a larger manifest estimate than a conversion stopped before binding.
+    let (unbound, bound) = one_tensor_reference_staging();
+    assert_eq!(failure.staging, bound);
+    assert_eq!(failure.staging.tensor_count, 1);
+    assert_eq!(
+        failure.staging.staged_payload_bytes,
+        unbound.staged_payload_bytes
+    );
+    assert!(
+        failure.staging.estimated_manifest_bytes > unbound.estimated_manifest_bytes,
+        "{:?} vs {unbound:?}",
+        failure.staging
+    );
+    for stats in [
+        failure.provenance.pre_execution.unwrap(),
+        failure.provenance.post_execution.unwrap(),
+    ] {
+        assert_eq!(stats.passes_completed, 1);
+        assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
+    }
+    assert_eq!(std::fs::read(&output).unwrap(), b"someone else's artifact");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+}
+
+/// The quantizer records each post-transform float dtype as its source dtype.
+///
+/// The F32 checkpoint is cast by the load plan, so the sidecar must describe
+/// the F16, BF16, or F64 tensor the quantizer actually received.
+#[test]
+fn post_transform_float_dtypes_are_recorded_as_quantizer_inputs() {
+    for (dtype, recorded) in [
+        (TensorDType::F16, SourceFloatDType::F16),
+        (TensorDType::BF16, SourceFloatDType::Bf16),
+        (TensorDType::F32, SourceFloatDType::F32),
+        (TensorDType::F64, SourceFloatDType::F64),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        write_checkpoint(
+            root.path(),
+            &[FixtureTensor {
+                name: "weight",
+                shape: vec![4, 64],
+                values: (0..256).map(|index| index as f32 / 64.0 - 2.0).collect(),
+            }],
+        );
+        let options = LoadOptions {
+            dtype_policy: crate::checkpoint::DTypePolicy::Cast(dtype),
+            ..LoadOptions::default()
+        };
+        let manifest = discover_checkpoint(root.path(), &options).unwrap();
+        let expected = [ExpectedTensor::new("weight", [4, 64])];
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(plan.tensors[0].dtype, dtype);
+        let output = root.path().join("cast.bpk");
+        let outcome = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome.artifact.tensor_count, 1);
+        let artifact = super::super::QuantizedBurnpackArtifact::open(&output).unwrap();
+        let metadata = &artifact.manifest().tensors["weight"];
+        assert_eq!(metadata.source_dtype, recorded, "{dtype}");
+        assert_eq!(metadata.shape, [4, 64]);
+    }
+}
+
+/// An eligible matrix of integers is skipped by preflight and refused when staged.
+///
+/// Preflight sizes only float targets; the integer target therefore reaches
+/// the quantizer, which names the rejected dtype at that target.
+#[test]
+fn integer_matrix_targets_fail_at_the_quantizer_with_their_dtype() {
+    let root = tempfile::tempdir().unwrap();
+    let header = serde_json::to_vec(&json!({
+        "weight": {"dtype": "I32", "shape": [4, 8], "data_offsets": [0, 128]}
+    }))
+    .unwrap();
+    let mut file = File::create(root.path().join("model.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(&header).unwrap();
+    file.write_all(&[0_u8; 128]).unwrap();
+    drop(file);
+    let manifest = discover_checkpoint(root.path(), &LoadOptions::default()).unwrap();
+    let expected = [ExpectedTensor::new("weight", [4, 8]).with_dtype(TensorDType::I32)];
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let output = root.path().join("integers.bpk");
+    let failure = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some("weight"));
+    assert!(matches!(
+        failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(
+            QuantizationError::UnsupportedInputDType {
+                dtype: burn::tensor::DType::I32
+            }
+        )
+    ));
+    assert_eq!(failure.staging.tensor_count, 0);
+    assert!(failure.report.applied.is_empty());
+    assert!(!output.exists());
 }

@@ -61,6 +61,33 @@ fn loss_contract_rejects_invalid_axes_labels_shapes_and_dtypes() {
     assert!(kl_divergence(input.clone(), input.cast(burn::tensor::FloatDType::F64)).is_err());
 }
 
+/// Logits with an empty axis are rejected before any reduction, naming the loss argument.
+#[test]
+fn empty_logit_axes_are_rejected_by_every_loss() {
+    let device = Default::default();
+    let empty = Tensor::<Cpu, 2>::zeros([2, 0], &device);
+    let full = Tensor::<Cpu, 2>::zeros([2, 3], &device);
+    let message = |error: Error| error.to_string();
+    assert_eq!(
+        message(log_softmax(empty.clone(), 1).unwrap_err()),
+        "invalid configuration at training.logits: all dimensions must be nonempty"
+    );
+    assert_eq!(
+        message(
+            cross_entropy(
+                Tensor::zeros([0, 3], &device),
+                Tensor::<Cpu, 1, Int>::zeros([0], &device),
+            )
+            .unwrap_err()
+        ),
+        "invalid configuration at training.logits: all dimensions must be nonempty"
+    );
+    assert_eq!(
+        message(kl_divergence(full, empty).unwrap_err()),
+        "invalid configuration at training.teacher_logits: all dimensions must be nonempty"
+    );
+}
+
 /// KL matches a teacher-to-student scalar reference averaged over examples and vanishes for identical logits.
 #[test]
 fn kl_uses_teacher_to_student_direction_and_example_mean() {
@@ -102,7 +129,7 @@ mod autodiff {
         nn::{Linear, LinearConfig, LinearLayout},
         optim::{AdamConfig, GradientsParams, Optimizer, SgdConfig},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
-        tensor::backend::Backend,
+        tensor::{Tolerance, backend::Backend},
     };
     /// Differentiable wrapper around the stable-loss fixture backend.
     type Ad = Autodiff<Cpu>;
@@ -610,9 +637,15 @@ mod autodiff {
         }
     }
 
-    /// Records saved from the training owner retain column mapping, evaluation values, and exact Adam resumption.
+    /// Records saved from the training owner restore exact weights, then evaluate and resume Adam to F32 rounding.
+    ///
+    /// The reloaded weight is bit-identical, but Burn's column mapper hands it
+    /// back as a transposed view of what training left contiguous. On x86 AVX
+    /// the GEMM then sums in another order, so outputs and the next Adam step
+    /// agree to F32 rounding rather than bit for bit; a lost mapper would
+    /// transpose the weight and differ at O(1).
     #[test]
-    fn column_records_saved_from_training_owner_reload_evaluate_and_resume_exactly() {
+    fn column_records_saved_from_training_owner_reload_exactly_and_resume() {
         let device = Default::default();
         for (input_width, output_width) in [(2, 3), (3, 3)] {
             Ad::seed(&device, 991);
@@ -650,9 +683,17 @@ mod autodiff {
                 [input_width, output_width]
             );
             assert_eq!(
-                restored.valid().forward(input().inner()).into_data(),
-                model.forward(input()).into_data()
+                restored.projection.weight.val().into_data(),
+                model.projection.weight.val().into_data()
             );
+            restored
+                .valid()
+                .forward(input().inner())
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &model.forward(input()).into_data(),
+                    Tolerance::rel_abs(1e-5, 1e-6),
+                );
             let grads = GradientsParams::from_grads(
                 model.forward(input()).square().mean().backward(),
                 &model,
@@ -663,10 +704,15 @@ mod autodiff {
             );
             model = optimizer.step(0.01, model, grads);
             restored = restored_optimizer.step(0.01, restored, restored_grads);
-            assert_eq!(
-                restored.projection.weight.val().into_data(),
-                model.projection.weight.val().into_data()
-            );
+            restored
+                .projection
+                .weight
+                .val()
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &model.projection.weight.val().into_data(),
+                    Tolerance::rel_abs(1e-5, 1e-6),
+                );
         }
     }
 
@@ -730,4 +776,160 @@ mod autodiff {
             );
         }
     }
+
+    /// A bare parameter is a module with one owner at the root path and passes preflight.
+    #[test]
+    fn a_root_parameter_has_a_single_owner() {
+        let parameter = Param::from_tensor(Tensor::<Ad, 1>::ones([3], &Default::default()));
+        validate_trainable_module(&parameter).unwrap();
+    }
+
+    /// Unique neighbours of a duplicated identity stay out of the trainability inspection.
+    ///
+    /// The two projections share only their weight; their biases are distinct
+    /// owners. The error therefore names exactly the shared weight paths.
+    #[test]
+    fn preflight_reports_only_the_duplicated_identity_beside_unique_parameters() {
+        let device = Default::default();
+        let first = LinearConfig::new(2, 2).init::<Ad>(&device);
+        let mut second = LinearConfig::new(2, 2).init::<Ad>(&device);
+        second.weight = first.weight.clone();
+        assert_ne!(
+            first.bias.as_ref().unwrap().id,
+            second.bias.as_ref().unwrap().id
+        );
+        let message = validate_trainable_module(&DuplicateOwners { first, second })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("duplicate parameter identifier at first.weight, second.weight includes a trainable owner"),
+            "{message}"
+        );
+        assert!(!message.contains("bias"), "{message}");
+    }
+}
+
+// Pairwise reduction: accuracy against F64, parity with the previous tree, and cost.
+
+/// The previous adjacent-pair tree, kept as the reference the folding tree must match.
+///
+/// Each level reshapes `[rows, w]` to `[rows, w/2, 2]` (after padding odd widths
+/// with one zero) and reduces the innermost pair.
+fn adjacent_pair_reference(input: Tensor<Cpu, 2>) -> Tensor<Cpu, 2> {
+    let [rows, mut width] = input.dims();
+    let mut values = input;
+    while width > 1 {
+        if !width.is_multiple_of(2) {
+            let zero = values.clone().narrow(1, 0, 1).zeros_like();
+            values = Tensor::cat(vec![values, zero], 1);
+            width += 1;
+        }
+        width /= 2;
+        values = values
+            .reshape([rows, width, 2])
+            .sum_dim(2)
+            .reshape([rows, width]);
+    }
+    values
+}
+
+/// One large term among tiny tail terms, wherever it sits, stays within 2e-7 of F64.
+///
+/// Flex's native reduction is sequential and errs by up to ~1e-3 here.
+#[test]
+fn folded_reduction_matches_f64_and_the_previous_tree_for_any_peak_position() {
+    let device = Default::default();
+    for classes in [50_303_usize, 151_936] {
+        let expected = (1.0 + (classes - 1) as f64 * (-16.0_f64).exp()).ln();
+        for position in [0, 1, 3, 7, 15, classes / 2, classes - 1] {
+            let mut values = vec![-16.0_f32; classes];
+            values[position] = 0.0;
+            let exps =
+                Tensor::<Cpu, 2>::from_data(TensorData::new(values, [1, classes]), &device).exp();
+            let folded = f64::from(pairwise_row_sums(exps.clone()).log().into_scalar());
+            let previous = f64::from(adjacent_pair_reference(exps).log().into_scalar());
+            assert!(
+                (folded - expected).abs() < 2e-7,
+                "V={classes} at {position}: {folded} vs {expected}"
+            );
+            // Both trees are within 2e-7 of F64, possibly on opposite sides.
+            assert!((folded - previous).abs() < 4e-7);
+        }
+    }
+}
+
+proptest::proptest! {
+    /// Random positive rows obey the pairwise F32 error bound against an F64 sum.
+    ///
+    /// For depth `k = ceil(log2 w)`, each input passes through at most `k`
+    /// additions, so `|error| <= k * 2^-24 * sum |x|` up to second-order terms.
+    /// Several rows of one width are reduced together and each row is checked
+    /// against its own sum, so a fold along the wrong axis (mixing rows) fails.
+    #[test]
+    fn folded_row_sums_obey_the_pairwise_error_bound(
+        (width, rows) in proptest::strategy::Strategy::prop_flat_map(1usize..300, |width| {
+            (
+                proptest::strategy::Just(width),
+                proptest::collection::vec(
+                    proptest::collection::vec(0.0f32..1e3, width),
+                    1..5,
+                ),
+            )
+        }),
+    ) {
+        let count = rows.len();
+        let flat = rows.iter().flatten().copied().collect::<Vec<_>>();
+        let tensor = Tensor::<Cpu, 2>::from_data(
+            TensorData::new(flat, [count, width]),
+            &Default::default(),
+        );
+        let sums = pairwise_row_sums(tensor);
+        proptest::prop_assert_eq!(sums.dims(), [count, 1]);
+        let sums = sums.into_data().to_vec::<f32>().unwrap();
+        let depth = (usize::BITS - (width - 1).leading_zeros()) as f64;
+        for (row, actual) in rows.iter().zip(sums) {
+            let actual = f64::from(actual);
+            let exact = row.iter().map(|value| f64::from(*value)).sum::<f64>();
+            let bound = (depth + 1.0) * f64::from(f32::EPSILON) / 2.0 * exact + 1e-30;
+            proptest::prop_assert!(
+                (actual - exact).abs() <= bound,
+                "{actual} vs {exact} (bound {bound})"
+            );
+        }
+    }
+}
+
+/// Reports per-call cost of the row reductions; run with `--release --ignored --nocapture`.
+#[test]
+#[ignore = "timing report, not a correctness check"]
+fn reduction_cost_report() {
+    use std::time::Instant;
+    let device = Default::default();
+    let logits = Tensor::<Cpu, 2>::random(
+        [64, 151_936],
+        burn::tensor::Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let iterations = 10;
+    let time = |label: &str, run: &dyn Fn() -> Tensor<Cpu, 2>| {
+        let _ = run().into_data();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = run().into_data();
+        }
+        let milliseconds = start.elapsed().as_secs_f64() * 1e3 / f64::from(iterations);
+        println!("{label}: {milliseconds:.2} ms");
+    };
+    time("folded pairwise tree", &|| {
+        pairwise_row_sums(logits.clone())
+    });
+    time("previous adjacent-pair tree", &|| {
+        adjacent_pair_reference(logits.clone())
+    });
+    time("native sequential sum_dim", &|| logits.clone().sum_dim(1));
+    time("cross_entropy (folded)", &|| {
+        cross_entropy(logits.clone(), Tensor::zeros([64], &device))
+            .unwrap()
+            .reshape([1, 1])
+    });
 }

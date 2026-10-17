@@ -151,7 +151,7 @@ impl Metrics {
     /// Input rows have 114 F32 logits; only their first 113 classes are analyzed.
     fn add(&mut self, start: usize, logits: &[f32]) {
         // Training includes '=', while the author's Fourier analysis drops it.
-        for (offset, row) in logits.chunks_exact(P + 1).enumerate() {
+        for (offset, row) in logits.as_chunks::<{ P + 1 }>().0.iter().enumerate() {
             let row = &row[..P];
             let pair = start + offset;
             let target = (pair / P + pair % P) % P;

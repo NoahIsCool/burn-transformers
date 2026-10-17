@@ -1,0 +1,11 @@
+[package]
+name = "burn-dump-patched"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+transformers = { path = "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/patched-silu", features = ["metal", "tokenizers"] }
+burn = { version = "=0.21.0", default-features = false }
+
+[workspace]

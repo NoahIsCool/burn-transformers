@@ -1,4 +1,6 @@
-//! Linear-operation tests for dense and packed execution, record layouts, and gradient ownership.
+//! Linear-operation tests for dense and packed execution, record layouts, and gradient ownership,
+//! plus the tied-readout product [`super::matmul_transposed`] and the storage-order helpers
+//! behind contiguous random initialization ([`super::contiguous_where_preferred`]).
 
 use burn::{
     backend::Flex,
@@ -7,7 +9,7 @@ use burn::{
     tensor::{DType, Tensor, TensorData},
 };
 
-use super::linear;
+use super::{linear, matmul_transposed};
 use crate::checkpoint::quantization::{
     QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
 };
@@ -369,7 +371,13 @@ fn projection_contract_bias_width_rejection_preserves_weight_values() {
 }
 
 /// The feature-unification guard distinguishes Q4 Metal from safe paths.
-#[cfg(all(feature = "metal", feature = "rocm"))]
+///
+/// It compiles under both features that enable CubeCL autotuning on Metal:
+/// `rocm` and the test-only `attention-kernel-tracing`.
+#[cfg(all(
+    feature = "metal",
+    any(feature = "rocm", feature = "attention-kernel-tracing")
+))]
 #[test]
 fn packed_metal_autotune_guard_is_narrow() {
     let q4 = quantize_tensor_data(
@@ -409,12 +417,20 @@ fn packed_metal_autotune_guard_is_narrow() {
     ));
 }
 
-/// Metal accepts a Q4 RHS through CubeCL's quantized matmul binding.
+/// Metal multiplies every row count through a packed Q4 weight correctly.
 ///
 /// Burn 0.21's CubeCL `q_matmul` passes packed values and their scale handle
-/// as an `InputBinding::quantized`; this test protects the public call path
-/// and verifies that no API-level conversion changes the parameter dtype.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+/// as an `InputBinding::quantized`. With F32 activations its multi-row kernels
+/// decode Q4 wrongly (relative error up to 1.0 for 2 to 32 rows), so [`linear`]
+/// splits such products into single rows. Each row count, including the boundaries on
+/// either side of the cooperative-matrix threshold, is compared with the host
+/// product of distinct per-row activations and the independently dequantized
+/// weight; identical rows would hide a kernel that repeats or drops rows. The
+/// test also verifies that no API-level conversion changes the parameter dtype.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires a Metal-capable macOS host"]
 fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
@@ -437,10 +453,6 @@ fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
         .expect("reference dequantization")
         .to_vec::<f32>()
         .expect("f32 reference data");
-    let expected = dequantized
-        .chunks_exact(64)
-        .map(|row| row.iter().sum::<f32>())
-        .collect::<Vec<_>>();
     let packed = Tensor::<Metal, 2>::from_data(
         quantized
             .into_burn_qfloat_data()
@@ -454,21 +466,66 @@ fn metal_qfloat_projection_executes_quantized_matmul_dispatch() {
     };
     assert!(matches!(projection.weight.val().dtype(), DType::QFloat(_)));
 
-    let actual = linear(Tensor::<Metal, 2>::ones([1, 64], &device), &projection)
+    for rows in [1, 2, 3, 8, 32, 33, 64] {
+        let input = distinct_rows(rows, 64);
+        let expected = host_projection(&input, &dequantized, rows, 64, 64);
+        let actual = linear(
+            Tensor::<Metal, 2>::from_data(TensorData::new(input, [rows, 64]), &device),
+            &projection,
+        )
         .expect("Metal packed projection")
         .into_data()
         .to_vec::<f32>()
         .expect("Metal output should be readable as f32");
-
+        let error = max_relative_error(&actual, &expected);
+        assert!(
+            error <= 1e-4,
+            "{rows}-row Q4 Metal projection deviates from the dequantized reference by {error:.3e}"
+        );
+    }
     assert!(matches!(projection.weight.val().dtype(), DType::QFloat(_)));
-    TensorData::new(actual, [1, 64]).assert_approx_eq::<f32>(
-        &TensorData::new(expected, [1, 64]),
-        burn::tensor::Tolerance::relative(2e-2),
-    );
 }
 
-/// Q4 Metal dispatch remains finite for every distinct Qwen3.5 projection shape.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+/// Metal rejects a 2-bit packed weight instead of returning wrong products.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+#[test]
+#[ignore = "requires a Metal-capable macOS host"]
+fn metal_two_bit_packed_projection_is_rejected() {
+    use burn::backend::Metal;
+    use burn::tensor::quantization::{
+        QuantLevel, QuantMode, QuantParam, QuantScheme, QuantStore, QuantValue,
+    };
+
+    let device = Default::default();
+    let scheme = QuantScheme::default()
+        .with_value(QuantValue::Q2S)
+        .with_param(QuantParam::F32)
+        .with_store(QuantStore::PackedU32(0))
+        .with_level(QuantLevel::block([1, 32]))
+        .with_mode(QuantMode::Symmetric);
+    let weight = Tensor::<Metal, 2>::ones([64, 64], &device).quantize_dynamic(&scheme);
+    let projection = Linear {
+        weight: Param::from_tensor(weight),
+        bias: None,
+    };
+    let error = linear(Tensor::<Metal, 2>::ones([1, 64], &device), &projection)
+        .expect_err("2-bit packed Metal projection must be rejected");
+    assert!(error.to_string().contains("2-bit packed linear weights"));
+}
+
+/// Q4 Metal dispatch is finite and correct for every distinct Qwen3.5 projection shape.
+///
+/// One-row (decode) and 3- and 17-row (short prefill) F16 activations are compared
+/// with the host product against the dequantized weight. The tolerance is 1% of
+/// the largest reference magnitude, which bounds F16 activation and output
+/// rounding while rejecting a wrong kernel (errors of order 10% to 100%).
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires a Metal-capable macOS host"]
 fn metal_qfloat_projection_covers_qwen35_shapes() {
@@ -497,6 +554,11 @@ fn metal_qfloat_projection_covers_qwen35_shapes() {
             },
         )
         .expect("reference quantization");
+        let dequantized = quantized
+            .dequantize_f32()
+            .expect("reference dequantization")
+            .to_vec::<f32>()
+            .expect("f32 reference data");
         let packed = Tensor::<Metal, 2>::from_data(
             quantized
                 .into_burn_qfloat_data()
@@ -508,18 +570,1014 @@ fn metal_qfloat_projection_covers_qwen35_shapes() {
             weight: Param::from_tensor(packed),
             bias: None,
         };
-        let actual = linear(
-            Tensor::<Metal, 2>::ones([1, input_width], &device).cast(DType::F16),
-            &projection,
+        for rows in [1, 3, 17] {
+            let input = distinct_rows(rows, input_width);
+            let expected = host_projection(&input, &dequantized, rows, input_width, output_width);
+            let actual = linear(
+                Tensor::<Metal, 2>::from_data(TensorData::new(input, [rows, input_width]), &device)
+                    .cast(DType::F16),
+                &projection,
+            )
+            .expect("Metal packed projection")
+            .cast(DType::F32)
+            .into_data()
+            .to_vec::<f32>()
+            .expect("Metal output should be readable as f32");
+            assert!(
+                actual.iter().all(|value| value.is_finite()),
+                "Q4 projection [{input_width}, {output_width}] produced non-finite output"
+            );
+            let error = max_relative_error(&actual, &expected);
+            assert!(
+                error <= 1e-2,
+                "{rows}-row Q4 projection [{input_width}, {output_width}] deviates by {error:.3e}"
+            );
+        }
+    }
+}
+
+/// Distinct, F16-exact activations `x[r, i] = ((7r + 3i) mod 13 - 6) / 8`.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+fn distinct_rows(rows: usize, width: usize) -> Vec<f32> {
+    (0..rows * width)
+        .map(|index| (((index / width) * 7 + (index % width) * 3) % 13) as f32 / 8.0 - 0.75)
+        .collect()
+}
+
+/// Host F64 product `y[r, o] = Σ_i x[r, i] · w[o, i]` for a stored `[output, input]` weight.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+fn host_projection(
+    input: &[f32],
+    weight: &[f32],
+    rows: usize,
+    input_width: usize,
+    output_width: usize,
+) -> Vec<f64> {
+    let mut output = vec![0.0_f64; rows * output_width];
+    for row in 0..rows {
+        for column in 0..output_width {
+            output[row * output_width + column] = (0..input_width)
+                .map(|inner| {
+                    f64::from(input[row * input_width + inner])
+                        * f64::from(weight[column * input_width + inner])
+                })
+                .sum();
+        }
+    }
+    output
+}
+
+/// Largest absolute deviation divided by the largest reference magnitude.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+fn max_relative_error(actual: &[f32], expected: &[f64]) -> f64 {
+    assert_eq!(actual.len(), expected.len(), "output length");
+    let scale = expected
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    actual
+        .iter()
+        .zip(expected)
+        .fold(0.0_f64, |max, (actual, expected)| {
+            max.max((f64::from(*actual) - expected).abs())
+        })
+        / scale.max(f64::MIN_POSITIVE)
+}
+
+/// Only 4-bit packed weights on CubeCL with several rows take single-row products.
+///
+/// F16 activations on Metal are the measured-correct exception; F16 on another
+/// CubeCL runtime, F32 everywhere, and E2M1 (also 4-bit) split. Eight-bit and
+/// float weights, one row, and Flex never split.
+#[test]
+fn single_row_products_are_limited_to_four_bit_cubecl_multi_row_weights() {
+    use super::packed_rows_need_single_row_products as splits;
+    use burn::tensor::quantization::{QuantScheme, QuantValue};
+
+    let q4 = packed_dtype(SymmetricQuantization::Q4);
+    let q8 = packed_dtype(SymmetricQuantization::Q8);
+    let e2m1 = DType::QFloat(QuantScheme::default().with_value(QuantValue::E2M1));
+    let metal = "fusion<cubecl<wgpu<msl>>>";
+    let cuda = "fusion<cubecl<cuda>>";
+
+    for weight in [q4, e2m1] {
+        assert!(splits(weight, DType::F32, metal, 2));
+        assert!(splits(weight, DType::F32, "cubecl<wgpu<msl>>", 64));
+        assert!(splits(weight, DType::F16, cuda, 2));
+        assert!(splits(weight, DType::BF16, cuda, 3));
+        assert!(!splits(weight, DType::F16, metal, 64));
+        assert!(!splits(weight, DType::F32, metal, 1));
+        assert!(!splits(weight, DType::F32, "flex", 2));
+    }
+    for weight in [q8, DType::F32, DType::F16] {
+        assert!(!splits(weight, DType::F32, metal, 64));
+        assert!(!splits(weight, DType::F32, cuda, 64));
+    }
+}
+
+/// Only sub-4-bit packed weights on CubeCL are rejected outright.
+#[test]
+fn two_bit_packed_weights_are_rejected_only_on_cubecl() {
+    use super::packed_value_is_unreliable_on_cubecl as rejected;
+    use burn::tensor::quantization::{QuantScheme, QuantValue};
+
+    for value in [QuantValue::Q2S, QuantValue::Q2F] {
+        let q2 = DType::QFloat(QuantScheme::default().with_value(value));
+        assert!(rejected(q2, "fusion<cubecl<wgpu<msl>>>"));
+        assert!(rejected(q2, "cubecl<cuda>"));
+        assert!(!rejected(q2, "flex"));
+    }
+    for weight in [
+        packed_dtype(SymmetricQuantization::Q4),
+        packed_dtype(SymmetricQuantization::Q8),
+        DType::F32,
+    ] {
+        assert!(!rejected(weight, "fusion<cubecl<wgpu<msl>>>"));
+    }
+}
+
+/// The packed `QFloat` dtype this crate's quantizer produces for `scheme`.
+fn packed_dtype(scheme: SymmetricQuantization) -> DType {
+    quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 64], [1, 64]),
+        WeightQuantizationConfig {
+            scheme,
+            group_size: QuantizationGroupSize::new(32).expect("supported group"),
+        },
+    )
+    .expect("reference quantization")
+    .into_burn_qfloat_data()
+    .expect("Burn-compatible packed data")
+    .dtype
+}
+
+/// Row-by-row products equal one matmul, row for row, including a single row.
+#[test]
+fn row_by_row_matmul_matches_one_matmul_exactly() {
+    let device = Default::default();
+    let weight = Tensor::<Flex, 2>::from_data(small_integers(4, 3, 1), &device);
+    for rows in [1, 2, 5] {
+        let input = Tensor::<Flex, 2>::from_data(small_integers(rows, 4, rows), &device);
+        let expected = input.clone().matmul(weight.clone()).into_data();
+        let actual = super::matmul_row_by_row(input, weight.clone());
+        assert_eq!(actual.dims(), [rows, 3]);
+        assert_eq!(actual.into_data(), expected);
+    }
+}
+
+/// Deterministic `[rows, columns]` values whose products stay exactly representable.
+fn small_integers(rows: usize, columns: usize, salt: usize) -> TensorData {
+    TensorData::new(
+        (0..rows * columns)
+            .map(|index| ((index * 7 + salt) % 11) as f32 - 5.0)
+            .collect::<Vec<_>>(),
+        [rows, columns],
+    )
+}
+
+/// The tied readout equals Burn's `module::linear` against the transposed matrix at every rank.
+#[test]
+fn matmul_transposed_matches_burn_linear_for_every_rank() {
+    let device = Default::default();
+    let matrix = Tensor::<Flex, 2>::from_data(small_integers(5, 4, 3), &device);
+    let reference = |input: Tensor<Flex, 3>| {
+        burn::tensor::module::linear(input, matrix.clone().transpose(), None).into_data()
+    };
+
+    let batched = Tensor::<Flex, 3>::from_data(
+        TensorData::new(small_integers(6, 4, 1).to_vec::<f32>().unwrap(), [2, 3, 4]),
+        &device,
+    );
+    let output = matmul_transposed(batched.clone(), matrix.clone()).unwrap();
+    assert_eq!(output.dims(), [2, 3, 5]);
+    assert_eq!(output.into_data(), reference(batched.clone()));
+
+    let rows = matmul_transposed(batched.clone().reshape([6, 4]), matrix.clone()).unwrap();
+    assert_eq!(rows.reshape([2, 3, 5]).into_data(), reference(batched));
+
+    let vector = Tensor::<Flex, 1>::from_floats([1.0, -2.0, 3.0, 0.5], &device);
+    let expected = matrix
+        .clone()
+        .matmul(vector.clone().reshape([4, 1]))
+        .reshape([5])
+        .into_data();
+    assert_eq!(
+        matmul_transposed(vector, matrix).unwrap().into_data(),
+        expected
+    );
+}
+
+/// Shape, dtype and packing mismatches are contextual errors before any matmul.
+#[test]
+fn matmul_transposed_rejects_invalid_operands() {
+    let device = Default::default();
+    let matrix = Tensor::<Flex, 2>::from_data(small_integers(5, 4, 0), &device);
+    let input = Tensor::<Flex, 2>::from_data(small_integers(2, 4, 0), &device);
+
+    let wrong_width = Tensor::<Flex, 2>::zeros([2, 3], &device);
+    assert!(matches!(
+        matmul_transposed(wrong_width, matrix.clone()),
+        Err(crate::Error::Shape { tensor, .. }) if tensor == "matmul_transposed.matrix"
+    ));
+    let empty_rows =
+        Tensor::<Flex, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, 4]), &device);
+    assert!(matches!(
+        matmul_transposed(input.clone(), empty_rows),
+        Err(crate::Error::Shape { tensor, .. }) if tensor == "matmul_transposed.matrix"
+    ));
+    let empty_input =
+        Tensor::<Flex, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, 4]), &device);
+    assert!(matches!(
+        matmul_transposed(empty_input, matrix.clone()),
+        Err(crate::Error::Shape { tensor, .. }) if tensor == "matmul_transposed.input"
+    ));
+    assert!(matches!(
+        matmul_transposed(input.clone().cast(DType::F64), matrix.clone()),
+        Err(crate::Error::BackendCapability(message)) if message.contains("must match")
+    ));
+    let packed = Tensor::<Flex, 2>::from_data(
+        quantize_tensor_data(
+            &TensorData::new(vec![0.5_f32; 64], [2, 32]),
+            WeightQuantizationConfig {
+                scheme: SymmetricQuantization::Q8,
+                group_size: QuantizationGroupSize::new(32).unwrap(),
+            },
         )
-        .expect("Metal packed projection")
-        .cast(DType::F32)
-        .into_data()
+        .unwrap()
+        .into_burn_qfloat_data()
+        .unwrap(),
+        &device,
+    );
+    assert!(matches!(
+        matmul_transposed(Tensor::<Flex, 2>::ones([1, 32], &device), packed),
+        Err(crate::Error::BackendCapability(message)) if message.contains("dequantize")
+    ));
+}
+
+/// Gradients of the tied readout reach both the activations and the matrix.
+#[cfg(feature = "autodiff")]
+#[test]
+fn matmul_transposed_differentiates_both_operands() {
+    use burn::backend::Autodiff;
+
+    /// Differentiable CPU backend for the tied-readout gradient check.
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let matrix = Tensor::<AdBackend, 2>::from_data(small_integers(3, 2, 0), &device).require_grad();
+    let input =
+        Tensor::<AdBackend, 3>::from_floats([[[1.0, 2.0], [3.0, 4.0]]], &device).require_grad();
+    let gradients = matmul_transposed(input.clone(), matrix.clone())
+        .unwrap()
+        .sum()
+        .backward();
+    // d(sum)/dM[o, i] = sum over rows of x[r, i]; d(sum)/dx[r, i] = sum over o of M[o, i].
+    assert_eq!(
+        matrix.grad(&gradients).unwrap().to_data(),
+        TensorData::from([[4.0_f32, 6.0], [4.0, 6.0], [4.0, 6.0]])
+    );
+    let column_sums = small_integers(3, 2, 0)
         .to_vec::<f32>()
-        .expect("Metal output should be readable as f32");
-        assert!(
-            actual.iter().all(|value| value.is_finite()),
-            "Q4 projection [{input_width}, {output_width}] produced non-finite output"
+        .unwrap()
+        .chunks(2)
+        .fold([0.0_f32; 2], |sums, row| {
+            [sums[0] + row[0], sums[1] + row[1]]
+        });
+    assert_eq!(
+        input.grad(&gradients).unwrap().to_data(),
+        TensorData::from([[column_sums, column_sums]])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Storage order of initialized and cached tensors
+// ---------------------------------------------------------------------------
+
+/// Returns the Flex primitive of `tensor` to inspect its physical layout.
+fn flex_primitive<const D: usize>(tensor: Tensor<Flex, D>) -> burn::backend::flex::FlexTensor {
+    tensor.into_primitive().tensor()
+}
+
+/// Irregular F32 values `sin(0.37 i)` laid out row-major in `shape`.
+fn irregular<const D: usize>(shape: [usize; D]) -> Tensor<Flex, D> {
+    let elements = shape.iter().product::<usize>();
+    Tensor::<Flex, 1, burn::tensor::Int>::arange(0..elements as i64, &Default::default())
+        .float()
+        .mul_scalar(0.37)
+        .sin()
+        .reshape(shape)
+}
+
+/// Only the inference Flex backend asks for contiguous copies; autodiff never does.
+#[test]
+fn only_inference_flex_prefers_contiguous_storage() {
+    let device = Default::default();
+    assert!(super::prefers_contiguous_storage::<Flex>(&device));
+    #[cfg(feature = "autodiff")]
+    assert!(!super::prefers_contiguous_storage::<
+        burn::backend::Autodiff<Flex>,
+    >(&device));
+}
+
+/// Materialization is an exact permutation: shape, dtype and every bit survive.
+#[test]
+fn contiguous_materialization_preserves_every_value_and_dtype() {
+    for dtype in [DType::F32, DType::F64, DType::F16, DType::BF16] {
+        let view = irregular([2, 3, 4, 5]).cast(dtype).swap_dims(1, 2);
+        assert!(!flex_primitive(view.clone()).is_contiguous(), "{dtype:?}");
+        let stored = super::contiguous_where_preferred(view.clone());
+        assert!(flex_primitive(stored.clone()).is_contiguous(), "{dtype:?}");
+        assert_eq!(stored.dims(), [2, 4, 3, 5]);
+        assert_eq!(stored.dtype(), dtype);
+        assert_eq!(stored.into_data(), view.into_data(), "{dtype:?}");
+    }
+}
+
+/// Already contiguous tensors and transposed matrices take the same exact path.
+#[test]
+fn contiguous_materialization_handles_contiguous_and_matrix_views() {
+    let contiguous = irregular([3, 4]);
+    let stored = super::contiguous_where_preferred(contiguous.clone());
+    assert!(flex_primitive(stored.clone()).is_contiguous());
+    assert_eq!(stored.into_data(), contiguous.clone().into_data());
+
+    let transposed = contiguous.transpose();
+    let stored = super::contiguous_where_preferred(transposed.clone());
+    assert!(flex_primitive(stored.clone()).is_contiguous());
+    assert_eq!(stored.dims(), [4, 3]);
+    assert_eq!(stored.into_data(), transposed.into_data());
+}
+
+/// Packed tensors are returned untouched: their block scales are layout-bound.
+#[test]
+fn contiguous_materialization_leaves_packed_tensors_unchanged() {
+    let device = Default::default();
+    let data = quantize_tensor_data(
+        &small_integers(2, 32, 1),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q8,
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+        },
+    )
+    .unwrap();
+    let packed = Tensor::<Flex, 2>::from_data(data.into_burn_qfloat_data().unwrap(), &device);
+    let dtype = packed.dtype();
+    assert!(matches!(dtype, DType::QFloat(_)));
+    let returned = super::contiguous_where_preferred(packed.clone());
+    assert_eq!(returned.dtype(), dtype);
+    assert_eq!(returned.into_data(), packed.into_data());
+}
+
+/// Autodiff tensors keep their view and therefore their gradient path.
+#[cfg(feature = "autodiff")]
+#[test]
+fn contiguous_materialization_keeps_autodiff_graphs_connected() {
+    /// Differentiable CPU backend whose tensors must never be copied off the graph.
+    type AdBackend = burn::backend::Autodiff<Flex>;
+    let device = Default::default();
+    let input = Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], &device)
+        .require_grad();
+    let weights =
+        Tensor::<AdBackend, 2>::from_floats([[1.0, 10.0], [100.0, 1000.0], [0.5, 2.0]], &device);
+    let gradients = (super::contiguous_where_preferred(input.clone().transpose()) * weights)
+        .sum()
+        .backward();
+    assert_eq!(
+        input.grad(&gradients).expect("connected").to_data(),
+        TensorData::from([[1.0_f32, 100.0, 0.5], [10.0, 1000.0, 2.0]])
+    );
+}
+
+/// A lazy initializer chained with the materialization keeps its exact values.
+///
+/// This is the composition `init_linear` installs on inference Flex: Burn's
+/// column-layout initializer yields the transposed view of an `[out, in]`
+/// draw, and the chained mapper stores it contiguously at the first read.
+#[test]
+fn chained_materialization_preserves_lazy_initializer_values() {
+    let device = Default::default();
+    let drawn = irregular([3, 5]);
+    let source = drawn.clone();
+    let lazy = Param::uninitialized(
+        burn::module::ParamId::new(),
+        move |_, _| source.clone().transpose(),
+        device,
+        false,
+        [5, 3].into(),
+    )
+    .init_mapper(super::contiguous_where_preferred::<Flex, 2>);
+    assert!(!lazy.is_initialized());
+    let value = lazy.val();
+    assert!(flex_primitive(value.clone()).is_contiguous());
+    assert_eq!(value.into_data(), drawn.transpose().into_data());
+}
+
+/// Random column-layout weights are contiguous on inference Flex and keep Burn's distribution.
+///
+/// Burn draws a column-layout weight as `[out, in]` with Kaiming-uniform bound
+/// `1/sqrt(out)` (Burn 0.21 passes `d_output` as the fan-in of that layout) and
+/// exposes its transposed view. The installed weight must be contiguous,
+/// remain lazy until read, stay inside that bound, and round-trip a serialized
+/// record through the unchanged save/load mappers with exactly the same values.
+/// Row layouts are already contiguous.
+///
+/// The contiguous layout is a property of random initialization only. A Burn
+/// recorder serializes the `[out, in]` checkpoint orientation in row-major
+/// order, and Burn's column-layout load mapper exposes it as a strided
+/// `[in, out]` view; `load_record` never runs the initializer, so it never runs
+/// the contiguous copy either. The final layout assertion pins that documented
+/// limitation, so a Burn change that alters it is noticed. Products against
+/// the two layouts may differ by F32 reassociation inside Flex's GEMM only.
+#[test]
+fn inference_flex_random_column_projections_are_contiguous() {
+    use burn::{
+        module::Module,
+        nn::LinearLayout,
+        record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
+        tensor::Tolerance,
+    };
+
+    let device = Default::default();
+    let (input, output) = (24, 40);
+    let config = LinearConfig::new(input, output)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col);
+    let projection = super::init_linear::<Flex>(&config, &device);
+    assert!(!projection.weight.is_initialized());
+    let weight = projection.weight.val();
+    assert_eq!(weight.dims(), [input, output]);
+    assert!(flex_primitive(weight.clone()).is_contiguous());
+    let bound = 1.0 / (output as f32).sqrt();
+    let values = weight.to_data().to_vec::<f32>().unwrap();
+    assert!(values.iter().all(|value| value.abs() <= bound));
+    assert!(values.iter().any(|&value| value != values[0]));
+
+    let probe = irregular([2, input]);
+    let expected = linear(probe.clone(), &projection).unwrap().into_data();
+    let record = projection.into_record();
+    assert_eq!(record.weight.val().dims(), [output, input]);
+    let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+    let bytes = recorder.record(record, ()).unwrap();
+    let restored = super::init_linear::<Flex>(&config, &device)
+        .load_record(recorder.load(bytes, &device).unwrap());
+    let restored_weight = restored.weight.val();
+    assert_eq!(restored_weight.to_data(), weight.into_data());
+    linear(probe, &restored)
+        .unwrap()
+        .into_data()
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&expected, Tolerance::rel_abs(1e-5, 1e-6));
+    assert!(
+        !flex_primitive(restored_weight).is_contiguous(),
+        "Burn-record loads keep the load mapper's strided view"
+    );
+
+    let row = super::init_linear::<Flex>(&config.clone().with_layout(LinearLayout::Row), &device);
+    assert!(flex_primitive(row.weight.val()).is_contiguous());
+}
+
+/// Rank-zero activations have no projection axis and are rejected before any reshape.
+///
+/// Burn's creation APIs refuse rank zero, but a reshape to `[]` produces one;
+/// both products must report the missing axis instead of indexing `dims[D - 1]`.
+#[test]
+fn rank_zero_activations_are_contextual_errors() {
+    let device = Default::default();
+    let scalar = Tensor::<Flex, 1>::from_floats([3.0], &device).reshape::<0, [usize; 0]>([]);
+    let projection = Linear {
+        weight: Param::from_tensor(Tensor::<Flex, 2>::from_floats([[2.0]], &device)),
+        bias: None,
+    };
+    assert!(matches!(
+        linear(scalar.clone(), &projection),
+        Err(crate::Error::Shape { tensor, expected, actual })
+            if tensor == "linear.input"
+                && expected == "a tensor with at least one dimension"
+                && actual == "rank zero"
+    ));
+    assert!(matches!(
+        matmul_transposed(scalar, Tensor::<Flex, 2>::from_floats([[2.0]], &device)),
+        Err(crate::Error::Shape { tensor, expected, actual })
+            if tensor == "matmul_transposed.input"
+                && expected == "a tensor with at least one dimension"
+                && actual == "rank zero"
+    ));
+}
+
+/// Autodiff refuses a packed weight before dispatch, even when the weight is frozen.
+///
+/// Burn 0.21 cannot differentiate a quantized matmul, including the input
+/// gradient through a frozen packed matrix, so the boundary must name the
+/// limitation and the explicit-dequantization workaround instead of panicking
+/// in backward.
+#[cfg(feature = "autodiff")]
+#[test]
+fn autodiff_projection_rejects_packed_weights() {
+    /// Differentiable CPU backend that must not see packed parameters.
+    type AdBackend = burn::backend::Autodiff<Flex>;
+    let device = Default::default();
+    let packed = quantize_tensor_data(
+        &small_integers(32, 32, 3),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q8,
+            group_size: QuantizationGroupSize::new(32).expect("supported group"),
+        },
+    )
+    .expect("reference quantization")
+    .into_burn_qfloat_data()
+    .expect("Burn-compatible matrix");
+    // Burn 0.21's autodiff backend cannot upload packed data itself; wrap the
+    // inner backend's packed primitive, which autodiff stores unchanged.
+    let burn::tensor::TensorPrimitive::QFloat(inner) =
+        Tensor::<Flex, 2>::from_data(packed, &device).into_primitive()
+    else {
+        panic!("packed data must upload as a quantized primitive");
+    };
+    let weight =
+        Tensor::<AdBackend, 2>::from_primitive(burn::tensor::TensorPrimitive::QFloat(inner));
+    assert!(matches!(weight.dtype(), DType::QFloat(_)));
+    let projection = Linear {
+        weight: Param::from_tensor(weight).set_require_grad(false),
+        bias: None,
+    };
+    let input = Tensor::<AdBackend, 2>::ones([1, 32], &device).require_grad();
+    match linear(input, &projection) {
+        Err(crate::Error::BackendCapability(message)) => {
+            assert!(message.contains("autodiff does not support packed Q4/Q8 linear weights"));
+            assert!(message.contains("explicitly dequantize"));
+        }
+        other => panic!("expected a backend capability error, got {other:?}"),
+    }
+}
+
+/// A projection with no output channels is a shape error, not an empty product.
+#[test]
+fn zero_width_projections_are_rejected() {
+    let device = Default::default();
+    let projection = Linear {
+        weight: Param::from_tensor(Tensor::<Flex, 2>::from_data(
+            TensorData::new(Vec::<f32>::new(), [2, 0]),
+            &device,
+        )),
+        bias: None,
+    };
+    assert!(matches!(
+        linear(Tensor::<Flex, 2>::ones([1, 2], &device), &projection),
+        Err(crate::Error::Shape { tensor, expected, actual })
+            if tensor == "linear.weight" && expected == "[2, nonzero_output]" && actual == "[2, 0]"
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// In-place region writes
+// ---------------------------------------------------------------------------
+
+/// Address of the host buffer behind a Flex tensor, read through a cheap clone.
+fn buffer_address<const D: usize>(tensor: &Tensor<Flex, D>) -> usize {
+    flex_primitive(tensor.clone()).bytes().as_ptr() as usize
+}
+
+/// Bit patterns of a floating tensor, compared exactly in its own dtype.
+fn bit_pattern<const D: usize>(tensor: Tensor<Flex, D>) -> Vec<u64> {
+    let data = tensor.into_data();
+    match data.dtype {
+        DType::F64 => data
+            .to_vec::<f64>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect(),
+        DType::F32 => data
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect(),
+        DType::F16 => data
+            .to_vec::<burn::tensor::f16>()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect(),
+        DType::BF16 => data
+            .to_vec::<burn::tensor::bf16>()
+            .unwrap()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect(),
+        other => panic!("unexpected dtype {other:?}"),
+    }
+}
+
+/// A one-token cache write reuses the destination buffer and equals `slice_assign`.
+///
+/// This is the decode-cache pattern `[rows, 0..H, t..t+1, 0..d]` into
+/// `[B, H, C, d]`. Burn Flex 0.21's `slice_assign` copies the whole
+/// destination; `assign_region` must keep the buffer address of a uniquely
+/// owned destination while producing bit-identical results in every dtype.
+#[test]
+fn region_writes_reuse_a_unique_destination_and_match_slice_assign() {
+    for dtype in [DType::F32, DType::F64, DType::F16, DType::BF16] {
+        let mut destination = irregular([2, 3, 7, 4]).cast(dtype);
+        let reference = destination.clone();
+        let values = irregular([1, 3, 1, 4]).add_scalar(5.0).cast(dtype);
+        let ranges = [1..2, 0..3, 5..6, 0..4];
+        let expected = reference.slice_assign(ranges.clone(), values.clone());
+        let address = buffer_address(&destination);
+        super::assign_region(&mut destination, ranges, values);
+        assert_eq!(buffer_address(&destination), address, "{dtype:?}");
+        assert_eq!(destination.dtype(), dtype);
+        assert_eq!(bit_pattern(destination), bit_pattern(expected), "{dtype:?}");
+    }
+}
+
+/// Zeroing a region writes `+0.0` in place and equals assigning a zero tensor.
+#[test]
+fn zero_regions_write_positive_zero_in_place() {
+    for dtype in [DType::F32, DType::F16, DType::BF16] {
+        let mut destination = irregular([3, 2, 5, 2]).cast(dtype).neg();
+        let expected = destination.clone().slice_assign(
+            [1..2, 0..2, 0..5, 0..2],
+            Tensor::zeros([1, 2, 5, 2], (&Default::default(), dtype)),
         );
+        let address = buffer_address(&destination);
+        super::zero_region(&mut destination, [1..2, 0..2, 0..5, 0..2]);
+        assert_eq!(buffer_address(&destination), address, "{dtype:?}");
+        assert_eq!(bit_pattern(destination), bit_pattern(expected), "{dtype:?}");
+    }
+}
+
+/// Shared and strided destinations are copied first, so no other tensor observes the write.
+///
+/// A clone shares the Flex buffer (as a live cache read view does), and a
+/// transposed view is not contiguous; both must leave their other users
+/// unchanged and still produce exactly the `slice_assign` result.
+#[test]
+fn region_writes_copy_shared_or_strided_destinations() {
+    let mut shared = irregular([2, 4, 3]);
+    let alias = shared.clone();
+    let before = bit_pattern(alias.clone());
+    let values = irregular([2, 1, 3]).add_scalar(9.0);
+    let expected = alias
+        .clone()
+        .slice_assign([0..2, 2..3, 0..3], values.clone());
+    super::assign_region(&mut shared, [0..2, 2..3, 0..3], values);
+    assert_eq!(
+        bit_pattern(alias.clone()),
+        before,
+        "the alias must not change"
+    );
+    assert_ne!(buffer_address(&shared), buffer_address(&alias));
+    assert_eq!(bit_pattern(shared), bit_pattern(expected));
+
+    let mut strided = irregular([3, 5]).transpose();
+    assert!(!flex_primitive(strided.clone()).is_contiguous());
+    let values = irregular([2, 2]).add_scalar(-3.0);
+    let expected = strided.clone().slice_assign([1..3, 0..2], values.clone());
+    super::assign_region(&mut strided, [1..3, 0..2], values);
+    assert_eq!(bit_pattern(strided), bit_pattern(expected));
+}
+
+/// Operands that do not qualify fall back to `slice_assign` with its exact semantics.
+///
+/// A dtype mismatch, a source of the wrong shape, an empty region, and a
+/// region outside the destination all take Burn's path, so the first two
+/// convert or panic exactly as before and the last keeps Burn's panic.
+#[test]
+fn unqualified_region_writes_fall_back_to_slice_assign() {
+    let destination = irregular([2, 3]);
+    assert!(!super::region_writable_in_place(
+        &destination,
+        &[0..1, 0..3],
+        Some(&irregular([1, 3]).cast(DType::F16)),
+    ));
+    assert!(!super::region_writable_in_place(
+        &destination,
+        &[0..1, 0..3],
+        Some(&irregular([1, 2])),
+    ));
+    assert!(!super::region_writable_in_place(
+        &destination,
+        &[1..1, 0..3],
+        None
+    ));
+    assert!(!super::region_writable_in_place(
+        &destination,
+        &[0..1, 0..4],
+        None
+    ));
+    assert!(super::region_writable_in_place(
+        &destination,
+        &[0..2, 0..3],
+        None
+    ));
+    let outside = std::panic::catch_unwind(|| {
+        let mut destination = irregular([2, 3]);
+        super::assign_region(&mut destination, [0..1, 2..4], irregular([1, 2]));
+    });
+    assert!(
+        outside.is_err(),
+        "Burn rejects a region outside the destination"
+    );
+}
+
+/// Autodiff backends keep Burn's differentiable `slice_assign`.
+#[cfg(feature = "autodiff")]
+#[test]
+fn autodiff_region_writes_stay_differentiable() {
+    use burn::backend::Autodiff;
+    /// Differentiable CPU backend for the fallback path.
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let destination = Tensor::<AdBackend, 2>::ones([2, 3], &device).require_grad();
+    let values = Tensor::<AdBackend, 2>::ones([1, 3], &device).require_grad();
+    assert!(!super::region_writable_in_place(
+        &destination,
+        &[0..1, 0..3],
+        Some(&values)
+    ));
+    let mut written = destination.clone();
+    super::assign_region(&mut written, [0..1, 0..3], values.clone() * 2.0);
+    let gradients = written.sum().backward();
+    assert_eq!(
+        values.grad(&gradients).unwrap().into_data(),
+        TensorData::from([[2.0_f32, 2.0, 2.0]])
+    );
+    assert_eq!(
+        destination.grad(&gradients).unwrap().into_data(),
+        TensorData::from([[0.0_f32, 0.0, 0.0], [1.0, 1.0, 1.0]])
+    );
+}
+
+/// Runs cover the region in row-major order with the longest contiguous spans.
+#[test]
+fn region_runs_merge_fully_covered_inner_axes() {
+    // One token per row and head: `rows · heads` runs of one head row.
+    assert_eq!(
+        super::region_runs(&[2, 3, 8, 4], &[0..2, 0..3, 5..6, 0..4]),
+        (4, vec![20, 52, 84, 116, 148, 180])
+    );
+    // A whole-batch write is one run.
+    assert_eq!(
+        super::region_runs(&[2, 3, 4], &[0..2, 0..3, 0..4]),
+        (24, vec![0])
+    );
+    // A partial last axis splits every row.
+    assert_eq!(super::region_runs(&[2, 5], &[0..2, 1..3]), (2, vec![1, 6]));
+    // A row range with full inner axes is one run starting at that row.
+    assert_eq!(
+        super::region_runs(&[4, 2, 3], &[1..3, 0..2, 0..3]),
+        (12, vec![6])
+    );
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(96))]
+
+    /// Every in-bounds region write equals `slice_assign`, bit for bit.
+    #[test]
+    fn region_writes_match_slice_assign(
+        shape in proptest::collection::vec(1_usize..5, 4),
+        corners in proptest::collection::vec((0_usize..5, 0_usize..5), 4),
+        zero in proptest::bool::ANY,
+    ) {
+        let shape: [usize; 4] = shape.try_into().unwrap();
+        let ranges: [core::ops::Range<usize>; 4] = core::array::from_fn(|axis| {
+            let (a, b) = corners[axis];
+            let (low, high) = (a % shape[axis], b % shape[axis]);
+            low.min(high)..low.max(high) + 1
+        });
+        let lengths = ranges.clone().map(|range| range.len());
+        let mut destination = irregular(shape);
+        let values = if zero {
+            Tensor::zeros(lengths, &Default::default())
+        } else {
+            irregular(lengths).add_scalar(7.0)
+        };
+        let expected = destination.clone().slice_assign(ranges.clone(), values.clone());
+        let address = buffer_address(&destination);
+        if zero {
+            super::zero_region(&mut destination, ranges);
+        } else {
+            super::assign_region(&mut destination, ranges, values);
+        }
+        proptest::prop_assert_eq!(buffer_address(&destination), address);
+        proptest::prop_assert_eq!(bit_pattern(destination), bit_pattern(expected));
+    }
+}
+
+/// Release-mode timing: one-token cache writes no longer scale with capacity.
+///
+/// Writes one `[1, 8, 1, 128]` F32 token into `[1, 8, C, 128]` planes through
+/// Burn's `slice_assign` (which copies the whole plane on Flex 0.21) and
+/// through `assign_region`, interleaving the two and reporting medians. A
+/// prefill-sized block from a shared, heads-swapped view checks that large
+/// strided writes, dominated by gathering the source, cost the same on both
+/// paths. Run with `cargo test --release --lib
+/// operations::tests::region_write_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn region_write_timing() {
+    use std::time::Instant;
+    let device = Default::default();
+    let token = Tensor::<Flex, 4>::ones([1, 8, 1, 128], &device);
+    for capacity in [256, 2048, 16384, 65536] {
+        let mut burn_plane = Tensor::<Flex, 4>::zeros([1, 8, capacity, 128], &device);
+        let mut crate_plane = Tensor::<Flex, 4>::zeros([1, 8, capacity, 128], &device);
+        let (mut burn_samples, mut crate_samples) = (Vec::new(), Vec::new());
+        for step in 0..41 {
+            let slot = step % capacity;
+            let ranges = [0..1, 0..8, slot..slot + 1, 0..128];
+            let started = Instant::now();
+            burn_plane.inplace(|plane| plane.slice_assign(ranges.clone(), token.clone()));
+            burn_samples.push(started.elapsed().as_secs_f64());
+            let started = Instant::now();
+            super::assign_region(&mut crate_plane, ranges, token.clone());
+            crate_samples.push(started.elapsed().as_secs_f64());
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2] * 1e6
+        };
+        let (burn, ours) = (median(&mut burn_samples), median(&mut crate_samples));
+        eprintln!(
+            "one-token write into [1, 8, {capacity}, 128] F32: slice_assign {burn:.1} us, assign_region {ours:.2} us ({:.0}x)",
+            burn / ours
+        );
+    }
+    // A prefill block: 64 tokens of 8 rows from a shared, heads-swapped
+    // projection view, as attention layers write right after prefill.
+    let projected = irregular([8, 64, 2, 64]);
+    let (mut burn_samples, mut crate_samples) = (Vec::new(), Vec::new());
+    for _ in 0..41 {
+        let mut burn_plane = Tensor::<Flex, 4>::zeros([8, 2, 80, 64], &device);
+        let mut crate_plane = Tensor::<Flex, 4>::zeros([8, 2, 80, 64], &device);
+        let ranges = [0..8, 0..2, 0..64, 0..64];
+        let block = projected.clone().swap_dims(1, 2);
+        let started = Instant::now();
+        burn_plane.inplace(|plane| plane.slice_assign(ranges.clone(), block.clone()));
+        burn_samples.push(started.elapsed().as_secs_f64());
+        let started = Instant::now();
+        super::assign_region(&mut crate_plane, ranges, block);
+        crate_samples.push(started.elapsed().as_secs_f64());
+    }
+    burn_samples.sort_by(f64::total_cmp);
+    crate_samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "prefill block [8, 2, 64, 64] (strided, shared) into [8, 2, 80, 64] F32: slice_assign {:.1} us, assign_region {:.1} us",
+        burn_samples[20] * 1e6,
+        crate_samples[20] * 1e6
+    );
+}
+
+// ---------------------------------------------------------------------------
+// One-column depthwise convolution
+// ---------------------------------------------------------------------------
+
+/// Burn's depthwise `conv1d` with unit stride and dilation and no padding (the reference).
+fn reference_depthwise(
+    input: Tensor<Flex, 3>,
+    weight: Tensor<Flex, 3>,
+    bias: Option<Tensor<Flex, 1>>,
+) -> Tensor<Flex, 3> {
+    let groups = weight.dims()[0];
+    burn::tensor::module::conv1d(
+        input,
+        weight,
+        bias,
+        burn::tensor::ops::ConvOptions::new([1], [0], [1], groups),
+    )
+}
+
+/// The decode column reproduces Flex's depthwise kernel bit for bit, with and without bias.
+///
+/// Covers kernels 1 through 4, a batch of one and above one, channel counts
+/// that are and are not SIMD multiples, and inputs whose products cancel to
+/// signed zeros, so the sequential accumulation order is checked exactly.
+#[test]
+fn single_column_depthwise_convolution_matches_conv1d_bitwise() {
+    for kernel in 1..=4 {
+        for (batch, channels) in [(1, 5), (3, 37), (8, 16)] {
+            let input = irregular([batch, channels, kernel]).mul_scalar(3.0);
+            let weight = irregular([channels, 1, kernel]).add_scalar(0.25);
+            let bias = irregular([channels]).mul_scalar(-0.5);
+            for bias in [None, Some(bias)] {
+                let expected = reference_depthwise(input.clone(), weight.clone(), bias.clone());
+                let actual = super::depthwise_conv1d(input.clone(), weight.clone(), bias, channels);
+                assert_eq!(actual.dims(), [batch, channels, 1]);
+                assert_eq!(
+                    bit_pattern(actual),
+                    bit_pattern(expected),
+                    "{batch}x{channels}x{kernel}"
+                );
+            }
+        }
+    }
+    let zeros = Tensor::<Flex, 3>::zeros([2, 3, 4], &Default::default()).neg();
+    let weight = irregular([3, 1, 4]);
+    assert_eq!(
+        bit_pattern(super::depthwise_conv1d(
+            zeros.clone(),
+            weight.clone(),
+            None,
+            3
+        )),
+        bit_pattern(reference_depthwise(zeros, weight, None))
+    );
+}
+
+/// Every other convolution is exactly Burn's `conv1d`.
+///
+/// Prefill widths, grouped (non-depthwise) weights, and F16/BF16 operands
+/// take Burn's kernel, so their results are identical by construction.
+#[test]
+fn other_depthwise_convolutions_are_burn_conv1d() {
+    let input = irregular([2, 4, 6]);
+    let weight = irregular([4, 1, 3]);
+    assert_eq!(
+        bit_pattern(super::depthwise_conv1d(
+            input.clone(),
+            weight.clone(),
+            None,
+            4
+        )),
+        bit_pattern(reference_depthwise(input.clone(), weight.clone(), None))
+    );
+    for dtype in [DType::F16, DType::BF16] {
+        let input = irregular([2, 4, 3]).cast(dtype);
+        let weight = irregular([4, 1, 3]).cast(dtype);
+        assert_eq!(
+            bit_pattern(super::depthwise_conv1d(
+                input.clone(),
+                weight.clone(),
+                None,
+                4
+            )),
+            bit_pattern(reference_depthwise(input, weight, None)),
+            "{dtype:?}"
+        );
+    }
+    let grouped = irregular([4, 2, 3]);
+    let expected = burn::tensor::module::conv1d(
+        irregular([1, 4, 3]),
+        grouped.clone(),
+        None,
+        burn::tensor::ops::ConvOptions::new([1], [0], [1], 2),
+    );
+    assert_eq!(
+        bit_pattern(super::depthwise_conv1d(
+            irregular([1, 4, 3]),
+            grouped,
+            None,
+            2
+        )),
+        bit_pattern(expected)
+    );
+}
+
+/// Release-mode timing of the decode column against Burn Flex's depthwise `conv1d`.
+///
+/// Shapes are a Lightning Mamba-2 layer (10,240 channels, with bias) and a
+/// Qwen3.5-0.8B DeltaNet layer (6,144 channels, no bias), kernel 4, at batch
+/// 1 and 8; medians of 41 interleaved samples. Run with `cargo test --release
+/// --lib operations::tests::depthwise_column_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn depthwise_column_timing() {
+    use std::time::Instant;
+    let median = |samples: &mut Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2] * 1e6
+    };
+    for (channels, biased) in [(10_240, true), (6_144, false)] {
+        for batch in [1, 8] {
+            let input = irregular([batch, channels, 4]);
+            let weight = irregular([channels, 1, 4]);
+            let bias = biased.then(|| irregular([channels]));
+            let (mut burn, mut column) = (Vec::new(), Vec::new());
+            for _ in 0..41 {
+                let started = Instant::now();
+                let _ =
+                    reference_depthwise(input.clone(), weight.clone(), bias.clone()).into_data();
+                burn.push(started.elapsed().as_secs_f64());
+                let started = Instant::now();
+                let _ =
+                    super::depthwise_conv1d(input.clone(), weight.clone(), bias.clone(), channels)
+                        .into_data();
+                column.push(started.elapsed().as_secs_f64());
+            }
+            let (before, after) = (median(&mut burn), median(&mut column));
+            eprintln!(
+                "depthwise decode column [{batch}, {channels}, 4] bias {biased}: conv1d {before:.0} us, column {after:.0} us ({:.1}x)",
+                before / after
+            );
+        }
     }
 }

@@ -46,9 +46,15 @@ use transformers::{
     },
 };
 
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use transformers::checkpoint::quantization::BURNPACK_QUANTIZATION_FORMAT_VERSION_V2;
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use transformers::models::AutoCausalDecodeState;
 
 #[cfg(feature = "metal")]
@@ -56,7 +62,10 @@ use burn::{
     backend::Metal,
     tensor::{Bool, DType, Int, Tensor, TensorData},
 };
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use burn::{module::Param, nn::Linear};
 #[cfg(feature = "metal")]
 use transformers::{
@@ -64,7 +73,10 @@ use transformers::{
     LogitsSelection, TokenMask, architecture::CausalLmInput, cache::CacheConfig,
     checkpoint::execute_local_load_plan, models::qwen3_5::Qwen3_5ForCausalLm,
 };
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use transformers::{
     cache::KvCacheStorage,
     delta_net::{DeltaNetMode, GatedDeltaNetState},
@@ -1700,8 +1712,10 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
     );
     assert_eq!(raw_digest, reference.last_logits.sha256);
     let values = raw
-        .chunks_exact(size_of::<f32>())
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 logit")))
+        .as_chunks::<{ size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(values.len(), reference.last_logits.elements);
     assert!(values.iter().all(|value| value.is_finite()));
@@ -2422,7 +2436,10 @@ fn quantize_pinned_qwen38_weights_to_burnpack(
     );
     drop(artifact);
 
-    #[cfg(all(feature = "metal", not(feature = "rocm")))]
+    #[cfg(all(
+        feature = "metal",
+        not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+    ))]
     runs_pinned_qwen38_quantized_text_and_mtp_on_metal(&root, &output, scheme, 497);
 
     eprintln!(
@@ -2436,7 +2453,10 @@ fn quantize_pinned_qwen38_weights_to_burnpack(
 }
 
 /// Loads one retained Qwen3.8 sidecar and exercises packed base and F16 MTP paths.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn runs_pinned_qwen38_quantized_text_and_mtp_on_metal(
     root: &std::path::Path,
     burnpack: &std::path::Path,
@@ -2895,7 +2915,10 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
                 .all(|tensor| tensor.source_dtype == SourceFloatDType::F16)
         );
 
-        #[cfg(all(feature = "metal", not(feature = "rocm")))]
+        #[cfg(all(
+            feature = "metal",
+            not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+        ))]
         {
             let device = Default::default();
             let loaded = AutoCausalLm::<Metal>::load_local(
@@ -3050,7 +3073,10 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
 }
 
 /// Replays the first real Qwen DeltaNet layer one packed projection at a time.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3.5 weights, a retained Burnpack, and Metal"]
 fn diagnoses_pinned_qwen35_packed_delta_layer_on_metal() {
@@ -3189,7 +3215,10 @@ fn diagnoses_pinned_qwen35_packed_delta_layer_on_metal() {
 }
 
 /// Loads a retained Q4 sidecar and verifies complete stateless/cached Metal inference.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3.5 weights, a retained Q4 Burnpack, and Metal"]
 fn loads_pinned_qwen35_q4_burnpack_and_runs_metal() {
@@ -3291,21 +3320,33 @@ fn loads_pinned_qwen35_q4_burnpack_and_runs_metal() {
 }
 
 /// Exact reviewed identity of the revision-bound Qwen3.5-0.8B Q4/v2 sidecar.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const TRUSTED_QWEN35_Q4_V2_BYTES: u64 = 280_044_715;
 
 /// SHA-256 over the complete reviewed Qwen3.5-0.8B Q4/v2 Burnpack file.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const TRUSTED_QWEN35_Q4_V2_SHA256: &str =
     "cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5";
 
 /// Canonical architecture plan bound into the reviewed Qwen Q4/v2 manifest.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const TRUSTED_QWEN35_Q4_V2_LOAD_PLAN_SHA256: &str =
     "5be61f117255c794a5e6386196c667a99002d9bbabf7a69fef3a8fbdcc3bdabf";
 
 /// Authenticates and loads the exact source-bound Q4/v2 artifact for 32K tests.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn load_reviewed_qwen35_q4_v2() -> transformers::LoadedModel<AutoCausalLm<Metal>> {
     /// Original SafeTensors shard bound into the reviewed Q4 sidecar.
     const SOURCE_SHARD: &str = "model.safetensors-00001-of-00001.safetensors";
@@ -3396,7 +3437,10 @@ fn load_reviewed_qwen35_q4_v2() -> transformers::LoadedModel<AutoCausalLm<Metal>
 /// 32,768-token cache has the model-derived physical geometry and split dtypes,
 /// and that one stateless token executes at absolute position 32,767. Quality
 /// over a populated long history remains a separate release acceptance run.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires the reviewed Qwen3.5-0.8B Q4/v2 Burnpack and about 1 GiB of Metal memory; this is a cache/position envelope, not 32K prefill"]
 fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
@@ -3502,7 +3546,10 @@ fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
 ///
 /// Times are synchronized, one-shot stress diagnostics, not warmed benchmarks.
 /// Passing does not establish agreement with an official 32K oracle or Q4 NLL.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen checkpoint/reference/Q4-v2 artifacts and exclusive Metal; executes a populated 32,768-token history"]
 fn qwen35_q4_v2_populates_and_decodes_the_32k_history_on_metal() {
@@ -3683,7 +3730,10 @@ fn qwen35_q4_v2_populates_and_decodes_the_32k_history_on_metal() {
 /// Returned host snapshots compare bit-exactly before/after rejected decode.
 /// KV sampling avoids duplicating the entire 384 MiB cache on the host; the
 /// accumulated logical lengths separately prove all 128 chunks were committed.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn qwen35_stress_cache_snapshots(state: &AutoCausalDecodeState<Metal>) -> Vec<Vec<f32>> {
     let AutoCausalDecodeState::Qwen3_5(state) = state else {
         panic!("Qwen hybrid state required");
@@ -3731,7 +3781,10 @@ fn qwen35_stress_cache_snapshots(state: &AutoCausalDecodeState<Metal>) -> Vec<Ve
 }
 
 /// Synchronizes one Metal tensor and rejects the first non-finite component result.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_metal_tensor_finite<const D: usize>(label: &str, tensor: &Tensor<Metal, D>) {
     let values = metal_tensor_values(label, tensor);
     assert!(
@@ -4041,11 +4094,11 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         "teacher-forced official-comparison logits",
         &generation_logits,
     );
-    let teacher_rows = teacher_logits.chunks_exact(248_320).collect::<Vec<_>>();
+    let (teacher_rows, teacher_remainder) = teacher_logits.as_chunks::<248_320>();
     assert_eq!(teacher_rows.len(), expected_greedy.len());
-    assert!(teacher_logits.chunks_exact(248_320).remainder().is_empty());
+    assert!(teacher_remainder.is_empty());
     let mut minimum_teacher_reference_cosine = f64::INFINITY;
-    for (step, actual) in teacher_rows.into_iter().enumerate() {
+    for (step, actual) in teacher_rows.iter().enumerate() {
         let official_cosine = cosine_similarity(actual, official_reference.teacher_row(step));
         minimum_teacher_reference_cosine = minimum_teacher_reference_cosine.min(official_cosine);
         assert!(

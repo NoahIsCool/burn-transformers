@@ -4,9 +4,9 @@ use super::*;
 use crate::cache::{CacheConfig, DecodeStateError};
 
 /// Builds a two-row transaction fixture from explicit baseline lengths.
-fn state(lengths: [usize; 2]) -> DecodeState {
+fn state(lengths: [usize; 2]) -> SequenceLengths {
     let config = CacheConfig::new(2, 32).expect("valid config");
-    DecodeState::from_lengths(config, lengths.to_vec()).expect("valid state")
+    SequenceLengths::from_lengths(config, lengths.to_vec()).expect("valid state")
 }
 
 /// Restores every baseline length after speculative appends are rolled back.
@@ -75,7 +75,7 @@ fn invalid_commit_is_atomic_and_can_be_rolled_back() {
     let mark = state.mark().expect("starts transaction");
     let rollback_mark = mark.clone();
     state.advance_all(&[2, 4]).expect("speculative append");
-    let speculative = state.lengths().to_vec();
+    let speculative = state.working_lengths().to_vec();
 
     assert_eq!(
         state.commit_prefix_per_sequence(mark, &[1, 5]),
@@ -87,7 +87,8 @@ fn invalid_commit_is_atomic_and_can_be_rolled_back() {
             }
         ))
     );
-    assert_eq!(state.lengths(), speculative);
+    assert_eq!(state.working_lengths(), speculative);
+    assert_eq!(state.lengths(), &[3, 7]);
     assert!(state.has_active_transaction());
     state
         .rollback(rollback_mark)
@@ -122,6 +123,39 @@ fn rejects_nested_stale_and_foreign_marks() {
             TransactionError::NoActiveTransaction
         ))
     );
+}
+
+/// A mark must carry both the active token and the exact baseline lengths.
+///
+/// The token alone identifies the transaction; the baseline guards against a
+/// mark whose recorded lengths no longer describe the committed state. A
+/// mark with the right token but a different baseline is rejected as stale
+/// for both commit and rollback, and the genuine mark still recovers.
+#[test]
+fn marks_with_a_foreign_baseline_are_stale() {
+    let mut lengths = state([1, 2]);
+    let mark = lengths.mark().expect("starts transaction");
+    let tampered = CacheMark {
+        token: mark.token.clone(),
+        baseline_lengths: vec![1, 3],
+    };
+    assert_eq!(
+        lengths.commit_prefix_per_sequence(tampered.clone(), &[0, 0]),
+        Err(DecodeStateError::Transaction(
+            TransactionError::StaleOrForeignMark
+        ))
+    );
+    assert_eq!(
+        lengths.rollback(tampered),
+        Err(DecodeStateError::Transaction(
+            TransactionError::StaleOrForeignMark
+        ))
+    );
+    assert!(lengths.has_active_transaction());
+    lengths
+        .rollback(mark)
+        .expect("the genuine mark still recovers");
+    assert_eq!(lengths.lengths(), &[1, 2]);
 }
 
 /// Forbids reset, reorder, and truncate while a transaction is active.

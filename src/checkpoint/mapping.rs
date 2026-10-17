@@ -12,14 +12,21 @@
 //! cannot allocate or mutate model parameters. Tied aliases resolve to one owner,
 //! while dtype conversion follows each architecture's precision contract.
 
+mod aliases;
+mod ledger;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+
+use aliases::{AliasLink, AliasWalk, walk_alias_chain};
+use ledger::{TargetLedger, TargetState, open_ledger};
 
 use super::{
     AliasRecord, ArtifactSource, CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest,
     DTypeConversion, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     LoadReport, MemoryEstimate, Result, TensorDType, TensorInventory, TransformRecord,
+    layout::{ConcatError, SectionError, extend_concatenation, section_starts},
 };
 
 // Declarative architecture mapping: names, axes, dtypes, and alias topology.
@@ -154,6 +161,24 @@ pub enum TensorOperation {
         /// New model parameter alias.
         target: String,
     },
+    /// Decode an MXFP4 blocks/scales pair into one floating-point target.
+    ///
+    /// `blocks` is `u8 [experts, rows, groups, 16]` (two FP4 E2M1 codes per
+    /// byte) and `scales` is `[experts, rows, groups]` E8M0 exponents (`U8` or
+    /// `F8_E8M0`). The target is `[experts, 32 · groups, rows]`, exactly the
+    /// tensor Transformers' `convert_moe_packed_tensors` returns; see
+    /// [`crate::checkpoint`]'s `mxfp4` module for the decoding rules. The
+    /// decoded values are nominally BF16 (Transformers' dequantized dtype),
+    /// so the load plan's [`DTypePolicy`] selects the stored dtype, and each
+    /// value is rounded once from its exact decoded value.
+    DequantizeMxfp4 {
+        /// Packed `*_blocks` checkpoint tensor name.
+        blocks: String,
+        /// Shared `*_scales` checkpoint tensor name.
+        scales: String,
+        /// Model parameter name.
+        target: String,
+    },
 }
 
 /// Architecture-owned sequence of explicit mapping operations.
@@ -239,6 +264,23 @@ impl MappingPlan {
         self
     }
 
+    /// Adds an MXFP4 dequantization of a blocks/scales pair into one target.
+    ///
+    /// See [`TensorOperation::DequantizeMxfp4`] for the shapes and decoding.
+    pub fn dequantize_mxfp4(
+        &mut self,
+        blocks: impl Into<String>,
+        scales: impl Into<String>,
+        target: impl Into<String>,
+    ) -> &mut Self {
+        self.operations.push(TensorOperation::DequantizeMxfp4 {
+            blocks: blocks.into(),
+            scales: scales.into(),
+            target: target.into(),
+        });
+        self
+    }
+
     /// Adds a tied target alias.
     pub fn alias(
         &mut self,
@@ -318,6 +360,8 @@ pub enum PlannedTransform {
         /// Ultimate non-aliased target that owns storage.
         source_target: String,
     },
+    /// MXFP4 decoding of `sources = [blocks, scales]` into the target dtype.
+    DequantizeMxfp4,
 }
 
 /// Fully validated work item for pass-two parameter loading.
@@ -372,6 +416,65 @@ impl LoadPlan {
     pub fn parameter_count(&self) -> usize {
         self.tensors.len() + self.aliases.len()
     }
+
+    /// Returns the tight host staging requirement of executing this plan.
+    ///
+    /// This is the maximum over primary operations of
+    /// [`PlannedTensor::staging_bytes`] and over equivalence work items of the
+    /// alias-plus-owner payload pair: the largest amount the generic executor
+    /// holds at once. It never exceeds the conservative
+    /// [`MemoryEstimate::peak_host_staging_bytes`] of a plan built by
+    /// [`build_load_plan`], which additionally budgets for whole shard files.
+    pub fn required_host_staging_bytes(&self) -> Result<u64> {
+        let mut required = self.memory.largest_equivalence_pair_bytes;
+        for tensor in &self.tensors {
+            required = required.max(tensor.staging_bytes()?);
+        }
+        Ok(required)
+    }
+}
+
+impl PlannedTensor {
+    /// Returns the host bytes the executor stages while materializing this target.
+    ///
+    /// The executor holds one source payload at a time plus the output buffer:
+    /// `largest source + output`. MXFP4 decoding holds both of its sources and
+    /// the output: `blocks + scales + output`. An identity transfer that converts in place
+    /// ([`TensorDType::converts_in_place_to`]) reuses its source buffer, so it
+    /// needs only the source. The runtime enforces this same figure against
+    /// [`MemoryEstimate::peak_host_staging_bytes`] before any source read.
+    pub fn staging_bytes(&self) -> Result<u64> {
+        let output = self.dtype.tensor_storage_bytes(&self.shape)?;
+        if matches!(self.transform, PlannedTransform::DequantizeMxfp4) {
+            // Blocks, scales, and the decoded output are resident together.
+            let mut total = output;
+            for source in &self.sources {
+                total = total
+                    .checked_add(source.dtype.tensor_storage_bytes(&source.shape)?)
+                    .ok_or(CheckpointError::ArithmeticOverflow {
+                        context: "computing MXFP4 decoding staging bound",
+                    })?;
+            }
+            return Ok(total);
+        }
+        let mut largest_source = 0_u64;
+        for source in &self.sources {
+            largest_source = largest_source.max(source.dtype.tensor_storage_bytes(&source.shape)?);
+        }
+        let in_place = matches!(self.transform, PlannedTransform::Identity)
+            && self
+                .sources
+                .first()
+                .is_some_and(|source| source.dtype.converts_in_place_to(self.dtype));
+        if in_place {
+            return Ok(largest_source);
+        }
+        largest_source
+            .checked_add(output)
+            .ok_or(CheckpointError::ArithmeticOverflow {
+                context: "computing runtime staging bound",
+            })
+    }
 }
 
 /// Validates architecture expectations against a checkpoint and compiles pass two.
@@ -409,234 +512,34 @@ fn build_load_plan_with_policy(
     validate_matchers(&options.allow_missing)?;
     validate_matchers(&options.allow_unexpected)?;
     validate_manifest_index_provenance(manifest, options, policy)?;
-    if matches!(options.dtype_policy, DTypePolicy::Cast(dtype) if !dtype.is_float()) {
+    if matches!(options.dtype_policy, DTypePolicy::Cast(dtype) if !dtype.is_castable_float()) {
         return Err(CheckpointError::InvalidMapping {
-            message: "DTypePolicy::Cast requires a real floating-point target dtype".into(),
+            message: "DTypePolicy::Cast requires a castable floating-point target dtype \
+                      (F16, BF16, F32, or F64)"
+                .into(),
         });
     }
 
-    let expected = expected_inventory(expected)?;
-    let mut consumed = BTreeSet::new();
-    let mut produced = BTreeSet::new();
-    let mut primary = Vec::new();
-    let mut alias_specs = BTreeMap::new();
-
+    let mut builder = PlanBuilder {
+        manifest,
+        expected: expected_inventory(expected)?,
+        policy: options.dtype_policy,
+        consumed: BTreeSet::new(),
+        ledger: open_ledger(expected.len()),
+        primary: Vec::new(),
+        alias_specs: BTreeMap::new(),
+    };
     for operation in mappings.operations() {
-        match operation {
-            TensorOperation::Map {
-                source,
-                target,
-                transform,
-            } => {
-                consume(&mut consumed, source)?;
-                let source_tensor = source_tensor(manifest, source)?;
-                let shape = match transform {
-                    TensorTransform::Identity => source_tensor.shape.clone(),
-                    TensorTransform::Transpose2d => {
-                        if source_tensor.shape.len() != 2 {
-                            return Err(CheckpointError::InvalidMapping {
-                                message: format!(
-                                    "transpose source `{source}` has rank {}, expected rank 2",
-                                    source_tensor.shape.len()
-                                ),
-                            });
-                        }
-                        vec![source_tensor.shape[1], source_tensor.shape[0]]
-                    }
-                };
-                let planned_transform = match transform {
-                    TensorTransform::Identity => PlannedTransform::Identity,
-                    TensorTransform::Transpose2d => PlannedTransform::Transpose2d,
-                };
-                insert_primary(
-                    &expected,
-                    &mut produced,
-                    &mut primary,
-                    target,
-                    vec![source_tensor.into()],
-                    planned_transform,
-                    shape,
-                    source_tensor.dtype,
-                    options.dtype_policy,
-                )?;
-            }
-            TensorOperation::Split {
-                source,
-                axis,
-                targets,
-            } => {
-                consume(&mut consumed, source)?;
-                let source_tensor = source_tensor(manifest, source)?;
-                let axis_len = *source_tensor.shape.get(*axis).ok_or_else(|| {
-                    CheckpointError::InvalidMapping {
-                        message: format!(
-                            "split axis {axis} is out of bounds for `{source}` rank {}",
-                            source_tensor.shape.len()
-                        ),
-                    }
-                })?;
-                if targets.is_empty() {
-                    return Err(CheckpointError::InvalidMapping {
-                        message: format!("split of `{source}` has no targets"),
-                    });
-                }
-                let total = targets.iter().try_fold(0_u64, |sum, (_, length)| {
-                    sum.checked_add(*length)
-                        .ok_or(CheckpointError::ArithmeticOverflow {
-                            context: "summing split section lengths",
-                        })
-                })?;
-                if total != axis_len {
-                    return Err(CheckpointError::InvalidMapping {
-                        message: format!(
-                            "split sections for `{source}` sum to {total}, axis {axis} has length {axis_len}"
-                        ),
-                    });
-                }
-                let mut start = 0_u64;
-                for (target, length) in targets {
-                    let mut shape = source_tensor.shape.clone();
-                    shape[*axis] = *length;
-                    insert_primary(
-                        &expected,
-                        &mut produced,
-                        &mut primary,
-                        target,
-                        vec![source_tensor.into()],
-                        PlannedTransform::Slice {
-                            axis: *axis,
-                            start,
-                            length: *length,
-                        },
-                        shape,
-                        source_tensor.dtype,
-                        options.dtype_policy,
-                    )?;
-                    start += length;
-                }
-            }
-            TensorOperation::Concatenate {
-                sources,
-                target,
-                axis,
-            } => {
-                if sources.is_empty() {
-                    return Err(CheckpointError::InvalidMapping {
-                        message: format!("concatenation for `{target}` has no sources"),
-                    });
-                }
-                let source_tensors = sources
-                    .iter()
-                    .map(|source| {
-                        consume(&mut consumed, source)?;
-                        source_tensor(manifest, source)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let first = source_tensors[0];
-                if *axis >= first.shape.len() {
-                    return Err(CheckpointError::InvalidMapping {
-                        message: format!(
-                            "concatenation axis {axis} is out of bounds for `{}` rank {}",
-                            first.name,
-                            first.shape.len()
-                        ),
-                    });
-                }
-                let mut shape = first.shape.clone();
-                shape[*axis] = 0;
-                for tensor in &source_tensors {
-                    if tensor.dtype != first.dtype {
-                        return Err(CheckpointError::InvalidMapping {
-                            message: format!(
-                                "concatenation for `{target}` mixes {} and {}",
-                                first.dtype, tensor.dtype
-                            ),
-                        });
-                    }
-                    if tensor.shape.len() != shape.len()
-                        || tensor
-                            .shape
-                            .iter()
-                            .enumerate()
-                            .any(|(index, value)| index != *axis && *value != shape[index])
-                    {
-                        return Err(CheckpointError::InvalidMapping {
-                            message: format!(
-                                "concatenation source `{}` has incompatible shape {:?}",
-                                tensor.name, tensor.shape
-                            ),
-                        });
-                    }
-                    shape[*axis] = shape[*axis].checked_add(tensor.shape[*axis]).ok_or(
-                        CheckpointError::ArithmeticOverflow {
-                            context: "summing concatenated tensor dimensions",
-                        },
-                    )?;
-                }
-                insert_primary(
-                    &expected,
-                    &mut produced,
-                    &mut primary,
-                    target,
-                    source_tensors
-                        .into_iter()
-                        .map(PlannedSource::from)
-                        .collect(),
-                    PlannedTransform::Concatenate { axis: *axis },
-                    shape,
-                    first.dtype,
-                    options.dtype_policy,
-                )?;
-            }
-            TensorOperation::Alias {
-                source_target,
-                target,
-            } => {
-                if produced.contains(target) || alias_specs.contains_key(target) {
-                    return Err(CheckpointError::MappingTargetCollision {
-                        tensor: target.clone(),
-                    });
-                }
-                if !expected.contains_key(target) {
-                    return Err(CheckpointError::UnknownMappingTarget {
-                        tensor: target.clone(),
-                    });
-                }
-                alias_specs.insert(target.clone(), source_target.clone());
-            }
-        }
+        builder.apply(operation)?;
     }
-
-    let primary_by_target: BTreeMap<_, _> = primary
-        .iter()
-        .map(|tensor: &PlannedTensor| (tensor.target.clone(), tensor))
-        .collect();
-    let mut aliases = Vec::new();
-    for target in alias_specs.keys() {
-        let root_target = resolve_alias(target, &alias_specs, &primary_by_target)?;
-        let root = primary_by_target[root_target];
-        let expectation = expected[target];
-        ensure_shape(target, &expectation.shape, &root.shape)?;
-        if let Some(dtype) = expectation.dtype
-            && dtype != root.dtype
-        {
-            return Err(CheckpointError::DTypeMismatch {
-                tensor: target.clone(),
-                observed: root.dtype,
-                expected: dtype,
-            });
-        }
-        produced.insert(target.clone());
-        aliases.push(PlannedTensor {
-            target: target.clone(),
-            sources: Vec::new(),
-            transform: PlannedTransform::Alias {
-                source_target: root_target.clone(),
-            },
-            shape: root.shape.clone(),
-            dtype: root.dtype,
-        });
-    }
+    let mut aliases = builder.resolve_aliases()?;
+    let PlanBuilder {
+        expected,
+        mut consumed,
+        ledger,
+        mut primary,
+        ..
+    } = builder;
 
     let equivalences = plan_tensor_equivalences(manifest, options, &mut consumed)?;
     let mut report = create_report(&primary, &aliases);
@@ -647,7 +550,12 @@ fn build_load_plan_with_policy(
             CheckpointEquivalenceRecord::new(&equivalence.alias.name, &equivalence.owner.name)
         })
         .collect();
-    for key in expected.keys().filter(|key| !produced.contains(*key)) {
+    // Verified ledger: produced targets are exactly the primaries and resolved aliases.
+    for key in expected
+        .iter()
+        .filter(|(_, (index, _))| !ledger.is_produced(*index))
+        .map(|(key, _)| key)
+    {
         if matches_any(&options.allow_missing, key) {
             report.allowlisted_missing.push(key.clone());
         } else {
@@ -690,6 +598,391 @@ fn build_load_plan_with_policy(
         report,
         memory,
     })
+}
+
+/// Temporary state while compiling mapping operations into planned tensors.
+///
+/// Every operation claims its targets through [`Self::claim_primary`] or
+/// [`Self::declare_alias`], which both claim the target in one verified
+/// [`TargetLedger`], so a target collision is rejected regardless of
+/// declaration order.
+/// Each source is consumed through [`consume`], so no checkpoint tensor is used
+/// twice. Nothing here touches model parameters: a rejected plan is discarded.
+struct PlanBuilder<'a> {
+    /// Discovered checkpoint inventory that sources are resolved against.
+    manifest: &'a CheckpointManifest,
+    /// Expected model parameters keyed by target name, with their ledger index.
+    expected: BTreeMap<String, (usize, &'a ExpectedTensor)>,
+    /// Dtype conversion policy applied to every primary target.
+    policy: DTypePolicy,
+    /// Checkpoint tensors already consumed by an operation.
+    consumed: BTreeSet<String>,
+    /// Claim state of every expected target, indexed by expectation position.
+    ledger: TargetLedger,
+    /// Planned storage-owning targets in declaration order.
+    primary: Vec<PlannedTensor>,
+    /// Declared alias targets mapped to their (possibly aliased) sources.
+    alias_specs: BTreeMap<String, String>,
+}
+
+impl PlanBuilder<'_> {
+    /// Plans one declared mapping operation.
+    fn apply(&mut self, operation: &TensorOperation) -> Result<()> {
+        match operation {
+            TensorOperation::Map {
+                source,
+                target,
+                transform,
+            } => self.plan_map(source, target, *transform),
+            TensorOperation::Split {
+                source,
+                axis,
+                targets,
+            } => self.plan_split(source, *axis, targets),
+            TensorOperation::Concatenate {
+                sources,
+                target,
+                axis,
+            } => self.plan_concatenate(sources, target, *axis),
+            TensorOperation::Alias {
+                source_target,
+                target,
+            } => self.declare_alias(source_target, target),
+            TensorOperation::DequantizeMxfp4 {
+                blocks,
+                scales,
+                target,
+            } => self.plan_mxfp4(blocks, scales, target),
+        }
+    }
+
+    /// Plans an identity copy, rename, or rank-two transpose of one source.
+    fn plan_map(&mut self, source: &str, target: &str, transform: TensorTransform) -> Result<()> {
+        consume(&mut self.consumed, source)?;
+        let source_tensor = source_tensor(self.manifest, source)?;
+        let (shape, planned_transform) = match transform {
+            TensorTransform::Identity => (source_tensor.shape.clone(), PlannedTransform::Identity),
+            TensorTransform::Transpose2d => {
+                let [rows, columns] = source_tensor.shape.as_slice() else {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!(
+                            "transpose source `{source}` has rank {}, expected rank 2",
+                            source_tensor.shape.len()
+                        ),
+                    });
+                };
+                (vec![*columns, *rows], PlannedTransform::Transpose2d)
+            }
+        };
+        self.claim_primary(
+            target,
+            vec![source_tensor.into()],
+            planned_transform,
+            shape,
+            source_tensor.dtype,
+        )
+    }
+
+    /// Plans consecutive sections of one fused source along `axis`.
+    ///
+    /// Section starts come from the verified [`section_starts`], which requires
+    /// the lengths to sum exactly to the axis length.
+    fn plan_split(&mut self, source: &str, axis: usize, targets: &[(String, u64)]) -> Result<()> {
+        consume(&mut self.consumed, source)?;
+        let source_tensor = source_tensor(self.manifest, source)?;
+        let axis_len =
+            *source_tensor
+                .shape
+                .get(axis)
+                .ok_or_else(|| CheckpointError::InvalidMapping {
+                    message: format!(
+                        "split axis {axis} is out of bounds for `{source}` rank {}",
+                        source_tensor.shape.len()
+                    ),
+                })?;
+        if targets.is_empty() {
+            return Err(CheckpointError::InvalidMapping {
+                message: format!("split of `{source}` has no targets"),
+            });
+        }
+        let lengths = targets
+            .iter()
+            .map(|(_, length)| *length)
+            .collect::<Vec<_>>();
+        let starts = section_starts(&lengths, axis_len).map_err(|error| match error {
+            SectionError::Overflow => CheckpointError::ArithmeticOverflow {
+                context: "summing split section lengths",
+            },
+            SectionError::LengthMismatch { total } => CheckpointError::InvalidMapping {
+                message: format!(
+                    "split sections for `{source}` sum to {total}, axis {axis} has length {axis_len}"
+                ),
+            },
+        })?;
+        for ((target, length), start) in targets.iter().zip(starts) {
+            let mut shape = source_tensor.shape.clone();
+            shape[axis] = *length;
+            self.claim_primary(
+                target,
+                vec![source_tensor.into()],
+                PlannedTransform::Slice {
+                    axis,
+                    start,
+                    length: *length,
+                },
+                shape,
+                source_tensor.dtype,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Plans a concatenation whose sources agree on dtype and every other axis.
+    fn plan_concatenate(&mut self, sources: &[String], target: &str, axis: usize) -> Result<()> {
+        if sources.is_empty() {
+            return Err(CheckpointError::InvalidMapping {
+                message: format!("concatenation for `{target}` has no sources"),
+            });
+        }
+        let source_tensors = sources
+            .iter()
+            .map(|source| {
+                consume(&mut self.consumed, source)?;
+                source_tensor(self.manifest, source)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let first = source_tensors[0];
+        if axis >= first.shape.len() {
+            return Err(CheckpointError::InvalidMapping {
+                message: format!(
+                    "concatenation axis {axis} is out of bounds for `{}` rank {}",
+                    first.name,
+                    first.shape.len()
+                ),
+            });
+        }
+        let mut shape = first.shape.clone();
+        shape[axis] = 0;
+        for tensor in &source_tensors {
+            if tensor.dtype != first.dtype {
+                return Err(CheckpointError::InvalidMapping {
+                    message: format!(
+                        "concatenation for `{target}` mixes {} and {}",
+                        first.dtype, tensor.dtype
+                    ),
+                });
+            }
+            // Verified: agrees with `shape` off the axis and adds its axis length.
+            match extend_concatenation(&mut shape, &tensor.shape, axis) {
+                Ok(()) => {}
+                Err(ConcatError::Incompatible) => {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!(
+                            "concatenation source `{}` has incompatible shape {:?}",
+                            tensor.name, tensor.shape
+                        ),
+                    });
+                }
+                Err(ConcatError::Overflow) => {
+                    return Err(CheckpointError::ArithmeticOverflow {
+                        context: "summing concatenated tensor dimensions",
+                    });
+                }
+            }
+        }
+        self.claim_primary(
+            target,
+            source_tensors
+                .into_iter()
+                .map(PlannedSource::from)
+                .collect(),
+            PlannedTransform::Concatenate { axis },
+            shape,
+            first.dtype,
+        )
+    }
+
+    /// Plans an MXFP4 dequantization of `blocks` and `scales` into `target`.
+    ///
+    /// Blocks must be `U8` and scales `U8` or `F8_E8M0` (the same byte
+    /// encoding); their shapes must pass [`super::mxfp4::mxfp4_geometry`]. The
+    /// target is `[experts, 32 · groups, rows]` with the nominal source dtype
+    /// BF16, so the dtype policy chooses the stored float dtype.
+    fn plan_mxfp4(&mut self, blocks: &str, scales: &str, target: &str) -> Result<()> {
+        consume(&mut self.consumed, blocks)?;
+        consume(&mut self.consumed, scales)?;
+        let blocks_tensor = source_tensor(self.manifest, blocks)?;
+        let scales_tensor = source_tensor(self.manifest, scales)?;
+        if blocks_tensor.dtype != TensorDType::U8
+            || !matches!(scales_tensor.dtype, TensorDType::U8 | TensorDType::F8_E8M0)
+        {
+            return Err(CheckpointError::InvalidMapping {
+                message: format!(
+                    "MXFP4 target `{target}` needs U8 blocks and U8/F8_E8M0 scales, found {} and {}",
+                    blocks_tensor.dtype, scales_tensor.dtype
+                ),
+            });
+        }
+        let shape = super::mxfp4::decoded_shape(&blocks_tensor.shape, &scales_tensor.shape)
+            .map_err(|reason| CheckpointError::InvalidMapping {
+                message: format!(
+                    "MXFP4 target `{target}`: blocks {:?} and scales {:?} {reason}",
+                    blocks_tensor.shape, scales_tensor.shape
+                ),
+            })?;
+        self.claim_primary(
+            target,
+            vec![blocks_tensor.into(), scales_tensor.into()],
+            PlannedTransform::DequantizeMxfp4,
+            shape,
+            TensorDType::BF16,
+        )
+    }
+
+    /// Records a tied alias; resolution waits until every owner is planned.
+    ///
+    /// Only expected targets are ever claimed, so an unknown target cannot
+    /// collide and is reported as unknown.
+    fn declare_alias(&mut self, source_target: &str, target: &str) -> Result<()> {
+        let Some(&(index, _)) = self.expected.get(target) else {
+            return Err(CheckpointError::UnknownMappingTarget {
+                tensor: target.to_owned(),
+            });
+        };
+        if !self.ledger.claim(index, TargetState::Alias) {
+            return Err(CheckpointError::MappingTargetCollision {
+                tensor: target.to_owned(),
+            });
+        }
+        self.alias_specs
+            .insert(target.to_owned(), source_target.to_owned());
+        Ok(())
+    }
+
+    /// Adds one uniquely owned target after its shape and dtype contract match.
+    ///
+    /// A target already claimed by a primary operation or declared as an alias
+    /// is a collision, whichever was declared first.
+    fn claim_primary(
+        &mut self,
+        target: &str,
+        sources: Vec<PlannedSource>,
+        transform: PlannedTransform,
+        shape: Vec<u64>,
+        source_dtype: TensorDType,
+    ) -> Result<()> {
+        let &(index, expectation) =
+            self.expected
+                .get(target)
+                .ok_or_else(|| CheckpointError::UnknownMappingTarget {
+                    tensor: target.to_owned(),
+                })?;
+        if !self.ledger.claim(index, TargetState::Primary) {
+            return Err(CheckpointError::MappingTargetCollision {
+                tensor: target.to_owned(),
+            });
+        }
+        ensure_shape(target, &expectation.shape, &shape)?;
+        let dtype = resolve_dtype(target, source_dtype, expectation.dtype, self.policy)?;
+        self.primary.push(PlannedTensor {
+            target: target.to_owned(),
+            sources,
+            transform,
+            shape,
+            dtype,
+        });
+        Ok(())
+    }
+
+    /// Resolves every alias to its storage-owning primary target.
+    ///
+    /// Each alias inherits its owner's shape and dtype, which must satisfy the
+    /// alias's own expectation. Resolved alias targets become produced in the ledger.
+    ///
+    /// Aliases are numbered in target-name order and linked to their sources;
+    /// the verified [`walk_alias_chain`] follows each chain to its first
+    /// owner, dangling source, or repeated alias, so resolution always
+    /// terminates and an owner is reached only along an acyclic chain. The
+    /// walks share one self-clearing visited buffer, so resolving `A` aliases
+    /// costs one allocation and time proportional to the total chain length
+    /// (at most `A` steps per alias).
+    fn resolve_aliases(&mut self) -> Result<Vec<PlannedTensor>> {
+        let primary_by_target: BTreeMap<_, _> = self
+            .primary
+            .iter()
+            .map(|tensor| (tensor.target.as_str(), tensor))
+            .collect();
+        let names = self.alias_specs.keys().collect::<Vec<_>>();
+        let sources = self.alias_specs.values().collect::<Vec<_>>();
+        let index_of = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect::<BTreeMap<_, _>>();
+        // A primary source owns storage; it is checked before alias sources.
+        let links = sources
+            .iter()
+            .map(|source| {
+                if primary_by_target.contains_key(source.as_str()) {
+                    AliasLink::Owner
+                } else if let Some(&next) = index_of.get(source.as_str()) {
+                    AliasLink::Next(next)
+                } else {
+                    AliasLink::Dangling
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut aliases = Vec::with_capacity(self.alias_specs.len());
+        // One scratch buffer serves every walk; each walk leaves it clear.
+        let mut visited = vec![false; links.len()];
+        for (start, &target) in names.iter().enumerate() {
+            let root_target = match walk_alias_chain(&links, start, &mut visited) {
+                AliasWalk::Owner(last) => sources[last],
+                AliasWalk::Cycle(repeated) => {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!("alias cycle contains `{}`", names[repeated]),
+                    });
+                }
+                AliasWalk::Dangling(last) => {
+                    return Err(CheckpointError::InvalidMapping {
+                        message: format!(
+                            "alias `{target}` references unknown target `{}`",
+                            sources[last]
+                        ),
+                    });
+                }
+            };
+            let root = primary_by_target[root_target.as_str()];
+            let (index, expectation) = self.expected[target];
+            ensure_shape(target, &expectation.shape, &root.shape)?;
+            if let Some(dtype) = expectation.dtype
+                && dtype != root.dtype
+            {
+                return Err(CheckpointError::DTypeMismatch {
+                    tensor: target.clone(),
+                    observed: root.dtype,
+                    expected: dtype,
+                });
+            }
+            if !self.ledger.resolve(index) {
+                // Unreachable through `declare_alias`/`claim_primary`; kept as
+                // defense in depth so a target can never be planned twice.
+                return Err(CheckpointError::MappingTargetCollision {
+                    tensor: target.clone(),
+                });
+            }
+            aliases.push(PlannedTensor {
+                target: target.clone(),
+                sources: Vec::new(),
+                transform: PlannedTransform::Alias {
+                    source_target: root_target.clone(),
+                },
+                shape: root.shape.clone(),
+                dtype: root.dtype,
+            });
+        }
+        Ok(aliases)
+    }
 }
 
 /// Plans exact comparisons for declared aliases that own physical payloads.
@@ -948,61 +1241,27 @@ fn manifest_accounting_mismatch(reason: String) -> CheckpointError {
 // Validation helpers operate on temporary plans before parameter allocation.
 
 /// Indexes expected targets after checking nonempty unique names and shape products.
-fn expected_inventory(expected: &[ExpectedTensor]) -> Result<BTreeMap<String, &ExpectedTensor>> {
+fn expected_inventory(
+    expected: &[ExpectedTensor],
+) -> Result<BTreeMap<String, (usize, &ExpectedTensor)>> {
     let mut inventory = BTreeMap::new();
-    for tensor in expected {
+    for (index, tensor) in expected.iter().enumerate() {
         if tensor.name.is_empty() {
             return Err(CheckpointError::InvalidMapping {
                 message: "expected tensor names cannot be empty".into(),
             });
         }
         checked_elements(&tensor.shape)?;
-        if inventory.insert(tensor.name.clone(), tensor).is_some() {
+        if inventory
+            .insert(tensor.name.clone(), (index, tensor))
+            .is_some()
+        {
             return Err(CheckpointError::MappingTargetCollision {
                 tensor: tensor.name.clone(),
             });
         }
     }
     Ok(inventory)
-}
-
-/// Adds one uniquely owned target only after its shape and dtype contract match.
-///
-/// This mutates temporary planning state, not model parameters. A rejected plan is
-/// discarded before execution, so partial planning cannot install invalid tensors.
-#[allow(clippy::too_many_arguments)]
-fn insert_primary(
-    expected: &BTreeMap<String, &ExpectedTensor>,
-    produced: &mut BTreeSet<String>,
-    planned: &mut Vec<PlannedTensor>,
-    target: &str,
-    sources: Vec<PlannedSource>,
-    transform: PlannedTransform,
-    shape: Vec<u64>,
-    source_dtype: TensorDType,
-    policy: DTypePolicy,
-) -> Result<()> {
-    let expectation =
-        expected
-            .get(target)
-            .ok_or_else(|| CheckpointError::UnknownMappingTarget {
-                tensor: target.to_owned(),
-            })?;
-    if !produced.insert(target.to_owned()) {
-        return Err(CheckpointError::MappingTargetCollision {
-            tensor: target.to_owned(),
-        });
-    }
-    ensure_shape(target, &expectation.shape, &shape)?;
-    let dtype = resolve_dtype(target, source_dtype, expectation.dtype, policy)?;
-    planned.push(PlannedTensor {
-        target: target.to_owned(),
-        sources,
-        transform,
-        shape,
-        dtype,
-    });
-    Ok(())
 }
 
 /// Marks a physical source consumed once; explicit split operations own their reuse.
@@ -1043,6 +1302,10 @@ fn ensure_shape(target: &str, expected: &[u64], observed: &[u64]) -> Result<()> 
 ///
 /// Automatic conversion changes only real floating-point types. Blanket casts
 /// cannot override a concrete target dtype or reinterpret integer parameters.
+/// A requested change between floats that the executor cannot convert (FP8 or
+/// microscaling formats) fails here with
+/// [`CheckpointError::UnsupportedDTypeConversion`], so a strictly valid plan
+/// never records a conversion that execution would reject.
 fn resolve_dtype(
     target: &str,
     source: TensorDType,
@@ -1052,7 +1315,7 @@ fn resolve_dtype(
     let resolved = match policy {
         DTypePolicy::Preserve => source,
         DTypePolicy::Auto => match expected {
-            Some(dtype) if source != dtype && source.is_float() && dtype.is_float() => dtype,
+            Some(dtype) if source.is_float() && dtype.is_float() => dtype,
             _ => source,
         },
         // A concrete architecture contract denotes a numerically significant
@@ -1063,6 +1326,12 @@ fn resolve_dtype(
             .unwrap_or(dtype),
         DTypePolicy::Cast(_) => source,
     };
+    if resolved != source && !(source.is_castable_float() && resolved.is_castable_float()) {
+        return Err(CheckpointError::UnsupportedDTypeConversion {
+            source_dtype: source,
+            target_dtype: resolved,
+        });
+    }
     if let Some(expected) = expected
         && resolved != expected
     {
@@ -1075,38 +1344,6 @@ fn resolve_dtype(
     Ok(resolved)
 }
 
-/// Follows alias chains to a storage owner and rejects cycles or dangling targets.
-fn resolve_alias<'a>(
-    target: &'a str,
-    aliases: &'a BTreeMap<String, String>,
-    primary: &BTreeMap<String, &PlannedTensor>,
-) -> Result<&'a String> {
-    let mut cursor = target;
-    let mut visited = BTreeSet::new();
-    loop {
-        if !visited.insert(cursor) {
-            return Err(CheckpointError::InvalidMapping {
-                message: format!("alias cycle contains `{cursor}`"),
-            });
-        }
-        let source = aliases
-            .get(cursor)
-            .ok_or_else(|| CheckpointError::InvalidMapping {
-                message: format!("alias `{target}` has no source target"),
-            })?;
-        if primary.contains_key(source) {
-            return Ok(source);
-        }
-        if aliases.contains_key(source) {
-            cursor = source;
-        } else {
-            return Err(CheckpointError::InvalidMapping {
-                message: format!("alias `{target}` references unknown target `{source}`"),
-            });
-        }
-    }
-}
-
 // Auditable transformations and conservative host/parameter storage accounting.
 
 /// Builds deterministic provenance records for renames, layout changes, casts, and ties.
@@ -1114,7 +1351,10 @@ fn create_report(primary: &[PlannedTensor], aliases: &[PlannedTensor]) -> LoadRe
     let mut report = LoadReport::new();
     for tensor in primary {
         let source_dtype = tensor.sources[0].dtype;
-        if source_dtype != tensor.dtype {
+        // MXFP4 decoding writes the target dtype directly; it is a transform,
+        // not a cast of its integer sources.
+        let decoded = matches!(tensor.transform, PlannedTransform::DequantizeMxfp4);
+        if source_dtype != tensor.dtype && !decoded {
             report.dtype_converted.push(DTypeConversion {
                 target: tensor.target.clone(),
                 source: source_dtype,
@@ -1132,6 +1372,7 @@ fn create_report(primary: &[PlannedTensor], aliases: &[PlannedTensor]) -> LoadRe
                 length,
             } => Some(format!("slice(axis={axis},start={start},length={length})")),
             PlannedTransform::Concatenate { axis } => Some(format!("concatenate(axis={axis})")),
+            PlannedTransform::DequantizeMxfp4 => Some("dequantize_mxfp4".to_owned()),
             PlannedTransform::Alias { .. } => None,
         };
         if let Some(operation) = operation {
@@ -1238,7 +1479,17 @@ fn estimate_memory(
         .ok_or(CheckpointError::ArithmeticOverflow {
             context: "estimating peak host staging bytes",
         })?;
-    let peak_host_staging_bytes = transform_staging_bytes.max(largest_equivalence_pair_bytes);
+    // MXFP4 decoding holds two sources, which may live in different shards.
+    let mut decoding_staging_bytes = 0_u64;
+    for tensor in primary
+        .iter()
+        .filter(|tensor| matches!(tensor.transform, PlannedTransform::DequantizeMxfp4))
+    {
+        decoding_staging_bytes = decoding_staging_bytes.max(tensor.staging_bytes()?);
+    }
+    let peak_host_staging_bytes = transform_staging_bytes
+        .max(largest_equivalence_pair_bytes)
+        .max(decoding_staging_bytes);
     Ok(MemoryEstimate {
         artifact_bytes: manifest.artifact_bytes,
         checkpoint_tensor_bytes: manifest.tensor_bytes,
@@ -1259,12 +1510,8 @@ fn tensor_bytes(shape: &[u64], dtype: TensorDType) -> Result<u64> {
 
 /// Multiplies target dimensions without overflow, treating rank zero as one scalar.
 fn checked_elements(shape: &[u64]) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |count, dimension| {
-        count
-            .checked_mul(*dimension)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing mapped tensor element count",
-            })
+    super::layout::element_count(shape).ok_or(CheckpointError::ArithmeticOverflow {
+        context: "computing mapped tensor element count",
     })
 }
 

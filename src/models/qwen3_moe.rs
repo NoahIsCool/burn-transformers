@@ -18,25 +18,30 @@
 //! matmuls used packed execution without whole-weight dequantization. It is not a
 //! claim that the model has passed every release gate.
 
-use std::collections::HashSet;
-
 use serde::{Deserialize, Serialize};
 
 mod checkpoint;
 mod load;
 pub mod model;
+mod plan;
 
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
 pub use model::{
-    Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel,
-    qwen3_moe_load_balancing_loss,
+    Qwen3MoeBackboneOutput, Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm,
+    Qwen3MoeModel, qwen3_moe_load_balancing_loss,
 };
+// Deprecated spellings of `Layer::router_logits` and `Layer::router_weights`,
+// kept for code written against unreleased sources.
+#[allow(deprecated)]
+pub use model::{router_logits_point, router_weights_point};
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
+    ConfigError, ModelConfig, PartialRotary, RopeContext, RopeParameters, TokenIds, Validate,
+    checkpoint_tensor_count, divisible, expert_count, layer_count, model_type, nonzero,
     positive_finite, probability, token_ids,
 };
+use crate::position::RopeConfig;
 
 /// Serialized topology for Qwen3 MoE models such as Qwen3-30B-A3B.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,7 +88,10 @@ pub struct Qwen3MoeConfig {
     pub use_sliding_window: bool,
     /// Number of preceding tokens visible under sliding attention.
     pub sliding_window: Option<usize>,
-    /// Legacy limit on layers eligible for a sliding window.
+    /// Legacy per-layer window boundary, retained for configuration round trips.
+    ///
+    /// Ignored: the pinned Transformers 5.2 Qwen3-MoE applies an enabled
+    /// window to every block (see [`Qwen3MoeConfig::layer_sliding_window`]).
     pub max_window_layers: usize,
     /// Period between MoE feed-forward blocks.
     pub decoder_sparse_step: usize,
@@ -152,11 +160,89 @@ impl Default for Qwen3MoeConfig {
 
 impl Qwen3MoeConfig {
     /// Reports whether the indexed decoder block owns routed expert matrices.
+    ///
+    /// Block `i` is sparse when it is not in `mlp_only_layers`, the model has
+    /// experts, and `(i + 1) mod decoder_sparse_step = 0` (a zero step
+    /// disables sparsity); the predicate and the membership test are verified
+    /// in `verus/qwen.rs`.
     pub fn is_moe_layer(&self, layer_index: usize) -> bool {
-        self.decoder_sparse_step != 0
-            && !self.mlp_only_layers.contains(&layer_index)
-            && self.num_experts > 0
-            && (layer_index + 1).is_multiple_of(self.decoder_sparse_step)
+        plan::sparse_layer(
+            layer_index,
+            self.decoder_sparse_step,
+            self.num_experts,
+            plan::listed(&self.mlp_only_layers, layer_index),
+        )
+    }
+
+    /// Returns [`Self::is_moe_layer`] for every block, in `O(L + M)` time.
+    ///
+    /// `L` is `num_hidden_layers` and `M` the length of `mlp_only_layers`.
+    /// Asking [`Self::is_moe_layer`] once per block scans the override list
+    /// each time, `O(L · M)`; this marks the listed blocks once and then
+    /// applies the same verified predicate. Indices at or beyond `L` (which
+    /// validation rejects) are ignored.
+    pub(crate) fn moe_layer_flags(&self) -> Vec<bool> {
+        let mut dense = vec![false; self.num_hidden_layers];
+        for &index in &self.mlp_only_layers {
+            if let Some(flag) = dense.get_mut(index) {
+                *flag = true;
+            }
+        }
+        dense
+            .into_iter()
+            .enumerate()
+            .map(|(index, dense)| self.sparse_layer(index, dense))
+            .collect()
+    }
+
+    /// Applies the verified sparsity predicate to block `index` with its `mlp_only_layers` membership.
+    fn sparse_layer(&self, index: usize, dense_override: bool) -> bool {
+        plan::sparse_layer(
+            index,
+            self.decoder_sparse_step,
+            self.num_experts,
+            dense_override,
+        )
+    }
+
+    /// Marks the `mlp_only_layers` overrides, one flag per block, in `O(L + M)` time.
+    ///
+    /// Returns `None` when an index repeats or is not below
+    /// `num_hidden_layers`, the two override errors validation reports.
+    fn dense_overrides(&self) -> Option<Vec<bool>> {
+        let mut dense = vec![false; self.num_hidden_layers];
+        for &index in &self.mlp_only_layers {
+            let flag = dense.get_mut(index)?;
+            if *flag {
+                return None;
+            }
+            *flag = true;
+        }
+        Some(dense)
+    }
+
+    /// Translates the serialized RoPE metadata into the executable rotary configuration.
+    ///
+    /// Qwen3-MoE rotates whole heads, so a partial factor other than one is
+    /// rejected as an unused field. Resolution and strictness follow the shared
+    /// [`RopeParameters::to_rope_config`] translator: the nested
+    /// `rope_parameters` are authoritative, the legacy top-level `rope_theta`
+    /// is a fallback, and a disagreement between the two is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error at `qwen3_moe.rope.<field>` (or
+    /// `qwen3_moe.head_dim`) for a missing, out-of-range, conflicting, or
+    /// unused RoPE field.
+    pub fn rope_config(&self) -> crate::Result<RopeConfig> {
+        self.rope_parameters
+            .clone()
+            .unwrap_or_default()
+            .to_rope_config(
+                &RopeContext::new("qwen3_moe", self.head_dim, self.max_position_embeddings)
+                    .with_rope_theta(self.rope_theta)
+                    .with_partial_rotary(PartialRotary::FullHeadOnly),
+            )
     }
 }
 
@@ -180,6 +266,9 @@ impl Validate for Qwen3MoeConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // Bounded before any per-layer or per-expert work below.
+        layer_count(FAMILY, "num_hidden_layers", self.num_hidden_layers)?;
+        expert_count(FAMILY, "num_experts", self.num_experts)?;
         divisible(
             FAMILY,
             "num_attention_heads",
@@ -227,32 +316,34 @@ impl Validate for Qwen3MoeConfig {
                     "cannot exceed max_position_embeddings",
                 ));
             }
-            if self.max_window_layers > self.num_hidden_layers {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "max_window_layers",
-                    "cannot exceed num_hidden_layers",
-                ));
-            }
         }
 
-        let mut seen = HashSet::new();
-        for index in &self.mlp_only_layers {
-            if *index >= self.num_hidden_layers || !seen.insert(*index) {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "mlp_only_layers",
-                    "indices must be unique and less than num_hidden_layers",
-                ));
-            }
-        }
-        if !(0..self.num_hidden_layers).any(|index| self.is_moe_layer(index)) {
+        // One pass marks the overrides and one applies the verified per-block
+        // predicate, so a long override list costs `O(L + M)`, not a scan of
+        // the list per block (`O(L · M)`, minutes for a large valid config).
+        let dense = self.dense_overrides().ok_or_else(|| {
+            ConfigError::new(
+                FAMILY,
+                "mlp_only_layers",
+                "indices must be unique and less than num_hidden_layers",
+            )
+        })?;
+        let sparse_layers = dense
+            .into_iter()
+            .enumerate()
+            .filter(|&(index, dense)| self.sparse_layer(index, dense))
+            .count();
+        // Equal to the verified `plan::any_sparse_layer` (tested against it).
+        if sparse_layers == 0 {
             return Err(ConfigError::new(
                 FAMILY,
                 "decoder_sparse_step",
                 "schedule does not contain an MoE layer",
             ));
         }
+        // The contract and the graph hold one tensor set per routed expert of
+        // every MoE block, so their product is bounded as a whole.
+        checkpoint_tensor_count(FAMILY, "num_experts", self.inventory(sparse_layers))?;
 
         self.rope_parameters
             .clone()

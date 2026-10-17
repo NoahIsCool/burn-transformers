@@ -42,6 +42,64 @@ pub enum CheckpointError {
         /// Candidate filenames, sorted for deterministic diagnostics.
         candidates: Vec<String>,
     },
+    /// A checkpoint of a family published in a multimodal (`model.language_model.*`)
+    /// and a text-only (`model.embed_tokens.weight`) layout contains neither.
+    #[error("{family} checkpoint contains neither official language parameter namespace")]
+    LanguageNamespaceNotFound {
+        /// Model family whose namespaces were probed, such as `Qwen`.
+        family: &'static str,
+    },
+    /// A checkpoint contains both the multimodal and the text-only language namespace.
+    #[error("{family} checkpoint ambiguously contains wrapped and text-only language namespaces")]
+    AmbiguousLanguageNamespace {
+        /// Model family whose namespaces were probed, such as `Muse`.
+        family: &'static str,
+    },
+    /// A checkpoint of a family whose published layouts are each identified by
+    /// the name of their token embedding (Gemma's text-only, multimodal, and
+    /// original multimodal releases) contains none of those embeddings.
+    #[error("{family} checkpoint contains none of the embeddings {embeddings:?}")]
+    LanguageEmbeddingNotFound {
+        /// Model family whose layouts were probed, such as `Gemma`.
+        family: &'static str,
+        /// The identifying embedding of every probed layout, in detection order.
+        embeddings: Vec<String>,
+    },
+    /// A checkpoint contains the identifying token embeddings of more than one
+    /// published layout, so its language namespace is ambiguous.
+    #[error(
+        "{family} checkpoint ambiguously contains the embeddings of several language \
+         namespaces: {embeddings:?}"
+    )]
+    AmbiguousLanguageEmbedding {
+        /// Model family whose layouts were probed, such as `Gemma`.
+        family: &'static str,
+        /// The identifying embeddings present, in detection order.
+        embeddings: Vec<String>,
+    },
+    /// The configuration needs more source tensors than the checkpoint holds.
+    ///
+    /// Every layer of every family owns at least one checkpoint tensor, so a
+    /// configuration's depth (or, for one-to-one contracts, its exact
+    /// inventory) bounds the tensors any loadable checkpoint must contain.
+    /// Automatic loading and direct T5 planning
+    /// ([`crate::models::t5::T5Config::plan_checkpoint`] and
+    /// [`crate::models::t5::T5ForConditionalGeneration::load_checkpoint`],
+    /// bounded by `num_layers` plus the decoder depth) check that bound
+    /// against the discovered tensors and index aliases before they build the
+    /// per-tensor contract, whose cost grows with the declared depth and
+    /// expert count. It is not checked when
+    /// [`super::LoadOptions::allow_missing`] can excuse missing tensors.
+    #[error(
+        "the configuration needs at least {required} checkpoint tensors, but the checkpoint \
+         provides only {available} (tensors plus index aliases)"
+    )]
+    TooFewTensors {
+        /// Lower bound on the distinct source tensors the configuration needs.
+        required: usize,
+        /// Discovered tensors plus resolved index-only aliases.
+        available: usize,
+    },
     /// A user- or index-supplied relative path was unsafe.
     #[error("unsafe checkpoint-relative path `{path}`: {reason}")]
     UnsafeRelativePath {
@@ -145,6 +203,32 @@ pub enum CheckpointError {
         expected: u64,
         /// Described byte length.
         actual: u64,
+    },
+    /// One SafeTensors header entry failed validation; `source` holds the violated rule.
+    ///
+    /// Header entries are validated independently, so this wrapper names the
+    /// shard and tensor that a dtype, element-count, storage-size, or byte-length
+    /// failure belongs to. In a many-shard checkpoint, the bare inner error alone
+    /// would not identify the offending entry.
+    #[error("invalid SafeTensors header entry `{tensor}` in `{shard}`: {source}")]
+    InvalidTensorHeader {
+        /// Root-relative shard containing the entry.
+        shard: String,
+        /// Tensor name as written in the header.
+        tensor: String,
+        /// Underlying dtype, arithmetic, storage, or byte-length violation.
+        #[source]
+        source: Box<CheckpointError>,
+    },
+    /// A SafeTensors header used a reserved or empty tensor name.
+    #[error("invalid SafeTensors tensor name `{tensor}` in `{shard}`: {reason}")]
+    InvalidTensorName {
+        /// Root-relative shard containing the name.
+        shard: String,
+        /// Rejected name.
+        tensor: String,
+        /// Naming rule that rejected it.
+        reason: &'static str,
     },
     /// A tensor key occurred in more than one shard.
     #[error("tensor `{tensor}` appears in both `{first_shard}` and `{second_shard}`")]

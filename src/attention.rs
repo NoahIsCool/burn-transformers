@@ -2,38 +2,82 @@
 //!
 //! Attention maps a query to a convex combination of values using
 //! `softmax(Q K^T / sqrt(d)) V`. Grouped-query attention stores fewer key/value
-//! heads than query heads and repeats each KV head across a contiguous query
-//! group only for the attention operation. The cache therefore retains native
-//! KV heads instead of paying the repeated representation's memory cost.
+//! heads than query heads; each KV head serves a contiguous group of query
+//! heads. Caches and every K/V intervention point keep the native KV heads.
+//! Attention evaluation also keeps them: a group's queries are folded into
+//! extra query rows of one call instead of repeating the KV history per query
+//! head (see [`grouped_query_attention`]). One exception remains: square
+//! causal prefill under [`AttentionPrecisionMode::BackendDefault`] (without
+//! sinks) repeats K/V so the backend's fused `is_causal` kernel can skip
+//! masked tiles. Every other call folds, including decode, cached suffixes,
+//! explicit masks, sinks, and the eager graph.
 //!
 //! Rotary and relative-position transformations are deliberately separate from
 //! projection and attention dispatch. This lets one architecture rotate only a
 //! prefix, another use NoPE layers, and T5 provide an additive relative bias
 //! without duplicating projection code. Backend-native attention is the default.
 //! Architectures whose pinned eager graphs materialize reduced-precision scores
-//! before an explicit F32 softmax can opt into that exact operation order; the
-//! unfused path can be paired with [`AttentionExecutionPolicy`] to cap every
-//! score-like plane by evaluating complete attention rows in synchronized query
-//! chunks. This is a storage bound, not a linear-time attention approximation:
-//! full-attention chunks still visit every key.
+//! before an explicit F32 softmax can opt into that exact operation order.
+//!
+//! [`AttentionExecutionPolicy`] plans query chunks that bound every score-like
+//! plane; it is a storage bound, not a linear-time approximation, because each
+//! chunk still visits its complete key support. [`GroupedQueryAttention::attend`]
+//! evaluates complete planes, while [`GroupedQueryAttention::attend_bounded`]
+//! executes a plan in synchronized query chunks (Muse-Glimmer still runs its
+//! own equivalent loop).
+//!
+//! [`DifferentialAttention`] subtracts two softmax maps (DIFF Transformer)
+//! while reusing the same grouped dispatch over native KV heads.
+//!
+//! [`AttentionConnectivity`] builds padding-aware causal, sliding-window, and
+//! chunked-local exclusion masks for per-layer local/global schedules, and
+//! [`sliding_window_key_range`] gives the matching key slice of a query chunk.
 //!
 //! Queries use `[batch, query_head, query_token, head_dim]`; keys and values
 //! retain native KV heads until dispatch. Score masks use `true == excluded`,
 //! whereas incoming token-validity masks use `true == valid`. Causal alignment is
-//! bottom-right for cached prefixes. Exclusions are restored after interventions,
-//! and eager softmax defines fully excluded rows as zero probabilities.
+//! bottom-right for cached prefixes on every backend: query row `i` of `Q` sees
+//! keys `j <= i + K - Q`. Exclusions are restored after interventions, and eager
+//! softmax defines fully excluded rows as zero probabilities.
+
+mod connectivity;
+mod differential;
+mod dispatch;
+mod execution;
+mod geometry;
+mod grouping;
+mod mask;
+
+/// Largest position an integer tensor of a given dtype can hold (shared with cache masks).
+pub(crate) use mask::position_limit;
+mod plan;
+mod rules;
+mod widths;
 
 use burn::{
-    module::Module,
+    module::{Initializer, Module, Param},
     nn::{Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, Int, Tensor,
-        activation::{sigmoid, silu, softmax},
+        Bool, DType, Tensor,
+        activation::{sigmoid, silu},
         backend::Backend,
-        module::attention,
         ops::AttentionModuleOptions,
     },
 };
+
+use connectivity::ExclusionPlan;
+pub use connectivity::{AttentionConnectivity, MaskGeometry, valid_token_ordinals};
+pub use differential::{DifferentialAttention, DifferentialAttentionConfig, depth_lambda_init};
+use dispatch::{Operands, causal_exclusion, default_scale, grouped_mix, scaled_scores};
+pub(crate) use dispatch::{dispatch_attention, eager_probabilities, zero_excluded};
+pub use dispatch::{grouped_query_attention, repeat_key_value};
+use mask::padding_plane;
+pub(crate) use mask::{bottom_right_causal_mask, union_exclusions};
+
+pub use execution::{AttentionExecutionPlan, AttentionExecutionPolicy, sliding_window_key_range};
+pub(crate) use geometry::causal_mask_needed;
+use geometry::{HeadLayout, ProjectionFault, projection_fault};
+use widths::{ProjectionWidths, WidthError, projection_widths};
 
 use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
@@ -55,6 +99,58 @@ pub enum AttentionOutputGate {
     Silu,
 }
 
+/// Which of the four attention projections carry an additive bias.
+///
+/// Most checkpoints bias all four or none; Qwen2/2.5 and GLM-4.5 bias only the
+/// query, key, and value projections.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectionBias {
+    /// Whether the query (and fused gate) projection has a bias.
+    pub query: bool,
+    /// Whether the key projection has a bias.
+    pub key: bool,
+    /// Whether the value projection has a bias.
+    pub value: bool,
+    /// Whether the output projection has a bias.
+    pub output: bool,
+}
+
+impl ProjectionBias {
+    /// Biases all four projections, or none of them.
+    #[must_use]
+    pub const fn uniform(enabled: bool) -> Self {
+        Self {
+            query: enabled,
+            key: enabled,
+            value: enabled,
+            output: enabled,
+        }
+    }
+
+    /// Biases the query, key, and value projections but not the output projection.
+    #[must_use]
+    pub const fn query_key_value_only() -> Self {
+        Self {
+            query: true,
+            key: true,
+            value: true,
+            output: false,
+        }
+    }
+}
+
+/// Channels over which optional Q/K RMS normalization computes its statistic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryKeyNormScope {
+    /// One `head_dim`-wide norm applied to every head separately (Qwen3, Gemma 3).
+    #[default]
+    PerHead,
+    /// One norm over all projected query (or key) channels before the head
+    /// split, with `heads * head_dim` learned scales (OLMo 2/3).
+    FullWidth,
+}
+
 /// Numerical operation graph used to evaluate attention probabilities.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,237 +167,6 @@ pub enum AttentionPrecisionMode {
     EagerFp32Softmax,
 }
 
-/// Controls the peak score-plane size of an attention operation.
-///
-/// A score plane contains one element for every
-/// `[batch, head, query, key]` pair. Query chunking preserves the mathematical
-/// attention rows because every chunk still sees its complete allowed key
-/// range, while changing peak temporary storage from `O(query * key)` to
-/// `O(query_chunk * key)`. Backends are synchronized between chunks so dropped
-/// score, mask, and probability buffers can be reclaimed before the next chunk.
-///
-/// This policy bounds score-like intermediates, not parameters, Q/K/V storage,
-/// the linear-size output, or an autodiff tape. Multi-chunk execution is
-/// therefore rejected on autodiff backends; callers doing training can select
-/// [`Self::Unbounded`] explicitly after provisioning the required memory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttentionExecutionPolicy {
-    /// Evaluate all query rows together without a score-plane bound.
-    ///
-    /// This is useful for small golden-oracle calls and explicitly provisioned
-    /// training runs. Its peak attention workspace is quadratic for self
-    /// attention.
-    Unbounded,
-    /// Split query rows while retaining the complete key support of every row.
-    QueryChunked {
-        /// Hard upper bound on query rows submitted in one attention call.
-        max_query_tokens: usize,
-        /// Hard upper bound on elements in any score-like chunk plane.
-        max_score_elements: usize,
-    },
-}
-
-impl Default for AttentionExecutionPolicy {
-    /// Uses a conservative production bound suitable for 32K Muse inference.
-    fn default() -> Self {
-        Self::QueryChunked {
-            max_query_tokens: 512,
-            max_score_elements: 1 << 26,
-        }
-    }
-}
-
-impl AttentionExecutionPolicy {
-    /// Constructs a synchronized query-chunked policy.
-    #[must_use]
-    pub const fn query_chunked(max_query_tokens: usize, max_score_elements: usize) -> Self {
-        Self::QueryChunked {
-            max_query_tokens,
-            max_score_elements,
-        }
-    }
-
-    /// Validates non-zero chunk and workspace limits.
-    pub fn validate(self) -> Result<()> {
-        if let Self::QueryChunked {
-            max_query_tokens,
-            max_score_elements,
-        } = self
-        {
-            if max_query_tokens == 0 {
-                return Err(Error::configuration(
-                    "attention.execution.max_query_tokens",
-                    "must be greater than zero",
-                ));
-            }
-            if max_score_elements == 0 {
-                return Err(Error::configuration(
-                    "attention.execution.max_score_elements",
-                    "must be greater than zero",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Plans query chunks for a conservative upper bound on keys per chunk.
-    ///
-    /// `key_sequence_bound` may be smaller than the physical key tensor when a
-    /// caller can prove that each chunk slices a local window first. The caller
-    /// remains responsible for checking every concrete key slice against the
-    /// resulting score-element limit.
-    pub fn plan(
-        self,
-        batch: usize,
-        heads: usize,
-        query_sequence: usize,
-        key_sequence_bound: usize,
-    ) -> Result<AttentionExecutionPlan> {
-        self.validate()?;
-        if batch == 0 || heads == 0 || query_sequence == 0 || key_sequence_bound == 0 {
-            return Err(Error::configuration(
-                "attention.execution_shape",
-                "batch, heads, query sequence, and key bound must be non-zero",
-            ));
-        }
-        let elements_per_query = batch
-            .checked_mul(heads)
-            .and_then(|elements| elements.checked_mul(key_sequence_bound))
-            .ok_or_else(|| {
-                Error::configuration(
-                    "attention.execution_shape",
-                    "score-plane dimensions overflow usize",
-                )
-            })?;
-        let (query_chunk_size, score_element_limit) = match self {
-            Self::Unbounded => (query_sequence, None),
-            Self::QueryChunked {
-                max_query_tokens,
-                max_score_elements,
-            } => {
-                if elements_per_query > max_score_elements {
-                    return Err(Error::BackendCapability(format!(
-                        "one attention query row requires {elements_per_query} score elements, exceeding the configured bound of {max_score_elements}"
-                    )));
-                }
-                (
-                    query_sequence
-                        .min(max_query_tokens)
-                        .min(max_score_elements / elements_per_query),
-                    Some(max_score_elements),
-                )
-            }
-        };
-        let chunk_count = query_sequence.div_ceil(query_chunk_size);
-        let peak_score_elements = elements_per_query
-            .checked_mul(query_chunk_size.min(query_sequence))
-            .ok_or_else(|| {
-                Error::configuration(
-                    "attention.execution_shape",
-                    "planned score-plane size overflows usize",
-                )
-            })?;
-        Ok(AttentionExecutionPlan {
-            query_sequence,
-            key_sequence_bound,
-            query_chunk_size,
-            chunk_count,
-            peak_score_elements,
-            score_element_limit,
-        })
-    }
-
-    /// Returns the configured maximum query rows before score-bound reduction.
-    #[must_use]
-    pub const fn maximum_query_tokens(self, query_sequence: usize) -> usize {
-        match self {
-            Self::Unbounded => query_sequence,
-            Self::QueryChunked {
-                max_query_tokens, ..
-            } => {
-                if max_query_tokens < query_sequence {
-                    max_query_tokens
-                } else {
-                    query_sequence
-                }
-            }
-        }
-    }
-
-    /// Checks that one concrete chunk stays within this policy's score bound.
-    pub fn validate_chunk(
-        self,
-        batch: usize,
-        heads: usize,
-        query_sequence: usize,
-        key_sequence: usize,
-    ) -> Result<()> {
-        let plan = self.plan(batch, heads, query_sequence, key_sequence)?;
-        if plan.chunk_count != 1 {
-            return Err(Error::BackendCapability(format!(
-                "attention chunk [{batch}, {heads}, {query_sequence}, {key_sequence}] exceeds the configured single-chunk score bound"
-            )));
-        }
-        Ok(())
-    }
-}
-
-/// Immutable allocation plan produced by [`AttentionExecutionPolicy`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AttentionExecutionPlan {
-    /// Complete query length covered by this plan.
-    query_sequence: usize,
-    /// Conservative maximum key length permitted for each planned chunk.
-    key_sequence_bound: usize,
-    /// Query rows evaluated in each chunk except possibly the final remainder.
-    query_chunk_size: usize,
-    /// Number of sequential attention calls.
-    chunk_count: usize,
-    /// Maximum score elements produced by the planned shape.
-    peak_score_elements: usize,
-    /// Configured bound, or `None` for unbounded execution.
-    score_element_limit: Option<usize>,
-}
-
-impl AttentionExecutionPlan {
-    /// Returns the complete query length covered by this plan.
-    #[must_use]
-    pub const fn query_sequence(self) -> usize {
-        self.query_sequence
-    }
-
-    /// Returns the conservative maximum key length permitted for each chunk.
-    #[must_use]
-    pub const fn key_sequence_bound(self) -> usize {
-        self.key_sequence_bound
-    }
-
-    /// Returns query rows evaluated per chunk.
-    #[must_use]
-    pub const fn query_chunk_size(self) -> usize {
-        self.query_chunk_size
-    }
-
-    /// Returns the number of sequential chunks.
-    #[must_use]
-    pub const fn chunk_count(self) -> usize {
-        self.chunk_count
-    }
-
-    /// Returns the maximum number of elements in one score-like plane.
-    #[must_use]
-    pub const fn peak_score_elements(self) -> usize {
-        self.peak_score_elements
-    }
-
-    /// Returns the configured score-element limit when execution is bounded.
-    #[must_use]
-    pub const fn score_element_limit(self) -> Option<usize> {
-        self.score_element_limit
-    }
-}
-
 /// Configuration for full MHA, GQA, or MQA projections and attention dispatch.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroupedQueryAttentionConfig {
@@ -314,9 +179,17 @@ pub struct GroupedQueryAttentionConfig {
     /// Query/key/value width per head.
     pub head_dim: usize,
     /// Whether all projection layers include additive biases.
+    ///
+    /// [`Self::projection_bias`], when present, overrides this per projection.
     pub bias: bool,
-    /// Optional Q/K per-head RMS normalization epsilon.
+    /// Optional per-projection bias flags overriding [`Self::bias`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_bias: Option<ProjectionBias>,
+    /// Optional Q/K RMS normalization epsilon.
     pub query_key_norm_epsilon: Option<f64>,
+    /// Channels normalized by the optional Q/K RMS norm.
+    #[serde(default)]
+    pub query_key_norm_scope: QueryKeyNormScope,
     /// Whether Q/K norm checkpoints store `scale - 1` instead of `scale`.
     pub query_key_norm_zero_centered: bool,
     /// Optional multiplicative output-gate convention.
@@ -328,6 +201,14 @@ pub struct GroupedQueryAttentionConfig {
     /// Numerical operation graph used for score and softmax evaluation.
     #[serde(default)]
     pub precision_mode: AttentionPrecisionMode,
+    /// Whether each query head learns an attention-sink logit (gpt-oss, StreamingLLM).
+    ///
+    /// The sink is an extra softmax column per head that is dropped after
+    /// normalization, so attention rows sum to `1 - p_sink` and a row whose
+    /// keys are all excluded yields zero context. Backend-default dispatch
+    /// rejects sinks combined with a softcap, which would also cap the sink.
+    #[serde(default)]
+    pub attention_sinks: bool,
 }
 
 impl GroupedQueryAttentionConfig {
@@ -344,12 +225,15 @@ impl GroupedQueryAttentionConfig {
             key_value_heads,
             head_dim,
             bias: false,
+            projection_bias: None,
             query_key_norm_epsilon: None,
+            query_key_norm_scope: QueryKeyNormScope::PerHead,
             query_key_norm_zero_centered: false,
             output_gate: AttentionOutputGate::None,
             scale: None,
             softcap: None,
             precision_mode: AttentionPrecisionMode::BackendDefault,
+            attention_sinks: false,
         }
     }
 
@@ -359,47 +243,35 @@ impl GroupedQueryAttentionConfig {
         self
     }
 
+    /// Selects the bias flag of each projection independently.
+    pub fn with_projection_bias(mut self, projection_bias: ProjectionBias) -> Self {
+        self.projection_bias = Some(projection_bias);
+        self
+    }
+
+    /// Returns the bias flags actually used: [`Self::projection_bias`] or uniform [`Self::bias`].
+    #[must_use]
+    pub fn effective_projection_bias(&self) -> ProjectionBias {
+        self.projection_bias
+            .unwrap_or(ProjectionBias::uniform(self.bias))
+    }
+
+    /// Enables Q/K RMS normalization with `epsilon` over the chosen channels.
+    pub fn with_query_key_norm(mut self, epsilon: f64, scope: QueryKeyNormScope) -> Self {
+        self.query_key_norm_epsilon = Some(epsilon);
+        self.query_key_norm_scope = scope;
+        self
+    }
+
+    /// Enables or disables learned per-head attention-sink logits.
+    pub fn with_attention_sinks(mut self, attention_sinks: bool) -> Self {
+        self.attention_sinks = attention_sinks;
+        self
+    }
+
     /// Validates projection sizes, GQA grouping, and numerical options.
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_size == 0
-            || self.query_heads == 0
-            || self.key_value_heads == 0
-            || self.head_dim == 0
-        {
-            return Err(Error::configuration(
-                "attention",
-                "hidden_size, query_heads, key_value_heads, and head_dim must be non-zero",
-            ));
-        }
-        if !self.query_heads.is_multiple_of(self.key_value_heads) {
-            return Err(Error::configuration(
-                "attention.key_value_heads",
-                "must divide query_heads exactly",
-            ));
-        }
-        let query_width = self.query_heads.checked_mul(self.head_dim);
-        let key_value_width = self.key_value_heads.checked_mul(self.head_dim);
-        let query_output_width = query_width.and_then(|width| {
-            if self.output_gate == AttentionOutputGate::None {
-                Some(width)
-            } else {
-                width.checked_mul(2)
-            }
-        });
-        // Validate the complete matrix products, not just per-head widths:
-        // lazy Burn parameters otherwise defer overflowing shapes until use.
-        if query_output_width
-            .and_then(|width| self.hidden_size.checked_mul(width))
-            .is_none()
-            || key_value_width
-                .and_then(|width| self.hidden_size.checked_mul(width))
-                .is_none()
-        {
-            return Err(Error::configuration(
-                "attention",
-                "projected head or matrix dimensions overflow usize",
-            ));
-        }
+        self.projection_widths()?;
         if self
             .query_key_norm_epsilon
             .is_some_and(|epsilon| !epsilon.is_finite() || epsilon <= 0.0)
@@ -427,55 +299,93 @@ impl GroupedQueryAttentionConfig {
                 "must be finite and greater than zero when present",
             ));
         }
+        if self.attention_sinks
+            && self.softcap.is_some()
+            && self.precision_mode == AttentionPrecisionMode::BackendDefault
+        {
+            return Err(Error::configuration(
+                "attention.attention_sinks",
+                "backend-default dispatch cannot combine sinks with a softcap; select EagerFp32Softmax",
+            ));
+        }
         Ok(())
     }
 
-    /// Initializes checkpoint-native `[out, in]` projections and optional Q/K norms.
+    /// Returns the verified projection widths, or why they are not representable.
+    ///
+    /// Success implies `key_value_heads` divides `query_heads` and that every
+    /// projection matrix's element count fits in `usize` (checked with Verus).
+    fn projection_widths(&self) -> Result<ProjectionWidths> {
+        projection_widths(
+            self.hidden_size,
+            self.query_heads,
+            self.key_value_heads,
+            self.head_dim,
+            self.output_gate != AttentionOutputGate::None,
+        )
+        .map_err(|error| match error {
+            WidthError::EmptyAxis => Error::configuration(
+                "attention",
+                "hidden_size, query_heads, key_value_heads, and head_dim must be non-zero",
+            ),
+            WidthError::UngroupedHeads => Error::configuration(
+                "attention.key_value_heads",
+                "must divide query_heads exactly",
+            ),
+            WidthError::Overflow => Error::configuration(
+                "attention",
+                "projected head or matrix dimensions overflow usize",
+            ),
+        })
+    }
+
+    /// Initializes checkpoint-native `[out, in]` projections, optional Q/K norms, and sinks.
+    ///
+    /// Sink logits start at zero, i.e. one extra unit of softmax mass per row.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<GroupedQueryAttention<B>> {
         self.validate()?;
-        let query_width = self
-            .query_heads
-            .checked_mul(self.head_dim)
-            .ok_or_else(|| Error::configuration("attention", "query width overflows usize"))?;
-        let key_value_width = self
-            .key_value_heads
-            .checked_mul(self.head_dim)
-            .ok_or_else(|| Error::configuration("attention", "key/value width overflows usize"))?;
-        let query_output_width = if self.output_gate == AttentionOutputGate::None {
-            query_width
-        } else {
-            query_width.checked_mul(2).ok_or_else(|| {
-                Error::configuration("attention", "gated query width overflows usize")
-            })?
-        };
-        let linear = |input, output| {
+        let ProjectionWidths {
+            query_width,
+            key_value_width,
+            query_output_width,
+        } = self.projection_widths()?;
+        let bias = self.effective_projection_bias();
+        let linear = |input, output, bias| {
             operations::init_linear(
                 &LinearConfig::new(input, output)
-                    .with_bias(self.bias)
+                    .with_bias(bias)
                     .with_layout(LinearLayout::Col),
                 device,
             )
         };
-        let query_key_norm = |epsilon| {
-            RmsNormConfig::new(self.head_dim)
+        let query_key_norm = |epsilon, width| {
+            RmsNormConfig::new(width)
                 .with_epsilon(epsilon)
                 .with_zero_centered(self.query_key_norm_zero_centered)
                 .init(device)
         };
+        let (query_norm_width, key_norm_width) = match self.query_key_norm_scope {
+            QueryKeyNormScope::PerHead => (self.head_dim, self.head_dim),
+            QueryKeyNormScope::FullWidth => (query_width, key_value_width),
+        };
         let (query_norm, key_norm) = match self.query_key_norm_epsilon {
             Some(epsilon) => (
-                Some(query_key_norm(epsilon)?),
-                Some(query_key_norm(epsilon)?),
+                Some(query_key_norm(epsilon, query_norm_width)?),
+                Some(query_key_norm(epsilon, key_norm_width)?),
             ),
             None => (None, None),
         };
+        let sinks = self
+            .attention_sinks
+            .then(|| Initializer::Zeros.init([self.query_heads], device));
         Ok(GroupedQueryAttention {
-            q_proj: linear(self.hidden_size, query_output_width),
-            k_proj: linear(self.hidden_size, key_value_width),
-            v_proj: linear(self.hidden_size, key_value_width),
-            o_proj: linear(query_width, self.hidden_size),
+            q_proj: linear(self.hidden_size, query_output_width, bias.query),
+            k_proj: linear(self.hidden_size, key_value_width, bias.key),
+            v_proj: linear(self.hidden_size, key_value_width, bias.value),
+            o_proj: linear(query_width, self.hidden_size, bias.output),
             query_norm,
             key_norm,
+            query_key_norm_scope: self.query_key_norm_scope,
             hidden_size: self.hidden_size,
             query_heads: self.query_heads,
             key_value_heads: self.key_value_heads,
@@ -484,6 +394,7 @@ impl GroupedQueryAttentionConfig {
             scale: self.scale,
             softcap: self.softcap,
             precision_mode: self.precision_mode,
+            sinks,
         })
     }
 }
@@ -512,10 +423,12 @@ pub struct GroupedQueryAttention<B: Backend> {
     pub v_proj: Linear<B>,
     /// Projection from concatenated query-head outputs to the residual stream.
     pub o_proj: Linear<B>,
-    /// Optional per-query-head normalization.
+    /// Optional query normalization (per head or full width, see `query_key_norm_scope`).
     pub query_norm: Option<RmsNorm<B>>,
-    /// Optional per-key-head normalization.
+    /// Optional key normalization (per head or full width, see `query_key_norm_scope`).
     pub key_norm: Option<RmsNorm<B>>,
+    /// Channels over which the optional Q/K norms compute their statistic.
+    pub query_key_norm_scope: QueryKeyNormScope,
     /// Input/output width of the residual stream.
     pub hidden_size: usize,
     /// Number of query heads.
@@ -532,6 +445,8 @@ pub struct GroupedQueryAttention<B: Backend> {
     pub softcap: Option<f64>,
     /// Numerical operation graph used for score and softmax evaluation.
     pub precision_mode: AttentionPrecisionMode,
+    /// Optional learned sink logit per query head, `[query_heads]`, in the activation dtype.
+    pub sinks: Option<Param<Tensor<B, 1>>>,
 }
 
 impl<B: Backend> GroupedQueryAttention<B> {
@@ -566,9 +481,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
         let projected_query = operations::linear(query_hidden, &self.q_proj)?;
         let (query, gate) = if self.output_gate == AttentionOutputGate::None {
             (
-                projected_query
-                    .reshape([batch, query_sequence, self.query_heads, self.head_dim])
-                    .swap_dims(1, 2),
+                projected_query.reshape([batch, query_sequence, self.query_heads, self.head_dim]),
                 None,
             )
         } else {
@@ -581,10 +494,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 self.head_dim * 2,
             ]);
             (
-                projected_query
-                    .clone()
-                    .narrow(3, 0, self.head_dim)
-                    .swap_dims(1, 2),
+                projected_query.clone().narrow(3, 0, self.head_dim),
                 Some(
                     projected_query
                         .narrow(3, self.head_dim, self.head_dim)
@@ -592,20 +502,17 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 ),
             )
         };
-        let key = operations::linear(key_value_hidden.clone(), &self.k_proj)?
-            .reshape([batch, key_sequence, self.key_value_heads, self.head_dim])
-            .swap_dims(1, 2);
+        let key = operations::linear(key_value_hidden.clone(), &self.k_proj)?.reshape([
+            batch,
+            key_sequence,
+            self.key_value_heads,
+            self.head_dim,
+        ]);
         let value = operations::linear(key_value_hidden, &self.v_proj)?
             .reshape([batch, key_sequence, self.key_value_heads, self.head_dim])
             .swap_dims(1, 2);
-        let query = self
-            .query_norm
-            .as_ref()
-            .map_or(query.clone(), |norm| norm.forward(query));
-        let key = self
-            .key_norm
-            .as_ref()
-            .map_or(key.clone(), |norm| norm.forward(key));
+        let query = self.normalize_heads(query, self.query_norm.as_ref());
+        let key = self.normalize_heads(key, self.key_norm.as_ref());
         Ok(AttentionProjection {
             query,
             key,
@@ -614,13 +521,30 @@ impl<B: Backend> GroupedQueryAttention<B> {
         })
     }
 
+    /// Applies an optional Q/K norm and moves heads first: `[b, s, h, d] -> [b, h, s, d]`.
+    ///
+    /// Per-head norms reduce over `d`; full-width norms reduce over all `h * d`
+    /// projected channels of a token before the head split.
+    fn normalize_heads(&self, tensor: Tensor<B, 4>, norm: Option<&RmsNorm<B>>) -> Tensor<B, 4> {
+        let [batch, sequence, heads, width] = tensor.dims();
+        match (norm, self.query_key_norm_scope) {
+            (None, _) => tensor.swap_dims(1, 2),
+            (Some(norm), QueryKeyNormScope::PerHead) => norm.forward(tensor.swap_dims(1, 2)),
+            (Some(norm), QueryKeyNormScope::FullWidth) => norm
+                .forward(tensor.reshape([batch, sequence, heads * width]))
+                .reshape([batch, sequence, heads, width])
+                .swap_dims(1, 2),
+        }
+    }
+
     /// Dispatches projected attention after the caller applies positional transforms.
     ///
     /// `mask` follows Burn's low-level convention: `true` means excluded. Public
     /// token-valid masks should first pass through [`padding_attention_mask`].
     /// Projected tensors and additive bias must share a dense floating dtype and
     /// device; the mask and output projection must also use that device. No
-    /// implicit dtype conversions are performed.
+    /// implicit dtype conversions are performed. Keys and values keep their
+    /// native KV heads; see [`grouped_query_attention`] for the evaluation.
     pub fn attend(
         &self,
         projection: AttentionProjection<B>,
@@ -629,53 +553,165 @@ impl<B: Backend> GroupedQueryAttention<B> {
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
         validate_projection(self, &projection, mask.as_ref(), bias.as_ref())?;
-        let [batch, _, query_sequence, _] = projection.query.dims();
-        let key = repeat_key_value(projection.key, self.query_heads)?;
-        let value = repeat_key_value(projection.value, self.query_heads)?;
-        let context = dispatch_attention(
-            projection.query,
+        let AttentionProjection {
+            query,
             key,
             value,
-            mask,
-            bias,
-            AttentionModuleOptions {
-                scale: self.scale,
-                softcap: self.softcap,
-                is_causal: causal,
+            gate,
+        } = projection;
+        let context = self.head_context(
+            Operands {
+                query,
+                key,
+                value,
+                mask,
+                bias,
+                sinks: self.sink_logits(),
             },
-            self.precision_mode,
-        )?
-        .swap_dims(1, 2)
-        .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
-        let context = match (self.output_gate, projection.gate) {
-            (AttentionOutputGate::None, None) => context,
-            (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
-            (AttentionOutputGate::Silu, Some(gate)) => context * silu(gate),
-            _ => {
-                return Err(Error::shape(
-                    "attention.gate",
-                    format!("a gate matching {:?}", self.output_gate),
-                    "a mismatched gate payload",
-                ));
+            causal,
+        )?;
+        self.project_heads(context, gate)
+    }
+
+    /// Evaluates attention in synchronized query chunks that bound every score plane.
+    ///
+    /// Each chunk evaluates complete attention rows for at most
+    /// `policy`-limited query rows, so peak score, mask, and probability planes
+    /// follow [`AttentionExecutionPolicy::plan`] instead of `O(query * key)`.
+    /// This is a storage bound, not an approximation: results equal
+    /// [`Self::attend`] with the corresponding full exclusion mask.
+    ///
+    /// Exclusions come from token masks (`true == valid`), `causal`, and
+    /// `connectivity`, as in [`AttentionConnectivity::exclusion_mask`]; queries
+    /// are the bottom-right suffix of the keys, and token masks are validated
+    /// without building any full plane. Keys start at absolute position zero
+    /// ([`MaskGeometry::new`]); a chunked-local layer over a cache that evicted
+    /// earlier keys needs [`MaskGeometry::with_key_start`], so build its mask
+    /// with [`AttentionConnectivity::exclusion_mask`] and call [`Self::attend`].
+    /// A causal sliding window over
+    /// unpadded keys also narrows every chunk's keys to
+    /// [`sliding_window_key_range`], so local layers need only
+    /// `O(chunk * (chunk + window))` score elements. Additive bias and hooks
+    /// need the full plane and are not supported here; use [`Self::attend`] or
+    /// [`Self::attend_with_hooks`]. The backend is synchronized between chunks
+    /// so dropped workspaces can be reclaimed. Autodiff backends, whose tape
+    /// would retain every chunk anyway, evaluate one unbounded call with the
+    /// same values ([`AttentionExecutionPolicy::effective_on`]), exactly as the
+    /// Muse and MLA attention paths do; size training memory accordingly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for an invalid `policy` (checked on every
+    /// backend), and the projection, mask, and chunk-limit errors of the
+    /// unbounded path.
+    pub fn attend_bounded(
+        &self,
+        projection: AttentionProjection<B>,
+        query_mask: Option<&TokenMask<B>>,
+        key_mask: Option<&TokenMask<B>>,
+        causal: bool,
+        connectivity: AttentionConnectivity,
+        policy: AttentionExecutionPolicy,
+    ) -> Result<Tensor<B, 3>> {
+        validate_projection(self, &projection, None, None)?;
+        let [batch, _, query_sequence, _] = projection.query.dims();
+        let key_sequence = projection.key.dims()[2];
+        let device = projection.query.device();
+        policy.validate()?;
+        let policy = policy.effective_on::<B>(&device);
+        let exclusions = ExclusionPlan::new(
+            connectivity,
+            causal,
+            MaskGeometry::new(batch, self.query_heads, query_sequence, key_sequence),
+            query_mask,
+            key_mask,
+            &device,
+        )?;
+        // Column positions make a causal window's key union narrow and verified.
+        let window = match connectivity {
+            AttentionConnectivity::SlidingWindow { window } if causal && key_mask.is_none() => {
+                Some(window)
             }
+            _ => None,
         };
-        operations::linear(context, &self.o_proj)
+        // `ExclusionPlan::new` validated the window as non-zero and the keys as
+        // at least as long as the queries. Every planned chunk therefore has a
+        // window key range within the verified bound, and `validate_chunk`
+        // below accepts it (`plan::lemma_window_chunk_admitted`, which builds
+        // on `plan::lemma_planned_chunk_fits_one_call`).
+        let key_bound = window.map_or(key_sequence, |window| {
+            plan::windowed_key_bound(
+                policy.maximum_query_tokens(query_sequence),
+                window,
+                key_sequence,
+            )
+        });
+        let plan = policy.plan(batch, self.query_heads, query_sequence, key_bound)?;
+        // `effective_on` made the policy unbounded on autodiff backends, so a
+        // multi-chunk plan here is always an inference plan.
+        let chunked = plan.chunk_count() > 1;
+        let AttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let mut contexts = Vec::with_capacity(plan.chunk_count());
+        for rows in plan.query_ranges() {
+            let keys = match window {
+                Some(window) => {
+                    sliding_window_key_range(query_sequence, key_sequence, rows.clone(), window)
+                        .ok_or_else(|| {
+                            Error::configuration(
+                                "attention.bounded",
+                                "sliding-window chunk has no key range",
+                            )
+                        })?
+                }
+                None => 0..key_sequence,
+            };
+            policy.validate_chunk(batch, self.query_heads, rows.len(), keys.len())?;
+            let context = dispatch::evaluate(
+                Operands {
+                    query: query.clone().narrow(2, rows.start, rows.len()),
+                    key: key.clone().narrow(2, keys.start, keys.len()),
+                    value: value.clone().narrow(2, keys.start, keys.len()),
+                    mask: exclusions.chunk(rows, keys, self.query_heads)?,
+                    bias: None,
+                    sinks: self.sink_logits(),
+                },
+                self.module_options(false),
+                self.precision_mode,
+            )?;
+            if chunked {
+                B::sync(&device).map_err(|error| {
+                    Error::BackendCapability(format!(
+                        "failed to synchronize a bounded attention chunk: {error}"
+                    ))
+                })?;
+                B::memory_cleanup(&device);
+            }
+            contexts.push(context);
+        }
+        self.project_heads(Tensor::cat(contexts, 2), gate)
     }
 
     /// Evaluates attention with selected Q/K/V, score, pattern, or head edits.
     ///
     /// Q/K/V points observe the supplied projection: after any normalization
     /// and positional transforms already performed by the caller, with native
-    /// KV heads before grouped-query repetition. Head context is
+    /// KV heads (`[batch, kv_head, token, head_dim]` for K/V). Head context is
     /// `[batch, query_head, query_token, head_dim]` before the output gate and
     /// projection. These points preserve the configured attention dispatch.
     ///
     /// Scores and patterns require [`AttentionPrecisionMode::EagerFp32Softmax`]
     /// because backend-native kernels do not expose a portable intermediate
     /// arithmetic graph. Scores are scaled and softcapped, before exclusion
-    /// masks and additive bias. Patterns follow softmax and the cast back to
-    /// the query dtype. Selecting either point materializes the full quadratic
-    /// score plane; callers must provision memory for it.
+    /// masks and additive bias, as `[batch, query_head, query_token, key_token]`.
+    /// Patterns follow softmax and the cast back to the query dtype. With
+    /// attention sinks the pattern excludes the dropped sink column, so its rows
+    /// sum to `1 - p_sink`. Selecting either point materializes the full
+    /// quadratic score plane; callers must provision memory for it.
     ///
     /// Pattern edits need not remain normalized or positive, allowing direct
     /// ablation and other experiments. Excluded links are zeroed again after
@@ -757,7 +793,8 @@ impl<B: Backend> GroupedQueryAttention<B> {
         let inspect_projection = [points.query(), points.key(), points.value()]
             .into_iter()
             .any(|point| hooks.needs_point(point.info()));
-        if !inspect_projection && !materialize && !hooks.needs_point(points.head_context().info()) {
+        let inspect_context = hooks.needs_point(points.head_context().info());
+        if !inspect_projection && !materialize && !inspect_context {
             return self.attend(projection, mask, bias, causal);
         }
         if materialize && self.precision_mode != AttentionPrecisionMode::EagerFp32Softmax {
@@ -770,113 +807,107 @@ impl<B: Backend> GroupedQueryAttention<B> {
         projection.query = hooks.apply(points.query(), projection.query)?;
         projection.key = hooks.apply(points.key(), projection.key)?;
         projection.value = hooks.apply(points.value(), projection.value)?;
-        if !materialize && !hooks.needs_point(points.head_context().info()) {
+        if !materialize && !inspect_context {
             return self.attend(projection, mask, bias, causal);
         }
-
-        let [batch, _, query_sequence, head_dim] = projection.query.dims();
-        let key_sequence = projection.key.dims()[2];
-        let key = repeat_key_value(projection.key, self.query_heads)?;
-        let value = repeat_key_value(projection.value, self.query_heads)?;
+        let AttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let operands = Operands {
+            query,
+            key,
+            value,
+            mask,
+            bias,
+            sinks: self.sink_logits(),
+        };
         let context = if materialize {
-            let scale = self
-                .scale
-                .unwrap_or_else(|| (head_dim as f64).sqrt().recip());
-            let scores = projection.query.matmul(key.swap_dims(2, 3)) * scale;
-            let scores = if let Some(softcap) = self.softcap {
-                (scores / softcap).tanh() * softcap
-            } else {
-                scores
-            };
-            let scores = hooks.apply(points.scores(), scores)?;
-            let exclusion = if causal {
-                let causal_mask = bottom_right_causal_mask(
-                    batch,
-                    self.query_heads,
-                    query_sequence,
-                    key_sequence,
-                    &scores.device(),
-                )?;
-                Some(mask.map_or(causal_mask.clone(), |mask| mask.bool_or(causal_mask)))
-            } else {
-                mask
-            };
-            let scores = if let Some(exclusion) = &exclusion {
-                scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
-            } else {
-                scores
-            };
-            let scores = if let Some(bias) = bias {
-                scores + bias
-            } else {
-                scores
-            };
-            let pattern = fp32_softmax(scores, exclusion.clone());
-            let pattern = if let Some(transform) = transform {
-                let shape = pattern.dims();
-                let dtype = pattern.dtype();
-                let device = pattern.device();
-                let pattern = transform(pattern).map_err(|error| {
-                    Error::configuration(
-                        "attention.pattern_transform",
-                        format!("structural transform failed: {error}"),
-                    )
-                })?;
-                if pattern.dims() != shape || pattern.dtype() != dtype || pattern.device() != device
-                {
-                    return Err(Error::configuration(
-                        "attention.pattern_transform",
-                        "structural transform must preserve pattern shape, dtype, and device",
-                    ));
-                }
-                if let Some(exclusion) = &exclusion {
-                    pattern.mask_fill(exclusion.clone(), 0.0)
-                } else {
-                    pattern
-                }
-            } else {
-                pattern
-            };
-            let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
-                Ok(if let Some(exclusion) = &exclusion {
-                    pattern.mask_fill(exclusion.clone(), 0.0)
-                } else {
-                    pattern
-                })
-            })?;
-            pattern.matmul(value)
+            self.materialized_context(operands, causal, points, hooks, transform)?
         } else {
-            dispatch_attention(
-                projection.query,
-                key,
-                value,
-                mask,
-                bias,
-                AttentionModuleOptions {
-                    scale: self.scale,
-                    softcap: self.softcap,
-                    is_causal: causal,
-                },
-                self.precision_mode,
-            )?
+            self.head_context(operands, causal)?
         };
-        let context = hooks
-            .apply(points.head_context(), context)?
-            .swap_dims(1, 2)
-            .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
-        let context = match (self.output_gate, projection.gate) {
-            (AttentionOutputGate::None, None) => context,
-            (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
-            (AttentionOutputGate::Silu, Some(gate)) => context * silu(gate),
-            _ => {
-                return Err(Error::shape(
-                    "attention.gate",
-                    format!("a gate matching {:?}", self.output_gate),
-                    "a mismatched gate payload",
-                ));
-            }
+        let context = hooks.apply(points.head_context(), context)?;
+        self.project_heads(context, gate)
+    }
+
+    /// Evaluates per-head context `[batch, query_head, query, head_dim]` with the configured graph.
+    fn head_context(&self, operands: Operands<B>, causal: bool) -> Result<Tensor<B, 4>> {
+        dispatch::evaluate(operands, self.module_options(causal), self.precision_mode)
+    }
+
+    /// Evaluates the eager graph while exposing scores and patterns to hooks.
+    ///
+    /// Scores and patterns are per query head even though the matmuls run on
+    /// folded native KV heads. A structural transform runs before pattern
+    /// hooks; exclusions are re-applied after the transform and every edit.
+    fn materialized_context(
+        &self,
+        operands: Operands<B>,
+        causal: bool,
+        points: AttentionPoints,
+        hooks: &mut Hooks<'_, B>,
+        transform: Option<&mut PatternTransform<'_, B>>,
+    ) -> Result<Tensor<B, 4>> {
+        let geometry = operands.geometry()?;
+        let Operands {
+            query,
+            key,
+            value,
+            mask,
+            bias,
+            sinks,
+        } = operands;
+        let device = query.device();
+        let scale = self.scale.unwrap_or_else(|| default_scale(self.head_dim));
+        let scores = hooks.apply(
+            points.scores(),
+            scaled_scores(query, key, scale, self.softcap),
+        )?;
+        let exclusion = union_exclusions(mask, causal_exclusion(causal, geometry, &device)?);
+        let pattern = eager_probabilities(scores, exclusion.as_ref(), bias, sinks);
+        let pattern = match transform {
+            Some(transform) => apply_pattern_transform(transform, pattern, exclusion.as_ref())?,
+            None => pattern,
         };
-        operations::linear(context, &self.o_proj)
+        let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
+            Ok(zero_excluded(pattern, exclusion.as_ref()))
+        })?;
+        Ok(grouped_mix(pattern, value))
+    }
+
+    /// Applies the output gate and projection to per-head context `[batch, query_head, query, head_dim]`.
+    fn project_heads(
+        &self,
+        context: Tensor<B, 4>,
+        gate: Option<Tensor<B, 3>>,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, _, query_sequence, _] = context.dims();
+        let context = context.swap_dims(1, 2).reshape([
+            batch,
+            query_sequence,
+            self.query_heads * self.head_dim,
+        ]);
+        operations::linear(
+            apply_output_gate(context, gate, self.output_gate)?,
+            &self.o_proj,
+        )
+    }
+
+    /// Returns the learned sink logits, if this module has them.
+    fn sink_logits(&self) -> Option<Tensor<B, 1>> {
+        self.sinks.as_ref().map(Param::val)
+    }
+
+    /// Returns Burn attention options for this module and causal flag.
+    fn module_options(&self, causal: bool) -> AttentionModuleOptions {
+        AttentionModuleOptions {
+            scale: self.scale,
+            softcap: self.softcap,
+            is_causal: causal,
+        }
     }
 
     /// Evaluates attention without RoPE or relative-position bias.
@@ -901,152 +932,52 @@ impl<B: Backend> GroupedQueryAttention<B> {
     }
 }
 
-/// Dispatches either backend-native or explicitly ordered eager attention.
+/// Multiplies flattened head outputs by the configured output gate.
 ///
-/// The eager mode computes score scaling and optional softcapping in the input
-/// dtype, applies exclusions and additive bias, promotes only the softmax to
-/// F32, casts probabilities back, and multiplies by `V` in the original dtype.
-/// Callers must provide shape-compatible Q/K/V, mask, and bias tensors.
-pub(crate) fn dispatch_attention<B: Backend>(
-    query: Tensor<B, 4>,
-    key: Tensor<B, 4>,
-    value: Tensor<B, 4>,
-    mask: Option<Tensor<B, 4, Bool>>,
-    bias: Option<Tensor<B, 4>>,
-    options: AttentionModuleOptions,
-    precision_mode: AttentionPrecisionMode,
-) -> Result<Tensor<B, 4>> {
-    if precision_mode == AttentionPrecisionMode::BackendDefault {
-        return Ok(attention(query, key, value, mask, bias, options));
+/// `Sigmoid` computes `context * sigmoid(gate)` and `Silu` computes
+/// `context * gate * sigmoid(gate)`; the gate must be present exactly when a
+/// gating convention is configured.
+fn apply_output_gate<B: Backend>(
+    context: Tensor<B, 3>,
+    gate: Option<Tensor<B, 3>>,
+    kind: AttentionOutputGate,
+) -> Result<Tensor<B, 3>> {
+    match (kind, gate) {
+        (AttentionOutputGate::None, None) => Ok(context),
+        (AttentionOutputGate::Sigmoid, Some(gate)) => Ok(context * sigmoid(gate)),
+        (AttentionOutputGate::Silu, Some(gate)) => Ok(context * silu(gate)),
+        _ => Err(Error::shape(
+            "attention.gate",
+            format!("a gate matching {kind:?}"),
+            "a mismatched gate payload",
+        )),
     }
-    let [batch, heads, query_sequence, head_dim] = query.dims();
-    let key_sequence = key.dims()[2];
-    let scale = options
-        .scale
-        .unwrap_or_else(|| (head_dim as f64).sqrt().recip());
-    let scores = query.matmul(key.swap_dims(2, 3)) * scale;
-    let scores = if let Some(softcap) = options.softcap {
-        (scores / softcap).tanh() * softcap
-    } else {
-        scores
-    };
-    let causal_mask = if options.is_causal {
-        Some(bottom_right_causal_mask(
-            batch,
-            heads,
-            query_sequence,
-            key_sequence,
-            &scores.device(),
-        )?)
-    } else {
-        None
-    };
-    let exclusion = match (mask, causal_mask) {
-        (Some(mask), Some(causal_mask)) => Some(mask.bool_or(causal_mask)),
-        (Some(mask), None) => Some(mask),
-        (None, Some(causal_mask)) => Some(causal_mask),
-        (None, None) => None,
-    };
-    let scores = if let Some(exclusion) = &exclusion {
-        scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
-    } else {
-        scores
-    };
-    let scores = if let Some(bias) = bias {
-        scores + bias
-    } else {
-        scores
-    };
-    let probabilities = fp32_softmax(scores, exclusion);
-    Ok(probabilities.matmul(value))
 }
 
-/// Applies FP32 softmax and defines fully excluded rows as exact zeros.
+/// Runs a structural pattern transform and checks that it preserves the pattern contract.
 ///
-/// Additive bias and score interventions can also remove all row support by
-/// producing only negative infinities, even without a boolean exclusion mask.
-pub(crate) fn fp32_softmax<B: Backend>(
-    scores: Tensor<B, 4>,
-    exclusion: Option<Tensor<B, 4, Bool>>,
-) -> Tensor<B, 4> {
-    let dtype = scores.dtype();
-    let shape = scores.dims();
-    let unsupported_row = scores
-        .clone()
-        .equal_elem(f32::NEG_INFINITY)
-        .all_dim(3)
-        .expand(shape);
-    let scores = scores.mask_fill(unsupported_row.clone(), 0.0);
-    let Some(exclusion) = exclusion else {
-        return softmax(scores.cast(DType::F32), 3)
-            .mask_fill(unsupported_row, 0.0)
-            .cast(dtype);
-    };
-    let row_has_key = exclusion
-        .clone()
-        .bool_not()
-        .int()
-        .sum_dim(3)
-        .greater_elem(0)
-        .expand(shape);
-    softmax(
-        scores
-            .cast(DType::F32)
-            .mask_fill(row_has_key.bool_not(), 0.0),
-        3,
-    )
-    .mask_fill(exclusion, 0.0)
-    .mask_fill(unsupported_row, 0.0)
-    .cast(dtype)
-}
-
-/// Builds the bottom-right causal exclusion `key > query + (K - Q)`.
-///
-/// Bottom-right alignment is essential for cached decoding, where a query
-/// chunk is a suffix of a longer key sequence. `true` excludes a pair.
-pub(crate) fn bottom_right_causal_mask<B: Backend>(
-    batch: usize,
-    heads: usize,
-    query_sequence: usize,
-    key_sequence: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let query_end = i64::try_from(query_sequence)
-        .map_err(|_| Error::configuration("attention.causal_mask", "query length exceeds i64"))?;
-    let key_end = i64::try_from(key_sequence)
-        .map_err(|_| Error::configuration("attention.causal_mask", "key length exceeds i64"))?;
-    let offset = key_end - query_end;
-    let query = (Tensor::<B, 1, Int>::arange(0..query_end, device) + offset)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([batch, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..key_end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([batch, heads, query_sequence, key_sequence]);
-    Ok(key.greater(query))
-}
-
-/// Repeats native KV heads into contiguous query-head groups for one attention call.
-pub fn repeat_key_value<B: Backend>(
-    tensor: Tensor<B, 4>,
-    query_heads: usize,
+/// The transform's result is re-masked so it cannot reactivate excluded links.
+fn apply_pattern_transform<B: Backend>(
+    transform: &mut PatternTransform<'_, B>,
+    pattern: Tensor<B, 4>,
+    exclusion: Option<&Tensor<B, 4, Bool>>,
 ) -> Result<Tensor<B, 4>> {
-    let [batch, key_value_heads, sequence, head_dim] = tensor.dims();
-    if key_value_heads == 0 || query_heads == 0 || !query_heads.is_multiple_of(key_value_heads) {
+    let shape = pattern.dims();
+    let dtype = pattern.dtype();
+    let device = pattern.device();
+    let pattern = transform(pattern).map_err(|error| {
+        Error::configuration(
+            "attention.pattern_transform",
+            format!("structural transform failed: {error}"),
+        )
+    })?;
+    if pattern.dims() != shape || pattern.dtype() != dtype || pattern.device() != device {
         return Err(Error::configuration(
-            "attention.head_grouping",
-            format!(
-                "query_heads ({query_heads}) must be non-zero and divisible by key_value_heads ({key_value_heads})"
-            ),
+            "attention.pattern_transform",
+            "structural transform must preserve pattern shape, dtype, and device",
         ));
     }
-    let groups = query_heads / key_value_heads;
-    if groups == 1 {
-        return Ok(tensor);
-    }
-    Ok(tensor
-        .unsqueeze_dim::<5>(2)
-        .expand([batch, key_value_heads, groups, sequence, head_dim])
-        .reshape([batch, query_heads, sequence, head_dim]))
+    Ok(zero_excluded(pattern, exclusion))
 }
 
 /// Validates projected tensor topology before dispatching a backend attention kernel.
@@ -1056,118 +987,29 @@ fn validate_projection<B: Backend>(
     mask: Option<&Tensor<B, 4, Bool>>,
     bias: Option<&Tensor<B, 4>>,
 ) -> Result<()> {
-    let [batch, query_heads, query_sequence, query_dim] = projection.query.dims();
-    let [key_batch, key_value_heads, key_sequence, key_dim] = projection.key.dims();
-    let [value_batch, value_heads, value_sequence, value_dim] = projection.value.dims();
     // External callers can assemble projections without going through project().
     // Preserve its non-empty contract here; in particular, an empty key axis
     // cannot define the probability distribution required by softmax attention.
-    if batch == 0 || query_sequence == 0 || key_sequence == 0 {
-        return Err(Error::shape(
-            "attention.projection",
-            "non-empty batch, query sequence, and key sequence",
-            format!(
-                "query={:?}, key={:?}",
-                projection.query.dims(),
-                projection.key.dims()
-            ),
+    // The shape checks are the verified `geometry::projection_fault`.
+    let layout = HeadLayout {
+        query_heads: attention.query_heads,
+        key_value_heads: attention.key_value_heads,
+        head_dim: attention.head_dim,
+        gated: attention.output_gate != AttentionOutputGate::None,
+    };
+    let fault = projection_fault(
+        layout,
+        projection.query.dims(),
+        projection.key.dims(),
+        projection.value.dims(),
+        projection.gate.as_ref().map(Tensor::dims),
+        mask.map(Tensor::dims),
+        bias.map(Tensor::dims),
+    );
+    if let Some(fault) = fault {
+        return Err(projection_shape_error(
+            attention, projection, mask, bias, fault,
         ));
-    }
-    let expected_query = [
-        batch,
-        attention.query_heads,
-        query_sequence,
-        attention.head_dim,
-    ];
-    if [batch, query_heads, query_sequence, query_dim] != expected_query {
-        return Err(Error::shape(
-            "attention.query",
-            format!("{:?}", expected_query),
-            format!("{:?}", projection.query.dims()),
-        ));
-    }
-    let expected_key = [
-        batch,
-        attention.key_value_heads,
-        key_sequence,
-        attention.head_dim,
-    ];
-    if [key_batch, key_value_heads, key_sequence, key_dim] != expected_key {
-        return Err(Error::shape(
-            "attention.key",
-            format!("{:?}", expected_key),
-            format!("{:?}", projection.key.dims()),
-        ));
-    }
-    let expected_value = [
-        batch,
-        attention.key_value_heads,
-        key_sequence,
-        attention.head_dim,
-    ];
-    if [value_batch, value_heads, value_sequence, value_dim] != expected_value {
-        return Err(Error::shape(
-            "attention.value",
-            format!("{:?}", expected_value),
-            format!("{:?}", projection.value.dims()),
-        ));
-    }
-    let expected_gate = [
-        batch,
-        query_sequence,
-        attention.query_heads * attention.head_dim,
-    ];
-    match (attention.output_gate, projection.gate.as_ref()) {
-        (AttentionOutputGate::None, None) => {}
-        (AttentionOutputGate::None, Some(_)) => {
-            return Err(Error::shape(
-                "attention.gate",
-                "no gate for ungated attention",
-                "a gate tensor",
-            ));
-        }
-        (_, Some(gate)) if gate.dims() == expected_gate => {}
-        (_, Some(gate)) => {
-            return Err(Error::shape(
-                "attention.gate",
-                format!("{:?}", expected_gate),
-                format!("{:?}", gate.dims()),
-            ));
-        }
-        (_, None) => {
-            return Err(Error::shape(
-                "attention.gate",
-                format!("{:?}", expected_gate),
-                "no gate tensor",
-            ));
-        }
-    }
-    let expected_additive = [batch, attention.query_heads, query_sequence, key_sequence];
-    if let Some(mask) = mask
-        && mask.dims() != expected_additive
-    {
-        return Err(Error::shape(
-            "attention.mask",
-            format!("{:?}", expected_additive),
-            format!("{:?}", mask.dims()),
-        ));
-    }
-    if let Some(bias) = bias {
-        let [bias_batch, bias_heads, bias_query, bias_key] = bias.dims();
-        if ![1, batch].contains(&bias_batch)
-            || bias_heads != attention.query_heads
-            || bias_query != query_sequence
-            || bias_key != key_sequence
-        {
-            return Err(Error::shape(
-                "attention.bias",
-                format!(
-                    "[batch in {{1, {batch}}}, {}, {query_sequence}, {key_sequence}]",
-                    attention.query_heads
-                ),
-                format!("{:?}", bias.dims()),
-            ));
-        }
     }
 
     let dtype = projection.query.dtype();
@@ -1212,6 +1054,17 @@ fn validate_projection<B: Backend>(
     if let Some(bias) = bias {
         validate_type("attention.bias", bias.dtype(), &bias.device())?;
     }
+    if let Some(sinks) = &attention.sinks {
+        let sinks = sinks.val();
+        if sinks.dims() != [attention.query_heads] {
+            return Err(Error::shape(
+                "attention.sinks",
+                format!("[{}]", attention.query_heads),
+                format!("{:?}", sinks.dims()),
+            ));
+        }
+        validate_type("attention.sinks", sinks.dtype(), &sinks.device())?;
+    }
     let output_weight = attention.o_proj.weight.val();
     if output_weight.device() != device
         || (!matches!(output_weight.dtype(), DType::QFloat(_)) && output_weight.dtype() != dtype)
@@ -1232,7 +1085,103 @@ fn validate_projection<B: Backend>(
     Ok(())
 }
 
+/// Describes one projection shape fault with the expected and actual extents.
+fn projection_shape_error<B: Backend>(
+    attention: &GroupedQueryAttention<B>,
+    projection: &AttentionProjection<B>,
+    mask: Option<&Tensor<B, 4, Bool>>,
+    bias: Option<&Tensor<B, 4>>,
+    fault: ProjectionFault,
+) -> Error {
+    let [batch, _, query_sequence, _] = projection.query.dims();
+    let key_sequence = projection.key.dims()[2];
+    let expected_query = [
+        batch,
+        attention.query_heads,
+        query_sequence,
+        attention.head_dim,
+    ];
+    let expected_key_value = [
+        batch,
+        attention.key_value_heads,
+        key_sequence,
+        attention.head_dim,
+    ];
+    let expected_gate = [
+        batch,
+        query_sequence,
+        attention.query_heads * attention.head_dim,
+    ];
+    let expected_additive = [batch, attention.query_heads, query_sequence, key_sequence];
+    match fault {
+        ProjectionFault::EmptyAxis => Error::shape(
+            "attention.projection",
+            "non-empty batch, query sequence, and key sequence",
+            format!(
+                "query={:?}, key={:?}",
+                projection.query.dims(),
+                projection.key.dims()
+            ),
+        ),
+        ProjectionFault::QueryShape => Error::shape(
+            "attention.query",
+            format!("{:?}", expected_query),
+            format!("{:?}", projection.query.dims()),
+        ),
+        ProjectionFault::KeyShape => Error::shape(
+            "attention.key",
+            format!("{:?}", expected_key_value),
+            format!("{:?}", projection.key.dims()),
+        ),
+        ProjectionFault::ValueShape => Error::shape(
+            "attention.value",
+            format!("{:?}", expected_key_value),
+            format!("{:?}", projection.value.dims()),
+        ),
+        ProjectionFault::UnexpectedGate => Error::shape(
+            "attention.gate",
+            "no gate for ungated attention",
+            "a gate tensor",
+        ),
+        ProjectionFault::GateShape => Error::shape(
+            "attention.gate",
+            format!("{:?}", expected_gate),
+            format!(
+                "{:?}",
+                projection
+                    .gate
+                    .as_ref()
+                    .map(Tensor::dims)
+                    .unwrap_or_default()
+            ),
+        ),
+        ProjectionFault::MissingGate => Error::shape(
+            "attention.gate",
+            format!("{:?}", expected_gate),
+            "no gate tensor",
+        ),
+        ProjectionFault::MaskShape => Error::shape(
+            "attention.mask",
+            format!("{:?}", expected_additive),
+            format!("{:?}", mask.map(Tensor::dims).unwrap_or_default()),
+        ),
+        ProjectionFault::BiasShape => Error::shape(
+            "attention.bias",
+            format!(
+                "[batch in {{1, {batch}}}, {}, {query_sequence}, {key_sequence}]",
+                attention.query_heads
+            ),
+            format!("{:?}", bias.map(Tensor::dims).unwrap_or_default()),
+        ),
+    }
+}
+
 /// Converts semantic valid-token masks into Burn's `true == excluded` mask.
+///
+/// Query masks are `[batch, query]` and key masks `[batch, key]`, both with
+/// `true == valid`. The result is `[batch, heads, query, key]`: one Boolean
+/// `[batch, 1, query, key]` plane expanded (not copied) across heads, or
+/// `None` when neither mask is supplied.
 pub fn padding_attention_mask<B: Backend>(
     query_mask: Option<&TokenMask<B>>,
     key_mask: Option<&TokenMask<B>>,
@@ -1247,50 +1196,10 @@ pub fn padding_attention_mask<B: Backend>(
             "batch, heads, query sequence, and key sequence must be non-zero",
         ));
     }
-    let query_invalid = if let Some(mask) = query_mask {
-        let [mask_batch, mask_sequence] = mask.as_tensor().dims();
-        if [mask_batch, mask_sequence] != [batch, query_sequence] {
-            return Err(Error::shape(
-                "query_mask",
-                format!("[{batch}, {query_sequence}]"),
-                format!("[{mask_batch}, {mask_sequence}]"),
-            ));
-        }
-        Some(
-            mask.as_tensor()
-                .clone()
-                .bool_not()
-                .reshape([batch, 1, query_sequence, 1])
-                .expand([batch, heads, query_sequence, key_sequence]),
-        )
-    } else {
-        None
-    };
-    let key_invalid = if let Some(mask) = key_mask {
-        let [mask_batch, mask_sequence] = mask.as_tensor().dims();
-        if [mask_batch, mask_sequence] != [batch, key_sequence] {
-            return Err(Error::shape(
-                "key_mask",
-                format!("[{batch}, {key_sequence}]"),
-                format!("[{mask_batch}, {mask_sequence}]"),
-            ));
-        }
-        Some(
-            mask.as_tensor()
-                .clone()
-                .bool_not()
-                .reshape([batch, 1, 1, key_sequence])
-                .expand([batch, heads, query_sequence, key_sequence]),
-        )
-    } else {
-        None
-    };
-    Ok(match (query_invalid, key_invalid) {
-        (Some(query), Some(key)) => Some(query.bool_or(key)),
-        (Some(query), None) => Some(query),
-        (None, Some(key)) => Some(key),
-        (None, None) => None,
-    })
+    Ok(
+        padding_plane(query_mask, key_mask, batch, query_sequence, key_sequence)?
+            .map(|plane| plane.expand([batch, heads, query_sequence, key_sequence])),
+    )
 }
 
 #[cfg(test)]

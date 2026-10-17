@@ -1,0 +1,493 @@
+{
+ "schema_version": 1,
+ "scope": "official_half_precision_calibration_not_a_gate_pass",
+ "date_utc": "2026-10-17",
+ "advertised_supported": false,
+ "passed": true,
+ "source_commit": "da92bfd07477457d4dd27f7cc62cd4c337703602",
+ "sources": [
+  {
+   "commit": "896b4ec5ae8e18b0b9ca07760eb284d52088c1d8",
+   "log": "half-precision-calibration-20261017/generation.log",
+   "description": "the seven official BF16 bundles were generated from this clean tree by the unchanged scripts/generate_causal_lm_reference.py, under the shared heavy-model lock"
+  },
+  {
+   "commit": "da92bfd07477457d4dd27f7cc62cd4c337703602",
+   "log": "half-precision-calibration-20261017/calibration.log",
+   "description": "adds the half-precision Llama-family and Gemma gates (f48859f, da92bfd); the bundle-only calibration tests ran from this clean tree"
+  }
+ ],
+ "cargo_lock_sha256": "119caecd2cf4ab40dcfb542314984045f3b2f0740d75e00494ecdec99c16dbc9",
+ "toolchain": {
+  "rustc": "1.94.0-nightly",
+  "commit_hash": "4f14395c37db4c1be874e6b0ace6721674223c22",
+  "host": "aarch64-apple-darwin",
+  "burn": "0.21.0",
+  "profile": "debug test profile, default features (std,flex)",
+  "python": "3.11.9",
+  "torch": "2.10.0",
+  "transformers": "5.2.0"
+ },
+ "host": "Apple M3 Max, 96 GiB unified memory, macOS 27.0.1 (26A434), shared with desktop applications and other sessions; the generation took the shared /Users/nover/repos/transformers-worktrees/.heavy-model.lock after no source gate was running",
+ "harness": "heavy_generate.sh waited for source gates, took the lock, refused a dirty tree, and ran generate_bf16_bundles.py, which reran scripts/generate_causal_lm_reference.py --dtype bfloat16 under /usr/bin/time -l for each twin with the twin's model_dir, repository, revision, prompt texts in order and greedy length, then checked the token IDs. The log abbreviates multi-line prompt texts in its command lines; the arguments were the twin manifests' exact texts. run_calibration.sh ran each ignored calibration test from its prebuilt test binary in its own process under /usr/bin/time -l.",
+ "generator": {
+  "script": "scripts/generate_causal_lm_reference.py",
+  "script_sha256": "e31c7ff373a3612fa53e76ab98e164e41f91db49d77fd02618d8e7b523b6fe37",
+  "options": "--dtype bfloat16; no --num-hidden-layers and no --bf16-resident (every twin evaluates the whole model)"
+ },
+ "runner_scripts": {
+  "half-precision-calibration-20261017/heavy_generate.sh": "b4b8f8d0f762ae4f61ce4de960a04e4a063b45f8ee0570eb99d9f1c37a61d42b",
+  "half-precision-calibration-20261017/generate_bf16_bundles.py": "509a485af8922a5689a4a4e4f06e23307d3608c6ccda44aff542ad163e556550",
+  "half-precision-calibration-20261017/run_calibration.sh": "8730e28a72c4ac28a919ec601ad8d2b0024b2c8b4f0daa428270b15b0f963c0b"
+ },
+ "logs": {
+  "half-precision-calibration-20261017/generation.log": "0d724978add2e1c5ba23314b75322e236a41820f2ea562222a438c165e6ef4aa",
+  "half-precision-calibration-20261017/calibration.log": "2a58f7e6d5124ce58bfb9009ae97620d0e7035e98874647c7872d8e7bc8e81bf"
+ },
+ "calibration_binaries": {
+  "llama_family_artifacts": "e0dceaaaaef2362a9f8a52635f5cf781b3cd1e6807ea247dcb657bdd6cbc3d68",
+  "gemma_artifacts": "d9f35d9328283ab58c32999c3394a1bfe5b828e3a3acdf6216e46b0a80db9f2a"
+ },
+ "rule": {
+  "module": "tests/support/half_precision_calibration.rs",
+  "slack": 1.2,
+  "statistics": "per prompt, the maximum and the mean |Δ| of the official BF16 logits from the F32 (F64 for Qwen2-7B) twin over every position and vocabulary entry; each difference exact in F64, the mean summed in F64",
+  "bounds": "a half-precision run's maximum and mean |Δ| per prompt may reach slack times the official ones (inclusive); single rows (cached prefill, batched rows, Gemma long-context chunk ends) use the maximum bound of their prompt",
+  "greedy": "teacher-forced steps are compared only where the twin's top-2 margin exceeds twice prompt 0's maximum bound",
+  "self_consistency": {
+   "F16": 0.5,
+   "BF16": 0.5
+  },
+  "slack_basis": "largest Burn/official ratio of a per-prompt statistic measured on gpt-oss-20b (all 24 blocks, against gpt-oss-20b-6cee5e81-f32-reference.bundle): 1.1725, the Flex/BF16 prompt-2 mean 0.033998 over the official 0.028996 (reference-precision-followups-20261016.json, runs at c15f24e and gpt-oss-20b-transformers-bf16-vs-f32-bundles), rounded up to two significant digits"
+ },
+ "bundles": [
+  {
+   "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16",
+   "reference_json_sha256": "5f7bfb10d8a164ec94b13669fbd3829d84b2d049ec55b691c26c1f980f9c348c",
+   "twin": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723",
+   "twin_reference_json_sha256": "3d3235dc28250bf45284bcf16cb8525db6b1f800f7ec700286909e4afea05010",
+   "twin_dtype": "float32",
+   "family_test": "llama_family_artifacts",
+   "repository": "HuggingFaceTB/SmolLM-135M",
+   "revision": "1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "model_dir": "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "config_sha256": "a1fe6f43e20f7a6c6dbc6380222af9526b5cef262446391a281c038249e3e3b7",
+   "generated_at": "2026-10-17T05:57:47+00:00",
+   "wall_seconds": 4.11,
+   "maximum_resident_set_bytes": 1143488512,
+   "peak_memory_footprint_bytes": 562726424,
+   "prompts": [
+    {
+     "tokens": 5,
+     "official_max_abs_delta": 1.4637150764465332,
+     "max_position": 0,
+     "max_token": 5166,
+     "official_mean_abs_delta": 0.19027704019370442,
+     "bound_max": 1.7564580917358399,
+     "bound_mean": 0.2283324482324453
+    },
+    {
+     "tokens": 18,
+     "official_max_abs_delta": 1.1012539863586426,
+     "max_position": 0,
+     "max_token": 19178,
+     "official_mean_abs_delta": 0.07548485835081199,
+     "bound_max": 1.321504783630371,
+     "bound_mean": 0.09058183002097439
+    },
+    {
+     "tokens": 8,
+     "official_max_abs_delta": 1.6523456573486328,
+     "max_position": 0,
+     "max_token": 7953,
+     "official_mean_abs_delta": 0.0705334668252572,
+     "bound_max": 1.9828147888183594,
+     "bound_mean": 0.08464016019030864
+    }
+   ],
+   "greedy": {
+    "steps": 32,
+    "threshold": 3.5129161834716798,
+    "decisive_steps": []
+   }
+  },
+  {
+   "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16",
+   "reference_json_sha256": "4722fa1374d6e45b2b41f5cc9b6dc882333ea141cd08a14afa2f92865035a804",
+   "twin": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2",
+   "twin_reference_json_sha256": "70fc11946cb9adc97af7a173d419438a9ca2350940b8519ddb33497172985b3a",
+   "twin_dtype": "float32",
+   "family_test": "llama_family_artifacts",
+   "repository": "Qwen/Qwen3-4B",
+   "revision": "531c80e289d6cff3a7cd8c0db8110231d23a6f7a",
+   "model_dir": "/Volumes/T9/models/Qwen/Qwen3-4B",
+   "config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+   "generated_at": "2026-10-17T05:58:11+00:00",
+   "wall_seconds": 27.91,
+   "maximum_resident_set_bytes": 8607744000,
+   "peak_memory_footprint_bytes": 428448704,
+   "prompts": [
+    {
+     "tokens": 5,
+     "official_max_abs_delta": 0.7000284194946289,
+     "max_position": 0,
+     "max_token": 330,
+     "official_mean_abs_delta": 0.07797086951588278,
+     "bound_max": 0.8400341033935547,
+     "bound_mean": 0.09356504341905933
+    },
+    {
+     "tokens": 13,
+     "official_max_abs_delta": 0.7010948657989502,
+     "max_position": 0,
+     "max_token": 15486,
+     "official_mean_abs_delta": 0.04336637812924365,
+     "bound_max": 0.8413138389587402,
+     "bound_mean": 0.052039653755092376
+    },
+    {
+     "tokens": 8,
+     "official_max_abs_delta": 0.8795242309570312,
+     "max_position": 0,
+     "max_token": 27,
+     "official_mean_abs_delta": 0.053848711138326316,
+     "bound_max": 1.0554290771484374,
+     "bound_mean": 0.06461845336599158
+    }
+   ],
+   "greedy": {
+    "steps": 32,
+    "threshold": 1.6800682067871093,
+    "decisive_steps": [
+     2,
+     4,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25,
+     27,
+     28,
+     29,
+     30,
+     31
+    ]
+   }
+  },
+  {
+   "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16",
+   "reference_json_sha256": "47cf6ca772af221541fd436d1f565b063034fa2ff16073470c82fd4dd03711ac",
+   "twin": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28",
+   "twin_reference_json_sha256": "cf399f62351665297f181c12c68f89d163315cf87001b78a62c0c0335dbd40d7",
+   "twin_dtype": "float32",
+   "family_test": "llama_family_artifacts",
+   "repository": "HuggingFaceTB/SmolLM3-3B",
+   "revision": "1fa6fa281b5c635c89171a2b53769609cc1199c6",
+   "model_dir": "/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B",
+   "config_sha256": "cef25c6da5422f151c06095e524529d9baed243ec9dc4ae7e045618b1ae06e3b",
+   "generated_at": "2026-10-17T05:58:38+00:00",
+   "wall_seconds": 26.21,
+   "maximum_resident_set_bytes": 6705758208,
+   "peak_memory_footprint_bytes": 431735792,
+   "prompts": [
+    {
+     "tokens": 5,
+     "official_max_abs_delta": 6.281063079833984,
+     "max_position": 0,
+     "max_token": 9125,
+     "official_mean_abs_delta": 0.15643366756693425,
+     "bound_max": 7.537275695800781,
+     "bound_mean": 0.1877204010803211
+    },
+    {
+     "tokens": 13,
+     "official_max_abs_delta": 6.671215057373047,
+     "max_position": 0,
+     "max_token": 9125,
+     "official_mean_abs_delta": 0.0788765337917555,
+     "bound_max": 8.005458068847656,
+     "bound_mean": 0.09465184055010659
+    },
+    {
+     "tokens": 8,
+     "official_max_abs_delta": 5.328104019165039,
+     "max_position": 0,
+     "max_token": 9125,
+     "official_mean_abs_delta": 0.17689148640009886,
+     "bound_max": 6.393724822998046,
+     "bound_mean": 0.21226978368011862
+    }
+   ],
+   "greedy": {
+    "steps": 32,
+    "threshold": 15.074551391601561,
+    "decisive_steps": []
+   }
+  },
+  {
+   "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16",
+   "reference_json_sha256": "b570f1c8d33d1a634f82e1064690b8de44f6efb3f9daf81f8930a8c43a170941",
+   "twin": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64",
+   "twin_reference_json_sha256": "a1272a0a6d5b44e733ed3a1b7845e3849cfb20237918d9926ba0ca1939ed8687",
+   "twin_dtype": "float64",
+   "family_test": "llama_family_artifacts",
+   "repository": "Qwen/Qwen2-7B",
+   "revision": "453ed1575b739b5b03ce3758b23befdb0967f40e",
+   "model_dir": "/Volumes/T9/models/Qwen/Qwen2-7B",
+   "config_sha256": "d318b49c4a29771e259d93053084eb752f5bfe69c20c4f2e041bd1017884f810",
+   "generated_at": "2026-10-17T05:59:50+00:00",
+   "wall_seconds": 47.11,
+   "maximum_resident_set_bytes": 14732427264,
+   "peak_memory_footprint_bytes": 442691128,
+   "prompts": [
+    {
+     "tokens": 5,
+     "official_max_abs_delta": 8.488914847373962,
+     "max_position": 0,
+     "max_token": 114438,
+     "official_mean_abs_delta": 0.4210097347725022,
+     "bound_max": 10.186697816848755,
+     "bound_mean": 0.5052116817270026
+    },
+    {
+     "tokens": 13,
+     "official_max_abs_delta": 6.845636606216431,
+     "max_position": 0,
+     "max_token": 108336,
+     "official_mean_abs_delta": 0.31206549464708855,
+     "bound_max": 8.214763927459716,
+     "bound_mean": 0.37447859357650626
+    },
+    {
+     "tokens": 8,
+     "official_max_abs_delta": 10.72231149673462,
+     "max_position": 0,
+     "max_token": 114438,
+     "official_mean_abs_delta": 0.6750068808521248,
+     "bound_max": 12.866773796081542,
+     "bound_mean": 0.8100082570225497
+    }
+   ],
+   "greedy": {
+    "steps": 32,
+    "threshold": 20.37339563369751,
+    "decisive_steps": []
+   }
+  },
+  {
+   "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16",
+   "reference_json_sha256": "2d909999f5e7d418dd5d25a4cb3d62f4d5fe111aaa3428781f2ece1c06f023c3",
+   "twin": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b",
+   "twin_reference_json_sha256": "3b6b5196d7a864c6d219b29a3366e357057d6e38b1dad00129d1310f0f801edf",
+   "twin_dtype": "float32",
+   "family_test": "llama_family_artifacts",
+   "repository": "meta-llama/Llama-3.1-8B",
+   "revision": "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b",
+   "model_dir": "/Volumes/T9/models/meta-llama/Llama-3.1-8B",
+   "config_sha256": "54acfad3cffe057640904ca8a1e83525e6551c70c7a04c641f5a9eda0bbf64bd",
+   "generated_at": "2026-10-17T06:00:49+00:00",
+   "wall_seconds": 59.34,
+   "maximum_resident_set_bytes": 15575711744,
+   "peak_memory_footprint_bytes": 436667400,
+   "prompts": [
+    {
+     "tokens": 6,
+     "official_max_abs_delta": 0.13741159439086914,
+     "max_position": 4,
+     "max_token": 56704,
+     "official_mean_abs_delta": 0.017169639360766542,
+     "bound_max": 0.16489391326904296,
+     "bound_mean": 0.02060356723291985
+    },
+    {
+     "tokens": 14,
+     "official_max_abs_delta": 0.21217364072799683,
+     "max_position": 5,
+     "max_token": 18217,
+     "official_mean_abs_delta": 0.02211786553701078,
+     "bound_max": 0.25460836887359617,
+     "bound_mean": 0.026541438644412937
+    },
+    {
+     "tokens": 9,
+     "official_max_abs_delta": 0.18185949325561523,
+     "max_position": 7,
+     "max_token": 29532,
+     "official_mean_abs_delta": 0.023225002115629088,
+     "bound_max": 0.21823139190673826,
+     "bound_mean": 0.027870002538754903
+    }
+   ],
+   "greedy": {
+    "steps": 32,
+    "threshold": 0.3297878265380859,
+    "decisive_steps": [
+     1,
+     2,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     25,
+     26,
+     27,
+     28,
+     29,
+     30,
+     31
+    ]
+   }
+  },
+  {
+   "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16",
+   "reference_json_sha256": "013c286287024e3d304a1c0293425ef80d5886ef66a671ff41a11b487d32902b",
+   "twin": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38",
+   "twin_reference_json_sha256": "a3e0fd391940cb5789160c5f08ea4a60fa6eab75075eac3cdb4737afe5c86c86",
+   "twin_dtype": "float32",
+   "family_test": "gemma_artifacts",
+   "repository": "google/gemma-3-4b-it",
+   "revision": "093f9f388b31de276ce2de164bdc2081324b9767",
+   "model_dir": "/Volumes/T9/models/google/gemma-3-4b-it",
+   "config_sha256": "9059f680f4dbd1957f35cb44b9fdd6948f4792db7a7a35ee353ea42e68adf7ff",
+   "generated_at": "2026-10-17T05:59:06+00:00",
+   "wall_seconds": 29.74,
+   "maximum_resident_set_bytes": 8807137280,
+   "peak_memory_footprint_bytes": 581354840,
+   "prompts": [
+    {
+     "tokens": 6,
+     "official_max_abs_delta": 0.38358402252197266,
+     "max_position": 5,
+     "max_token": 1,
+     "official_mean_abs_delta": 0.0377085699479953,
+     "bound_max": 0.46030082702636715,
+     "bound_mean": 0.04525028393759436
+    },
+    {
+     "tokens": 19,
+     "official_max_abs_delta": 0.5921669006347656,
+     "max_position": 1,
+     "max_token": 23130,
+     "official_mean_abs_delta": 0.05219429958334905,
+     "bound_max": 0.7106002807617188,
+     "bound_mean": 0.06263315950001885
+    },
+    {
+     "tokens": 9,
+     "official_max_abs_delta": 0.7478094100952148,
+     "max_position": 3,
+     "max_token": 33178,
+     "official_mean_abs_delta": 0.0633858395716251,
+     "bound_max": 0.8973712921142578,
+     "bound_mean": 0.07606300748595012
+    }
+   ],
+   "greedy": {
+    "steps": 32,
+    "threshold": 0.9206016540527343,
+    "decisive_steps": [
+     0,
+     1,
+     3,
+     4,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     15,
+     16,
+     18,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25,
+     26,
+     27,
+     28,
+     29,
+     30,
+     31
+    ]
+   }
+  },
+  {
+   "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16",
+   "reference_json_sha256": "7b9ed384edd3e8e6a6605093b18ede05ee6aa83c35edc47b5c89baa56536113c",
+   "twin": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long",
+   "twin_reference_json_sha256": "b73b85f0f503524a16eba289ed633bdd73139fbfa3008640732ef5d39b774cf4",
+   "twin_dtype": "float32",
+   "family_test": "gemma_artifacts",
+   "repository": "google/gemma-3-4b-it",
+   "revision": "093f9f388b31de276ce2de164bdc2081324b9767",
+   "model_dir": "/Volumes/T9/models/google/gemma-3-4b-it",
+   "config_sha256": "9059f680f4dbd1957f35cb44b9fdd6948f4792db7a7a35ee353ea42e68adf7ff",
+   "generated_at": "2026-10-17T06:03:57+00:00",
+   "wall_seconds": 184.45,
+   "maximum_resident_set_bytes": 11763335168,
+   "peak_memory_footprint_bytes": 3140675208,
+   "prompts": [
+    {
+     "tokens": 1237,
+     "official_max_abs_delta": 8.071844696998596,
+     "max_position": 855,
+     "max_token": 13763,
+     "official_mean_abs_delta": 0.0661665169112006,
+     "bound_max": 9.686213636398316,
+     "bound_mean": 0.07939982029344071
+    }
+   ],
+   "greedy": {
+    "steps": 8,
+    "threshold": 19.37242727279663,
+    "decisive_steps": []
+   }
+  }
+ ],
+ "not_run": [
+  {
+   "gates": "every Burn half-precision gate of tests/llama_family_artifacts.rs and tests/gemma_artifacts.rs (Flex/BF16 and Metal/F16)",
+   "reason": "This campaign generates the official BF16 bundles and measures the bounds they set; the Burn runs are left to a later stage, and the slack was fixed before any of them."
+  }
+ ],
+ "notes": [
+  "Experimental evidence only: the calibration tests read two bundles each and evaluate no Burn model, so their passes qualify no Burn run and promote no checkpoint.",
+  "The maximum official deviation of every Llama-family prompt except Llama-3.1-8B's lies at position 0, whose massive activations round worst in BF16; the per-prompt mean is the sharper half-precision check there.",
+  "With no decisive greedy step at the bound, the cached greedy gates of SmolLM-135M, SmolLM3-3B, Qwen2-7B and the Gemma long-context bundle need TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0 or TRANSFORMERS_GEMMA_MIN_GREEDY=0, as the gpt-oss half-precision gates do.",
+  "Qwen2-7B's official BF16 run already picks another first greedy token (32671) than its F64 twin (12095, margin 0.603).",
+  "Peak memory footprint excludes the checkpoints' memory-mapped SafeTensors pages; the maximum resident set size includes them.",
+  "These bounds calibrate BF16 runs only. The generator writes no float16 bundle, so the Metal/F16 gates reuse the BF16 bounds as an upper limit (as gpt-oss applies one bound to any half-precision side); they do not reflect F16 rounding, whose unit roundoff 2^-11 is eight times smaller than BF16's 2^-8, so an F16 pass is weaker evidence than a BF16 pass."
+ ]
+}

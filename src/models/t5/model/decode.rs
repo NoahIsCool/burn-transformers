@@ -1,4 +1,4 @@
-//! Cache-aware T5/FLAN decoder execution.
+//! Cache-aware T5/FLAN decoder execution, one batched pass per call.
 //!
 //! T5 decoding retains two mathematically different kinds of state. Decoder
 //! self-attention appends keys and values as the target prefix grows, so it uses
@@ -7,31 +7,58 @@
 //! `K = H_encoder W_K` and `V = H_encoder W_V` exactly once, then every target
 //! step computes only its query projection.
 //!
-//! For a target chunk beginning at committed length `p`, self-attention uses
-//! absolute query indices `p + i`, cached keys `0..p`, and current keys
-//! `p..p+t`. Its exclusion mask is `M[i, j] = -inf` exactly when
-//! `j > p + i`, and the first decoder block supplies the T5 bucketed bias
-//! `b(p + i, j)` shared by later blocks. Scores intentionally remain
-//! `Q K^T + b + M` without the usual `1 / sqrt(d_kv)` factor. Cross-attention
-//! similarly evaluates `softmax(Q K_encoder^T + M_encoder) V_encoder`, but its
-//! two encoder projections are immutable cache entries.
+//! # One pass over the whole batch
 //!
-//! Rectangular target batches are compacted row by row according to the public
-//! `true == valid` mask convention. Invalid columns do not consume cache
-//! capacity or relative positions. A fully masked row is accepted only during
-//! decode, where it represents a finished sequence and produces exact zero
-//! hidden states and logits without changing any state. All new self-attention
-//! tensors remain operation-local until every layer, row, diagnostic, and
-//! vocabulary projection has succeeded. The final publication validates every
-//! write, advances all logical cursors atomically, then performs only infallible
-//! tensor assignments.
+//! A call appends `n_b` valid tokens to row `b`, whose committed length is
+//! `L_b` (`n_b = 0` marks a finished row during decode). The valid tokens of
+//! every row are packed left-aligned into one `[batch, Q]` block,
+//! `Q = max_b n_b`: row `b`'s new tokens fill slots `0..n_b` in order and
+//! padding fills slots `n_b..Q` (see [`super::packing`]). The whole block runs
+//! through the shared block graph once:
+//!
+//! - each layer writes its new keys and values *ahead* into cache slots
+//!   `[L_b, L_b + n_b)` and attends over the zero-copy view of slots
+//!   `[0, K)`, `K = max_b (L_b + n_b)`, read through one per-step plan;
+//! - query `i < n_b` of row `b` sits at absolute position `p = L_b + i` and
+//!   sees exactly the keys `j <= p`; this one comparison also excludes every
+//!   slot beyond the row's own history. Padded queries (`i >= n_b`) reuse the
+//!   row's last position, so no row is ever fully masked unless it has no
+//!   history at all; their outputs are discarded;
+//! - the shared relative bias `b(j - p)` is the contiguous `[1, heads, Q, K]`
+//!   plane when all active rows share one `L` (every beam- or greedy-search
+//!   step), and the per-row `[batch, heads, Q, K]` positional bias otherwise;
+//! - cross-attention reads the projected `[batch, heads, source, d_kv]`
+//!   encoder keys and values of all rows at once.
+//!
+//! # Attention-ready cross keys and values
+//!
+//! A projection produces `[batch, source, heads * d_kv]` rows, so splitting
+//! heads (`reshape` then `swap_dims(1, 2)`) yields a strided view. CubeCL
+//! kernels read that view directly, but Burn Flex's attention copies every
+//! non-contiguous key and value operand on every call: with the view cached,
+//! each decode step re-copied all `2 * layers * batch * source * heads * d_kv`
+//! cached elements (the projected inner width `heads * d_kv`, which need not
+//! equal `d_model`, is 6 * 64 = 384 for FLAN-T5-small). That copy took about
+//! two thirds of FLAN-T5-small's Flex decode time at 512 source tokens. The
+//! cache therefore stores both tensors contiguously once at prefill on
+//! backends that prefer it ([`operations::contiguous_where_preferred`]), a
+//! one-time copy of the same size as one decode step used to make. Values are
+//! unchanged; only the physical layout differs.
+//!
+//! Values of invalid key slots are zeroed before attention (they may hold
+//! stale bytes), and scores of excluded keys are replaced, never offset.
+//! Scores remain `Q K^T + b + M` without the usual `1 / sqrt(d_kv)` factor.
+//!
+//! # Atomicity
+//!
+//! The appends form one [`TensorStepWrites`] step. Lengths advance only when
+//! [`TensorDecodeState::publish_step`] succeeds, after every layer, the final
+//! normalization, every diagnostic, and the vocabulary projection: a failed
+//! call changes no length and no readable cache position (only slots beyond
+//! the lengths may hold its abandoned write-ahead tokens). A fully masked row
+//! produces exact zero hidden states and logits without changing its state.
 
-use std::collections::BTreeSet;
-
-use burn::{
-    nn::Linear,
-    tensor::{Bool, Int, Tensor, TensorData, backend::Backend},
-};
+use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
     CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
@@ -40,22 +67,35 @@ use crate::{
         DecodeState as ArchitectureDecodeState, EncoderOutput, Seq2SeqInput, Seq2SeqOutput,
         TokenMask,
     },
-    attention::{AttentionProjection, padding_attention_mask},
     cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
-        TensorDecodeState,
+        CacheConfig, KvBatchReadPlan, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
+        TensorDecodeState, TensorStepWrites,
     },
+    intervention::Hooks,
     operations,
+    position::T5RelativePositionBias,
 };
 
 use super::{
-    T5Block, T5ForConditionalGeneration, T5Stack, diagnostic_buffer, select_hidden,
-    validate_encoder_output, validate_options,
+    DECODER_INPUT, T5ForConditionalGeneration, bias,
+    block::{CrossAttentionPlan, CrossSource, SelfAttentionPlan, SelfKeyValues, StackPlan},
+    packing::{
+        BatchedRows, Packing, displacement_bound, first_out_of_range, groups_preserved, plan_rows,
+        step_positions,
+    },
+    validate_encoder_layout, validate_encoder_output, validate_options,
+};
+use crate::models::shared::{
+    EmptyRows, StatefulContract, StatefulRows, ensure_grid, ensure_same_device, index_tensor,
+    prepare_stateful_rows, select_hidden_with_last_columns, validate_logits_selection,
 };
 use crate::models::t5::T5Config;
 
 /// Index of T5's sole homogeneous decoder self-attention cache group.
 const SELF_KV_GROUP: usize = 0;
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "T5 decode state";
 
 /// Stateful operation whose empty-row policy differs by lifecycle phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +107,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether a fully masked input row is a valid no-op.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 }
 
@@ -84,16 +127,28 @@ struct T5CrossAttentionCache<B: Backend> {
     /// Bound source hidden states, mask, and optional encoder diagnostics.
     encoder: EncoderOutput<B>,
     /// Per-layer projected keys with axes `[batch, heads, source, d_kv]`.
+    ///
+    /// Contiguous on backends that prefer contiguous attention operands (see
+    /// the module documentation); a strided head view elsewhere.
     keys: Vec<Tensor<B, 4>>,
-    /// Per-layer projected values with the same axes as the keys.
+    /// Per-layer projected values with the same axes and layout as the keys.
     values: Vec<Tensor<B, 4>>,
 }
 
 impl<B: Backend> T5CrossAttentionCache<B> {
     /// Builds all decoder-layer cross projections without mutating decode state.
+    ///
+    /// The caller has already validated `encoder` (including its source-mask
+    /// rows) in [`prepare_stateful_input`]; the sync-free layout check here
+    /// only guards the projection reshapes. Projections go through
+    /// [`operations::linear`], the same contract as the stateless
+    /// cross-attention projection (dtype/device agreement, packed weights).
+    /// Each split-head result is stored attention-ready
+    /// ([`operations::contiguous_where_preferred`]), so decode steps never
+    /// re-layout it.
     fn project(model: &T5ForConditionalGeneration<B>, encoder: &EncoderOutput<B>) -> Result<Self> {
         let [batch, source_sequence, _] = encoder.hidden_state.dims();
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             batch,
             model.config.d_model,
@@ -109,28 +164,19 @@ impl<B: Backend> T5CrossAttentionCache<B> {
                 )
             })?;
             let attention = &cross.enc_dec_attention.attention;
-            let key = attention
-                .k_proj
-                .forward(encoder.hidden_state.clone())
-                .reshape([
-                    batch,
-                    source_sequence,
-                    attention.key_value_heads,
-                    attention.head_dim,
-                ])
-                .swap_dims(1, 2);
-            let value = attention
-                .v_proj
-                .forward(encoder.hidden_state.clone())
-                .reshape([
-                    batch,
-                    source_sequence,
-                    attention.key_value_heads,
-                    attention.head_dim,
-                ])
-                .swap_dims(1, 2);
-            keys.push(key);
-            values.push(value);
+            let heads = |projection| -> Result<Tensor<B, 4>> {
+                let split = operations::linear(encoder.hidden_state.clone(), projection)?
+                    .reshape([
+                        batch,
+                        source_sequence,
+                        attention.key_value_heads,
+                        attention.head_dim,
+                    ])
+                    .swap_dims(1, 2);
+                Ok(operations::contiguous_where_preferred(split))
+            };
+            keys.push(heads(&attention.k_proj)?);
+            values.push(heads(&attention.v_proj)?);
         }
         Ok(Self {
             encoder: encoder.clone(),
@@ -149,56 +195,13 @@ impl<B: Backend> T5CrossAttentionCache<B> {
         self.encoder.hidden_state.dims()[1]
     }
 
-    /// Returns one row of a decoder layer's projected encoder keys and values.
-    fn layer_row(&self, layer: usize, sequence: usize) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
-        let layers = self.layers();
-        let key = self.keys.get(layer).ok_or_else(|| {
-            Error::Cache(format!(
-                "T5 cross-attention layer {layer} is outside {layers} cached layers"
-            ))
-        })?;
-        let value = self.values.get(layer).ok_or_else(|| {
-            Error::Cache(format!(
-                "T5 cross-attention value layer {layer} is outside {layers} cached layers"
-            ))
-        })?;
-        let batch = key.dims()[0];
-        if sequence >= batch {
-            return Err(Error::Cache(format!(
-                "T5 cross-attention row {sequence} is outside batch {batch}"
-            )));
-        }
-        Ok((
-            key.clone().slice([
-                sequence..sequence + 1,
-                0..key.dims()[1],
-                0..key.dims()[2],
-                0..key.dims()[3],
-            ]),
-            value.clone().slice([
-                sequence..sequence + 1,
-                0..value.dims()[1],
-                0..value.dims()[2],
-                0..value.dims()[3],
-            ]),
-        ))
-    }
-
-    /// Returns one row of the source-validity mask, preserving gapped padding.
-    fn mask_row(&self, sequence: usize) -> Option<TokenMask<B>> {
-        self.encoder.token_mask.as_ref().map(|mask| {
-            let width = mask.as_tensor().dims()[1];
-            TokenMask::new(
-                mask.as_tensor()
-                    .clone()
-                    .slice([sequence..sequence + 1, 0..width]),
-            )
-        })
-    }
-
     /// Produces a reordered cache without mutating the current binding.
     fn reordered(&self, indices: &[usize]) -> Result<Self> {
-        let selector = batch_selector::<B>(indices, &self.encoder.hidden_state.device())?;
+        let selector = index_tensor::<B>(
+            indices,
+            &self.encoder.hidden_state.device(),
+            "t5.decode_state.reorder",
+        )?;
         let encoder = EncoderOutput {
             hidden_state: self
                 .encoder
@@ -368,10 +371,11 @@ impl<B: Backend> T5DecodeState<B> {
                 encoder.hidden_state.dtype(),
             )));
         }
-        ensure_device(
+        ensure_same_device(
             "t5.encoder_output.hidden_state",
             &encoder.hidden_state.device(),
             self.tensors.device(),
+            DECODE_STATE,
         )?;
         let expected_mask = cross
             .encoder
@@ -390,10 +394,11 @@ impl<B: Backend> T5DecodeState<B> {
             ));
         }
         if let Some(mask) = &encoder.token_mask {
-            ensure_device(
+            ensure_same_device(
                 "t5.encoder_output.token_mask",
                 &mask.as_tensor().device(),
                 self.tensors.device(),
+                DECODE_STATE,
             )?;
         }
         Ok(())
@@ -434,6 +439,26 @@ impl<B: Backend> ArchitectureDecodeState<B> for T5DecodeState<B> {
         self.tensors.reorder(indices)?;
         self.cross = reordered_cross;
         Ok(())
+    }
+
+    /// Reorders beams inside groups whose rows share one bound source.
+    ///
+    /// The caller guarantees (see the trait method) that the rows of each
+    /// group hold the same encoder output, and therefore the same projected
+    /// cross-attention keys and values. Moving rows inside their group then
+    /// leaves the cross binding unchanged, so only the decoder self-attention
+    /// history is gathered; the per-step cost no longer grows with the source
+    /// length. Indices that leave their group are rejected before anything
+    /// changes.
+    fn reorder_within_groups(&mut self, indices: &[usize], group_size: usize) -> Result<()> {
+        validate_reorder(indices, self.tensors.batch_size())?;
+        if !groups_preserved(indices, group_size) {
+            return Err(Error::Cache(format!(
+                "T5 group-preserving reorder needs groups of {group_size} rows that divide batch {} and indices that stay inside their group",
+                indices.len()
+            )));
+        }
+        self.tensors.reorder(indices).map_err(Into::into)
     }
 
     /// Rolls logical target lengths backward while retaining reusable allocation.
@@ -515,87 +540,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for T5ForConditionalGeneration<B> {
 }
 
 impl<B: Backend> T5ForConditionalGeneration<B> {
-    /// Evaluates a masked stateless target with cache-compatible token semantics.
-    ///
-    /// Padding columns are removed before attention so they neither consume a
-    /// relative position nor enter a causal key history. Valid results are then
-    /// scattered back into the original rectangle. This matches stateful
-    /// prefill for left, right, and gapped masks while preserving a fully
-    /// differentiable tensor graph for all parameterized operations.
-    pub(super) fn decode_stateless_masked(
-        &self,
-        encoder: &EncoderOutput<B>,
-        decoder: CausalLmInput<B>,
-        options: &ForwardOptions,
-    ) -> Result<CausalLmOutput<B>> {
-        let [batch, sequence] = decoder.token_ids.dims();
-        let valid_indices = semantic_indices(decoder.token_mask.as_ref(), batch, sequence)?;
-        let diagnostic_count = self.decoder.block.len() + 2;
-        let mut final_rows = Vec::with_capacity(batch);
-        let mut diagnostic_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
-            (0..diagnostic_count)
-                .map(|_| Vec::with_capacity(batch))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for (row, valid) in valid_indices.iter().enumerate() {
-            if valid.is_empty() {
-                return Err(Error::shape(
-                    "t5.decoder.token_mask",
-                    "at least one valid token in every stateless row",
-                    "a fully masked row",
-                ));
-            }
-            let selector = sequence_selector::<B>(valid, &decoder.token_ids.device())?;
-            let tokens = decoder
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..sequence])
-                .select(1, selector);
-            let hidden = self.shared.forward(tokens);
-            let source = encoder.hidden_state.clone().slice([
-                row..row + 1,
-                0..encoder.hidden_state.dims()[1],
-                0..encoder.hidden_state.dims()[2],
-            ]);
-            let source_mask = encoder_mask_row(encoder, row);
-            let output = self.decoder.forward_decoder(
-                hidden,
-                None,
-                source,
-                source_mask.as_ref(),
-                options.hidden_states,
-            )?;
-            final_rows.push(scatter_compact(output.hidden, sequence, valid)?);
-            if options.hidden_states {
-                if output.hidden_states.len() != diagnostic_count {
-                    return Err(Error::Cache(format!(
-                        "T5 stateless hidden-state count must be {diagnostic_count}, found {}",
-                        output.hidden_states.len()
-                    )));
-                }
-                for (destination, compact) in diagnostic_rows.iter_mut().zip(output.hidden_states) {
-                    destination.push(scatter_compact(compact, sequence, valid)?);
-                }
-            }
-        }
-        let hidden = Tensor::cat(final_rows, 0);
-        let selected = select_hidden(hidden.clone(), decoder.token_mask.as_ref(), &options.logits)?;
-        Ok(CausalLmOutput {
-            logits: self.project_logits(selected)?,
-            final_hidden_state: options.hidden_states.then_some(hidden),
-            hidden_states: diagnostic_rows
-                .into_iter()
-                .map(|rows| Tensor::cat(rows, 0))
-                .collect(),
-            attentions: Vec::new(),
-            routers: Vec::new(),
-            load_balancing_loss: None,
-        })
-    }
-
-    /// Evaluates one stateful target segment and publishes it atomically.
+    /// Evaluates one stateful target segment for every row in one pass and publishes it atomically.
     fn forward_with_decode_state(
         &self,
         encoder: &EncoderOutput<B>,
@@ -614,6 +559,13 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         }
         let prepared = prepare_stateful_input(self, encoder, &decoder, state, phase)?;
         validate_logits_selection(&options.logits, prepared.sequence)?;
+        let rows = plan_rows(&prepared.valid_indices, prepared.sequence).ok_or_else(|| {
+            Error::shape(
+                DECODER_INPUT.token_mask,
+                "sorted valid columns below the sequence length",
+                format!("{:?}", prepared.valid_indices),
+            )
+        })?;
 
         let pending_cross = if state.cross.is_none() {
             if phase == StatefulPhase::Decode {
@@ -625,87 +577,51 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         } else {
             None
         };
-        let cross = pending_cross
+        let T5DecodeState { tensors, cross, .. } = state;
+        let bound = pending_cross
             .as_ref()
-            .or(state.cross.as_ref())
+            .or(cross.as_ref())
             .ok_or_else(|| Error::Cache("T5 encoder cross cache is unavailable".into()))?;
 
-        let device = decoder.token_ids.device();
-        let diagnostic_count = self.decoder.block.len() + 2;
-        let mut pending_self = PendingT5SelfWrites::new();
-        let mut final_rows = Vec::with_capacity(prepared.batch);
-        let mut diagnostic_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
-            (0..diagnostic_count)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
+        let output = if rows.is_empty() {
+            // Every row is finished: exact zeros, no model work, nothing to publish.
+            let zeros = Tensor::zeros(
+                [rows.batch, rows.sequence, self.config.d_model],
+                (
+                    &decoder.token_ids.device(),
+                    self.shared.weight.val().dtype(),
+                ),
+            );
+            BatchedOutput {
+                hidden_states: if options.hidden_states {
+                    vec![zeros.clone(); self.decoder.block.len() + 2]
+                } else {
+                    Vec::new()
+                },
+                hidden: zeros,
+                step: None,
+            }
         } else {
-            Vec::new()
+            self.run_batched_rows(&decoder, &rows, tensors, bound, options)?
         };
-
-        for sequence_index in 0..prepared.batch {
-            let valid = &prepared.valid_indices[sequence_index];
-            if valid.is_empty() {
-                let empty = empty_hidden_row(self, prepared.sequence, &device);
-                final_rows.push(empty.clone());
-                if options.hidden_states {
-                    for destination in &mut diagnostic_rows {
-                        destination.push(empty.clone());
-                    }
-                }
-                continue;
-            }
-            let selector = sequence_selector::<B>(valid, &device)?;
-            let tokens = decoder
-                .token_ids
-                .clone()
-                .slice([sequence_index..sequence_index + 1, 0..prepared.sequence])
-                .select(1, selector);
-            let baseline = state.tensors.lengths()[sequence_index];
-            let (compact, diagnostics) = self.decoder.forward_cached_row(
-                self,
-                tokens,
-                sequence_index,
-                baseline,
-                &state.tensors,
-                cross,
-                &mut pending_self,
-                options.hidden_states,
-            )?;
-            final_rows.push(scatter_compact(compact, prepared.sequence, valid)?);
-            if options.hidden_states {
-                if diagnostics.len() != diagnostic_count {
-                    return Err(Error::Cache(format!(
-                        "T5 hidden-state count must be {diagnostic_count}, found {}",
-                        diagnostics.len()
-                    )));
-                }
-                for (destination, compact_state) in diagnostic_rows.iter_mut().zip(diagnostics) {
-                    destination.push(scatter_compact(compact_state, prepared.sequence, valid)?);
-                }
-            }
-        }
-
-        let hidden = Tensor::cat(final_rows, 0);
-        let hidden_states = diagnostic_rows
-            .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
-        let selected = select_hidden(hidden.clone(), decoder.token_mask.as_ref(), &options.logits)?;
-        let logits = self.project_logits(selected)?;
-        let bound_encoder = cross.encoder.clone();
-        pending_self.commit(
-            &mut state.tensors,
-            self.config.decoder_layers(),
-            &prepared.token_counts,
+        let selected = select_hidden_with_last_columns(
+            output.hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
         )?;
-        if let Some(cross) = pending_cross {
-            state.cross = Some(cross);
+        let logits = self.project_logits(selected)?;
+        let bound_encoder = bound.encoder.clone();
+        if let Some(step) = output.step {
+            tensors.publish_step(step)?;
+        }
+        if let Some(projected) = pending_cross {
+            *cross = Some(projected);
         }
         Ok(Seq2SeqOutput {
             decoder: CausalLmOutput {
                 logits,
-                final_hidden_state: options.hidden_states.then_some(hidden),
-                hidden_states,
+                final_hidden_state: options.hidden_states.then_some(output.hidden),
+                hidden_states: output.hidden_states,
                 attentions: Vec::new(),
                 routers: Vec::new(),
                 load_balancing_loss: None,
@@ -714,339 +630,317 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             cross_attentions: Vec::new(),
         })
     }
-}
 
-impl<B: Backend> T5Stack<B> {
-    /// Evaluates one compact target row using cached self- and cross-attention.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_cached_row(
+    /// Runs the packed `[batch, Q]` block through every decoder layer with cached attention.
+    ///
+    /// Returns rectangular `[batch, S, d_model]` states (zeros at padding) and
+    /// the unpublished step holding every layer's written-ahead tokens.
+    fn run_batched_rows(
         &self,
-        model: &T5ForConditionalGeneration<B>,
-        token_ids: Tensor<B, 2, Int>,
-        sequence_index: usize,
-        baseline: usize,
-        state: &TensorDecodeState<B>,
+        decoder: &CausalLmInput<B>,
+        rows: &BatchedRows,
+        tensors: &mut TensorDecodeState<B>,
         cross: &T5CrossAttentionCache<B>,
-        pending: &mut PendingT5SelfWrites<B>,
-        retain_hidden_states: bool,
-    ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
-        if !self.is_decoder {
-            return Err(Error::configuration(
-                "t5.decoder",
-                "cannot run cached decoding through an encoder stack",
-            ));
-        }
-        let query_sequence = token_ids.dims()[1];
-        let key_sequence = baseline.checked_add(query_sequence).ok_or_else(|| {
-            Error::configuration("t5.decoder.position_bias", "key length overflows usize")
-        })?;
-        let position_bias = self
-            .block
-            .first()
-            .ok_or_else(|| Error::configuration("t5.decoder.block", "stack must be non-empty"))?
-            .self_attention
-            .self_attention
-            .position_bias(query_sequence, key_sequence, baseline, &token_ids.device())?;
-        let mut hidden = model.shared.forward(token_ids);
-        let mut hidden_states = diagnostic_buffer(self.block.len(), retain_hidden_states);
-        if retain_hidden_states {
-            hidden_states.push(hidden.clone());
-        }
-        for (layer_index, block) in self.block.iter().enumerate() {
-            hidden = block.forward_cached(
-                hidden,
-                position_bias.clone(),
-                sequence_index,
-                baseline,
-                state,
-                cross,
-                layer_index,
-                pending,
-            )?;
-            if retain_hidden_states {
-                hidden_states.push(hidden.clone());
-            }
-        }
-        hidden = self.final_layer_norm.forward(hidden);
-        if retain_hidden_states {
-            hidden_states.push(hidden.clone());
-        }
-        Ok((hidden, hidden_states))
-    }
-}
-
-impl<B: Backend> T5Block<B> {
-    /// Applies cached causal self-attention, cached cross-attention, and the FFN.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_cached(
-        &self,
-        hidden: Tensor<B, 3>,
-        position_bias: Tensor<B, 4>,
-        sequence_index: usize,
-        baseline: usize,
-        state: &TensorDecodeState<B>,
-        cross: &T5CrossAttentionCache<B>,
-        layer_index: usize,
-        pending: &mut PendingT5SelfWrites<B>,
-    ) -> Result<Tensor<B, 3>> {
-        if !self.self_attention.causal {
-            return Err(Error::configuration(
-                "t5.decoder.block",
-                "decoder block was initialized with bidirectional self-attention",
-            ));
-        }
-        let residual = hidden.clone();
-        let normalized = self.self_attention.layer_norm.forward(hidden);
-        let attention = &self.self_attention.self_attention.attention;
-        let mut projection = attention.project_self(normalized)?;
-        let new_keys = projection.key.clone();
-        let new_values = projection.value.clone();
-        let query_sequence = projection.query.dims()[2];
-        let cache = state.main().native_kv(SELF_KV_GROUP)?;
-        let history = cache.read_sequence(layer_index, sequence_index, baseline)?;
-        if history.retained_positions() != (0..baseline) {
-            return Err(Error::Cache(
-                "T5 self-attention cache evicted required global history".into(),
-            ));
-        }
-        if let Some((past_keys, past_values)) = history.materialize() {
-            projection.key = Tensor::cat(vec![past_keys, projection.key], 2);
-            projection.value = Tensor::cat(vec![past_values, projection.value], 2);
-        }
-        let mask = cached_causal_mask::<B>(
-            baseline,
-            query_sequence,
-            attention.query_heads,
-            &projection.query.device(),
-        )?;
-        let hidden =
-            residual + attention.attend(projection, Some(mask), Some(position_bias), false)?;
-        pending.writes.push(PendingT5SelfWrite {
-            layer: layer_index,
-            sequence: sequence_index,
-            start: baseline,
-            keys: new_keys,
-            values: new_values,
-        });
-
-        let residual = hidden.clone();
-        let cross_layer = self.cross_attention.as_ref().ok_or_else(|| {
-            Error::configuration(
-                "t5.decoder.cross_attention",
-                "decoder block has no encoder-decoder attention module",
-            )
-        })?;
-        let cross_attention = &cross_layer.enc_dec_attention.attention;
-        let query = project_query(
-            &cross_attention.q_proj,
-            cross_layer.layer_norm.forward(hidden),
-            cross_attention.query_heads,
-            cross_attention.head_dim,
-        )?;
-        let (key, value) = cross.layer_row(layer_index, sequence_index)?;
-        let source_mask = cross.mask_row(sequence_index);
-        let cross_mask = padding_attention_mask(
-            None,
-            source_mask.as_ref(),
-            1,
-            cross_attention.query_heads,
-            query_sequence,
-            cross.source_sequence(),
-        )?;
-        let hidden = residual
-            + cross_attention.attend(
-                AttentionProjection {
-                    query,
-                    key,
-                    value,
-                    gate: None,
+        options: &ForwardOptions,
+    ) -> Result<BatchedOutput<B>> {
+        let device = decoder.token_ids.device();
+        let packer = TensorPacker::new(rows, decoder.token_mask.as_ref(), &device)?;
+        let hidden = self
+            .shared
+            .forward(packer.pack_tokens(decoder.token_ids.clone()));
+        let geometry = StepGeometry::new(tensors.lengths(), &rows.counts, rows.block)?;
+        let step = tensors.step(&rows.counts)?;
+        let plan = tensors.kv_read_plan_through(&step, SELF_KV_GROUP)?;
+        let key_slots = plan.key_slots();
+        let stack_plan = StackPlan {
+            self_attention: SelfAttentionPlan {
+                excluded: Some(geometry.exclusions(key_slots, &device)?),
+                bias: Some(geometry.bias(self.decoder.relative_table()?, key_slots, &device)?),
+                causal: false,
+            },
+            cross_attention: Some(CrossAttentionPlan::new(
+                CrossSource::Projected {
+                    keys: &cross.keys,
+                    values: &cross.values,
                 },
-                cross_mask,
-                None,
-                false,
-            )?;
-        self.feed_forward.forward(hidden)
+                cross.encoder.token_mask.as_ref(),
+            )),
+        };
+        let mut keys = CachedSelfKeyValues {
+            state: tensors,
+            step,
+            plan,
+        };
+        let output = self.decoder.run(
+            hidden,
+            &stack_plan,
+            &mut keys,
+            options.hidden_states,
+            &mut Hooks::new(),
+        )?;
+        Ok(BatchedOutput {
+            hidden: packer.unpack(output.hidden),
+            hidden_states: output
+                .hidden_states
+                .into_iter()
+                .map(|hidden| packer.unpack(hidden))
+                .collect(),
+            step: Some(keys.step),
+        })
     }
 }
 
-/// Projects T5 queries without redundantly recomputing cached encoder K/V.
-fn project_query<B: Backend>(
-    projection: &Linear<B>,
+/// Rectangular outputs of one batched stateful pass and its unpublished step.
+struct BatchedOutput<B: Backend> {
+    /// Final normalized states `[batch, S, d_model]`, zero at padding.
     hidden: Tensor<B, 3>,
-    heads: usize,
-    head_dim: usize,
-) -> Result<Tensor<B, 4>> {
-    let [batch, sequence, _] = hidden.dims();
-    Ok(operations::linear(hidden, projection)?
-        .reshape([batch, sequence, heads, head_dim])
-        .swap_dims(1, 2))
+    /// Requested diagnostics in the same coordinates.
+    hidden_states: Vec<Tensor<B, 3>>,
+    /// Written-ahead appends to publish once every output exists; `None` when no row is active.
+    step: Option<TensorStepWrites<B>>,
 }
 
-/// One operation-local self-attention append.
-struct PendingT5SelfWrite<B: Backend> {
-    /// Decoder layer receiving this append.
-    layer: usize,
-    /// Batch row whose committed prefix is extended.
-    sequence: usize,
-    /// First cache position to write, equal to the row's current prefix length.
-    start: usize,
-    /// New keys with axes `[1, heads, appended_tokens, d_kv]`.
-    keys: Tensor<B, 4>,
-    /// New values with the same axes as the keys.
-    values: Tensor<B, 4>,
+/// Cached self-attention keys: write a layer's tokens ahead, then read its history.
+///
+/// Every layer of one call shares one step and one read plan over slots
+/// `[0, max_b (L_b + n_b))`. The returned values have invalid slots zeroed
+/// ([`crate::cache::KvBatchSegment::masked_values`]), so stale bytes cannot
+/// reach attention through a zero probability.
+struct CachedSelfKeyValues<'s, B: Backend> {
+    /// Decode state receiving the write-ahead tokens.
+    state: &'s mut TensorDecodeState<B>,
+    /// The call's step; published by the caller after every output exists.
+    step: TensorStepWrites<B>,
+    /// Per-step batched read plan through the written-ahead tokens.
+    plan: KvBatchReadPlan<B>,
 }
 
-/// Deferred self-attention writes for one public prefill or decode call.
-struct PendingT5SelfWrites<B: Backend> {
-    /// One deferred append per active batch row and decoder layer.
-    writes: Vec<PendingT5SelfWrite<B>>,
-}
-
-impl<B: Backend> PendingT5SelfWrites<B> {
-    /// Creates an empty write set.
-    fn new() -> Self {
-        Self { writes: Vec::new() }
-    }
-
-    /// Validates exact coverage and atomically publishes lengths plus tensors.
-    fn commit(
-        self,
-        state: &mut TensorDecodeState<B>,
-        layers: usize,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        self.validate_coverage(state, layers, token_counts)?;
-        let cache = state.main().native_kv(SELF_KV_GROUP)?;
-        let writes = self
-            .writes
-            .into_iter()
-            .map(|write| {
-                cache.prepare_sequence_write(
-                    write.layer,
-                    write.sequence,
-                    write.start,
-                    write.keys,
-                    write.values,
-                )
-            })
-            .collect::<core::result::Result<Vec<_>, _>>()?;
-        let prepared = state
-            .main()
-            .prepare_direct_writes(Some((SELF_KV_GROUP, writes)), None)?;
-        state.advance(token_counts)?;
-        state.main_mut().apply_prepared_direct_writes(prepared);
-        Ok(())
-    }
-
-    /// Ensures every active row produced exactly one append for every layer.
-    fn validate_coverage(
-        &self,
-        state: &TensorDecodeState<B>,
-        layers: usize,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        let batch = state.batch_size();
-        if token_counts.len() != batch {
-            return Err(Error::Cache(format!(
-                "T5 pending writes describe {} rows for batch {batch}",
-                token_counts.len()
-            )));
-        }
-        let active = token_counts.iter().filter(|&&count| count > 0).count();
-        let expected = layers.checked_mul(active).ok_or_else(|| {
-            Error::configuration(
-                "t5.cache_commit",
-                "self-attention write count overflows usize",
-            )
-        })?;
-        if self.writes.len() != expected {
-            return Err(Error::Cache(format!(
-                "T5 pending self-cache coverage is {}/{expected}",
-                self.writes.len()
-            )));
-        }
-        let mut seen = BTreeSet::new();
-        for write in &self.writes {
-            let count = token_counts.get(write.sequence).copied().ok_or_else(|| {
-                Error::Cache(format!(
-                    "T5 self-cache write references row {} outside batch {batch}",
-                    write.sequence
-                ))
-            })?;
-            if count == 0
-                || write.layer >= layers
-                || write.start != state.lengths()[write.sequence]
-                || write.keys.dims()[2] != count
-                || write.values.dims()[2] != count
-                || !seen.insert((write.layer, write.sequence))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid or duplicate T5 self-cache write for layer {}, row {}",
-                    write.layer, write.sequence
-                )));
-            }
-        }
-        for (sequence, &count) in token_counts.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
-            for layer in 0..layers {
-                if !seen.contains(&(layer, sequence)) {
-                    return Err(Error::Cache(format!(
-                        "missing T5 self-cache write for layer {layer}, row {sequence}"
-                    )));
-                }
-            }
-        }
-        Ok(())
+impl<B: Backend> SelfKeyValues<B> for CachedSelfKeyValues<'_, B> {
+    /// Writes `[batch, heads, Q, d_kv]` keys/values ahead and returns the attended history.
+    fn resolve(
+        &mut self,
+        layer: usize,
+        keys: Tensor<B, 4>,
+        values: Tensor<B, 4>,
+    ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
+        self.state
+            .write_kv_ahead(&mut self.step, SELF_KV_GROUP, layer, keys, values)?;
+        let segment = self
+            .state
+            .read_kv_through(&self.step, SELF_KV_GROUP, layer, &self.plan)?
+            .materialize()
+            .ok_or_else(|| Error::Cache("T5 self-attention read has no key slots".into()))?;
+        Ok((segment.keys().clone(), segment.masked_values()))
     }
 }
 
-/// Validated rectangular metadata for a stateful target operation.
-struct PreparedStatefulInput {
-    /// Number of decoder input rows, matching the decode state batch size.
+/// Per-call query positions and the derived self-attention mask and bias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StepGeometry {
+    /// Rows `B`.
     batch: usize,
-    /// Rectangular decoder input width before invalid tokens are compacted.
+    /// Block width `Q`.
+    block: usize,
+    /// Mask position of every block slot `[B, Q]`: `L_b + min(i, n_b - 1)`, or `L_b - 1` when inactive.
+    mask_positions: Vec<i64>,
+    /// Bias position of every block slot `[B, Q]`: `L_b + i`.
+    bias_positions: Vec<i64>,
+    /// The committed length shared by every active row, when there is one.
+    shared_length: Option<usize>,
+    /// Largest bias position, bounding query displacements.
+    max_position: usize,
+}
+
+impl StepGeometry {
+    /// Derives slot positions from committed lengths `L_b` and new-token counts `n_b`.
+    ///
+    /// The verified [`step_positions`] plans every slot; `None` means a
+    /// position beyond `i64`.
+    fn new(lengths: &[usize], counts: &[usize], block: usize) -> Result<Self> {
+        let plan = step_positions(lengths, counts, block)
+            .ok_or_else(|| Error::configuration("t5.decoder.positions", "position exceeds i64"))?;
+        Ok(Self {
+            batch: counts.len(),
+            block,
+            mask_positions: plan.mask_positions,
+            bias_positions: plan.bias_positions,
+            shared_length: plan.shared_length,
+            max_position: plan.max_position,
+        })
+    }
+
+    /// Builds the `[B, 1, Q, K]` exclusion plane `key_slot > mask_position`.
+    ///
+    /// Valid queries see exactly their causal history; slots beyond a row's
+    /// `L_b + n_b` are excluded by the same comparison. One `B * Q * K`
+    /// Boolean plane is materialized per call and shared by every layer.
+    fn exclusions<B: Backend>(
+        &self,
+        key_slots: usize,
+        device: &B::Device,
+    ) -> Result<Tensor<B, 4, Bool>> {
+        let keys = i64::try_from(key_slots).map_err(|_| {
+            Error::configuration("t5.decoder.attention_mask", "key length exceeds i64")
+        })?;
+        let shape = [self.batch, 1, self.block, key_slots];
+        let positions = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(self.mask_positions.clone(), [self.batch, self.block]),
+            device,
+        );
+        let slots = Tensor::<B, 1, Int>::arange(0..keys, device)
+            .reshape([1, 1, 1, key_slots])
+            .expand(shape);
+        Ok(slots.greater(
+            positions
+                .reshape([self.batch, 1, self.block, 1])
+                .expand(shape),
+        ))
+    }
+
+    /// Builds the shared relative bias `b(key_slot - bias_position)`.
+    ///
+    /// Active rows sharing one committed length `L` (every beam- or
+    /// greedy-search step) use the contiguous `[1, heads, Q, K]` plane with
+    /// query offset `L`; ragged lengths use the per-row positional bias.
+    fn bias<B: Backend>(
+        &self,
+        table: &T5RelativePositionBias<B>,
+        key_slots: usize,
+        device: &B::Device,
+    ) -> Result<Tensor<B, 4>> {
+        if let Some(length) = self.shared_length {
+            return bias::contiguous_bias(table, self.block, key_slots, length, device);
+        }
+        let keys = i64::try_from(key_slots)
+            .map_err(|_| Error::configuration("t5.decoder.positions", "key length exceeds i64"))?;
+        let queries = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(self.bias_positions.clone(), [self.batch, self.block]),
+            device,
+        );
+        let keys = Tensor::<B, 1, Int>::arange(0..keys, device)
+            .reshape([1, key_slots])
+            .expand([self.batch, key_slots]);
+        let bound = displacement_bound(self.max_position, key_slots);
+        bias::positional_bias(table, queries, keys, bound)
+    }
+}
+
+/// Device realization of a [`BatchedRows`] packing plan.
+///
+/// Index tensors are uploaded once per call and reused for the tokens, the
+/// final states, and every requested diagnostic.
+struct TensorPacker<B: Backend> {
+    /// Rows `B`.
+    batch: usize,
+    /// Input columns `S`.
     sequence: usize,
-    /// Original valid token positions, ordered within each batch row.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of appended tokens per row; zero marks an inactive decode row.
-    token_counts: Vec<usize>,
+    /// Block width `Q`.
+    block: usize,
+    /// Padded block slots `[B, Q]` (`true` = padding), when any exist.
+    padded_slots: Option<Tensor<B, 2, Bool>>,
+    /// Padded input columns `[B, S]` (`true` = padding), from the call's mask.
+    padded_columns: Option<Tensor<B, 2, Bool>>,
+    /// Flat gather indices `(compaction, scatter)` for leading or interior padding.
+    gather: Option<(Tensor<B, 1, Int>, Tensor<B, 1, Int>)>,
+}
+
+impl<B: Backend> TensorPacker<B> {
+    /// Uploads the plan's index and padding tensors.
+    fn new(rows: &BatchedRows, mask: Option<&TokenMask<B>>, device: &B::Device) -> Result<Self> {
+        let padded_slots = rows.has_padded_slots().then(|| {
+            Tensor::<B, 2, Bool>::from_data(
+                TensorData::new(rows.padded_slots(), [rows.batch, rows.block]),
+                device,
+            )
+        });
+        let gather = match &rows.packing {
+            Packing::Prefix => None,
+            Packing::Gather { compact, scatter } => Some((
+                index_tensor::<B>(compact, device, "t5.decoder.packing")?,
+                index_tensor::<B>(scatter, device, "t5.decoder.unpacking")?,
+            )),
+        };
+        Ok(Self {
+            batch: rows.batch,
+            sequence: rows.sequence,
+            block: rows.block,
+            padded_slots,
+            padded_columns: mask.map(|mask| mask.as_tensor().clone().bool_not()),
+            gather,
+        })
+    }
+
+    /// Packs `[B, S]` token IDs into the `[B, Q]` block; padded slots hold token zero.
+    ///
+    /// Padding columns may carry arbitrary sentinel IDs (validation covers
+    /// valid columns only), so padded slots are overwritten with zero, which
+    /// every vocabulary contains, before the embedding lookup.
+    fn pack_tokens(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2, Int> {
+        let packed = match &self.gather {
+            Some((compact, _)) => tokens
+                .reshape([self.batch * self.sequence])
+                .select(0, compact.clone())
+                .reshape([self.batch, self.block]),
+            None if self.block == self.sequence => tokens,
+            None => tokens.narrow(1, 0, self.block),
+        };
+        match &self.padded_slots {
+            Some(padded) => packed.mask_fill(padded.clone(), 0),
+            None => packed,
+        }
+    }
+
+    /// Unpacks `[B, Q, d]` block states into `[B, S, d]` with exact zeros at padding.
+    fn unpack(&self, packed: Tensor<B, 3>) -> Tensor<B, 3> {
+        let width = packed.dims()[2];
+        let rectangular = match &self.gather {
+            Some((_, scatter)) => packed
+                .reshape([self.batch * self.block, width])
+                .select(0, scatter.clone())
+                .reshape([self.batch, self.sequence, width]),
+            None if self.block == self.sequence => packed,
+            None => {
+                let padding = Tensor::zeros(
+                    [self.batch, self.sequence - self.block, width],
+                    (&packed.device(), packed.dtype()),
+                );
+                Tensor::cat(vec![packed, padding], 1)
+            }
+        };
+        match &self.padded_columns {
+            Some(padded) => rectangular.mask_fill(
+                padded
+                    .clone()
+                    .unsqueeze_dim::<3>(2)
+                    .expand([self.batch, self.sequence, width]),
+                0.0,
+            ),
+            None => rectangular,
+        }
+    }
 }
 
 /// Validates state, encoder, tokens, masks, devices, and capacity before math.
+///
+/// The encoder binding is checked first (or validated for a fresh state);
+/// explicit decoder positions are rejected because T5 uses relative buckets.
+/// The shared preparation then reads the decoder mask and token IDs in one
+/// transfer and plans every row's compaction and cache append.
 fn prepare_stateful_input<B: Backend>(
     model: &T5ForConditionalGeneration<B>,
     encoder: &EncoderOutput<B>,
     decoder: &CausalLmInput<B>,
     state: &T5DecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = decoder.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "t5.decoder.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.tensors.batch_size() {
-        return Err(TensorCacheError::BatchSizeMismatch {
-            configured: state.tensors.batch_size(),
-            requested: batch,
-        }
-        .into());
-    }
-    ensure_device(
-        "t5.decoder.input_ids",
-        &decoder.token_ids.device(),
-        state.tensors.device(),
-    )?;
-    ensure_device(
+) -> Result<StatefulRows> {
+    let device = state.tensors.device();
+    ensure_same_device(
         "t5.model",
-        &model.shared.weight.val().device(),
-        state.tensors.device(),
+        &model.shared.weight.lazy_device(),
+        device,
+        DECODE_STATE,
     )?;
+    let [batch, sequence] = decoder.token_ids.dims();
     if state.cross.is_some() {
         state.validate_encoder_binding(encoder)?;
     } else {
@@ -1056,227 +950,51 @@ fn prepare_stateful_input<B: Backend>(
             model.config.d_model,
             model.shared.weight.val().dtype(),
         )?;
-        ensure_device(
+        ensure_same_device(
             "t5.encoder_output.hidden_state",
             &encoder.hidden_state.device(),
-            state.tensors.device(),
+            device,
+            DECODE_STATE,
         )?;
         if let Some(mask) = &encoder.token_mask {
-            ensure_device(
+            ensure_same_device(
                 "t5.encoder_output.token_mask",
                 &mask.as_tensor().device(),
-                state.tensors.device(),
+                device,
+                DECODE_STATE,
             )?;
         }
     }
-    if let Some(mask) = &decoder.token_mask {
-        ensure_device(
-            "t5.decoder.token_mask",
-            &mask.as_tensor().device(),
-            state.tensors.device(),
-        )?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "t5.decoder.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-    }
     if let Some(positions) = &decoder.position_ids {
-        ensure_device(
-            "t5.decoder.position_ids",
+        ensure_same_device(
+            DECODER_INPUT.position_ids,
             &positions.device(),
-            state.tensors.device(),
+            device,
+            DECODE_STATE,
         )?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "t5.decoder.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
+        ensure_grid(
+            positions.dims(),
+            batch,
+            sequence,
+            DECODER_INPUT.position_ids,
+        )?;
         return Err(Error::BackendCapability(
             "T5 decoder uses relative positions and does not accept explicit position IDs".into(),
         ));
     }
-    let valid_indices = semantic_indices(decoder.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "t5.decoder.token_mask",
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    for (row, (&baseline, &additional)) in state
-        .tensors
-        .lengths()
-        .iter()
-        .zip(&token_counts)
-        .enumerate()
-    {
-        let requested = baseline.checked_add(additional).ok_or({
-            TensorCacheError::Metadata(DecodeStateError::LengthOverflow {
-                sequence: row,
-                length: baseline,
-                additional,
-            })
-        })?;
-        if requested > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: row,
-                    requested,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
-    }
-    for (row, valid) in valid_indices.iter().enumerate() {
-        if valid.is_empty() {
-            continue;
-        }
-        let selector = sequence_selector::<B>(valid, state.tensors.device())?;
-        let tokens = decoder
-            .token_ids
-            .clone()
-            .slice([row..row + 1, 0..sequence])
-            .select(1, selector);
-        validate_active_token_ids(tokens, model.config.vocab_size)?;
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-    })
-}
-
-/// Validates selective-logit indices before any cache mutation.
-fn validate_logits_selection(selection: &crate::LogitsSelection, sequence: usize) -> Result<()> {
-    if let crate::LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|position| *position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Reads a semantic mask into stable per-row valid-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "T5 decoder token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(column, &valid)| valid.then_some(column))
-                .collect()
-        })
-        .collect())
-}
-
-/// Returns one encoder mask row without changing `true == valid` semantics.
-fn encoder_mask_row<B: Backend>(
-    encoder: &EncoderOutput<B>,
-    sequence: usize,
-) -> Option<TokenMask<B>> {
-    encoder.token_mask.as_ref().map(|mask| {
-        let source = mask.as_tensor().dims()[1];
-        TokenMask::new(
-            mask.as_tensor()
-                .clone()
-                .slice([sequence..sequence + 1, 0..source]),
-        )
-    })
-}
-
-/// Validates only active token IDs so masked sentinels remain inert.
-fn validate_active_token_ids<B: Backend>(
-    token_ids: Tensor<B, 2, Int>,
-    vocabulary: usize,
-) -> Result<()> {
-    use burn::tensor::ElementConversion;
-
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate T5 token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate T5 token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "t5.decoder.input_ids",
-            format!("active token values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Creates a checked selector for target sequence columns.
-fn sequence_selector<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "t5.decoder.token_mask",
-                    format!("column index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
+    prepare_stateful_rows(
+        decoder,
         device,
-    ))
-}
-
-/// Creates a checked selector for cache batch reordering.
-fn batch_selector<B: Backend>(indices: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "t5.decode_state.reorder",
-                    format!("batch index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
+        state.tensors.lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: DECODER_INPUT,
+            owner: DECODE_STATE,
+            vocabulary: model.config.vocab_size,
+            position_limit: None,
+            empty_rows: phase.empty_rows(),
+        },
+    )
 }
 
 /// Validates a fixed-size batch permutation or duplication vector.
@@ -1287,7 +1005,7 @@ fn validate_reorder(indices: &[usize], batch: usize) -> Result<()> {
             indices.len()
         )));
     }
-    if let Some(&index) = indices.iter().find(|&&index| index >= batch) {
+    if let Some(index) = first_out_of_range(indices, batch) {
         return Err(Error::Cache(format!(
             "T5 reorder index {index} is outside batch {batch}"
         )));
@@ -1295,102 +1013,10 @@ fn validate_reorder(indices: &[usize], batch: usize) -> Result<()> {
     Ok(())
 }
 
-/// Builds an explicit cached causal mask `excluded(q, k) = k > baseline + q`.
-fn cached_causal_mask<B: Backend>(
-    baseline: usize,
-    query_sequence: usize,
-    heads: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let key_sequence = baseline.checked_add(query_sequence).ok_or_else(|| {
-        Error::configuration("t5.decoder.attention_mask", "key length overflows usize")
-    })?;
-    let query_start = i64::try_from(baseline).map_err(|_| {
-        Error::configuration("t5.decoder.attention_mask", "query offset exceeds i64")
-    })?;
-    let end = i64::try_from(key_sequence)
-        .map_err(|_| Error::configuration("t5.decoder.attention_mask", "key length exceeds i64"))?;
-    let query = Tensor::<B, 1, Int>::arange(query_start..end, device)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([1, heads, query_sequence, key_sequence]);
-    Ok(key.greater(query))
-}
-
-/// Returns zero hidden states for a fully inactive decode row.
-fn empty_hidden_row<B: Backend>(
-    model: &T5ForConditionalGeneration<B>,
-    sequence: usize,
-    device: &B::Device,
-) -> Tensor<B, 3> {
-    Tensor::zeros(
-        [1, sequence, model.config.d_model],
-        (device, model.shared.weight.val().dtype()),
-    )
-}
-
-/// Scatters compact active states into a zero-filled rectangular row.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    if compact.dims()[1] != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "t5.decoder.compact_hidden",
-            "compact width matching sorted, unique in-range output indices",
-            format!("compact={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let width = compact.dims()[2];
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::with_capacity(indices.len().saturating_mul(2).saturating_add(1));
-    let mut cursor = 0usize;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    if segments.is_empty() {
-        return Err(Error::shape(
-            "t5.decoder.compact_hidden",
-            "at least one active output position",
-            "an empty compact tensor",
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Checks that two backend-generic device values identify the same device.
-fn ensure_device<D: PartialEq>(name: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(Error::shape(
-            name,
-            "the decode-state device",
-            "another device",
-        ))
-    }
-}
-
 #[cfg(test)]
 #[path = "decode_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "decode_batch_tests.rs"]
+mod batch_tests;

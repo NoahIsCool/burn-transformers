@@ -6,12 +6,22 @@
 //! token while differing substantially below it. These helpers therefore bind
 //! every comparison to an execution path before evaluating full-vocabulary
 //! cosine or exact argmax agreement.
+//!
+//! Logit rows are judged against the official class's F32 rows of the same
+//! path (the precision bundle), not against the half-precision oracle: an F16
+//! row carries its implementation's own rounding, and on this sparse hybrid
+//! two official F16 runs of the same code already disagree by cosine `0.9943`
+//! on a teacher-forced row. Each path's floor is the worst cosine any official
+//! F16 evaluation reaches against F32 on that path, so a Burn F16 row must be
+//! at least as faithful to F32 as the worst official F16 row on its path. The
+//! bound is per path, not per decision.
 
 #![allow(dead_code)]
 
 use super::nemotron_h_base_reference::{
     OfficialExecutionPath, OfficialHiddenPoint, OfficialHiddenTrace, OfficialLogitRow,
 };
+use super::nemotron_h_precision_reference::{RowKind, TruthRow};
 
 /// Required full-vector cosine for every corresponding-path comparison.
 pub(super) const MINIMUM_CORRESPONDING_PATH_COSINE: f64 = 0.999;
@@ -223,6 +233,186 @@ pub(super) fn assert_corresponding_hidden_trace(
     }
 }
 
+/// Lowest per-path floor accepted; a looser official F16 envelope is too wide to gate on.
+pub(super) const MINIMUM_HALF_PRECISION_FLOOR: f64 = 0.99;
+
+/// Worst cosine any official half-precision row reaches against its F32 truth row.
+///
+/// `truth` and every matrix in `official` are row-major `[rows, width]`
+/// matrices of the same path. The floor must lie in
+/// `[MINIMUM_HALF_PRECISION_FLOOR, 1]`.
+pub(super) fn half_precision_floor(
+    label: &str,
+    truth: &[f32],
+    official: &[&[f32]],
+    width: usize,
+) -> f64 {
+    assert!(width > 0, "{label} row width must be nonzero");
+    assert!(
+        !official.is_empty(),
+        "{label} needs at least one official half-precision matrix"
+    );
+    assert!(
+        !truth.is_empty() && truth.len().is_multiple_of(width),
+        "{label} truth must hold whole rows"
+    );
+    assert_finite(label, "F32 truth", truth);
+    let mut floor = f64::INFINITY;
+    for matrix in official {
+        assert_eq!(
+            matrix.len(),
+            truth.len(),
+            "{label} official matrix shape changed"
+        );
+        assert_finite(label, "official half-precision", matrix);
+        for (row, reference) in matrix.chunks_exact(width).zip(truth.chunks_exact(width)) {
+            floor = floor.min(cosine_similarity(row, reference));
+        }
+    }
+    assert!(
+        (MINIMUM_HALF_PRECISION_FLOOR..=1.0).contains(&floor),
+        "{label} official half-precision floor {floor} is outside [{MINIMUM_HALF_PRECISION_FLOOR}, 1]"
+    );
+    floor
+}
+
+/// Requires one Burn row to match its F32 truth row at least as closely as official F16 does.
+///
+/// The row family must match, the truth and Burn argmaxes must both equal
+/// the authenticated `expected_top1` token, and the cosine must reach `floor`.
+pub(super) fn assert_row_against_truth(
+    label: &str,
+    actual_kind: RowKind,
+    actual: &[f32],
+    truth: TruthRow<'_>,
+    expected_top1: usize,
+    floor: f64,
+) -> RowParityObservation {
+    assert_eq!(
+        actual_kind,
+        truth.kind(),
+        "{label} compared a different row family"
+    );
+    assert_eq!(
+        actual_kind.path(),
+        truth.path(),
+        "{label} crossed the stateless and cached streams"
+    );
+    assert_eq!(
+        actual.len(),
+        truth.values().len(),
+        "{label} vector length changed"
+    );
+    assert!(!actual.is_empty(), "{label} vectors must not be empty");
+    assert_finite(label, "Burn", actual);
+    assert_finite(label, "F32 truth", truth.values());
+    assert_eq!(
+        stable_top1(truth.values()),
+        expected_top1,
+        "{label} F32 truth disagrees with the authenticated token at decision {}",
+        truth.decision()
+    );
+    let actual_top1 = stable_top1(actual);
+    assert_eq!(
+        actual_top1,
+        expected_top1,
+        "{label} top-1 differs at decision {}",
+        truth.decision()
+    );
+    let cosine = cosine_similarity(actual, truth.values());
+    assert!(
+        cosine >= floor,
+        "{label} cosine {cosine} against the F32 truth is below the official F16 floor {floor} at decision {}",
+        truth.decision()
+    );
+    RowParityObservation {
+        cosine,
+        actual_top1_token_id: actual_top1,
+    }
+}
+
+/// Ordered aggregate of one row family judged against its F32 truth.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TruthPathSummary {
+    /// Row family required for every observed row.
+    kind: RowKind,
+    /// Official F16 floor applied to every row.
+    floor: f64,
+    /// Number of contiguous decisions compared.
+    rows: usize,
+    /// Smallest observed cosine, initially positive infinity.
+    minimum_cosine: f64,
+    /// Decision that first attained the smallest cosine.
+    minimum_decision: usize,
+}
+
+impl TruthPathSummary {
+    /// Starts an empty sequence for `kind` under `floor`.
+    pub(super) const fn new(kind: RowKind, floor: f64) -> Self {
+        Self {
+            kind,
+            floor,
+            rows: 0,
+            minimum_cosine: f64::INFINITY,
+            minimum_decision: 0,
+        }
+    }
+
+    /// Checks and records the next decision in strict contiguous order.
+    pub(super) fn observe(
+        &mut self,
+        label: &str,
+        actual: &[f32],
+        truth: TruthRow<'_>,
+        expected_top1: usize,
+    ) -> RowParityObservation {
+        assert_eq!(
+            truth.decision(),
+            self.rows,
+            "{label} must compare every decision once and in order"
+        );
+        let observation =
+            assert_row_against_truth(label, self.kind, actual, truth, expected_top1, self.floor);
+        if observation.cosine < self.minimum_cosine {
+            self.minimum_cosine = observation.cosine;
+            self.minimum_decision = self.rows;
+        }
+        self.rows += 1;
+        observation
+    }
+
+    /// Completes the sequence only after exactly `expected_rows` decisions.
+    pub(super) fn finish(self, expected_rows: usize) -> CompletedTruthSummary {
+        assert!(expected_rows > 0, "a truth sequence cannot be empty");
+        assert_eq!(
+            self.rows, expected_rows,
+            "truth parity did not cover every expected row"
+        );
+        CompletedTruthSummary {
+            kind: self.kind,
+            floor: self.floor,
+            rows: self.rows,
+            minimum_cosine: self.minimum_cosine,
+            minimum_decision: self.minimum_decision,
+        }
+    }
+}
+
+/// Immutable result for one fully covered row family.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct CompletedTruthSummary {
+    /// Row family compared.
+    pub(super) kind: RowKind,
+    /// Official F16 floor applied.
+    pub(super) floor: f64,
+    /// Number of decisions checked.
+    pub(super) rows: usize,
+    /// Lowest cosine against the F32 truth.
+    pub(super) minimum_cosine: f64,
+    /// Decision at which it occurred.
+    pub(super) minimum_decision: usize,
+}
+
 /// Computes cosine with F64 products and sums after validating nonzero norms.
 pub(super) fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
     assert_eq!(left.len(), right.len(), "cosine vector lengths differ");
@@ -292,6 +482,99 @@ mod tests {
         top1: u32,
     ) -> OfficialLogitRow<'_> {
         OfficialLogitRow::synthetic(path, decision, values, top1)
+    }
+
+    /// The floor is the worst official half-precision row and must stay meaningful.
+    #[test]
+    fn half_precision_floor_takes_the_worst_official_row() {
+        let truth = [1.0, 0.0, 0.0, 1.0];
+        let close = [1.0, 0.01, 0.0, 1.0];
+        let closer = [1.0, 0.0, 0.001, 1.0];
+        let floor = half_precision_floor("synthetic", &truth, &[&close, &closer], 2);
+        assert_eq!(floor, cosine_similarity(&close[..2], &truth[..2]));
+        assert!(floor < 1.0 && floor > 0.9999);
+        let far = [1.0, 1.0, 0.0, 1.0];
+        assert!(catch_unwind(|| half_precision_floor("synthetic", &truth, &[&far], 2)).is_err());
+        assert!(catch_unwind(|| half_precision_floor("synthetic", &truth, &[], 2)).is_err());
+        assert!(
+            catch_unwind(|| half_precision_floor("synthetic", &truth, &[&close[..2]], 2)).is_err()
+        );
+        assert!(
+            catch_unwind(|| half_precision_floor("synthetic", &truth[..3], &[&close[..3]], 2))
+                .is_err()
+        );
+    }
+
+    /// Truth rows gate on family, both argmaxes, and the official floor.
+    #[test]
+    fn truth_row_gate_checks_family_top1_and_floor() {
+        let truth_values = [0.0, 3.0, 1.0];
+        let truth = TruthRow::synthetic(RowKind::Teacher, 4, &truth_values);
+        let near = [0.0, 3.0, 1.1];
+        let observation =
+            assert_row_against_truth("synthetic", RowKind::Teacher, &near, truth, 1, 0.99);
+        assert_eq!(observation.actual_top1_token_id, 1);
+        assert!(observation.cosine > 0.99);
+        let exact_floor = cosine_similarity(&near, &truth_values);
+        assert_row_against_truth("synthetic", RowKind::Teacher, &near, truth, 1, exact_floor);
+        for (kind, actual, top1, floor) in [
+            (RowKind::Cached, &near, 1, 0.99),
+            (RowKind::Prompt, &near, 1, 0.99),
+            (RowKind::Teacher, &[0.0, 1.0, 3.0], 1, 0.0),
+            (RowKind::Teacher, &near, 2, 0.0),
+            (RowKind::Teacher, &near, 1, exact_floor + 1e-12),
+            (RowKind::Teacher, &[0.0, f32::NAN, 1.0], 1, 0.0),
+        ] {
+            assert!(
+                catch_unwind(|| assert_row_against_truth(
+                    "synthetic",
+                    kind,
+                    actual,
+                    truth,
+                    top1,
+                    floor
+                ))
+                .is_err(),
+                "{kind:?} top1={top1} floor={floor} must be rejected"
+            );
+        }
+    }
+
+    /// A truth summary enforces contiguous decisions and complete coverage.
+    #[test]
+    fn truth_summary_enforces_order_and_coverage() {
+        let values = [0.0, 3.0, 1.0];
+        let mut summary = TruthPathSummary::new(RowKind::Cached, 0.99);
+        summary.observe(
+            "synthetic",
+            &values,
+            TruthRow::synthetic(RowKind::Cached, 0, &values),
+            1,
+        );
+        let worse = [0.0, 3.0, 1.2];
+        summary.observe(
+            "synthetic",
+            &worse,
+            TruthRow::synthetic(RowKind::Cached, 1, &values),
+            1,
+        );
+        let mut skipped = summary;
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                skipped.observe(
+                    "synthetic",
+                    &values,
+                    TruthRow::synthetic(RowKind::Cached, 3, &values),
+                    1,
+                )
+            }))
+            .is_err()
+        );
+        assert!(catch_unwind(|| summary.finish(3)).is_err());
+        let done = summary.finish(2);
+        assert_eq!((done.rows, done.minimum_decision), (2, 1));
+        assert_eq!(done.floor, 0.99);
+        assert_eq!(done.kind, RowKind::Cached);
     }
 
     /// Exact and positive-scaled vectors satisfy both mathematical gates.

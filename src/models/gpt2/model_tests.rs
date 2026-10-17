@@ -7,6 +7,7 @@ use burn::{
 use serde::Deserialize;
 
 use super::*;
+use crate::LogitsSelection;
 use crate::checkpoint::LoadOptions;
 use crate::models::gpt2::{Gpt2Activation, Gpt2Config};
 
@@ -383,6 +384,241 @@ fn invalid_input_unknown_points_and_readout_failures_are_recoverable_and_clear_c
         model
             .readout(Tensor::zeros([1, 2, 13], &Default::default()))
             .is_err()
+    );
+}
+
+/// Splits a contextual shape error into `(tensor, expected, actual)`.
+///
+/// Panics on any other variant, so callers pin both the variant and its names.
+fn shape_parts(error: Error) -> (String, String, String) {
+    match error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    }
+}
+
+/// Input-value and selection violations are `Error::Shape` naming the shared tensors.
+///
+/// Pins the public error contract adopted with the shared family glue:
+/// out-of-range token and position IDs, fully masked rows, and invalid
+/// explicit logits positions were `Error::Configuration` before.
+#[test]
+fn input_value_errors_are_shape_errors_with_shared_tensor_names() {
+    let fixture = fixture();
+    let model = loaded(fixture.config.clone());
+    let options = ForwardOptions::default();
+
+    let mut invalid = input(&fixture);
+    invalid.token_ids =
+        Tensor::<B, 2, Int>::from_ints([[19, 1, 2, 3], [1, 2, 3, 4]], &Default::default());
+    assert_eq!(
+        shape_parts(model.forward(invalid, &options).unwrap_err()),
+        (
+            "gpt2.token_ids".into(),
+            "token values in 0..19".into(),
+            "observed range 1..=19".into()
+        )
+    );
+
+    let mut invalid = input(&fixture);
+    invalid.position_ids = Some(Tensor::<B, 2, Int>::from_ints(
+        [[0, 1, 2, 16], [0, 1, 2, 3]],
+        &Default::default(),
+    ));
+    assert_eq!(
+        shape_parts(model.forward(invalid, &options).unwrap_err()),
+        (
+            "gpt2.position_ids".into(),
+            "position values in 0..16".into(),
+            "observed range 0..=16".into()
+        )
+    );
+
+    let mut invalid = input(&fixture);
+    invalid.token_mask = Some(TokenMask::new(Tensor::from_bool(
+        [[true, true, true, true], [false, false, false, false]].into(),
+        &Default::default(),
+    )));
+    assert_eq!(
+        shape_parts(model.forward(invalid, &options).unwrap_err()),
+        (
+            "gpt2.token_mask".into(),
+            "at least one valid token in every row".into(),
+            "a fully masked row".into()
+        )
+    );
+
+    let selection = ForwardOptions {
+        logits: LogitsSelection::Positions(vec![99]),
+        ..Default::default()
+    };
+    let (tensor, _, actual) = shape_parts(model.forward(input(&fixture), &selection).unwrap_err());
+    assert_eq!(
+        (tensor.as_str(), actual.as_str()),
+        ("forward_options.logits.positions", "[99]")
+    );
+
+    // A public block applies the same mask contract to its own input.
+    let hidden = Tensor::<B, 3>::zeros([1, 2, 12], &Default::default());
+    let empty = TokenMask::new(Tensor::from_bool(
+        [[false, false]].into(),
+        &Default::default(),
+    ));
+    assert_eq!(
+        shape_parts(
+            model.model.layers[0]
+                .forward(hidden, Some(&empty))
+                .unwrap_err()
+        )
+        .0,
+        "gpt2.token_mask"
+    );
+}
+
+/// A failing edit at any emitted point aborts both the backbone and the causal language model.
+#[test]
+fn every_activation_point_propagates_edit_failures() {
+    use crate::models::shared::test_support::assert_edit_failures_propagate;
+    let fixture = fixture();
+    let model = Gpt2ForCausalLm::<B>::init(fixture.config.clone(), &Default::default()).unwrap();
+    let points = model.activation_points();
+    assert_edit_failures_propagate(&points, |hooks| {
+        model.forward_with_hooks(input(&fixture), &ForwardOptions::default(), hooks)
+    });
+    assert_edit_failures_propagate(&points, |hooks| {
+        model
+            .model
+            .forward_with_hooks(&input(&fixture), true, hooks)
+    });
+}
+
+/// The backbone's hooked pass equals its plain pass and retains `L + 2` hidden states.
+#[test]
+fn backbone_hooked_pass_matches_the_plain_pass() {
+    let fixture = fixture();
+    let model = loaded(fixture.config.clone());
+    let plain = model.model.forward(&input(&fixture), true).unwrap();
+    let mut hooks = Hooks::new();
+    let embedding = hooks.capture(Stack::Decoder.embedding());
+    let hooked = model
+        .model
+        .forward_with_hooks(&input(&fixture), true, &mut hooks)
+        .unwrap();
+    assert_eq!(
+        values(plain.last_hidden_state),
+        values(hooked.last_hidden_state)
+    );
+    assert_eq!(hooked.hidden_states.len(), fixture.config.n_layer + 2);
+    assert_eq!(
+        values(hooks.get(&embedding).unwrap()),
+        values(hooked.hidden_states[0].clone())
+    );
+}
+
+/// The backbone's precision builder drops score and pattern points and keeps the outputs.
+#[test]
+fn backbone_precision_builder_matches_eager_attention() {
+    let fixture = fixture();
+    let eager = loaded(fixture.config.clone()).model;
+    let expected = eager.forward(&input(&fixture), false).unwrap();
+    let fused = eager
+        .clone()
+        .with_attention_precision(AttentionPrecisionMode::BackendDefault);
+    let actual = fused.forward(&input(&fixture), false).unwrap();
+    close(
+        &values(actual.last_hidden_state),
+        &values(expected.last_hidden_state),
+        2e-5,
+    );
+    assert_eq!(
+        fused.activation_points().len() + 2 * fixture.config.n_layer,
+        eager.activation_points().len()
+    );
+}
+
+/// Token grids that are empty or longer than the position table fail before embedding.
+#[test]
+fn token_grids_beyond_the_position_table_are_rejected() {
+    let fixture = fixture();
+    let model = Gpt2ForCausalLm::<B>::init(fixture.config.clone(), &Default::default()).unwrap();
+    for dims in [[0, 2], [1, fixture.config.n_positions + 1]] {
+        let input = CausalLmInput {
+            token_ids: Tensor::<B, 2, Int>::zeros(dims, &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        };
+        assert_eq!(
+            shape_parts(
+                model
+                    .forward(input, &ForwardOptions::default())
+                    .unwrap_err()
+            ),
+            (
+                "gpt2.token_ids".into(),
+                "nonempty batch and sequence within position capacity".into(),
+                format!("{dims:?}"),
+            )
+        );
+    }
+}
+
+/// Attention probabilities are hook-only; the tied projection checks width and dtype.
+#[test]
+fn readout_and_diagnostic_requests_are_validated() {
+    use burn::tensor::DType;
+    let fixture = fixture();
+    let model = loaded(fixture.config.clone());
+    let error = model
+        .forward(
+            input(&fixture),
+            &ForwardOptions {
+                attentions: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("pattern() hooks")),
+        "{error}"
+    );
+    assert_eq!(
+        shape_parts(
+            model
+                .project(Tensor::<B, 3>::zeros([1, 2, 11], &Default::default()))
+                .unwrap_err()
+        ),
+        (
+            "gpt2.hidden".into(),
+            "[batch>0, token>0, 12]".into(),
+            "[1, 2, 11]".into()
+        )
+    );
+    let error = model
+        .project(Tensor::<B, 3>::zeros([1, 2, 12], &Default::default()).cast(DType::F64))
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(reason) if reason.contains("share a floating dtype")),
+        "{error}"
+    );
+}
+
+/// An edited final norm is reported by the complete pass after the blocks have run.
+#[test]
+fn edited_final_norm_width_is_reported_by_the_complete_pass() {
+    let fixture = fixture();
+    let mut model = loaded(fixture.config.clone());
+    model.model.final_norm = burn::nn::LayerNormConfig::new(11).init(&Default::default());
+    assert_eq!(
+        shape_parts(
+            model
+                .forward(input(&fixture), &ForwardOptions::default())
+                .unwrap_err()
+        ),
+        ("gpt2.final_norm".into(), "[12]".into(), "[11]".into())
     );
 }
 
@@ -856,4 +1092,342 @@ fn pretrained_gpt2_matches_pytorch_last_logits_and_late_mlp_outputs() {
         .unwrap();
     }
     assert!(logits_match && mlps_match && probabilities_match);
+}
+
+/// Sample standard deviation of every element of a floating tensor.
+fn standard_deviation<const D: usize>(tensor: Tensor<B, D>) -> f64 {
+    let values = values(tensor);
+    let count = values.len() as f64;
+    let mean = values.iter().map(|&value| f64::from(value)).sum::<f64>() / count;
+    (values
+        .iter()
+        .map(|&value| (f64::from(value) - mean).powi(2))
+        .sum::<f64>()
+        / count)
+        .sqrt()
+}
+
+/// Random initialization follows GPT-2: `N(0, 0.02^2)`, zero biases, depth-scaled residual writers.
+///
+/// Burn's defaults (`N(0, 1)` embeddings, Kaiming-uniform projections with
+/// random biases) made the tied readout's initial logits about
+/// `sqrt(n_embd) = 8` wide here; GPT-2's scheme keeps them near
+/// `0.02 * sqrt(n_embd) = 0.16`.
+#[test]
+fn random_initialization_follows_gpt2() {
+    let config = Gpt2Config {
+        vocab_size: 512,
+        n_embd: 64,
+        n_layer: 4,
+        n_head: 4,
+        n_positions: 64,
+        ..Gpt2Config::default()
+    };
+    let device = Default::default();
+    B::seed(&device, 7);
+    let model = Gpt2ForCausalLm::<B>::init(config.clone(), &device).unwrap();
+    let within = |actual: f64, expected: f64| (actual / expected - 1.0).abs() < 0.1;
+    let embedding = &model.model;
+    assert!(within(
+        standard_deviation(embedding.token_embedding.weight.val()),
+        0.02
+    ));
+    assert!(within(
+        standard_deviation(embedding.position_embedding.weight.val()),
+        0.02
+    ));
+    let residual_std = 0.02 / 8.0_f64.sqrt();
+    assert!((config.residual_projection_std() - residual_std).abs() < 1e-15);
+    for block in &embedding.layers {
+        for (projection, std) in [
+            (&block.attention.q_proj, 0.02),
+            (&block.attention.k_proj, 0.02),
+            (&block.attention.v_proj, 0.02),
+            (&block.attention.o_proj, residual_std),
+            (&block.mlp.up_proj, 0.02),
+            (&block.mlp.down_proj, residual_std),
+        ] {
+            assert!(within(standard_deviation(projection.weight.val()), std));
+            let bias = values(projection.bias.as_ref().unwrap().val());
+            assert!(bias.iter().all(|&value| value == 0.0));
+        }
+        for norm in [&block.attention_norm, &block.mlp_norm] {
+            assert!(values(norm.gamma.val()).iter().all(|&value| value == 1.0));
+            let beta = values(norm.beta.as_ref().unwrap().val());
+            assert!(beta.iter().all(|&value| value == 0.0));
+        }
+    }
+    let ids: Vec<i32> = (0..256).map(|index| index * 37 % 512).collect();
+    let logits = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<B, 2, Int>::from_data(TensorData::new(ids, [4, 64]), &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap()
+        .logits;
+    let spread = standard_deviation(logits);
+    assert!((0.1..0.25).contains(&spread), "initial logit std {spread}");
+}
+
+/// The constructor and [`Gpt2Config::init_policy`] describe the same distributions per parameter.
+#[test]
+fn initialization_policy_matches_the_constructed_parameters() {
+    use crate::initialization::{ParameterInit, ParameterRole};
+
+    let config = Gpt2Config {
+        vocab_size: 32,
+        n_embd: 8,
+        n_layer: 2,
+        n_head: 2,
+        n_positions: 8,
+        initializer_range: 0.05,
+        ..Gpt2Config::default()
+    };
+    let model = Gpt2ForCausalLm::<B>::init(config.clone(), &Default::default()).unwrap();
+    let policy = config.init_policy();
+    policy.validate_for(&model).unwrap();
+    let (_, report) = policy.apply(model).unwrap();
+    let residual = config.residual_projection_std();
+    for parameter in &report.parameters {
+        let expected = match parameter.role {
+            ParameterRole::Embedding | ParameterRole::Projection => {
+                ParameterInit::Normal { std: 0.05 }
+            }
+            ParameterRole::ResidualProjection => {
+                assert!(
+                    parameter.path.contains("o_proj") || parameter.path.contains("down_proj"),
+                    "{}",
+                    parameter.path
+                );
+                ParameterInit::Normal { std: residual }
+            }
+            ParameterRole::Bias => ParameterInit::Zeros,
+            ParameterRole::Other => ParameterInit::Keep,
+        };
+        assert_eq!(parameter.init, expected, "{}", parameter.path);
+    }
+    let residual_count = report
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.role == ParameterRole::ResidualProjection)
+        .count();
+    assert_eq!(residual_count, 2 * config.n_layer);
+    assert!(
+        Gpt2Config {
+            initializer_range: 0.0,
+            ..config.clone()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Gpt2Config {
+            initializer_range: f64::INFINITY,
+            ..config
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+/// Applying [`Gpt2Config::init_policy`] re-samples projections but keeps LayerNorm parameters.
+///
+/// Pins the documented limit of the policy: role rules cannot tell a
+/// LayerNorm scale from its shift (see [`Gpt2Config::reinit_policy`]), so
+/// re-initializing an edited model leaves its norms untouched.
+#[test]
+fn applying_the_initialization_policy_keeps_layer_norm_parameters() {
+    use crate::initialization::{ParameterInit, ParameterRole};
+    use burn::module::Param;
+
+    let config = Gpt2Config {
+        vocab_size: 32,
+        n_embd: 8,
+        n_layer: 2,
+        n_head: 2,
+        n_positions: 8,
+        ..Gpt2Config::default()
+    };
+    let device = Default::default();
+    let mut model = Gpt2ForCausalLm::<B>::init(config.clone(), &device).unwrap();
+    model.model.final_norm.gamma = Param::from_tensor(Tensor::full([8], 2.0, &device));
+    model.model.final_norm.beta = Some(Param::from_tensor(Tensor::full([8], 0.5, &device)));
+    let projection_before = model.model.layers[0].attention.o_proj.weight.val();
+    let (model, report) = config.init_policy().apply(model).unwrap();
+
+    let values = |tensor: Tensor<B, 1>| tensor.into_data().to_vec::<f32>().unwrap();
+    let norm = &model.model.final_norm;
+    assert!(values(norm.gamma.val()).iter().all(|&value| value == 2.0));
+    assert!(
+        values(norm.beta.as_ref().unwrap().val())
+            .iter()
+            .all(|&value| value == 0.5)
+    );
+    let projection_after = model.model.layers[0].attention.o_proj.weight.val();
+    assert_ne!(
+        projection_before.into_data().to_vec::<f32>().unwrap(),
+        projection_after.into_data().to_vec::<f32>().unwrap()
+    );
+    let norm_entries: Vec<_> = report
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.path.contains("norm"))
+        .collect();
+    assert_eq!(norm_entries.len(), 2 * (2 * config.n_layer + 1));
+    for parameter in norm_entries {
+        assert_eq!(parameter.role, ParameterRole::Other, "{}", parameter.path);
+        assert_eq!(parameter.init, ParameterInit::Keep, "{}", parameter.path);
+    }
+}
+
+/// Backend-default attention matches the eager graph and drops only score and pattern points.
+#[test]
+fn backend_default_attention_matches_eager_and_drops_score_points() {
+    let fixture = fixture();
+    let eager = loaded(fixture.config.clone());
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let expected = eager.forward(input(&fixture), &options).unwrap();
+    let fused = eager
+        .clone()
+        .with_attention_precision(AttentionPrecisionMode::BackendDefault);
+    assert!(
+        fused
+            .model
+            .layers
+            .iter()
+            .all(|block| block.attention.precision_mode == AttentionPrecisionMode::BackendDefault)
+    );
+    let actual = fused.forward(input(&fixture), &options).unwrap();
+    close(&values(actual.logits), &values(expected.logits), 2e-5);
+    for (actual, expected) in actual.hidden_states.into_iter().zip(expected.hidden_states) {
+        close(&values(actual), &values(expected), 2e-5);
+    }
+    let points = fused.activation_points();
+    let attention = Layer::decoder(0).self_attention();
+    assert!(!points.contains(&attention.scores().info()));
+    assert!(!points.contains(&attention.pattern().info()));
+    assert!(points.contains(&attention.head_context().info()));
+    assert_eq!(
+        points.len() + 2 * fixture.config.n_layer,
+        eager.activation_points().len()
+    );
+    let mut restored = fused;
+    restored.set_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+    assert_eq!(restored.activation_points(), eager.activation_points());
+}
+
+/// Multiplies layer `layer`'s query projection (weight and bias) by `factor`.
+fn scale_queries(model: &mut Gpt2ForCausalLm<B>, layer: usize, factor: f64) {
+    let query = &mut model.model.layers[layer].attention.q_proj;
+    query.weight = query.weight.clone().map(|weight| weight.mul_scalar(factor));
+    let bias = query.bias.take().unwrap();
+    query.bias = Some(bias.map(|bias| bias.mul_scalar(factor)));
+}
+
+/// `scale_attn_weights` and `scale_attn_by_inverse_layer_idx` scale scores exactly as configured.
+///
+/// Scores are `(x W_q + b_q) K^T * scale`, so a model whose layer-`i` scale
+/// differs by a factor `c` matches the default model once its layer-`i`
+/// queries are multiplied by `1 / c`. Disabling `scale_attn_weights` drops
+/// `1 / sqrt(head_dim)`; the inverse-layer variant divides layer `i` by
+/// `i + 1` (an off-by-one would break the match at layer zero or one).
+#[test]
+fn attention_scale_variants_divide_scores_as_configured() {
+    let fixture = fixture();
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let expected = values(
+        loaded(fixture.config.clone())
+            .forward(input(&fixture), &options)
+            .unwrap()
+            .logits,
+    );
+    let head_dim = (fixture.config.n_embd / fixture.config.n_head) as f64;
+    for (scale_weights, inverse_layer) in [(false, false), (true, true), (false, true)] {
+        let config = Gpt2Config {
+            scale_attn_weights: scale_weights,
+            scale_attn_by_inverse_layer_idx: inverse_layer,
+            ..fixture.config.clone()
+        };
+        let mut model = loaded(config);
+        for layer in 0..fixture.config.n_layer {
+            let base = if scale_weights {
+                head_dim.sqrt().recip()
+            } else {
+                1.0
+            };
+            let configured = if inverse_layer {
+                base / (layer + 1) as f64
+            } else {
+                base
+            };
+            assert_eq!(
+                model.model.layers[layer].attention.scale,
+                Some(configured),
+                "layer {layer}"
+            );
+            scale_queries(&mut model, layer, head_dim.sqrt().recip() / configured);
+        }
+        let actual = values(model.forward(input(&fixture), &options).unwrap().logits);
+        close(&actual, &expected, 1e-5);
+    }
+}
+
+/// GPT-2 configurations load through the shared `ModelConfig` API with field-level errors.
+#[test]
+fn configurations_load_through_the_shared_model_config_api() {
+    use crate::models::config::{ConfigLoadError, ModelConfig, Validate};
+
+    let json = r#"{"model_type": "gpt2", "vocab_size": 19, "n_embd": 12, "n_layer": 2,
+                   "n_head": 3, "n_positions": 16, "initializer_range": 0.04}"#;
+    let config = Gpt2Config::from_json_str(json).unwrap();
+    assert_eq!(config.initializer_range, 0.04);
+    assert_eq!(<Gpt2Config as ModelConfig>::MODEL_TYPES, ["gpt2"]);
+    crate::ArchitectureConfig::validate(&config).unwrap();
+    let defaulted =
+        Gpt2Config::from_json_str(&json.replace(", \"initializer_range\": 0.04", "")).unwrap();
+    assert_eq!(defaulted.initializer_range, 0.02);
+    for (edit, field) in [
+        (("\"n_head\": 3", "\"n_head\": 5"), "n_head"),
+        (
+            ("\"model_type\": \"gpt2\"", "\"model_type\": \"gpt_neox\""),
+            "model_type",
+        ),
+        (
+            ("\"initializer_range\": 0.04", "\"initializer_range\": -1.0"),
+            "initializer_range",
+        ),
+    ] {
+        let invalid = json.replace(edit.0, edit.1);
+        match Gpt2Config::from_json_str(&invalid).unwrap_err() {
+            ConfigLoadError::Validation(error) => assert_eq!(error.field, field),
+            other => panic!("expected a validation error, found {other}"),
+        }
+    }
+    let invalid = Gpt2Config {
+        n_head: 5,
+        ..config
+    };
+    assert_eq!(Validate::validate(&invalid).unwrap_err().field, "n_head");
+    // The inherent wrapper keeps the crate error path `gpt2.<field>`.
+    assert!(
+        invalid
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("gpt2.n_head")
+    );
 }

@@ -8,16 +8,38 @@ description = "Backend-generic modern transformer architectures for Burn"
 readme = "README.md"
 keywords = ["burn", "transformer", "inference", "llm"]
 categories = ["science", "algorithms"]
+# crates.io limits an upload to 10 MiB compressed, so bulky evidence stays in
+# Git. scripts/package_contents.py describes the split, and the package gate
+# rejects a listing that breaks it. Patterns are root-anchored; later `!`
+# patterns remove files that earlier ones matched.
 include = [
     "/src/**",
     "/examples/**",
+    # Recorded outputs of the mechanistic studies: figures, result records,
+    # and captured runs. Their programs, protocols, and fixtures ship.
+    "!/examples/mechanistic/**/*.png",
+    "!/examples/mechanistic/**/*.svg",
+    "!/examples/mechanistic/**/result.json",
+    "!/examples/mechanistic/**/*.result.json",
+    "!/examples/mechanistic/*/evidence/**",
+    "!/examples/mechanistic/*/results/**",
     "/tests/**",
     "/scripts/**/*.py",
     "/scripts/COVERAGE_EVIDENCE.md",
     "/scripts/WHOLE_FILE_COVERAGE.md",
     "/scripts/tests/fixtures/coverage_lines/**",
     "/scripts/tests/fixtures/coverage_dependencies/**",
-    "/acceptance/**",
+    # Checkpoint support records, one summary record per measurement campaign,
+    # and the compact summaries the v0.1 release record names as its baseline.
+    # Other campaign directories (raw logs, coverage exports, replay reports)
+    # are repository-only.
+    "/acceptance/*.json",
+    "/acceptance/measurements/*.json",
+    "/acceptance/measurements/README.md",
+    "/acceptance/measurements/small-model-performance-20260910/**",
+    # tests/verus_harness.rs reads the harnesses and their guide.
+    "/verus/*.rs",
+    "/verus/README.md",
     "/*.md",
     "/LICENSE-*",
     "/deny.toml",
@@ -31,8 +53,21 @@ autodiff = ["burn/autodiff"]
 # Optional access to Burn's own Learner and TrainStep APIs. Ordinary optimizer
 # loops require only `autodiff`; the crate does not provide a separate trainer.
 train = ["std", "autodiff", "burn/train"]
+# Burn's CubeCL MLIR backend. Its build scripts download a prebuilt LLVM 20
+# (tracel-llvm 20.1.4-7) and run its `llvm-config`, which needs glibc 2.34 or
+# newer and libstdc++ from GCC 11 or newer (Ubuntu 22.04+, RHEL/Alma 9+). On
+# older hosts such as RHEL 8 the build fails before this crate compiles; no
+# library code depends on the feature, only tests: the CubeCL CPU validation
+# and three reports that record it (SUPPORT.md lists them). The downloaded
+# archive is kept in `$HOME/.cache/tracel` (only `HOME` moves it;
+# `XDG_CACHE_HOME` does not) and the extracted LLVM in `$XDG_DATA_HOME/tracel`,
+# by default `~/.local/share/tracel` on Linux. See SUPPORT.md.
 cpu = ["burn/cpu"]
-flex = ["burn/flex"]
+# Burn's own default enables Flex's SIMD kernels and rayon-parallel GEMM, but
+# this crate disables Burn defaults to keep backends opt-in. Re-enable both for
+# Flex explicitly; without them every elementwise op takes the scalar path and
+# matrix products run on one core.
+flex = ["burn/flex", "burn/simd", "dep:burn-flex", "burn-flex/rayon"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
 rocm = ["burn/rocm"]
@@ -49,43 +84,118 @@ attention-kernel-tracing = ["kernel-tracing", "burn/autotune"]
 
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }
+# Direct handle used only to enable burn-flex's rayon feature (already in the
+# dependency graph through burn); see the `flex` feature.
+burn-flex = { version = "=0.21.0", default-features = false, optional = true }
 burn-store = { version = "=0.21.0", default-features = false, features = ["burnpack", "memmap"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.149", features = ["raw_value"] }
+serde_json = { version = "1.0.149", features = ["float_roundtrip", "raw_value"] }
 safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }
 sha2 = "=0.10.9"
 thiserror = "2.0.18"
 tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"], optional = true }
 minijinja = { version = "=2.19.0", default-features = false, features = ["adjacent_loop_items", "builtins", "fuel", "json", "loop_controls", "macros", "multi_template", "serde", "std_collections"], optional = true }
 
+[lints.rust]
+# Verus sets these configurations only while checking the in-place proofs
+# described in verus/README.md; ordinary builds never enable them.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_keep_ghost_body)", "cfg(verus_only)"] }
+
 [dev-dependencies]
+# Burn's own shape and stride utilities, already in the graph through burn. A
+# unit test pins the CubeCL reshape decision that `delta_net`'s
+# `trailing_unit_axis` works around, so a Burn upgrade that changes it fails.
+burn-std = { version = "=0.21.0", default-features = false }
 proptest = "1.9.0"
 tempfile = "3.27.0"
 tracing = "=0.1.44"
+
+# Every example names the crate features it needs. Cargo skips it in builds
+# without them, and `cargo run --example NAME` prints the missing `--features`.
+
+[[example]]
+name = "activation_patching"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
+name = "activation_workbench"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "attention_head_attribution"
+required-features = ["std", "flex"]
 
 [[example]]
 name = "burn_training"
 required-features = ["train", "flex"]
 
 [[example]]
-name = "grokking_train"
-required-features = ["std", "flex", "autodiff"]
+name = "clock_and_pizza"
+required-features = ["std", "flex"]
 
 [[example]]
 name = "clock_and_pizza_train"
 required-features = ["std", "flex", "autodiff"]
 
 [[example]]
-name = "tuned_lens_train"
-required-features = ["std", "flex", "autodiff", "tokenizers"]
+name = "custom_composition"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "flan_t5_small"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
+name = "gemma_generate"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
+name = "greater_than"
+required-features = ["std", "flex"]
 
 [[example]]
 name = "greater_than_train"
 required-features = ["std", "flex", "autodiff"]
 
 [[example]]
+name = "grokking_fourier"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "grokking_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "llama_generate"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
+name = "mla_encoder_decoder"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "qwen35_chat"
+required-features = ["std", "metal", "chat-templates"]
+
+[[example]]
+name = "qwen_prefix"
+required-features = ["std", "flex"]
+
+[[example]]
+name = "t5_classifier"
+required-features = ["std", "flex"]
+
+[[example]]
 name = "train_qwen_adapter"
 required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "tuned_lens"
+required-features = ["std", "flex", "tokenizers"]
+
+[[example]]
+name = "tuned_lens_train"
+required-features = ["std", "flex", "autodiff", "tokenizers"]
 
 # Checkpoint integrity is part of ordinary local loading, and acceptance gates
 # hash tens of gigabytes. Keep SHA-256 optimized even when the surrounding

@@ -211,6 +211,10 @@ results. Its cutoff-aligned curves use the same 80 preselected held-out clean
 prompts (suffixes 10–89) at every offset; the condition table uses all 97.
 Error bars show descriptive sample SD, not confidence intervals. Use
 `--result DIRECTORY/result.json --output-dir DIRECTORY` to plot another run.
+The recorded `result.json` and figures exist only in the Git repository, so in
+the published crate the default `--result` is missing: plot your own run, for
+example `--result target/mechanistic/greater_than/result.json --output-dir
+target/mechanistic/greater_than` after the default `greater_than` run.
 The [plot validation record](plot_validation.json) records dependency versions,
 artifact hashes, and visual checks of both PNG and independently rendered SVG.
 

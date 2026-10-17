@@ -1,0 +1,9 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== cmd CARGO_TARGET_DIR='/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates' cargo test --locked --release --features metal,tokenizers --test gpt_oss_artifacts --no-run
+2026-10-17T09:00:50Z
+/dev/disk7s1   1.8Ti   1.5Ti   352Gi    82%    1.8M  3.7G    0%   /Volumes/bag of holding
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-polish-half)
+    Finished `release` profile [optimized] target(s) in 41.78s
+  Executable tests/gpt_oss_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gpt_oss_artifacts-98a177a8f6a4ce38)
+== exit=0
+2026-10-17T09:01:32Z

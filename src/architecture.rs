@@ -1,22 +1,29 @@
 //! Public architecture contracts and reusable model specifications.
 //!
 //! Contracts separate stateless parameterized computation from mutable decode
-//! sessions. Shared specifications describe mixer, normalization, and residual
-//! choices without selecting a checkpoint family. Input/output types make tensor
-//! axes and token-validity semantics explicit; family implementations validate the
+//! sessions. [`HookedModel`] and [`StagedModel`] give experiments one interface
+//! for activation hooks and staged execution across families. Shared
+//! specifications describe mixer, normalization, and residual choices without
+//! selecting a checkpoint family. Input/output types make tensor axes and
+//! token-validity semantics explicit; family implementations validate the
 //! requested capabilities before applying their numerical graph.
 
+mod constraints;
 mod spec;
 mod traits;
 mod types;
 
 pub use spec::{
-    Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+    Activation, AttentionOptions, AttentionSpec, ClampedSwiGluSpec, CrossAttentionSpec,
+    DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec, DifferentialAttentionSpec,
     FeedForwardSpec, Mamba2Spec, MixerSpec, MixtureOfExpertsSpec, MlaSpec, NormPlacement,
-    NormalizationSpec, PositionEncodingSpec, ResidualTopology, RopeScaling, Seq2SeqSpec,
-    SlidingWindowSpec,
+    NormalizationSpec, OutputGateActivation, PositionEncodingSpec, ResidualTopology, RopeScaling,
+    ScoreScale, Seq2SeqSpec, SlidingWindowSpec,
 };
-pub use traits::{ArchitectureConfig, CausalLanguageModel, DecodeState, Seq2SeqLanguageModel};
+pub use traits::{
+    ArchitectureConfig, CausalLanguageModel, DecodeState, HookedModel, Seq2SeqLanguageModel,
+    StagedModel,
+};
 pub use types::{
     CausalLmInput, CausalLmOutput, DecodeInput, EncoderOutput, ForwardOptions, LogitsSelection,
     RouterDiagnostics, Seq2SeqInput, Seq2SeqOutput, TokenMask,

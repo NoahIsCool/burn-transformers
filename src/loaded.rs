@@ -6,13 +6,24 @@
 //! those values together so an application cannot accidentally report one
 //! revision while executing another model. The bundle performs no network I/O;
 //! [`ModelSourceMetadata`] canonicalizes an already-present local directory.
+//!
+//! A bundle whose model implements [`HookedModel`] or [`StagedModel`]
+//! implements them too, by delegating to that model, so family-generic
+//! experiment code accepts `&loaded` directly.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
+use burn::tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
-    Error, GenerationConfig, Result,
+    CausalLmInput, Error, ForwardOptions, GenerationConfig, Result,
+    architecture::{HookedModel, StagedModel},
     checkpoint::{
         ExecutionStats, LoadReport,
         quantization::{
@@ -21,6 +32,9 @@ use crate::{
             ProvenanceExecutionStats, ProvenanceHashStats,
         },
     },
+    experiment::HiddenState,
+    intervention::{Hooks, PointInfo, Stack},
+    models::shared::load_audit::{equivalence_reads, payload_totals},
 };
 
 /// Tokenizer type carried by [`LoadedModel`] when tokenizer support is enabled.
@@ -158,6 +172,41 @@ struct RetainedLoadAudit {
     quantized: Option<QuantizedLoadAudit>,
 }
 
+/// Every component of a [`LoadedModel`], moved out by name.
+///
+/// Returned by [`LoadedModel::into_named_parts`]. Destructure only what you
+/// need, for example
+/// `let LoadedModelParts { model, tokenizer, .. } = loaded.into_named_parts();`.
+/// The struct is non-exhaustive so later audit domains can be added without
+/// breaking such patterns.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct LoadedModelParts<M> {
+    /// Strictly loaded executable model.
+    pub model: M,
+    /// Local tokenizer when the load attached one.
+    pub tokenizer: Option<ModelTokenizer>,
+    /// Validated generation defaults normalized for the model vocabulary.
+    pub generation_defaults: GenerationConfig,
+    /// Local artifact path and recorded upstream identity.
+    pub source: ModelSourceMetadata,
+    /// Finalized tensor-level load accounting.
+    pub load_report: LoadReport,
+    /// SafeTensors plan-execution counters, when the loader retained them.
+    pub execution_stats: Option<ExecutionStats>,
+    /// Burnpack preflight, decode, and provenance counters of a quantized load.
+    pub quantized_load_audit: Option<QuantizedLoadAudit>,
+    /// Checkpoint generation settings that change Hugging Face generation but were not applied.
+    pub unsupported_generation_settings: BTreeMap<String, Value>,
+}
+
+impl<M> From<LoadedModel<M>> for LoadedModelParts<M> {
+    /// Moves every component out of the bundle by name.
+    fn from(loaded: LoadedModel<M>) -> Self {
+        loaded.into_named_parts()
+    }
+}
+
 /// An executable model and all host-side state established by a strict load.
 #[derive(Debug)]
 pub struct LoadedModel<M> {
@@ -175,6 +224,8 @@ pub struct LoadedModel<M> {
     execution_stats: Option<ExecutionStats>,
     /// Additional Burnpack validation and provenance work when applicable.
     quantized_load_audit: Option<QuantizedLoadAudit>,
+    /// `generation_config.json` settings with no equivalent in [`GenerationConfig`].
+    unsupported_generation_settings: BTreeMap<String, Value>,
 }
 
 impl<M> LoadedModel<M> {
@@ -320,7 +371,27 @@ impl<M> LoadedModel<M> {
             load_report,
             execution_stats,
             quantized_load_audit,
+            unsupported_generation_settings: BTreeMap::new(),
         })
+    }
+
+    /// Records checkpoint generation settings that this crate could not apply.
+    ///
+    /// Automatic loaders call this with the behavior-changing keys of
+    /// `generation_config.json` (beam search, `typical_p`, `max_length`, ...)
+    /// whose values differ from Hugging Face's neutral defaults, so callers can
+    /// see where generation may diverge from the reference implementation.
+    /// Seq2seq loads also report what their beam search does not read: the
+    /// logits-processor constraints (`min_p`, `no_repeat_ngram_size`,
+    /// `min_new_tokens`), `repetition_penalty`, and `do_sample` with its
+    /// non-neutral `temperature`, `top_k`, and `top_p`.
+    #[must_use]
+    pub fn with_unsupported_generation_settings(
+        mut self,
+        settings: BTreeMap<String, Value>,
+    ) -> Self {
+        self.unsupported_generation_settings = settings;
+        self
     }
 
     /// Returns the executable Burn module.
@@ -370,16 +441,38 @@ impl<M> LoadedModel<M> {
         self.quantized_load_audit.as_ref()
     }
 
+    /// Returns checkpoint generation settings that were present but not applied.
+    ///
+    /// Keys are `generation_config.json` field names such as `num_beams` or
+    /// `typical_p`; an empty map means every behavior-changing setting the
+    /// checkpoint declared is honored by [`Self::generation_defaults`].
+    pub fn unsupported_generation_settings(&self) -> &BTreeMap<String, Value> {
+        &self.unsupported_generation_settings
+    }
+
     /// Consumes the bundle and returns the executable module.
     pub fn into_model(self) -> M {
         self.model
     }
 
+    /// Consumes the bundle and returns every component in a named struct.
+    pub fn into_named_parts(self) -> LoadedModelParts<M> {
+        LoadedModelParts {
+            model: self.model,
+            tokenizer: self.tokenizer,
+            generation_defaults: self.generation_defaults,
+            source: self.source,
+            load_report: self.load_report,
+            execution_stats: self.execution_stats,
+            quantized_load_audit: self.quantized_load_audit,
+            unsupported_generation_settings: self.unsupported_generation_settings,
+        }
+    }
+
     /// Consumes the bundle using the original five-component compatibility API.
     ///
     /// This method intentionally omits optional checkpoint execution counters.
-    /// Use [`Self::into_parts_with_execution_stats`] when retaining that audit
-    /// data matters.
+    #[deprecated(note = "use `into_named_parts`, which names every component")]
     pub fn into_parts(
         self,
     ) -> (
@@ -399,6 +492,7 @@ impl<M> LoadedModel<M> {
     }
 
     /// Consumes the bundle and returns every component, including load counters.
+    #[deprecated(note = "use `into_named_parts`, which names every component")]
     pub fn into_parts_with_execution_stats(
         self,
     ) -> (
@@ -421,9 +515,9 @@ impl<M> LoadedModel<M> {
 
     /// Consumes the bundle and additionally returns its quantized-load audit.
     ///
-    /// The first six elements intentionally match
-    /// [`Self::into_parts_with_execution_stats`]. Full-precision bundles return
-    /// `None` for the final element.
+    /// The first six elements match the execution-stats tuple. Full-precision
+    /// bundles return `None` for the final element.
+    #[deprecated(note = "use `into_named_parts`, which names every component")]
     pub fn into_parts_with_quantized_load_audit(
         self,
     ) -> (
@@ -509,25 +603,22 @@ fn validate_quantized_load_audit(report: &LoadReport, audit: &QuantizedLoadAudit
             report.quantized.len()
         )));
     }
-    let reported_payload_bytes = report
+    // Verified: the exact total (or overflow) and the largest record, zero when empty.
+    let record_bytes = report
         .quantized
         .iter()
-        .try_fold(0_u64, |total, record| total.checked_add(record.bytes));
-    let reported_payload_bytes = reported_payload_bytes.ok_or_else(|| {
-        Error::Checkpoint("quantized load-report payload byte count overflowed".into())
-    })?;
+        .map(|record| record.bytes)
+        .collect::<Vec<_>>();
+    let (reported_payload_bytes, reported_largest_payload) = payload_totals(&record_bytes)
+        .ok_or_else(|| {
+            Error::Checkpoint("quantized load-report payload byte count overflowed".into())
+        })?;
     if reported_payload_bytes != packed.payload_bytes {
         return Err(Error::Checkpoint(format!(
             "Burnpack decoded {} payload bytes but the load report accounts for {reported_payload_bytes}",
             packed.payload_bytes
         )));
     }
-    let reported_largest_payload = report
-        .quantized
-        .iter()
-        .map(|record| record.bytes)
-        .max()
-        .unwrap_or(0);
     if packed.largest_payload_bytes != reported_largest_payload {
         return Err(Error::Checkpoint(format!(
             "largest Burnpack payload is {}, but the load report records {reported_largest_payload}",
@@ -637,9 +728,7 @@ fn validate_execution_stats(report: &LoadReport, stats: &ExecutionStats) -> Resu
             report.equivalence_verified.len()
         )));
     }
-    let expected_equivalence_reads = u64::try_from(stats.equivalences_verified)
-        .ok()
-        .and_then(|count| count.checked_mul(2))
+    let expected_equivalence_reads = equivalence_reads(stats.equivalences_verified)
         .ok_or_else(|| Error::Checkpoint("equivalence read count overflowed".into()))?;
     if stats.equivalence_source_reads != expected_equivalence_reads {
         return Err(Error::Checkpoint(format!(
@@ -674,6 +763,70 @@ fn validate_execution_stats(report: &LoadReport, stats: &ExecutionStats) -> Resu
         }
     }
     Ok(())
+}
+
+// Experiments on a loaded bundle run on its model.
+
+impl<B: Backend, M: HookedModel<B>> HookedModel<B> for LoadedModel<M> {
+    /// The loaded model's complete input.
+    type Input = M::Input;
+    /// The loaded model's complete output.
+    type Output = M::Output;
+
+    /// Lists the loaded model's activation points.
+    fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        self.model.activation_points()
+    }
+
+    /// Runs the loaded model's hooked forward pass; the bundle's metadata is untouched.
+    fn forward_with_hooks(
+        &self,
+        input: M::Input,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<M::Output> {
+        self.model.forward_with_hooks(input, options, hooks)
+    }
+}
+
+impl<B: Backend, M: StagedModel<B>> StagedModel<B> for LoadedModel<M> {
+    /// Number of blocks the loaded model can stage.
+    fn num_layers(&self) -> usize {
+        self.model.num_layers()
+    }
+
+    /// Stack whose layer addresses the loaded model's staged blocks emit.
+    fn stack(&self) -> Stack {
+        self.model.stack()
+    }
+
+    /// Embeds tokens with the loaded model.
+    fn embed_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.embed_with_hooks(input, hooks)
+    }
+
+    /// Runs a block range of the loaded model.
+    fn run_layers_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        range: Range<usize>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.run_layers_with_hooks(state, range, hooks)
+    }
+
+    /// Applies the loaded model's final normalization.
+    fn normalize_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        self.model.normalize_with_hooks(state, hooks)
+    }
 }
 
 /// Rejects empty, surrounding-whitespace, and control-character provenance.

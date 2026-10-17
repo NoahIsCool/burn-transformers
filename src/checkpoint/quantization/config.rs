@@ -30,12 +30,24 @@ impl SymmetricQuantization {
         }
     }
 
-    /// Computes the packed bytes required for `elements` values.
-    pub(crate) fn packed_bytes(self, elements: usize) -> Result<usize> {
+    /// Maps this precision to the packed code width that stores it.
+    ///
+    /// Q8 stores one two's-complement code per byte and Q4 two codes per byte,
+    /// low nibble first; every packed-length, wire-count, and code-validation
+    /// computation takes its width from here.
+    pub(crate) const fn code_width(self) -> super::packing::CodeWidth {
         match self {
-            Self::Q8 => Ok(elements),
-            Self::Q4 => Ok(elements / 2 + elements % 2),
+            Self::Q8 => super::packing::CodeWidth::Byte,
+            Self::Q4 => super::packing::CodeWidth::Nibble,
         }
+    }
+
+    /// Computes the packed bytes required for `elements` values.
+    ///
+    /// This is `n` for Q8 and `ceil(n / 2)` for Q4; the Verus-checked
+    /// `packing::packed_len` proves the formula never overflows.
+    pub(crate) fn packed_bytes(self, elements: usize) -> Result<usize> {
+        Ok(super::packing::packed_len(self.code_width(), elements))
     }
 }
 
@@ -51,6 +63,9 @@ pub struct QuantizationGroupSize(
 );
 
 impl QuantizationGroupSize {
+    /// Largest supported group size; bounds per-group stack buffers.
+    pub const MAX: usize = 128;
+
     /// Creates a supported group size.
     pub fn new(value: usize) -> Result<Self> {
         match value {
@@ -63,6 +78,15 @@ impl QuantizationGroupSize {
     #[must_use]
     pub const fn get(self) -> usize {
         self.0
+    }
+
+    /// Returns the group size in the `u64` domain of the wire-count arithmetic.
+    ///
+    /// A validated size is at most [`Self::MAX`], so this widening is exact on
+    /// every host and needs no fallible conversion.
+    #[must_use]
+    pub(crate) const fn get_u64(self) -> u64 {
+        self.0 as u64
     }
 }
 
@@ -126,6 +150,36 @@ pub struct WeightQuantizationConfig {
     pub scheme: SymmetricQuantization,
     /// Number of contiguous source values sharing a scale.
     pub group_size: QuantizationGroupSize,
+}
+
+impl WeightQuantizationConfig {
+    /// Stable report label of the persisted storage format.
+    ///
+    /// Conversion records `symmetric-{q8|q4}-g{G}-flat-row-major`: contiguous
+    /// row-major groups of `G` values in the sidecar. Loading records the
+    /// runtime form of the same payload,
+    /// [`QuantizedTensorMetadata::runtime_label`](super::QuantizedTensorMetadata::runtime_label),
+    /// because the installed tensor is Burn block-QFloat; for aligned matrices
+    /// the two describe identical groups.
+    #[must_use]
+    pub fn storage_label(self) -> String {
+        format!(
+            "symmetric-{}-g{}-flat-row-major",
+            self.scheme.label(),
+            self.group_size.get()
+        )
+    }
+}
+
+impl SymmetricQuantization {
+    /// Lowercase precision spelling used in report labels: `q8` or `q4`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Q8 => "q8",
+            Self::Q4 => "q4",
+        }
+    }
 }
 
 impl Default for WeightQuantizationConfig {

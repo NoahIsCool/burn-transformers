@@ -10,7 +10,7 @@ use crate::checkpoint::{
     },
 };
 
-use super::{LoadedModel, ModelSourceMetadata};
+use super::{LoadedModel, LoadedModelParts, ModelSourceMetadata};
 
 /// Source metadata canonicalizes roots and preserves pinned provenance.
 #[test]
@@ -113,6 +113,8 @@ fn loaded_model_validates_and_preserves_components() {
     assert!(loaded.execution_stats().is_none());
     assert!(loaded.quantized_load_audit().is_none());
 
+    // The deprecated tuple API keeps working for existing callers.
+    #[allow(deprecated)]
     let (model, tokenizer, _, unpacked_source, unpacked_report) = loaded.into_parts();
     assert_eq!(model, 17);
     assert!(tokenizer.is_none());
@@ -166,6 +168,7 @@ fn loaded_model_preserves_execution_stats_without_changing_legacy_parts() {
 
     assert_eq!(loaded.execution_stats(), Some(&stats));
     assert!(loaded.quantized_load_audit().is_none());
+    #[allow(deprecated)]
     let (model, tokenizer, _, unpacked_source, unpacked_report, unpacked_stats) =
         loaded.into_parts_with_execution_stats();
     assert_eq!(model, 23);
@@ -256,6 +259,7 @@ fn loaded_model_preserves_quantized_load_audit() {
     assert_eq!(audit.packed(), &packed);
     assert_eq!(audit.provenance(), &provenance);
 
+    #[allow(deprecated)]
     let (model, tokenizer, _, unpacked_source, unpacked_report, unpacked_stats, unpacked_audit) =
         loaded.into_parts_with_quantized_load_audit();
     assert_eq!(model, 29);
@@ -1072,5 +1076,79 @@ fn bundle_rejects_equivalence_bytes_above_total_source_bytes() {
     assert_eq!(
         error.to_string(),
         "checkpoint error: equivalence source bytes 9 exceed all checkpoint source bytes 8"
+    );
+}
+
+/// Named parts move every component out, including retained execution counters.
+#[test]
+fn named_parts_expose_every_component_by_name() {
+    let directory = tempfile::tempdir().expect("temporary source root");
+    let source = ModelSourceMetadata::local(directory.path(), "t5").expect("valid source");
+    let mut report = LoadReport::new();
+    report.applied = vec!["b.weight".into(), "a.weight".into()];
+    let stats = ExecutionStats {
+        tensors_applied: 2,
+        ..ExecutionStats::default()
+    };
+    let loaded = LoadedModel::new_with_execution_stats(
+        31_u8,
+        None,
+        Default::default(),
+        source.clone(),
+        report,
+        stats.clone(),
+        32_128,
+    )
+    .expect("strict execution-aware bundle");
+    let LoadedModelParts {
+        model,
+        tokenizer,
+        generation_defaults,
+        source: unpacked_source,
+        load_report,
+        execution_stats,
+        quantized_load_audit,
+        ..
+    } = loaded.into_named_parts();
+    assert_eq!(model, 31);
+    assert!(tokenizer.is_none());
+    assert_eq!(generation_defaults.max_new_tokens, 256);
+    assert_eq!(unpacked_source, source);
+    assert_eq!(load_report.applied, ["a.weight", "b.weight"]);
+    assert_eq!(execution_stats, Some(stats));
+    assert!(quantized_load_audit.is_none());
+
+    let directory = tempfile::tempdir().expect("temporary source root");
+    let source = ModelSourceMetadata::local(directory.path(), "t5").expect("valid source");
+    let loaded = LoadedModel::new(7_u8, None, Default::default(), source, LoadReport::new(), 8)
+        .expect("empty strict bundle");
+    assert!(loaded.unsupported_generation_settings().is_empty());
+    let settings =
+        std::collections::BTreeMap::from([("num_beams".to_owned(), serde_json::json!(4))]);
+    let loaded = loaded.with_unsupported_generation_settings(settings.clone());
+    assert_eq!(loaded.unsupported_generation_settings(), &settings);
+    let parts = LoadedModelParts::from(loaded);
+    assert_eq!(parts.model, 7);
+    assert!(parts.execution_stats.is_none());
+    assert_eq!(parts.unsupported_generation_settings, settings);
+}
+
+/// Execution accounting rejects an incomplete equivalence plan on its own.
+///
+/// `LoadedModel` construction checks the same equality first, so this calls
+/// the accounting validator directly: it must stay sound for any caller.
+#[test]
+fn execution_accounting_rejects_unverified_planned_equivalences() {
+    let report = LoadReport {
+        equivalence_planned: vec![CheckpointEquivalenceRecord::new("copy", "owner")],
+        ..LoadReport::default()
+    };
+    let error = super::validate_execution_stats(&report, &ExecutionStats::default()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        crate::Error::Checkpoint(
+            "checkpoint execution verified 0 of 1 planned tensor equivalences".into()
+        )
+        .to_string()
     );
 }

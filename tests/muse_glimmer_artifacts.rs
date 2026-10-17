@@ -96,7 +96,12 @@
 
 #![recursion_limit = "256"]
 
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[path = "support/kernel_trace.rs"]
 mod kernel_trace;
 
@@ -148,7 +153,11 @@ use transformers::{EncodeOptions, LocalTokenizer};
 #[cfg(feature = "chat-templates")]
 use transformers::{ChatMessage, ChatTemplateOptions};
 
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use burn::nn::Linear;
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use burn::{
@@ -166,13 +175,26 @@ use transformers::{
         muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerLayerCache},
     },
 };
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use transformers::{LoadedModel, models::muse_glimmer::MuseGlimmerForCausalLm};
 
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use quantized_quality::{FixedSequenceQuality, enforce_regression_limit};
 
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use kernel_trace::{
     calibrated_dequantization_kernel_names, capture_kernel_launches, compact_kernel_id,
     packed_matmul_launches, whole_weight_dequantization_launches,
@@ -317,7 +339,12 @@ const Q8_LARGEST_PACKED_TENSOR_BYTES: u64 = 1_428_883_456;
 const Q4_LARGEST_PACKED_TENSOR_BYTES: u64 = 756_467_712;
 
 /// Every matrix invoked by one batch-one recurrent decode.
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const PACKED_DECODE_MATMUL_LAUNCHES: usize = 417;
 
 /// Environment variable selecting the create-only/reused Q8 artifact.
@@ -363,11 +390,19 @@ const Q8_BURNPACK_ARTIFACT_BYTES: Option<u64> = Some(28_165_645_337);
 const Q4_BURNPACK_ARTIFACT_BYTES: Option<u64> = Some(14_911_372_485);
 
 /// Inclusive Q8 mean-NLL regression budget from the v1 release policy.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const Q8_MAXIMUM_RELATIVE_NLL_REGRESSION: f64 = 0.01;
 
 /// Inclusive Q4 mean-NLL regression budget from the v1 release policy.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const Q4_MAXIMUM_RELATIVE_NLL_REGRESSION: f64 = 0.05;
 
 /// Number of consumed tensors renamed out of the multimodal namespace.
@@ -2789,8 +2824,10 @@ fn decode_f32le(label: &str, payload: &[u8]) -> Vec<f32> {
         "{label} payload is not aligned to F32 elements"
     );
     payload
-        .chunks_exact(size_of::<f32>())
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 element")))
+        .as_chunks::<{ size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -3059,8 +3096,10 @@ fn read_pinned_muse_reference() -> LoadedMuseReference {
         "official stateless/cached prompt cosine was {prompt_cached_cosine}"
     );
     for (row, (stateless, cached)) in hidden
-        .chunks_exact(6_656)
-        .zip(cached_prefill_hidden.chunks_exact(6_656))
+        .as_chunks::<6_656>()
+        .0
+        .iter()
+        .zip(cached_prefill_hidden.as_chunks::<6_656>().0.iter())
         .enumerate()
     {
         let cosine = cosine_similarity(stateless, cached);
@@ -3070,8 +3109,10 @@ fn read_pinned_muse_reference() -> LoadedMuseReference {
         );
     }
     for (step, (cached_row, teacher_row)) in cached_prefix_logits
-        .chunks_exact(202_048)
-        .zip(teacher_prefix_logits.chunks_exact(202_048))
+        .as_chunks::<202_048>()
+        .0
+        .iter()
+        .zip(teacher_prefix_logits.as_chunks::<202_048>().0.iter())
         .enumerate()
     {
         assert_eq!(
@@ -3557,8 +3598,10 @@ fn assert_hidden_trace_parity(
     assert_eq!(labels.len(), 54);
     let mut minimum = f64::INFINITY;
     for (row, ((actual, expected), semantic_label)) in actual
-        .chunks_exact(6_656)
-        .zip(expected.chunks_exact(6_656))
+        .as_chunks::<6_656>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<6_656>().0.iter())
         .zip(labels)
         .enumerate()
     {
@@ -4389,7 +4432,10 @@ fn quantize_pinned_muse_glimmer(scheme: SymmetricQuantization, output_environmen
         outcome.execution.delivered_tensor_bytes,
         LANGUAGE_PARAMETER_BYTES
     );
-    assert_eq!(outcome.execution.source.shard_opens, SHARDS.len() as u64);
+    // Both vocabulary matrices exceed the loader's 1 GiB hoisting threshold and
+    // are read first in sorted-target order (`lm_head` in shard 2, then
+    // `embed_tokens` in shard 1) before the physical schedule reopens shard 2.
+    assert_eq!(outcome.execution.source.shard_opens, 3);
     assert_eq!(
         outcome.execution.source.tensor_reads,
         CONSUMED_TENSOR_COUNT as u64
@@ -4401,10 +4447,7 @@ fn quantize_pinned_muse_glimmer(scheme: SymmetricQuantization, output_environmen
     assert_eq!(outcome.execution.source.max_open_shards, 1);
     assert_eq!(
         outcome.execution.source.shard_open_order,
-        SHARDS
-            .iter()
-            .map(|(name, _, _)| (*name).to_owned())
-            .collect::<Vec<_>>()
+        [SHARDS[1].0, SHARDS[0].0, SHARDS[1].0]
     );
     for (phase, stats) in [
         ("pre-execution", outcome.provenance.pre_execution),
@@ -4455,7 +4498,11 @@ fn quantizes_pinned_muse_glimmer_weights_to_q4_burnpack() {
 }
 
 /// Requires one Muse linear map to retain packed QFloat storage without a bias.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_muse_linear_qfloat(label: &str, linear: &Linear<Metal>) {
     assert!(
         matches!(linear.weight.val().dtype(), DType::QFloat(_)),
@@ -4468,7 +4515,11 @@ fn assert_muse_linear_qfloat(label: &str, linear: &Linear<Metal>) {
 }
 
 /// Proves every architecture-eligible matrix and exclusion retained its dtype.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_muse_mixed_parameter_dtypes(model: &MuseGlimmerForCausalLm<Metal>) {
     assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F16);
     assert_eq!(model.model.norm.weight.val().dtype(), DType::F16);
@@ -4515,7 +4566,11 @@ fn assert_muse_mixed_parameter_dtypes(model: &MuseGlimmerForCausalLm<Metal>) {
 }
 
 /// A fully authenticated mixed-precision graph and its cold load duration.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 struct AuthenticatedMuseBurnpack {
     /// Executable model plus the strict load and provenance reports it produced.
     loaded: LoadedModel<AutoCausalLm<Metal>>,
@@ -4530,7 +4585,11 @@ struct AuthenticatedMuseBurnpack {
 /// binding, lets the quantized loader perform source pre/postflight hashing,
 /// and proves all 417 eligible matrices remain packed while every exclusion
 /// remains F16.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn load_authenticated_muse_burnpack(
     scheme: SymmetricQuantization,
     output_environment: &str,
@@ -4649,6 +4708,10 @@ fn load_authenticated_muse_burnpack(
         execution.peak_host_staging_bytes,
         LARGEST_TARGET_PAYLOAD_BYTES
     );
+    // Both vocabulary matrices reach the loader's 1 GiB hoisting threshold and are
+    // installed first in plan order, but the certified packed `lm_head` comes from
+    // the sidecar without a source read. Only the retained `embed_tokens` (shard 1)
+    // opens a shard before the physical schedule, so the shard order stays physical.
     assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
     assert_eq!(
         execution.source.tensor_reads,
@@ -4712,7 +4775,11 @@ fn load_authenticated_muse_burnpack(
 }
 
 /// Loads, executes, and optionally traces one exact Muse packed sidecar.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn smoke_and_audit_pinned_muse_glimmer_burnpack(
     scheme: SymmetricQuantization,
     output_environment: &str,
@@ -4856,14 +4923,22 @@ fn smoke_and_audit_pinned_muse_glimmer_burnpack(
 }
 
 /// Rejects an audit invocation whose binary lacks CubeCL kernel instrumentation.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn require_muse_packed_kernel_tracing() {
     #[cfg(not(feature = "kernel-tracing"))]
     panic!("Muse packed-kernel audits require the `kernel-tracing` feature");
 }
 
 /// Runs the content-pinned Q8 sidecar and audits all recurrent packed kernels.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Muse weights, reviewed Q8 Burnpack, Metal, and unified memory"]
 fn smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal() {
@@ -4872,7 +4947,11 @@ fn smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal() {
 }
 
 /// Runs the content-pinned Q4 sidecar and audits all recurrent packed kernels.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Muse weights, reviewed Q4 Burnpack, Metal, and unified memory"]
 fn smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal() {
@@ -4887,7 +4966,11 @@ fn smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal() {
 /// `i` always represents the same prefix and target in both streams even when a
 /// quantized top-one changes. Cached/stateless self-consistency is neither
 /// computed nor accepted as quality evidence here.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn measure_pinned_muse_glimmer_quantized_quality(
     scheme: SymmetricQuantization,
     output_environment: &str,
@@ -5030,7 +5113,11 @@ fn measure_pinned_muse_glimmer_quantized_quality(
 }
 
 /// Enforces the one-percent Q8 mean-NLL budget on all 32 official cached rows.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Muse weights, schema-3 oracle, reviewed Q8 Burnpack, Metal, and unified memory"]
 fn measures_pinned_muse_glimmer_q8_official_cached_quality_on_metal() {
@@ -5042,7 +5129,11 @@ fn measures_pinned_muse_glimmer_q8_official_cached_quality_on_metal() {
 }
 
 /// Enforces the five-percent Q4 mean-NLL budget on all 32 official cached rows.
-#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    feature = "tokenizers",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Muse weights, schema-3 oracle, reviewed Q4 Burnpack, Metal, and unified memory"]
 fn measures_pinned_muse_glimmer_q4_official_cached_quality_on_metal() {
@@ -5122,7 +5213,11 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
         execution.peak_host_staging_bytes,
         LARGEST_TARGET_PAYLOAD_BYTES
     );
-    assert_eq!(execution.source.shard_opens, 2);
+    // The loader installs groups of at least 1 GiB before the physical schedule
+    // so Metal's first-fit pools stay packed. Muse's two vocabulary matrices
+    // qualify and are read in sorted-target order: `lm_head` (shard 2), then
+    // `embed_tokens` (shard 1); the physical schedule then reopens shard 2.
+    assert_eq!(execution.source.shard_opens, 3);
     assert_eq!(execution.source.tensor_reads, CONSUMED_TENSOR_COUNT as u64);
     assert_eq!(
         execution.source.payload_bytes_read,
@@ -5131,10 +5226,7 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
     assert_eq!(execution.source.max_open_shards, 1);
     assert_eq!(
         execution.source.shard_open_order,
-        SHARDS
-            .iter()
-            .map(|(name, _, _)| (*name).to_owned())
-            .collect::<Vec<_>>()
+        [SHARDS[1].0, SHARDS[0].0, SHARDS[1].0]
     );
 
     let generation = loaded.generation_defaults();
@@ -5468,9 +5560,11 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
     let mut minimum_teacher_official_cosine = f64::INFINITY;
     let mut minimum_burn_cached_teacher_cosine = f64::INFINITY;
     for (step, ((teacher_row, official_teacher_row), cached_row)) in burn_teacher_logits
-        .chunks_exact(202_048)
-        .zip(oracle.teacher_prefix_logits.chunks_exact(202_048))
-        .zip(burn_cached_logits.chunks_exact(202_048))
+        .as_chunks::<202_048>()
+        .0
+        .iter()
+        .zip(oracle.teacher_prefix_logits.as_chunks::<202_048>().0.iter())
+        .zip(burn_cached_logits.as_chunks::<202_048>().0.iter())
         .enumerate()
     {
         let teacher_official_cosine = cosine_similarity(teacher_row, official_teacher_row);

@@ -1,153 +1,349 @@
-# Burn transformer architectures
+# transformers
 
-`transformers` is a Rust/Burn toolkit for experiments with transformer
-architectures and mechanisms, using either random initialization or selected
-pretrained weights. The priority is making intermediate activations easy to
-inspect, modify, and process with additional modules, alongside changes to
-attention rules, layer dimensions, topology, and task heads.
+Modern transformer architectures for [Burn](https://burn.dev), built for
+experiments. Load a pinned checkpoint or build a model from a serializable
+spec, then inspect and edit any named activation, change attention rules and
+topology, run the stack in stages, and train with native Burn. The same code
+runs batched cached inference, and its numerics are checked against pinned
+reference implementations, from tiny Transformers-generated goldens to opt-in
+real-checkpoint gates.
 
-The **v0.2** experiment interface supports selective activation capture,
-edits, clean-run patches, and inserted Burn modules; staged execution;
-editable T5/Qwen recipes; selective weight transfer; custom sequence mixers and
-width adapters; and shared MLA for encoder-decoder experiments. Start with the
-[activation guide](EXPERIMENTS.md) and its
-[runnable workbench](examples/activation_workbench.rs):
+- **One experiment interface for every model.** The `HookedModel` trait
+  captures, ablates, patches, and steers activations on every built-in family,
+  on a model loaded from disk, and on your own compositions; `StagedModel`
+  splits a causal stack into resumable stages (T5 and modular encoder-decoder
+  models expose it on their encoder and decoder stage views).
+- **Shared, model-independent mechanisms.** Grouped-query, latent, sliding,
+  chunked-local, differential, and sink attention; every Hugging Face RoPE
+  rule; Gated DeltaNet and Mamba-2 mixers; dense, gated, clamped, and sparse
+  feed-forwards with configurable routing. Families are thin wiring over them.
+- **Efficient inference.** Genuinely batched cached prefill and decoding for
+  ragged batches, native-KV-head attention, sliding-window ring caches,
+  score-bounded long-context attention (Muse Glimmer, DeepSeek-V2, and custom
+  code), and packed Q4/Q8 matmuls on Metal.
+- **Verified where it matters.** More than 2,500 tests, reference goldens generated
+  with Hugging Face Transformers, property tests, twelve fuzz targets, and 25
+  Verus harnesses that prove the cache, planning, decoding, and checkpoint
+  arithmetic overflow-free and in bounds.
+
+This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. The package version
+is 0.1.0; [support](#model-families-and-status) is deliberately narrower than
+what is implemented.
+
+## Quickstart
+
+Run commands from the repository root. Building needs no model download.
+
+### 1. See it work
+
+The workbench builds tiny random models, captures and ablates neurons, inserts
+an adapter, enables bidirectional attention, and runs one family-generic
+experiment on a modular model, GPT-2, and a Llama-family model:
 
 ```sh
 cargo run --release --locked --example activation_workbench
 ```
 
-The **v0.3** [training guide](TRAINING.md) shows how these experiments use native
-Burn autodiff, optimizers, freezing, records, and its optional Learner. Start
-with a small classifier that trains without downloads:
+### 2. Load a checkpoint and generate
+
+The runtime reads local files only. Download an immutable revision with any
+external tool, then point an example at the directory:
+
+```sh
+hf download HuggingFaceTB/SmolLM-135M \
+  --revision 1d461723eec654e65efdc40cf49301c89c0c92f4 --local-dir /models/smollm-135m
+cargo run --release --locked --features tokenizers --example llama_generate -- \
+  /models/smollm-135m "The capital of France is" 24
+```
+
+In your own code, `AutoCausalLm` selects the family from `config.json`, loads
+every tensor strictly, and returns the model with its tokenizer and generation
+defaults (enable the `tokenizers` feature):
+
+```rust
+use std::{error::Error, path::Path};
+
+use burn::backend::Flex;
+use transformers::{
+    AutoCausalLm, AutoLoadOptions, CausalGenerationRequest, EncodeOptions, generate_causal,
+    cache::CacheConfig,
+    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
+};
+
+type B = Flex<f32, i32>;
+
+fn complete(root: &Path, text: &str) -> Result<String, Box<dyn Error>> {
+    let device = Default::default();
+    let options = AutoLoadOptions {
+        checkpoint: LoadOptions {
+            dtype_policy: DTypePolicy::Cast(TensorDType::F32),
+            ..LoadOptions::default()
+        },
+        ..AutoLoadOptions::default()
+    };
+    let loaded = AutoCausalLm::<B>::load_local(root, &options, &device)?;
+    let tokenizer = loaded.tokenizer().ok_or("the directory has no tokenizer.json")?;
+    let prompt = tokenizer
+        .encode(text, &EncodeOptions::default())?
+        .to_causal_input::<B>(&device)?;
+    let [batch, prompt_tokens] = prompt.token_ids.dims();
+
+    let mut generation = loaded.generation_defaults().clone();
+    generation.max_new_tokens = 24;
+    let output = generate_causal(
+        loaded.model(),
+        CausalGenerationRequest {
+            cache: CacheConfig::new(batch, prompt_tokens + generation.max_new_tokens)?,
+            prompt,
+            generation,
+            prefill_chunk_size: None,
+            vocabulary_size: loaded.model().config().vocabulary_size(),
+        },
+    )?;
+    Ok(tokenizer.decode(&output.sequences[0].token_ids, true)?)
+}
+```
+
+The default `DTypePolicy::Auto` keeps a checkpoint's stored float dtype, so a
+BF16 checkpoint runs in BF16 even on `Flex<f32>`; `Cast(TensorDType::F32)`, as
+above, executes in F32. A load failure is a typed error:
+`Error::CheckpointPlan` carries the `CheckpointError` of discovery or strict
+planning (for example `ArtifactNotFound`), and `Error::CheckpointExecution`
+keeps the partial load report of a failed tensor stream. To load a known family
+directly, initialize it from its configuration and call `load_checkpoint` (see
+the `checkpoint` module's "Loading a concrete family").
+
+### 3. Capture and edit an activation on any model
+
+Experiments are written once against the `HookedModel` trait. Points have
+stable semantic names, such as `decoder.layers.0.residual.post`, and selections
+keep their axes, so selecting token 1 of a `[batch, token, channel]` point
+yields `[batch, 1, channel]`:
+
+```rust
+use burn::tensor::{Tensor, backend::Backend};
+use transformers::{
+    CausalLmInput, CausalLmOutput, ForwardOptions, Result,
+    architecture::HookedModel,
+    intervention::{Hooks, Layer},
+};
+
+/// Halves token 1's residual stream after block 0; returns the original and the new logits.
+fn steer<B: Backend, M>(
+    model: &M,
+    input: CausalLmInput<B>,
+) -> Result<(Tensor<B, 3>, CausalLmOutput<B>)>
+where
+    M: HookedModel<B, Input = CausalLmInput<B>, Output = CausalLmOutput<B>>,
+{
+    for point in model.activation_points()? {
+        println!("{} {:?}", point.name, point.axes);
+    }
+    let residual = Layer::decoder(0).residual_post().token(1);
+    let mut hooks = Hooks::new();
+    let original = hooks.capture(&residual); // registered first: sees the clean value
+    hooks.edit(&residual, |x| x * 0.5);
+    let steered = model.forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)?;
+    Ok((hooks.get(&original)?, steered))
+}
+```
+
+The function accepts a concrete family, an `AutoCausalLm`, or the
+`LoadedModel` returned by `load_local`, unchanged. `StagedModel` adds
+`embed`, `run_layers`, and `normalize` for patching residual streams across
+runs. The [activation guide](EXPERIMENTS.md) covers selections, patching,
+attention policies, custom points, and the per-family point catalogs.
+
+### 4. Build your own model
+
+`DecoderSpec` and `Seq2SeqSpec` describe a topology as data (they derive Serde,
+so an experiment can save its exact architecture as JSON). Each block chooses
+its own mixer, feed-forward, normalization, and positions:
+
+```rust
+use burn::tensor::backend::Backend;
+use transformers::{
+    Result,
+    architecture::{
+        Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
+        FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+        ResidualTopology, RopeScaling,
+    },
+    models::custom::ModularCausalLm,
+};
+
+/// A two-block grouped-query decoder with RoPE, Q/K norms, and SwiGLU.
+fn tiny_decoder<B: Backend>(device: &B::Device) -> Result<ModularCausalLm<B>> {
+    let norm = NormalizationSpec::Rms { epsilon: 1e-6, zero_centered: false };
+    let block = DecoderLayerSpec {
+        mixer: MixerSpec::Attention(AttentionSpec {
+            query_heads: 4,
+            key_value_heads: 2,
+            head_dim: 16,
+            query_key_norm: true,
+            output_gate: false,
+            position: PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 16,
+                scaling: RopeScaling::None,
+            },
+        }),
+        feed_forward: FeedForwardSpec::Dense(DenseFeedForwardSpec {
+            intermediate_size: 128,
+            activation: Activation::Silu,
+            bias: false,
+        }),
+        mixer_norm: norm,
+        feed_forward_norm: norm,
+        norm_placement: NormPlacement::Pre,
+        residual: ResidualTopology::Add,
+    };
+    let spec = DecoderSpec {
+        vocabulary_size: 256,
+        hidden_size: 64,
+        layers: vec![block; 2],
+        final_norm: norm,
+        tie_word_embeddings: true,
+        max_position_embeddings: 128,
+        embedding_scale: None,
+        final_logit_softcap: None,
+    };
+    // N(0, 0.02^2) weights with GPT-2 depth scaling of the residual writers.
+    let policy = spec.scaled_init_policy(0.02);
+    ModularCausalLm::init_with(spec, &policy, device)
+}
+```
+
+The result implements `HookedModel` and `StagedModel`, so `steer` above runs on
+it too. Swap a block's mixer for `MixerSpec::AttentionWithOptions` (sliding
+or chunked-local connectivity, sinks, soft caps, biases),
+`MixerSpec::DifferentialAttention`, `MixerSpec::Mla`, `MixerSpec::DeltaNet`, or
+`MixerSpec::Mamba2`; see [Building your own architecture](EXPERIMENTS.md#build-your-own-architecture).
+To train it, read the [training guide](TRAINING.md):
 
 ```sh
 cargo run --release --locked --features autodiff --example t5_classifier -- --train
 ```
 
-[Grokking](examples/mechanistic/grokking_training/README.md) now trains from random
-weights, measures delayed generalization, and tests its learned Fourier circuit.
-[Clock and Pizza](examples/mechanistic/clock_and_pizza_training/README.md) trains
-different attention rules; [Tuned Lens](examples/mechanistic/tuned_lens_training/README.md)
-learns new translators on a frozen backbone. [Greater-Than](examples/mechanistic/greater_than_training/README.md)
-adds a learned replacement experiment. The [examples index](examples/README.md)
-distinguishes these training studies from retained analyses of published weights.
-Each declares its data, compute, and reproduction limits. Follow the
-[roadmap](ROADMAP.md) for implementation and validation status. The package
-version and bounded checkpoint support remain v0.1.
+## What is inside
 
-This is a standalone repository. Run the commands below from its root, where
-`Cargo.toml` lives. [Migration and historical reproduction](MIGRATION.md)
-documents the extraction from `hmm_compression` and the original commit mappings.
+### Experiment interface
 
-Version 0.1 supports the exact pinned **Qwen3.5-0.8B Metal/F16** base-text
-profile and **FLAN-T5-small Flex/F32 and Metal/F32** profiles on the validated
-Apple M3 Max host. Their acceptance records define the supported features and
-limits. Other checkpoints, quantized execution and real-weight MTP remain
-experimental; substantial bring-up evidence does not extend these support
-claims. FLAN-UL2 remains pending a real-weight run. This is a local source
-release: no registry publication or Git tag is implied.
+- **Typed activation points** with token, head, channel, and batch selections;
+  detached or differentiable captures, observers, ordered edits, clean-run
+  patches, catalog-driven captures of every point, and custom points in your
+  own modules. Failures name the point (`Error::Intervention`).
+- **Staged execution**: embed, run any block range, normalize, and resume,
+  with positions, padding, and encoder context carried in `HiddenState`.
+- **Attention as a choice**: causal, bidirectional, or custom connectivity per
+  pass or per layer, plus additive biases and structural pattern transforms.
+- **Editable recipes and weight transfer**: change T5 or Qwen block geometry,
+  load only a pretrained prefix, and transfer selected tensors with explicit
+  shape and tie policies and an auditable report.
+- **Explicit initialization**: `InitPolicy` states the random distribution as
+  data, including depth-scaled residual projections and lazy application.
+- **Native Burn training**: models are ordinary `Module`s; freezing, records,
+  optimizers, and the optional Burn `Learner` work unchanged.
 
-The pinned architecture research and release criteria live in
-[ARCHITECTURES.md](ARCHITECTURES.md). The narrower
-[configuration compatibility matrix](ARCHITECTURE_COMPATIBILITY.md) records
-which upstream schemas can be represented without implying weight or inference
-acceptance. The bounded first-release usage contract for the smallest Qwen
-checkpoint is documented separately in
-[Qwen3.5-0.8B v0.1 profile](QWEN3_5_0_8B_RELEASE.md).
+### Model families and status
 
-The v0.1 release is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
-families remain experimental. Both have refreshed local correctness evidence.
-The recorded [v0.1 source-gate and public-example replay](acceptance/measurements/v0_1-source-gates-20260910.json)
-passes both line-coverage thresholds at that snapshot: 90.005% crate-wide and 95.011% shared/core.
-This excludes 79 verified test-only files and was measured at `b4d6410` with
-1,184 passing tests. Manual review
-binds every retained native region to authored production function items for
-that exact source/configuration; it adds no generated-code exclusions. This is
-not a general macro-closure or branch-coverage proof. All 17 source/MSRV/backend/
-package checks and both unchanged public examples also pass at that snapshot.
-The [refreshed timing and sampled-memory records](acceptance/measurements/small-model-performance-20260910/manifest.json)
-are now available, including FLAN's first Flex CPU baseline. The
-[release decision](acceptance/measurements/v0_1-release-20260910.json) records
-the user's explicit approval of the controlled Qwen baseline. Its historical
-slowdown from roughly 36 to 27 tokens/s remains unexplained and documented;
-it has not been fixed or erased. Future comparisons retain the 5% alert and
-confirmed 10% failure thresholds. See [the release gates](RELEASE_GATES.md).
+`AutoCausalLm` dispatches the causal families below by `model_type`, and
+`AutoSeq2SeqLm` dispatches `t5`. `AutoCausalLm` implements both experiment
+traits and `AutoSeq2SeqLm` implements `HookedModel`. A family
+being implemented is not a support claim: support requires a committed
+acceptance record for an exact checkpoint, backend, and dtype
+([SUPPORT.md](SUPPORT.md)). Evidence for every row is on the
+[model status page](ARCHITECTURE_COMPATIBILITY.md).
 
-## Current status
-
-| Runtime | Implemented surface | Real-checkpoint status |
+| Family | `model_type` | Validation status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | DeltaNet/full-attention schedules, gated GQA, partial RoPE, SwiGLU, external recurrent/KV caches, batch-one MTP speculation, and strict text-tower mapping | [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json) passed historical reference-logit, 32-token greedy, cached-parity, and packed-Q4 smokes. Its reviewed 186-matrix Q4/G64 v2 sidecar is source/plan bound and passed stateless/cached Metal execution at cosine `1.0`; Q4 quality remains experimental. Its independently authenticated stable-prompt oracle now passes Metal F16: all 32 cached and stateless greedy decisions match, and minimum full-vocabulary reference cosine is `0.999996242`. Its [populated Q4 32K stress](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json) now passes finite-state, overflow-atomicity, and reset checks; this is execution evidence, not long-context quality. [Qwen3.8-27B](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json) strictly applied all 866 text/MTP tensors, matched the official F16 full-vocabulary logits at `0.999999881` cosine and all 32 greedy tokens, and passed mixed Q8/F16 and Q4/F16 stateless, cached, MTP, and recurrent-decode smokes. Qwen3.5-0.8B is supported only in its bounded Metal/F16 base-text profile, with the explicitly accepted historical timing limitation. Qwen3.8 remains experimental and still needs quantized corpus quality, standardized performance and real 32K stress. |
-| Qwen3 MoE | GQA with Q/K normalization, sparse selected-expert dispatch, top-k routing, and cached decode | [Qwen3-30B-A3B](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json) strictly applied all 18,867 BF16-derived F16 tensors and passed six-token F16, mixed Q8/F16, and mixed Q4/F16 Metal stateless, cached-prefill, hidden-trace, and recurrent-decode smokes. Both packed decode audits observed all 1,345 architecture-declared matmuls without whole-weight dequantization. Official reference logits, 32-token generation, quantized quality, standardized performance, and 32K stress remain open; not advertised. |
-| DeepSeek V2 | YaRN, MLA reference prefill, compressed latent-cache absorbed decode, routed and shared experts | [DeepSeek-V2-Lite](acceptance/deepseek-v2-lite-604d5664dddd88a0433dbae533b7fe9472482de0.json) strictly applied all 5,291 BF16-derived F16 tensors and passed a six-token Metal stateless, reference-prefill, compressed-cache, and absorbed-decode smoke. Cached/stateless cosine was `1.0`; absorbed decode matched the internal stateless path at `0.999998964`. This is internal Burn-path parity, not comparison with the official implementation. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
-| Muse Glimmer | Sliding/full hybrid attention, RoPE/NoPE schedule, sandwich norms, output gates, final-logit softcap, and exact eager-F16 attention with a bounded query-chunk policy | The exact [Muse-Glimmer-30B artifact](acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json) authenticated both weight shards and a seven-file schema-3 official oracle, then strictly applied all 627 text tensors as F16 on Metal with no unexplained load diagnostics. The real graph matched official prompt, cached-prefix, teacher-prefix, and hidden-trace fixtures with minimum official/Burn cosine `0.999943377` and reproduced all 32 greedy tokens. Real Q8/G64 and Q4/G64 sidecars have both passed create-only conversion, full reopen, and mixed F16/packed Metal inference; each traced decode launched all 417 packed projections with no whole-weight dequantization. A synthetic 32-head F16 Metal envelope exercised actual 32K keys, terminal RoPE, and full/mirrored cache boundaries with a reduced four-channel head; it is not full-model 32K evidence. Quantized reference/quality, a real 32K stress run, real-checkpoint padded/context-boundary coverage, and standardized performance remain open; not advertised. |
-| T5 / FLAN / UL2 | Bidirectional encoder, causal decoder, cross-attention cache, relative-position bias, shared encoder/decoder embeddings with a configurable tied or independent LM head, and cached beam search | [FLAN-T5-small](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json) now has a content-authenticated Transformers 5.2/CPU F32 oracle. Flex and Metal both strictly apply all 190 tensors, match complete encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced, padded-batch, and 512-token boundary vectors with minimum cosine `0.999999999999` and zero `1e-4` tolerance failures, and reproduce all 32 greedy decisions plus the exact four-beam continuation. The [refreshed Metal/Flex timing and sampled-memory series](acceptance/measurements/small-model-performance-20260910/manifest.json) covers 32/128/512-token sources with 128 forced decode steps and 93 separate memory phases. Its bounded Flex/F32 and Metal/F32 profiles are supported for v0.1; quantized quality and unvalidated execution combinations are excluded. [FLAN-T5-XXL](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json) strictly applied all 558 runtime tensors on Metal and matched official Transformers/MPS F32 encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced fixtures at minimum cosine `0.999999999998`, plus exact greedy and four-beam tokens. XXL is not advertised; UL2 is pending. |
-| Nemotron-H | Interleaved Mamba2, GQA, dense/MoE blocks, ReLU-squared experts, shared experts, and next-token-head mapping | The exact [Nemotron 3.5 Lightning artifact](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json) authenticated and strictly applied all 6,513 tensors, including 270 MTP tensors, then passed Metal F16 stateless, cached-prefill, and one-token recurrent base-model execution. Stateless and prefill hidden traces were bit-identical; recurrent and teacher-forced logits had cosine `0.999376514` and identical top-1. The exact one-stage MTP body and transactional batch-one speculator pass exhaustive tiny Flex tests. This remains internal-consistency evidence: official base parity, real-weight MTP parity, 32-token generation, quantization, and 32K are open; not advertised. |
-| Custom modular models | Serializable causal and seq2seq specifications using full/sliding attention, shared MLA, causal DeltaNet, dense gated FFNs, sparse MoE, configurable normalization, cross-attention, and staged execution; open Rust modules and width adapters permit additional compositions | Intended for controlled experiments, not compatibility with an upstream checkpoint. Explicit policies support noncausal full-sequence attention. Mamba2, bidirectional DeltaNet, and learned gated residual specifications return capability errors. |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). Qwen3.8-27B matches official logits on Metal/F16 (experimental). The public example and the Qwen3.8 gates passed again at `8a4404a` ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)), and the Qwen3.8 official gate again at `c15f24e` after a loader fix that lowers its Metal peak footprint ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)). |
+| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)) and at `c2936fe` ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). FLAN-T5-XXL matches official references on Metal (experimental; passed again at `8a4404a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)); UL2 pending. |
+| Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16 (passed again at `4f9502a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json), and at `c15f24e`, [reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)); Q8/Q4 conversions byte-identical and packed Metal smokes at `c2936fe` ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
+| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference; on Metal under the documented `2.5e-3` tolerance), repeated at `53f167b`. First half-precision runs there: every Metal/F16 gate passes, Flex/BF16 passes 10 of 15 ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
+| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window (repeated at `c2936fe`). Half precision at `c2936fe`: Flex/BF16 passes 4 of 5 gates; Metal/F16 fails because the model overflows F16 ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
+| gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex and Metal F32 parity with exact MXFP4 decoding (repeated at `c2936fe`, [Mac validation record](acceptance/measurements/mac-validation-20261017.json)); full-model Flex/BF16 and Metal/F16 parity against a full F32 reference ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)). |
+| Qwen3-MoE | `qwen3_moe` | Experimental: strict real-weight loading and Metal smokes (passed again at `8a4404a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json), and with Q8/Q4 conversions byte-identical at `c2936fe`, [Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
+| DeepSeek-V2 | `deepseek_v2` | Experimental: strict real-weight loading and an internal Metal smoke; tiny goldens for V2 and V3-style routing. |
+| Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading, an internal Metal smoke, and official base-model parity against the official F32 rows ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json), [analysis](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)). |
+| GPT-2, GPT-NeoX / Pythia | concrete types only | Experimental stateless modules for interpretability studies. |
+| Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
 
-Qwen MTP speculative generation currently requires batch size one and defaults
-to two draft tokens per cycle; callers may configure a different positive draft
-count. Ordinary Qwen inference retains rectangular batched execution.
+The two supported profiles were qualified on the v0.1.0 source. Later work
+changed their execution paths; their gates passed again on source `f4c56c4`,
+as recorded in the [real-checkpoint replay](acceptance/measurements/real-checkpoint-replay-20261016.json),
+and the larger experimental checkpoints were replayed afterwards in the
+[large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json); see
+[v0.1 release qualification](ARCHITECTURE_COMPATIBILITY.md#v01-release-qualification)
+and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
+FLAN-T5-small's gates passed again at `c2936fe` in the
+[Mac validation round](RELEASE_GATES.md#mac-validation-round-october-17),
+which did not rerun Qwen3.5-0.8B.
 
-## Design
+### Shared mechanisms
 
-Family code under `src/models` translates exact upstream configuration, layer
-schedules, and tensor names. Shared modules own the reusable operations:
+Reusable mathematics lives outside `src/models` and contains no model-name
+branches. The [innovation matrix](TRANSFORMER_INNOVATIONS.md) gives each
+mechanism's equations, reference, and implementation.
 
-- `attention`, `mla`, `delta_net`, `feed_forward`, `moe`, `normalization`, and
-  `position` implement transformer mathematics without model-name branches.
-- `cache` provides preallocated KV, sliding-ring, recurrent, cross-attention,
-  and transactional state. Cache tensors are external to model parameters.
-- `checkpoint` discovers and validates local SafeTensors, builds strict mapping
-  plans, streams tensors into Burn modules, and reports every transformation or
-  omission.
-- `generation` provides cached causal generation and deterministic cached T5
-  beam search. Sampling supports temperature, top-k, top-p, repetition and
-  presence penalties, deterministic seeds, EOS/PAD handling, token stop
-  sequences, per-token log probabilities, and synchronous streaming callbacks.
-  Runtime F16/BF16/F32/F64 probabilities are handled independently of the
-  backend's default dtype. Flex32 supports greedy and unfiltered sampling;
-  active Flex32 top-k/top-p requests return a capability error because Burn
-  0.21's fallback sort cannot handle that storage tag safely.
-- `models::custom` constructs experimental causal or encoder-decoder graphs
-  from serializable topology specifications.
-- `intervention` provides typed activation addresses, rank-preserving selections,
-  scoped captures and edits, and custom computation points. See
-  [EXPERIMENTS.md](EXPERIMENTS.md) for ordering, gradients, and capabilities.
-- `experiment` provides explicit hidden-state boundaries, attention policies,
-  open residual blocks, and registered width adapters. `transfer` reuses selected
-  parameters with validated shape/tie policies and auditable reports.
+| Area | Mechanisms |
+| --- | --- |
+| Attention | MHA/GQA/MQA computed on native KV heads; global, sliding-window, and chunked-local connectivity; learned sinks; logit soft caps; Q/K RMSNorm per head or full width; output gates; projection biases; differential attention; multi-head latent attention with absorbed decoding; score-bounded chunked execution. |
+| Positions | RoPE with linear, dynamic-NTK, YaRN, Llama 3, LongRoPE, and proportional scaling (one translator for every Hugging Face `rope_type`); partial and multi-axis RoPE; NoPE; T5 relative buckets. Dynamic NTK is translated for every family but rescales only in custom compositions: the built-in families refuse positions beyond `max_position_embeddings`, where it would take effect. |
+| Mixers | Gated DeltaNet with block-parallel chunked prefill; Mamba-2 with a vectorized chunk scan; fixed-state recurrent decoding. |
+| Feed-forward | SwiGLU/GeGLU, ungated, ReLU², and clamped SwiGLU; sparse experts with one router covering softmax or sigmoid scoring, top-k before or after scoring, group-limited selection, correction bias, renormalization, and shared experts, dispatched in memory-bounded expert blocks. |
+| State | Preallocated KV, ring, latent, recurrent, and cross-attention caches outside the parameters; atomic multi-layer step writes; transactional speculative staging ([used by](TRANSFORMER_INNOVATIONS.md#innovation-transactional-cache) DeepSeek-V2, Qwen3.5, and Nemotron-H); reorder, truncate, and reset. |
+| Generation | Greedy, temperature, top-k, top-p, min-p, repetition/presence/frequency penalties, logit bias, `min_new_tokens`, no-repeat n-grams, stop sequences, streaming callbacks, cache-aware beam search, and lossless speculative verification. |
+| Artifacts | Strict local SafeTensors discovery and streaming, exact dtype casts, exact MXFP4 decoding, native Q4/Q8 Burnpack sidecars, local tokenizers, and sandboxed chat templates with Hugging Face semantics. |
 
-Experiments use `HiddenState`, `ExecutionContext`, `Hooks`, and ordinary Burn
-modules to expose the computation directly. Inference compatibility uses the
-`CausalLanguageModel` and `Seq2SeqLanguageModel` contracts.
-Both expose a stateless full-precision `forward` path and explicit
-`new_decode_state`, prefill, and decode operations. `DecodeState` exposes
-capacity, per-sequence lengths, reset, reorder/duplication, and truncation.
-Inputs use `[batch, sequence]` token IDs and optional explicit positions; a
-`TokenMask` always means `true == valid token`. `ForwardOptions` projects only
-the last valid position by default and makes hidden states, router logits, and
-auxiliary losses opt-in where supported. For selective attention tensors on
-Qwen3.5/3.8, T5, and custom models, use activation hooks; these models reject the
-legacy `options.attentions` request.
+### Performance
 
-`AutoCausalLm` dispatches `deepseek_v2`, `muse_glimmer_text`, `nemotron_h`,
-`qwen3_5_text`, and `qwen3_moe`. `AutoSeq2SeqLm` dispatches `t5`. These enum
-registries contain executable Burn modules; their presence says nothing about
-whether a particular real checkpoint has completed the release gates above.
+- Every family runs cached prefill and decoding as **one model pass per step
+  over the whole ragged batch**; rows of different lengths are handled by
+  masks and cache segments, not by per-row loops. On Flex CPU with small
+  random models and eight rows, batched decoding measured 1.7× to 3.6× faster
+  than the earlier row-by-row path for dense and hybrid families and 1.3× to
+  2.7× for sparse-expert families; gpt-oss's wide experts are not faster on
+  CPU (0.8× to 1.1×). These were measured on a shared host; the
+  [changelog](CHANGELOG.md#performance) lists each measurement.
+- Cached decoding attends over the stored grouped-query KV heads directly,
+  never repeating keys and values per query head.
+- Sliding layers keep only their window in ring caches.
+- Muse Glimmer and DeepSeek-V2 (MLA) run long attention in query chunks whose
+  score planes stay below a configurable `AttentionExecutionPolicy` bound, and
+  `GroupedQueryAttention::attend_bounded` offers the same to custom code. The
+  other families evaluate each call's full score plane, so for them
+  `prefill_chunk_size` is what bounds long causal prompts.
+- Input validation and generation bookkeeping read back to the host once per
+  step, and speculative drafts are verified in one target pass.
+- Flex runs with SIMD kernels and rayon-parallel matrix products.
+- On Metal, packed Q4/Q8 Burnpack weights execute through Burn's quantized
+  matmul without whole-weight dequantization. Burn 0.21's multi-row Q4
+  kernels are wrong with F32 activations, so those products run one row at a
+  time (one packed matmul per row); F16 activations keep a single matmul.
+
+Measurement protocols and recorded results are in [BENCHMARKS.md](BENCHMARKS.md).
+
+### Verification
+
+Ordinary tests run on the deterministic Flex backend. Family behavior is
+checked against Hugging Face Transformers 5.2 goldens on tiny random-weight
+checkpoints; optimized and batched paths are compared with stateless and
+row-by-row references; real-checkpoint gates are opt-in. Integer planning in
+the cache, attention, mixer, MoE, position, generation, tokenizer, checkpoint,
+transfer, and family modules is proved correct in place with
+[Verus](verus/README.md). [Fuzz targets](fuzz/README.md)
+and property suites cover configuration parsing, RoPE translation, attention
+masks, cache transactions, SafeTensors headers, chat templates, and generation.
 
 ## Build features
-
-The crate declares Rust 1.92 as its minimum supported Rust version and pins Burn
-0.21.
 
 | Feature | Effect |
 | --- | --- |
 | `default` | Enables `std` and the deterministic `flex` backend used by ordinary tests. |
 | `std` | Enables Burn's standard-library support. |
-| `flex` | Enables Burn Flex. |
-| `cpu` | Enables Burn's CPU backend. |
+| `flex` | Enables Burn Flex with SIMD kernels and parallel matrix products. |
+| `cpu` | Enables Burn's CubeCL CPU backend, which compiles the GPU backends' kernels to host code through MLIR and LLVM. Tests compare it with Flex and the tiny Transformers goldens, but it is not a supported inference backend: Burn 0.21 reshapes some strided views wrongly on it ([SUPPORT.md](SUPPORT.md#cubecl-cpu-backend-validation)). Its build runs a downloaded prebuilt LLVM that needs glibc 2.34+ and GCC 11+ libstdc++, so it does not build on RHEL/Alma 8; see [SUPPORT.md](SUPPORT.md#host-requirement-of-the-cpu-feature). |
 | `metal` | Enables Burn Metal. |
 | `cuda` | Enables Burn CUDA. |
 | `rocm` | Enables Burn ROCm. |
@@ -155,9 +351,11 @@ The crate declares Rust 1.92 as its minimum supported Rust version and pins Burn
 | `train` | Adds Burn's native Learner/TrainStep framework; implies `std` and `autodiff`. |
 | `tokenizers` | Adds local `tokenizer.json` loading through the `tokenizers` crate. |
 | `chat-templates` | Adds bounded local chat-template rendering with MiniJinja and implies `tokenizers`. |
+| `kernel-tracing` | Test-only. Implies `metal` and Burn tracing so opt-in tests can observe CubeCL kernel launches. |
+| `attention-kernel-tracing` | Test-only. Implies `kernel-tracing` and enables CubeCL autotuning (`burn/autotune`) for the fused-attention parity gate; it is not a certified packed-Metal build. |
 
-For example, a consumer in a sibling directory selecting only Metal and local
-tokenization can use (adjust the local path for your checkout):
+A consumer in a sibling directory selecting only Metal and local tokenization
+can use (adjust the path for your checkout):
 
 ```toml
 [dependencies]
@@ -165,252 +363,151 @@ burn = { version = "=0.21.0", default-features = false, features = ["metal"] }
 transformers = { path = "../transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
 ```
 
-Packed Metal Q4/Q8 has a stricter feature boundary; see
-[Quantization](#quantization).
+## Local artifacts
 
-## Local artifacts only
+The runtime never contacts a model hub, executes remote Python, or downloads
+missing files. A model directory must contain `config.json` and either
+`model.safetensors` or a SafeTensors index with all of its shards;
+`tokenizer.json` and its metadata are needed only for tokenization. Discovery
+rejects escaping shard paths and symlinks, duplicates, mapping collisions,
+unsupported dtypes, invalid byte ranges, missing shards, and shape mismatches
+before any parameter changes. Special-token declarations must resolve to the
+tokenizer's vocabulary.
 
-The Rust runtime never contacts Hugging Face, executes remote Python, or
-downloads missing files. Download an immutable revision with an external tool,
-then pass the resulting directory to `load_local`. For example:
+`AutoLoadOptions` controls the strict checkpoint policy, tokenizer attachment,
+generation defaults, provenance metadata, Qwen MTP loading, and an optional
+quantized sidecar. A successful call returns a `LoadedModel`, which keeps the
+model, tokenizer, normalized `generation_config.json` defaults (with any
+setting the runtime does not apply listed by
+`unsupported_generation_settings()`), source metadata, and the final
+`LoadReport` together. `LoadedModel` forwards `HookedModel` and `StagedModel`
+to its model.
 
-```sh
-hf download Qwen/Qwen3.5-0.8B \
-  --revision 2fc06364715b967f1860aea9cf38778875588b17 \
-  --local-dir /Volumes/models/qwen3.5-0.8b
+Other complete programs: [`flan_t5_small`](examples/flan_t5_small.rs) runs
+cache-aware four-beam T5 translation, [`qwen35_chat`](examples/qwen35_chat.rs)
+renders a checkpoint chat template, and [`gemma_generate`](examples/gemma_generate.rs)
+loads Gemma 2 or Gemma 3 text towers.
 
-hf download google/flan-t5-small \
-  --revision 0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab \
-  --local-dir /Volumes/models/flan-t5-small
-```
+## Inference API
 
-A local directory must contain `config.json` and either an official
-`model.safetensors` or a contained SafeTensors index and all of its shards.
-`tokenizer.json` and tokenizer metadata are optional unless the application
-needs tokenization. Discovery rejects escaping shard paths and symlinks,
-duplicates, mapping collisions, unsupported dtypes, invalid byte ranges,
-missing shards, and shape mismatches before parameter application.
+Every family that `AutoCausalLm` or `AutoSeq2SeqLm` dispatches, and every
+modular model, implements one of two contracts from `architecture`, so a
+generation loop written against them runs on any of these models (GPT-2 and
+GPT-NeoX are stateless study modules without decode state):
 
-Special-token declarations must resolve to the tokenizer's actual vocabulary.
-An explicit token ID cannot authorize absent or malformed token text; present
-IDs must be unsigned 32-bit integers (or null for an absent override). This
-keeps padding and other special IDs inside the validated model vocabulary.
+- `CausalLanguageModel`: a stateless, differentiable `forward`, plus
+  `new_decode_state_for` (a decode state sized by a `CacheConfig`), `prefill`
+  (a prompt), and `decode` (one or more new tokens) over external decode
+  state.
+- `Seq2SeqLanguageModel` (T5): `encode`, a stateless `forward`,
+  `new_decode_state_for`, `prefill_decoder`, and `decode`.
 
-`AutoLoadOptions` controls strict checkpoint policy, tokenizer attachment,
-normalized generation defaults, provenance metadata, Qwen MTP loading, and an
-optional quantized Burnpack sidecar. A successful call returns `LoadedModel`,
-which keeps the executable module, tokenizer, generation defaults, canonical
-source metadata, and finalized `LoadReport` together.
-
-### FLAN-T5-small loading and generation
-
-The [complete FLAN-T5-small example](examples/flan_t5_small.rs) loads the
-pinned official SafeTensors checkpoint through `AutoSeq2SeqLm`, tokenizes one
-instruction locally, encodes its source once, and runs cache-aware four-beam
-decoding. No Python environment or network access is used at inference time:
-
-```sh
-cargo run --release --manifest-path Cargo.toml \
-  --no-default-features --features std,flex,tokenizers \
-  --example flan_t5_small -- /Volumes/models/flan-t5-small \
-  "translate English to German: The house is wonderful."
-```
-
-Both this example and `qwen35_chat` passed their unchanged public entry points
-on Rust 1.92 with local checkpoints, including a
-[final post-tokenizer-fix replay](acceptance/measurements/v0_1-source-gates-20260910.json)
-with exact previous outputs and before/after source, checkpoint, and binary
-hashes. The [earlier execution record](acceptance/measurements/public-examples-20260909.json)
-is retained separately. These are functional runs, not throughput measurements.
-
-`generate_t5_beam_search` reads decoder-start, EOS, and PAD IDs from the loaded
-T5 configuration. It allocates decoder state for `source_batch * num_beams`,
-keeps encoder computation outside the token loop, and reorders decoder self-KV,
-encoder rows, and immutable cross-attention KV together whenever beams change
-parents. Set `num_beams = 1` for deterministic greedy decoding through the same
-cached coordinator.
-
-When supplying an `EncoderOutput` to T5 directly, its hidden-state dtype must
-match the model's actual projection dtype, not the backend's default element
-type. Dtype mismatches return a contextual error before cross-attention or
-cache mutation; states are not silently cast. Once prefilled, a decode state
-uses its retained encoder output and cross-KV. Subsequent encoder arguments
-must preserve that binding's shape, device, dtype, and mask layout; matching
-structure is not a check that their tensor values are identical.
-
-### Causal loading and generation
-
-With the `tokenizers` feature enabled, the same API works for any backend that
-can execute the selected architecture:
+Inputs are `[batch, sequence]` token IDs with optional explicit positions and
+an optional `TokenMask` in which `true` marks a valid token, so ragged rows can
+be left- or right-padded. Cached prefill and decode run the whole batch in one
+model pass per step. Decode state lives outside the parameters, and the
+`DecodeState` trait exposes its capacity and per-row lengths, `reset`,
+`reorder` (gather or duplicate rows, for example beams), and `truncate` (roll
+back to earlier lengths). A failed call leaves the lengths and every readable
+cache slot unchanged.
 
 ```rust
-use std::{error::Error, io, path::Path};
-
-use burn::tensor::backend::Backend;
+use burn::tensor::{Int, Tensor, backend::Backend};
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, CausalGenerationRequest, EncodeOptions,
-    generate_causal,
-    cache::CacheConfig,
-    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
+    CausalLanguageModel, CausalLmInput, DecodeInput, ForwardOptions, Result, cache::CacheConfig,
 };
 
-fn generate<B: Backend>(root: &Path, device: &B::Device) -> Result<String, Box<dyn Error>> {
-    let options = AutoLoadOptions {
-        checkpoint: LoadOptions {
-            // The accepted M3 Metal profile streams BF16 source tensors into F16.
-            dtype_policy: DTypePolicy::Cast(TensorDType::F16),
-            ..LoadOptions::default()
-        },
-        repository: Some("Qwen/Qwen3.5-0.8B".into()),
-        revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
-        ..AutoLoadOptions::default()
-    };
-    let loaded = AutoCausalLm::<B>::load_local(root, &options, device)?;
-    let tokenizer = loaded
-        .tokenizer()
-        .ok_or_else(|| io::Error::other("build with the tokenizers feature"))?;
-    let prompt = tokenizer
-        .encode("Hello", &EncodeOptions::default())?
-        .to_causal_input::<B>(device)?;
-    let [batch, prompt_length] = prompt.token_ids.dims();
-
-    let mut generation = loaded.generation_defaults().clone();
-    generation.max_new_tokens = 32;
-    let capacity = prompt_length
-        .checked_add(generation.max_new_tokens.saturating_sub(1))
-        .ok_or_else(|| io::Error::other("context capacity overflow"))?;
-    let output = generate_causal(
-        loaded.model(),
-        CausalGenerationRequest {
-            prompt,
-            cache: CacheConfig::new(batch, capacity)?,
-            generation,
-            prefill_chunk_size: None,
-            vocabulary_size: loaded.model().config().vocabulary_size(),
-        },
-    )?;
-    let sequence = output
-        .sequences
-        .first()
-        .ok_or_else(|| io::Error::other("model returned no sequence"))?;
-    Ok(tokenizer.decode(&sequence.token_ids, true)?)
+/// Greedily appends `steps >= 1` tokens to every row, keeping the cache external.
+fn greedy<B: Backend, M: CausalLanguageModel<B>>(
+    model: &M,
+    prompt: CausalLmInput<B>,
+    steps: usize,
+) -> Result<Tensor<B, 2, Int>> {
+    let device = prompt.token_ids.device();
+    let [batch, prompt_tokens] = prompt.token_ids.dims();
+    // The last sampled token is never fed back, so it needs no cache slot.
+    let cache = CacheConfig::new(batch, prompt_tokens + steps.saturating_sub(1))?;
+    let mut state = model.new_decode_state_for(cache, &device)?;
+    // The defaults project only each row's last valid position: [batch, 1, vocabulary].
+    let options = ForwardOptions::default();
+    let mut logits = model.prefill(prompt, &mut state, &options)?.logits;
+    let mut tokens: Vec<Tensor<B, 2, Int>> = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        if let Some(previous) = tokens.last() {
+            let input = DecodeInput { token_ids: previous.clone(), position_ids: None, token_mask: None };
+            logits = model.decode(input, &mut state, &options)?.logits;
+        }
+        tokens.push(logits.clone().argmax(2).squeeze_dim::<2>(2)); // [batch, 1]
+    }
+    Ok(Tensor::cat(tokens, 1))
 }
 ```
 
-A complete macOS chat program is available as
-[`examples/qwen35_chat.rs`](examples/qwen35_chat.rs). It uses
-`LocalTokenizer::encode_chat` so the checkpoint template and tokenizer
-post-processor cannot insert special delimiters twice.
+`ForwardOptions` selects logits with `LogitsSelection` (`Last` by default,
+`All`, or explicit `Positions`) and makes hidden states, router logits, and
+auxiliary losses opt-in. Its `attentions` flag materializes probabilities only
+in stateless passes of DeepSeek-V2, and of the Llama, Gemma, and gpt-oss
+families when every block uses `AttentionPrecisionMode::EagerFp32Softmax`;
+other families and every cached path return an error. Attention-pattern hook
+points are the general route
+([EXPERIMENTS.md](EXPERIMENTS.md#attention-scores-patterns-and-sinks)).
 
-Applications that need resumable sessions can bypass the coordinator and call
-`prefill` and `decode` directly with architecture-matched external state. T5
-callers can use `generation::generate_seq2seq_beam_search`, which encodes once
-and reorders both decoder and cross-attention state as beams change parents.
-For long causal prompts, set `prefill_chunk_size` to a bounded value such as
-`Some(256)`: the coordinator advances the same preallocated state segment by
-segment and retains the last valid logits independently for every ragged batch
-row. Leaving it as `None` preserves a single-call prefill for short prompts and
-reference comparisons.
-
-### Building an experimental topology
-
-`DecoderSpec` and `Seq2SeqSpec` derive Serde traits, so an experiment can retain
-its exact architecture as JSON and initialize it on any Burn backend:
-
-```rust
-use burn::tensor::backend::Backend;
-use transformers::{
-    Result,
-    architecture::DecoderSpec,
-    models::custom::ModularCausalLm,
-};
-
-fn build_experiment<B: Backend>(
-    spec: DecoderSpec,
-    device: &B::Device,
-) -> Result<ModularCausalLm<B>> {
-    ModularCausalLm::init(spec, device)
-}
-```
-
-The modular runtime validates the complete specification before allocating
-parameters. Its current decode state is a correctness-oriented recomputation
-path; family runtimes retain the optimized native KV, latent, ring, and
-recurrent caches used for performance work.
+`generate_causal` (and `generate_causal_streaming`) wrap this loop with
+sampling, penalties, stop sequences, and per-token log probabilities;
+`prefill_chunk_size: Some(256)` bounds long prompts while keeping each ragged
+row's last valid logits, for every `CausalLanguageModel`, `ModularCausalLm`
+included. For T5,
+`generate_t5_beam_search` reads the decoder-start, EOS, and PAD IDs from the
+configuration, encodes once, and decodes `source_batch * num_beams` rows; each
+step reorders the decoder cache within each source's beams while the encoder
+output and projected cross-attention keys and values stay in place.
+`num_beams = 1` gives deterministic greedy decoding through the same path, and
+`generation::generate_seq2seq_beam_search` accepts a longer decoder prompt and
+an explicit `BeamSearchConfig`; over `AutoSeq2SeqLm` it also keeps the
+cross-attention keys and values in place. Both stop with Transformers'
+`EarlyStopping::Heuristic` by default. An `EncoderOutput` passed to T5 must have the
+dtype of the model's parameters (states are never cast silently). The first
+successful `prefill_decoder` binds it to the state; later calls must pass an
+output of the same shape, device, dtype, and mask layout, and the state keeps
+using its bound copy.
 
 ## Quantization
 
 The native format is deterministic, symmetric, weight-only Q8 or Q4 with
 contiguous groups of 32, 64, or 128 values (64 by default). Conversion follows
-the validated architecture mapping and streams one transformed tensor at a
-time into a memory-mapped Burnpack sidecar. The sidecar is **not** a standalone
-checkpoint: excluded parameters are still loaded from the original
-SafeTensors. Embeddings, norms, biases, router classifiers, recurrent scalars
-and convolutions, MLA latent expansion, and first-generation MTP parameters
-remain in source precision.
+the validated architecture mapping and streams one tensor at a time into a
+memory-mapped Burnpack sidecar. The sidecar is **not** a standalone checkpoint:
+excluded parameters (embeddings, norms, biases, routers, recurrent scalars and
+convolutions, MLA latent expansion, and first-generation MTP parameters) still
+load from the original SafeTensors. Automatic packed loading is enabled for
+`qwen3_5_text`, `qwen3_moe`, and `muse_glimmer_text`; the
+[status page](ARCHITECTURE_COMPATIBILITY.md#quantized-checkpoints) records
+their evidence. No quantized profile is advertised.
 
-Automatic packed loading is enabled for `qwen3_5_text`, `qwen3_moe`, and
-`muse_glimmer_text`.
-Qwen3.5-0.8B Q4 has passed a finite full-model Metal smoke test and exact
-cached/stateless consistency, but its first token differs from F16 and the
-quality corpus has not passed. Qwen3.8-27B Q8 and Q4 have each passed strict
-streaming conversion and a clean single-backend Metal smoke: 497 matrices were
-packed in groups of 64, 369 tensors remained outside each sidecar and loaded as
-F16, and both mixed graphs exercised stateless, cached, MTP, and recurrent
-paths. The F16 graph now matches the pinned official full-vocabulary logits and
-all 32 stable-margin greedy tokens, but quantized reference/longer-generation
-parity, the quality corpus, standardized throughput and output hashing, and 32K
-stress remain open. Neither format is advertised for production inference yet.
+Every packed projection is installed as exactly the artifact's values. On
+Metal it stays packed QFloat. On Burn Flex 0.21, whose quantized transpose
+would re-block the weights, the packed Qwen3.5, Qwen3-MoE, and Muse
+projections are held as their exact dequantized F32 values, about 3.6 times
+the packed projection bytes. The load report's quantized records describe the
+artifact's packed form, not the in-memory storage. No prefill speed figure is
+claimed for this path until an idle-host benchmark exists.
 
-Qwen3-30B-A3B Q8 and Q4 have also passed provenance-bound streaming
-conversion and mixed F16/packed Metal stateless, cached-prefill, and recurrent
-decode smokes. Each sidecar contains 18,625 packed matrices; 242 embeddings,
-norms, and routers remain F16, and runtime MoE dispatch evaluates only selected
-experts. The Q4 decode audit observed all 1,345 expected packed matmuls and no
-whole-weight dequantization; the Q8 audit proved the same 1,345-of-1,345 packed
-launch result. Official-reference and 32-token generation parity, quantized
-quality, standardized performance, and 32K stress remain open, so the model is
-not yet advertised as fully supported.
-
-Muse-Glimmer's exact 627-tensor F16 load plan classifies 417 matrices for
-Burnpack (all five attention projections, all three SwiGLU projections in each
-of 52 layers, and the independent LM head) and retains the embedding plus 209
-normalization vectors. Every eligible input width aligns to G64. A nonzero
-two-layer fixture has passed Q8 and Q4 streaming conversion, automatic mixed
-loading, stateless/prefill/recurrent parity, complete dtype accounting, and a
-negative gate proving row-unaligned artifacts remain reference-only. The real
-Q8/G64 conversion then revalidated all 417 payloads and published a
-`28,165,645,337`-byte v2 artifact with SHA-256
-`91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb`;
-the strict conversion/provenance gate took `1,570.845 s`. A separate traced
-Metal gate reauthenticated that sidecar and its source provenance, then ran
-stateless, cached-prefill, and recurrent decode. Its cached/stateless cosine was
-`1.0`, and the decode launched all 417 packed Q8 matmuls with no whole-weight
-dequantization. The real
-Q4/G64 conversion has now also published and fully reopened its
-`14,911,372,485`-byte v2 artifact with SHA-256
-`05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3`;
-its separate traced Metal gate likewise ran all 417 packed Q4 matmuls without
-whole-weight dequantization and reported cached/stateless cosine `1.0`.
-Quantized official-reference and quality evaluation plus full-model 32K
-execution remain pending; Muse is not advertised as supported.
-
-Burn 0.21 can execute compatible Burnpack matrices through packed `QFloat`
-matmul. The only certified packed-Metal build shape is an exact single-backend
-build such as:
+The only certified packed-Metal build is an exact single-backend build:
 
 ```sh
-cargo build --manifest-path Cargo.toml \
-  --release --no-default-features --features std,metal,tokenizers
+cargo build --release --no-default-features --features std,metal,tokenizers
 ```
 
-Do not include `rocm` in that Metal binary. Burn 0.21 feature-unifies CubeCL
-autotuning from ROCm, which can select invalid packed Q4/Q8 Metal GEMV
-candidates. The crate rejects the known `metal + rocm` packed path before
-dispatch. A downstream dependency can also enable CubeCL autotuning directly;
-that untracked combination is not certified.
+Do not include `rocm` or `attention-kernel-tracing` in that binary: Burn 0.21
+feature-unifies CubeCL autotuning from either, which can select invalid packed
+Q4/Q8 Metal kernels. The crate rejects packed Q4/Q8 Metal execution in builds
+with either feature before dispatch; a downstream crate that enables CubeCL
+autotuning directly is not certified.
 
-## Explicit non-goals for this release
+gpt-oss's MXFP4 experts are decoded exactly to the load dtype; there is no
+packed MXFP4 execution yet.
+
+## Non-goals
 
 - Vision or audio towers, even when their tensors are present in a checkpoint.
 - GGUF, AWQ, GPTQ, external FP8 formats, or importing third-party quantized
@@ -423,10 +520,25 @@ that untracked combination is not certified.
 - Silent approximation of an unavailable architecture feature. Unsupported
   combinations return contextual errors.
 
-## Validation and performance
+## Documentation map
 
-Ordinary tests use Flex; hardware tests and real-weight tests are opt-in and
-ignored unless their pinned local artifacts are supplied. Benchmark results
-must separate cold compilation/loading from warm prefill and decode and must
-include checkpoint provenance. See [BENCHMARKS.md](BENCHMARKS.md) for the
-measurement protocol and the limited smoke evidence recorded so far.
+| Read | For |
+| --- | --- |
+| [EXPERIMENTS.md](EXPERIMENTS.md) | Capturing, editing, and patching activations; staged execution; attention policies; custom modules and specs. |
+| [TRAINING.md](TRAINING.md) | Native Burn training, initialization policies, freezing, losses, and records. |
+| [examples/README.md](examples/README.md) | Runnable examples and the paper reproductions with their measured results. |
+| [ARCHITECTURE_COMPATIBILITY.md](ARCHITECTURE_COMPATIBILITY.md) | Model status: what is implemented, validated, and supported, with every evidence link. |
+| [SUPPORT.md](SUPPORT.md) | What a support claim means and the advertised v0.1 profiles. |
+| [TRANSFORMER_INNOVATIONS.md](TRANSFORMER_INNOVATIONS.md) | Every mechanism's mathematics, reference, and implementation, per family. |
+| [ARCHITECTURES.md](ARCHITECTURES.md) | Pinned research targets, shared-feature ownership, and numerical policy. |
+| [CHANGELOG.md](CHANGELOG.md), [MIGRATION.md](MIGRATION.md) | What changed, and how to upgrade from 0.1.0. |
+| [BENCHMARKS.md](BENCHMARKS.md) | Performance protocol and measurements. |
+| [RELEASE_GATES.md](RELEASE_GATES.md), [RELEASING.md](RELEASING.md) | Release checks, real-checkpoint gates, and their recorded history. |
+| [verus/README.md](verus/README.md), [fuzz/README.md](fuzz/README.md) | Formal proofs and fuzzing. |
+| [ROADMAP.md](ROADMAP.md), [V0_2_INTERFACE.md](V0_2_INTERFACE.md) | Plans and the experiment-interface contract. |
+| [QWEN3_5_0_8B_RELEASE.md](QWEN3_5_0_8B_RELEASE.md), [QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md), [NEMOTRON_H_ACCEPTANCE.md](NEMOTRON_H_ACCEPTANCE.md) | Model-specific profiles, tensor mappings, and acceptance protocols. |
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

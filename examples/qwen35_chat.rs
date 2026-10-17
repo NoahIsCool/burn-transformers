@@ -1,43 +1,57 @@
-//! Runs local text-only chat generation with the pinned Qwen3.5-0.8B profile.
+//! Streams a text-only chat reply from the pinned Qwen3.5-0.8B checkpoint on Metal.
 //!
-//! The model repository is multimodal, but this crate intentionally loads only
-//! its language tower. The example casts the BF16 checkpoint to F16 while each
+//! ```text
+//! cargo run --release --locked --no-default-features --features std,metal,chat-templates \
+//!   --example qwen35_chat -- MODEL_DIR ["PROMPT"] [MAX_NEW_TOKENS]
+//! ```
+//!
+//! macOS only. The model repository is multimodal, but this crate intentionally
+//! loads only its language tower. The BF16 checkpoint is cast to F16 while each
 //! tensor is streamed because that is the validated M3 Metal execution policy.
 //!
-//! Tokenized chat uses `[batch, token]` IDs with causal visibility. The prepared
-//! BF16 weights are streamed into the explicit F16 Metal execution policy; this
-//! program does not imply quantized-training support. Decode state is external to
-//! parameters: its capacity covers the complete prompt plus the requested token
-//! budget, and prefill is chunked into at most 256 tokens. Generation uses the
-//! checkpoint's defaults after overriding `max_new_tokens`. No optimizer records
-//! or training dropout participate in this inference-only path.
+//! Tokenized chat uses `[batch, token]` IDs with causal visibility. Decode state
+//! is external to parameters: its capacity covers the complete prompt plus the
+//! requested token budget, and prefill is chunked into at most 256 tokens.
+//! Generation uses the checkpoint's defaults after overriding `max_new_tokens`;
+//! settings in `generation_config.json` that the crate does not implement are
+//! listed on standard error. Text is streamed as it is generated: an
+//! incremental decoder emits each piece once its UTF-8 characters are complete,
+//! so multi-byte characters split across tokens never print as replacement
+//! glyphs. No optimizer records or training dropout participate in this
+//! inference-only path.
 
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
-use std::{env, error::Error as StdError, io, path::PathBuf};
+use std::{
+    env,
+    error::Error as StdError,
+    ffi::OsString,
+    io::{self, Write},
+    path::PathBuf,
+};
 
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
 use burn::backend::Metal;
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalGenerationRequest, ChatMessage, ChatTemplateOptions,
     EncodeOptions, Error,
     cache::CacheConfig,
     checkpoint::{DTypePolicy, LoadOptions, TensorDType},
-    generate_causal,
+    generate_causal_streaming,
 };
 
 /// Immutable upstream identity used by the v0.1 Qwen profile.
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
 const QWEN_REPOSITORY: &str = "Qwen/Qwen3.5-0.8B";
 
 /// Exact artifact revision covered by the committed acceptance evidence.
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
 const QWEN_REVISION: &str = "2fc06364715b967f1860aea9cf38778875588b17";
 
-/// Loads one pinned local checkpoint, renders a no-thinking chat, and generates text.
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
+/// User message sent when no prompt is given.
+const DEFAULT_PROMPT: &str = "Explain why a KV cache speeds up decoding in one sentence.";
+
+/// Token budget used when no `MAX_NEW_TOKENS` is given.
+const DEFAULT_MAX_NEW_TOKENS: usize = 64;
+
+/// Loads one pinned local checkpoint, renders a no-thinking chat, and streams the reply.
 fn main() -> Result<(), Box<dyn StdError>> {
-    let (root, prompt, max_new_tokens) = arguments()?;
+    let (root, prompt, max_new_tokens) = arguments(env::args_os().skip(1))?;
     let device = Default::default();
     let options = AutoLoadOptions {
         checkpoint: LoadOptions {
@@ -49,9 +63,12 @@ fn main() -> Result<(), Box<dyn StdError>> {
         ..AutoLoadOptions::default()
     };
     let loaded = AutoCausalLm::<Metal>::load_local(&root, &options, &device)?;
+    for (setting, value) in loaded.unsupported_generation_settings() {
+        eprintln!("ignoring unsupported generation setting {setting} = {value}");
+    }
     let tokenizer = loaded
         .tokenizer()
-        .ok_or_else(|| Error::Tokenizer("the local Qwen profile requires tokenizer.json".into()))?;
+        .ok_or("the local Qwen profile requires tokenizer.json")?;
     let encoded = tokenizer.encode_chat(
         &[ChatMessage::text("user", prompt)],
         &ChatTemplateOptions {
@@ -66,11 +83,14 @@ fn main() -> Result<(), Box<dyn StdError>> {
 
     let mut generation = loaded.generation_defaults().clone();
     generation.max_new_tokens = max_new_tokens;
+    // The last sampled token is never fed back, so it needs no cache slot.
     let cache_capacity = prompt_width
-        .checked_add(max_new_tokens.saturating_sub(1))
-        .ok_or_else(|| io::Error::other("prompt and generation length overflow usize"))?;
+        .checked_add(max_new_tokens - 1)
+        .ok_or("prompt and generation length overflow usize")?;
     let vocabulary_size = loaded.model().config().vocabulary_size();
-    let output = generate_causal(
+    let mut text = tokenizer.decode_stream(true);
+    let mut stdout = io::stdout().lock();
+    generate_causal_streaming(
         loaded.model(),
         CausalGenerationRequest {
             prompt,
@@ -79,81 +99,55 @@ fn main() -> Result<(), Box<dyn StdError>> {
             prefill_chunk_size: Some(256),
             vocabulary_size,
         },
+        |token| {
+            if let Some(piece) = text.step(token.token_id)? {
+                write!(stdout, "{piece}")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|error| Error::Generation(format!("failed to print: {error}")))?;
+            }
+            Ok(())
+        },
     )?;
-    let sequence = output
-        .sequences
-        .first()
-        .ok_or_else(|| io::Error::other("generation returned no sequence"))?;
-    println!("{}", tokenizer.decode(&sequence.token_ids, true)?);
+    writeln!(stdout)?;
     Ok(())
 }
 
 /// Parses `MODEL_DIR [PROMPT] [MAX_NEW_TOKENS]` without adding a CLI dependency.
-#[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
-fn arguments() -> Result<(PathBuf, String, usize), Box<dyn StdError>> {
-    let mut arguments = env::args_os();
-    let executable = arguments
-        .next()
-        .unwrap_or_else(|| "qwen35_chat".into())
-        .to_string_lossy()
-        .into_owned();
-    let root = arguments.next().map(PathBuf::from).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("usage: {executable} MODEL_DIR [PROMPT] [MAX_NEW_TOKENS]"),
-        )
-    })?;
-    let prompt = arguments
-        .next()
-        .map(|value| {
-            value.into_string().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "PROMPT must be valid UTF-8")
-            })
-        })
-        .transpose()?
-        .unwrap_or_else(|| "Explain why a KV cache speeds up decoding in one sentence.".into());
-    let max_new_tokens = arguments
-        .next()
-        .map(|value| {
+///
+/// The directory may be any operating-system path, including one that is not
+/// UTF-8. The prompt and the token budget must be UTF-8 text, and the budget
+/// must be a positive integer because generation always emits one token.
+fn arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<(PathBuf, String, usize), Box<dyn StdError>> {
+    let usage = "usage: qwen35_chat MODEL_DIR [PROMPT] [MAX_NEW_TOKENS]";
+    let root = arguments.next().map(PathBuf::from).ok_or(usage)?;
+    let prompt = match arguments.next() {
+        Some(prompt) => prompt
+            .into_string()
+            .map_err(|_| "PROMPT must be UTF-8 text")?,
+        None => DEFAULT_PROMPT.into(),
+    };
+    let max_new_tokens = match arguments.next() {
+        Some(value) => {
+            let value = value
+                .into_string()
+                .map_err(|_| "MAX_NEW_TOKENS must be UTF-8 text")?;
             value
-                .to_str()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "MAX_NEW_TOKENS must be valid UTF-8",
-                    )
-                })?
                 .parse::<usize>()
-                .map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("invalid MAX_NEW_TOKENS: {error}"),
-                    )
-                })
-        })
-        .transpose()?
-        .unwrap_or(64);
+                .map_err(|error| format!("invalid MAX_NEW_TOKENS {value:?}: {error}"))?
+        }
+        None => DEFAULT_MAX_NEW_TOKENS,
+    };
     if max_new_tokens == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "MAX_NEW_TOKENS must be greater than zero",
-        )
-        .into());
+        return Err("MAX_NEW_TOKENS must be greater than zero".into());
     }
     if arguments.next().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("usage: {executable} MODEL_DIR [PROMPT] [MAX_NEW_TOKENS]"),
-        )
-        .into());
+        return Err(usage.into());
     }
     Ok((root, prompt, max_new_tokens))
 }
 
-/// Explains the build-time feature contract on unsupported example builds.
-#[cfg(not(all(target_os = "macos", feature = "metal", feature = "chat-templates")))]
-fn main() {
-    eprintln!(
-        "qwen35_chat requires macOS and --no-default-features --features std,metal,chat-templates"
-    );
-}
+#[cfg(test)]
+#[path = "generation/qwen35_chat_tests.rs"]
+mod tests;

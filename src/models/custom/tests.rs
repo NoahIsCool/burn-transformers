@@ -1,159 +1,38 @@
 //! Tiny executable, validation, serialization, state-lifecycle, and autodiff tests.
 
 use burn::{
-    backend::Flex,
-    module::{Module, ModuleMapper, Param},
-    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    module::{Module, Param},
+    tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use crate::{
     CausalLanguageModel, CausalLmInput, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
     Seq2SeqInput, Seq2SeqLanguageModel, TokenMask,
     architecture::{
-        Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
-        FeedForwardSpec, Mamba2Spec, MixerSpec, MixtureOfExpertsSpec, MlaSpec, NormPlacement,
-        NormalizationSpec, PositionEncodingSpec, ResidualTopology, RopeScaling, Seq2SeqSpec,
-        SlidingWindowSpec,
+        Activation, AttentionSpec, DecoderSpec, FeedForwardSpec, Mamba2Spec, MixerSpec,
+        MixtureOfExpertsSpec, MlaSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+        ResidualTopology, RopeScaling, ScoreScale, SlidingWindowSpec,
     },
+    attention::AttentionConnectivity,
     cache::CacheConfig,
+    intervention::Stack,
+    moe::RoutingPolicy,
     position::T5RelativePositionBiasConfig,
 };
 
-use super::{ModularCausalLm, ModularSeq2SeqLm, common::relative_bias_from_positions};
-
-/// CPU backend with F32 values and I32 indices for compact modular-model fixtures.
-type TestBackend = Flex<f32, i32>;
+use super::{ModularCausalLm, ModularSeq2SeqLm, pass::StackPass, test_support::*};
 
 #[path = "state_contracts_tests.rs"]
 /// Sparse decode diagnostics and transactional failure contract tests.
 mod state_contracts;
 
-/// Standard scale-only normalization for compact fixtures.
-fn rms() -> NormalizationSpec {
-    NormalizationSpec::Rms {
-        epsilon: 1e-6,
-        zero_centered: false,
-    }
-}
+#[path = "family_parity_tests.rs"]
+/// Modular graphs configured like family blocks reproduce the family outputs.
+mod family_parity;
 
-/// Full two-head attention without an explicit position transform.
-fn attention(position: PositionEncodingSpec) -> MixerSpec {
-    MixerSpec::Attention(AttentionSpec {
-        query_heads: 2,
-        key_value_heads: 1,
-        head_dim: 4,
-        query_key_norm: true,
-        output_gate: false,
-        position,
-    })
-}
-
-/// Bias-free gated feed-forward branch used by most fixtures.
-fn dense_ffn() -> FeedForwardSpec {
-    FeedForwardSpec::Dense(DenseFeedForwardSpec {
-        intermediate_size: 12,
-        activation: Activation::Silu,
-        bias: false,
-    })
-}
-
-/// One pre-normalized additive residual layer.
-fn layer(mixer: MixerSpec) -> DecoderLayerSpec {
-    DecoderLayerSpec {
-        mixer,
-        feed_forward: dense_ffn(),
-        mixer_norm: rms(),
-        feed_forward_norm: rms(),
-        norm_placement: NormPlacement::Pre,
-        residual: ResidualTopology::Add,
-    }
-}
-
-/// Small decoder whose layer schedule is supplied by the test.
-fn decoder(layers: Vec<DecoderLayerSpec>) -> DecoderSpec {
-    DecoderSpec {
-        vocabulary_size: 32,
-        hidden_size: 8,
-        layers,
-        final_norm: rms(),
-        tie_word_embeddings: false,
-        max_position_embeddings: 32,
-    }
-}
-
-/// Small causal decoder with RoPE attention followed by DeltaNet.
-fn causal_spec() -> DecoderSpec {
-    decoder(vec![
-        layer(attention(PositionEncodingSpec::Rope {
-            theta: 10_000.0,
-            rotary_dim: 4,
-            scaling: RopeScaling::None,
-        })),
-        layer(MixerSpec::DeltaNet {
-            key_heads: 1,
-            value_heads: 2,
-            key_head_dim: 4,
-            value_head_dim: 4,
-            convolution_kernel: 2,
-        }),
-    ])
-}
-
-/// One-layer encoder-decoder fixture with plain absolute-free attention.
-fn seq2seq_spec() -> Seq2SeqSpec {
-    Seq2SeqSpec {
-        encoder: decoder(vec![layer(attention(PositionEncodingSpec::None))]),
-        decoder: decoder(vec![layer(attention(PositionEncodingSpec::None))]),
-        cross_attention_heads: 2,
-        cross_attention_head_dim: 4,
-    }
-}
-
-/// Constructs a token-validity mask from a nested boolean array.
-fn mask<const B: usize, const S: usize>(
-    values: [[bool; S]; B],
-    device: &<TestBackend as BackendTypes>::Device,
-) -> TokenMask<TestBackend> {
-    TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
-        values.into(),
-        device,
-    ))
-}
-
-/// Replaces every lazy float parameter with reproducible, non-degenerate fixture values.
-///
-/// The mapping consumes the graph and initializes every parameter before any model clone can
-/// occur. Matrix entries vary by their ordinal and parameter traversal order, while norm scales
-/// remain one. This avoids random global seeds and independently initialized lazy clones.
-#[derive(Default)]
-struct DeterministicParameters {
-    /// Stable traversal ordinal used to distinguish equally shaped projection matrices.
-    ordinal: usize,
-}
-
-impl ModuleMapper<TestBackend> for DeterministicParameters {
-    /// Materializes deterministic weights without changing the original parameter identities.
-    fn map_float<const D: usize>(
-        &mut self,
-        param: Param<Tensor<TestBackend, D>>,
-    ) -> Param<Tensor<TestBackend, D>> {
-        self.ordinal += 1;
-        let ordinal = self.ordinal;
-        param.map(|tensor| {
-            let shape = tensor.dims();
-            let values = (0..shape.iter().product())
-                .map(|index| {
-                    if D == 1 {
-                        1.0
-                    } else {
-                        (((index + 1) * (ordinal + 3)) as f32 * 0.17).sin() * 0.2
-                    }
-                })
-                .collect::<Vec<_>>();
-            Tensor::from_data(TensorData::new(values, shape), &tensor.device())
-        })
-    }
-}
+#[path = "perf_tests.rs"]
+/// Ignored release-mode timings of the pass tables and batched history writes.
+mod perf;
 
 /// Builds a fully initialized single-layer full/sliding attention graph for parity tests.
 fn deterministic_attention_model(
@@ -757,6 +636,9 @@ fn causal_moe_exposes_opt_in_router_diagnostics() {
         activation: Activation::ReluSquared,
         renormalize_selected: true,
         routed_scale: 0.75,
+        routing: RoutingPolicy::default(),
+        shared_expert_gate: false,
+        expert_bias: false,
     });
     let model = ModularCausalLm::<TestBackend>::init(decoder(vec![moe_layer]), &device).unwrap();
     let output = model
@@ -873,8 +755,14 @@ fn t5_relative_bias_honors_explicit_position_gaps() {
             .reshape([8, 1]),
     );
 
-    let actual =
-        relative_bias_from_positions(&bias, Tensor::from_ints([[5, 7, 10]], &device)).unwrap();
+    let pass = StackPass::new(
+        Tensor::from_ints([[5, 7, 10]], &device),
+        None,
+        11,
+        Stack::Decoder,
+        burn::tensor::DType::F32,
+    );
+    let actual = pass.relative_bias(&bias).unwrap();
     actual.into_data().assert_approx_eq::<f32>(
         &Tensor::<TestBackend, 4>::from_floats(
             [[[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 3.0, 0.0]]]],
@@ -898,6 +786,7 @@ fn yarn_and_post_norm_graph_is_executable() {
             attention_factor: Some(1.1),
             beta_slow: 1.0,
             beta_fast: 32.0,
+            truncate: true,
         },
     }));
     block.norm_placement = NormPlacement::Post;
@@ -949,7 +838,7 @@ fn modular_spec_round_trips_through_json() {
     assert_eq!(decoded, spec);
 }
 
-/// Invalid MLA rotary dimensions, unsupported Mamba2, and undefined residual gates fail explicitly.
+/// Invalid MLA rotary dimensions, unrunnable Mamba-2 geometry, and undefined residual gates fail explicitly.
 #[test]
 fn unavailable_or_ambiguous_components_are_rejected() {
     let device = Default::default();
@@ -965,6 +854,8 @@ fn unavailable_or_ambiguous_components_are_rejected() {
             rotary_dim: 4,
             scaling: RopeScaling::None,
         },
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::Global,
     });
     let error = ModularCausalLm::<TestBackend>::init(decoder(vec![layer(mla)]), &device)
         .expect_err("MLA rotary dimension exceeds its rotary channel width");
@@ -974,12 +865,16 @@ fn unavailable_or_ambiguous_components_are_rejected() {
         heads: 2,
         head_dim: 4,
         state_dim: 8,
-        convolution_kernel: 4,
+        convolution_kernel: 1,
         group_size: 1,
     });
     let error = ModularCausalLm::<TestBackend>::init(decoder(vec![layer(mamba)]), &device)
-        .expect_err("Mamba2 kernel is not executable yet");
-    assert!(error.to_string().contains("requests Mamba2"));
+        .expect_err("the Mamba-2 kernel needs a convolution of width two or more");
+    assert!(
+        matches!(&error, crate::Error::Configuration { field, reason }
+            if field.ends_with("layers[0].mixer.mamba2") && reason.contains("at least two")),
+        "{error:?}"
+    );
 
     let mut gated = layer(attention(PositionEncodingSpec::None));
     gated.residual = ResidualTopology::Gated;
@@ -1232,7 +1127,16 @@ fn decode_state_rejects_batch_configuration_mismatch() {
     let error = model
         .new_decode_state(CacheConfig::new(2, 8).unwrap(), 1, &device)
         .expect_err("batch and cache geometry must agree");
-    assert!(error.to_string().contains("expected 2 sequences"));
+    assert!(
+        matches!(
+            error,
+            crate::Error::TensorCache(crate::cache::TensorCacheError::BatchSizeMismatch {
+                configured: 2,
+                requested: 1,
+            })
+        ),
+        "{error}"
+    );
 }
 
 /// State topology identity prevents passing a valid state to a different custom graph.
@@ -1446,6 +1350,144 @@ fn seq2seq_rejects_directionally_invalid_encoder_mixers() {
     let error = ModularSeq2SeqLm::<TestBackend>::init(spec, &device)
         .expect_err("trailing window is invalid in encoder");
     assert!(error.to_string().contains("symmetric bidirectional"));
+
+    // The explicit forms of a past-only window are rejected the same way (CUS-6).
+    let sliding = crate::architecture::AttentionOptions {
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+        ..Default::default()
+    };
+    let mla = MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 2,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: None,
+        position: PositionEncodingSpec::None,
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+    };
+    for mixer in [
+        MixerSpec::AttentionWithOptions {
+            attention: attention_spec(),
+            options: sliding,
+        },
+        MixerSpec::Mla(mla.clone()),
+    ] {
+        let mut spec = seq2seq_spec();
+        spec.encoder.layers[0].mixer = mixer;
+        let error = ModularSeq2SeqLm::<TestBackend>::init(spec, &device)
+            .expect_err("trailing window is invalid in encoder");
+        assert!(error.to_string().contains("past-only"), "{error}");
+    }
+    // Symmetric local chunks are valid encoder connectivity for both attention kinds.
+    for mixer in [
+        MixerSpec::AttentionWithOptions {
+            attention: attention_spec(),
+            options: crate::architecture::AttentionOptions {
+                connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+                ..Default::default()
+            },
+        },
+        MixerSpec::Mla(MlaSpec {
+            connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+            ..mla.clone()
+        }),
+    ] {
+        let mut spec = seq2seq_spec();
+        spec.encoder.layers[0].mixer = mixer;
+        ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap();
+    }
+}
+
+/// The grouped-query topology of the shared [`attention`] fixture.
+fn attention_spec() -> AttentionSpec {
+    match attention(PositionEncodingSpec::None) {
+        MixerSpec::Attention(attention) => attention,
+        _ => unreachable!("the fixture is compact attention"),
+    }
+}
+
+/// A last-token prediction depends only on the keys its connectivity allows.
+///
+/// For a one-layer causal graph, the last query's output is a function of the
+/// visible raw embeddings alone. Evaluating exactly those tokens (with the same
+/// explicit positions) is therefore an independent control for sliding MLA
+/// windows and chunked-local grouped-query attention; padding consumes neither.
+#[test]
+fn local_connectivity_limits_the_last_token_to_its_visible_keys() {
+    let device = Default::default();
+    let ids = [1, 2, 3, 4, 5];
+    let positions = [3, 4, 5, 6, 7];
+    let rope = PositionEncodingSpec::Rope {
+        theta: 10_000.0,
+        rotary_dim: 4,
+        scaling: RopeScaling::None,
+    };
+    let sliding_mla = MixerSpec::Mla(MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 4,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: None,
+        position: rope.clone(),
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+    });
+    let chunked = MixerSpec::AttentionWithOptions {
+        attention: AttentionSpec {
+            position: rope,
+            ..attention_spec()
+        },
+        options: crate::architecture::AttentionOptions {
+            connectivity: AttentionConnectivity::ChunkedLocal { chunk: 3 },
+            ..Default::default()
+        },
+    };
+    // Sliding window 2 sees the last two tokens; chunks of 3 put tokens 3..5 together.
+    for (mixer, visible) in [(sliding_mla, 3..5), (chunked, 3..5)] {
+        let model = ModularCausalLm::<TestBackend>::init(decoder(vec![layer(mixer)]), &device)
+            .unwrap()
+            .map(&mut DeterministicParameters::default());
+        let options = ForwardOptions::default();
+        let control = model
+            .forward(
+                parity_input(
+                    &ids[visible.clone()],
+                    None,
+                    Some(&positions[visible]),
+                    &device,
+                ),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let full = model
+            .forward(
+                parity_input(&ids, None, Some(&positions), &device),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&full, &control);
+        let padded = model
+            .forward(
+                parity_input(
+                    &[0, 1, 2, 0, 3, 4, 0, 5],
+                    Some(&[false, true, true, false, true, true, false, true]),
+                    Some(&[0, 3, 4, 0, 5, 6, 0, 7]),
+                    &device,
+                ),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&padded, &control);
+    }
 }
 
 /// Encoder MoE math is allowed, but unavailable encoder router output is rejected explicitly.
@@ -1461,6 +1503,9 @@ fn seq2seq_encoder_router_diagnostics_are_not_silently_dropped() {
         activation: Activation::Silu,
         renormalize_selected: true,
         routed_scale: 1.0,
+        routing: RoutingPolicy::default(),
+        shared_expert_gate: false,
+        expert_bias: false,
     });
     let model = ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap();
     let error = model
@@ -1542,4 +1587,234 @@ fn seq2seq_stateless_graph_is_autodiff_safe() {
     let gradients = loss.backward();
     assert!(model.encoder_embed_tokens.weight.grad(&gradients).is_some());
     assert!(model.decoder_embed_tokens.weight.grad(&gradients).is_some());
+}
+
+/// Records every float parameter of a module that received no gradient.
+#[cfg(feature = "autodiff")]
+struct GradientAudit<'a, B: burn::tensor::backend::AutodiffBackend> {
+    /// Gradients of one backward pass.
+    gradients: &'a B::Gradients,
+    /// Module path of the parameter being visited.
+    path: Vec<String>,
+    /// Paths of parameters without a gradient.
+    missing: Vec<String>,
+    /// Number of float parameters visited.
+    visited: usize,
+}
+
+#[cfg(feature = "autodiff")]
+impl<B: burn::tensor::backend::AutodiffBackend> burn::module::ModuleVisitor<B>
+    for GradientAudit<'_, B>
+{
+    /// Descends into a named submodule.
+    fn enter_module(&mut self, name: &str, _container_type: &str) {
+        self.path.push(name.to_owned());
+    }
+
+    /// Leaves the current submodule.
+    fn exit_module(&mut self, _name: &str, _container_type: &str) {
+        self.path.pop();
+    }
+
+    /// Records whether this parameter's tensor has a gradient.
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        self.visited += 1;
+        if param.val().grad(self.gradients).is_none() {
+            self.missing.push(self.path.join("."));
+        }
+    }
+}
+
+/// Every parameter of a graph using each new mechanism is a trainable autodiff leaf.
+///
+/// Covers option-rich attention (Llama 3 RoPE, sinks, per-projection biases,
+/// full-width Q/K norm, SiLU gate, chunked-local connectivity), learned T5
+/// bias through the shared pass table, sliding MLA, a gated shared expert,
+/// clamped and ungated MLPs, an attention-only block, and differential
+/// attention, over padded input.
+/// Routed experts that no token selects legitimately receive no gradient.
+#[cfg(feature = "autodiff")]
+#[test]
+fn every_mechanism_keeps_parameters_trainable() {
+    use burn::backend::Autodiff;
+
+    use crate::{
+        architecture::{
+            AttentionOptions, ClampedSwiGluSpec, DenseFeedForwardSpec, OutputGateActivation,
+        },
+        attention::{ProjectionBias, QueryKeyNormScope},
+    };
+
+    /// Reverse-mode CPU backend.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let options = AttentionOptions {
+        connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+        attention_sinks: true,
+        projection_bias: ProjectionBias::query_key_value_only(),
+        query_key_norm_scope: QueryKeyNormScope::FullWidth,
+        output_gate_activation: OutputGateActivation::Silu,
+        ..AttentionOptions::default()
+    };
+    let mut rich = layer(MixerSpec::AttentionWithOptions {
+        attention: AttentionSpec {
+            query_heads: 2,
+            key_value_heads: 1,
+            head_dim: 4,
+            query_key_norm: true,
+            output_gate: true,
+            position: PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 4,
+                scaling: RopeScaling::Llama3 {
+                    factor: 8.0,
+                    low_freq_factor: 1.0,
+                    high_freq_factor: 4.0,
+                    original_max_positions: 4,
+                },
+            },
+        },
+        options,
+    });
+    rich.feed_forward = FeedForwardSpec::ClampedSwiGlu(ClampedSwiGluSpec {
+        intermediate_size: 6,
+        bias: true,
+        limit: 7.0,
+        alpha: 1.702,
+        up_offset: 1.0,
+    });
+    let mut t5 = layer(attention(PositionEncodingSpec::T5RelativeBias {
+        buckets: 8,
+        max_distance: 16,
+        bidirectional: false,
+    }));
+    t5.feed_forward = FeedForwardSpec::Ungated(DenseFeedForwardSpec {
+        intermediate_size: 6,
+        activation: Activation::GeluTanh,
+        bias: true,
+    });
+    let mut mla = layer(MixerSpec::Mla(MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 2,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: Some(4),
+        position: PositionEncodingSpec::Rope {
+            theta: 10_000.0,
+            rotary_dim: 2,
+            scaling: RopeScaling::None,
+        },
+        score_scale: ScoreScale::Unscaled,
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+    }));
+    mla.feed_forward = FeedForwardSpec::MixtureOfExperts(MixtureOfExpertsSpec {
+        routed_experts: 2,
+        experts_per_token: 2,
+        shared_experts: 1,
+        expert_intermediate_size: 4,
+        activation: Activation::Silu,
+        renormalize_selected: true,
+        routed_scale: 1.0,
+        routing: RoutingPolicy::default(),
+        shared_expert_gate: true,
+        expert_bias: false,
+    });
+    let mut attention_only = layer(attention(PositionEncodingSpec::None));
+    attention_only.feed_forward = FeedForwardSpec::None;
+    let model =
+        ModularCausalLm::<AdBackend>::init(decoder(vec![rich, t5, mla, attention_only]), &device)
+            .unwrap();
+    let loss = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<AdBackend, 2, Int>::from_ints(
+                    [[1, 2, 3, 4, 5], [0, 6, 7, 8, 0]],
+                    &device,
+                ),
+                token_mask: Some(TokenMask::new(Tensor::from_bool(
+                    [[true; 5], [false, true, true, true, false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .logits
+        .powi_scalar(2)
+        .mean();
+    let gradients = loss.backward();
+    let mut audit = GradientAudit::<AdBackend> {
+        gradients: &gradients,
+        path: Vec::new(),
+        missing: Vec::new(),
+        visited: 0,
+    };
+    model.visit(&mut audit);
+    assert!(audit.visited > 40, "visited {}", audit.visited);
+    assert!(
+        audit.missing.is_empty(),
+        "no gradient for {:?}",
+        audit.missing
+    );
+}
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// Causal and seq2seq tied readouts equal Burn's reshaping `linear(h, Eᵀ)` within F32 rounding.
+///
+/// They multiply by the transposed table view without reshaping it (no
+/// per-call table copy on Flex); the logits must not change beyond rounding.
+#[test]
+fn tied_readouts_match_reshaping_linear_oracle() {
+    let device = Default::default();
+    let mut spec = decoder(vec![layer(attention(PositionEncodingSpec::None))]);
+    spec.tie_word_embeddings = true;
+    let causal = ModularCausalLm::<TestBackend>::init(spec, &device).unwrap();
+    let width = causal.embed_tokens.weight.val().dims()[1];
+    let hidden = readout_hidden(width, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        causal.embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    causal
+        .project(hidden.clone())
+        .unwrap()
+        .into_data()
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&oracle, Tolerance::rel_abs(1e-5, 1e-6));
+
+    let mut spec = seq2seq_spec();
+    spec.decoder.tie_word_embeddings = true;
+    let seq2seq = ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap();
+    let width = seq2seq.decoder_embed_tokens.weight.val().dims()[1];
+    let hidden = readout_hidden(width, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        seq2seq.decoder_embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    seq2seq
+        .project_decoder(hidden)
+        .unwrap()
+        .into_data()
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&oracle, Tolerance::rel_abs(1e-5, 1e-6));
 }

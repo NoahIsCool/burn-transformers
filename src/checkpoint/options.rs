@@ -84,11 +84,20 @@ impl Default for ArtifactLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum ArtifactSelection {
-    /// Prefer `model.safetensors.index.json`, then `model.safetensors`, and only
-    /// then fall back to an unambiguous nonstandard filename in the root.
+    /// Use whichever of `model.safetensors.index.json` and `model.safetensors`
+    /// exists, and only then fall back to an unambiguous nonstandard filename in
+    /// the root. When both standard artifacts exist, discovery loads through
+    /// the index only if it parses and its `weight_map` is non-empty and
+    /// assigns every tensor to `model.safetensors` (so both provably describe
+    /// the same weights); otherwise it reports
+    /// [`super::CheckpointError::AmbiguousArtifacts`] instead of guessing, and
+    /// the caller selects one with [`Self::Index`] or [`Self::Single`].
     #[default]
     Auto,
     /// Load a specific checkpoint index, relative to the repository root.
+    ///
+    /// Shard names in its `weight_map` resolve relative to the index's own
+    /// directory, so a nested index finds its co-located shards.
     Index(
         /// Root-relative index path checked for containment during discovery.
         String,
@@ -101,14 +110,30 @@ pub enum ArtifactSelection {
 }
 
 /// Determines the dtype produced by the second-pass tensor loader.
+///
+/// The policy never consults the backend: Burn parameters keep whatever dtype
+/// the loader delivers, even when it differs from the backend's default float
+/// element. To execute a BF16 or F16 checkpoint in F32 on `Flex<f32, _>`, for
+/// example, select [`Self::Cast`]`(`[`TensorDType::F32`]`)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum DTypePolicy {
-    /// Use the expected model dtype for safe float-to-float conversions and
-    /// otherwise preserve the source dtype.
+    /// Keep the checkpoint's float dtype unless the architecture contract pins one.
+    ///
+    /// The expected dtype is the contract's per-tensor
+    /// [`super::ExpectedTensor`] dtype, not the backend's float element. A float
+    /// tensor whose contract names a float dtype (such as an F32 router or
+    /// recurrent buffer) is converted to it; every other tensor keeps its
+    /// stored dtype. Ordinary dtype-generic weights therefore stay in the
+    /// checkpoint's precision: a BF16 checkpoint loaded into `Flex<f32, _>`
+    /// holds BF16 parameters and runs its forward pass in BF16. Use
+    /// [`Self::Cast`]`(`[`TensorDType::F32`]`)` for F32 execution.
     #[default]
     Auto,
     /// Never convert checkpoint dtypes.
+    ///
+    /// Planning fails with [`super::CheckpointError::DTypeMismatch`] when the
+    /// contract pins a dtype the checkpoint does not store.
     Preserve,
     /// Convert dtype-generic real floating-point tensors to the selected dtype.
     ///

@@ -13,7 +13,7 @@ use crate::{
     CausalLmInput, Error, Result,
     cache::CacheConfig,
     generation::{
-        BeamSearchConfig, Seq2SeqBeamSearchOutput, Seq2SeqBeamSearchRequest,
+        BeamSearchConfig, EarlyStopping, Seq2SeqBeamSearchOutput, Seq2SeqBeamSearchRequest,
         generate_seq2seq_beam_search,
     },
     models::config::TokenIds,
@@ -33,8 +33,16 @@ pub struct T5BeamSearchOptions {
     pub num_return_sequences: usize,
     /// Exponent used to normalize cumulative log probability by output length.
     pub length_penalty: f64,
-    /// Whether to stop once every source row has `num_beams` EOS hypotheses.
-    pub early_stopping: bool,
+    /// When a source row stops searching, as Transformers' `early_stopping`.
+    ///
+    /// The default is [`EarlyStopping::Heuristic`], Transformers' `false` and
+    /// the rule FLAN-T5's generation configuration selects.
+    /// [`EarlyStopping::Eager`] (`true`) stops once a row has `num_beams`
+    /// finished hypotheses, and [`EarlyStopping::Never`] (`"never"`) gives the
+    /// result of searching every row to the length bound. Serialized as
+    /// `true`, `false`, or `"never"`, so options saved with the former Boolean
+    /// field still load.
+    pub early_stopping: EarlyStopping,
 }
 
 impl Default for T5BeamSearchOptions {
@@ -45,7 +53,7 @@ impl Default for T5BeamSearchOptions {
             num_beams: 4,
             num_return_sequences: 1,
             length_penalty: 1.0,
-            early_stopping: false,
+            early_stopping: EarlyStopping::Heuristic,
         }
     }
 }
@@ -53,7 +61,10 @@ impl Default for T5BeamSearchOptions {
 /// Generates ranked T5/FLAN/UL2 continuations using checkpoint token defaults.
 ///
 /// The helper constructs a one-token decoder prompt and a cache whose fixed
-/// batch is `source_batch * num_beams`. Call
+/// batch is `source_batch * num_beams`. Each row holds the decoder-start token
+/// plus every fed-back token; the final selected token is never decoded, so
+/// the cache capacity is exactly `1 + max_new_tokens - 1 = max_new_tokens`.
+/// Call
 /// [`generate_seq2seq_beam_search`] directly when prefix-constrained decoding
 /// needs a longer caller-supplied decoder prompt.
 pub fn generate_t5_beam_search<B: Backend>(
@@ -93,11 +104,9 @@ pub fn generate_t5_beam_search<B: Backend>(
     let expanded_batch = batch
         .checked_mul(search.num_beams)
         .ok_or_else(|| Error::Generation("T5 beam batch overflows usize".into()))?;
-    let capacity = search
-        .max_new_tokens
-        .checked_add(1)
-        .ok_or_else(|| Error::Generation("T5 beam cache capacity overflows usize".into()))?;
-    let cache = CacheConfig::new(expanded_batch, capacity)
+    // The decoder-start prompt (one token) plus `max_new_tokens - 1` fed-back
+    // tokens; `validate` guarantees `max_new_tokens >= 1`.
+    let cache = CacheConfig::new(expanded_batch, search.max_new_tokens)
         .map_err(|error| Error::Generation(format!("invalid T5 beam cache geometry: {error}")))?;
     let device = source.token_ids.device();
     let decoder_prompt = CausalLmInput {

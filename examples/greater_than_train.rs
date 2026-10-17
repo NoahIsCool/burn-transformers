@@ -12,24 +12,14 @@
 //! All training uses F32; host F64 metrics compare the fixed development/held-out
 //! split only after the predetermined endpoint, without validation-driven selection.
 
-#[cfg(not(all(feature = "flex", feature = "autodiff")))]
-/// Explain the required Cargo features and exit before accessing local artifacts.
-fn main() {
-    eprintln!("greater_than_train requires flex and autodiff");
-    std::process::exit(1);
-}
-
-#[cfg(all(feature = "flex", feature = "autodiff"))]
 #[path = "mechanistic/greater_than_training/support.rs"]
 mod support;
 
-#[cfg(all(feature = "flex", feature = "autodiff"))]
 /// Run the fixed conditioned replacement experiment and propagate artifact errors.
 fn main() -> support::Result<()> {
     experiment::run()
 }
 
-#[cfg(all(feature = "flex", feature = "autodiff"))]
 mod experiment {
     //! Registered student ownership and native Adam execution for the fixed protocol.
     //!

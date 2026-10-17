@@ -10,6 +10,13 @@
 //! is implied. Gradients remain connected, but training policy belongs to the
 //! experiment. Exact GELU and the original GPT-2 tanh GELU are distinct explicit
 //! configurations; importing weights never silently changes this choice.
+//! Random initialization follows GPT-2 ([`Gpt2Config::init_policy`]).
+//!
+//! [`Gpt2ForCausalLm`] implements [`crate::architecture::HookedModel`] and,
+//! with [`Gpt2Model`], [`crate::architecture::StagedModel`], so generic
+//! activation caches and residual patching run on it unchanged. Attention is
+//! eager (score and pattern points available) by default;
+//! [`Gpt2Model::set_attention_precision`] selects the backend's fused kernel.
 //!
 //! ```
 //! use burn::{backend::Flex, tensor::{Int, Tensor}};
@@ -47,12 +54,22 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, architecture::Activation};
+use crate::{
+    Error, Result,
+    architecture::Activation,
+    initialization::{InitPolicy, ParameterInit, ResidualScaling},
+    models::config::{
+        ConfigError, ModelConfig, Validate, layer_count, model_type, positive_finite,
+    },
+};
 
 mod checkpoint;
+pub(crate) mod extents;
 mod model;
 
-pub use checkpoint::{Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2LoadError};
+pub use checkpoint::{
+    Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2CheckpointLoadError, Gpt2LoadError,
+};
 pub use model::{Gpt2Block, Gpt2ForCausalLm, Gpt2Model, Gpt2ModelOutput};
 
 // Explicit graph choices; checkpoint data never selects a different nonlinearity.
@@ -122,6 +139,11 @@ pub struct Gpt2Config {
     pub tie_word_embeddings: bool,
     /// Experimental visibility policy. `false` makes stateless attention bidirectional.
     pub causal: bool,
+    /// Standard deviation of newly initialized weights (Hugging Face `initializer_range`).
+    ///
+    /// Random initialization follows GPT-2 (see [`Self::init_policy`]); loaded
+    /// checkpoints replace every parameter, so this affects only fresh models.
+    pub initializer_range: f64,
 }
 
 impl Default for Gpt2Config {
@@ -143,6 +165,7 @@ impl Default for Gpt2Config {
             add_cross_attention: false,
             tie_word_embeddings: true,
             causal: true,
+            initializer_range: 0.02,
         }
     }
 }
@@ -150,54 +173,157 @@ impl Default for Gpt2Config {
 impl Gpt2Config {
     /// Returns the explicit or conventional MLP width, rejecting overflow.
     pub fn intermediate_size(&self) -> Result<usize> {
-        self.n_inner
-            .or_else(|| self.n_embd.checked_mul(4))
-            .filter(|width| *width != 0)
+        extents::intermediate_width(self.n_inner, self.n_embd)
             .ok_or_else(|| Error::configuration("gpt2.n_inner", "must be positive and fit usize"))
     }
 
     /// Checks the full stateless graph before any parameters are allocated.
+    ///
+    /// The same checks as [`Validate::validate`], reported as a crate error at
+    /// `gpt2.<field>`.
     pub fn validate(&self) -> Result<()> {
-        if self.model_type != "gpt2" {
-            return Err(Error::configuration("gpt2.model_type", "expected gpt2"));
-        }
-        for (name, value) in [
+        Validate::validate(self).map_err(Error::from)
+    }
+
+    /// GPT-2's random-initialization scheme as an explicit, auditable policy.
+    ///
+    /// Following Hugging Face `GPT2PreTrainedModel._init_weights`: token and
+    /// position embeddings and every Conv1D projection draw
+    /// `N(0, initializer_range^2)` and projection biases are zero. Following
+    /// the GPT-2 paper (and Transformers 4.x), the two projections that write
+    /// into the residual stream (attention `o_proj`, HF `attn.c_proj`, and MLP
+    /// `down_proj`, HF `mlp.c_proj`) use
+    /// `initializer_range / sqrt(2 * n_layer)`, so the residual variance at
+    /// initialization does not grow with depth. (The pinned Transformers 5
+    /// revision compares full parameter paths with `"c_proj.weight"`, which
+    /// no nested GPT-2 parameter matches, so it no longer scales them.) With the
+    /// tied readout `LN(z) E^T`, `N(0, 0.02^2)` embeddings keep the initial
+    /// logits near `0.02 * sqrt(n_embd)` (about 0.55 for GPT-2 small) instead
+    /// of `sqrt(n_embd)` (about 28) for Burn's `N(0, 1)` default.
+    ///
+    /// [`Gpt2ForCausalLm::init`] constructs parameters lazily with exactly
+    /// these distributions, and builds every LayerNorm with scale one and
+    /// shift zero as Hugging Face does.
+    ///
+    /// The policy itself covers embeddings, projections, and projection biases
+    /// only, so it applies to any module rooted anywhere: a LayerNorm's scale
+    /// and shift both have the role
+    /// [`ParameterRole::Other`](crate::initialization::ParameterRole::Other),
+    /// so no role rule can set the scale to one and the shift to zero, and the
+    /// policy keeps them. Applying it to a trained or edited model therefore
+    /// re-samples the embeddings and projections and zeroes the biases but
+    /// leaves the LayerNorm parameters as they are. [`Self::reinit_policy`]
+    /// adds the per-path [`ParameterInit::Ones`] and [`ParameterInit::Zeros`]
+    /// overrides that complete a Hugging Face-style re-initialization.
+    #[must_use]
+    pub fn init_policy(&self) -> InitPolicy {
+        InitPolicy::normal(self.initializer_range)
+            .with_depth_scaling(self.n_layer, ["o_proj", "down_proj"])
+    }
+
+    /// [`Self::init_policy`] plus LayerNorm resets: Hugging Face's complete `_init_weights`.
+    ///
+    /// Hugging Face also sets every LayerNorm scale to one and shift to zero.
+    /// This policy adds one path override per parameter for the attention and
+    /// MLP norms of all `n_layer` blocks and for the final norm:
+    /// [`ParameterInit::Ones`] for each scale (`gamma`) and
+    /// [`ParameterInit::Zeros`] for each shift (`beta`). The paths are rooted
+    /// at [`Gpt2ForCausalLm`] (`model.layers.{l}.attention_norm.gamma`, ...),
+    /// so apply it to that type; [`InitPolicy::apply`] rejects it, unchanged,
+    /// for a module where those paths do not exist.
+    #[must_use]
+    pub fn reinit_policy(&self) -> InitPolicy {
+        let norms = (0..self.n_layer)
+            .flat_map(|layer| {
+                ["attention_norm", "mlp_norm"].map(|norm| format!("model.layers.{layer}.{norm}"))
+            })
+            .chain(["model.final_norm".to_owned()]);
+        norms.fold(self.init_policy(), |policy, norm| {
+            policy
+                .with_override(format!("{norm}.gamma"), ParameterInit::Ones)
+                .with_override(format!("{norm}.beta"), ParameterInit::Zeros)
+        })
+    }
+
+    /// Standard deviation of residual-writing projections, `initializer_range / sqrt(2 * n_layer)`.
+    pub(crate) fn residual_projection_std(&self) -> f64 {
+        self.initializer_range
+            * ResidualScaling::DepthScaled {
+                layers: self.n_layer,
+            }
+            .factor()
+    }
+}
+
+impl Validate for Gpt2Config {
+    /// Checks dimensions, head divisibility, epsilon, initialization, and supported conventions.
+    fn validate(&self) -> std::result::Result<(), ConfigError> {
+        /// Family label attached to configuration validation errors.
+        const FAMILY: &str = "gpt2";
+        model_type(FAMILY, &self.model_type, &["gpt2"])?;
+        let fields = [
             ("vocab_size", self.vocab_size),
             ("n_embd", self.n_embd),
             ("n_layer", self.n_layer),
             ("n_head", self.n_head),
             ("n_positions", self.n_positions),
+        ];
+        if let Some(position) = extents::first_invalid_extent(&fields.map(|(_, value)| value)) {
+            return Err(ConfigError::new(
+                FAMILY,
+                fields[position].0,
+                "must be positive and fit the portable integer index range",
+            ));
+        }
+        layer_count(FAMILY, "n_layer", self.n_layer)?;
+        if !self.n_embd.is_multiple_of(self.n_head) {
+            return Err(ConfigError::new(FAMILY, "n_head", "must divide n_embd"));
+        }
+        positive_finite(FAMILY, "layer_norm_epsilon", self.layer_norm_epsilon)?;
+        positive_finite(FAMILY, "initializer_range", self.initializer_range)?;
+        for (field, unsupported, reason) in [
+            (
+                "reorder_and_upcast_attn",
+                self.reorder_and_upcast_attn,
+                "the reordered, upcast attention graph is not implemented",
+            ),
+            (
+                "add_cross_attention",
+                self.add_cross_attention,
+                "cross-attention blocks are not implemented",
+            ),
+            (
+                "tie_word_embeddings",
+                !self.tie_word_embeddings,
+                "the readout must be tied to the token embedding",
+            ),
         ] {
-            if value == 0 || value > i32::MAX as usize {
-                return Err(Error::configuration(
-                    format!("gpt2.{name}"),
-                    "must be positive and fit the portable integer index range",
+            if unsupported {
+                return Err(ConfigError::new(FAMILY, field, reason));
+            }
+        }
+        let intermediate = extents::intermediate_width(self.n_inner, self.n_embd)
+            .ok_or_else(|| ConfigError::new(FAMILY, "n_inner", "must be positive and fit usize"))?;
+        for width in [self.vocab_size, self.n_positions, intermediate, 3] {
+            if !extents::product_fits(&[self.n_embd, width]) {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "n_embd",
+                    "parameter dimensions overflow usize",
                 ));
             }
         }
-        if !self.n_embd.is_multiple_of(self.n_head) {
-            return Err(Error::configuration("gpt2.n_head", "must divide n_embd"));
-        }
-        if !self.layer_norm_epsilon.is_finite() || self.layer_norm_epsilon <= 0.0 {
-            return Err(Error::configuration(
-                "gpt2.layer_norm_epsilon",
-                "must be finite and positive",
-            ));
-        }
-        if self.reorder_and_upcast_attn || self.add_cross_attention || !self.tie_word_embeddings {
-            return Err(Error::configuration(
-                "gpt2",
-                "this graph requires tied embeddings, no cross attention, and standard attention ordering",
-            ));
-        }
-        for width in [self.vocab_size, self.n_positions, self.intermediate_size()?] {
-            self.n_embd.checked_mul(width).ok_or_else(|| {
-                Error::configuration("gpt2", "parameter dimensions overflow usize")
-            })?;
-        }
-        self.n_embd.checked_mul(3).ok_or_else(|| {
-            Error::configuration("gpt2.n_embd", "fused QKV width overflows usize")
-        })?;
         Ok(())
     }
 }
+
+impl ModelConfig for Gpt2Config {
+    /// Family label used by generic configuration dispatch and diagnostics.
+    const FAMILY: &'static str = "gpt2";
+    /// Serialized model discriminators supported by this GPT-2 schema.
+    const MODEL_TYPES: &'static [&'static str] = &["gpt2"];
+}
+
+#[cfg(test)]
+#[path = "gpt2_tests.rs"]
+mod tests;

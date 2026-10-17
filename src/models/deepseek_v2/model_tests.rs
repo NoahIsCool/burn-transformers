@@ -3,11 +3,19 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{Bool, Int, Tensor, Tolerance, backend::BackendTypes},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
-use crate::architecture::TokenMask;
+use crate::{
+    LogitsSelection,
+    architecture::TokenMask,
+    models::{
+        config::{RopeType, yarn_mscale},
+        shared::ensure_same_device,
+    },
+    position::RopeScaling,
+};
 
 /// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
@@ -276,13 +284,13 @@ fn semantic_padding_and_invalid_rows_are_validated() {
 /// Stateless device preflight names every independently supplied tensor.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("deepseek_v2.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("deepseek_v2.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "deepseek_v2.input_ids",
         "deepseek_v2.token_mask",
         "deepseek_v2.position_ids",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));
@@ -293,13 +301,13 @@ fn stateless_device_affinity_errors_are_contextual() {
 #[test]
 fn pinned_yarn_scaling_matches_closed_form() {
     let config = DeepseekV2Config::default();
-    let rope = deepseek_rope_config(&config).unwrap();
+    let (rope, scale) = rope_and_softmax_scale(&config).unwrap();
     let RopeScaling::Yarn(yarn) = rope.scaling() else {
         panic!("pinned config must use YaRN")
     };
     assert!((yarn.attention_factor() - 1.0).abs() < 1e-12);
     let expected = (192.0_f64).sqrt().recip() * yarn_mscale(40.0, 0.707).powi(2);
-    assert!((deepseek_attention_scale(&config).unwrap() - expected).abs() < 1e-12);
+    assert!((scale - expected).abs() < 1e-12);
 }
 
 /// One-sided YaRN beta overrides retain the official default for the other bound.
@@ -313,19 +321,62 @@ fn yarn_beta_overrides_are_resolved_independently() {
         beta_fast: Some(24.0),
         ..Default::default()
     });
-    let RopeScaling::Yarn(fast_only) = deepseek_rope_config(&config).unwrap().scaling() else {
-        panic!("expected YaRN")
+    let yarn = |config: &DeepseekV2Config| {
+        let RopeScaling::Yarn(yarn) = rope_and_softmax_scale(config).unwrap().0.scaling() else {
+            panic!("expected YaRN")
+        };
+        yarn
     };
+    let fast_only = yarn(&config);
     assert_eq!(fast_only.beta_fast(), 24.0);
     assert_eq!(fast_only.beta_slow(), 1.0);
 
     config.rope_scaling.as_mut().unwrap().beta_fast = None;
     config.rope_scaling.as_mut().unwrap().beta_slow = Some(2.0);
-    let RopeScaling::Yarn(slow_only) = deepseek_rope_config(&config).unwrap().scaling() else {
-        panic!("expected YaRN")
-    };
+    let slow_only = yarn(&config);
     assert_eq!(slow_only.beta_fast(), 32.0);
     assert_eq!(slow_only.beta_slow(), 2.0);
+}
+
+/// The rotary sub-head always rotates completely (API-2): a partial factor is an error.
+#[test]
+fn partial_rotary_factors_are_rejected_instead_of_ignored() {
+    let mut config = tests_support::tiny_config();
+    // Four rotary channels keep the factor itself valid (two rotated channels).
+    config.qk_rope_head_dim = 4;
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        partial_rotary_factor: Some(0.5),
+        ..Default::default()
+    });
+    let error = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &Default::default())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deepseek_v2.rope.partial_rotary_factor"),
+        "{error}"
+    );
+    config.rope_scaling.as_mut().unwrap().partial_rotary_factor = Some(1.0);
+    assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &Default::default()).is_ok());
+}
+
+/// The softmax correction follows the reference for every scaled `rope_type`.
+///
+/// DeepSeek's reference multiplies the softmax scale by `m(f, mscale_all_dim)^2`
+/// whenever `rope_scaling` is set, not only for YaRN; default RoPE has none.
+#[test]
+fn softmax_correction_applies_to_every_scaled_rope_type() {
+    let mut config = tests_support::tiny_config();
+    let base = (5.0_f64).sqrt().recip();
+    assert!((rope_and_softmax_scale(&config).unwrap().1 - base).abs() < 1e-15);
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        rope_type: RopeType::Linear,
+        factor: Some(4.0),
+        mscale_all_dim: Some(1.0),
+        ..Default::default()
+    });
+    let scale = rope_and_softmax_scale(&config).unwrap().1;
+    assert!((scale - base * yarn_mscale(4.0, 1.0).powi(2)).abs() < 1e-15);
 }
 
 /// DeepSeek returns vocabulary logits in FP32 even for reduced-precision modules.
@@ -382,7 +433,7 @@ fn unsupported_runtime_variants_fail_during_initialization() {
     assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).is_err());
 
     let mut config = tests_support::tiny_config();
-    config.topk_method = DeepseekTopKMethod::GroupLimitedGreedy;
+    config.scoring_func = crate::models::deepseek_v2::DeepseekScoringFunction::Sigmoid;
     assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).is_err());
 
     let mut config = tests_support::tiny_config();
@@ -419,4 +470,157 @@ fn autodiff_stateless_smoke_reaches_embedding() {
         .sum();
     let gradients = loss.backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
+}
+
+/// Bounded chunking, one full plane, and the probability-retaining path agree.
+///
+/// One-token chunks exercise per-chunk key prefixes in every layer; the
+/// padded row checks that padding visibility survives chunking.
+#[test]
+fn bounded_stateless_prefill_matches_unbounded_execution() {
+    let (model, device) = tiny_model();
+    let input = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+            [[1, 2, 3, 4, 5], [0, 0, 6, 7, 8]],
+            &device,
+        ),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true; 5], [false, false, true, true, true]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let logits = |model: &DeepseekV2ForCausalLm<TestBackend>, attentions: bool| {
+        model
+            .forward(
+                input(),
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    attentions,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits
+            .into_data()
+    };
+    let reference = logits(&model, true);
+    for policy in [
+        AttentionExecutionPolicy::Unbounded,
+        AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+        AttentionExecutionPolicy::default(),
+    ] {
+        let model = model
+            .clone()
+            .with_attention_execution_policy(policy)
+            .unwrap();
+        assert_eq!(model.attention_execution_policy(), policy);
+        logits(&model, false).assert_approx_eq::<f32>(&reference, Tolerance::absolute(1e-6));
+    }
+    let error = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(0, 1))
+        .unwrap_err();
+    assert!(error.to_string().contains("max_query_tokens"), "{error}");
+}
+
+/// Deterministic `[2, 3, width]` hidden states with irregular F32 values.
+fn readout_hidden(
+    width: usize,
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, burn::tensor::Int>::arange(0..(6 * width) as i64, device)
+        .float()
+        .mul_scalar(0.731)
+        .sin()
+        .reshape([2, 3, width])
+}
+
+/// The tied readout equals Burn's reshaping `linear(h, Eᵀ)` up to F32 reassociation.
+///
+/// It multiplies by the transposed table view without reshaping it (no
+/// per-call table copy on Flex) and still returns F32 logits.
+#[test]
+fn tied_readout_matches_reshaping_linear_oracle() {
+    let device = Default::default();
+    let config = DeepseekV2Config {
+        tie_word_embeddings: true,
+        ..tests_support::tiny_config()
+    };
+    let model = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .expect("tied tiny model");
+    assert!(model.lm_head.is_none());
+    let hidden = readout_hidden(config.hidden_size, &device);
+    let oracle = burn::tensor::module::linear(
+        hidden.clone(),
+        model.model.embed_tokens.weight.val().transpose(),
+        None,
+    )
+    .into_data();
+    let logits = model.project_logits(hidden).expect("tied head");
+    assert_eq!(logits.dtype(), DType::F32);
+    logits
+        .into_data()
+        // A tied or reloaded weight is a transposed view; x86 GEMM may sum it in another order.
+        .assert_approx_eq::<f32>(&oracle, Tolerance::rel_abs(1e-5, 1e-6));
+}
+
+/// A block owning both or neither feed-forward branch is rejected rather than guessed.
+#[test]
+fn layers_require_exactly_one_feed_forward_branch() {
+    let (mut model, device) = tiny_model();
+    let input = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    // Block 0 is dense; adding block 1's expert bank gives it both branches.
+    model.model.layers[0].sparse_mlp = model.model.layers[1].sparse_mlp.clone();
+    let both = model
+        .forward(input(), &ForwardOptions::default())
+        .expect_err("a dense and sparse block is ambiguous");
+    model.model.layers[0].sparse_mlp = None;
+    model.model.layers[0].dense_mlp = None;
+    let neither = model
+        .forward(input(), &ForwardOptions::default())
+        .expect_err("a block without a feed-forward branch is incomplete");
+    for error in [both, neither] {
+        assert!(matches!(error, Error::Checkpoint(_)));
+        assert!(error.to_string().contains("dense/MoE topology"), "{error}");
+    }
+}
+
+/// Custom staged connectivity is evaluated only inside a hook scope.
+///
+/// The staged API always supplies a scope; calling a block with custom
+/// connectivity and no scope is a private-contract violation that must fail
+/// rather than silently fall back to causal attention.
+#[test]
+fn custom_connectivity_outside_a_hook_scope_is_rejected() {
+    let (model, device) = tiny_model();
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1]], &device);
+    let angles = model.model.rotary_tables(positions, 2).unwrap();
+    let visibility = PositionalVisibility::causal_columns(2, None, &device).unwrap();
+    let inputs = AttentionInputs {
+        angles: &angles,
+        visibility: &visibility,
+        policy: model.model.execution_policy,
+        retain_attention: false,
+    };
+    let custom = CustomConnectivity {
+        causal: false,
+        exclusion: None,
+        bias: None,
+    };
+    let hidden = model
+        .model
+        .embed_tokens
+        .forward(Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device));
+    let error = model.model.layers[0]
+        .forward(hidden, &inputs, Some(&custom), Layer::decoder(0), None)
+        .err()
+        .expect("custom connectivity requires hooks");
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "deepseek_v2.execution.attention"),
+        "{error}"
+    );
 }

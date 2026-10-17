@@ -1,0 +1,37 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Flex/F32 flex_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== env TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=1e-3
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 flex_prompt_logits_match_the_reference
+== start 2026-10-17T07:20:41+00:00 load 3.41 7.30 10.22
+
+running 1 test
+test flex_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 2.1600723e-4
+prompt 1: 13 tokens, max |Δ| = 1.4591217e-4
+prompt 2: 8 tokens, max |Δ| = 3.8337708e-4
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 12.50s
+
+       12.52 real        13.30 user         4.55 sys
+         14218575872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              874735  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  13  voluntary context switches
+              136740  involuntary context switches
+         77054742670  instructions retired
+         59054454054  cycles elapsed
+         14216293032  peak memory footprint
+== exit=0 wall=13.2s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

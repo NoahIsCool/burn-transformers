@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 import unittest
 
+from repository_evidence import repository_evidence
+
 
 MEASUREMENTS = Path(__file__).resolve().parents[2] / "acceptance/measurements"
 
@@ -45,7 +47,7 @@ class ParameterReloadReplayRecordTests(unittest.TestCase):
             relative = Path(run["log"])
             self.assertFalse(relative.is_absolute())
             self.assertNotIn("..", relative.parts)
-            data = (MEASUREMENTS / relative).read_bytes()
+            data = repository_evidence(MEASUREMENTS / relative).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), run["log_sha256"])
             log = data.decode()
             if run["exit_code"] == 0:
@@ -62,14 +64,14 @@ class ParameterReloadReplayRecordTests(unittest.TestCase):
         """Recompute vector/hash comparisons instead of trusting a summary label."""
 
         qwen, flan = self.record["runs"]
-        qwen_log = (MEASUREMENTS / qwen["log"]).read_text()
-        self.assertIn("q4: tensors=186, top1=13, cached_cosine=1.000000000", qwen_log)
         self.assertEqual(qwen["q4"], self.prior["runs"][0]["q4"])
         self.assertEqual(qwen["f16"], self.prior["runs"][0]["f16"])
+        qwen_log = repository_evidence(MEASUREMENTS / qwen["log"]).read_text()
+        self.assertIn("q4: tensors=186, top1=13, cached_cosine=1.000000000", qwen_log)
         for key in ("prompt_official_cosine", "minimum_cached_official_cosine", "minimum_teacher_official_cosine"):
             self.assertIn(f"{qwen['f16'][key]:.9f}", qwen_log)
         pattern = r"Metal/F32 (\w+): cosine=([0-9.]+) max_abs=([0-9.]+) failures_1e-4=(\d+) actual_f32le_sha256=([0-9a-f]{64})"
-        rows = re.findall(pattern, (MEASUREMENTS / flan["log"]).read_text())
+        rows = re.findall(pattern, repository_evidence(MEASUREMENTS / flan["log"]).read_text())
         self.assertEqual(len(rows), 7)
         self.assertEqual({row[0]: row[4] for row in rows}, self.prior["runs"][1]["vectors_f32le_sha256"])
         self.assertEqual(min(float(row[1]) for row in rows), flan["minimum_full_vector_cosine"])

@@ -1,0 +1,38 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 sha256 9b4bc73ce0544c60649e226e295d4bc64b31b67745e26628a0190004ef45c395
+== Flex/F32 flex_prompt_logits_match_the_reference
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979 --ignored --exact --nocapture --test-threads 1 flex_prompt_logits_match_the_reference
+== start 2026-10-17T08:04:00+00:00 load 15.02 8.43 5.63
+
+running 1 test
+test flex_prompt_logits_match_the_reference ... load: 439 vision-tower tensors intentionally ignored
+prompt 0: 6 tokens, max |Δ| = 7.247925e-5
+prompt 1: 19 tokens, max |Δ| = 1.296997e-4
+prompt 2: 9 tokens, max |Δ| = 1.6117096e-4
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 14.86s
+
+       14.89 real        15.05 user         4.68 sys
+         19970342912  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1225756  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  10  voluntary context switches
+              277687  involuntary context switches
+        111301131386  instructions retired
+         67741830106  cycles elapsed
+         19970652800  peak memory footprint
+== exit=0 wall=15.3s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -5,11 +5,14 @@ use burn::{
     module::{Initializer, Module, ModuleMapper, Param},
     tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
-use proptest::prelude::*;
 
+use super::super::{
+    PARAMETERS, TargetColumns, ValidatedTarget, defer_encoder_output, defer_token_input,
+};
 use super::*;
 use crate::{
     DecodeState, LogitsSelection,
+    models::shared::DeferredChecks,
     models::t5::{T5FeedForwardProjection, T5LayerCrossAttention},
 };
 
@@ -25,6 +28,58 @@ type ContractFixture = (
     EncoderOutput<TestBackend>,
     T5DecodeState<TestBackend>,
 );
+
+/// Stateless decoding against an arbitrary encoder result: the cached-parity oracle.
+///
+/// Production `forward` validates source and target together and produces the
+/// encoder result itself. These tests instead pair one target with supplied,
+/// possibly invalid, encoder results, so the oracle validates both with one
+/// readback (target layout, encoder devices/extents/dtype, then target tokens,
+/// target mask, and encoder mask values) and runs the production decoder path.
+impl<B: Backend> T5ForConditionalGeneration<B> {
+    /// Runs the decoder without persistent KV or cross-attention state.
+    fn decode_stateless(
+        &self,
+        encoder: &EncoderOutput<B>,
+        decoder: CausalLmInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        validate_options(options)?;
+        let model_device = self.shared.weight.lazy_device();
+        let mut checks = DeferredChecks::new();
+        let target = defer_token_input(
+            &decoder,
+            self.config.vocab_size,
+            &model_device,
+            DECODER_INPUT,
+            "decoder",
+            &mut checks,
+        )?;
+        ensure_same_device(
+            "t5.encoder_output.hidden_state",
+            &encoder.hidden_state.device(),
+            &model_device,
+            PARAMETERS,
+        )?;
+        if let Some(mask) = &encoder.token_mask {
+            ensure_same_device(
+                "t5.encoder_output.token_mask",
+                &mask.as_tensor().device(),
+                &model_device,
+                PARAMETERS,
+            )?;
+        }
+        defer_encoder_output(
+            &mut checks,
+            encoder,
+            decoder.token_ids.dims()[0],
+            self.config.d_model,
+            self.shared.weight.val().dtype(),
+        )?;
+        let target = ValidatedTarget::read(checks, &decoder, target, None, TargetColumns::Read)?;
+        self.decode_validated(encoder, decoder, options, target.columns)
+    }
+}
 
 /// Builds a small topology with configurable FFN and vocabulary-head layouts.
 fn tiny_config(projection: T5FeedForwardProjection, tied: bool, layers: usize) -> T5Config {
@@ -611,7 +666,12 @@ fn assert_close<const D: usize>(left: Tensor<TestBackend, D>, right: Tensor<Test
         .assert_approx_eq::<f32>(&right.into_data(), Tolerance::absolute(1e-4));
 }
 
-/// Materializes all physical self-KV slots, including uncommitted zero suffixes.
+/// Materializes every row's committed self-KV slots `[0, L_b)` in every layer.
+///
+/// Batched decoding writes each layer's tokens ahead of attention, so a
+/// rejected call may leave bytes in slots beyond the lengths; those slots are
+/// unreachable and excluded here. Atomicity is therefore asserted on the
+/// logical cache contents and lengths, which is what later reads observe.
 fn self_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<Vec<f32>> {
     let cache = state
         .tensors
@@ -621,16 +681,45 @@ fn self_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<Vec<f32>> {
     let mut snapshot = Vec::new();
     for layer in 0..state.self_spec.layers() {
         for row in 0..state.tensors.batch_size() {
-            let (keys, values) = cache
-                .read_sequence(layer, row, state.tensors.capacity())
-                .expect("physical cache read")
+            let length = state.lengths()[row];
+            let (keys, values) = match cache
+                .read_sequence(layer, row, length)
+                .expect("committed cache read")
                 .materialize()
-                .expect("capacity is nonzero");
-            snapshot.push(keys.into_data().to_vec::<f32>().expect("F32 keys"));
-            snapshot.push(values.into_data().to_vec::<f32>().expect("F32 values"));
+            {
+                Some((keys, values)) => (
+                    keys.into_data().to_vec::<f32>().expect("F32 keys"),
+                    values.into_data().to_vec::<f32>().expect("F32 values"),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
+            snapshot.push(keys);
+            snapshot.push(values);
         }
     }
     snapshot
+}
+
+/// Materializes all physical self-KV slots, including those beyond the lengths.
+fn physical_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<f32> {
+    let cache = state
+        .tensors
+        .main()
+        .native_kv(SELF_KV_GROUP)
+        .expect("self cache");
+    let mut values = Vec::new();
+    for layer in 0..state.self_spec.layers() {
+        for tensor in [cache.keys(layer).unwrap(), cache.values(layer).unwrap()] {
+            values.extend(
+                tensor
+                    .clone()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .expect("F32 cache"),
+            );
+        }
+    }
+    values
 }
 
 /// Includes source tensors and diagnostics because a rejected operation must retain its binding.
@@ -706,34 +795,6 @@ fn contract_fixture(device: &TestDevice, masked: bool) -> ContractFixture {
         )
         .unwrap();
     (model, encoder, state)
-}
-
-/// Builds one nonzero append per active row and layer at the current committed cursor.
-fn contract_pending(
-    state: &T5DecodeState<TestBackend>,
-    counts: &[usize],
-) -> PendingT5SelfWrites<TestBackend> {
-    let cache = state.tensors.main().native_kv(SELF_KV_GROUP).unwrap();
-    let mut pending = PendingT5SelfWrites::new();
-    for (row, &count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
-        for layer in 0..state.self_spec.layers() {
-            let keys = cache
-                .keys(layer)
-                .unwrap()
-                .clone()
-                .narrow(0, row, 1)
-                .narrow(2, 0, count)
-                + 1.0;
-            pending.writes.push(PendingT5SelfWrite {
-                layer,
-                sequence: row,
-                start: state.lengths()[row],
-                values: keys.clone() + 1.0,
-                keys,
-            });
-        }
-    }
-    pending
 }
 
 /// Bad target rectangles fail before modifying an already bound encoder or self-KV prefix.
@@ -885,124 +946,6 @@ fn cache_contract_same_shape_encoder_values_do_not_rebind() {
     assert_eq!(state.lengths(), &[3]);
 }
 
-/// Coverage validation rejects absent rows and missing/extra layers before length publication.
-#[test]
-fn cache_contract_pending_cardinality_is_atomic() {
-    let device = Default::default();
-    let (_, _, mut state) = contract_fixture(&device, false);
-    let before = contract_snapshot(&state);
-    for case in 0..3 {
-        let mut pending = contract_pending(&state, &[1]);
-        let counts: &[usize] = if case == 0 { &[] } else { &[1] };
-        if case == 1 {
-            pending.writes.pop();
-        }
-        if case == 2 {
-            pending.writes.extend(contract_pending(&state, &[1]).writes);
-        }
-        let error = pending
-            .commit(&mut state.tensors, state.self_spec.layers(), counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "describe 0 rows"
-            } else {
-                "pending self-cache coverage"
-            }),
-            "{error}"
-        );
-        assert_eq!(contract_snapshot(&state), before);
-    }
-}
-
-/// Appends require active unique row/layer pairs, the old cursor, and both matching time axes.
-#[test]
-fn cache_contract_pending_coordinates_are_atomic() {
-    let device = Default::default();
-    let model = T5ForConditionalGeneration::<TestBackend>::init(
-        tiny_config(T5FeedForwardProjection::Relu, true, 2),
-        &device,
-    )
-    .unwrap();
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    for case in 0..7 {
-        let counts = if case == 6 { [1, 0] } else { [1, 1] };
-        let mut pending = contract_pending(&state, &counts);
-        let write = pending.writes.last_mut().unwrap();
-        match case {
-            0 => write.sequence = 2,
-            1 => write.layer = 2,
-            2 => write.start = 1,
-            3 => write.keys = Tensor::zeros([1, 2, 2, 4], &device),
-            4 => write.values = Tensor::zeros([1, 2, 2, 4], &device),
-            5 => write.layer = 0,
-            6 => write.sequence = 1,
-            _ => unreachable!(),
-        }
-        let error = pending
-            .commit(&mut state.tensors, state.self_spec.layers(), &counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "outside batch 2"
-            } else {
-                "invalid or duplicate T5 self-cache write"
-            }),
-            "case {case}: {error}"
-        );
-        assert_eq!(contract_snapshot(&state), before, "case {case}");
-    }
-}
-
-/// A late malformed head axis leaves earlier prepared writes and the retained encoder unpublished.
-#[test]
-fn cache_contract_pending_tensor_geometry_is_atomic() {
-    let device = Default::default();
-    let (_, _, mut state) = contract_fixture(&device, false);
-    let before = contract_snapshot(&state);
-    let mut pending = contract_pending(&state, &[1]);
-    pending.writes.last_mut().unwrap().values = Tensor::zeros([1, 1, 1, 4], &device);
-    let error = pending
-        .commit(&mut state.tensors, state.self_spec.layers(), &[1])
-        .unwrap_err();
-    assert!(error.to_string().contains("shape"), "{error}");
-    assert_eq!(contract_snapshot(&state), before);
-    contract_pending(&state, &[1])
-        .commit(&mut state.tensors, state.self_spec.layers(), &[1])
-        .unwrap();
-    assert_eq!(state.lengths(), &[3]);
-    assert_eq!(contract_snapshot(&state).cross, before.cross);
-}
-
-/// Cross-cache lookup bounds remain contextual even when the value vector is incomplete.
-#[test]
-fn cache_contract_cross_lookup_rejects_missing_layers_and_rows() {
-    let device = Default::default();
-    let (_, _, mut state) = contract_fixture(&device, false);
-    let before = contract_snapshot(&state);
-    let cross = state.cross.as_mut().unwrap();
-    let error = cross.layer_row(2, 0).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("layer 2 is outside 2 cached layers")
-    );
-    let error = cross.layer_row(0, 1).unwrap_err();
-    assert!(error.to_string().contains("row 1 is outside batch 1"));
-    let last = cross.values.pop().unwrap();
-    let error = cross.layer_row(1, 0).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("value layer 1 is outside 2 cached layers")
-    );
-    cross.values.push(last);
-    assert_eq!(contract_snapshot(&state), before);
-}
-
 /// A corrupted cross-layer count fails public decode before the valid self cache is changed.
 #[test]
 fn cache_contract_cross_geometry_rejection_is_atomic() {
@@ -1028,50 +971,6 @@ fn cache_contract_cross_geometry_rejection_is_atomic() {
             .contains("cross cache has 1 layers for a 2-layer decoder")
     );
     assert_eq!(contract_snapshot(&state), before);
-}
-
-/// Active-only write sets advance exactly those rows without requiring padding-layer appends.
-#[test]
-fn cache_contract_pending_active_rows_commit_without_touching_peers() {
-    let device = Default::default();
-    let model = T5ForConditionalGeneration::<TestBackend>::init(
-        tiny_config(T5FeedForwardProjection::Relu, true, 2),
-        &device,
-    )
-    .unwrap();
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    contract_pending(&state, &[0, 2])
-        .commit(&mut state.tensors, state.self_spec.layers(), &[0, 2])
-        .unwrap();
-    assert_eq!(state.lengths(), &[0, 2]);
-    let cache = state.tensors.main().native_kv(SELF_KV_GROUP).unwrap();
-    for layer in 0..state.self_spec.layers() {
-        for tensor in [cache.keys(layer).unwrap(), cache.values(layer).unwrap()] {
-            assert!(
-                tensor
-                    .clone()
-                    .narrow(0, 0, 1)
-                    .into_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .all(|&value| value == 0.0)
-            );
-            assert!(
-                tensor
-                    .clone()
-                    .narrow(0, 1, 1)
-                    .narrow(2, 0, 2)
-                    .into_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .all(|&value| value > 0.0)
-            );
-        }
-    }
 }
 
 /// Cached prefill exactly reproduces stateless logits and diagnostics.
@@ -1632,9 +1531,8 @@ fn lifecycle_operations_coordinate_self_and_cross_caches() {
     assert_eq!(state.lengths(), [0, 0]);
     assert!(!state.has_encoder_cache());
     assert!(
-        self_cache_snapshot(&state)
+        physical_cache_snapshot(&state)
             .into_iter()
-            .flatten()
             .all(|value| value == 0.0)
     );
 }
@@ -1834,54 +1732,6 @@ fn incompatible_model_and_state_layout_is_rejected() {
     assert!(error.to_string().contains("incompatible model layout"));
 }
 
-/// A semantic causal mask exposes history and only the current query prefix.
-#[test]
-fn cached_causal_mask_matches_absolute_query_positions() {
-    let device = Default::default();
-    let mask = cached_causal_mask::<TestBackend>(2, 3, 1, &device)
-        .unwrap()
-        .into_data();
-    assert_eq!(
-        mask.to_vec::<bool>().unwrap(),
-        vec![
-            false, false, false, true, true, false, false, false, false, true, false, false, false,
-            false, false,
-        ]
-    );
-}
-
-proptest! {
-    /// Every cached causal mask agrees with the absolute-position inequality.
-    #[test]
-    fn cached_causal_mask_property(
-        baseline in 0_usize..8,
-        query_sequence in 1_usize..6,
-        heads in 1_usize..4,
-    ) {
-        let device = Default::default();
-        let actual = cached_causal_mask::<TestBackend>(
-            baseline,
-            query_sequence,
-            heads,
-            &device,
-        )
-        .unwrap()
-        .into_data()
-        .to_vec::<bool>()
-        .unwrap();
-        let key_sequence = baseline + query_sequence;
-        let mut expected = Vec::with_capacity(heads * query_sequence * key_sequence);
-        for _head in 0..heads {
-            for query in 0..query_sequence {
-                for key in 0..key_sequence {
-                    expected.push(key > baseline + query);
-                }
-            }
-        }
-        prop_assert_eq!(actual, expected);
-    }
-}
-
 /// Test-only construction ensures a decoder block without cross attention errors cleanly.
 #[test]
 fn cross_projection_rejects_missing_decoder_component() {
@@ -2010,4 +1860,663 @@ fn stateless_encoder_decoder_graph_has_parameter_gradients() {
             .get::<TestBackend, 2>(model.shared.weight.id)
             .is_some()
     );
+}
+
+/// Builds a `[rows, columns]` validity mask (`true == valid`) on `device`.
+fn validity<const R: usize, const C: usize>(
+    values: [[bool; C]; R],
+    device: &TestDevice,
+) -> TokenMask<TestBackend> {
+    TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        values.into(),
+        device,
+    ))
+}
+
+/// Builds a target or source input from `[rows, columns]` IDs and an optional mask.
+fn padded_input<const R: usize, const C: usize>(
+    ids: [[i32; C]; R],
+    mask: Option<[[bool; C]; R]>,
+    device: &TestDevice,
+) -> CausalLmInput<TestBackend> {
+    CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints(ids, device),
+        token_mask: mask.map(|mask| validity(mask, device)),
+        position_ids: None,
+    }
+}
+
+/// Reads a float tensor into exact row-major host values.
+fn exact<const D: usize>(tensor: Tensor<TestBackend, D>) -> Vec<f32> {
+    tensor.into_data().to_vec::<f32>().expect("f32 tensor data")
+}
+
+/// The fused single-readback `forward` reproduces separately validated stages bit for bit.
+///
+/// Source and target use left, interior, and right padding, so the masked
+/// compaction path consumes the valid columns read with the validation.
+#[test]
+fn fused_forward_matches_separately_validated_encode_and_decode() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let source = padded_input(
+        [[8, 9, 10, 0], [8, 0, 9, 10]],
+        Some([[true, true, true, false], [true, false, true, true]]),
+        &device,
+    );
+    let target = padded_input(
+        [[0, 3, 0, 4], [0, 0, 5, 6]],
+        Some([[true, true, false, true], [false, false, true, true]]),
+        &device,
+    );
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let fused = model
+        .forward(
+            Seq2SeqInput {
+                encoder: source.clone(),
+                decoder: target.clone(),
+            },
+            &options,
+        )
+        .unwrap();
+    let encoder = model.encode(source, &options).unwrap();
+    let staged = model.decode_stateless(&encoder, target, &options).unwrap();
+    assert_eq!(
+        exact(fused.encoder.hidden_state),
+        exact(encoder.hidden_state)
+    );
+    assert_eq!(exact(fused.decoder.logits), exact(staged.logits));
+    assert_eq!(
+        fused.decoder.hidden_states.len(),
+        staged.hidden_states.len()
+    );
+    for (fused, staged) in fused
+        .decoder
+        .hidden_states
+        .into_iter()
+        .zip(staged.hidden_states)
+    {
+        assert_eq!(exact(fused), exact(staged));
+    }
+}
+
+/// Complete passes validate both inputs before encoding: layout errors first,
+/// then source values, then target values, with and without hooks.
+#[test]
+fn complete_pass_validation_reports_layout_then_source_then_target_errors() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let run = |input: Seq2SeqInput<TestBackend>, hooked: bool| {
+        if hooked {
+            let mut hooks = crate::intervention::Hooks::new();
+            hooks.edit(
+                crate::intervention::Layer::decoder(0).cross_attention_output(),
+                |activation| activation,
+            );
+            model.forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)
+        } else {
+            model.forward(input, &ForwardOptions::default())
+        }
+    };
+    let shape = |error: Error| match error {
+        Error::Shape { tensor, actual, .. } => (tensor, actual),
+        other => panic!("expected a shape error, found {other:?}"),
+    };
+    for hooked in [false, true] {
+        // Source token values precede target token values.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[99, 1]], None, &device),
+                decoder: padded_input([[0, 99]], None, &device),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape(error),
+            (
+                "t5.encoder.input_ids".into(),
+                "observed range 1..=99".into()
+            )
+        );
+
+        // A target layout error precedes any value error.
+        let mut decoder = padded_input([[0, 1]], None, &device);
+        decoder.token_mask = Some(validity([[true, true, true]], &device));
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[99, 1]], None, &device),
+                decoder,
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(shape(error).0, "t5.decoder.token_mask");
+
+        // A fully masked target row is rejected after valid source values.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[4, 1], [2, 3]], None, &device),
+                decoder: padded_input(
+                    [[0, 1], [0, 2]],
+                    Some([[true, true], [false, false]]),
+                    &device,
+                ),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape(error),
+            ("t5.decoder.token_mask".into(), "a fully masked row".into())
+        );
+
+        // A fully masked source row is named after the source input.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[4, 1]], Some([[false, false]]), &device),
+                decoder: padded_input([[0, 1]], None, &device),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape(error),
+            ("t5.encoder.token_mask".into(), "a fully masked row".into())
+        );
+
+        // Mismatched source and target batches are still rejected after encoding.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[4, 1], [2, 3]], None, &device),
+                decoder: padded_input([[0, 1]], None, &device),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(shape(error).0, "t5.encoder_output.hidden_state");
+    }
+}
+
+/// The test oracle reports a supplied fully masked source row after target values.
+#[test]
+fn supplied_source_mask_is_checked_after_target_values() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.token_mask = Some(validity([[false, false, false]], &device));
+    let options = ForwardOptions::default();
+    let error = model
+        .decode_stateless(&encoder, target(&[0, 99], &device), &options)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("t5.decoder.input_ids"),
+        "{error}"
+    );
+    let error = model
+        .decode_stateless(&encoder, target(&[0, 1], &device), &options)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, actual, .. }
+            if tensor == "t5.encoder_output.token_mask" && actual == "a fully masked row"),
+        "{error}"
+    );
+}
+
+/// Cached cross projections follow the crate's linear contract instead of panicking.
+///
+/// A cross-attention key projection stored in another dtype than the encoder
+/// states is reported as a contextual capability error, exactly as the
+/// stateless cross-attention projection reports it.
+#[test]
+fn cross_projection_rejects_mismatched_weight_dtypes_contextually() {
+    let device = Default::default();
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    let attention = &mut model.decoder.block[0]
+        .cross_attention
+        .as_mut()
+        .unwrap()
+        .enc_dec_attention
+        .attention;
+    attention.k_proj.weight = attention
+        .k_proj
+        .weight
+        .clone()
+        .map(|weight| weight.cast(DType::F64));
+    let error = T5CrossAttentionCache::project(&model, &encoder).unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)), "{error}");
+    assert!(error.to_string().contains("linear.weight dtype"), "{error}");
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    assert!(
+        model
+            .prefill_decoder(
+                &encoder,
+                target(&[0], &device),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .is_err()
+    );
+    assert!(!state.has_encoder_cache());
+}
+
+/// Returns whether a Flex tensor occupies contiguous row-major storage.
+fn is_contiguous<const D: usize>(tensor: Tensor<TestBackend, D>) -> bool {
+    let primitive: burn::backend::flex::FlexTensor = tensor.into_primitive().tensor();
+    primitive.is_contiguous()
+}
+
+/// Projects one layer's cross keys or values as the strided head view decode used to cache.
+fn strided_cross_heads(
+    model: &T5ForConditionalGeneration<TestBackend>,
+    encoder: &EncoderOutput<TestBackend>,
+    layer: usize,
+    keys: bool,
+) -> Tensor<TestBackend, 4> {
+    let attention = &model.decoder.block[layer]
+        .cross_attention
+        .as_ref()
+        .unwrap()
+        .enc_dec_attention
+        .attention;
+    let projection = if keys {
+        &attention.k_proj
+    } else {
+        &attention.v_proj
+    };
+    let [batch, source, _] = encoder.hidden_state.dims();
+    operations::linear(encoder.hidden_state.clone(), projection)
+        .unwrap()
+        .reshape([batch, source, attention.key_value_heads, attention.head_dim])
+        .swap_dims(1, 2)
+}
+
+/// Prefill stores cross keys and values contiguously on Flex with exactly the projected values.
+///
+/// Flex's attention copied the former strided head view on every decode
+/// step; the cache now holds attention-ready storage from prefill on, and a
+/// beam reorder keeps it contiguous.
+#[test]
+fn cached_cross_projections_are_attention_ready_and_exact() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = model
+        .encode(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[8, 9, 10], [11, 12, 13]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0], [0]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let cross = state.cross.as_ref().unwrap();
+    for layer in 0..2 {
+        for (cached, keys) in [(&cross.keys[layer], true), (&cross.values[layer], false)] {
+            let strided = strided_cross_heads(&model, &encoder, layer, keys);
+            assert!(!is_contiguous(strided.clone()));
+            assert!(is_contiguous(cached.clone()), "layer {layer} keys={keys}");
+            assert_eq!(cached.clone().into_data(), strided.into_data());
+        }
+    }
+    let before = state.cross.as_ref().unwrap().values[1].clone();
+    state.reorder(&[1, 1]).unwrap();
+    let after = state.cross.as_ref().unwrap().values[1].clone();
+    assert!(is_contiguous(after.clone()));
+    assert_eq!(
+        after.narrow(0, 0, 1).into_data(),
+        before.narrow(0, 1, 1).into_data()
+    );
+}
+
+/// Decoding from attention-ready cross storage is bit-identical to decoding from the strided view.
+///
+/// The layout change is a pure permutation of storage, and Flex's attention
+/// made the same contiguous copy itself before, so every logit must match
+/// exactly, not merely within tolerance.
+#[test]
+fn attention_ready_cross_storage_leaves_decode_logits_bit_identical() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    let mut contiguous = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut contiguous,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mut strided = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut strided,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let cross = strided.cross.as_mut().unwrap();
+    for layer in 0..2 {
+        cross.keys[layer] = strided_cross_heads(&model, &encoder, layer, true);
+        cross.values[layer] = strided_cross_heads(&model, &encoder, layer, false);
+    }
+    for token in [5, 7, 2] {
+        let step = |state: &mut T5DecodeState<TestBackend>| {
+            model
+                .decode(
+                    &encoder,
+                    DecodeInput {
+                        token_ids: target(&[token], &device).token_ids,
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap()
+                .decoder
+                .logits
+                .into_data()
+        };
+        assert_eq!(step(&mut contiguous), step(&mut strided));
+    }
+}
+
+/// A state whose configured sequence count differs from its batch is rejected.
+#[test]
+fn state_batch_must_match_the_cache_configuration() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let error = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 3, &device)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::TensorCache(TensorCacheError::BatchSizeMismatch {
+                configured: 2,
+                requested: 3
+            })
+        ),
+        "{error:?}"
+    );
+}
+
+/// A first prefill rejects an encoder output of another width before binding it.
+#[test]
+fn first_prefill_validates_the_encoder_width() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.hidden_state = Tensor::zeros([1, 3, 7], &device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "t5.encoder_output.hidden_state"
+                && expected == "[1, source>0, 8]"
+                && actual == "[1, 3, 7]"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+}
+
+/// A first prefill rejects an encoder mask whose grid differs from the encoder states.
+#[test]
+fn first_prefill_validates_the_encoder_mask_grid() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.token_mask = Some(validity([[true, true]], &device));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, expected, actual }
+            if tensor == "t5.encoder_output.token_mask" && expected == "[1, 3]" && actual == "[1, 2]"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+}
+
+/// A vocabulary head that contradicts tying fails after the pass without binding the encoder.
+#[test]
+fn prefill_projection_failure_binds_nothing() {
+    let device = Default::default();
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    model.lm_head = Some(crate::operations::init_linear(
+        &burn::nn::LinearConfig::new(8, 24).with_bias(false),
+        &device,
+    ));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let error = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "t5.lm_head"),
+        "{error:?}"
+    );
+    assert!(!state.has_encoder_cache());
+    assert_eq!(state.lengths(), [0]);
+}
+
+/// Trailing padding packs into a narrower block and unpacks with exact zeros.
+///
+/// Every row's valid tokens form a prefix of the two columns, so the packed
+/// block is the first column alone; the padded column of every output is
+/// zero, and the valid column equals the unpadded one-token step.
+#[test]
+fn trailing_padding_packs_a_prefix_block() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = model
+        .encode(
+            padded_input([[8, 9], [10, 11]], None, &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let run = |input: CausalLmInput<TestBackend>| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+            .unwrap();
+        model
+            .prefill_decoder(
+                &encoder,
+                padded_input([[0], [0]], None, &device),
+                &mut state,
+                &options,
+            )
+            .unwrap();
+        model
+            .decode(
+                &encoder,
+                DecodeInput {
+                    token_ids: input.token_ids,
+                    token_mask: input.token_mask,
+                    position_ids: None,
+                },
+                &mut state,
+                &options,
+            )
+            .unwrap()
+    };
+    let padded = run(padded_input(
+        [[3, 23], [4, 23]],
+        Some([[true, false], [true, false]]),
+        &device,
+    ));
+    let compact = run(padded_input([[3], [4]], None, &device));
+    assert_close(
+        padded.decoder.logits.clone().narrow(1, 0, 1),
+        compact.decoder.logits,
+    );
+    assert!(
+        exact(padded.decoder.logits.narrow(1, 1, 1))
+            .iter()
+            .all(|value| *value == 0.0)
+    );
+    for (padded, compact) in padded
+        .decoder
+        .hidden_states
+        .into_iter()
+        .zip(compact.decoder.hidden_states)
+    {
+        assert!(
+            exact(padded.clone().narrow(1, 1, 1))
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert_close(padded.narrow(1, 0, 1), compact);
+    }
+}
+
+/// A step where every row is finished returns zero diagnostics for every requested state.
+#[test]
+fn all_finished_steps_return_zero_hidden_states() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        &device,
+    )
+    .unwrap();
+    let encoder = model
+        .encode(
+            padded_input([[8, 9]], None, &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let output = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: Tensor::from_ints([[5]], &device),
+                token_mask: Some(validity([[false]], &device)),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                hidden_states: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(output.decoder.hidden_states.len(), 4);
+    for hidden in output.decoder.hidden_states {
+        assert_eq!(hidden.dims(), [1, 1, 8]);
+        assert!(exact(hidden).iter().all(|value| *value == 0.0));
+    }
+    assert_eq!(state.lengths(), [2], "a finished row commits nothing");
 }

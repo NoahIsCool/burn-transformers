@@ -30,13 +30,14 @@ use burn::tensor::TensorData;
 
 use super::{
     BurnpackAppendOutcome, BurnpackArtifactSummary, BurnpackProvenance, BurnpackSessionLimits,
-    BurnpackStagingStats, QuantizationError, QuantizationExclusion, QuantizedBurnpackSession,
-    SymmetricQuantization, WeightQuantizationConfig,
+    BurnpackStagingStats, QuantizationEligibility, QuantizationError, QuantizationExclusion,
+    QuantizedBurnpackSession, QuantizedTensorMetadata, SourceFloatDType, WeightQuantizationConfig,
+    classify_weight_for_quantization,
     provenance::{ProvenanceExecutionStats, hash_local_checkpoint_provenance_audited},
 };
 use crate::checkpoint::{
     CheckpointError, CheckpointManifest, ExecutionFailureCause, ExecutionStats, LoadPlan,
-    LoadReport, LocalShardSource, QuantizationRecord, TensorSink, execute_load_plan,
+    LoadReport, LocalShardSource, QuantizationRecord, TensorDType, TensorSink, execute_load_plan,
 };
 
 /// Controls one strict, architecture-aware checkpoint conversion.
@@ -46,6 +47,118 @@ pub struct QuantizedCheckpointOptions {
     pub weights: WeightQuantizationConfig,
     /// Bounded disk, tensor-count, and metadata resources for the writer.
     pub limits: BurnpackSessionLimits,
+    /// Treatment of eligible matrices whose input width is not group-aligned.
+    pub unaligned: UnalignedMatrixPolicy,
+}
+
+/// Treatment of an eligible `[output, input]` matrix whose `input` width is not a
+/// multiple of the group size `G`.
+///
+/// Packed Burn block-QFloat needs every group to stay within one row, which
+/// holds exactly when `input % G == 0`. A single unaligned matrix marks the
+/// whole sidecar [`super::PackedExecutionSupport::Unavailable`], and every packed
+/// loader then rejects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UnalignedMatrixPolicy {
+    /// Quantize it anyway; the artifact is valid reference-only storage.
+    #[default]
+    ReferenceOnly,
+    /// Keep it in source precision, recording
+    /// [`QuantizationExclusion::GroupUnaligned`], so the sidecar stays loadable.
+    Exclude,
+    /// Fail before reading any source payload, naming the first such target.
+    Reject,
+}
+
+/// Returns whether an eligible matrix's groups stay within its rows.
+///
+/// Supported group sizes are multiples of eight, so `input % G == 0` also
+/// aligns rows to whole packed `u32` words for both Q4 and Q8.
+fn group_aligned_matrix(shape: &[usize], config: WeightQuantizationConfig) -> bool {
+    matches!(shape, [_, input] if input.is_multiple_of(config.group_size.get()))
+}
+
+/// Predicts every packed entry and the provenance of a conversion, then checks limits.
+///
+/// Targets are classified with their post-transform shapes exactly as the sink
+/// will classify them; metadata sizes depend only on shape and configuration.
+/// Provenance digests are placeholders of the correct length.
+fn preflight_planned_sidecar(
+    session: &QuantizedBurnpackSession,
+    manifest: &CheckpointManifest,
+    plan: &LoadPlan,
+    options: QuantizedCheckpointOptions,
+) -> Result<(), QuantizationError> {
+    let mut planned = Vec::new();
+    for tensor in &plan.tensors {
+        let Ok(shape) = tensor
+            .shape
+            .iter()
+            .map(|&dimension| usize::try_from(dimension))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            continue;
+        };
+        if classify_weight_for_quantization(&tensor.target, &shape)
+            != QuantizationEligibility::Eligible
+            || (options.unaligned == UnalignedMatrixPolicy::Exclude
+                && !group_aligned_matrix(&shape, options.weights))
+        {
+            continue;
+        }
+        // Non-float targets fail at quantization time with their own error.
+        let Some(source_dtype) = source_float_dtype(tensor.dtype) else {
+            continue;
+        };
+        let metadata = QuantizedTensorMetadata::new(&shape, source_dtype, options.weights)?;
+        planned.push((tensor.target.as_str(), metadata));
+    }
+    let provenance = BurnpackProvenance {
+        load_plan_sha256: "0".repeat(64),
+        checkpoint_shards: manifest
+            .shards
+            .iter()
+            .map(|shard| {
+                (
+                    shard.relative_path.clone(),
+                    super::BurnpackShardProvenance {
+                        file_bytes: shard.file_bytes,
+                        sha256: "0".repeat(64),
+                    },
+                )
+            })
+            .collect(),
+    };
+    session.preflight_inventory(
+        planned.iter().map(|(name, metadata)| (*name, metadata)),
+        &provenance,
+    )
+}
+
+/// Maps a planned float dtype to the quantizer's source-dtype vocabulary.
+fn source_float_dtype(dtype: TensorDType) -> Option<SourceFloatDType> {
+    match dtype {
+        TensorDType::F16 => Some(SourceFloatDType::F16),
+        TensorDType::BF16 => Some(SourceFloatDType::Bf16),
+        TensorDType::F32 => Some(SourceFloatDType::F32),
+        TensorDType::F64 => Some(SourceFloatDType::F64),
+        _ => None,
+    }
+}
+
+/// Finds the first plan target that `Reject` refuses, before any source read.
+fn first_unaligned_target(plan: &LoadPlan, config: WeightQuantizationConfig) -> Option<&str> {
+    plan.tensors.iter().find_map(|tensor| {
+        let shape = tensor
+            .shape
+            .iter()
+            .map(|&dimension| usize::try_from(dimension).unwrap_or(usize::MAX))
+            .collect::<Vec<_>>();
+        let eligible = classify_weight_for_quantization(&tensor.target, &shape)
+            == QuantizationEligibility::Eligible;
+        (eligible && !group_aligned_matrix(&shape, config)).then_some(tensor.target.as_str())
+    })
 }
 
 /// One load-plan target deliberately retained in source precision.
@@ -200,9 +313,49 @@ pub fn quantize_local_checkpoint_to_burnpack(
     output_path: impl AsRef<Path>,
     options: QuantizedCheckpointOptions,
 ) -> CheckpointQuantizationResult<CheckpointQuantizationOutcome> {
-    let output_path = output_path.as_ref().to_path_buf();
-    let mut report = unstarted_report(plan);
+    quantize_with_post_execution_hook(manifest, plan, output_path.as_ref(), options, || {})
+}
+
+/// Runs the conversion, calling `after_execution` once between its two hash passes.
+///
+/// The hook runs after every target has been staged and the source closed, and
+/// before the post-execution provenance pass that guards publication; it is not
+/// called when an earlier phase fails. The public entry point passes a no-op,
+/// so the hook exists only to let tests change the checkpoint or claim the
+/// output inside exactly the window the second hash pass and create-only
+/// publication must defend.
+fn quantize_with_post_execution_hook(
+    manifest: &CheckpointManifest,
+    plan: &LoadPlan,
+    output_path: &Path,
+    options: QuantizedCheckpointOptions,
+    after_execution: impl FnOnce(),
+) -> CheckpointQuantizationResult<CheckpointQuantizationOutcome> {
+    let output_path = output_path.to_path_buf();
+    let mut report = plan.report.without_progress();
     let mut provenance_stats = ProvenanceExecutionStats::default();
+    if options.unaligned == UnalignedMatrixPolicy::Reject
+        && let Some(target) = first_unaligned_target(plan, options.weights)
+    {
+        let cause = QuantizationError::BurnQFloatIncompatible {
+            reason: format!(
+                "`{target}` has an input width that is not a multiple of group size {}",
+                options.weights.group_size.get()
+            ),
+        };
+        return Err(conversion_failure(
+            output_path,
+            Some(target.to_owned()),
+            CheckpointQuantizationFailureCause::Quantization(cause),
+            CheckpointQuantizationProgress {
+                report,
+                execution: ExecutionStats::default(),
+                staging: BurnpackStagingStats::default(),
+                excluded: Vec::new(),
+                provenance: provenance_stats,
+            },
+        ));
+    }
     let mut session =
         QuantizedBurnpackSession::with_limits(&output_path, options.limits).map_err(|cause| {
             conversion_failure(
@@ -219,8 +372,25 @@ pub fn quantize_local_checkpoint_to_burnpack(
             )
         })?;
 
+    // Fail before any hashing or source read when the planned sidecar cannot fit
+    // the session limits: count, per-tensor and total payload, and manifest.
+    if let Err(cause) = preflight_planned_sidecar(&session, manifest, plan, options) {
+        return Err(conversion_failure(
+            output_path,
+            None,
+            CheckpointQuantizationFailureCause::Quantization(cause),
+            CheckpointQuantizationProgress {
+                report,
+                execution: ExecutionStats::default(),
+                staging: session.stats(),
+                excluded: Vec::new(),
+                provenance: provenance_stats,
+            },
+        ));
+    }
+
     // Hashing on both sides of pass two prevents a source mutation from spanning
-    // conversion unnoticed. The one-MiB hash buffer is independent of model size.
+    // conversion unnoticed. Each hash worker's buffer is independent of model size.
     provenance_stats.pre_execution = Some(Default::default());
     let (initial_provenance, initial_hash_stats) =
         match hash_local_checkpoint_provenance_audited(manifest, plan) {
@@ -244,7 +414,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
     provenance_stats.pre_execution = Some(initial_hash_stats);
 
     let mut source = LocalShardSource::new(manifest);
-    let mut sink = BurnpackQuantizationSink::new(&mut session, options.weights);
+    let mut sink = BurnpackQuantizationSink::new(&mut session, options.weights, options.unaligned);
     let execution_result = execute_load_plan(plan, &mut source, &mut sink);
     let quantized = std::mem::take(&mut sink.quantized);
     let mut excluded = std::mem::take(&mut sink.excluded);
@@ -256,7 +426,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
         Err(failure) => {
             let failure = *failure;
             report = failure.report;
-            extend_quantized_report(&mut report, quantized);
+            report.extend_quantized(quantized);
             normalize_exclusions(&mut excluded);
             let cause = match failure.cause {
                 ExecutionFailureCause::Checkpoint(cause) => {
@@ -282,8 +452,9 @@ pub fn quantize_local_checkpoint_to_burnpack(
     };
 
     report = execution.report;
-    extend_quantized_report(&mut report, quantized);
+    report.extend_quantized(quantized);
     normalize_exclusions(&mut excluded);
+    after_execution();
     provenance_stats.post_execution = Some(Default::default());
     let (final_provenance, final_hash_stats) =
         match hash_local_checkpoint_provenance_audited(manifest, plan) {
@@ -379,6 +550,8 @@ struct BurnpackQuantizationSink<'a> {
     session: &'a mut QuantizedBurnpackSession,
     /// Quantization scheme and group size applied to eligible targets.
     config: WeightQuantizationConfig,
+    /// Whether group-unaligned eligible matrices are quantized or kept unpacked.
+    unaligned: UnalignedMatrixPolicy,
     /// Successful staged target conversions, in execution order.
     quantized: Vec<QuantizationRecord>,
     /// Ineligible targets and their explicit exclusion reasons.
@@ -387,10 +560,15 @@ struct BurnpackQuantizationSink<'a> {
 
 impl<'a> BurnpackQuantizationSink<'a> {
     /// Creates an empty reporting sink over one private write session.
-    fn new(session: &'a mut QuantizedBurnpackSession, config: WeightQuantizationConfig) -> Self {
+    fn new(
+        session: &'a mut QuantizedBurnpackSession,
+        config: WeightQuantizationConfig,
+        unaligned: UnalignedMatrixPolicy,
+    ) -> Self {
         Self {
             session,
             config,
+            unaligned,
             quantized: Vec::new(),
             excluded: Vec::new(),
         }
@@ -407,11 +585,22 @@ impl TensorSink for BurnpackQuantizationSink<'_> {
         target: &str,
         data: TensorData,
     ) -> std::result::Result<(), Self::Error> {
+        let shape = data.shape.as_slice();
+        if self.unaligned == UnalignedMatrixPolicy::Exclude
+            && classify_weight_for_quantization(target, shape) == QuantizationEligibility::Eligible
+            && !group_aligned_matrix(shape, self.config)
+        {
+            self.excluded.push(QuantizationExclusionRecord {
+                target: target.to_owned(),
+                reason: QuantizationExclusion::GroupUnaligned,
+            });
+            return Ok(());
+        }
         match self.session.append(target, &data, self.config)? {
             BurnpackAppendOutcome::Staged(staged) => {
                 self.quantized.push(QuantizationRecord {
                     target: target.to_owned(),
-                    scheme: quantization_scheme_name(self.config),
+                    scheme: self.config.storage_label(),
                     bytes: staged.payload_bytes,
                 });
             }
@@ -433,36 +622,6 @@ impl TensorSink for BurnpackQuantizationSink<'_> {
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
-}
-
-/// Produces the stable scheme spelling stored in [`LoadReport`].
-fn quantization_scheme_name(config: WeightQuantizationConfig) -> String {
-    let precision = match config.scheme {
-        SymmetricQuantization::Q8 => "q8",
-        SymmetricQuantization::Q4 => "q4",
-    };
-    format!(
-        "symmetric-{precision}-g{}-flat-row-major",
-        config.group_size.get()
-    )
-}
-
-/// Resets progress-bearing report categories before the first source read.
-fn unstarted_report(plan: &LoadPlan) -> LoadReport {
-    let mut report = plan.report.clone();
-    report.applied.clear();
-    report.quantized.clear();
-    report.equivalence_verified.clear();
-    report.finalize();
-    report
-}
-
-/// Adds exact sidecar records and restores deterministic report ordering.
-fn extend_quantized_report(report: &mut LoadReport, quantized: Vec<QuantizationRecord>) {
-    for record in quantized {
-        report.record_quantized(record);
-    }
-    report.finalize();
 }
 
 /// Sorts exclusion records and removes exact duplicates defensively.

@@ -29,8 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ArchitectureConfig, Error, Result,
     checkpoint::{
-        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LoadOptions, MappingPlan,
-        TensorDType, TensorOperation, build_load_plan, execute_local_load_plan,
+        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LanguageNamespace,
+        LoadOptions, MappingPlan, TensorDType, TensorOperation, build_load_plan,
+        execute_local_load_plan,
     },
     normalization::RmsNormConfig,
     transfer::{
@@ -41,7 +42,7 @@ use crate::{
 
 use super::{
     Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5DecoderLayer, Qwen3_5LayerType,
-    Qwen3_5TextConfig, Qwen3_5TextModel, model::qwen_rope_config,
+    Qwen3_5TextConfig, Qwen3_5TextModel,
 };
 use crate::models::config::ModelConfig;
 
@@ -205,7 +206,7 @@ impl Qwen3_5BackboneRecipe {
         config.mtp_num_hidden_layers = 0;
         let layer_rope = configurations
             .iter()
-            .map(qwen_rope_config)
+            .map(Qwen3_5TextConfig::rope_config)
             .collect::<Result<Vec<_>>>()?;
         let layers = configurations
             .iter()
@@ -256,19 +257,15 @@ impl Qwen3_5BackboneRecipe {
                 "recipe loading owns its explicit parameter exceptions; remove broad missing/unexpected allowlists",
             ));
         }
-        let manifest = CheckpointManifest::discover(root, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let manifest = CheckpointManifest::discover(root, &options.checkpoint)?;
         let source = source_namespace(&manifest, options.source)?;
         let source_contract = self
             .source_config
             .checkpoint_contract(Qwen3_5CheckpointOptions {
                 source,
                 include_mtp: false,
-            })
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        let source_plan = source_contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            })?;
+        let source_plan = source_contract.build_load_plan(&manifest, &options.checkpoint)?;
         let initialization_dtype = source_plan
             .tensors
             .iter()
@@ -381,8 +378,7 @@ impl Qwen3_5BackboneRecipe {
         if self.source_config.tie_word_embeddings {
             report.omitted.push(ParameterDisposition::new("lm_head.weight", "tied vocabulary view omitted; its embedding storage owner remains available to the backbone"));
         }
-        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)?;
         let new_parameters = report
             .newly_initialized
             .iter_mut()
@@ -390,7 +386,7 @@ impl Qwen3_5BackboneRecipe {
                 parameter.reason.push_str(&format!(
                     "; initialized in the resolved embedding dtype {initialization_dtype:?}"
                 ));
-                parameter.name.clone()
+                module_parameter_path(&parameter.name)
             })
             .collect();
         let mut model = self.init_random(device)?.map(&mut InitializeDtype {
@@ -399,7 +395,7 @@ impl Qwen3_5BackboneRecipe {
             dtype: initialization_dtype,
         });
         let checkpoint = execute_local_load_plan(&manifest, &plan, &mut model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            .map_err(Error::checkpoint_execution)?;
         for conversion in &checkpoint.report.dtype_converted {
             if let Some(index) = report
                 .reused
@@ -452,7 +448,7 @@ impl Qwen3_5BackboneRecipe {
             }
             let config = layer.config(&self.config);
             ArchitectureConfig::validate(&config)?;
-            qwen_rope_config(&config)?;
+            config.rope_config()?;
             configurations.push(config);
         }
         Ok(configurations)
@@ -483,12 +479,10 @@ impl Qwen3_5BackboneRecipe {
             ),
         ];
         for (index, config) in configurations.iter().enumerate() {
-            let contract = config
-                .checkpoint_contract(Qwen3_5CheckpointOptions {
-                    source: Qwen3_5CheckpointSource::TextOnly,
-                    include_mtp: false,
-                })
-                .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            let contract = config.checkpoint_contract(Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: false,
+            })?;
             for tensor in contract.expected_tensors() {
                 let Some(suffix) = tensor.name.strip_prefix("model.layers.0.") else {
                     continue;
@@ -507,11 +501,40 @@ impl Qwen3_5BackboneRecipe {
 
 // Selective installation: preserve lazy pretrained data and explicit dtype policy.
 
+/// Checkpoint parameter suffixes whose Burn field names differ from Hugging Face's.
+///
+/// Burn's derived module paths use Rust field names, while the checkpoint
+/// contract (and therefore the transfer report) uses Hugging Face tensor
+/// names. These are the only Qwen3.5 backbone parameters where the two
+/// disagree; every other segment, including `layers.{index}`, is identical,
+/// and `Option` containers add no path segment. The family loader's
+/// `install_layer_tensor` dispatch encodes the same correspondence.
+const CHECKPOINT_TO_MODULE_SUFFIXES: [(&str, &str); 3] = [
+    (".self_attn.q_norm.weight", ".self_attn.query_norm.weight"),
+    (".self_attn.k_norm.weight", ".self_attn.key_norm.weight"),
+    (".linear_attn.A_log", ".linear_attn.a_log"),
+];
+
+/// Translates a checkpoint parameter name into the Burn module path that owns it.
+///
+/// For example `model.layers.3.self_attn.q_norm.weight` becomes
+/// `model.layers.3.self_attn.query_norm.weight`. Names without a differing
+/// suffix are returned unchanged.
+fn module_parameter_path(checkpoint_name: &str) -> String {
+    for (checkpoint_suffix, module_suffix) in CHECKPOINT_TO_MODULE_SUFFIXES {
+        if let Some(prefix) = checkpoint_name.strip_suffix(checkpoint_suffix) {
+            return format!("{prefix}{module_suffix}");
+        }
+    }
+    checkpoint_name.to_owned()
+}
+
 /// Cast only new parameters, leaving overwritten pretrained parameters lazy.
 struct InitializeDtype {
     /// Current module components used to construct fully qualified parameter names.
     path: Vec<String>,
-    /// Parameter owners whose checkpoint shapes cannot or should not be reused.
+    /// Burn module paths (see [`module_parameter_path`]) of parameters whose
+    /// checkpoint shapes cannot or should not be reused.
     new_parameters: BTreeSet<String>,
     /// Floating dtype selected by the source embedding's resolved load plan.
     dtype: DType,
@@ -544,9 +567,13 @@ impl<B: Backend> ModuleMapper<B> for InitializeDtype {
     }
 }
 
-/// Uses an explicit namespace or requires exactly one recognized embedding key.
+/// Uses an explicit namespace or detects exactly one language namespace.
 ///
-/// Ambiguous or absent namespaces fail rather than guessing a model layout.
+/// Detection is the shared [`LanguageNamespace`] classifier, so recipe,
+/// concrete-family, and automatic loading choose the same layout for the same
+/// checkpoint. Ambiguous or absent namespaces fail rather than guessing a
+/// model layout, as [`crate::checkpoint::CheckpointError::AmbiguousLanguageNamespace`]
+/// or [`crate::checkpoint::CheckpointError::LanguageNamespaceNotFound`].
 fn source_namespace(
     manifest: &CheckpointManifest,
     explicit: Option<Qwen3_5CheckpointSource>,
@@ -554,19 +581,10 @@ fn source_namespace(
     if let Some(source) = explicit {
         return Ok(source);
     }
-    match (
-        manifest.tensor("model.embed_tokens.weight").is_some(),
-        manifest
-            .tensor("model.language_model.embed_tokens.weight")
-            .is_some(),
-    ) {
-        (true, false) => Ok(Qwen3_5CheckpointSource::TextOnly),
-        (false, true) => Ok(Qwen3_5CheckpointSource::Multimodal),
-        _ => Err(Error::configuration(
-            "qwen.recipe.source",
-            "expected exactly one Qwen embedding namespace",
-        )),
-    }
+    Ok(match LanguageNamespace::of_manifest(manifest, "Qwen")? {
+        LanguageNamespace::Wrapped => Qwen3_5CheckpointSource::Multimodal,
+        LanguageNamespace::TextOnly => Qwen3_5CheckpointSource::TextOnly,
+    })
 }
 
 /// Reads and parses local `config.json` under a 16 MiB bound.

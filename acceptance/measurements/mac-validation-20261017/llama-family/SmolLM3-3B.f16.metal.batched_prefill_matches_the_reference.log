@@ -1,0 +1,45 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Metal/F16 metal::metal_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 metal::metal_batched_prefill_matches_the_reference
+== start 2026-10-17T07:22:10+00:00 load 3.19 6.35 9.57
+
+running 1 test
+test metal::metal_batched_prefill_matches_the_reference ... F16 bounds of prompt 0: max 7.537275695800781e0, mean 1.877204010803211e-1 (1.2 × official BF16 6.281063079833984e0, 1.5643366756693425e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F16 bounds of prompt 1: max 8.005458068847656e0, mean 9.465184055010659e-2 (1.2 × official BF16 6.671215057373047e0, 7.88765337917555e-2; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F16 bounds of prompt 2: max 6.393724822998046e0, mean 2.1226978368011862e-1 (1.2 × official BF16 5.328104019165039e0, 1.7689148640009886e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 2.612447738647461e-2 to the reference (bound 7.537275695800781e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 4.6562910079956055e-2 to the reference (bound 8.005458068847656e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 4.2296648025512695e-2 to the reference (bound 6.393724822998046e0)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.56s
+
+        3.57 real         2.09 user         1.38 sys
+          3421028352  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              488591  page reclaims
+                   9  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               14589  involuntary context switches
+         50576767415  instructions retired
+         12759324744  cycles elapsed
+          9227701056  peak memory footprint
+== exit=0 wall=4.1s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0

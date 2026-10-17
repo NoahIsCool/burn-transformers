@@ -411,3 +411,566 @@ fn sliced_edits_and_captures_preserve_the_requested_gradient_policy() {
     let detached_loss = hooks.get(&detached).unwrap().sum();
     assert!(input.grad(&detached_loss.backward()).is_none());
 }
+
+// Observers, typed failures, and catalog-driven access.
+
+/// Observers neither invoke the point constraint nor alter values, and see edits in order.
+#[test]
+fn observers_skip_constraints_and_see_earlier_edits() {
+    use std::cell::Cell;
+    let point = Layer::decoder(0).mlp_output();
+    let constraint_calls = Cell::new(0);
+    let before = Cell::new(f32::NAN);
+    let after = Cell::new(f32::NAN);
+    let mut hooks = Hooks::<B>::new();
+    hooks.observe(point.token(1), |tensor| {
+        before.set(tensor.sum().into_scalar())
+    });
+    let output = hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply_constrained(
+                point.clone(),
+                Tensor::<B, 3>::ones([1, 2, 2], &Default::default()),
+                |tensor| {
+                    constraint_calls.set(constraint_calls.get() + 1);
+                    Ok(tensor)
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        constraint_calls.get(),
+        0,
+        "observers must not trigger constraints"
+    );
+    assert_eq!(before.get(), 2.0);
+    assert_eq!(values(output), vec![1.0; 4]);
+
+    // An edit runs the constraint once; an observer after it sees the edited value.
+    hooks.edit(point.token(1), |tensor| tensor * 3.0);
+    hooks.observe(point.token(1), |tensor| {
+        after.set(tensor.sum().into_scalar())
+    });
+    hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply_constrained(
+                point.clone(),
+                Tensor::<B, 3>::ones([1, 2, 2], &Default::default()),
+                |tensor| {
+                    constraint_calls.set(constraint_calls.get() + 1);
+                    Ok(tensor)
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(constraint_calls.get(), 1);
+    assert_eq!(before.get(), 2.0);
+    assert_eq!(after.get(), 6.0);
+}
+
+/// Runtime hook failures are intervention errors carrying the callback's original error.
+#[test]
+fn runtime_failures_are_intervention_errors_with_matchable_causes() {
+    let point = Layer::encoder(4).mlp_output();
+    let mut hooks = Hooks::<B>::new();
+    hooks.try_edit(&point, |_| {
+        Err(crate::Error::shape("adapter", "[1, 1, 2]", "[1, 1, 3]"))
+    });
+    let error = hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply(point.clone(), Tensor::ones([1, 1, 2], &Default::default()))
+        })
+        .unwrap_err();
+    match &error {
+        crate::Error::Intervention {
+            point: name,
+            reason,
+            cause: Some(cause),
+        } => {
+            assert_eq!(name, "encoder.layers.4.mlp.output");
+            assert!(
+                reason.contains("edit callback returned an error"),
+                "{reason}"
+            );
+            assert!(
+                matches!(cause.as_ref(), crate::Error::Shape { tensor, .. } if tensor == "adapter")
+            );
+        }
+        other => panic!("expected an intervention error, got {other:?}"),
+    }
+
+    let mut bounds = Hooks::<B>::new();
+    bounds.capture(point.token(5));
+    let error = bounds
+        .run(vec![point.info()], |hooks| {
+            hooks.apply(point.clone(), Tensor::ones([1, 2, 2], &Default::default()))
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Intervention { cause: None, reason, .. }
+            if reason == "Token selection 5..6 is outside extent 2 of the emitted [1, 2, 2] activation"),
+        "{error:?}"
+    );
+
+    // Registration mistakes are still configuration errors, raised before computation.
+    let mut empty = Hooks::<B>::new();
+    empty.capture(point.channels(1..1));
+    let error = empty
+        .run(vec![point.info()], |_| -> crate::Result<()> {
+            panic!("must reject the empty range before execution")
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Configuration { reason, .. } if reason.contains("empty Channel selection")),
+        "{error:?}"
+    );
+}
+
+/// Catalog entries convert back to typed points only at their declared rank.
+#[test]
+fn discovered_points_convert_back_to_typed_points() {
+    let pattern = Layer::decoder(2).self_attention().pattern();
+    let info = pattern.info();
+    assert_eq!(info.rank(), 4);
+    assert_eq!(Point::<4>::try_from(info.clone()).unwrap(), pattern);
+    let error = Point::<3>::try_from(info).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("decoder.layers.2.attention.pattern"),
+        "{message}"
+    );
+    assert!(message.contains("rank 4"), "{message}");
+}
+
+/// Dynamic captures read any rank, reject foreign collections, and restore typed tensors.
+#[test]
+fn dynamic_captures_cover_every_rank_and_restore_typed_tensors() {
+    let hidden = Layer::decoder(0).residual_post();
+    let pattern = Layer::decoder(0).self_attention().pattern();
+    let points = vec![hidden.info(), pattern.info()];
+    let mut hooks = Hooks::<B>::new();
+    let handles = points
+        .iter()
+        .map(|point| hooks.capture_dynamic(point.clone()))
+        .collect::<Vec<_>>();
+    assert!(
+        hooks.get_dynamic(&handles[0]).is_err(),
+        "nothing has run yet"
+    );
+    hooks
+        .run(points, |hooks| {
+            let device = Default::default();
+            hooks.apply(hidden.clone(), Tensor::ones([1, 2, 3], &device))?;
+            hooks.apply(pattern.clone(), Tensor::zeros([1, 2, 2, 2], &device))
+        })
+        .unwrap();
+    let hidden_activation = hooks.get_dynamic(&handles[0]).unwrap();
+    assert_eq!(handles[0].point(), &hidden.info());
+    assert_eq!(hidden_activation.shape, [1, 2, 3]);
+    assert!(hidden_activation.clone().into_tensor::<4>().is_err());
+    assert_eq!(
+        values(hidden_activation.into_tensor::<3>().unwrap()),
+        vec![1.0; 6]
+    );
+    assert_eq!(hooks.get_dynamic(&handles[1]).unwrap().shape, [1, 2, 2, 2]);
+
+    let other = Hooks::<B>::new();
+    assert!(other.get_dynamic(&handles[0]).is_err());
+}
+
+/// The sink point is the mass missing from each pattern row, emitted only on request, and read-only.
+#[test]
+fn sink_probability_is_the_mass_missing_from_each_pattern_row() {
+    let device = Default::default();
+    let points = Layer::decoder(2).self_attention();
+    let point = points.sink_probability();
+    assert_eq!(
+        point.info().name,
+        "decoder.layers.2.attention.sink_probability"
+    );
+    assert_eq!(point.info().axes, [Axis::Batch, Axis::Head, Axis::Query]);
+    assert_eq!(
+        Layer::encoder(0)
+            .cross_attention()
+            .sink_probability()
+            .info()
+            .name,
+        "encoder.layers.0.cross_attention.sink_probability"
+    );
+    assert!(!points.all().contains(&point.info()));
+
+    // Rows summing to 0.75, 1, and 0 (fully excluded) leave 0.25, 0, and 1 for the sink.
+    let pattern = || {
+        Tensor::<B, 4>::from_floats(
+            [[[[0.5, 0.25, 0.0], [0.2, 0.3, 0.5], [0.0, 0.0, 0.0]]]],
+            &device,
+        )
+    };
+    let catalog = vec![points.pattern().info(), point.info()];
+    let mut hooks = Hooks::<B>::new();
+    let sink = hooks.capture(point.clone());
+    let row = hooks.capture(point.query_token(2));
+    hooks
+        .run(catalog.clone(), |hooks| {
+            let pattern = hooks.apply(points.pattern(), pattern())?;
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap();
+    let captured = hooks.get(&sink).unwrap();
+    assert_eq!(captured.dtype(), DType::F32);
+    let expected = [0.25_f32, 0.0, 1.0];
+    for (actual, expected) in captured
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .iter()
+        .zip(expected)
+    {
+        assert!((actual - expected).abs() < 1e-6, "{actual} vs {expected}");
+    }
+    assert_eq!(
+        hooks
+            .get(&row)
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        [1.0]
+    );
+
+    // An edit of the pattern is reflected in the derived sink mass.
+    let mut edited = Hooks::<B>::new();
+    let sink = edited.capture(point.clone());
+    edited.edit(points.pattern().query_token(1), |row| row * 0.5);
+    edited
+        .run(catalog.clone(), |hooks| {
+            let pattern = hooks.apply(points.pattern(), pattern())?;
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap();
+    let second = edited
+        .get(&sink)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()[1];
+    assert!((second - 0.5).abs() < 1e-6, "{second}");
+
+    // Editing the derived point is an intervention error, not a silent no-op.
+    let mut rejected = Hooks::<B>::new();
+    rejected.edit(point.clone(), |sink| sink * 0.0);
+    let error = rejected
+        .run(catalog, |hooks| {
+            let pattern = hooks.apply(points.pattern(), pattern())?;
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, crate::Error::Intervention { point: name, .. } if name == &point.info().name),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("read-only"), "{error}");
+
+    // Without a request the helper does nothing, even outside a scope.
+    let mut idle = Hooks::<B>::new();
+    idle.apply_sink_probability(points, &pattern()).unwrap();
+}
+
+/// On real sink attention, the derived point equals the sink's softmax share of each row.
+///
+/// With per-head sink logits `s_h` and scaled scores `z_k`, the eager graph
+/// normalizes `[z_1, ..., z_K, s_h]` and drops the last column, so
+/// `p_sink = exp(s_h) / (exp(s_h) + sum_k exp(z_k))`.
+#[test]
+fn sink_probability_matches_the_sink_softmax_share() {
+    use burn::{module::Param, tensor::TensorData};
+
+    use crate::attention::{
+        AttentionPrecisionMode, AttentionProjection, GroupedQueryAttentionConfig,
+    };
+
+    let device = Default::default();
+    let sinks = [0.5_f32, -1.0, 2.0, 0.0];
+    let mut module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .with_attention_sinks(true)
+        .with_precision_mode(AttentionPrecisionMode::EagerFp32Softmax)
+        .init::<B>(&device)
+        .unwrap();
+    module.sinks = Some(Param::from_tensor(Tensor::from_floats(sinks, &device)));
+    let tensor = |shape: [usize; 4], seed: usize| {
+        let count = shape.iter().product::<usize>();
+        let values = (0..count)
+            .map(|index| ((index * 5 + seed) % 11) as f32 * 0.2 - 1.0)
+            .collect::<Vec<_>>();
+        Tensor::<B, 4>::from_data(TensorData::new(values, shape), &device)
+    };
+    let projection = AttentionProjection {
+        query: tensor([2, 4, 3, 2], 1),
+        key: tensor([2, 2, 5, 2], 2),
+        value: tensor([2, 2, 5, 2], 3),
+        gate: None,
+    };
+    let points = Layer::decoder(0).self_attention();
+    let mut hooks = Hooks::<B>::new();
+    let scores = hooks.capture(points.scores());
+    let pattern = hooks.capture(points.pattern());
+    let catalog = vec![points.scores().info(), points.pattern().info()];
+    hooks
+        .run(catalog, |hooks| {
+            module.attend_with_hooks(projection, None, None, false, points, hooks)
+        })
+        .unwrap();
+    let scores = hooks
+        .get(&scores)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let pattern = hooks.get(&pattern).unwrap();
+
+    let mut derived = Hooks::<B>::new();
+    let sink = derived.capture(points.sink_probability());
+    derived
+        .run(vec![points.sink_probability().info()], |hooks| {
+            hooks.apply_sink_probability(points, &pattern)
+        })
+        .unwrap();
+    let sink = derived.get(&sink).unwrap();
+    assert_eq!(sink.dims(), [2, 4, 3]);
+    let sink = sink.into_data().to_vec::<f32>().unwrap();
+    for (row, &actual) in sink.iter().enumerate() {
+        let head = (row / 3) % 4;
+        let logit = f64::from(sinks[head]);
+        let keys = &scores[row * 5..row * 5 + 5];
+        let maximum = keys
+            .iter()
+            .map(|&score| f64::from(score))
+            .fold(logit, f64::max);
+        let denominator = (logit - maximum).exp()
+            + keys
+                .iter()
+                .map(|&score| (f64::from(score) - maximum).exp())
+                .sum::<f64>();
+        let expected = (logit - maximum).exp() / denominator;
+        assert!(
+            (f64::from(actual) - expected).abs() < 1e-5,
+            "row {row}: {actual} vs {expected}"
+        );
+    }
+}
+
+/// Batch-row and arbitrary-axis helpers on points and selections slice declared semantic axes.
+///
+/// The `[batch, token, channel] = [2, 3, 2]` activation holds `0..12` in row-major
+/// order, so each capture's values identify exactly which elements it selected.
+#[test]
+fn batch_and_axis_helpers_select_by_semantic_axis() {
+    let point = Point::custom("rows.tokens", [Axis::Batch, Axis::Token, Axis::Channel]);
+    let mut hooks = Hooks::<B>::default();
+    let second_row = hooks.capture(point.batch(1));
+    let first_token = hooks.capture(point.slice(Axis::Token, 0..1));
+    let selection = super::Selection::from(&point).batch(0).channels(1..2);
+    let borrowed = hooks.capture(&selection);
+    let input = Tensor::<B, 3>::from_data(
+        burn::tensor::TensorData::new((0..12).map(|value| value as f32).collect(), [2, 3, 2]),
+        &Default::default(),
+    );
+    let output = hooks
+        .run(vec![point.info()], |hooks| {
+            hooks.apply(point.clone(), input)
+        })
+        .unwrap();
+    assert_eq!(
+        values(output),
+        (0..12).map(|value| value as f32).collect::<Vec<_>>()
+    );
+    let second_row = hooks.get(&second_row).unwrap();
+    assert_eq!(second_row.dims(), [1, 3, 2]);
+    assert_eq!(values(second_row), [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
+    let first_token = hooks.get(&first_token).unwrap();
+    assert_eq!(first_token.dims(), [2, 1, 2]);
+    assert_eq!(values(first_token), [0.0, 1.0, 6.0, 7.0]);
+    let borrowed = hooks.get(&borrowed).unwrap();
+    assert_eq!(borrowed.dims(), [1, 3, 1]);
+    assert_eq!(values(borrowed), [1.0, 3.0, 5.0]);
+}
+
+/// MoE constructors on [`Layer`] name `<stack>.layers.<i>.mlp.<suffix>` with the families' axes.
+///
+/// Router scores and weights end in the expert and expert-slot axes; routed
+/// and shared expert outputs are ordinary hidden states. The router points
+/// equal the Qwen3-MoE constructors that gpt-oss also emits.
+#[test]
+fn moe_layer_points_have_documented_names_and_axes() {
+    use super::PointInfo;
+
+    let layer = Layer::decoder(3);
+    let info = |name: &str, last: Axis| PointInfo {
+        name: name.into(),
+        axes: vec![Axis::Batch, Axis::Token, last],
+    };
+    assert_eq!(Axis::EXPERT, Axis::Other("expert"));
+    assert_eq!(Axis::EXPERT_SLOT, Axis::Other("expert_slot"));
+    assert_eq!(
+        layer.router_logits().info(),
+        info("decoder.layers.3.mlp.router_logits", Axis::EXPERT)
+    );
+    assert_eq!(
+        layer.router_weights().info(),
+        info("decoder.layers.3.mlp.router_weights", Axis::EXPERT_SLOT)
+    );
+    assert_eq!(
+        layer.routed_output().info(),
+        info("decoder.layers.3.mlp.routed_output", Axis::Channel)
+    );
+    assert_eq!(
+        layer.shared_output().info(),
+        info("decoder.layers.3.mlp.shared_output", Axis::Channel)
+    );
+    assert_eq!(
+        Layer::encoder(0).router_logits().info().name,
+        "encoder.layers.0.mlp.router_logits"
+    );
+    // The deprecated Qwen3-MoE spellings name the same shared points.
+    #[allow(deprecated)]
+    let (legacy_logits, legacy_weights) = (
+        crate::models::qwen3_moe::router_logits_point(layer),
+        crate::models::qwen3_moe::router_weights_point(layer),
+    );
+    assert_eq!(layer.router_logits(), legacy_logits);
+    assert_eq!(layer.router_weights(), legacy_weights);
+}
+
+/// Captures every MoE point a sparse model lists through the [`Layer`] constructors.
+///
+/// Each constructor whose point the catalog lists for `layer` is captured in
+/// full, and the router logits also through an [`Axis::EXPERT`] slice of one
+/// expert. Returns how many constructors the catalog listed, after checking
+/// the captured `[batch, token, last]` extents against `last_extents` (router
+/// logits, router weights, routed output, shared output).
+fn capture_moe_points<M>(
+    model: &M,
+    input: crate::CausalLmInput<B>,
+    layer: Layer,
+    last_extents: [usize; 4],
+) -> usize
+where
+    M: crate::architecture::HookedModel<
+            B,
+            Input = crate::CausalLmInput<B>,
+            Output = crate::CausalLmOutput<B>,
+        >,
+{
+    let catalog = model.activation_points().unwrap();
+    let tokens = input.token_ids.dims()[1];
+    let mut hooks = Hooks::<B>::new();
+    let points = [
+        layer.router_logits(),
+        layer.router_weights(),
+        layer.routed_output(),
+        layer.shared_output(),
+    ];
+    let captures = points
+        .iter()
+        .zip(last_extents)
+        .filter(|(point, _)| catalog.contains(&point.info()))
+        .map(|(point, extent)| (hooks.capture(point), extent))
+        .collect::<Vec<_>>();
+    let one_expert = hooks.capture(layer.router_logits().slice(Axis::EXPERT, 1..2));
+    model
+        .forward_with_hooks(input, &crate::ForwardOptions::default(), &mut hooks)
+        .unwrap();
+    for (capture, extent) in &captures {
+        assert_eq!(hooks.get(capture).unwrap().dims(), [1, tokens, *extent]);
+    }
+    assert_eq!(hooks.get(&one_expert).unwrap().dims(), [1, tokens, 1]);
+    captures.len()
+}
+
+/// Qwen3-MoE, gpt-oss, and DeepSeek emit their MoE points under the shared [`Layer`] constructors.
+///
+/// Qwen3-MoE and gpt-oss emit router logits and weights in every sparse
+/// layer; DeepSeek emits router logits, the routed sum, and the shared expert
+/// in its sparse layer 1 and none of them in its dense layer 0.
+#[test]
+fn moe_layer_points_capture_from_every_sparse_family() {
+    use crate::models::{
+        deepseek_v2::{DeepseekV2ForCausalLm, model::tests_support::tiny_config as deepseek},
+        gpt_oss::{GptOssConfig, GptOssForCausalLm},
+        qwen3_moe::{Qwen3MoeConfig, Qwen3MoeForCausalLm},
+    };
+
+    let device = Default::default();
+    let input = || crate::CausalLmInput {
+        token_ids: Tensor::<B, 2, burn::tensor::Int>::from_ints([[1, 4, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+
+    let qwen = Qwen3MoeForCausalLm::<B>::init(
+        Qwen3MoeConfig {
+            vocab_size: 16,
+            hidden_size: 4,
+            intermediate_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 2,
+            max_position_embeddings: 16,
+            max_window_layers: 1,
+            decoder_sparse_step: 1,
+            moe_intermediate_size: 3,
+            num_experts: 3,
+            num_experts_per_tok: 2,
+            norm_topk_prob: true,
+            ..Qwen3MoeConfig::default()
+        },
+        &device,
+    )
+    .unwrap();
+    assert_eq!(
+        capture_moe_points(&qwen, input(), Layer::decoder(0), [3, 2, 4, 4]),
+        2
+    );
+
+    let gpt_oss = GptOssForCausalLm::<B>::init(
+        GptOssConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            intermediate_size: 6,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            num_local_experts: 4,
+            num_experts_per_tok: 2,
+            sliding_window: Some(2),
+            layer_types: GptOssConfig::default_layer_types(2),
+            max_position_embeddings: 16,
+            ..GptOssConfig::default()
+        },
+        &device,
+    )
+    .unwrap();
+    for layer in [Layer::decoder(0), Layer::decoder(1)] {
+        assert_eq!(
+            capture_moe_points(&gpt_oss, input(), layer, [4, 2, 8, 8]),
+            2
+        );
+    }
+
+    let deepseek = DeepseekV2ForCausalLm::<B>::init(deepseek(), &device).unwrap();
+    assert_eq!(
+        capture_moe_points(&deepseek, input(), Layer::decoder(1), [4, 2, 8, 8]),
+        3
+    );
+    let catalog = crate::architecture::HookedModel::activation_points(&deepseek).unwrap();
+    let dense = Layer::decoder(0);
+    for point in [
+        dense.router_logits(),
+        dense.routed_output(),
+        dense.shared_output(),
+    ] {
+        assert!(!catalog.contains(&point.info()), "{:?}", point.info());
+    }
+}

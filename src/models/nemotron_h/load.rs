@@ -19,8 +19,8 @@ use thiserror::Error;
 use crate::{
     attention::GroupedQueryAttention,
     checkpoint::{
-        CheckpointError, ExecutionFailure, ExecutionOutcome, LoadOptions, ParameterInstallError,
-        TensorSink, execute_local_load_plan, install_float_parameter,
+        CheckpointError, ExecutionFailure, ExecutionOutcome, LoadOptions, PackedLayoutPolicy,
+        ParameterInstallError, TensorSink, execute_local_load_plan, install_packed_parameter,
     },
     normalization::RmsNorm,
 };
@@ -138,7 +138,8 @@ impl<B: Backend> TensorSink for NemotronHForCausalLm<B> {
                 install_linear_weight(target, head, data)
             }
             target if target.starts_with("model.layers.") => {
-                let (layer_index, suffix) = parse_indexed_target(target, "model.layers.")?;
+                let (layer_index, suffix) =
+                    parse_block_target(target, &target["model.layers.".len()..])?;
                 let layer_count = self.model.layers.len();
                 let layer = self.model.layers.get_mut(layer_index).ok_or_else(|| {
                     NemotronHLoadError::InvalidIndex {
@@ -207,11 +208,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
-        self.load_checkpoint_with_architecture_options(
-            root,
-            options,
-            NemotronHCheckpointOptions::default(),
-        )
+        self.load_checkpoint_with(root, options, NemotronHCheckpointOptions::default())
     }
 
     /// Loads with explicit family provenance for pinned artifact policies.
@@ -222,36 +219,49 @@ impl<B: Backend> NemotronHForCausalLm<B> {
     /// physical payload by counting 23 base routers twice. Every source label,
     /// control hash, tensor name, dtype, shape, and byte total is revalidated
     /// before that one exception is applied.
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: NemotronHCheckpointOptions,
+    ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
+        let contract = self.config().checkpoint_contract(family_options)?;
+        let manifest = contract.discover_checkpoint(root, options)?;
+        let plan = contract.build_load_plan(&manifest, options)?;
+        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+    }
+
+    /// Former name of [`Self::load_checkpoint_with`], kept so 0.1.0 code compiles.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint_with`], to which it forwards unchanged.
+    #[deprecated(note = "use `load_checkpoint_with`, the name every family shares")]
     pub fn load_checkpoint_with_architecture_options(
         &mut self,
         root: impl AsRef<Path>,
         options: &LoadOptions,
         architecture_options: NemotronHCheckpointOptions,
     ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
-        let contract = self.config().checkpoint_contract(architecture_options)?;
-        let manifest = contract.discover_checkpoint(root, options)?;
-        let plan = contract.build_load_plan(&manifest, options)?;
-        Ok(execute_local_load_plan(&manifest, &plan, self)?)
+        self.load_checkpoint_with(root, options, architecture_options)
     }
 }
 
-/// Parses `<prefix><decimal>.<suffix>` without accepting empty components.
-fn parse_indexed_target<'a>(
-    target: &'a str,
-    prefix: &str,
+/// Splits the `<decimal>.<suffix>` remainder of a `model.layers.` target.
+///
+/// `remainder` is the text after the prefix the caller already matched;
+/// `target` is the full name reported by diagnostics. A missing separator, an
+/// empty suffix, and a non-decimal index are invalid.
+fn parse_block_target<'a>(
+    target: &str,
+    remainder: &'a str,
 ) -> Result<(usize, &'a str), NemotronHLoadError> {
-    let remainder =
-        target
-            .strip_prefix(prefix)
-            .ok_or_else(|| NemotronHLoadError::UnknownTarget {
-                target: target.into(),
-            })?;
     let (index, suffix) =
         remainder
             .split_once('.')
             .ok_or_else(|| NemotronHLoadError::InvalidIndex {
                 target: target.into(),
-                reason: format!("expected `{prefix}<index>.<parameter>`"),
+                reason: "expected `model.layers.<index>.<parameter>`".into(),
             })?;
     if suffix.is_empty() {
         return Err(NemotronHLoadError::InvalidIndex {
@@ -286,7 +296,7 @@ fn install_block_tensor<B: Backend>(
                         target: target.into(),
                         component: "Mamba2 mixer selected by the block schedule",
                     })?;
-            install_mamba_tensor(mamba, target, &suffix[6..], data)
+            install_mamba_tensor(mamba, target, &suffix["mamba.".len()..], data)
         }
         suffix if suffix.starts_with("attention.") => {
             let attention =
@@ -297,7 +307,7 @@ fn install_block_tensor<B: Backend>(
                         target: target.into(),
                         component: "attention mixer selected by the block schedule",
                     })?;
-            install_attention_tensor(attention, target, &suffix[10..], data)
+            install_attention_tensor(attention, target, &suffix["attention.".len()..], data)
         }
         suffix if suffix.starts_with("mlp.") => {
             let mlp = block
@@ -307,7 +317,7 @@ fn install_block_tensor<B: Backend>(
                     target: target.into(),
                     component: "dense MLP selected by the block schedule",
                 })?;
-            install_dense_tensor(mlp, target, &suffix[4..], data)
+            install_dense_tensor(mlp, target, &suffix["mlp.".len()..], data)
         }
         suffix if suffix.starts_with("moe.") => {
             let moe = block
@@ -317,7 +327,7 @@ fn install_block_tensor<B: Backend>(
                     target: target.into(),
                     component: "routed MoE selected by the block schedule",
                 })?;
-            install_moe_tensor(moe, target, &suffix[4..], data)
+            install_moe_tensor(moe, target, &suffix["moe.".len()..], data)
         }
         _ => Err(NemotronHLoadError::UnknownTarget {
             target: target.into(),
@@ -411,7 +421,8 @@ fn install_moe_tensor<B: Backend>(
         "router.weight" => install_linear_weight(target, &mut moe.router, data),
         "correction_bias" => install(target, &mut moe.correction_bias, data),
         suffix if suffix.starts_with("routed.") => {
-            let (expert_index, projection) = parse_indexed_suffix(target, suffix, "routed.")?;
+            let (expert_index, projection) =
+                parse_expert_target(target, &suffix["routed.".len()..])?;
             let count = moe.routed.len();
             let expert = moe.routed.get_mut(expert_index).ok_or_else(|| {
                 NemotronHLoadError::InvalidIndex {
@@ -422,7 +433,7 @@ fn install_moe_tensor<B: Backend>(
             install_dense_tensor(expert, target, projection, data)
         }
         suffix if suffix.starts_with("shared.") => {
-            install_dense_tensor(&mut moe.shared, target, &suffix[7..], data)
+            install_dense_tensor(&mut moe.shared, target, &suffix["shared.".len()..], data)
         }
         suffix if suffix.starts_with("fc1_latent_proj.") => {
             let projection = moe.fc1_latent_proj.as_mut().ok_or_else(|| {
@@ -431,7 +442,12 @@ fn install_moe_tensor<B: Backend>(
                     component: "first routed-expert latent projection",
                 }
             })?;
-            install_linear_tensor(projection, target, &suffix[16..], data)
+            install_linear_tensor(
+                projection,
+                target,
+                &suffix["fc1_latent_proj.".len()..],
+                data,
+            )
         }
         suffix if suffix.starts_with("fc2_latent_proj.") => {
             let projection = moe.fc2_latent_proj.as_mut().ok_or_else(|| {
@@ -440,7 +456,12 @@ fn install_moe_tensor<B: Backend>(
                     component: "second routed-expert latent projection",
                 }
             })?;
-            install_linear_tensor(projection, target, &suffix[16..], data)
+            install_linear_tensor(
+                projection,
+                target,
+                &suffix["fc2_latent_proj.".len()..],
+                data,
+            )
         }
         _ => Err(NemotronHLoadError::UnknownTarget {
             target: target.into(),
@@ -448,24 +469,22 @@ fn install_moe_tensor<B: Backend>(
     }
 }
 
-/// Parses an indexed fragment already isolated from its full target prefix.
-fn parse_indexed_suffix<'a>(
+/// Splits the `<decimal>.<projection>` remainder of a `routed.` expert target.
+///
+/// `remainder` is the text after the `routed.` prefix the caller already
+/// matched; `target` is the full name reported by diagnostics. An empty
+/// projection is left to the expert's own dispatch, which rejects it as
+/// unknown.
+fn parse_expert_target<'a>(
     target: &str,
-    suffix: &'a str,
-    prefix: &str,
+    remainder: &'a str,
 ) -> Result<(usize, &'a str), NemotronHLoadError> {
-    let remainder =
-        suffix
-            .strip_prefix(prefix)
-            .ok_or_else(|| NemotronHLoadError::UnknownTarget {
-                target: target.into(),
-            })?;
     let (index, projection) =
         remainder
             .split_once('.')
             .ok_or_else(|| NemotronHLoadError::InvalidIndex {
                 target: target.into(),
-                reason: format!("expected `{prefix}<index>.<parameter>`"),
+                reason: "expected `routed.<index>.<parameter>`".into(),
             })?;
     let index = index
         .parse::<usize>()
@@ -504,12 +523,15 @@ fn install_next_token_tensor<B: Backend>(
         "hidden_norm.weight" => install_norm(target, &mut head.hidden_norm, data),
         "eh_proj.weight" => install_linear_weight(target, &mut head.eh_proj, data),
         "attention_norm.weight" => install_norm(target, &mut head.attention_norm, data),
-        suffix if suffix.starts_with("attention.") => {
-            install_attention_tensor(&mut head.attention, target, &suffix[10..], data)
-        }
+        suffix if suffix.starts_with("attention.") => install_attention_tensor(
+            &mut head.attention,
+            target,
+            &suffix["attention.".len()..],
+            data,
+        ),
         "moe_norm.weight" => install_norm(target, &mut head.moe_norm, data),
         suffix if suffix.starts_with("moe.") => {
-            install_moe_tensor(&mut head.moe, target, &suffix[4..], data)
+            install_moe_tensor(&mut head.moe, target, &suffix["moe.".len()..], data)
         }
         "final_layer_norm.weight" => install_norm(target, &mut head.final_layer_norm, data),
         _ => Err(NemotronHLoadError::UnknownTarget {
@@ -552,16 +574,24 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Validates and installs one statically ranked floating-point parameter.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), NemotronHLoadError> {
-    install_float_parameter(parameter, data).map_err(|source| NemotronHLoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| NemotronHLoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

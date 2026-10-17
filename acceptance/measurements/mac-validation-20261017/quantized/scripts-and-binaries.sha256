@@ -1,0 +1,18 @@
+# scratch harness scripts
+d349c62d8dcd3d12c567a326c445a8e8fd14b8d2450f352c129b329cc9f99cec  /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/quantized_build.sh
+6fb87a15c2e2e517accebf91938f1928df79dd05e6dd88e5a6654c90a5bdae4f  /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/run_quantized_gates.py
+ca4cfac84997617dadaeeb4804162fe537937639a8d0ad5cf65feefae4de9858  /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/quantized_heavy.sh
+2b425ee10fb4b23800e266df26ab1b5ca831cbdfa4892104b6b7115d5eaeebf4  /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/quantized_ab.sh
+3a730f4a2c00e1b3ce69bce667934991b95dfccdf1651da865ea79759de1e24f  /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/digest_quantized.py
+52280ddd0679e4124dce93d4de6e66bcf29629d2e3aca47fed8db756121da840  /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/verify_export.py
+# head c2936fe release gate binaries (CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates)
+# A std,kernel-tracing; B default+metal; C std,tokenizers; D/Dq std,metal,tokenizers,kernel-tracing; E std,metal,tokenizers,chat-templates (all --no-default-features except B)
+a97b2fbd2e1c91562a3a2b7bb429128466a959710eb28a4682b2abea996f7150  packed_metal_kernels-d022358ee6eb7f4a
+861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8  transformers-241387578fbba24d
+d9de344e42b7fb96fb9d1f1590cb5544b563ad6a8774fe011414fa27e3357b8a  packed_metal_kernels-7de3d3302d9a9b49
+2000c667b84f9a4fb7a99205cc90923e3a72fcddcf3ac33e24dbb365435a60f7  muse_glimmer_artifacts-a056c89048174866
+fc8524f3258ed5aff9762b86f6ae0fb849435007491fe190e57c1531caa7f98c  muse_glimmer_artifacts-14fa2946558d2b24
+4729b191dd1ac17bfbd3e13d90c53a6368ccc33a934df236c560329a06243244  qwen3_moe_artifacts-aa35af79e02f436b
+f3aa179eec9da3e4dc7602153f053fd8c5cad19528bba7934a835def59140d42  qwen3_moe_artifacts-7b2bee6375279079
+# control 9a9c730 (CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab), std,metal,tokenizers,kernel-tracing
+86630d8ec5ca4126248f231aff675ee27cf3eb5a4fefaf444d7e427a8fb64995  /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates-ab/release/deps/muse_glimmer_artifacts-14fa2946558d2b24

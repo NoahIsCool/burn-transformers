@@ -76,6 +76,11 @@ fn working_keys(
         .expect("f32 cache")
 }
 
+/// Uploads validated beam-source rows as the shared device selector.
+fn selection(indices: &[usize]) -> Tensor<TestBackend, 1, burn::tensor::Int> {
+    kv::selection_tensor::<TestBackend>(indices, &device()).expect("selector fits i32")
+}
+
 /// Builds one scalar-head attention layer with the selected storage and proposal capacity.
 fn scalar_kv_spec(storage: KvCacheStorage, staging: usize) -> NativeKvCacheSpec {
     NativeKvCacheSpec::new(1, 1, 1, storage, DType::F32)
@@ -982,10 +987,6 @@ fn recurrent_cache_validates_shapes_indices_and_staging_lifecycle() {
         Err(TensorCacheError::TransactionAlreadyActive)
     ));
     assert!(matches!(
-        cache.reorder(&[0]),
-        Err(TensorCacheError::TransactionActive { .. })
-    ));
-    assert!(matches!(
         cache.set_sequence_state(
             0,
             0,
@@ -1037,7 +1038,7 @@ fn recurrent_cache_validates_shapes_indices_and_staging_lifecycle() {
         cache.prepare_staging_commit(&[0], &[0]),
         Err(TensorCacheError::TransactionNotActive)
     ));
-    cache.reorder(&[0]).expect("staging allocations reorder");
+    cache.reorder_rows(&selection(&[0]));
     cache.reset();
 
     let mut no_staging =
@@ -1167,7 +1168,7 @@ fn transaction_marks_and_accepted_counts_are_state_local_and_recoverable() {
     let mut first = TensorDecodeState::<TestBackend>::new(config, 2, &device).expect("state");
     let mut second = TensorDecodeState::<TestBackend>::new(config, 2, &device).expect("state");
     let first_mark = first.begin_transaction().expect("transaction");
-    assert!(format!("{first_mark:?}").contains("TensorTransactionToken"));
+    assert!(format!("{first_mark:?}").contains("TransactionToken(..)"));
     let rollback = first_mark.clone();
     let foreign = second.begin_transaction().expect("transaction");
     let second_rollback = foreign.clone();
@@ -1273,10 +1274,6 @@ fn low_level_commit_validation_covers_full_mirrored_and_zero_prefixes() {
         full.begin_staging(),
         Err(TensorCacheError::TransactionAlreadyActive)
     ));
-    assert!(matches!(
-        full.reorder(&[0]),
-        Err(TensorCacheError::TransactionActive { .. })
-    ));
     let (keys, values) = scalar_kv(&[1.0]);
     full.stage_sequence(0, 0, keys, values).expect("proposal");
     assert!(matches!(
@@ -1300,7 +1297,7 @@ fn low_level_commit_validation_covers_full_mirrored_and_zero_prefixes() {
         full.prepare_staging_commit(&[0], &[0], &[0]),
         Err(TensorCacheError::TransactionNotActive)
     ));
-    full.reorder(&[0]).expect("reorder staging tensors");
+    full.reorder_rows(&selection(&[0]));
 
     let mut disabled = NativeKvCache::<TestBackend>::new(
         full_config,

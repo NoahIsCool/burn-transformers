@@ -6,12 +6,46 @@
 //! so its effective dimension must be even. The helpers in this module turn those
 //! mathematical assumptions into errors at load time rather than tensor panics in
 //! the first forward pass.
+//!
+//! The [`rope`] submodule translates the serialized Hugging Face RoPE schema
+//! ([`RopeParameters`], or a per-layer-type [`RopeParameterSet`]) together with
+//! the surrounding config fields ([`RopeContext`]) into the executable
+//! [`crate::position::RopeConfig`], so every family shares one precedence policy.
+//!
+//! The integer verdicts behind these checks (multimodal RoPE sections, head
+//! divisibility, token-ID ranges, the trained context and its precedence, and
+//! the lexer of the legacy `Infinity` normalization) live in the private
+//! `plan` module, which Verus verifies in place through `verus/config.rs`.
+//!
+//! Counts read from an untrusted `config.json` are bounded before anything
+//! proportional to them is allocated, so that no family describes a
+//! checkpoint contract longer than the [`MAX_CHECKPOINT_TENSORS`] artifact
+//! limit: [`MAX_LAYERS`] per stack (sized for the densest per-layer
+//! contract), [`MAX_EXPERTS`] per MoE layer, and, for checkpoint layouts with
+//! one tensor set per routed expert, the exact size of the whole contract.
+
+mod plan;
+pub mod rope;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{DeserializeOwned, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use plan::{
+    CountFault, DivisibilityFault, INFINITY_TOKEN_LENGTH, MropeSectionFault, TokenIdFault,
+    count_fault, divisibility_fault, infinity_token_starts, mrope_section_fault,
+    original_context_fits, token_id_fault,
+};
+pub(crate) use plan::{MoeInventory, moe_inventory};
+
+pub use rope::{
+    DEFAULT_ROPE_THETA, DynamicNtkContext, MropeHandling, PartialRotary, RopeContext,
+    RopeParameterSet, RopeParametersByLayerType, SoftmaxMscale, UnusedRopeFields,
+    YarnMscaleConvention, yarn_mscale,
+};
 
 /// A topology error associated with one checkpoint field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +84,7 @@ impl Error for ConfigError {}
 
 /// Failure to decode a serialized configuration or validate its topology.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ConfigLoadError {
     /// The input was not compatible JSON or a field had the wrong serialized type.
     Json(
@@ -97,6 +132,34 @@ impl From<ConfigError> for ConfigLoadError {
     }
 }
 
+impl From<ConfigError> for crate::Error {
+    /// Maps a topology failure to a configuration error at `architecture.field`.
+    ///
+    /// This is the same mapping used by [`crate::ArchitectureConfig::validate`].
+    fn from(error: ConfigError) -> Self {
+        crate::Error::configuration(
+            format!("{}.{}", error.architecture, error.field),
+            error.reason,
+        )
+    }
+}
+
+impl From<ConfigLoadError> for crate::Error {
+    /// Converts a configuration loading failure so loaders can use `?`.
+    ///
+    /// Topology failures keep their `architecture.field` path. JSON failures
+    /// keep their parser diagnostic, including line and column, under the
+    /// field `config`.
+    fn from(error: ConfigLoadError) -> Self {
+        match error {
+            ConfigLoadError::Validation(error) => error.into(),
+            ConfigLoadError::Json(error) => {
+                crate::Error::configuration("config", format!("invalid model config JSON: {error}"))
+            }
+        }
+    }
+}
+
 /// Validation implemented by every model topology schema.
 pub trait Validate {
     /// Checks all relationships needed to construct matrices and caches safely.
@@ -125,12 +188,7 @@ where
 
     /// Reuses the family schema's field-level validation in the runtime API.
     fn validate(&self) -> crate::Result<()> {
-        Validate::validate(self).map_err(|error| {
-            crate::Error::configuration(
-                format!("{}.{}", error.architecture, error.field),
-                error.reason,
-            )
-        })
+        Validate::validate(self).map_err(crate::Error::from)
     }
 }
 
@@ -139,15 +197,27 @@ where
 /// Hugging Face multimodal repositories conventionally store the language backbone
 /// under `text_config`. Historic/custom repositories also use `language_config` or
 /// `llm_config`; accepting those aliases is safe because this crate intentionally
-/// ignores the vision tower. NVIDIA's original Nemotron-H files contain the
-/// non-standard JSON literal `Infinity`; it is normalized to `null`, the same
-/// representation used by newer official checkpoints for an unbounded limit.
+/// ignores the vision tower.
+///
+/// JSON has no infinity, and checkpoints spell an unbounded limit (Nemotron-H's
+/// `time_step_limit` upper bound) in two non-standard ways, both read as `null`:
+///
+/// * NVIDIA's original files contain the bare Python literal `Infinity`, which
+///   a lexical pass rewrites before parsing.
+/// * Transformers 5 (`PreTrainedConfig.to_json_string`, since 5.2 and at the
+///   pinned `cfa309cf`) writes every non-finite float as a tagged object,
+///   `{"__float__": "Infinity"}`, so every config it saves carries one; the
+///   tag is decoded after parsing, exactly where Transformers recognizes it.
+///
+/// The tagged `-Infinity` and `NaN`, which no supported field can hold, are
+/// rejected with the JSON path of the offending value.
 pub fn parse_text_config<T>(json: &str) -> Result<T, ConfigLoadError>
 where
     T: Validate + DeserializeOwned,
 {
     let normalized = normalize_positive_infinity(json);
-    let value: serde_json::Value = serde_json::from_str(&normalized)?;
+    let mut value: serde_json::Value = serde_json::from_str(&normalized)?;
+    decode_float_tags(&mut value, &mut String::new())?;
     let text_value = ["text_config", "language_config", "llm_config"]
         .iter()
         .find_map(|key| value.get(*key).filter(|nested| !nested.is_null()))
@@ -164,43 +234,92 @@ where
 /// used Python's extension in `time_step_limit`. A small lexical pass is preferable
 /// to adopting a permissive JSON dialect for every model. Quoted text is copied
 /// byte-for-byte, including escaped quotes, so metadata strings cannot be changed.
+///
+/// The Verus-verified `infinity_token_starts` finds exactly the tokens outside
+/// strings, in increasing order and at least one token length apart. Each
+/// token is ASCII, so every start and end is a character boundary of `input`
+/// and the slices below cannot panic.
 fn normalize_positive_infinity(input: &str) -> String {
-    /// Legacy non-JSON numeric literal accepted outside quoted metadata.
-    const TOKEN: &[u8] = b"Infinity";
+    /// JSON literal written in place of each legacy token.
+    const REPLACEMENT: &str = "null";
     let mut normalized = String::with_capacity(input.len());
-    let mut remaining = input;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while let Some(character) = remaining.chars().next() {
-        if in_string {
-            normalized.push(character);
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            remaining = &remaining[character.len_utf8()..];
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-            normalized.push('"');
-            remaining = &remaining[character.len_utf8()..];
-        } else if remaining.as_bytes().starts_with(TOKEN) {
-            normalized.push_str("null");
-            // The matched token is ASCII, so its end is a UTF-8 boundary.
-            remaining = &remaining[TOKEN.len()..];
-        } else {
-            normalized.push(character);
-            remaining = &remaining[character.len_utf8()..];
-        }
+    let mut copied = 0;
+    for start in infinity_token_starts(input.as_bytes()) {
+        normalized.push_str(&input[copied..start]);
+        normalized.push_str(REPLACEMENT);
+        copied = start + INFINITY_TOKEN_LENGTH;
     }
-
+    normalized.push_str(&input[copied..]);
     normalized
+}
+
+/// Object key under which Transformers 5 serializes a non-finite float.
+const FLOAT_TAG_KEY: &str = "__float__";
+
+/// Decodes Transformers 5's tagged non-finite floats in place, reporting errors at `path`.
+///
+/// Transformers' `_decode_special_floats` (pinned `cfa309cf`,
+/// `configuration_utils.py`) recognizes exactly an object whose only key is
+/// `__float__` and whose value is a string, and maps `"Infinity"`,
+/// `"-Infinity"`, and `"NaN"` to the IEEE values; any other object is
+/// ordinary data. This decoder recognizes the same objects:
+///
+/// * `"Infinity"` becomes `null`, the crate's representation of an unbounded
+///   limit (the same value the legacy `Infinity` repair produces);
+/// * `"-Infinity"`, `"NaN"`, and any other tag string are errors naming the
+///   tag and its JSON path (for example `time_step_limit[1]`), because no
+///   supported field accepts them and Transformers never writes other tags.
+///
+/// `path` is the location of `value` (empty at the root) and is restored
+/// before returning. Recursion follows the parsed document, whose depth
+/// `serde_json` already limits to 128 nested levels.
+fn decode_float_tags(
+    value: &mut serde_json::Value,
+    path: &mut String,
+) -> Result<(), serde_json::Error> {
+    use serde::de::Error as _;
+    use serde_json::Value;
+    use std::fmt::Write as _;
+
+    match value {
+        Value::Object(fields) => {
+            if fields.len() == 1
+                && let Some(Value::String(tag)) = fields.get(FLOAT_TAG_KEY)
+            {
+                if tag != "Infinity" {
+                    let location = if path.is_empty() { "<root>" } else { path };
+                    return Err(serde_json::Error::custom(format!(
+                        "unsupported float {{\"{FLOAT_TAG_KEY}\": \"{tag}\"}} at `{location}`; \
+                         only Transformers' tagged +Infinity (an unbounded limit, read as null) \
+                         is accepted"
+                    )));
+                }
+                *value = Value::Null;
+                return Ok(());
+            }
+            for (key, field) in fields.iter_mut() {
+                let restore = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(key);
+                decode_float_tags(field, path)?;
+                path.truncate(restore);
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let restore = path.len();
+                // Writing to a `String` cannot fail.
+                let _ = write!(path, "[{index}]");
+                decode_float_tags(item, path)?;
+                path.truncate(restore);
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
+    }
 }
 
 /// A token field that may contain one ID or several accepted end-of-sequence IDs.
@@ -240,6 +359,10 @@ pub enum RopeType {
     #[serde(rename = "linear")]
     Linear,
     /// Dynamic NTK scaling.
+    ///
+    /// It rescales only passes longer than the trained context; the built-in
+    /// families refuse such positions, so for them it is inert (see the
+    /// [`rope`] module documentation).
     #[serde(rename = "dynamic")]
     Dynamic,
     /// YaRN interpolation/extrapolation.
@@ -257,10 +380,18 @@ pub enum RopeType {
 }
 
 /// Superset of RoPE fields used by the supported model families.
+///
+/// Deserialization accepts the current `rope_type` key, the legacy `type` key,
+/// or both: Hugging Face config constructors copy `type` into `rope_type` and
+/// `save_pretrained` then writes both. When both are present they must agree.
+/// Only a JSON object is accepted, as in Transformers (`[]` or `["yarn"]` is
+/// a type error, not a positional field list). Serialization writes only
+/// `rope_type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(try_from = "RopeParametersMapping")]
 pub struct RopeParameters {
     /// RoPE scaling algorithm; legacy configs serialize this key as `type`.
-    #[serde(default, alias = "type")]
+    #[serde(default)]
     pub rope_type: RopeType,
     /// Geometric base theta controlling the longest base wavelength.
     #[serde(default)]
@@ -307,6 +438,195 @@ pub struct RopeParameters {
     /// Whether Qwen interleaves rather than concatenates multimodal frequencies.
     #[serde(default)]
     pub mrope_interleaved: Option<bool>,
+    /// Whether YaRN rounds its correction range outward to whole pair indices.
+    ///
+    /// Absent means `true`, the reference default; gpt-oss checkpoints set
+    /// `false` to keep fractional ramp bounds. Only YaRN reads this key.
+    #[serde(default)]
+    pub truncate: Option<bool>,
+}
+
+impl RopeType {
+    /// Returns the serialized Hugging Face name, such as `"yarn"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Linear => "linear",
+            Self::Dynamic => "dynamic",
+            Self::Yarn => "yarn",
+            Self::LongRope => "longrope",
+            Self::Llama3 => "llama3",
+            Self::Proportional => "proportional",
+        }
+    }
+}
+
+/// Serialized form of [`RopeParameters`] with separate current and legacy type keys.
+///
+/// Serde aliases map both keys to one field slot and reject a map containing
+/// both as a duplicate field, so the two keys are read independently here and
+/// reconciled by [`resolve_rope_type`]. Destructuring every field in the
+/// conversion makes adding a field to one struct but not the other a compile error.
+#[derive(Deserialize)]
+struct RopeParametersRepr {
+    /// Current scaling-algorithm key.
+    #[serde(default)]
+    rope_type: Option<RopeType>,
+    /// Legacy scaling-algorithm key retained by older and re-saved checkpoints.
+    #[serde(default, rename = "type")]
+    legacy_type: Option<RopeType>,
+    /// See [`RopeParameters::rope_theta`].
+    #[serde(default)]
+    rope_theta: Option<f64>,
+    /// See [`RopeParameters::partial_rotary_factor`].
+    #[serde(default)]
+    partial_rotary_factor: Option<f64>,
+    /// See [`RopeParameters::factor`].
+    #[serde(default)]
+    factor: Option<f64>,
+    /// See [`RopeParameters::original_max_position_embeddings`].
+    #[serde(default)]
+    original_max_position_embeddings: Option<usize>,
+    /// See [`RopeParameters::attention_factor`].
+    #[serde(default)]
+    attention_factor: Option<f64>,
+    /// See [`RopeParameters::beta_fast`].
+    #[serde(default)]
+    beta_fast: Option<f64>,
+    /// See [`RopeParameters::beta_slow`].
+    #[serde(default)]
+    beta_slow: Option<f64>,
+    /// See [`RopeParameters::mscale`].
+    #[serde(default)]
+    mscale: Option<f64>,
+    /// See [`RopeParameters::mscale_all_dim`].
+    #[serde(default)]
+    mscale_all_dim: Option<f64>,
+    /// See [`RopeParameters::short_factor`].
+    #[serde(default)]
+    short_factor: Option<Vec<f64>>,
+    /// See [`RopeParameters::long_factor`].
+    #[serde(default)]
+    long_factor: Option<Vec<f64>>,
+    /// See [`RopeParameters::low_freq_factor`].
+    #[serde(default)]
+    low_freq_factor: Option<f64>,
+    /// See [`RopeParameters::high_freq_factor`].
+    #[serde(default)]
+    high_freq_factor: Option<f64>,
+    /// See [`RopeParameters::mrope_section`].
+    #[serde(default)]
+    mrope_section: Option<Vec<usize>>,
+    /// See [`RopeParameters::mrope_interleaved`].
+    #[serde(default)]
+    mrope_interleaved: Option<bool>,
+    /// See [`RopeParameters::truncate`].
+    #[serde(default)]
+    truncate: Option<bool>,
+}
+
+/// A [`RopeParametersRepr`] that was read from a mapping and never from a sequence.
+///
+/// Serde's derived struct deserializer also accepts a sequence of field values
+/// in declaration order, so through the derived impl alone `[]` would parse as
+/// default RoPE and `["yarn"]` would set `rope_type` positionally. Asking the
+/// deserializer for a map makes every non-object value (sequence, string,
+/// number, boolean, null) a type error before any field is read.
+struct RopeParametersMapping(
+    /// Fields read from the JSON object, before type-key reconciliation.
+    RopeParametersRepr,
+);
+
+impl<'de> Deserialize<'de> for RopeParametersMapping {
+    /// Requests a map and reads its entries with the derived field rules.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Accepts only `visit_map`; every other shape uses serde's type error.
+        struct MappingVisitor;
+
+        impl<'de> Visitor<'de> for MappingVisitor {
+            /// A mapping is the only value this visitor produces.
+            type Value = RopeParametersMapping;
+
+            /// Names the expected shape in serde's `invalid type` message.
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a RoPE parameter object")
+            }
+
+            /// Deserializes the derived representation from the map's entries.
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                RopeParametersRepr::deserialize(MapAccessDeserializer::new(map))
+                    .map(RopeParametersMapping)
+            }
+        }
+
+        deserializer.deserialize_map(MappingVisitor)
+    }
+}
+
+impl TryFrom<RopeParametersMapping> for RopeParameters {
+    /// Serde custom-error text for conflicting `rope_type`/`type` keys.
+    type Error = String;
+
+    /// Reconciles the type keys and moves every other field unchanged.
+    fn try_from(RopeParametersMapping(repr): RopeParametersMapping) -> Result<Self, Self::Error> {
+        let RopeParametersRepr {
+            rope_type,
+            legacy_type,
+            rope_theta,
+            partial_rotary_factor,
+            factor,
+            original_max_position_embeddings,
+            attention_factor,
+            beta_fast,
+            beta_slow,
+            mscale,
+            mscale_all_dim,
+            short_factor,
+            long_factor,
+            low_freq_factor,
+            high_freq_factor,
+            mrope_section,
+            mrope_interleaved,
+            truncate,
+        } = repr;
+        Ok(Self {
+            rope_type: resolve_rope_type(rope_type, legacy_type)?,
+            rope_theta,
+            partial_rotary_factor,
+            factor,
+            original_max_position_embeddings,
+            attention_factor,
+            beta_fast,
+            beta_slow,
+            mscale,
+            mscale_all_dim,
+            short_factor,
+            long_factor,
+            low_freq_factor,
+            high_freq_factor,
+            mrope_section,
+            mrope_interleaved,
+            truncate,
+        })
+    }
+}
+
+/// Chooses the RoPE algorithm from the current and legacy keys.
+///
+/// Either key alone is authoritative, equal keys are accepted, absent keys mean
+/// [`RopeType::Default`], and disagreeing keys are an error naming both values.
+fn resolve_rope_type(
+    current: Option<RopeType>,
+    legacy: Option<RopeType>,
+) -> Result<RopeType, String> {
+    match (current, legacy) {
+        (Some(current), Some(legacy)) if current != legacy => Err(format!(
+            "rope_type \"{}\" conflicts with legacy type \"{}\"; a re-saved config must carry one algorithm",
+            current.as_str(),
+            legacy.as_str()
+        )),
+        (current, legacy) => Ok(current.or(legacy).unwrap_or_default()),
+    }
 }
 
 impl RopeParameters {
@@ -320,59 +640,99 @@ impl RopeParameters {
     ) -> Result<(), ConfigError> {
         nonzero(architecture, "head_dim", head_dim)?;
         let theta = self.rope_theta.or(fallback_theta).unwrap_or(10_000.0);
-        positive_finite(architecture, "rope_theta", theta)?;
+        // A base below one makes `theta^(-2i/d)` grow with `i` and can
+        // overflow the `f32` frequency table (`RopeConfig::new` agrees).
+        if !(theta.is_finite() && theta >= 1.0) {
+            return Err(ConfigError::new(
+                architecture,
+                "rope_theta",
+                "must be finite and at least one",
+            ));
+        }
 
         let factor = self.partial_rotary_factor.unwrap_or(1.0);
-        if !(factor.is_finite() && 0.0 < factor && factor <= 1.0) {
+        let proportional = self.rope_type == RopeType::Proportional;
+        if proportional {
+            // Proportional RoPE reads the factor as the fraction of pairs that
+            // keep a nonzero frequency; zero (every pair unrotated) is valid,
+            // as in Transformers 5.8.0 and `ProportionalRopeScaling`.
+            if !(factor.is_finite() && (0.0..=1.0).contains(&factor)) {
+                return Err(ConfigError::new(
+                    architecture,
+                    "partial_rotary_factor",
+                    "must be finite and in [0, 1] for proportional RoPE",
+                ));
+            }
+        } else if !(factor.is_finite() && 0.0 < factor && factor <= 1.0) {
             return Err(ConfigError::new(
                 architecture,
                 "partial_rotary_factor",
                 "must be finite and in (0, 1]",
             ));
         }
-        let rotary_width = head_dim as f64 * factor;
-        let rounded_rotary_width = rotary_width.round();
-        if (rotary_width - rounded_rotary_width).abs() > 1e-9 || rotary_width < 2.0 {
-            return Err(ConfigError::new(
-                architecture,
-                "partial_rotary_factor",
-                "head_dim * factor must be an integer of at least two channels",
-            ));
-        }
-        let rotary_width = rounded_rotary_width as usize;
+        let rotary_width = if proportional {
+            // Proportional RoPE rotates the whole head in split-half pairs and
+            // reads the factor only as the fraction of leading pairs that keep
+            // a nonzero frequency, `floor(factor * head_dim / 2)`, so the
+            // product need not be an integral channel count.
+            if !head_dim.is_multiple_of(2) {
+                return Err(ConfigError::new(
+                    architecture,
+                    "head_dim",
+                    "proportional RoPE rotates whole-head channel pairs, so head_dim must be even",
+                ));
+            }
+            head_dim
+        } else {
+            let rotary_width = head_dim as f64 * factor;
+            let rounded_rotary_width = rotary_width.round();
+            if (rotary_width - rounded_rotary_width).abs() > 1e-9 || rotary_width < 2.0 {
+                return Err(ConfigError::new(
+                    architecture,
+                    rotary_width_field(rotary_width, head_dim),
+                    "head_dim * factor must be an integer of at least two channels",
+                ));
+            }
+            rounded_rotary_width as usize
+        };
         if !rotary_width.is_multiple_of(2) {
             return Err(ConfigError::new(
                 architecture,
-                "partial_rotary_factor",
+                rotary_width_field(rotary_width as f64, head_dim),
                 "RoPE rotates channel pairs, so the effective width must be even",
             ));
         }
 
         if let Some(sections) = &self.mrope_section {
-            if sections.is_empty() || sections.contains(&0) {
-                return Err(ConfigError::new(
-                    architecture,
-                    "mrope_section",
-                    "sections must be non-empty and contain only positive widths",
-                ));
-            }
-            let section_width = sections
-                .iter()
-                .try_fold(0usize, |sum, width| sum.checked_add(*width))
-                .and_then(|sum| sum.checked_mul(2));
-            if section_width != Some(rotary_width) {
-                return Err(ConfigError::new(
-                    architecture,
-                    "mrope_section",
-                    "twice the complex-pair section sum must equal the rotary width",
-                ));
+            match mrope_section_fault(sections, rotary_width) {
+                Some(MropeSectionFault::EmptyOrZero) => {
+                    return Err(ConfigError::new(
+                        architecture,
+                        "mrope_section",
+                        "sections must be non-empty and contain only positive widths",
+                    ));
+                }
+                Some(MropeSectionFault::WidthMismatch) => {
+                    return Err(ConfigError::new(
+                        architecture,
+                        "mrope_section",
+                        "twice the complex-pair section sum must equal the rotary width",
+                    ));
+                }
+                None => {}
             }
         }
 
         match self.rope_type {
             RopeType::Default => {}
-            RopeType::Linear | RopeType::Dynamic | RopeType::Proportional => {
+            RopeType::Linear | RopeType::Dynamic => {
                 scaling_factor(architecture, self.factor)?;
+            }
+            // Transformers 5.8.0 defaults the proportional position divisor to one.
+            RopeType::Proportional => {
+                if self.factor.is_some() {
+                    scaling_factor(architecture, self.factor)?;
+                }
             }
             RopeType::Yarn => {
                 scaling_factor(architecture, self.factor)?;
@@ -403,15 +763,23 @@ impl RopeParameters {
                     let values = values.ok_or_else(|| {
                         ConfigError::new(architecture, field, "is required for longrope")
                     })?;
+                    // Factors divide `f32` frequencies, so each must round to an
+                    // `f32` that keeps every angle `p * omega / r` finite (see
+                    // `LongRopeScaling::MIN_FACTOR`).
+                    let minimum = crate::position::LongRopeScaling::MIN_FACTOR;
                     if values.len() != expected
-                        || values
-                            .iter()
-                            .any(|value| !value.is_finite() || *value <= 0.0)
+                        || values.iter().any(|&value| {
+                            let rounded = value as f32;
+                            !(rounded.is_finite() && rounded >= minimum)
+                        })
                     {
                         return Err(ConfigError::new(
                             architecture,
                             field,
-                            format!("must contain {expected} positive finite factors"),
+                            format!(
+                                "must contain {expected} factors that round to f32 values in {minimum:e}..={:e} (2^-64 to f32::MAX)",
+                                f32::MAX
+                            ),
                         ));
                     }
                 }
@@ -448,6 +816,20 @@ impl RopeParameters {
     }
 }
 
+/// Names the field to repair when the rotary width `head_dim * partial_rotary_factor` is invalid.
+///
+/// `rotary_width` is the exact product. A whole-head rotation (the product
+/// equals `head_dim`, so the factor is one) is repaired through `head_dim`,
+/// matching the shared translator's mapping of `RopeConfigError`; anything
+/// else, including a non-integral product, through `partial_rotary_factor`.
+fn rotary_width_field(rotary_width: f64, head_dim: usize) -> &'static str {
+    if rotary_width == head_dim as f64 {
+        "head_dim"
+    } else {
+        "partial_rotary_factor"
+    }
+}
+
 /// Validates that a serialized dimension or count is nonzero.
 pub(crate) fn nonzero(
     architecture: &'static str,
@@ -458,6 +840,163 @@ pub(crate) fn nonzero(
         Err(ConfigError::new(architecture, field, "must be nonzero"))
     } else {
         Ok(())
+    }
+}
+
+// Resource bounds for untrusted counts.
+//
+// A `config.json` is untrusted input: a few hundred bytes can declare
+// `num_hidden_layers = 2^64 - 1` or a million routed experts. Validation,
+// checkpoint contracts, and model construction each hold host structures with
+// one entry per layer (and, in per-expert checkpoint layouts, one entry per
+// routed expert of every MoE layer), so an unchecked count makes them overflow
+// a vector's capacity (a panic) or allocate until the process is killed,
+// instead of returning an error. Every family therefore checks its counts
+// against the bounds below before it builds anything proportional to them.
+//
+// The bounds follow from the default artifact tensor limit
+// [`MAX_CHECKPOINT_TENSORS`]: a configuration is only useful if some checkpoint
+// can satisfy it, and its checkpoint contract lists every parameter tensor, so
+// no accepted configuration may describe a longer contract than that limit.
+// A dense contract grows with the depth alone, by at most
+// `MAX_TENSORS_PER_LAYER` tensors per layer index summed over every stack,
+// which fixes [`MAX_LAYERS`]. A per-expert MoE contract grows with the product
+// of MoE layers and experts, so those families compute its exact length and
+// compare it with the limit itself.
+
+/// The default artifact tensor limit, ten million tensors.
+///
+/// Equal to [`ArtifactLimits::default`](crate::checkpoint::ArtifactLimits)'s
+/// `max_tensors`, the largest inventory that default checkpoint discovery
+/// accepts. A configuration whose complete checkpoint contract would list
+/// more tensors than this describes a checkpoint that no default-limited load
+/// can accept, so no family accepts one: dense families through
+/// [`MAX_LAYERS`], and families whose contracts grow with a product of two
+/// counts (one tensor set per routed expert of every MoE layer) by checking
+/// the exact contract length during validation, before a contract or graph
+/// exists.
+pub const MAX_CHECKPOINT_TENSORS: usize = 10_000_000;
+
+/// The most tensors a dense checkpoint contract lists per layer index, summed over all stacks.
+///
+/// Measured for every family by the configuration tests
+/// (`every_dense_contract_fits_the_artifact_limit_at_the_layer_bound`):
+/// Llama-family layouts list 9 tensors per layer (16 with every projection
+/// bias), Gemma 11 to 13, GPT-NeoX and Muse 12, GPT-2 16, gpt-oss 17, T5 23
+/// (one encoder and one decoder layer), and Qwen3.5 up to 25 (one decoder
+/// and one multi-token-prediction layer). Thirty-two leaves headroom for new
+/// optional tensors; the test fails if a contract outgrows it.
+const MAX_TENSORS_PER_LAYER: usize = 32;
+
+/// The largest accepted layer count of one stack, `2^18` (262,144).
+///
+/// Validation, checkpoint contracts, and graph construction keep one entry
+/// per layer, so an absurd count in an untrusted `config.json` would overflow
+/// a vector's capacity or exhaust memory before any error could be reported.
+/// The bound is the largest power of two whose densest contract,
+/// `MAX_TENSORS_PER_LAYER` (32) tensors per layer index, fits the
+/// [`MAX_CHECKPOINT_TENSORS`] artifact limit: `2^18 · 32` is about 8.4
+/// million tensors, leaving room for embeddings and heads, while `2^19 · 32`
+/// exceeds ten million. That is about a thousand times the depth of any
+/// released checkpoint (all below `2^8` layers).
+///
+/// The bound keeps contracts within the artifact limit, not small: at the
+/// bound a Llama contract lists about 2.4 million tensors, as many as a
+/// checkpoint of that depth would hold, and a per-layer schedule takes
+/// between a quarter of a megabyte (one flag per layer) and about twenty
+/// megabytes (gpt-oss's one string per layer).
+pub const MAX_LAYERS: usize = 1 << 18;
+
+/// The largest accepted routed-expert count of one MoE layer, `2^20`.
+///
+/// Released routers choose among at most a few hundred experts (DeepSeek-V3
+/// 256, Kimi K2 384). The bound keeps every per-expert table (router rows,
+/// routing groups, dispatch counts) small. Per-expert checkpoint layouts
+/// store two or three tensors per expert, so `2^20` experts in a single MoE
+/// layer already list a fifth to a third of the [`MAX_CHECKPOINT_TENSORS`]
+/// artifact limit; those families bound the product of MoE layers and
+/// experts exactly, as the length of their whole contract.
+pub const MAX_EXPERTS: usize = 1 << 20;
+
+/// Compile-time check of the [`MAX_LAYERS`] derivation: the largest power of two that fits.
+const _: () = assert!(
+    MAX_LAYERS.is_power_of_two()
+        && MAX_LAYERS * MAX_TENSORS_PER_LAYER <= MAX_CHECKPOINT_TENSORS
+        && 2 * MAX_LAYERS * MAX_TENSORS_PER_LAYER > MAX_CHECKPOINT_TENSORS
+);
+
+/// Validates a stack depth: nonzero and at most [`MAX_LAYERS`].
+///
+/// Call it before building anything with one entry per layer.
+pub(crate) fn layer_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+) -> Result<(), ConfigError> {
+    bounded_count(architecture, field, value, MAX_LAYERS, "layers")
+}
+
+/// Validates a routed-expert count: nonzero and at most [`MAX_EXPERTS`].
+///
+/// Call it before building anything with one entry per expert.
+pub(crate) fn expert_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+) -> Result<(), ConfigError> {
+    bounded_count(architecture, field, value, MAX_EXPERTS, "experts")
+}
+
+/// Validates the size of a complete checkpoint contract.
+///
+/// `count` is the exact number of tensors the family's contract lists, or
+/// `None` when that number overflows `usize`; either way an inventory beyond
+/// [`MAX_CHECKPOINT_TENSORS`] is reported at `field`, the count that drives it.
+pub(crate) fn checkpoint_tensor_count(
+    architecture: &'static str,
+    field: &'static str,
+    count: Option<usize>,
+) -> Result<(), ConfigError> {
+    match count {
+        Some(count) if count <= MAX_CHECKPOINT_TENSORS => Ok(()),
+        Some(count) => Err(ConfigError::new(
+            architecture,
+            field,
+            format!(
+                "the checkpoint would list {count} tensors, more than the \
+                 {MAX_CHECKPOINT_TENSORS}-tensor artifact limit"
+            ),
+        )),
+        None => Err(ConfigError::new(
+            architecture,
+            field,
+            format!(
+                "the checkpoint tensor count overflows usize, far beyond the \
+                 {MAX_CHECKPOINT_TENSORS}-tensor artifact limit"
+            ),
+        )),
+    }
+}
+
+/// Accepts `value` in `1..=maximum`, naming the bounded quantity (`layers`, `experts`).
+///
+/// The verdict is the Verus-verified `count_fault`: a zero is reported, with
+/// [`nonzero`]'s message, before an excess.
+fn bounded_count(
+    architecture: &'static str,
+    field: &'static str,
+    value: usize,
+    maximum: usize,
+    unit: &str,
+) -> Result<(), ConfigError> {
+    match count_fault(value, maximum) {
+        None => Ok(()),
+        Some(CountFault::Zero) => Err(ConfigError::new(architecture, field, "must be nonzero")),
+        Some(CountFault::AboveMaximum) => Err(ConfigError::new(
+            architecture,
+            field,
+            format!("{value} exceeds the supported maximum of {maximum} {unit}"),
+        )),
     }
 }
 
@@ -496,6 +1035,9 @@ pub(crate) fn probability(
 }
 
 /// Validates the quotient needed when query heads share key/value heads.
+///
+/// The verdict is the Verus-verified `divisibility_fault`: both counts must be
+/// non-zero (numerator first) and the denominator must divide the numerator.
 pub(crate) fn divisible(
     architecture: &'static str,
     numerator_field: &'static str,
@@ -503,20 +1045,31 @@ pub(crate) fn divisible(
     denominator_field: &'static str,
     denominator: usize,
 ) -> Result<(), ConfigError> {
-    nonzero(architecture, numerator_field, numerator)?;
-    nonzero(architecture, denominator_field, denominator)?;
-    if numerator.is_multiple_of(denominator) {
-        Ok(())
-    } else {
-        Err(ConfigError::new(
+    match divisibility_fault(numerator, denominator) {
+        None => Ok(()),
+        // The verified fault names the zero count; the message matches `nonzero`.
+        Some(DivisibilityFault::ZeroNumerator) => Err(ConfigError::new(
+            architecture,
+            numerator_field,
+            "must be nonzero",
+        )),
+        Some(DivisibilityFault::ZeroDenominator) => Err(ConfigError::new(
+            architecture,
+            denominator_field,
+            "must be nonzero",
+        )),
+        Some(DivisibilityFault::Indivisible) => Err(ConfigError::new(
             architecture,
             numerator_field,
             format!("must be divisible by {denominator_field}"),
-        ))
+        )),
     }
 }
 
 /// Validates that token IDs index rows in the embedding table.
+///
+/// The verdict is the Verus-verified `token_id_fault`: a present field must
+/// list at least one ID, and every ID must be below `vocab_size`.
 pub(crate) fn token_ids(
     architecture: &'static str,
     field: &'static str,
@@ -525,19 +1078,22 @@ pub(crate) fn token_ids(
 ) -> Result<(), ConfigError> {
     if let Some(ids) = ids {
         let values = ids.iter().collect::<Vec<_>>();
-        if values.is_empty() {
-            return Err(ConfigError::new(
-                architecture,
-                field,
-                "must contain at least one token ID",
-            ));
-        }
-        if values.iter().any(|id| *id >= vocab_size) {
-            return Err(ConfigError::new(
-                architecture,
-                field,
-                "contains an ID outside the vocabulary",
-            ));
+        match token_id_fault(&values, vocab_size) {
+            Some(TokenIdFault::Empty) => {
+                return Err(ConfigError::new(
+                    architecture,
+                    field,
+                    "must contain at least one token ID",
+                ));
+            }
+            Some(TokenIdFault::OutOfVocabulary) => {
+                return Err(ConfigError::new(
+                    architecture,
+                    field,
+                    "contains an ID outside the vocabulary",
+                ));
+            }
+            None => {}
         }
     }
     Ok(())
@@ -593,7 +1149,7 @@ fn original_context(
             "is required by the selected scaling algorithm",
         )
     })?;
-    if original == 0 || original > max_position_embeddings {
+    if !original_context_fits(original, max_position_embeddings) {
         Err(ConfigError::new(
             architecture,
             "rope.original_max_position_embeddings",

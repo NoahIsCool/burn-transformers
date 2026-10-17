@@ -1,13 +1,11 @@
 //! Loads the pinned official FLAN-T5-small artifact and runs cached beam search.
 //!
-//! The runtime is deliberately local-only. Download the immutable checkpoint outside the program,
-//! enable the `flex` and `tokenizers` features, and pass its directory as the first argument:
+//! The runtime is deliberately local-only: download the immutable checkpoint
+//! outside the program and pass its directory as the first argument.
 //!
 //! ```text
-//! cargo run --release \
-//!   --no-default-features --features std,flex,tokenizers \
-//!   --example flan_t5_small -- /path/to/flan-t5-small \
-//!   "translate English to German: The house is wonderful."
+//! cargo run --release --locked --features tokenizers --example flan_t5_small -- \
+//!   /path/to/flan-t5-small "translate English to German: The house is wonderful."
 //! ```
 //!
 //! Flex executes F32 tensors with I32 IDs. Encoder attention is bidirectional;
@@ -15,51 +13,29 @@
 //! tokens. Source masks travel with tokenized input and cached decode state stays
 //! external to model parameters. Four beams accumulate log-probability scores
 //! under the generator's configured defaults; at most 64 new tokens are produced.
-//! This inference-only path uses no autodiff optimizer or training dropout.
+//! The decoded text goes to standard output and the best hypothesis's finish
+//! reason, length-normalized score, and length to standard error. This
+//! inference-only path uses no autodiff optimizer or training dropout.
 
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
-use std::{error::Error as StdError, ffi::OsString, io, path::PathBuf};
+use std::{error::Error as StdError, ffi::OsString, path::PathBuf};
 
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 use burn::backend::Flex;
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 use transformers::{
     AutoLoadOptions, AutoSeq2SeqLm, EncodeOptions,
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
-/// Explains the requirements when the Flex backend or local tokenization is disabled.
-#[cfg(not(all(feature = "flex", feature = "tokenizers")))]
-fn main() {
-    eprintln!("enable the `flex` and `tokenizers` features to run the FLAN-T5-small example");
-}
+/// CPU backend with F32 activations and I32 token IDs.
+type Cpu = Flex<f32, i32>;
+
+/// Source text used when no prompt is given.
+const DEFAULT_PROMPT: &str = "translate English to German: The house is wonderful.";
 
 /// Loads, tokenizes, generates, and decodes through the public release surface.
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 fn main() -> Result<(), Box<dyn StdError>> {
-    let mut arguments = std::env::args_os().skip(1);
-    let root = arguments.next().map(PathBuf::from).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usage: flan_t5_small MODEL_DIRECTORY [PROMPT]",
-        )
-    })?;
-    let prompt = arguments
-        .next()
-        .unwrap_or_else(|| OsString::from("translate English to German: The house is wonderful."));
-    let prompt = prompt
-        .into_string()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "prompt must be UTF-8"))?;
-    if arguments.next().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "expected at most one prompt argument",
-        )
-        .into());
-    }
-
+    let (root, prompt) = arguments(std::env::args_os().skip(1))?;
     let device = Default::default();
-    let loaded = AutoSeq2SeqLm::<Flex<f32, i32>>::load_local(
+    let loaded = AutoSeq2SeqLm::<Cpu>::load_local(
         &root,
         &AutoLoadOptions {
             repository: Some("google/flan-t5-small".into()),
@@ -68,24 +44,16 @@ fn main() -> Result<(), Box<dyn StdError>> {
         },
         &device,
     )?;
-    let tokenizer = loaded.tokenizer().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the local directory does not contain tokenizer.json",
-        )
-    })?;
+    let tokenizer = loaded
+        .tokenizer()
+        .ok_or("the model directory has no tokenizer.json")?;
     let source = tokenizer
         .encode(&prompt, &EncodeOptions::default())?
-        .to_causal_input::<Flex<f32, i32>>(&device)?;
-    let model = match loaded.model() {
-        AutoSeq2SeqLm::T5(model) => model,
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "automatic seq2seq loading returned a non-T5 model",
-            )
-            .into());
-        }
+        .to_causal_input::<Cpu>(&device)?;
+    // The automatic registry is open to future encoder-decoder families; the
+    // T5 helper reads its decoder-start, padding, and EOS tokens from the config.
+    let AutoSeq2SeqLm::T5(model) = loaded.model() else {
+        return Err("expected a T5-family checkpoint".into());
     };
     let generated = generate_t5_beam_search(
         model,
@@ -100,8 +68,8 @@ fn main() -> Result<(), Box<dyn StdError>> {
     let best = generated
         .sequences
         .first()
-        .and_then(|sequences| sequences.first())
-        .ok_or_else(|| io::Error::other("beam search returned no hypothesis"))?;
+        .and_then(|hypotheses| hypotheses.first())
+        .ok_or("beam search returned no hypothesis")?;
     println!("{}", tokenizer.decode(&best.token_ids, true)?);
     eprintln!(
         "finish={:?} score={:.6} tokens={}",
@@ -111,3 +79,28 @@ fn main() -> Result<(), Box<dyn StdError>> {
     );
     Ok(())
 }
+
+/// Splits `MODEL_DIR [PROMPT]` into the checkpoint directory and the source text.
+///
+/// The directory may be any operating-system path, including one that is not
+/// UTF-8. The prompt must be UTF-8 because it is tokenized as text.
+fn arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<(PathBuf, String), Box<dyn StdError>> {
+    let usage = "usage: flan_t5_small MODEL_DIR [PROMPT]";
+    let root = arguments.next().map(PathBuf::from).ok_or(usage)?;
+    let prompt = match arguments.next() {
+        Some(prompt) => prompt
+            .into_string()
+            .map_err(|_| "PROMPT must be UTF-8 text")?,
+        None => DEFAULT_PROMPT.into(),
+    };
+    if arguments.next().is_some() {
+        return Err(usage.into());
+    }
+    Ok((root, prompt))
+}
+
+#[cfg(test)]
+#[path = "generation/flan_t5_small_tests.rs"]
+mod tests;

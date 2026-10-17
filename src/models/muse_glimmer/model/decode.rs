@@ -1,39 +1,77 @@
-//! Preallocated cache-aware Muse-Glimmer inference.
+//! Preallocated cache-aware, batched Muse-Glimmer inference.
+//!
+//! # Storage
 //!
 //! Local and global attention layers have different physical retention needs.
-//! Sliding layers share one mirrored-ring group whose tensors are shaped
-//! `[batch, kv_heads, 2 * window, head_dim]`; mirroring makes the newest logical
-//! window one contiguous view after wraparound. NoPE global layers share a full
-//! group shaped `[batch, kv_heads, capacity, head_dim]`. A deterministic schedule
-//! maps model-layer indices to dense slots inside those groups.
+//! Sliding layers share one mirrored-ring group with its own window
+//! ([`NativeKvCacheSpec::with_sliding_window`]), whose tensors are shaped
+//! `[batch, kv_heads, 2 * window, head_dim]`; mirroring keeps the newest
+//! logical window one contiguous view after wraparound. NoPE global layers
+//! share a full group shaped `[batch, kv_heads, capacity, head_dim]`. A
+//! deterministic schedule maps model-layer indices to dense slots inside
+//! those groups.
 //!
-//! Public operations are failure-atomic. Every row is compacted according to the
-//! semantic `true == valid` mask, all layer results and KV appends are computed in
-//! operation-local handles, and every physical write is prevalidated. Logical
-//! lengths advance only after the complete write set is known to be valid, after
-//! which prepared assignments are infallible. A returned error therefore leaves
-//! both lengths and cache bytes at the retry baseline.
+//! # Batched execution
+//!
+//! A call packs every row's valid tokens into one `[B, T]` block (the shared
+//! [`BlockLayout`] of `models::shared::block`), runs each layer once for the
+//! whole batch, and scatters results back to `[B, S]` with exact zeros at
+//! padding and for finished rows. Global layers write their new keys and
+//! values ahead into full storage and attend over one zero-copy slot-ordered
+//! view `[0, max_b (L_b + n_b))`; local layers read their ring history in
+//! slot order and append the step's tokens as a second segment. Queries sit
+//! at cache slots `L_b + k`; visibility (causality, the window, validity) is
+//! derived from key positions, and stale invalid slots are zeroed before the
+//! value product. Long cached prefills run in score-bounded query chunks:
+//! global chunks score their verified causal key prefix, and local chunks
+//! score the whole ring only while one of their rows can still see history,
+//! then exactly their rows' window union (`schedule::ring_chunk_keys`).
+//!
+//! Token IDs and explicit positions are validated only at valid columns, so
+//! packing overwrites padding entries with token and position zero
+//! (`BlockLayout::compact_inert`) before the embedding and rotary tables.
+//!
+//! # Atomicity
+//!
+//! Every input, capacity, and cursor check runs before any model work. Ring
+//! writes are recorded in the step and published with
+//! [`TensorDecodeState::publish_step`] after logits succeed, so a failure
+//! leaves every length and every ring byte unchanged; full-storage
+//! write-aheads may leave bytes beyond a row's length, which no read can
+//! reach and the next write overwrites (logical atomicity).
 
-use std::collections::{BTreeMap, BTreeSet};
+use core::num::NonZeroUsize;
 
-use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, TokenMask},
+    architecture::DecodeState as ArchitectureDecodeState,
     cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
+        CacheConfig, KvBatchSegment, KvCacheStorage, NativeKvCacheSpec, StepBank, TensorCacheError,
         TensorDecodeState,
     },
-    position::{RopeScaling, apply_rotary, derive_position_ids, rotary_angles},
+    models::shared::{
+        EmptyRows, StatefulContract, StatefulRows,
+        block::BlockLayout,
+        block_plan::{first_uncacheable_context, rotary_contexts},
+        ensure_same_device, prepare_stateful_rows, select_hidden_with_last_columns,
+        validate_logits_selection,
+    },
+    position::{RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };
 
 use super::{
-    MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm, MuseGlimmerModel, evaluated_context,
-    scale_free_rms_norm, select_hidden, validate_logits_selection, validate_position_range,
-    validate_token_ids,
+    INPUT_NAMES, MuseAttentionProjection, MuseGlimmerForCausalLm, MuseKeySlicing, RotaryTables,
+    plan_attention_chunks,
 };
-use crate::models::muse_glimmer::{MuseGlimmerLayerType, MuseGlimmerTextConfig};
+use crate::models::muse_glimmer::{
+    MuseGlimmerLayerType, MuseGlimmerTextConfig,
+    schedule::{GroupFault, cache_groups},
+};
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "Muse decode state";
 
 /// Stateful operation whose empty-row semantics differ intentionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +83,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether a semantic row may contain no valid token.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 }
 
@@ -85,19 +126,6 @@ impl MuseGlimmerLayerCache {
         match self {
             Self::Sliding { .. } => KvCacheStorage::MirroredSlidingRing,
             Self::Full { .. } => KvCacheStorage::Full,
-        }
-    }
-
-    /// Returns the local window for sliding slots and no bound for full slots.
-    fn window(self, window: Option<usize>) -> Result<Option<usize>> {
-        match self {
-            Self::Sliding { .. } => window.map(Some).ok_or_else(|| {
-                Error::configuration(
-                    "muse_glimmer.decode_state.window",
-                    "a sliding cache slot requires an effective window",
-                )
-            }),
-            Self::Full { .. } => Ok(None),
         }
     }
 }
@@ -146,23 +174,9 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
                 "must fit Burn's portable signed position-index range",
             ));
         }
-        let physical_window = model
-            .config()
-            .resolved_sliding_window()
-            .map(|window| window.min(requested.capacity()));
-        let internal_config = CacheConfig::new(requested.sequence_count(), requested.capacity())
-            .map_err(|error| {
-                Error::configuration("muse_glimmer.decode_state", error.to_string())
-            })?;
-        let internal_config = match physical_window {
-            Some(window) => internal_config
-                .with_sliding_window(window)
-                .map_err(|error| {
-                    Error::configuration("muse_glimmer.decode_state", error.to_string())
-                })?,
-            None => internal_config,
-        };
-        let layout = cache_layout(model, physical_window)?;
+        // Each ring group carries its own window, so the bank needs none.
+        let internal_config = CacheConfig::new(requested.sequence_count(), requested.capacity())?;
+        let layout = planned_layout(model, requested.capacity())?;
         let mut tensors = TensorDecodeState::new(internal_config, batch_size, device)?;
         for (expected_group, spec) in layout.groups.iter().copied().enumerate() {
             let group = tensors.main_mut().add_native_kv(spec)?;
@@ -194,8 +208,23 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
     }
 
     /// Verifies that state geometry belongs to the supplied model.
+    ///
+    /// The expected layout is exactly what [`Self::new`] would allocate for
+    /// this model at the state's logical capacity, including the model's own
+    /// physical ring window `min(sliding_window, capacity)`. Decode masks
+    /// sliding layers with the state's stored window, so comparing windows is
+    /// what stops a state from a twin model that differs only in
+    /// `sliding_window` from silently attending over the wrong span. A
+    /// full-attention-only state (no window) on a hybrid model, or the
+    /// reverse, differs in its schedule and window and is refused the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cache("Muse-Glimmer decode state is incompatible with the
+    /// model")` for any schedule, group, or window mismatch, and a cache error
+    /// naming the group when a bank's geometry differs from its spec.
     fn validate_for_model(&self, model: &MuseGlimmerForCausalLm<B>) -> Result<()> {
-        let expected = cache_layout(model, self.layout.window)?;
+        let expected = planned_layout(model, self.tensors.capacity())?;
         if expected != self.layout || self.tensors.main().native_kv_count() != expected.groups.len()
         {
             return Err(Error::Cache(
@@ -210,6 +239,15 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
             }
         }
         Ok(())
+    }
+
+    /// Returns the group index of the given storage kind, if the layout has one.
+    fn group_of(&self, storage: KvCacheStorage) -> Option<usize> {
+        self.layout
+            .schedule
+            .iter()
+            .find(|slot| slot.storage() == storage)
+            .map(|slot| slot.coordinates().0)
     }
 }
 
@@ -309,7 +347,7 @@ impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
 }
 
 impl<B: Backend> MuseGlimmerForCausalLm<B> {
-    /// Evaluates one masked segment against external committed KV state.
+    /// Evaluates one masked segment against external KV state in one batched pass.
     fn forward_with_decode_state(
         &self,
         input: CausalLmInput<B>,
@@ -332,75 +370,98 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         let prepared = prepare_stateful_input(self, &input, state, phase)?;
         validate_logits_selection(&options.logits, prepared.sequence)?;
         let device = input.token_ids.device();
-        let diagnostic_count = self.model.layers.len() + 2;
-        let mut pending = PendingKvWrites::new();
-        let mut final_rows = Vec::with_capacity(prepared.batch);
-        let mut hidden_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
-            (0..diagnostic_count)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
-        } else {
-            Vec::new()
+        let Some(layout) = BlockLayout::<B>::new(&prepared, state.tensors.lengths(), &device)?
+        else {
+            return self.inactive_output(&prepared, options, &device);
         };
-
-        for row in 0..prepared.batch {
-            let valid = &prepared.valid_indices[row];
-            if valid.is_empty() {
-                let empty = empty_hidden_row(self, prepared.sequence, &device);
-                final_rows.push(empty.clone());
-                if options.hidden_states {
-                    for destination in &mut hidden_rows {
-                        destination.push(empty.clone());
-                    }
+        // Masked columns are never validated, so padding entries receive the
+        // valid token 0 and position 0 instead of whatever sentinel they hold.
+        let tokens = layout.compact_inert(input.token_ids.clone(), 0);
+        let positions = match &input.position_ids {
+            Some(position_ids) => layout.compact_inert(position_ids.clone(), 0),
+            None => layout.implicit_positions(),
+        };
+        let tables = self.cached_rotary_tables(positions, &prepared)?;
+        let mut step = state.tensors.step(&prepared.token_counts)?;
+        let full_group = state.group_of(KvCacheStorage::Full);
+        let full_plan = full_group
+            .map(|group| state.tensors.kv_read_plan_through(&step, group))
+            .transpose()?;
+        let sliding_group = state.group_of(KvCacheStorage::MirroredSlidingRing);
+        let sliding_plan = sliding_group
+            .map(|group| state.tensors.kv_read_plan(StepBank::Main, group))
+            .transpose()?;
+        let mut hidden = self.model.embed(tokens)?;
+        let mut hidden_states = Vec::new();
+        if options.hidden_states {
+            hidden_states.push(layout.scatter(hidden.clone()));
+        }
+        for (index, layer) in self.model.layers.iter().enumerate() {
+            let angles = layer
+                .rope
+                .as_ref()
+                .map(|rope| tables.get(rope))
+                .transpose()?;
+            let (residual, projection) = layer.attention_projection(hidden, angles, &mut None)?;
+            let slot = state.layout.schedule[index];
+            let (group, group_layer) = slot.coordinates();
+            let segment = match (slot, &full_plan, &sliding_plan) {
+                (MuseGlimmerLayerCache::Full { .. }, Some(plan), _) => {
+                    state.tensors.write_kv_ahead(
+                        &mut step,
+                        group,
+                        group_layer,
+                        projection.key.clone(),
+                        projection.value.clone(),
+                    )?;
+                    state
+                        .tensors
+                        .read_kv_through(&step, group, group_layer, plan)?
+                        .materialize()
                 }
-                continue;
+                (MuseGlimmerLayerCache::Sliding { .. }, _, Some(plan)) => {
+                    let history = state
+                        .tensors
+                        .main()
+                        .native_kv(group)?
+                        .read_batch(group_layer, plan)?;
+                    let fresh = state.tensors.step_token_segment(
+                        &step,
+                        projection.key.clone(),
+                        projection.value.clone(),
+                    )?;
+                    step.push_kv_batch(
+                        group,
+                        group_layer,
+                        projection.key.clone(),
+                        projection.value.clone(),
+                    );
+                    history.with_segment(fresh)?.materialize()
+                }
+                _ => None,
             }
-            let selector = selection_tensor(valid, &device)?;
-            let tokens = input
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..prepared.sequence])
-                .select(1, selector.clone());
-            let baseline = state.tensors.lengths()[row];
-            let positions = match &input.position_ids {
-                Some(position_ids) => position_ids
-                    .clone()
-                    .slice([row..row + 1, 0..prepared.sequence])
-                    .select(1, selector),
-                None => implicit_positions(baseline, valid.len(), &device)?,
-            };
-            let compact = self.model.forward_compact_row(
-                tokens,
-                positions,
-                row,
-                baseline,
-                prepared.evaluated_contexts[row],
-                state,
-                &mut pending,
-                options.hidden_states,
-            )?;
-            final_rows.push(scatter_compact(compact.hidden, prepared.sequence, valid)?);
+            .ok_or_else(|| Error::Cache(format!("Muse layer {index} read no cached keys")))?;
+            let window = layer.window(state.layout.window)?;
+            let context = cached_context(layer, &projection, &segment, &layout, slot, window)?;
+            let attended = layer
+                .self_attn
+                .gated_output(context, projection.gate, None)?;
+            hidden = layer.finish_block(residual, attended, None)?;
             if options.hidden_states {
-                if compact.hidden_states.len() != diagnostic_count {
-                    return Err(Error::Cache(format!(
-                        "Muse hidden-state count must be {diagnostic_count}, found {}",
-                        compact.hidden_states.len()
-                    )));
-                }
-                for (destination, hidden) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                    destination.push(scatter_compact(hidden, prepared.sequence, valid)?);
-                }
+                hidden_states.push(layout.scatter(hidden.clone()));
             }
         }
-
-        let hidden = Tensor::cat(final_rows, 0);
-        let hidden_states = hidden_rows
-            .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
-        let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
+        let hidden = layout.scatter(self.model.norm.forward(hidden));
+        if options.hidden_states {
+            hidden_states.push(hidden.clone());
+        }
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
         let logits = self.project_logits(selected)?;
-        pending.commit(state, &prepared.token_counts)?;
+        state.tensors.publish_step(step)?;
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -410,414 +471,242 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
             load_balancing_loss: None,
         })
     }
-}
 
-impl<B: Backend> MuseGlimmerModel<B> {
-    /// Runs one compact semantic row while deferring every physical cache write.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_compact_row(
+    /// Builds the exact-zero output of a decode step in which every row is finished.
+    fn inactive_output(
         &self,
-        token_ids: Tensor<B, 2, Int>,
-        positions: Tensor<B, 2, Int>,
-        row: usize,
-        baseline: usize,
-        evaluated_context: usize,
-        state: &MuseGlimmerDecodeState<B>,
-        pending: &mut PendingKvWrites<B>,
-        retain_hidden_states: bool,
-    ) -> Result<CompactRowOutput<B>> {
-        let mut hidden = scale_free_rms_norm(
-            self.embed_tokens.forward(token_ids),
-            self.config.rms_norm_eps,
+        prepared: &StatefulRows,
+        options: &ForwardOptions,
+        device: &B::Device,
+    ) -> Result<CausalLmOutput<B>> {
+        let hidden = Tensor::<B, 3>::zeros(
+            [prepared.batch, prepared.sequence, self.config().hidden_size],
+            (device, self.model.embed_tokens.weight.val().dtype()),
         );
-        let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
-            self.layers.len() + 2
-        } else {
-            0
-        });
-        if retain_hidden_states {
-            hidden_states.push(hidden.clone());
-        }
-        for (layer_index, layer) in self.layers.iter().enumerate() {
-            let cache_slot = state.layout.schedule[layer_index];
-            hidden = layer.forward_cached(
-                hidden,
-                positions.clone(),
-                evaluated_context,
-                row,
-                baseline,
-                cache_slot,
-                state,
-                layer_index,
-                pending,
-            )?;
-            if retain_hidden_states {
-                hidden_states.push(hidden.clone());
-            }
-        }
-        hidden = self.norm.forward(hidden);
-        if retain_hidden_states {
-            hidden_states.push(hidden.clone());
-        }
-        Ok(CompactRowOutput {
-            hidden,
-            hidden_states,
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
+        Ok(CausalLmOutput {
+            logits: self.project_logits(selected)?,
+            final_hidden_state: options.hidden_states.then(|| hidden.clone()),
+            hidden_states: if options.hidden_states {
+                vec![hidden; self.model.layers.len() + 2]
+            } else {
+                Vec::new()
+            },
+            attentions: Vec::new(),
+            routers: Vec::new(),
+            load_balancing_loss: None,
         })
     }
-}
 
-/// Result of one compact row before rectangular scatter.
-struct CompactRowOutput<B: Backend> {
-    /// Final normalized compact row, shaped `[1, valid_tokens, hidden_size]`.
-    hidden: Tensor<B, 3>,
-    /// Requested embedding, block-residual, and final-normalized row snapshots.
-    hidden_states: Vec<Tensor<B, 3>>,
-}
-
-impl<B: Backend> MuseGlimmerDecoderLayer<B> {
-    /// Evaluates one cached sandwich layer without publishing its new keys.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_cached(
+    /// Builds the block's rotary tables, per row only where frequencies differ.
+    ///
+    /// Static scalings use one table per configuration for every row.
+    /// Context-dependent scalings evaluate each row at its own context, as an
+    /// independent batch-one call would, and concatenate the tables over rows.
+    fn cached_rotary_tables(
         &self,
-        hidden: Tensor<B, 3>,
         positions: Tensor<B, 2, Int>,
-        evaluated_context: usize,
-        row: usize,
-        baseline: usize,
-        cache_slot: MuseGlimmerLayerCache,
-        state: &MuseGlimmerDecodeState<B>,
-        model_layer: usize,
-        pending: &mut PendingKvWrites<B>,
-    ) -> Result<Tensor<B, 3>> {
-        let residual = hidden.clone();
-        let normalized = self.input_layernorm.forward(hidden);
-        let mut projection = self.self_attn.project_self(normalized)?;
-        if let Some(rope) = self.rope {
-            let angles = rotary_angles(rope, positions, evaluated_context)?;
-            (projection.query, projection.key) =
-                apply_rotary(projection.query, projection.key, &angles)?;
+        prepared: &StatefulRows,
+    ) -> Result<RotaryTables<B>> {
+        // Verified: the first active context (at least one), whether every
+        // active row shares it, and each row's own context.
+        let contexts = rotary_contexts(&prepared.token_counts, &prepared.evaluated_contexts);
+        let ropes = self.model.distinct_ropes();
+        if contexts.uniform
+            || ropes
+                .iter()
+                .all(|rope| !rope.scaling().is_context_dependent())
+        {
+            return self.model.rotary_tables(positions, contexts.first);
         }
-        let new_keys = projection.key.clone();
-        let new_values = projection.value.clone();
-        let (group, group_layer) = cache_slot.coordinates();
-        let cache = state.tensors.main().native_kv(group)?;
-        let history = cache.read_sequence(group_layer, row, baseline)?;
-        let retained = history.retained_positions();
-        let local_window = cache_slot.window(state.layout.window)?;
-        let expected_start = local_window.map_or(0, |window| baseline.saturating_sub(window));
-        if retained != (expected_start..baseline) {
-            return Err(Error::Cache(format!(
-                "Muse layer {model_layer} retained {retained:?}, expected {expected_start}..{baseline}"
-            )));
-        }
-        if let Some((past_keys, past_values)) = history.materialize() {
-            projection.key = Tensor::cat(vec![past_keys, projection.key], 2);
-            projection.value = Tensor::cat(vec![past_values, projection.value], 2);
-        }
-        let attended = self.self_attn.attend_cached(projection, local_window)?;
-        let hidden = residual + self.post_attention_layernorm.forward(attended);
-        let residual = hidden.clone();
-        let fed = super::muse_gated_feed_forward(
-            &self.mlp,
-            self.pre_feedforward_layernorm.forward(hidden),
-        )?;
-        let hidden = residual + self.post_feedforward_layernorm.forward(fed);
-        pending.writes.push(PendingKvWrite {
-            model_layer,
-            group,
-            group_layer,
-            row,
-            start: baseline,
-            keys: new_keys,
-            values: new_values,
-        });
-        Ok(hidden)
+        let dtype = self.model.embed_tokens.weight.val().dtype();
+        let [batch, block] = positions.dims();
+        let entries = ropes
+            .into_iter()
+            .map(|rope| {
+                let mut cosine = Vec::with_capacity(batch);
+                let mut sine = Vec::with_capacity(batch);
+                let mut rotary_dimension = 0;
+                for row in 0..batch {
+                    let context = contexts.rows[row];
+                    let angles = rotary_angles_from_frequencies(
+                        &RotaryFrequencies::new(rope, context)?,
+                        positions.clone().slice([row..row + 1, 0..block]),
+                    )?
+                    .to_dtype(dtype);
+                    rotary_dimension = angles.rotary_dimension;
+                    cosine.push(angles.cosine);
+                    sine.push(angles.sine);
+                }
+                Ok((
+                    rope,
+                    RotaryAngles {
+                        cosine: Tensor::cat(cosine, 0),
+                        sine: Tensor::cat(sine, 0),
+                        rotary_dimension,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(RotaryTables { entries })
     }
 }
 
-/// One deferred native-KV append tagged with its model and group coordinates.
-struct PendingKvWrite<B: Backend> {
-    /// Model layer whose append must appear exactly once for this active row.
-    model_layer: usize,
-    /// Native-KV group receiving the append.
-    group: usize,
-    /// Layer slot within the destination KV group.
-    group_layer: usize,
-    /// Batch row receiving the append.
-    row: usize,
-    /// Committed semantic token count before this append.
-    start: usize,
-    /// New keys shaped `[1, kv_heads, valid_tokens, head_dim]`.
-    keys: Tensor<B, 4>,
-    /// New values with the same geometry as the staged keys.
-    values: Tensor<B, 4>,
-}
-
-/// Complete operation-local write set used for atomic publication.
-struct PendingKvWrites<B: Backend> {
-    /// Deferred appends checked for complete layer/row coverage before publication.
-    writes: Vec<PendingKvWrite<B>>,
-}
-
-impl<B: Backend> PendingKvWrites<B> {
-    /// Creates an empty scratch set.
-    fn new() -> Self {
-        Self { writes: Vec::new() }
-    }
-
-    /// Prepares every group, advances metadata, then publishes infallible writes.
-    fn commit(self, state: &mut MuseGlimmerDecodeState<B>, token_counts: &[usize]) -> Result<()> {
-        self.validate_coverage(state, token_counts)?;
-        let mut grouped = BTreeMap::<usize, Vec<_>>::new();
-        for write in self.writes {
-            let cache = state.tensors.main().native_kv(write.group)?;
-            let prepared = cache.prepare_sequence_write(
-                write.group_layer,
-                write.row,
-                write.start,
-                write.keys,
-                write.values,
-            )?;
-            grouped.entry(write.group).or_default().push(prepared);
+/// Evaluates one layer's queries against its cached keys in score-bounded chunks.
+///
+/// `segment` holds slot-ordered keys and values with their positions and
+/// validity; invalid slots' values are zeroed first so stale bytes cannot
+/// poison attention. Full storage is position-ordered, so each query chunk
+/// reads only its verified causal key prefix. A sliding layer's keys are
+/// `[ring history | fresh block]`: chunks whose rows can still see history
+/// read the whole ring, later chunks only their rows' window union, and the
+/// plan is sized for that width (`MuseKeySlicing::RingHistory`) rather than
+/// for every key. Returns the head context `[batch, query_heads, block, head_dim]`.
+fn cached_context<B: Backend>(
+    layer: &super::MuseGlimmerDecoderLayer<B>,
+    projection: &MuseAttentionProjection<B>,
+    segment: &KvBatchSegment<B>,
+    layout: &BlockLayout<B>,
+    slot: MuseGlimmerLayerCache,
+    window: Option<usize>,
+) -> Result<Tensor<B, 4>> {
+    let attention = &layer.self_attn;
+    let keyed = MuseAttentionProjection {
+        query: projection.query.clone(),
+        key: segment.keys().clone(),
+        value: segment.masked_values(),
+        gate: projection.gate.clone(),
+    };
+    let [batch, queries, keys] = attention.validate_projection(&keyed)?;
+    let positional = matches!(slot, MuseGlimmerLayerCache::Full { .. });
+    let visibility = layout.visibility(segment, positional).with_window(window);
+    let device = keyed.query.device();
+    let slicing = match (slot, window) {
+        // History width `keys - queries`: the step's fresh block is the last segment.
+        (MuseGlimmerLayerCache::Sliding { .. }, Some(window)) => {
+            MuseKeySlicing::RingHistory { window }
         }
-        let mut prepared_groups = Vec::with_capacity(grouped.len());
-        for (group, writes) in grouped {
-            prepared_groups.push(
-                state
-                    .tensors
-                    .main()
-                    .prepare_direct_writes(Some((group, writes)), None)?,
-            );
-        }
-        state.tensors.advance(token_counts)?;
-        for prepared in prepared_groups {
-            state
-                .tensors
-                .main_mut()
-                .apply_prepared_direct_writes(prepared);
-        }
-        Ok(())
-    }
-
-    /// Proves one append exists for every active row and model layer.
-    fn validate_coverage(
-        &self,
-        state: &MuseGlimmerDecodeState<B>,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        if token_counts.len() != state.tensors.batch_size() {
-            return Err(Error::Cache(format!(
-                "Muse pending counts describe {} rows for batch {}",
-                token_counts.len(),
-                state.tensors.batch_size()
-            )));
-        }
-        let active = token_counts.iter().filter(|&&count| count > 0).count();
-        let expected = state
-            .layout
-            .schedule
-            .len()
-            .checked_mul(active)
-            .ok_or_else(|| {
-                Error::configuration("muse_glimmer.cache_commit", "write count overflows usize")
-            })?;
-        if self.writes.len() != expected {
-            return Err(Error::Cache(format!(
-                "Muse pending cache coverage is {}/{expected}",
-                self.writes.len()
-            )));
-        }
-        let mut seen = BTreeSet::new();
-        for write in &self.writes {
-            let count = token_counts.get(write.row).copied().ok_or_else(|| {
-                Error::Cache(format!("Muse cache write row {} is invalid", write.row))
-            })?;
-            let expected_slot = state.layout.schedule.get(write.model_layer).copied();
-            if count == 0
-                || expected_slot.map(MuseGlimmerLayerCache::coordinates)
-                    != Some((write.group, write.group_layer))
-                || write.start != state.tensors.lengths()[write.row]
-                || write.keys.dims()[2] != count
-                || write.values.dims()[2] != count
-                || !seen.insert((write.model_layer, write.row))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid or duplicate Muse write for layer {}, row {}",
-                    write.model_layer, write.row
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Host-side metadata prepared before any model layer executes.
-struct PreparedStatefulInput {
-    /// Number of rows in the rectangular input.
-    batch: usize,
-    /// Physical input columns before removing padding.
-    sequence: usize,
-    /// Valid physical token columns retained for each compact row.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of new semantic tokens contributed by each row.
-    token_counts: Vec<usize>,
-    /// Per-row rotary context lengths derived from validated positions.
-    evaluated_contexts: Vec<usize>,
+        _ => MuseKeySlicing::PrefixLimits {
+            limits: visibility.key_limits(),
+        },
+    };
+    let chunks = plan_attention_chunks(
+        attention.effective_policy(&device),
+        batch,
+        attention.query_heads,
+        queries,
+        keys,
+        slicing,
+    )?;
+    debug_assert_eq!(layout.block(), queries);
+    attention.chunked_context(&keyed, &chunks, &visibility)
 }
 
 /// Validates shapes, devices, masks, positions, and capacity transitions.
+///
+/// The shared preparation reads the mask, token IDs, and explicit positions in
+/// one transfer; this wrapper adds the model-device guard and the cached
+/// rotary guard, which applies only once rotated keys are already cached.
 fn prepare_stateful_input<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &MuseGlimmerDecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = input.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "muse_glimmer.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.tensors.batch_size() {
-        return Err(TensorCacheError::BatchSizeMismatch {
-            configured: state.tensors.batch_size(),
-            requested: batch,
-        }
-        .into());
-    }
-    ensure_device(
-        "muse_glimmer.input_ids",
-        &input.token_ids.device(),
-        state.tensors.device(),
-    )?;
-    ensure_device(
+) -> Result<StatefulRows> {
+    ensure_same_device(
         "muse_glimmer.model",
-        &model.model.embed_tokens.weight.val().device(),
+        &model.model.embed_tokens.weight.lazy_device(),
         state.tensors.device(),
+        DECODE_STATE,
     )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_device(
-            "muse_glimmer.token_mask",
-            &mask.as_tensor().device(),
-            state.tensors.device(),
-        )?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "muse_glimmer.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-    }
-    if let Some(positions) = &input.position_ids {
-        ensure_device(
-            "muse_glimmer.position_ids",
-            &positions.device(),
-            state.tensors.device(),
-        )?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "muse_glimmer.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-    }
-    let valid_indices = semantic_indices(input.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "muse_glimmer.token_mask",
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut implicit_contexts = Vec::with_capacity(batch);
-    for (row, (&baseline, &additional)) in state
-        .tensors
-        .lengths()
+    let rows = prepare_stateful_rows(
+        input,
+        state.tensors.device(),
+        state.tensors.lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: INPUT_NAMES,
+            owner: DECODE_STATE,
+            vocabulary: model.config().vocab_size,
+            position_limit: Some(model.config().max_position_embeddings),
+            empty_rows: phase.empty_rows(),
+        },
+    )?;
+    // A fresh prefill has no rotated keys to invalidate yet. Verified: the
+    // first active row with cached keys whose context passes a rotary
+    // configuration's limit, rows first and configurations second.
+    let limits = model
+        .model
+        .distinct_ropes()
         .iter()
-        .zip(&token_counts)
-        .enumerate()
-    {
-        let requested = baseline.checked_add(additional).ok_or({
-            TensorCacheError::Metadata(DecodeStateError::LengthOverflow {
-                sequence: row,
-                length: baseline,
-                additional,
-            })
-        })?;
-        if requested > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: row,
-                    requested,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
-        implicit_contexts.push(requested);
+        .map(|rope| rope.scaling().cached_context_limit())
+        .collect::<Vec<_>>();
+    if let Some((context, limit)) = first_uncacheable_context(
+        state.tensors.lengths(),
+        &rows.token_counts,
+        &rows.evaluated_contexts,
+        &limits,
+    ) {
+        return Err(Error::BackendCapability(format!(
+            "Muse cached decoding at context {context} exceeds the {limit}-token limit of \
+             its context-dependent rotary scaling, which would require re-rotating cached keys"
+        )));
     }
-    let mut evaluated_contexts = Vec::with_capacity(batch);
-    for (row, valid) in valid_indices.iter().enumerate() {
-        if valid.is_empty() {
-            evaluated_contexts.push(implicit_contexts[row]);
-            continue;
-        }
-        let selector = selection_tensor(valid, state.tensors.device())?;
-        let tokens = input
-            .token_ids
-            .clone()
-            .slice([row..row + 1, 0..sequence])
-            .select(1, selector.clone());
-        validate_token_ids(tokens, model.config().vocab_size)?;
-        let context = match &input.position_ids {
-            Some(positions) => {
-                let compact = positions
-                    .clone()
-                    .slice([row..row + 1, 0..sequence])
-                    .select(1, selector);
-                validate_position_range(compact.clone(), model.config().max_position_embeddings)?;
-                evaluated_context(compact)?
-            }
-            None => implicit_contexts[row],
-        };
-        validate_cached_rope_context(model, context)?;
-        evaluated_contexts.push(context);
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-        evaluated_contexts,
-    })
+    Ok(rows)
+}
+
+/// Plans the layout a decode state of logical `capacity` uses for `model`.
+///
+/// A ring never needs more slots than the logical capacity, so the physical
+/// window is `min(sliding_window, capacity)`; a full-attention-only model
+/// resolves no window. Allocation and reuse validation both call this, so a
+/// state is accepted exactly when it matches a fresh allocation.
+///
+/// # Errors
+///
+/// Returns the planning errors of [`cache_layout`]; a validated model and a
+/// non-zero capacity always plan successfully.
+fn planned_layout<B: Backend>(
+    model: &MuseGlimmerForCausalLm<B>,
+    capacity: usize,
+) -> Result<MuseGlimmerCacheLayout> {
+    let physical_window = model
+        .config()
+        .resolved_sliding_window()
+        .map(|window| window.min(capacity));
+    cache_layout(model, physical_window)
 }
 
 /// Resolves the two homogeneous groups and dense per-layer schedule.
+///
+/// The sliding group stores a mirrored ring with the group's own `window`;
+/// the full group stores complete history.
 fn cache_layout<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
     window: Option<usize>,
 ) -> Result<MuseGlimmerCacheLayout> {
-    let schedule_types = model.config().resolved_layer_types();
-    let sliding_count = schedule_types
+    let global = model
+        .config()
+        .resolved_layer_types()
         .iter()
-        .filter(|&&kind| kind == MuseGlimmerLayerType::SlidingAttention)
-        .count();
-    let full_count = schedule_types.len() - sliding_count;
-    let window = match (sliding_count, window) {
-        (0, _) => None,
-        (_, Some(0)) => {
+        .map(|&kind| kind == MuseGlimmerLayerType::FullAttention)
+        .collect::<Vec<_>>();
+    // Verified: exact group sizes, a ring (group 0) exactly with local layers
+    // and a non-zero window, the full group after it exactly with global
+    // layers, and every layer's (existing) group and dense slot.
+    let plan = match cache_groups(&global, window) {
+        Ok(plan) => plan,
+        Err(GroupFault::ZeroWindow) => {
             return Err(Error::configuration(
                 "muse_glimmer.decode_state.window",
                 "must be non-zero",
             ));
         }
-        (_, Some(window)) => Some(window),
-        (_, None) => {
+        Err(GroupFault::MissingWindow) => {
             return Err(Error::configuration(
                 "muse_glimmer.decode_state.window",
                 "is required by the sliding cache group",
@@ -826,225 +715,43 @@ fn cache_layout<B: Backend>(
     };
     let dtype = model.model.embed_tokens.weight.val().dtype();
     let mut groups = Vec::with_capacity(2);
-    let sliding_group = if sliding_count > 0 {
-        let group = groups.len();
+    if let Some(width) = plan.window.and_then(NonZeroUsize::new) {
+        groups.push(
+            NativeKvCacheSpec::new(
+                plan.sliding_layers,
+                model.config().num_key_value_heads,
+                model.config().head_dim,
+                KvCacheStorage::MirroredSlidingRing,
+                dtype,
+            )?
+            .with_sliding_window(width),
+        );
+    }
+    if plan.full_group.is_some() {
         groups.push(NativeKvCacheSpec::new(
-            sliding_count,
-            model.config().num_key_value_heads,
-            model.config().head_dim,
-            KvCacheStorage::MirroredSlidingRing,
-            dtype,
-        )?);
-        Some(group)
-    } else {
-        None
-    };
-    let full_group = if full_count > 0 {
-        let group = groups.len();
-        groups.push(NativeKvCacheSpec::new(
-            full_count,
+            plan.full_layers,
             model.config().num_key_value_heads,
             model.config().head_dim,
             KvCacheStorage::Full,
             dtype,
         )?);
-        Some(group)
-    } else {
-        None
-    };
-    let mut next_sliding = 0;
-    let mut next_full = 0;
-    let schedule = schedule_types
-        .into_iter()
-        .map(|kind| -> Result<MuseGlimmerLayerCache> {
-            match kind {
-                MuseGlimmerLayerType::SlidingAttention => {
-                    let group = sliding_group.ok_or_else(|| {
-                        Error::Cache(
-                            "Muse schedule contains a sliding layer without a sliding cache group"
-                                .into(),
-                        )
-                    })?;
-                    let slot = MuseGlimmerLayerCache::Sliding {
-                        group,
-                        layer: next_sliding,
-                    };
-                    next_sliding += 1;
-                    Ok(slot)
-                }
-                MuseGlimmerLayerType::FullAttention => {
-                    let group = full_group.ok_or_else(|| {
-                        Error::Cache(
-                            "Muse schedule contains a full layer without a full cache group".into(),
-                        )
-                    })?;
-                    let slot = MuseGlimmerLayerCache::Full {
-                        group,
-                        layer: next_full,
-                    };
-                    next_full += 1;
-                    Ok(slot)
-                }
+    }
+    let schedule = global
+        .iter()
+        .zip(plan.groups.iter().zip(&plan.slots))
+        .map(|(&is_global, (&group, &layer))| {
+            if is_global {
+                MuseGlimmerLayerCache::Full { group, layer }
+            } else {
+                MuseGlimmerLayerCache::Sliding { group, layer }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
     Ok(MuseGlimmerCacheLayout {
         schedule,
         groups,
-        window,
+        window: plan.window,
     })
-}
-
-/// Reads a semantic mask into stable per-row source-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "Muse token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(index, &valid)| valid.then_some(index))
-                .collect()
-        })
-        .collect())
-}
-
-/// Builds a checked backend selector from host semantic indices.
-fn selection_tensor<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "muse_glimmer.token_mask",
-                    format!("column index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
-}
-
-/// Creates compact implicit positions `baseline .. baseline + token_count`.
-fn implicit_positions<B: Backend>(
-    baseline: usize,
-    tokens: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 2, Int>> {
-    let positions = derive_position_ids(&vec![true; tokens], baseline, 0)
-        .map_err(|error| Error::configuration("muse_glimmer.position_ids", error.to_string()))?
-        .into_iter()
-        .map(|position| {
-            i64::try_from(position).map_err(|_| {
-                Error::configuration("muse_glimmer.position_ids", "position exceeds i64")
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(positions, [1, tokens]),
-        device,
-    ))
-}
-
-/// Rejects dynamic-NTK changes that would invalidate already rotated local keys.
-fn validate_cached_rope_context<B: Backend>(
-    model: &MuseGlimmerForCausalLm<B>,
-    context: usize,
-) -> Result<()> {
-    for layer in &model.model.layers {
-        if let Some(rope) = layer.rope
-            && let RopeScaling::DynamicNtk(dynamic) = rope.scaling()
-            && context > dynamic.original_max_position_embeddings()
-        {
-            return Err(Error::BackendCapability(
-                "dynamic-NTK Muse decode beyond the original context requires re-rotating cached keys"
-                    .into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Scatters compact floating states back into rectangular source columns.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1
-        || compact_sequence != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "muse_glimmer.compact_hidden",
-            "[1, valid_columns, width] with sorted unique indices",
-            format!("shape={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::with_capacity(indices.len().saturating_mul(2).saturating_add(1));
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Produces a zero-filled inactive rectangular row in the model activation dtype.
-fn empty_hidden_row<B: Backend>(
-    model: &MuseGlimmerForCausalLm<B>,
-    sequence: usize,
-    device: &B::Device,
-) -> Tensor<B, 3> {
-    Tensor::zeros(
-        [1, sequence, model.config().hidden_size],
-        (device, model.model.embed_tokens.weight.val().dtype()),
-    )
-}
-
-/// Checks that two model/state devices are identical.
-fn ensure_device<D: PartialEq + core::fmt::Debug>(
-    field: &str,
-    actual: &D,
-    expected: &D,
-) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{field} is on {actual:?}, but Muse decode state is on {expected:?}"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+[package]
+name = "flex-depthwise-conv1d-fanout"
+version = "0.0.0"
+edition = "2024"
+publish = false
+rust-version = "1.95"
+
+[dependencies]
+burn = { version = "=0.22.0", features = ["flex"] }
+
+# Standalone: never join an enclosing workspace.
+[workspace]

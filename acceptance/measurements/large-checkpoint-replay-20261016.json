@@ -1,0 +1,737 @@
+{
+ "schema_version": 1,
+ "scope": "real_checkpoint_functional_replay_not_benchmark",
+ "date_utc": "2026-10-16",
+ "advertised_supported": false,
+ "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+ "sources": [
+  {
+   "commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "description": "claude/tfm-polish head; every gate except those below"
+  },
+  {
+   "commit": "4f9502a109f3549b56ea68fce77873b9dfee4b83",
+   "description": "adds only the ignored test diagnoses_pinned_nemotron_decision_14_time_step_clamp to tests/nemotron_h_artifacts.rs; Muse official reference, Nemotron bundle, smoke, and official gate ran from this clean tree"
+  },
+  {
+   "commit": "1b48b81877a240e80b04cf15321fbb000e6f5b4b",
+   "description": "extends that diagnostic with official-row profiles and router margins; the diagnostic ran from this clean tree"
+  }
+ ],
+ "cargo_lock_sha256": "dc0e94286cd8becdd62af3ef04938d1b056e77dd0c845880804e2c8d61b66654",
+ "toolchain": {
+  "rustc": "1.94.0-nightly",
+  "commit_hash": "4f14395c37db4c1be874e6b0ace6721674223c22",
+  "host": "aarch64-apple-darwin",
+  "burn": "0.21.0",
+  "profile": "release",
+  "python": "3.11.9",
+  "torch": "2.10.0",
+  "transformers": "5.2.0"
+ },
+ "host": "Apple M3 Max, 96 GiB unified memory, macOS 27.0.1 (26A434), shared with desktop applications (about 12 GB resident)",
+ "harness": "Each test ran in its own process from its prebuilt test binary (`TEST --ignored --exact --nocapture --test-threads 1`) under `/usr/bin/time -l`, so peak memory is per process. The runner appended every output line except libtest's 'running 1 test' and blank lines, kept only the wall-clock and peak-memory-footprint lines of the time summary, and closed each process with an `== exit=` line.",
+ "watchdog": {
+  "sampling": "once per second: vm.swapusage, vm_stat Swapins, memory_pressure -Q free percentage",
+  "first_attempt_policy": "kill when swap grew by more than 3 GiB",
+  "second_policy": "kill on swap-ins above 1 GiB, free memory below 10%, or swap growth above 8 GiB",
+  "policy": "kill on swap-ins above 1 GiB counted only while free memory is below 30%, free memory below 10%, or swap growth above 8 GiB; used for the gpt-oss reference retry and all later gates",
+  "reason_for_change": "The first Qwen3.8 smoke was killed after macOS paged 3.5 GiB of idle compressed memory to swap with zero swap-ins and at least 32% free; swap-ins, not swap-outs, indicate thrashing. Later the host paged evicted application memory back at about 5.7 MiB/s with nothing of this replay running, so swap-ins are counted only under memory pressure.",
+  "observation": "Across the session swap usage grew from 2.5 GiB to a peak of about 11.6 GiB as idle application memory was paged out, and fell back as applications paged it in. No gate thrashed: every completed process stayed at or above 32% free memory with at most 87 MiB of swap-ins; the largest swap growth of a completed process was 6.1 GiB (Nemotron diagnostic), and no swap-ins occurred below 30% free after the final policy change."
+ },
+ "notes": [
+  "Experimental validation only: no checkpoint below is advertised as supported by this record.",
+  "Timings come from a host shared with other applications and are not performance measurements.",
+  "Binaries built at 8a4404a stayed in use after the two diagnostic commits, which change only tests/nemotron_h_artifacts.rs; each binary's listed source commit is its exact source.",
+  "The Muse official-reference gate binds its source: it requires a clean committed crate tree and exactly the std,metal,tokenizers features, so it ran from a dedicated binary at the clean commit 4f9502a.",
+  "Qwen3.8 and Qwen3-30B-A3B F32 logit digests differ from their pre-polish records although top-1 tokens and cached/stateless cosines are unchanged; the batched-execution, attention and DeltaNet changes alter reduction order. Their official or internal parity measures below decide acceptance, not bitwise identity."
+ ],
+ "log": "large-checkpoint-replay-20261016/gates.log",
+ "log_sha256": "3086067cb69aaf0e4ec314d774432c6fe3e9fc6bacb8c596a5a5a9139536589f",
+ "passed": false,
+ "aborted_attempts": [
+  {
+   "exit": -9,
+   "log_label": "Qwen3.8-27B Metal/F16 text+MTP smoke",
+   "test": "loads_pinned_qwen38_text_and_mtp_and_runs_metal",
+   "watchdog_reason": "swap grew by 3528 MiB",
+   "diagnosis": "Harness, not product: the first watchdog policy killed the process after 89 s when macOS paged 3.5 GiB of idle compressed memory to swap (zero swap-ins, free memory at least 32%). The retry under the swap-in policy passed."
+  },
+  {
+   "exit": 101,
+   "log_label": "Muse-Glimmer-30B Metal/F16 official reference",
+   "test": "matches_pinned_muse_glimmer_official_f16_reference_on_metal",
+   "diagnosis": "Harness, not product: the gate refused to start because the worktree held this replay's untracked log and test file and the binary carried chat-templates; it requires a clean committed tree and exactly std,metal,tokenizers. The log moved outside the tree and a dedicated binary was built at the clean commit 4f9502a, which passed."
+  },
+  {
+   "exit": -9,
+   "log_label": "gpt-oss-20b full 24-block BF16 reference generation (Transformers 5.2.0, PyTorch 2.10.0, CPU, eager)",
+   "watchdog_reason": "swap-ins reached 1299 MiB",
+   "diagnosis": "Harness, not product: the swap-in policy killed the generator after 326 s with free memory never below 90%. With nothing of this replay running, the host swapped in about 5.7 MiB/s as applications paged back memory that earlier gates had evicted, so swap-ins no longer indicated pressure. The policy then counted swap-ins only while free memory was below 30%; the generator's partial staging directory was removed and the retry passed."
+  }
+ ],
+ "runs": [
+  {
+   "name": "qwen3.5-0.8b-public-example",
+   "kind": "example",
+   "repository": "Qwen/Qwen3.5-0.8B",
+   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "examples/qwen35_chat.rs",
+   "log_label": "Qwen3.5-0.8B public example qwen35_chat (std,metal,tokenizers,chat-templates)",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [],
+   "command": [
+    "target/release/examples/qwen35_chat",
+    "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "Explain why the seasons change in four complete sentences.",
+    "32"
+   ],
+   "example_sha256": "8f611f9c78df4a549223f57ede2b1bc5b35286252d72db94e23e37b930aed9c1",
+   "stdout": "The Earth's axis is tilted at an angle of approximately 23.5 degrees relative to its orbital plane, causing the planet to be closer to the Sun",
+   "stdout_sha256": "44ffd45f2751a5a5a5fa8bb99c5dd973dad64a96c2e70211f2de438f7964757f",
+   "measurements": [
+    "The Earth's axis is tilted at an angle of approximately 23.5 degrees relative to its orbital plane, causing the planet to be closer to the Sun"
+   ],
+   "result": "Reproduces the September public-example text exactly (same stdout SHA-256).",
+   "passed": 1,
+   "failed": 0,
+   "peak_memory_footprint_bytes": {
+    "qwen3.5-0.8b-public-example": 3606366296
+   }
+  },
+  {
+   "name": "flan-t5-xxl",
+   "kind": "test",
+   "repository": "google/flan-t5-xxl",
+   "revision": "ae7c9136adc7555eeccc78cdd960dfd60fb346ce",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "t5_xxl_metal, t5_xxl_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "validates_pinned_flan_t5_xxl_reference_bundle",
+    "validates_pinned_flan_t5_xxl_config_headers_plan_memory_and_tokenizer",
+    "loads_flan_t5_xxl_f32_and_matches_official_reference"
+   ],
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/flan-t5-xxl-ae7c9136-reference.bundle",
+    "reference_json_sha256": "430c2b4f4891e518ee717e6bcd1a8b53d1200d41a596105b0ced96d8ba16582f"
+   },
+   "result": "Metal/F32 minimum cosine 0.999999999998, all 32 greedy tokens, exact four-beam continuation; all seven canonical output digests are bitwise identical to the earlier record.",
+   "matches_earlier_record": [
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "e3d76795c0af455046c580dc54fde740c301322b5ae8b905836b129fb829c523"
+    },
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "b4ae4d84f4d872fecdbbf61dd223bbf6f88a7b3ce9af1ef7715840b335a9b5af"
+    },
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "05fa8d0b2fe007c11cc888bda82b3679877e5354aa10b9951392a930ef9823de"
+    },
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "043c141632dbde31b604c3e778437bcf531eecdc1aa4e96f37ca5aba2cd31d9b"
+    },
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "af10790cca5ce443d83a6ae4ddeac84cd569fb10126c934090aad0b43f2d80c0"
+    },
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "39e7bb643f90ca0127d2f4401912774f3648fcce3ea96c5df3ff1ee0fe543008"
+    },
+    {
+     "record": "acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json",
+     "value": "b818fc36304dd2cc12d37ba110ef2afa8500525fb5a2917f6776dc16a3303352"
+    }
+   ],
+   "passed": 3,
+   "failed": 0,
+   "measurements": [
+    "test validates_pinned_flan_t5_xxl_reference_bundle ... FLAN-T5-XXL reference bundle: revision=ae7c9136adc7555eeccc78cdd960dfd60fb346ce, manifest_sha256=430c2b4f4891e518ee717e6bcd1a8b53d1200d41a596105b0ced96d8ba16582f, raw_f32_bytes=9205248",
+    "test validates_pinned_flan_t5_xxl_config_headers_plan_memory_and_tokenizer ... FLAN-T5-XXL header gate: repository=google/flan-t5-xxl, revision=ae7c9136adc7555eeccc78cdd960dfd60fb346ce, shards=5, physical_tensors=559, parameters=558, header_inventory_sha256=794a9c5bb717021bf491ee6942cda6dab2b223a7bb5f7c2861be01248f590a0d, f32_plan_sha256=711cd9f6d278f519d511c47614be1ec1353e2b1657d7d04cbe7c34cb7881365b, target_bytes=44541329408, peak_host_staging_bytes=10526097928, prompt_ids=[13959, 1566, 12, 2968, 10, 37, 629, 19, 1627, 5, 1], elapsed_seconds=0.038",
+    "test loads_flan_t5_xxl_f32_and_matches_official_reference ... FLAN-T5-XXL F32 Metal: revision=ae7c9136adc7555eeccc78cdd960dfd60fb346ce, load_seconds=59.949, encoder_seconds=1.423, stateless_first_seconds=0.637, cached_32_seconds=6.825, teacher_seconds=1.710, beam_seconds=11.830, encoder_cosine=0.999999999999, decoder_first_hidden_cosine=0.999999999999, first_logits_cosine=1.000000000000, cached_minimum_row_cosine=0.999999999998, teacher_minimum_row_cosine=0.999999999998, analytical_self_cache_bytes_per_target_token=786432, analytical_self_cache_bytes=25165824, analytical_cross_cache_bytes=40108032, analytical_total_cache_payload_bytes=65273856, greedy_ids=[86, 74, 13558, 35, 20147, 31743, 3, 7, 235, 32, 17, 74, 17589, 1171, 20194, 732, 177, 3, 31622, 10469, 6, 3, 18152, 15, 3, 49, 3, 11059, 26, 1411, 6, 587], beam_ids=[644, 4598, 229, 19250, 5, 1]",
+    "FLAN-T5-XXL load report: applied=558, transformed=433, aliased=0, checkpoint_aliases=1, equivalence_planned=1, equivalence_verified=1, dtype_converted=0, quantized=0, allowlisted_missing=0, allowlisted_ignored=0, missing=0, unexpected=0, artifact_bytes=45067783756, checkpoint_tensor_bytes=45067714560, target_parameter_bytes=44541329408, logical_model_bytes=44541329408, largest_shard_bytes=9999712776, largest_source_tensor_bytes=526385152, largest_target_tensor_bytes=526385152, largest_planned_equivalence_pair_bytes=1052770304, planned_peak_host_staging_bytes=10526097928",
+    "FLAN-T5-XXL load execution: tensors_applied=558, aliases_applied=0, equivalences_verified=1, equivalence_source_reads=2, equivalence_source_payload_bytes=1052770304, source_reads=560, source_payload_bytes=45594099712, delivered_tensor_bytes=44541329408, largest_source_payload_bytes=526385152, largest_output_tensor_bytes=526385152, largest_equivalence_pair_bytes=1052770304, peak_host_staging_bytes=1052770304, shard_opens=7, source_tensor_reads=560, source_payload_bytes_read=45594099712, max_open_shards=1, shard_open_order=[\"model-00001-of-00005.safetensors\", \"model-00003-of-00005.safetensors\", \"model-00001-of-00005.safetensors\", \"model-00002-of-00005.safetensors\", \"model-00003-of-00005.safetensors\", \"model-00004-of-00005.safetensors\", \"model-00005-of-00005.safetensors\"]",
+    "FLAN-T5-XXL canonical output SHA-256: encoder_final_f32le=e3d76795c0af455046c580dc54fde740c301322b5ae8b905836b129fb829c523, decoder_first_final_f32le=b4ae4d84f4d872fecdbbf61dd223bbf6f88a7b3ce9af1ef7715840b335a9b5af, first_logits_f32le=05fa8d0b2fe007c11cc888bda82b3679877e5354aa10b9951392a930ef9823de, cached_logits_32x32128_f32le=043c141632dbde31b604c3e778437bcf531eecdc1aa4e96f37ca5aba2cd31d9b, teacher_logits_32x32128_f32le=af10790cca5ce443d83a6ae4ddeac84cd569fb10126c934090aad0b43f2d80c0, greedy_token_ids_u32le=39e7bb643f90ca0127d2f4401912774f3648fcce3ea96c5df3ff1ee0fe543008, beam_token_ids_u32le=b818fc36304dd2cc12d37ba110ef2afa8500525fb5a2917f6776dc16a3303352"
+   ],
+   "peak_memory_footprint_bytes": {
+    "validates_pinned_flan_t5_xxl_reference_bundle": 18432504,
+    "validates_pinned_flan_t5_xxl_config_headers_plan_memory_and_tokenizer": 61522472,
+    "loads_flan_t5_xxl_f32_and_matches_official_reference": 52013979504
+   }
+  },
+  {
+   "name": "qwen3.8-27b",
+   "kind": "test",
+   "repository": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "local_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "validates_pinned_qwen38_config_and_header_inventory",
+    "strictly_maps_pinned_qwen38_text_and_mtp",
+    "validates_pinned_qwen38_tokenizer",
+    "validates_pinned_qwen38_chat_template",
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal",
+    "matches_pinned_qwen38_official_reference_on_metal",
+    "quantizes_pinned_qwen38_weights_to_q8_burnpack",
+    "quantizes_pinned_qwen38_weights_to_q4_burnpack"
+   ],
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2/qwen3.8-27b-1d4bf0f2-reference.bundle",
+    "reference_json_sha256": "1d4f7d3c02a996c72a1d767d672f933ce83792dea116c4964b794003ac345ce2"
+   },
+   "result": "Metal/F16 official prompt cosine 0.999999873 (earlier 0.999999881), exact top-1, all 32 greedy tokens; text+MTP smoke top-1 271 with cached/stateless cosine 1.0; fresh create-only Q8 and Q4 conversions packed 497 tensors each with payloads byte-identical in size to the earlier conversions and ran on Metal (top-1 271, cached cosine 1.0). The F16 smoke's F32 logit digest changed from a3ae49dc10b7fbea to 4ac2bba6ac400095 and its peak footprint rose from 63.3 GB to 68.3 GB.",
+   "matches_earlier_record": [
+    {
+     "record": "acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json",
+     "value": "27223326720"
+    },
+    {
+     "record": "acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json",
+     "value": "14412349440"
+    },
+    {
+     "record": "acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json",
+     "value": "1350860800"
+    },
+    {
+     "record": "acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json",
+     "value": "715161600"
+    }
+   ],
+   "passed": 8,
+   "failed": 0,
+   "measurements": [
+    "test validates_pinned_qwen38_config_and_header_inventory ... ok",
+    "test strictly_maps_pinned_qwen38_text_and_mtp ... Qwen3.8 pre-allocation memory estimate: MemoryEstimate { artifact_bytes: 55563006776, checkpoint_tensor_bytes: 55562855904, target_parameter_bytes: 54641395712, logical_model_bytes: 54641395712, largest_shard_bytes: 3988973152, largest_source_tensor_bytes: 2542796800, largest_target_tensor_bytes: 2542796800, largest_equivalence_pair_bytes: 0, peak_host_staging_bytes: 6531769952 }",
+    "test validates_pinned_qwen38_tokenizer ... ok",
+    "test validates_pinned_qwen38_chat_template ... ok",
+    "test loads_pinned_qwen38_text_and_mtp_and_runs_metal ... Qwen3.8 F16: prompt_tokens=6, first_top1=271, mask_cosine=1.000000000, cached_cosine=1.000000000, min_mask_layer_cosine=1.000000000, min_cached_layer_cosine=1.000000000, stateless_logits_fnv1a64=4ac2bba6ac400095, load_seconds=83.613, stateless_seconds=10.335, prefill_seconds=0.284, mtp_seconds=0.110, decode_seconds=0.326",
+    "test matches_pinned_qwen38_official_reference_on_metal ... Qwen3.8 official F16 parity: prompt_cosine=0.999999873, top1=799, greedy_tokens=32",
+    "test quantizes_pinned_qwen38_weights_to_q8_burnpack ... Qwen3.8 q8 Metal: tensors=497, top1=271, cached_cosine=1.000000000",
+    "Qwen3.8 q8: tensors=497, excluded=369, payload_bytes=27223326720, artifact_bytes=27223690786, largest_tensor_bytes=1350860800",
+    "test quantizes_pinned_qwen38_weights_to_q4_burnpack ... Qwen3.8 q4 Metal: tensors=497, top1=271, cached_cosine=1.000000000",
+    "Qwen3.8 q4: tensors=497, excluded=369, payload_bytes=14412349440, artifact_bytes=14412721442, largest_tensor_bytes=715161600"
+   ],
+   "peak_memory_footprint_bytes": {
+    "validates_pinned_qwen38_config_and_header_inventory": 5997072,
+    "strictly_maps_pinned_qwen38_text_and_mtp": 7062008,
+    "validates_pinned_qwen38_tokenizer": 158728840,
+    "validates_pinned_qwen38_chat_template": 157205104,
+    "loads_pinned_qwen38_text_and_mtp_and_runs_metal": 68293322976,
+    "matches_pinned_qwen38_official_reference_on_metal": 66445600272,
+    "quantizes_pinned_qwen38_weights_to_q8_burnpack": 43571329456,
+    "quantizes_pinned_qwen38_weights_to_q4_burnpack": 31311227056
+   }
+  },
+  {
+   "name": "qwen3-30b-a3b",
+   "kind": "test",
+   "repository": "Qwen/Qwen3-30B-A3B",
+   "revision": "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "qwen3_moe_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features); kernel audits: std,metal,tokenizers,kernel-tracing (--no-default-features)",
+   "tests": [
+    "validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer",
+    "loads_pinned_qwen3_moe_f16_and_runs_metal_smoke",
+    "loads_pinned_qwen3_moe_q8_and_runs_metal_smoke",
+    "loads_pinned_qwen3_moe_q4_and_runs_metal_smoke",
+    "audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels",
+    "audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels"
+   ],
+   "result": "F16, Q8 and Q4 Metal smokes: top-1 1096, decode top-1 374, cached and stateless logits and 50-boundary traces bitwise equal within each run; the existing v2 sidecars installed exactly; each traced decode launched all 1,345 packed matmuls with zero whole-weight dequantizations. No official reference bundle exists for this checkpoint.",
+   "matches_earlier_record": [
+    {
+     "record": "acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json",
+     "value": "7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c"
+    },
+    {
+     "record": "acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json",
+     "value": "70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4"
+    }
+   ],
+   "passed": 6,
+   "failed": 0,
+   "measurements": [
+    "test validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer ... Qwen3-MoE header gate: repository=Qwen/Qwen3-30B-A3B, revision=ad44e777bcd18fa416d9da3bd8f70d33ebb85d39, shards=16, tensors=18867, tensor_bytes=61064245248, header_inventory_sha256=c4bc720cd21ec7a0fde1358a12a06f6ee09f6c6c39dcda613abeda5d16a29861, f16_plan_sha256=b90fa8fbfa08b6500dc3be8dd6e0458501b62580de704acac3bd300150d5b49d, f16_target_bytes=61064245248, peak_host_staging_bytes=4622305328, elapsed_seconds=1.413",
+    "test loads_pinned_qwen3_moe_f16_and_runs_metal_smoke ... Qwen3-MoE F16 Metal: prompt_tokens=6, first_top1=1096, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=edb40566d4415d42, cached_logits_fnv1a64=edb40566d4415d42, stateless_trace_fnv1a64=1f72c44df312d159, cached_trace_fnv1a64=1f72c44df312d159, decoded_logits_fnv1a64=f15a4352d9ade525, load_seconds=83.538, shard_opens=16, max_open_shards=1, source_reads=18867, stateless_seconds=1.464, prefill_seconds=0.471, decode_seconds=0.464",
+    "test loads_pinned_qwen3_moe_q8_and_runs_metal_smoke ... Qwen3-MoE q8 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, artifact_sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, packed_payload_bytes=32096174080, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=8f6d7ff7572c95fe, cached_logits_fnv1a64=8f6d7ff7572c95fe, stateless_trace_fnv1a64=fcff807a7a0157f3, cached_trace_fnv1a64=fcff807a7a0157f3, decoded_logits_fnv1a64=5c91f05510f1591a, load_seconds=379.480, source_reads=242, max_open_shards=1, stateless_seconds=2.622, prefill_seconds=0.444, decode_seconds=0.466",
+    "test loads_pinned_qwen3_moe_q4_and_runs_metal_smoke ... Qwen3-MoE q4 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk, artifact_sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4, packed_payload_bytes=16992092160, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=4f07e280b96484ab, cached_logits_fnv1a64=4f07e280b96484ab, stateless_trace_fnv1a64=ffc7c66f2df4ffde, cached_trace_fnv1a64=ffc7c66f2df4ffde, decoded_logits_fnv1a64=9cc237e913913a6c, load_seconds=262.867, source_reads=242, max_open_shards=1, stateless_seconds=0.686, prefill_seconds=0.409, decode_seconds=0.321",
+    "test audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels ... Qwen3-MoE q8 packed kernel audit: matmul_launches=1345, expected=1345, whole_weight_dequantizations=0",
+    "Qwen3-MoE q8 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk, artifact_sha256=7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c, packed_payload_bytes=32096174080, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=8f6d7ff7572c95fe, cached_logits_fnv1a64=8f6d7ff7572c95fe, stateless_trace_fnv1a64=fcff807a7a0157f3, cached_trace_fnv1a64=fcff807a7a0157f3, decoded_logits_fnv1a64=5c91f05510f1591a, load_seconds=364.655, source_reads=242, max_open_shards=1, stateless_seconds=1.596, prefill_seconds=0.430, decode_seconds=0.500",
+    "test audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels ... Qwen3-MoE q4 packed kernel audit: matmul_launches=1345, expected=1345, whole_weight_dequantizations=0",
+    "Qwen3-MoE q4 Metal: burnpack=/Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk, artifact_sha256=70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4, packed_payload_bytes=16992092160, prompt_tokens=6, first_top1=1096, decoded_top1=374, cached_cosine=1.000000000, min_hidden_cosine=1.000000000, stateless_logits_fnv1a64=4f07e280b96484ab, cached_logits_fnv1a64=4f07e280b96484ab, stateless_trace_fnv1a64=ffc7c66f2df4ffde, cached_trace_fnv1a64=ffc7c66f2df4ffde, decoded_logits_fnv1a64=9cc237e913913a6c, load_seconds=243.781, source_reads=242, max_open_shards=1, stateless_seconds=0.717, prefill_seconds=0.403, decode_seconds=0.495"
+   ],
+   "peak_memory_footprint_bytes": {
+    "validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer": 175620744,
+    "loads_pinned_qwen3_moe_f16_and_runs_metal_smoke": 63851547528,
+    "loads_pinned_qwen3_moe_q8_and_runs_metal_smoke": 36082640528,
+    "loads_pinned_qwen3_moe_q4_and_runs_metal_smoke": 20605336288,
+    "audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels": 36058572456,
+    "audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels": 20609383136
+   }
+  },
+  {
+   "name": "muse-glimmer-30b",
+   "kind": "test",
+   "repository": "meta-models/Muse-Glimmer-30B",
+   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+   "source_commit": "4f9502a109f3549b56ea68fce77873b9dfee4b83",
+   "test_target": "muse_glimmer_artifacts",
+   "features": "metadata and streaming: std,metal,tokenizers,chat-templates (--no-default-features) at 8a4404a; official reference: std,metal,tokenizers (--no-default-features) at 4f9502a; packed audits: std,metal,tokenizers,kernel-tracing (--no-default-features) at 8a4404a",
+   "tests": [
+    "validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer",
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming",
+    "matches_pinned_muse_glimmer_official_f16_reference_on_metal",
+    "smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal",
+    "smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal"
+   ],
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-a4e59da-reference.bundle",
+    "reference_json_sha256": "cab22352cf833802b4e530b1ad6b6a223481f3a52378ce2c3bfb980e15543f10"
+   },
+   "result": "Metal/F16 official parity: prompt cosine 0.999999616, minimum hidden cosine 0.999943377, minimum teacher cosine 0.999999333, all 32 greedy tokens, each identical to the earlier record; Q8 and Q4 packed smokes and kernel audits passed (prompt top-1 85068, decode top-1 90, cached cosine 1.0).",
+   "matches_earlier_record": [
+    {
+     "record": "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+     "value": "0.999943377"
+    },
+    {
+     "record": "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+     "value": "0.999999616"
+    },
+    {
+     "record": "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+     "value": "0.999999333"
+    },
+    {
+     "record": "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+     "value": "0.999999726"
+    },
+    {
+     "record": "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+     "value": "91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb"
+    },
+    {
+     "record": "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+     "value": "05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3"
+    }
+   ],
+   "passed": 5,
+   "failed": 0,
+   "measurements": [
+    "test validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer ... Muse-Glimmer-30B header gate: repository=meta-models/Muse-Glimmer-30B, revision=a4e59da52a7bc87ae7251dd5545c0dd437c44b68, reference=huggingface/transformers@cfa309cfa34b5497a32fd50af49aa97aac94c054:src/transformers/models/muse_glimmer/modeling_muse_glimmer.py, reference_bytes=53259, reference_sha256=459498a758446f580fb4a9203c64ab4be68488b40a04acd379dd62658d5bad71, shards=2, tensors=1436, consumed=627, allowlisted_visual=809, header_inventory_sha256=7bf662cfb4142c1f9994926574082e9adf52f9c335f226e46b998a7d9c4547cb, f16_plan_sha256=fde94638b261fbaee47e53dbf035660e5bd1732a6d92e45c45cddb720ed95d6d, f16_target_bytes=55709561856, largest_target_bytes=2689662976, peak_host_staging_bytes=52639775928, prompt_ids=[19873, 3817, 24, 41346, 63623, 26], elapsed_seconds=0.435",
+    "test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok",
+    "test matches_pinned_muse_glimmer_official_f16_reference_on_metal ... muse_rust_acceptance_provenance={\"git_head\":\"4f9502a109f3549b56ea68fce77873b9dfee4b83\",\"git_tree\":\"3ae85a3e7827834f69e71f32b28ade36bd5909e0\",\"transformers_tree\":\"3ae85a3e7827834f69e71f32b28ade36bd5909e0\",\"transformers_tree_dirty\":false,\"test_source_sha256\":\"df09a7c01ddc042f84d990dac107ae7acbdc904835d5d3c60675a81b8edb1695\",\"quantized_quality_source_sha256\":\"e5104d33e832a8cb8f5e137c68d29ffb853544aa8ed52d5dd5c0a79e5fc8dc1c\",\"cargo_package_rust_version\":\"1.92\",\"rustc_verbose\":\"rustc 1.94.0-nightly (4f14395c3 2025-12-22)\\nbinary: rustc\\ncommit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22\\ncommit-date: 2025-12-22\\nhost: aarch64-apple-darwin\\nrelease: 1.94.0-nightly\\nLLVM version: 21.1.8\",\"profile\":\"release\",\"target\":\"aarch64-macos\",\"features\":[\"std\",\"metal\",\"tokenizers\"]}",
+    "Muse-Glimmer-30B official F16 parity: prompt_cosine=0.999999616, cached_prompt_cosine=0.999999616, minimum_hidden_cosine=0.999943377, minimum_cached_prefill_hidden_cosine=0.999943377, minimum_burn_prefill_stateless_hidden_cosine=1.000000000, minimum_decode_hidden_cosine=0.999987445, minimum_cached_official_cosine=0.999999616, minimum_teacher_official_cosine=0.999999333, minimum_burn_cached_teacher_cosine=0.999999726, greedy_tokens=32",
+    "test smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal ... Muse-Glimmer-30B Q8 packed Metal smoke: load_seconds=498.151, stateless_seconds=4.114, prefill_seconds=0.360, decode_seconds=0.254, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90",
+    "test smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal ... Muse-Glimmer-30B Q4 packed Metal smoke: load_seconds=399.356, stateless_seconds=1.592, prefill_seconds=0.205, decode_seconds=0.213, cached_cosine=1.000000000, prompt_top1=85068, decode_top1=90"
+   ],
+   "peak_memory_footprint_bytes": {
+    "validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer": 292668136,
+    "loads_pinned_muse_glimmer_f16_and_audits_streaming": 63453717528,
+    "matches_pinned_muse_glimmer_official_f16_reference_on_metal": 63533488344,
+    "smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal": 43993999224,
+    "smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal": 29487899600
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning-30b-a3b",
+   "kind": "test",
+   "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+   "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "source_commit": "4f9502a109f3549b56ea68fce77873b9dfee4b83",
+   "test_target": "nemotron_h_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "validates_pinned_nemotron_official_base_reference_bundle",
+    "loads_pinned_nemotron_f16_and_smokes_base_inference",
+    "compares_pinned_nemotron_f16_with_official_base_reference"
+   ],
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+    "reference_json_sha256": "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196"
+   },
+   "result": "Bundle authenticated; Metal/F16 stateless, cached-prefill and one-token decode smoke passed (decode-versus-teacher cosine 0.999370862, earlier 0.999376514). The official corresponding-path gate FAILED on its first real run: the stateless prompt row and its 54-boundary hidden trace passed, then teacher-forced decision 18 reached cosine 0.994340 against the 0.999 floor.",
+   "failure_diagnosis": {
+    "status": "open; no implementation defect found; the gate threshold needs a reviewed decision",
+    "profile_source_commit": "1b48b81877a240e80b04cf15321fbb000e6f5b4b",
+    "burn_teacher_vs_official_teacher": "30 of 32 rows at least 0.999123; decision 18 0.994340 and decision 30 0.997652; 32/32 top-1",
+    "burn_cached_vs_official_cached": "every row at least 0.999299 (decision 25); 32/32 top-1",
+    "f16_self_consistency": "Burn's chunked teacher pass and its one-token path with the clamp enabled compute the same recurrence yet differ by up to cosine 0.994053 (decision 24), below the failing official row",
+    "router_margins": "every MoE block's sixth-to-seventh selection-score gap lies between 7.6e-6 and 1.9e-3 on the teacher sequence (8.7e-4 at decision 18's position), comparable to F16 rounding; the oracle records no expert IDs, so a flipped selection is consistent with, not proven by, this evidence",
+    "options": [
+     "qualify the teacher stream against a higher-precision oracle (an F32 Transformers run needs about 126 GB, beyond this host)",
+     "calibrate each row's floor from measured F16 self-consistency",
+     "record expert selections in a new oracle and compare routing directly"
+    ]
+   },
+   "passed": 2,
+   "failed": 1,
+   "failures": [
+    {
+     "test": "compares_pinned_nemotron_f16_with_official_base_reference",
+     "exit": 101
+    }
+   ],
+   "measurements": [
+    "test validates_pinned_nemotron_official_base_reference_bundle ... Nemotron base reference authenticated: outputs=7, prompt_tokens=6, generation_tokens=32, minimum_path_cosine=0.9215047947571176",
+    "test loads_pinned_nemotron_f16_and_smokes_base_inference ... Nemotron 3.5 Burn Metal smoke: tensors_applied=6513, source_bytes=65826538624, shard_order=[\"model-00001-of-00014.safetensors\", \"model-00002-of-00014.safetensors\", \"model-00003-of-00014.safetensors\", \"model-00004-of-00014.safetensors\", \"model-00005-of-00014.safetensors\", \"model-00006-of-00014.safetensors\", \"model-00007-of-00014.safetensors\", \"model-00008-of-00014.safetensors\", \"model-00009-of-00014.safetensors\", \"model-00010-of-00014.safetensors\", \"model-00011-of-00014.safetensors\", \"model-00012-of-00014.safetensors\", \"model-00013-of-00014.safetensors\", \"model-00014-of-00014.safetensors\"], load_seconds=89.219, stateless_seconds=1.927, prefill_seconds=0.309, decode_seconds=0.387, first_token=1256, stateless_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, prefill_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, decode_hidden_sha256=6622235da52e1865e6b479f4063ce80432cf78f9907570459c5d092a1da0d7f9, stateless_prefill_logit_cosine=1.000000000, stateless_prefill_hidden_cosine=1.000000000, decode_teacher_logit_cosine=0.999370862, total_seconds=289.397",
+    "test compares_pinned_nemotron_f16_with_official_base_reference ...",
+    "thread 'compares_pinned_nemotron_f16_with_official_base_reference' (32160487) panicked at tests/support/nemotron_h_parity.rs:153:5:",
+    "Nemotron teacher-forced row corresponding-path cosine 0.9943401011810318 is below 0.999 at decision 18"
+   ],
+   "peak_memory_footprint_bytes": {
+    "validates_pinned_nemotron_official_base_reference_bundle": 60686864,
+    "loads_pinned_nemotron_f16_and_smokes_base_inference": 68987931648,
+    "compares_pinned_nemotron_f16_with_official_base_reference": 69024123952
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning-decision-14-diagnostic",
+   "kind": "test",
+   "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+   "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "source_commit": "1b48b81877a240e80b04cf15321fbb000e6f5b4b",
+   "test_target": "nemotron_h_artifacts",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "tests": [
+    "diagnoses_pinned_nemotron_decision_14_time_step_clamp"
+   ],
+   "result": "The clamp asymmetry, not the F16 precision policy, causes the official decision-14 split: at Mamba layer 0 the clamp changes 278 of 2,368 steps (6 to 8 of 64 heads at every token, smallest step 1.76e-5); with the one-token clamp enabled Burn's cached-versus-teacher hidden cosines at decision 14 rise from 0.8919/0.4418 (after Mamba 0 / MoE 1) to 0.99999986/0.9999994 and the logit cosine from 0.9669 to 0.99998.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test diagnoses_pinned_nemotron_decision_14_time_step_clamp ... Nemotron official profile (Burn teacher vs official teacher (corresponding)): minimum_cosine=0.994340101@18, below_0.999=2, top1_agreements=32/32, cosines=[0.999982, 0.999997, 0.999984, 0.999995, 0.999997, 0.999987, 0.999983, 0.999679, 0.999983, 0.999344, 0.999875, 0.999963, 0.999987, 0.999989, 0.999974, 0.999931, 0.999178, 0.999632, 0.994340, 0.999363, 0.999908, 0.999976, 0.999912, 0.999988, 0.999896, 0.999901, 0.999942, 0.999896, 0.999123, 0.999259, 0.997652, 0.999329]",
+    "Nemotron official profile (Burn pinned cached vs official cached (corresponding)): minimum_cosine=0.999299206@25, below_0.999=0, top1_agreements=32/32, cosines=[0.999985, 0.999970, 0.999971, 0.999993, 0.999994, 0.999995, 0.999881, 0.999898, 0.999823, 0.999935, 0.999970, 0.999976, 0.999948, 0.999970, 0.999971, 0.999975, 0.999799, 0.999959, 0.999973, 0.999883, 0.999965, 0.999980, 0.999954, 0.999980, 0.999976, 0.999299, 0.999337, 0.999877, 0.999967, 0.999987, 0.999980, 0.999986]",
+    "Nemotron official profile (Burn teacher vs official cached (crossed)): minimum_cosine=0.921665430@22, below_0.999=29, top1_agreements=32/32, cosines=[0.999985, 0.999363, 0.999237, 0.997007, 0.987069, 0.993246, 0.983142, 0.986285, 0.987589, 0.974297, 0.972856, 0.975015, 0.972588, 0.977398, 0.966721, 0.979985, 0.948978, 0.974320, 0.931309, 0.981831, 0.950571, 0.976953, 0.921665, 0.974523, 0.953020, 0.973489, 0.939887, 0.971465, 0.926496, 0.968995, 0.969006, 0.968035]",
+    "Nemotron official profile (Burn pinned cached vs official teacher (crossed)): minimum_cosine=0.922242867@22, below_0.999=29, top1_agreements=32/32, cosines=[0.999982, 0.999363, 0.999294, 0.997014, 0.987185, 0.993189, 0.981679, 0.986010, 0.987373, 0.977511, 0.972742, 0.974495, 0.972866, 0.977007, 0.966950, 0.980007, 0.953235, 0.975138, 0.939905, 0.982183, 0.950355, 0.976738, 0.922243, 0.974149, 0.953730, 0.974150, 0.942656, 0.971497, 0.932951, 0.969686, 0.970110, 0.966121]",
+    "Nemotron official profile (Burn clamped cached vs official teacher): minimum_cosine=0.993911122@24, below_0.999=4, top1_agreements=32/32, cosines=[0.999982, 0.999997, 0.999984, 0.999996, 0.999741, 0.999874, 0.999957, 0.999921, 0.999966, 0.999391, 0.999859, 0.999780, 0.999952, 0.999973, 0.999952, 0.999939, 0.999153, 0.999724, 0.994376, 0.999355, 0.998683, 0.999929, 0.999926, 0.999965, 0.993911, 0.999164, 0.999861, 0.999840, 0.999008, 0.999203, 0.997145, 0.999138]",
+    "Nemotron official profile (Burn clamped cached vs official cached): minimum_cosine=0.922124179@22, below_0.999=29, top1_agreements=32/32, cosines=[0.999985, 0.999369, 0.999252, 0.997009, 0.985822, 0.992892, 0.982923, 0.986493, 0.987459, 0.974452, 0.972518, 0.975454, 0.972440, 0.977356, 0.966498, 0.979876, 0.948608, 0.974345, 0.931361, 0.981699, 0.950555, 0.976994, 0.922124, 0.974484, 0.941026, 0.972186, 0.939701, 0.971160, 0.925069, 0.968951, 0.969779, 0.968252]",
+    "Nemotron official profile (official teacher vs official cached): minimum_cosine=0.921504795@22, below_0.999=29, top1_agreements=32/32, cosines=[0.999999, 0.999362, 0.999284, 0.997047, 0.987048, 0.993168, 0.983124, 0.986785, 0.987689, 0.977954, 0.972949, 0.975056, 0.972605, 0.977476, 0.966789, 0.980171, 0.951812, 0.975355, 0.939527, 0.982118, 0.950084, 0.977010, 0.921505, 0.974523, 0.953507, 0.973904, 0.940044, 0.971659, 0.932629, 0.969861, 0.970378, 0.966490]",
+    "Nemotron Burn teacher router selection: minimum_margin_per_position=[\"1.53e-5\", \"5.34e-5\", \"1.53e-4\", \"1.14e-3\", \"1.24e-3\", \"1.14e-5\", \"6.48e-5\", \"5.80e-4\", \"1.41e-3\", \"3.43e-5\", \"2.29e-5\", \"7.63e-6\", \"2.33e-4\", \"2.40e-4\", \"9.27e-4\", \"7.86e-4\", \"4.46e-4\", \"1.48e-3\", \"2.67e-4\", \"2.94e-4\", \"5.68e-4\", \"5.72e-5\", \"1.53e-3\", \"8.74e-4\", \"1.16e-3\", \"1.21e-3\", \"2.21e-4\", \"6.26e-4\", \"1.95e-3\", \"7.59e-4\", \"3.55e-4\", \"7.63e-5\", \"1.14e-3\", \"9.42e-4\", \"2.10e-4\", \"2.37e-4\", \"3.17e-4\"], narrowest(margin,layer,position)=[\"(7.63e-6,47,11)\", \"(1.14e-5,6,5)\", \"(1.53e-5,45,0)\", \"(2.29e-5,38,10)\", \"(3.05e-5,10,0)\", \"(3.43e-5,27,9)\", \"(5.34e-5,29,1)\", \"(5.72e-5,1,21)\"]",
+    "Nemotron decision-14 \u0394 census at Mamba layer 0: time_step_min=0.001, heads=64, tokens=37, clamp_changed_all=278/2368, clamp_changed_recurrent=105/896 (positions 6..=19), changed_per_token=[7, 8, 8, 8, 6, 8, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8, 7, 8], changed_per_recurrent_token={1010: 7, 1256: 8}, minimum_step=1.7642975e-5, recurrent_minimum_step=1.7642975e-5",
+    "Nemotron Burn cached-versus-teacher (pinned unclamped one-token updates): minimum_logit_cosine=0.922406877234@22, decision_14_logit_cosine=0.966887982020, top1_agreements=32/32, decision_14_hidden_cosine[embedding,block0,block1,block2]=[1.000000000000, 0.891924797106, 0.441817102361, 0.561666822238], worst_hidden_cosine=0.441817102361@2",
+    "Nemotron Burn cached-versus-teacher (one-token updates clamped too): minimum_logit_cosine=0.994052557733@24, decision_14_logit_cosine=0.999978524461, top1_agreements=32/32, decision_14_hidden_cosine[embedding,block0,block1,block2]=[1.000000000000, 0.999999857065, 0.999999416245, 0.999998852075], worst_hidden_cosine=0.999976447647@44",
+    "Nemotron official crossed-path minimum=0.921504794757, total_seconds=301.692"
+   ],
+   "peak_memory_footprint_bytes": {
+    "diagnoses_pinned_nemotron_decision_14_time_step_clamp": 69137451888
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-bf16-reference",
+   "kind": "reference_generation",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "scripts/generate_causal_lm_reference.py --dtype bfloat16",
+   "features": "python3 -I (CPU, eager attention; MXFP4 experts dequantized to BF16)",
+   "tests": [],
+   "log_label": "gpt-oss-20b full 24-block BF16 reference generation, retry with swap-ins counted only below 30% free",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+    "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac",
+    "logits_sha256": {
+     "logits-0.f32le": "d5d06e3e9b1e071293d2a86a8910789cb530ca2bab0258f93dfa30eb6d81ab03",
+     "logits-1.f32le": "ce66f167c08a3f5942ba4314ef34bace406e661b6705df0a737f71ef024cf792",
+     "logits-2.f32le": "998969c477dd93593af69f4f8994b7307253272e827e96e861ba1721bd43e566",
+     "logits-3.f32le": "f2feb9ee5d0795dae033d30aa88af68961c70964ade30e1457b51f102820599d"
+    },
+    "dtype": "bfloat16",
+    "config_sha256": "3a2a26ded679375b7928ddeca59764df7cea83220c1961035f6d6e232659e9ce",
+    "script_sha256": "155a83ac91859639fcc51023fc19b66c23be6ecb8519db1eb3efb2e38f84a69f",
+    "transformers": "5.2.0",
+    "torch": "2.10.0",
+    "num_hidden_layers": null,
+    "prompt_tokens": [
+     5,
+     13,
+     8,
+     183
+    ],
+    "prompts": "the four prompts of gpt-oss-20b-6cee5e81-4layer-f32-reference.bundle",
+    "greedy_margins": "first step 3.0625; 5 of 32 steps exceed 5.0"
+   },
+   "result": "Generated the full 24-block BF16 bundle in 358 s with a 29 GB peak footprint.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "Using MXFP4 quantized models requires a GPU, we will default to dequantizing the model to bf16",
+    "{\"bundle\": \"/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle\", \"prompts\": 4}"
+   ],
+   "peak_memory_footprint_bytes": {
+    "gpt-oss-20b-full-bf16-reference": 29114899624
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-bf16-flex",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; dtype BF16 from the bundle; TRANSFORMERS_GPT_OSS_MIN_GREEDY=0 for the greedy test only",
+   "tests": [
+    "flex_prompt_logits_match_the_reference",
+    "flex_cached_greedy_matches_the_reference",
+    "flex_batched_prefill_matches_the_reference",
+    "flex_cached_long_prompt_matches_the_reference"
+   ],
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+    "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+   },
+   "tolerances": "half-precision defaults: 2.5 max, 0.15 mean per prompt; self-consistency 0.5",
+   "result": "All 24 blocks on Flex/BF16 against the full BF16 reference: every prompt position within 1.62 (mean at most 0.064), batched rows within 0.5, the 183-token cached decode through the wrapping ring within 1.32. The greedy test compared no tokens: the reference's first-step margin (3.06) is below twice the half-precision tolerance, so the greedy check is vacuous at this precision.",
+   "passed": 4,
+   "failed": 0,
+   "measurements": [
+    "test flex_prompt_logits_match_the_reference ... loaded all blocks as BF16 in 28.096468375s",
+    "prompt 0: 5 tokens, max |\u0394| = 1.34375e0, mean |\u0394| = 6.422824462088605e-2",
+    "prompt 1: 13 tokens, max |\u0394| = 2.5e-1, mean |\u0394| = 2.736695916307489e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 6.875e-1, mean |\u0394| = 4.264946364667708e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.6171875e0, mean |\u0394| = 4.320481230881781e-2",
+    "test flex_cached_greedy_matches_the_reference ... loaded all blocks as BF16 in 28.30233625s",
+    "greedy step 0: reference margin 3.0625e0 is a tie; stopping",
+    "greedy: 0 of 32 tokens match",
+    "test flex_batched_prefill_matches_the_reference ... loaded all blocks as BF16 in 28.591097709s",
+    "batched row 0: max |\u0394| = 5e-1 to the reference, 3.125e-1 to the stateless pass",
+    "batched row 1: max |\u0394| = 1.25e-1 to the reference, 1.25e-1 to the stateless pass",
+    "batched row 2: max |\u0394| = 2.5e-1 to the reference, 1.25e-1 to the stateless pass",
+    "batched row 3: max |\u0394| = 3.59375e-1 to the reference, 6.25e-2 to the stateless pass",
+    "test flex_cached_long_prompt_matches_the_reference ... loaded all blocks as BF16 in 28.646910917s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 1.3242188e0"
+   ],
+   "peak_memory_footprint_bytes": {
+    "flex_prompt_logits_match_the_reference": 49372466672,
+    "flex_cached_greedy_matches_the_reference": 49293856192,
+    "flex_batched_prefill_matches_the_reference": 49495346792,
+    "flex_cached_long_prompt_matches_the_reference": 49306570176
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-bf16-metal-f16",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; TRANSFORMERS_GPT_OSS_MIN_GREEDY=0 for the greedy test only",
+   "tests": [
+    "metal::metal_prompt_logits_match_the_reference",
+    "metal::metal_cached_greedy_matches_the_reference",
+    "metal::metal_cached_long_prompt_matches_the_reference",
+    "metal::metal_batched_prefill_matches_the_reference"
+   ],
+   "log_label": "gpt-oss-20b full BF16 bundle, Metal/F16 (default+metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+    "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+   },
+   "tolerances": "half-precision defaults: 2.5 max, 0.15 mean per prompt; self-consistency 0.5",
+   "result": "METAL_RESULT",
+   "failure_diagnosis": {
+    "status": "open; no crate defect found; the provisional full-model half-precision bound needs a reviewed decision",
+    "measured": "prompt 0 max 2.66 (mean 0.109); prompts 1-3 max 1.23, 0.70, 1.74 (means at most 0.058); see the first diagnostic run",
+    "crate_precision": "Metal/F16 against the 4-block F32 bundle stays within 0.122 (mean about 0.002), while Transformers' own BF16 run deviates from that F32 reference by 1.73 at four blocks (tests/gpt_oss_artifacts.rs), so the full-model gap is dominated by the BF16 reference's rounding",
+    "options": [
+     "qualify full-model half-precision runs against an F32 reference (the F32 model needs about 78 GiB, beyond this host for Transformers; a layer-streamed generator would be needed)",
+     "record a full-model half-precision bound calibrated from these measurements after review"
+    ]
+   },
+   "passed": 3,
+   "failed": 1,
+   "failures": [
+    {
+     "test": "metal::metal_prompt_logits_match_the_reference",
+     "exit": 101
+    }
+   ],
+   "measurements": [
+    "test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 30.416013875s",
+    "prompt 0: 5 tokens, max |\u0394| = 2.6601563e0, mean |\u0394| = 1.0853238918968665e-1",
+    "thread 'metal::metal_prompt_logits_match_the_reference' (32268394) panicked at tests/gpt_oss_artifacts.rs:497:9:",
+    "prompt 0: max |\u0394| = 2.6601563e0",
+    "test metal::metal_cached_greedy_matches_the_reference ... loaded all blocks as F16 in 30.0366165s",
+    "greedy step 0: reference margin 3.0625e0 is a tie; stopping",
+    "greedy: 0 of 32 tokens match",
+    "test metal::metal_cached_long_prompt_matches_the_reference ... loaded all blocks as F16 in 30.449651334s",
+    "cached decode of a 183-token prompt (prefill 45): max |\u0394| = 1.3432617e0",
+    "test metal::metal_batched_prefill_matches_the_reference ... loaded all blocks as F16 in 30.605231s",
+    "batched row 0: max |\u0394| = 4.7265625e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 1: max |\u0394| = 1.40625e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 2: max |\u0394| = 7.03125e-1 to the reference, 0e0 to the stateless pass",
+    "batched row 3: max |\u0394| = 7.421875e-1 to the reference, 0e0 to the stateless pass"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_prompt_logits_match_the_reference": 50598959968,
+    "metal::metal_cached_greedy_matches_the_reference": 50597845832,
+    "metal::metal_cached_long_prompt_matches_the_reference": 50598189896,
+    "metal::metal_batched_prefill_matches_the_reference": 50652420960
+   }
+  },
+  {
+   "name": "gpt-oss-20b-full-bf16-metal-f16-profile-diagnostic",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; TRANSFORMERS_GPT_OSS_TOLERANCE=5 (diagnostic override, measurement only)",
+   "tests": [
+    "metal::metal_prompt_logits_match_the_reference"
+   ],
+   "log_label": "DIAGNOSTIC gpt-oss-20b full BF16 bundle, Metal/F16 prompt profile with TRANSFORMERS_GPT_OSS_TOLERANCE=5 (measurement only)",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-bf16-reference.bundle",
+    "reference_json_sha256": "9a7891117900c5b90e049ce51616ce68ade3132d95ff4a1a5fa460da14660eac"
+   },
+   "result": "Diagnostic, not a gate pass: profiles all four prompts that the failing default gate stopped before.",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test metal::metal_prompt_logits_match_the_reference ... loaded all blocks as F16 in 30.2161265s",
+    "prompt 0: 5 tokens, max |\u0394| = 2.6601563e0, mean |\u0394| = 1.0853238918968665e-1",
+    "prompt 1: 13 tokens, max |\u0394| = 1.234375e0, mean |\u0394| = 4.909117747119321e-2",
+    "prompt 2: 8 tokens, max |\u0394| = 7.03125e-1, mean |\u0394| = 4.216956998858225e-2",
+    "prompt 3: 183 tokens, max |\u0394| = 1.7373047e0, mean |\u0394| = 5.7520232734584044e-2"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_prompt_logits_match_the_reference": 51264543056
+   }
+  },
+  {
+   "name": "gpt-oss-20b-4layer-f32-metal-f16-diagnostic",
+   "kind": "test",
+   "repository": "openai/gpt-oss-20b",
+   "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "test_target": "gpt_oss_artifacts",
+   "features": "default (std,flex) + metal,tokenizers; TRANSFORMERS_GPT_OSS_DTYPE=f16; default half-precision tolerances",
+   "tests": [
+    "metal::metal_prompt_logits_match_the_reference"
+   ],
+   "log_label": "DIAGNOSTIC gpt-oss-20b 4-block F32 bundle, Metal/F16 prompt logits at default half-precision tolerances",
+   "reference": {
+    "bundle": "/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-4layer-f32-reference.bundle",
+    "reference_json_sha256": "4028ec9ab2aa5e1acff0a3556994b07630cbe481afd6e19dbdd7ab4a25ed35ca"
+   },
+   "result": "Metal/F16 against the full BF16 reference: the cached long-prompt decode (within 1.34), batched prefill (rows within 0.74, identical to the stateless pass) and the vacuous greedy test passed; the prompt-logit gate FAILED at prompt 0 with max 2.66 against the provisional 2.5 half-precision bound (mean 0.109, within 0.15).",
+   "passed": 1,
+   "failed": 0,
+   "measurements": [
+    "test metal::metal_prompt_logits_match_the_reference ... loaded 4 blocks as F16 in 6.098566208s",
+    "prompt 0: 5 tokens, max |\u0394| = 1.8565178e-2, mean |\u0394| = 2.148643959921245e-3",
+    "prompt 1: 13 tokens, max |\u0394| = 1.8692017e-2, mean |\u0394| = 2.091395516460486e-3",
+    "prompt 2: 8 tokens, max |\u0394| = 2.0984173e-2, mean |\u0394| = 2.265152554369928e-3",
+    "prompt 3: 183 tokens, max |\u0394| = 1.21929646e-1, mean |\u0394| = 2.5428272690061903e-3"
+   ],
+   "peak_memory_footprint_bytes": {
+    "metal::metal_prompt_logits_match_the_reference": 19875471760
+   }
+  }
+ ],
+ "binaries": [
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/examples/qwen35_chat",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "c9e823b6f05243549963738bc0bcf14c038b1e79272be3131db860c8ec0e114f"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/local_artifacts-aafff6fa174f4d6d",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "e8423dcc91212d96682f510bc7c423d8af822ec0f0b21dd9bc530edb328d4f7f"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/t5_xxl_metal-c2f14e97e4097231",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "cc513b4ac6158656b1315026c81d2bba759420a499c408aa3ea3c3f35530fcf5"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/t5_xxl_artifacts-e0cbc21f29408933",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "a4fb0e31f196f15f41cf349314293e1a4b64cf71b3994ecce149e25a37193472"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/qwen3_moe_artifacts-4414bf3fd5d14466",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "5c1516d9d72bd6ad3263f15cfd9de0739cdd97cc207a40f0e8640f67a5bac609"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/qwen3_moe_artifacts-8729ca31ee3bcb90",
+   "features": "std,metal,tokenizers,kernel-tracing (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "22a42549b281bcb779dc2e33685982a47e826501da921025da187e0f91dcc353"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/muse_glimmer_artifacts-ceb6fd41880cfb1e",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "5247fae5bd60e1091d3a39818a5d03a840c6b8ba942ee4e86729dd4288c04fe1"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/muse_glimmer_artifacts-13345867f9f17ae7",
+   "features": "std,metal,tokenizers,kernel-tracing (--no-default-features)",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "00c9830ded7fbb281ed01a26a1f8d2372fdb1bd8195ed921c5e24197b7761578"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/muse_glimmer_artifacts-3ec4e497a8c59c63",
+   "features": "std,metal,tokenizers (--no-default-features)",
+   "source_commit": "4f9502a109f3549b56ea68fce77873b9dfee4b83",
+   "sha256": "69465200039d787c5bea4b94c9ee5fabc3ba035632151dbcf2f06e63bbdd26b3"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/nemotron_h_artifacts-673d9bd2ab151292",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "4f9502a109f3549b56ea68fce77873b9dfee4b83",
+   "sha256": "7168ab59cdda62d9905d967027c1b0bd9050e943d27ff0fa8bc2f77945946465"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/nemotron_h_artifacts-673d9bd2ab151292",
+   "features": "std,metal,tokenizers,chat-templates (--no-default-features)",
+   "source_commit": "1b48b81877a240e80b04cf15321fbb000e6f5b4b",
+   "sha256": "bfc1b845ac16b53a945b2df6aebcbb7206039385ac2c2bce28f13653a578c53d"
+  },
+  {
+   "path": "/Volumes/T9/cargo-targets/tfm-checkpoint-replay/release/deps/gpt_oss_artifacts-b47b127d4467bed2",
+   "features": "default (std,flex) + metal,tokenizers",
+   "source_commit": "8a4404a5a2d3d4d96ce8e7857ee06bd2abda1632",
+   "sha256": "1a7a50a098ce0eddf4d662915fb8551c4aa505bcba641ecbf1784d380c847a07"
+  }
+ ],
+ "created_artifacts": [
+  {
+   "path": "/Volumes/bag of holding/models/transformers-acceptance/replay-20261016/qwen3.8-27b-q8-1d4bf0f2/qwen3.8-27b-1d4bf0f2-q8-g64.bpk",
+   "bytes": 27223690786,
+   "sha256": "426d96329d13a7af473fa0bd0d6440e382544661b24de63fe54f9f76e290a73e",
+   "created_by": "quantizes_pinned_qwen38_weights_to_q8_burnpack"
+  },
+  {
+   "path": "/Volumes/bag of holding/models/transformers-acceptance/replay-20261016/qwen3.8-27b-q4-1d4bf0f2/qwen3.8-27b-1d4bf0f2-q4-g64.bpk",
+   "bytes": 14412721442,
+   "sha256": "32af18ef7a282b57e69ab580e47b85fe4617925860d57d0ea881a538498126c9",
+   "created_by": "quantizes_pinned_qwen38_weights_to_q4_burnpack"
+  }
+ ],
+ "not_run": [
+  "Q8/Q4 quantized-reference and quality gates for Qwen3.8, Qwen3-30B-A3B and Muse (never run; outside the replay list)",
+  "Qwen3-30B-A3B official reference comparison (no reference bundle exists)",
+  "Real-weight Nemotron MTP parity (no reviewed MTP oracle)",
+  "Payload-hash-only gates for FLAN-T5-XXL and Muse (the Metal loads verify the pinned artifacts strictly; Nemotron's gates hash every shard)",
+  "gpt-oss-20b on Metal in BF16 (the documented Metal profile is F16)"
+ ]
+}

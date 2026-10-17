@@ -2,14 +2,11 @@
 //! Run `--features autodiff --example grokking_train -- --steps 10` for a CPU smoke.
 //! See mechanistic/grokking_training/README.md for the full grokking experiment.
 
-#[cfg(all(feature = "std", feature = "flex", feature = "autodiff"))]
 #[path = "mechanistic/grokking_model.rs"]
 mod model;
-#[cfg(all(feature = "std", feature = "flex", feature = "autodiff"))]
 #[path = "mechanistic/grokking_training/study.rs"]
 mod study;
 
-#[cfg(all(feature = "std", feature = "flex", feature = "autodiff"))]
 /// Select the requested autodiff backend and run the frozen modular-addition protocol.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = study::Settings::from_args()?;
@@ -26,7 +23,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Inputs are `[batch, 3]` integer IDs `[a, b, =]`; targets are `[batch]` sums
 /// modulo 113. Mean F32 cross entropy includes all 114 output classes, including
 /// the never-targeted equals token, before one native optimizer update.
-#[cfg(all(feature = "std", feature = "flex", feature = "autodiff"))]
 fn training_step<B, O>(
     model: model::GrokkingTransformer<B>,
     optimizer: &mut O,
@@ -44,11 +40,4 @@ where
     let loss = loss_function.forward(logits, targets);
     let gradients = GradientsParams::from_grads(loss.backward(), &model);
     Ok(optimizer.step(learning_rate, model, gradients))
-}
-
-#[cfg(not(all(feature = "std", feature = "flex", feature = "autodiff")))]
-/// Explain the backend and autodiff features needed to execute the training graph.
-fn main() {
-    eprintln!("grokking_train requires --features std,flex,autodiff");
-    std::process::exit(1);
 }

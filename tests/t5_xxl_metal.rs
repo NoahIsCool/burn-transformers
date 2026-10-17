@@ -58,6 +58,7 @@ use transformers::{
         CheckpointEquivalenceRecord, DTypePolicy, ExecutionStats, LoadOptions, LoadReport,
         ResolvedIndexTensorAlias,
     },
+    generation::EarlyStopping,
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
@@ -637,12 +638,12 @@ fn read_f32le(path: &Path, spec: &ReferenceTensorSpec) -> Vec<f32> {
         spec.key
     );
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let mut chunks = bytes.chunks_exact(4);
+    let (chunks, remainder) = bytes.as_chunks::<4>();
     let values = chunks
-        .by_ref()
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 chunk")))
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
-    assert!(chunks.remainder().is_empty());
+    assert!(remainder.is_empty());
     assert_eq!(
         values.len(),
         spec.shape.iter().product::<usize>(),
@@ -1460,7 +1461,7 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
             length_penalty: 1.0,
             // Both implementations use the conventional eager rule: finish
             // once the beam-width EOS pool is complete for the source row.
-            early_stopping: true,
+            early_stopping: EarlyStopping::Eager,
         },
     )
     .expect("run exact four-beam FLAN generation");

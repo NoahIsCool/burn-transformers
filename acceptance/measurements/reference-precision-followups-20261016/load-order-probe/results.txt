@@ -1,0 +1,11 @@
+qwen3.8 source plateau_GB=62.351 | test probe_post_load_footprint ... probe loaded causal in 81.1s shard_opens=Some(18) peak=62351435256 at 81.59s of 84.63s samples=1549 exit=0 
+qwen3.8 target plateau_GB=54.590 | test probe_post_load_footprint ... probe loaded causal in 78.7s shard_opens=Some(34) peak=57212669960 at 77.03s of 82.01s samples=1501 exit=0 
+qwen3-moe source plateau_GB=61.310 | test probe_post_load_footprint ... probe loaded causal in 88.3s shard_opens=Some(16) peak=63653792576 at 87.85s of 91.33s samples=1676 exit=0 
+qwen3-moe target plateau_GB=61.315 | test probe_post_load_footprint ... probe loaded causal in 96.5s shard_opens=Some(255) peak=63374444968 at 96.46s of 99.49s samples=1820 exit=0 
+muse source plateau_GB=64.776 | test probe_post_load_footprint ... probe loaded causal in 90.4s shard_opens=Some(2) peak=68624445968 at 84.35s of 93.59s samples=1701 exit=0 
+muse target plateau_GB=59.395 | test probe_post_load_footprint ... probe loaded causal in 86.4s shard_opens=Some(7) peak=60551863160 at 80.44s of 89.43s samples=1631 exit=0 
+nemotron source plateau_GB=68.307 | test probe_post_load_footprint ... probe loaded causal in 111.8s shard_opens=Some(14) peak=68540156832 at 110.99s of 114.83s samples=2086 exit=0 
+nemotron target plateau_GB=68.302 | test probe_post_load_footprint ... probe loaded causal in 115.2s shard_opens=Some(210) peak=68564798344 at 114.09s of 118.31s samples=2132 exit=0 
+flan-t5-xxl source plateau_GB=47.989 | test probe_post_load_footprint ... probe loaded seq2seq in 58.6s shard_opens=Some(7) peak=49073625544 at 52.97s of 61.68s samples=1122 exit=0 
+flan-t5-xxl target plateau_GB=48.680 | test probe_post_load_footprint ... probe loaded seq2seq in 29.9s shard_opens=Some(19) peak=48679705584 at 29.92s of 32.96s samples=594 exit=0 
+probes-done

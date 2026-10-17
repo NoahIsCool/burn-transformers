@@ -1,5 +1,13 @@
 #![deny(missing_docs)]
+// Every public type must be reachable by a public path, so a public signature
+// never returns a type that callers cannot name or match.
+#![warn(unnameable_types)]
 #![forbid(unsafe_code)]
+// docs.rs documents the crate on nightly with `--cfg docsrs` (see
+// `[package.metadata.docs.rs]` in Cargo.toml). There, rustdoc labels each item
+// that a Cargo feature gates, such as the `tokenizers` and `chat-templates`
+// APIs, with the feature it requires. Ordinary builds never set `docsrs`.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! Backend-generic implementations of modern transformer architectures.
 //!
@@ -21,12 +29,15 @@ pub mod attention;
 pub mod cache;
 pub mod checkpoint;
 pub mod delta_net;
+pub(crate) mod division;
 pub mod error;
 pub mod experiment;
 pub mod feed_forward;
 pub mod generation;
+pub mod initialization;
 pub mod intervention;
 pub mod loaded;
+pub mod mamba2;
 pub mod mla;
 pub mod models;
 pub mod moe;
@@ -42,21 +53,26 @@ pub mod transfer;
 
 pub use architecture::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
-    DecodeState, EncoderOutput, ForwardOptions, LogitsSelection, Seq2SeqInput,
-    Seq2SeqLanguageModel, Seq2SeqOutput, TokenMask,
+    DecodeState, EncoderOutput, ForwardOptions, HookedModel, LogitsSelection, Seq2SeqInput,
+    Seq2SeqLanguageModel, Seq2SeqOutput, StagedModel, TokenMask,
 };
 pub use error::{Error, Result};
 pub use generation::{
     CausalGenerationOutput, CausalGenerationRequest, FinishReason, GeneratedSequence,
-    GenerationConfig, GenerationToken, GenerationTracker, LogitsProcessor, SamplingStrategy,
-    TokenSelection, generate_causal, generate_causal_streaming,
+    GenerationConfig, GenerationToken, GenerationTracker, LogitsProcessor, PenaltyScope,
+    SamplingStrategy, SplitMix64, TokenHistory, TokenSelection, generate_causal,
+    generate_causal_streaming, upcast_half_precision,
 };
-pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer, QuantizedLoadAudit};
+pub use initialization::InitPolicy;
+pub use loaded::{
+    LoadedModel, LoadedModelParts, ModelSourceMetadata, ModelTokenizer, QuantizedLoadAudit,
+};
 pub use models::{
     AutoCausalConfig, AutoCausalLm, AutoLoadOptions, AutoSeq2SeqConfig, AutoSeq2SeqLm,
 };
 #[cfg(feature = "tokenizers")]
 pub use tokenization::{
     BatchEncoding, ChatMessage, ChatTemplateOptions, EncodeOptions, LocalTokenizer, Padding,
-    PaddingSide, SpecialToken, SpecialTokens, TokenizerMetadata, TruncationSide,
+    PaddingSide, SpecialToken, SpecialTokens, TokenStreamDecoder, TokenizerMetadata,
+    TruncationSide,
 };

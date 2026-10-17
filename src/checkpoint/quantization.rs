@@ -23,12 +23,16 @@
 mod burnpack;
 mod checkpoint;
 mod config;
+mod counts;
 mod error;
+mod hash_workers;
 mod load;
 mod manifest;
+mod packing;
 mod policy;
 mod provenance;
 mod reference;
+mod staging;
 
 pub use burnpack::{
     BURNPACK_MANIFEST_TENSOR, BurnpackAppendOutcome, BurnpackArtifactSummary,
@@ -38,7 +42,7 @@ pub use burnpack::{
 pub use checkpoint::{
     CheckpointQuantizationFailure, CheckpointQuantizationFailureCause,
     CheckpointQuantizationOutcome, CheckpointQuantizationResult, QuantizationExclusionRecord,
-    QuantizedCheckpointOptions, quantize_local_checkpoint_to_burnpack,
+    QuantizedCheckpointOptions, UnalignedMatrixPolicy, quantize_local_checkpoint_to_burnpack,
 };
 pub use config::{
     PackedValueLayout, QuantizationGroupSize, QuantizedGroupLayout, QuantizedPayloadLayout,
@@ -53,11 +57,13 @@ pub use load::{
     execute_local_quantized_load_plan_audited, execute_quantized_load_plan,
     validate_sidecar_contract,
 };
+// Re-exported for source compatibility; the item itself carries the deprecation.
+#[allow(deprecated)]
+pub use manifest::BURNPACK_QUANTIZATION_FORMAT_VERSION;
 pub use manifest::{
-    BURNPACK_QUANTIZATION_FORMAT_VERSION, BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT,
-    BURNPACK_QUANTIZATION_FORMAT_VERSION_V1, BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
-    BurnpackByteOrder, BurnpackQuantizationManifest, PackedExecutionSupport,
-    QuantizedTensorMetadata, SourceFloatDType,
+    BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT, BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+    BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, BurnpackByteOrder, BurnpackQuantizationManifest,
+    PackedExecutionSupport, QuantizedTensorMetadata, SourceFloatDType,
 };
 pub use policy::{
     QuantizationEligibility, QuantizationExclusion, classify_weight_for_quantization,

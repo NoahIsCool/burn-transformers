@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 mod checkpoint;
 mod load;
 pub mod model;
+mod routing;
 
 pub use checkpoint::{
     NemotronHCheckpointContract, NemotronHCheckpointOptions, NemotronHCheckpointProvenance,
@@ -23,12 +24,12 @@ pub use model::mamba2::{
 pub use model::{
     NemotronHBlock, NemotronHDecodeState, NemotronHForCausalLm, NemotronHModel,
     NemotronHMtpPrediction, NemotronHNextTokenHead, NemotronHSpeculativeConfig,
-    NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput,
+    NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput, NemotronHSpeculativePrefill,
 };
 
 use super::config::{
-    ConfigError, ModelConfig, TokenIds, Validate, divisible, model_type, nonzero, positive_finite,
-    probability, token_ids,
+    ConfigError, ModelConfig, TokenIds, Validate, checkpoint_tensor_count, divisible, expert_count,
+    layer_count, model_type, nonzero, positive_finite, probability, token_ids,
 };
 
 /// Mixer/FFN operation owned by one Nemotron-H residual block.
@@ -130,9 +131,12 @@ pub struct NemotronHConfig {
     pub num_hidden_layers: Option<usize>,
     /// Whether token embedding and output projection share parameters.
     pub tie_word_embeddings: bool,
-    /// Whether inference maintains Mamba and attention caches.
+    /// Hugging Face generation hint; ignored here, where callers own [`NemotronHDecodeState`].
     pub use_cache: bool,
-    /// Number of final prompt positions projected to vocabulary logits.
+    /// Upstream count of final prompt positions given logits; must be nonzero.
+    ///
+    /// This runtime selects logit positions per call with
+    /// [`crate::ForwardOptions::logits`] instead.
     pub num_logits_to_keep: usize,
     /// Optional padding token ID.
     pub pad_token_id: Option<TokenIds>,
@@ -151,17 +155,33 @@ pub struct NemotronHConfig {
     pub max_position_embeddings: usize,
     /// Whether attention projections include bias.
     pub attention_bias: bool,
-    /// Attention-probability dropout.
+    /// Attention-probability dropout; inference rejects any nonzero value.
     pub attention_dropout: f64,
-    /// Optional causal sliding window for attention blocks.
+    /// Serialized `sliding_window`, retained as metadata; it never changes the graph.
+    ///
+    /// The pinned Transformers Nemotron-H graph (`cfa309cf`) never reads this
+    /// key: its attention builds plain causal masks and passes no window to
+    /// the attention interface, while `save_pretrained` still writes the key.
+    /// Applying it would silently diverge from the reference for any config
+    /// that sets it, so every value is accepted and ignored, as there. Set
+    /// [`Self::attention_window`] to window attention in an experiment.
     pub sliding_window: Option<usize>,
+    /// Experiment-only causal attention window, in tokens; never read from or written to JSON.
+    ///
+    /// `Some(w)` lets every attention block (and the MTP stage) see only keys
+    /// at most `w - 1` positions before each query, in the stateless,
+    /// cached, and hooked paths alike. Checkpoints cannot set it: the
+    /// reference ignores the serialized [`Self::sliding_window`], so a loaded
+    /// model always computes the reference's full causal attention.
+    #[serde(skip)]
+    pub attention_window: Option<usize>,
     /// Hidden width of dense MLP blocks.
     pub intermediate_size: usize,
     /// Dense MLP activation, normally squared ReLU (`relu2`).
     pub mlp_hidden_act: String,
     /// Whether dense MLP projections contain bias.
     pub mlp_bias: bool,
-    /// Runtime hint retained from official configs; it does not change topology.
+    /// Upstream fused-kernel hint; it changes neither topology nor this runtime's math.
     pub use_mamba_kernels: bool,
     /// State dimension `N` in each selective state-space head.
     pub ssm_state_size: usize,
@@ -180,19 +200,36 @@ pub struct NemotronHConfig {
     /// Legacy expansion hint retained for checkpoint compatibility.
     #[serde(alias = "mamba_expand")]
     pub expand: usize,
-    /// Minimum learned discretization step.
+    /// Lower end of the `dt_bias` initialization range, and the runtime clamp of prefill.
+    ///
+    /// The pinned Transformers graph clamps chunked-prefill steps to
+    /// `[time_step_min, +inf)` and leaves recurrent decode steps unclamped.
     #[serde(alias = "mamba_dt_min")]
     pub time_step_min: f64,
-    /// Maximum learned discretization step.
+    /// Upper end of the `dt_bias` initialization range only; never a runtime clamp.
     #[serde(alias = "mamba_dt_max")]
     pub time_step_max: f64,
-    /// Runtime clamp `[lower, upper]`; `None` denotes positive infinity.
+    /// Runtime clamp `[lower, upper]` declared by NVIDIA's remote code; `None` is `+inf`.
+    ///
+    /// An unbounded upper limit is read from JSON `null`, from NVIDIA's legacy
+    /// bare `Infinity`, or from the `{"__float__": "Infinity"}` tag that
+    /// Transformers 5 writes into every config it saves (see
+    /// [`crate::models::config::parse_text_config`]).
+    ///
+    /// Retained and validated as compatibility metadata. The Transformers
+    /// graph this crate executes ignores it (see [`Self::time_step_min`]);
+    /// NVIDIA's Nemotron Nano remote code instead clamps both paths to it,
+    /// which [`crate::mamba2::TimeStepClamp::both`] expresses for custom
+    /// compositions. No shipped checkpoint sets a finite upper bound.
     #[serde(alias = "mamba_dt_limit")]
     pub time_step_limit: Vec<Option<f64>>,
-    /// Small positive floor used while initializing discretization steps.
+    /// Upstream initialization floor of discretization steps (validated metadata).
+    ///
+    /// Validation requires `time_step_floor <= time_step_min`; parameters are
+    /// loaded from checkpoints, so the runtime never reads it.
     #[serde(alias = "mamba_dt_init_floor")]
     pub time_step_floor: f64,
-    /// Optional legacy low-rank discretization projection width.
+    /// Optional legacy low-rank discretization width; validated, never instantiated.
     pub time_step_rank: Option<usize>,
     /// Whether the causal convolution has a bias.
     #[serde(alias = "mamba_conv_bias")]
@@ -218,7 +255,7 @@ pub struct NemotronHConfig {
     pub moe_shared_expert_intermediate_size: usize,
     /// Optional low-rank bottleneck shared by expert projections.
     pub moe_latent_size: Option<usize>,
-    /// Whether shared-expert execution may overlap routed experts.
+    /// Upstream scheduling hint for overlapping shared and routed experts; unused here.
     pub moe_shared_expert_overlap: bool,
     /// Routed experts selected per token.
     pub num_experts_per_tok: usize,
@@ -240,7 +277,14 @@ pub struct NemotronHConfig {
     pub mtp_layers_block_type: Vec<NemotronHBlockType>,
     /// Bias switch used by the pinned Mamba input/output projection graph.
     pub use_bias: bool,
-    /// New-weight initialization standard deviation.
+    /// Upstream initialization standard deviation; validated as positive and
+    /// finite, but never read.
+    ///
+    /// Fresh parameters come from each component's own constructor: Burn's
+    /// default initializers for linear, depthwise-convolution, and embedding
+    /// weights, and fixed values elsewhere — Mamba-2 `A_log = log(1..=H)` with
+    /// unit `D`, `dt_bias`, and gated-norm scale, unit RMS-norm scales, and a
+    /// zero router correction bias.
     pub initializer_range: f64,
     /// Epsilon applied by residual-block normalization.
     pub layer_norm_epsilon: f64,
@@ -248,11 +292,11 @@ pub struct NemotronHConfig {
     pub rms_norm_eps: Option<f64>,
     /// Redundant epsilon emitted by newer Nemotron Nano checkpoints.
     pub norm_eps: Option<f64>,
-    /// Whether residual accumulation uses FP32.
+    /// Whether residual accumulation uses FP32; inference rejects `true`.
     pub residual_in_fp32: bool,
-    /// Residual-stream dropout.
+    /// Residual-stream dropout; inference rejects any nonzero value.
     pub hidden_dropout: f64,
-    /// Whether initialization rescales pre-normalized residual branches by depth.
+    /// Upstream initialization flag for depth-scaled residual branches; unused here.
     pub rescale_prenorm_residual: bool,
     /// Compatibility RoPE theta retained by NVIDIA configs; current attention is NoPE.
     pub rope_theta: Option<f64>,
@@ -287,6 +331,7 @@ impl Default for NemotronHConfig {
             attention_bias: false,
             attention_dropout: 0.0,
             sliding_window: None,
+            attention_window: None,
             intermediate_size: 21_504,
             mlp_hidden_act: "relu2".into(),
             mlp_bias: false,
@@ -364,6 +409,9 @@ impl Validate for NemotronHConfig {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        // The schedule's length is its own JSON size, but every block becomes
+        // contract entries and graph modules, so it is bounded like a count.
+        layer_count(FAMILY, "layers_block_type", self.block_count())?;
         if let Some(declared) = self.num_hidden_layers
             && declared != self.block_count()
         {
@@ -420,12 +468,14 @@ impl Validate for NemotronHConfig {
                 ));
             }
             positive_finite(FAMILY, "rope_theta", self.rope_theta.unwrap_or(10_000.0))?;
-            if let Some(window) = self.sliding_window {
-                nonzero(FAMILY, "sliding_window", window)?;
+            // The serialized `sliding_window` is ignored metadata (see its
+            // field); only the experiment's explicit window shapes attention.
+            if let Some(window) = self.attention_window {
+                nonzero(FAMILY, "attention_window", window)?;
                 if window > self.max_position_embeddings {
                     return Err(ConfigError::new(
                         FAMILY,
-                        "sliding_window",
+                        "attention_window",
                         "cannot exceed max_position_embeddings",
                     ));
                 }
@@ -537,6 +587,7 @@ impl Validate for NemotronHConfig {
             ] {
                 nonzero(FAMILY, field, value)?;
             }
+            expert_count(FAMILY, "n_routed_experts", self.n_routed_experts)?;
             if self.n_shared_experts != 1 {
                 return Err(ConfigError::new(
                     FAMILY,
@@ -554,28 +605,34 @@ impl Validate for NemotronHConfig {
                 "n_group",
                 self.n_group,
             )?;
-            if self.n_routed_experts / self.n_group < 2 {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "n_group",
-                    "each router group must contain at least two experts for top-2 group scoring",
-                ));
-            }
-            let eligible_experts = (self.n_routed_experts / self.n_group)
-                .checked_mul(self.topk_group)
-                .ok_or_else(|| {
-                    ConfigError::new(
+            match routing::routing_groups(
+                self.n_routed_experts,
+                self.n_group,
+                self.topk_group,
+                self.num_experts_per_tok,
+            ) {
+                Ok(_) => {}
+                Err(routing::RoutingError::SmallGroups) => {
+                    return Err(ConfigError::new(
+                        FAMILY,
+                        "n_group",
+                        "each router group must contain at least two experts for top-2 group scoring",
+                    ));
+                }
+                Err(routing::RoutingError::EligibleOverflow) => {
+                    return Err(ConfigError::new(
                         FAMILY,
                         "topk_group",
                         "eligible expert count overflows usize",
-                    )
-                })?;
-            if self.topk_group > self.n_group || self.num_experts_per_tok > eligible_experts {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "num_experts_per_tok",
-                    "routing groups do not contain enough eligible experts",
-                ));
+                    ));
+                }
+                Err(routing::RoutingError::Insufficient) => {
+                    return Err(ConfigError::new(
+                        FAMILY,
+                        "num_experts_per_tok",
+                        "routing groups do not contain enough eligible experts",
+                    ));
+                }
             }
             positive_finite(FAMILY, "routed_scaling_factor", self.routed_scaling_factor)?;
         }
@@ -598,6 +655,17 @@ impl Validate for NemotronHConfig {
                 )
             })?;
         }
+        // The contract and the graph hold one tensor set per routed expert of
+        // every MoE block, so the whole inventory is bounded.
+        checkpoint_tensor_count(
+            FAMILY,
+            if has_moe {
+                "n_routed_experts"
+            } else {
+                "layers_block_type"
+            },
+            self.checkpoint_tensor_count(),
+        )?;
         positive_finite(FAMILY, "initializer_range", self.initializer_range)?;
         positive_finite(FAMILY, "layer_norm_epsilon", self.layer_norm_epsilon)?;
         probability(FAMILY, "attention_dropout", self.attention_dropout)?;

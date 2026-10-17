@@ -3,7 +3,7 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -75,7 +75,7 @@ fn interleaved_rotary_channels_are_permuted_to_split_halves() {
         [[[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]]],
         &device,
     );
-    let actual = interleaved_to_split(input, "test").unwrap().into_data();
+    let actual = interleaved_to_split_half(input).unwrap().into_data();
     actual.assert_approx_eq::<f32>(
         &TensorData::from([[[[1.0, 3.0, 2.0, 4.0], [5.0, 7.0, 6.0, 8.0]]]]),
         Tolerance::absolute(0.0),
@@ -483,6 +483,39 @@ fn configuration_rejects_each_zero_extent_and_nonfinite_numerical_constant() {
     }
 }
 
+/// Initialization allocates every projection with exactly the validated widths.
+#[test]
+fn init_allocates_every_projection_from_the_validated_widths() {
+    let device = Default::default();
+    for q_lora_rank in [None, Some(6)] {
+        let config = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, q_lora_rank);
+        let widths = config.validated_widths().unwrap();
+        assert_eq!(widths.qk_head_dim, config.qk_head_dim().unwrap());
+        assert_eq!(widths.query_width, 2 * (3 + 2));
+        assert_eq!(widths.value_width, 2 * 4);
+        assert_eq!(
+            widths.compressed_width,
+            config.compressed_projection_width().unwrap()
+        );
+        assert_eq!(widths.expanded_width, config.expanded_kv_width().unwrap());
+        let mla = config.init::<TestBackend>(&device).unwrap();
+        let dims = |linear: &Linear<TestBackend>| linear.weight.val().dims();
+        match q_lora_rank {
+            None => assert_eq!(dims(mla.q_proj.as_ref().unwrap()), [8, widths.query_width]),
+            Some(rank) => {
+                assert_eq!(dims(mla.q_a_proj.as_ref().unwrap()), [8, rank]);
+                assert_eq!(
+                    dims(mla.q_b_proj.as_ref().unwrap()),
+                    [rank, widths.query_width]
+                );
+            }
+        }
+        assert_eq!(dims(&mla.kv_a_proj_with_mqa), [8, widths.compressed_width]);
+        assert_eq!(dims(&mla.kv_b_proj), [5, widths.expanded_width]);
+        assert_eq!(dims(&mla.o_proj), [widths.value_width, 8]);
+    }
+}
+
 /// Overflowing head sums and projection widths fail configuration before allocating parameter tensors.
 #[test]
 fn projection_extent_overflow_is_rejected_before_parameter_allocation() {
@@ -708,12 +741,10 @@ fn latent_and_rotary_helpers_reject_invalid_channel_widths() {
         .unwrap_err();
     assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.latents"));
     for width in [0, 1, 3] {
-        let error = interleaved_to_split(
-            Tensor::<TestBackend, 4>::zeros([1, 1, 2, width], &device),
-            "odd_rotary",
-        )
-        .unwrap_err();
-        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "odd_rotary"));
+        let error =
+            interleaved_to_split_half(Tensor::<TestBackend, 4>::zeros([1, 1, 2, width], &device))
+                .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "rope.interleaved_input"));
     }
     let error = attention_probabilities(
         Tensor::<TestBackend, 4>::zeros([1, 2, 1, 3], &device),
@@ -857,5 +888,651 @@ fn configuration_rejects_impossible_elements_in_every_registered_projection() {
         MultiLatentAttentionConfig::new(1, 1, 1, 2, 1, 1, Some(usize::MAX / 3)),
     ] {
         config.validate().unwrap();
+    }
+}
+
+/// Builds a deterministic multi-head MLA module with the given head count and latent rank.
+fn deterministic_wide_mla(
+    heads: usize,
+    rank: usize,
+) -> (
+    MultiLatentAttention<TestBackend>,
+    <TestBackend as BackendTypes>::Device,
+) {
+    let device = Default::default();
+    let mut mla = MultiLatentAttentionConfig::new(8, heads, 3, 2, 4, rank, None)
+        .init::<TestBackend>(&device)
+        .unwrap();
+    for (offset, linear) in [
+        mla.q_proj.as_mut().unwrap(),
+        &mut mla.kv_a_proj_with_mqa,
+        &mut mla.kv_b_proj,
+        &mut mla.o_proj,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let [input, output] = linear.weight.val().dims();
+        let values = (0..input * output)
+            .map(|index| ((index * 7 + offset * 5) % 17) as f32 * 0.02 - 0.16)
+            .collect::<Vec<_>>();
+        linear.weight = Param::from_tensor(Tensor::from_data(
+            TensorData::new(values, [input, output]),
+            &device,
+        ));
+    }
+    (mla, device)
+}
+
+/// The previous absorbed algorithm: latents expanded per head and one GEMV per head.
+///
+/// Retained in tests as the parity and timing reference for the folded path.
+fn per_head_absorbed_reference(
+    mla: &MultiLatentAttention<TestBackend>,
+    projection: &MlaProjection<TestBackend>,
+    latents: Tensor<TestBackend, 3>,
+    rotary_keys: Tensor<TestBackend, 4>,
+    mask: Option<Tensor<TestBackend, 4, Bool>>,
+) -> Tensor<TestBackend, 3> {
+    let config = &mla.config;
+    let [batch, heads, queries, _] = projection.query_content.dims();
+    let keys = latents.dims()[1];
+    let per_head = config.qk_nope_head_dim + config.value_head_dim;
+    let per_head_weight = mla
+        .kv_b_proj
+        .weight
+        .val()
+        .reshape([config.kv_lora_rank, heads, per_head])
+        .swap_dims(0, 1);
+    let key_weight = per_head_weight
+        .clone()
+        .narrow(2, 0, config.qk_nope_head_dim)
+        .swap_dims(1, 2)
+        .unsqueeze_dim::<4>(0)
+        .expand([batch, heads, config.qk_nope_head_dim, config.kv_lora_rank]);
+    let value_weight = per_head_weight
+        .narrow(2, config.qk_nope_head_dim, config.value_head_dim)
+        .unsqueeze_dim::<4>(0)
+        .expand([batch, heads, config.kv_lora_rank, config.value_head_dim]);
+    let latent_heads =
+        latents
+            .unsqueeze_dim::<4>(1)
+            .expand([batch, heads, keys, config.kv_lora_rank]);
+    let content = projection
+        .query_content
+        .clone()
+        .matmul(key_weight)
+        .matmul(latent_heads.clone().swap_dims(2, 3));
+    let rotary = projection.query_rotary.clone().matmul(
+        rotary_keys
+            .expand([batch, heads, keys, config.qk_rope_head_dim])
+            .swap_dims(2, 3),
+    );
+    let probabilities =
+        attention_probabilities((content + rotary) * config.softmax_scale, mask).unwrap();
+    let mixed = probabilities
+        .matmul(latent_heads)
+        .matmul(value_weight)
+        .swap_dims(1, 2)
+        .reshape([batch, queries, heads * config.value_head_dim]);
+    operations::linear(mixed, &mla.o_proj).unwrap()
+}
+
+/// Folded multi-head decode matches the per-head reference and the expanded path,
+/// including a fully padded history row.
+#[test]
+fn folded_absorbed_decode_matches_per_head_and_expanded_paths() {
+    let (mla, device) = deterministic_wide_mla(4, 5);
+    let hidden = Tensor::<TestBackend, 3>::from_data(
+        TensorData::new(
+            (0..2 * 6 * 8)
+                .map(|index| ((index % 11) as f32 - 5.0) * 0.09)
+                .collect::<Vec<_>>(),
+            [2, 6, 8],
+        ),
+        &device,
+    );
+    let history = mla.project_self(hidden.clone()).unwrap();
+    let query = mla.project(hidden.clone().narrow(1, 5, 1), hidden).unwrap();
+    // Batch 1's single query sees no key: every history link is padding.
+    let mut exclusions = vec![false; 2 * 4 * 6];
+    for (index, excluded) in exclusions.iter_mut().enumerate() {
+        *excluded = index >= 4 * 6 || index % 6 == 0;
+    }
+    let mask = Tensor::<TestBackend, 4, Bool>::from_data(
+        TensorData::new(exclusions, [2, 4, 1, 6]),
+        &device,
+    );
+    let absorbed = mla
+        .mix_absorbed(
+            &query,
+            history.normalized_latent.clone(),
+            history.rotated_key.clone(),
+            Some(mask.clone()),
+            true,
+        )
+        .unwrap();
+    let expanded = mla
+        .mix_unabsorbed(
+            &query,
+            history.normalized_latent.clone(),
+            history.rotated_key.clone(),
+            Some(mask.clone()),
+            false,
+        )
+        .unwrap();
+    let reference = per_head_absorbed_reference(
+        &mla,
+        &query,
+        history.normalized_latent,
+        history.rotated_key,
+        Some(mask),
+    );
+    absorbed
+        .hidden_state
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(&reference.into_data(), Tolerance::absolute(1e-6));
+    absorbed.hidden_state.into_data().assert_approx_eq::<f32>(
+        &expanded.hidden_state.into_data(),
+        Tolerance::absolute(1e-5),
+    );
+    let probabilities = absorbed
+        .probabilities
+        .unwrap()
+        .narrow(0, 1, 1)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(probabilities.iter().all(|value| *value == 0.0));
+}
+
+/// Single-tensor rotation equals the former self-paired rotation exactly.
+#[test]
+fn with_rotary_rotates_each_tensor_once_with_identical_values() {
+    let (mla, device) = deterministic_mla(Some(4));
+    let projection = mla
+        .project(
+            Tensor::ones([1, 2, 8], &device) * 0.4,
+            Tensor::ones([1, 3, 8], &device) * -0.2,
+        )
+        .unwrap();
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    let query_positions = Tensor::<TestBackend, 2, Int>::from_ints([[3, 4]], &device);
+    let key_positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 2]], &device);
+    let rotated = projection
+        .clone()
+        .with_rotary(query_positions.clone(), key_positions.clone(), rope, 5)
+        .unwrap();
+    let query_angles = rotary_angles(rope, query_positions, 5).unwrap();
+    let key_angles = rotary_angles(rope, key_positions, 5).unwrap();
+    let expected_query = apply_rotary(
+        projection.query_rotary.clone(),
+        projection.query_rotary,
+        &query_angles,
+    )
+    .unwrap()
+    .0;
+    let expected_key = apply_rotary(
+        projection.rotated_key.clone(),
+        projection.rotated_key,
+        &key_angles,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(rotated.query_rotary.into_data(), expected_query.into_data());
+    assert_eq!(rotated.rotated_key.into_data(), expected_key.into_data());
+}
+
+/// Measures one-token absorbed decode: folded heads versus per-head GEMVs.
+///
+/// Run with `cargo test --release --lib absorbed_decode_benchmark -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run explicitly in release mode"]
+fn absorbed_decode_benchmark() {
+    use std::time::Instant;
+    let device = Default::default();
+    let (heads, rank, rotary, keys) = (16, 512, 64, 4096);
+    let mut config = MultiLatentAttentionConfig::new(512, heads, 128, rotary, 128, rank, None);
+    config.softmax_scale = 0.07;
+    let mla = config.init::<TestBackend>(&device).unwrap();
+    let projection = mla
+        .project_self(Tensor::random(
+            [1, 1, 512],
+            burn::tensor::Distribution::Default,
+            &device,
+        ))
+        .unwrap();
+    let latents = Tensor::<TestBackend, 3>::random(
+        [1, keys, rank],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
+    let rotary_keys = Tensor::<TestBackend, 4>::random(
+        [1, 1, keys, rotary],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
+    let iterations = 10;
+    let time = |folded: bool| {
+        let started = Instant::now();
+        for _ in 0..iterations {
+            let output = if folded {
+                mla.mix_absorbed(
+                    &projection,
+                    latents.clone(),
+                    rotary_keys.clone(),
+                    None,
+                    false,
+                )
+                .unwrap()
+                .hidden_state
+            } else {
+                per_head_absorbed_reference(
+                    &mla,
+                    &projection,
+                    latents.clone(),
+                    rotary_keys.clone(),
+                    None,
+                )
+            };
+            let _ = output.into_data();
+        }
+        started.elapsed().as_secs_f64() * 1e3 / f64::from(iterations)
+    };
+    let _ = (time(true), time(false));
+    let (folded, per_head) = (time(true), time(false));
+    println!(
+        "absorbed MLA decode h={heads} r={rank} dr={rotary} k={keys}: folded {folded:.3} ms, per-head {per_head:.3} ms, speedup {:.2}x",
+        per_head / folded
+    );
+}
+
+/// Builds a `[batch, tokens]` validity mask from row-major flags.
+fn validity(values: &[bool], shape: [usize; 2]) -> Tensor<TestBackend, 2, Bool> {
+    Tensor::from_data(TensorData::new(values.to_vec(), shape), &Default::default())
+}
+
+/// Projects a deterministic `[batch, sequence, 8]` input with rotary positions `0..sequence`.
+fn rotated_projection(
+    mla: &MultiLatentAttention<TestBackend>,
+    batch: usize,
+    sequence: usize,
+) -> MlaProjection<TestBackend> {
+    let device = Default::default();
+    let hidden = Tensor::<TestBackend, 3>::from_data(
+        TensorData::new(
+            (0..batch * sequence * 8)
+                .map(|index| ((index * 13 % 29) as f32 - 14.0) * 0.07)
+                .collect(),
+            [batch, sequence, 8],
+        ),
+        &device,
+    );
+    let positions = Tensor::<TestBackend, 1, Int>::arange(0..sequence as i64, &device)
+        .reshape([1, sequence])
+        .expand([batch, sequence]);
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    mla.project_rotary(hidden, positions, rope, sequence)
+        .unwrap()
+}
+
+/// Every chunk schedule reproduces the full-plane reference, including padding holes.
+///
+/// One-row chunks exercise the per-chunk key prefix; the masks cover left
+/// padding, an interior hole, and a fully masked row (zero context).
+#[test]
+fn bounded_reference_attention_matches_the_full_plane() {
+    let (mla, device) = deterministic_mla(None);
+    let (batch, sequence) = (3, 5);
+    let projection = rotated_projection(&mla, batch, sequence);
+    let masks = [
+        None,
+        Some(validity(
+            &[
+                [true; 5],
+                [false, false, true, true, true],
+                [true, false, true, false, true],
+            ]
+            .concat(),
+            [batch, sequence],
+        )),
+        Some(validity(
+            &[[true; 5], [false; 5], [true; 5]].concat(),
+            [batch, sequence],
+        )),
+    ];
+    for mask in masks {
+        let visibility = PositionalVisibility::causal_columns(sequence, mask, &device).unwrap();
+        let reference = mla
+            .mix_unabsorbed(
+                &projection,
+                projection.normalized_latent.clone(),
+                projection.rotated_key.clone(),
+                Some(visibility.exclusion(batch, 2, 0..sequence, 0..sequence)),
+                false,
+            )
+            .unwrap()
+            .hidden_state;
+        for policy in [
+            AttentionExecutionPolicy::Unbounded,
+            AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+            AttentionExecutionPolicy::query_chunked(2, 1 << 20),
+            // A score budget of 2 heads * 3 rows * 5 keys forces 3-row chunks.
+            AttentionExecutionPolicy::query_chunked(64, 30),
+        ] {
+            let bounded = mla
+                .mix_unabsorbed_bounded(
+                    &projection,
+                    projection.normalized_latent.clone(),
+                    projection.rotated_key.clone(),
+                    &visibility,
+                    policy,
+                )
+                .unwrap();
+            bounded
+                .into_data()
+                .assert_approx_eq::<f32>(&reference.clone().into_data(), Tolerance::absolute(1e-6));
+        }
+    }
+}
+
+/// Cached visibility over slot positions equals the bottom-right cached mask.
+#[test]
+fn cached_visibility_matches_a_bottom_right_causal_suffix() {
+    let (mla, device) = deterministic_mla(None);
+    let projection = rotated_projection(&mla, 1, 6);
+    // Queries are the last three tokens at slots 3..6 over a six-slot history.
+    let query = MlaProjection {
+        query_content: projection.query_content.clone().narrow(2, 3, 3),
+        query_rotary: projection.query_rotary.clone().narrow(2, 3, 3),
+        normalized_latent: projection.normalized_latent.clone(),
+        rotated_key: projection.rotated_key.clone(),
+    };
+    let visibility = PositionalVisibility::cached(
+        Tensor::<TestBackend, 1, Int>::arange(3..6, &device).reshape([1, 3]),
+        None,
+        Tensor::<TestBackend, 1, Int>::arange(0..6, &device).reshape([1, 6]),
+        None,
+        vec![4, 5, 6],
+    );
+    let expected = mla
+        .mix_unabsorbed(
+            &query,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            Some(bottom_right_causal_mask(1, 2, 3, 6, &device).unwrap()),
+            false,
+        )
+        .unwrap()
+        .hidden_state;
+    for policy in [
+        AttentionExecutionPolicy::Unbounded,
+        AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+    ] {
+        mla.mix_unabsorbed_bounded(
+            &query,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &visibility,
+            policy,
+        )
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(1e-6));
+    }
+}
+
+/// Inconsistent visibility metadata is a shape error, never an out-of-range slice.
+#[test]
+fn visibility_metadata_is_validated_before_attention() {
+    let device = Default::default();
+    let positions = |len: i64| {
+        Tensor::<TestBackend, 1, Int>::arange(0..len, &device).reshape([1, len as usize])
+    };
+    let valid = PositionalVisibility::cached(positions(2), None, positions(3), None, vec![2, 3]);
+    assert!(
+        valid.validate(4, 2, 3).is_ok(),
+        "rows of extent one broadcast"
+    );
+    for visibility in [
+        // Too few limits, a decreasing limit, a zero limit, and a limit past the keys.
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![3]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![3, 2]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![0, 3]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![2, 4]),
+        // Position extents that disagree with the query and key axes.
+        PositionalVisibility::cached(positions(3), None, positions(3), None, vec![2, 3]),
+        PositionalVisibility::cached(positions(2), None, positions(4), None, vec![2, 3]),
+        // Validity tensors whose batch or token extent is wrong.
+        PositionalVisibility::cached(
+            positions(2),
+            Some(validity(&[true; 2], [1, 2])),
+            positions(3),
+            None,
+            vec![2, 3],
+        ),
+        PositionalVisibility::cached(
+            positions(2),
+            None,
+            positions(3),
+            Some(validity(&[true; 8], [4, 2])),
+            vec![2, 3],
+        ),
+    ] {
+        let error = visibility.validate(4, 2, 3).unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.visibility"));
+    }
+    let (mla, _) = deterministic_mla(None);
+    let projection = rotated_projection(&mla, 1, 3);
+    let error = mla
+        .mix_unabsorbed_bounded(
+            &projection,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &PositionalVisibility::cached(positions(3), None, positions(3), None, vec![1, 2]),
+            AttentionExecutionPolicy::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.visibility"));
+}
+
+/// Autodiff evaluates one call instead of rejecting a multi-chunk policy.
+#[cfg(feature = "autodiff")]
+#[test]
+fn bounded_reference_attention_is_differentiable_under_any_policy() {
+    use burn::backend::Autodiff;
+
+    /// Reverse-mode backend over the deterministic CPU backend.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let mla = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, None)
+        .init::<AdBackend>(&device)
+        .unwrap();
+    let hidden = Tensor::<AdBackend, 3>::ones([1, 4, 8], &device).require_grad();
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    let projection = mla
+        .project_rotary(
+            hidden.clone(),
+            Tensor::<AdBackend, 1, Int>::arange(0..4, &device).reshape([1, 4]),
+            rope,
+            4,
+        )
+        .unwrap();
+    let visibility = PositionalVisibility::causal_columns(4, None, &device).unwrap();
+    let output = mla
+        .mix_unabsorbed_bounded(
+            &projection,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &visibility,
+            AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+        )
+        .unwrap();
+    let gradients = output.sum().backward();
+    assert!(hidden.grad(&gradients).is_some());
+
+    // The autodiff substitution never hides an invalid policy.
+    let error = mla
+        .mix_unabsorbed_bounded(
+            &projection,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &visibility,
+            AttentionExecutionPolicy::query_chunked(0, 1 << 20),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. }
+            if field == "attention.execution.max_query_tokens"),
+        "{error}"
+    );
+}
+
+/// Windowed suffix visibility equals the shared scalar connectivity rule.
+///
+/// Every `(queries, keys, window)` geometry up to six keys is checked against
+/// [`crate::attention::AttentionConnectivity::excludes`] with bottom-right
+/// aligned query positions, including windows wider than the keys.
+#[test]
+fn windowed_suffix_visibility_matches_the_scalar_rule() {
+    use crate::attention::AttentionConnectivity;
+
+    let device = Default::default();
+    for keys in 1..=6_usize {
+        for queries in 1..=keys {
+            for window in 1..=keys + 1 {
+                let excluded = PositionalVisibility::<TestBackend>::suffix(queries, keys, &device)
+                    .unwrap()
+                    .with_window(Some(window))
+                    .exclusion(1, 1, 0..queries, 0..keys)
+                    .into_data()
+                    .to_vec::<bool>()
+                    .unwrap();
+                let rule = AttentionConnectivity::SlidingWindow { window };
+                for query in 0..queries {
+                    for key in 0..keys {
+                        assert_eq!(
+                            excluded[query * keys + key],
+                            rule.excludes(true, keys - queries + query, key),
+                            "Q={queries} K={keys} W={window} q={query} k={key}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let error = PositionalVisibility::<TestBackend>::suffix(1, 2, &device)
+        .unwrap()
+        .with_window(Some(0))
+        .validate(1, 1, 2)
+        .unwrap_err();
+    assert!(matches!(error, Error::Configuration { .. }));
+    assert!(PositionalVisibility::<TestBackend>::suffix(3, 2, &device).is_err());
+}
+
+/// Reference history whose batch, rank, or rotary extent disagrees with the queries is rejected.
+///
+/// Both the full-plane and the bounded reference paths check the latent
+/// history `[batch, key, kv_lora_rank]` and the rotated keys
+/// `[batch, 1, key, qk_rope_head_dim]` against the projected queries before
+/// expanding any key or value head.
+#[test]
+fn unabsorbed_history_extents_are_validated_on_both_reference_paths() {
+    let (mla, _) = deterministic_mla(None);
+    let projection = rotated_projection(&mla, 1, 3);
+    let latents = projection.normalized_latent.clone();
+    let rotary = projection.rotated_key.clone();
+    let cases = [
+        (
+            "latent batch",
+            Tensor::cat(vec![latents.clone(), latents.clone()], 0),
+            rotary.clone(),
+        ),
+        (
+            "latent rank",
+            latents.clone().narrow(2, 0, 4),
+            rotary.clone(),
+        ),
+        (
+            "rotary keys",
+            latents.clone(),
+            rotary.clone().narrow(2, 0, 2),
+        ),
+    ];
+    let device = Default::default();
+    for (case, history, rotated) in cases {
+        let error = mla
+            .mix_unabsorbed(&projection, history.clone(), rotated.clone(), None, false)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "mla.unabsorbed_history"),
+            "{case}: {error:?}"
+        );
+        let visibility = PositionalVisibility::causal_columns(3, None, &device).unwrap();
+        let error = mla
+            .mix_unabsorbed_bounded(
+                &projection,
+                history,
+                rotated,
+                &visibility,
+                AttentionExecutionPolicy::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Shape { tensor, .. } if tensor == "mla.unabsorbed_history"),
+            "bounded {case}: {error:?}"
+        );
+    }
+}
+
+/// Ordinal visibility places queries and keys at valid-token ordinals, not columns.
+///
+/// Padding holes consume no position: for the row `[pad, a, pad, b]` the
+/// ordinals are `[0, 0, 0, 1]`. Without a mask the positions are the columns
+/// themselves. Either way the causal key prefix of query `i` is `i + 1`
+/// columns, because a later valid column always has a larger ordinal.
+#[test]
+fn causal_ordinal_visibility_skips_padding_holes() {
+    let device = Default::default();
+    let mask = crate::architecture::TokenMask::new(validity(&[false, true, false, true], [1, 4]));
+    let ordinal =
+        PositionalVisibility::<TestBackend>::causal_ordinals(4, Some(&mask), &device).unwrap();
+    let read = |positions: &Tensor<TestBackend, 2, Int>| {
+        positions.clone().into_data().to_vec::<i32>().unwrap()
+    };
+    assert_eq!(read(&ordinal.query_positions), [0, 0, 0, 1]);
+    assert_eq!(read(&ordinal.key_positions), [0, 0, 0, 1]);
+    assert_eq!(ordinal.key_limits(), [1, 2, 3, 4]);
+    ordinal.validate(1, 4, 4).unwrap();
+
+    let columns = PositionalVisibility::<TestBackend>::causal_ordinals(4, None, &device).unwrap();
+    assert_eq!(read(&columns.query_positions), [0, 1, 2, 3]);
+    assert_eq!(read(&columns.key_positions), [0, 1, 2, 3]);
+    assert!(columns.query_valid.is_none() && columns.key_valid.is_none());
+    assert_eq!(columns.key_limits(), [1, 2, 3, 4]);
+}
+
+/// A failing edit at the expanded query or key point aborts MLA attention with that point.
+#[test]
+fn mla_query_and_key_edit_failures_are_reported_at_their_points() {
+    let (mla, _) = deterministic_mla(Some(4));
+    let points = Layer::decoder(0).self_attention();
+    for failing in [points.query(), points.key()] {
+        let mut hooks = Hooks::new();
+        hooks.try_edit(failing.clone(), |_| {
+            Err(Error::configuration("test.edit", "refused"))
+        });
+        let projection = rotated_projection(&mla, 1, 2);
+        let error = hooks
+            .run(mla.attention_points(points), |hooks| {
+                mla.attend_with_hooks(projection, None, None, true, points, hooks)
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Intervention { point, reason, .. }
+                if *point == failing.info().name && reason.contains("refused")),
+            "{error:?}"
+        );
     }
 }

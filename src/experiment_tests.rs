@@ -619,3 +619,356 @@ fn composition_context_rejects_invalid_extent_source_batch_positions_and_padding
     ));
     assert!(changed.validate([1, 3], &device).is_ok());
 }
+
+// Validation cost: position values once per pass, layouts once per block.
+
+/// Contiguous contexts equal explicit `0..T` positions and know their extent without a readback.
+#[test]
+fn contiguous_context_matches_explicit_positions_and_rejects_empty_extents() {
+    let device = Default::default();
+    let contiguous = ExecutionContext::<B>::contiguous(2, 3, &device).unwrap();
+    let explicit =
+        ExecutionContext::<B>::new(Tensor::from_ints([[0, 1, 2], [0, 1, 2]], &device), None)
+            .unwrap();
+    assert_eq!(
+        contiguous.positions.to_data().to_vec::<i32>().unwrap(),
+        explicit.positions.to_data().to_vec::<i32>().unwrap()
+    );
+    assert_eq!(contiguous.evaluated_context, explicit.evaluated_context);
+    assert!(contiguous.token_mask.is_none());
+    contiguous.validate([2, 3], &device).unwrap();
+    for (batch, tokens) in [(0, 3), (2, 0)] {
+        let error = ExecutionContext::<B>::contiguous(batch, tokens, &device).unwrap_err();
+        assert!(error.to_string().contains("execution.positions"), "{error}");
+    }
+}
+
+/// Layout checks never read position values; full validation catches edited public fields.
+#[test]
+fn layout_validation_is_value_free_while_full_validation_rejects_edited_positions() {
+    let device = Default::default();
+    let mut edited = context();
+    edited.positions = Tensor::from_ints([[0, -1, 2]], &device);
+    edited.validate_layout([1, 3], &device).unwrap();
+    let error = edited.validate([1, 3], &device).unwrap_err().to_string();
+    assert!(
+        error.contains("execution.positions") && error.contains("-1..=2"),
+        "{error}"
+    );
+
+    let mut shrunk = context();
+    shrunk.evaluated_context = 2;
+    shrunk.validate_layout([1, 3], &device).unwrap();
+    let error = shrunk.validate([1, 3], &device).unwrap_err().to_string();
+    assert!(error.contains("0..2"), "{error}");
+
+    // Public composition entry points validate values once before any block runs.
+    let input = Tensor::<B, 3>::ones([1, 3, 2], &device);
+    let block =
+        ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), matrix(2, 2, &[0.0; 4]))
+            .unwrap();
+    let error = block
+        .run(input.clone(), &edited, Layer::decoder(0))
+        .unwrap_err();
+    assert!(error.to_string().contains("execution.positions"), "{error}");
+    let adapter = WidthAdapter::new(matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]), 2, 2, 2, &device).unwrap();
+    let error = adapter.run(input, &shrunk, Layer::decoder(0)).unwrap_err();
+    assert!(error.to_string().contains("execution.positions"), "{error}");
+}
+
+/// A run rejected by context validation clears the previous run's captures.
+///
+/// Validation happens inside the hook scope, so `get` cannot return
+/// activations from an earlier successful run after a failed one.
+#[test]
+fn rejected_contexts_fail_inside_the_hook_scope_and_clear_old_captures() {
+    let device = Default::default();
+    let input = Tensor::<B, 3>::ones([1, 3, 2], &device);
+    let identity = || matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let mut edited = context();
+    edited.positions = Tensor::from_ints([[0, -1, 2]], &device);
+
+    let block = ResidualBlock::without_normalization(2, identity(), identity()).unwrap();
+    let mut hooks = Hooks::new();
+    let output = hooks.capture(Layer::decoder(0).residual_post());
+    block
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    assert!(hooks.get(&output).is_ok());
+    let error = block
+        .run_with_hooks(input.clone(), &edited, Layer::decoder(0), &mut hooks)
+        .unwrap_err();
+    assert!(error.to_string().contains("execution.positions"), "{error}");
+    assert!(
+        hooks.get(&output).is_err(),
+        "stale capture survived a failed run"
+    );
+    // A width error is also raised inside the scope.
+    block
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    let narrow = Tensor::<B, 3>::ones([1, 3, 1], &device);
+    assert!(
+        block
+            .run_with_hooks(narrow, &context(), Layer::decoder(0), &mut hooks)
+            .is_err()
+    );
+    assert!(hooks.get(&output).is_err());
+
+    // The adapter exposes its inner block's points.
+    let adapter = WidthAdapter::new(block, 2, 2, 2, &device).unwrap();
+    let mut hooks = Hooks::new();
+    let output = hooks.capture(Layer::decoder(0).residual_post());
+    adapter
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    assert!(hooks.get(&output).is_ok());
+    assert!(
+        adapter
+            .run_with_hooks(input, &edited, Layer::decoder(0), &mut hooks)
+            .is_err()
+    );
+    assert!(
+        hooks.get(&output).is_err(),
+        "stale capture survived a failed run"
+    );
+}
+
+/// Attaching an encoder checks its layout and nonnegative source positions together.
+#[test]
+fn with_encoder_validates_source_layout_and_positions() {
+    let device = Default::default();
+    let source = |positions: [[i32; 2]; 1]| EncoderContext {
+        hidden: Tensor::<B, 3>::ones([1, 2, 4], &device),
+        positions: Tensor::from_ints(positions, &device),
+        token_mask: None,
+    };
+    let attached = context().with_encoder(source([[5, 9]])).unwrap();
+    assert_eq!(attached.encoder.unwrap().positions.dims(), [1, 2]);
+    let error = context().with_encoder(source([[-3, 0]])).unwrap_err();
+    assert!(
+        error.to_string().contains("execution.encoder.positions"),
+        "{error}"
+    );
+    let mut wide = source([[0, 1]]);
+    wide.hidden = Tensor::ones([2, 2, 4], &device);
+    let error = context().with_encoder(wide).unwrap_err();
+    assert!(error.to_string().contains("execution.encoder"), "{error}");
+}
+
+/// One readback returns every scalar in order, widening I32 storage to `i64`.
+#[test]
+fn batched_integer_readback_preserves_order_and_handles_empty_input() {
+    let device = Default::default();
+    let values = Tensor::<B, 1, Int>::from_ints([4, -7, 2], &device);
+    let read = read_int_scalars(
+        vec![values.clone().max(), values.clone().min(), values.sum()],
+        "fixture scalars",
+    )
+    .unwrap();
+    assert_eq!(read, [4, -7, -1]);
+    assert!(
+        read_int_scalars::<B>(Vec::new(), "nothing")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Reports per-call validation cost; run with `--ignored --nocapture`.
+///
+/// Compares the sync-free layout check, the one-readback value check, and the
+/// previous scheme of two separate scalar readbacks. On Flex a readback is a
+/// cheap host copy; on Metal/CUDA every readback also drains the device queue.
+#[test]
+#[ignore = "timing report, not a correctness check"]
+fn validation_cost_report() {
+    use std::time::Instant;
+    let device = Default::default();
+    let context = ExecutionContext::<B>::contiguous(8, 512, &device).unwrap();
+    let iterations = 2_000;
+    let time = |label: &str, run: &mut dyn FnMut()| {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            run();
+        }
+        let nanoseconds = start.elapsed().as_nanos() / iterations as u128;
+        println!("{label}: {nanoseconds} ns/call");
+    };
+    time("validate_layout (0 readbacks)", &mut || {
+        context.validate_layout([8, 512], &device).unwrap()
+    });
+    time("validate (1 batched readback)", &mut || {
+        context.validate([8, 512], &device).unwrap()
+    });
+    time("previous scheme (2 scalar readbacks)", &mut || {
+        let low = context.positions.clone().min().into_scalar();
+        let high = context.positions.clone().max().into_scalar();
+        assert!(low <= high);
+    });
+}
+
+/// Explicit connectivity without padding excludes exactly the disallowed links.
+#[test]
+fn allowed_links_without_padding_exclude_only_disallowed_pairs() {
+    let device = Default::default();
+    // Query 0 may see key 0 only; query 1 may see both keys.
+    let allowed = Tensor::<B, 4, Int>::from_ints([[[[1, 0], [1, 1]]]], &device).bool();
+    let mask = AttentionPolicy::custom(allowed)
+        .exclusion_mask(None, [2, 1, 2, 2], &device)
+        .unwrap()
+        .expect("connectivity always produces a mask");
+    assert_eq!(mask.dims(), [2, 1, 2, 2]);
+    assert_eq!(
+        mask.int().into_data().to_vec::<i32>().unwrap(),
+        [0, 1, 0, 0, 0, 1, 0, 0]
+    );
+    assert!(
+        AttentionPolicy::<B>::bidirectional()
+            .exclusion_mask(None, [1, 1, 2, 2], &device)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Contexts and representations reject empty axes with the field a caller must repair.
+#[test]
+fn empty_positions_sources_and_representations_are_rejected() {
+    let device = Default::default();
+    let error =
+        ExecutionContext::<B>::new(Tensor::<B, 2, Int>::zeros([1, 0], &device), None).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid configuration at execution.positions: positions must be nonempty"
+    );
+    for [tokens, width] in [[0, 4], [2, 0]] {
+        let mut changed = context();
+        changed.encoder = Some(EncoderContext {
+            hidden: Tensor::<B, 3>::ones([1, tokens, width], &device),
+            positions: Tensor::<B, 2, Int>::zeros([1, tokens], &device),
+            token_mask: None,
+        });
+        let error = changed.validate_layout([1, 3], &device).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("matching nonempty batch/token axes"),
+            "{tokens}x{width}: {error}"
+        );
+    }
+    let state = HiddenState::<B>::new(Tensor::ones([1, 3, 4], &device), context()).unwrap();
+    assert!(
+        state
+            .validate(0)
+            .unwrap_err()
+            .to_string()
+            .contains("execution.hidden")
+    );
+    for shape in [[0, 3, 4], [1, 0, 4]] {
+        let mut empty = state.clone();
+        empty.hidden = Tensor::ones(shape, &device);
+        assert!(
+            empty
+                .validate(4)
+                .unwrap_err()
+                .to_string()
+                .contains("execution.hidden"),
+            "{shape:?}"
+        );
+    }
+}
+
+/// Encoder output, like encoder context, is exported only after final normalization.
+#[test]
+fn encoder_output_requires_a_normalized_source_stack() {
+    let device = Default::default();
+    let state = HiddenState::<B>::new(Tensor::ones([1, 3, 4], &device), context()).unwrap();
+    assert_eq!(
+        state.into_encoder_output().unwrap_err().to_string(),
+        "invalid configuration at execution.encoder: normalize the source stack before exporting encoder output"
+    );
+}
+
+/// Residual blocks reject empty batch or token axes before running any branch.
+#[test]
+fn residual_blocks_reject_empty_batch_and_token_axes() {
+    let device = Default::default();
+    let block =
+        ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), matrix(2, 2, &[0.0; 4]))
+            .unwrap();
+    for shape in [[0, 3, 2], [1, 0, 2]] {
+        let mut hooks = Hooks::new();
+        let error = block
+            .forward(
+                Tensor::<B, 3>::ones(shape, &device),
+                &context(),
+                Layer::decoder(0),
+                &mut hooks,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("residual_block.input"),
+            "{shape:?}: {error}"
+        );
+    }
+}
+
+/// A failing edit before the feed-forward nonlinearity aborts dense and gated branches.
+#[test]
+fn pre_activation_edit_failures_abort_dense_and_gated_feed_forwards() {
+    use crate::{
+        architecture::Activation,
+        feed_forward::{DenseFeedForward, GatedFeedForward},
+    };
+    let device = Default::default();
+    let input = Tensor::<B, 3>::ones([1, 3, 2], &device);
+    let identity = || matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let failing_hooks = || {
+        let mut hooks = Hooks::new();
+        hooks.try_edit(Layer::decoder(0).mlp_pre_activation(), |_| {
+            Err(Error::configuration("test.edit", "rejected pre-activation"))
+        });
+        hooks
+    };
+    let dense = ResidualBlock::without_normalization(
+        2,
+        matrix(2, 2, &[0.0; 4]),
+        DenseFeedForward {
+            up_proj: identity(),
+            down_proj: identity(),
+            activation: Activation::Relu,
+        },
+    )
+    .unwrap();
+    let gated = ResidualBlock::without_normalization(
+        2,
+        matrix(2, 2, &[0.0; 4]),
+        GatedFeedForward {
+            gate_proj: identity(),
+            up_proj: identity(),
+            down_proj: identity(),
+            activation: Activation::Relu,
+        },
+    )
+    .unwrap();
+    let errors = [
+        dense
+            .run_with_hooks(
+                input.clone(),
+                &context(),
+                Layer::decoder(0),
+                &mut failing_hooks(),
+            )
+            .unwrap_err(),
+        gated
+            .run_with_hooks(input, &context(), Layer::decoder(0), &mut failing_hooks())
+            .unwrap_err(),
+    ];
+    for error in errors {
+        let message = error.to_string();
+        assert!(
+            message.contains("edit callback returned an error"),
+            "{message}"
+        );
+        assert!(matches!(error, Error::Intervention { .. }), "{error:?}");
+    }
+}

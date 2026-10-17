@@ -6,7 +6,7 @@ use burn::{
     tensor::{DType, Tensor, TensorData, Tolerance, f16},
 };
 
-use super::{RmsNormConfig, RmsNormRootMode};
+use super::{RmsNormConfig, RmsNormRootMode, scale_free_rms_norm};
 
 /// Conventional and zero-centered initialization both begin with unit scale.
 #[test]
@@ -170,9 +170,80 @@ fn invalid_config_is_rejected() {
         .expect_err("zero width must fail");
     assert!(error.to_string().contains("rms_norm.size"));
 
-    let error = RmsNormConfig::new(4)
-        .with_epsilon(f64::NAN)
-        .validate()
-        .expect_err("NaN epsilon must fail");
-    assert!(error.to_string().contains("rms_norm.epsilon"));
+    // Non-finite, zero, and negative epsilons can make the denominator
+    // sqrt(mean(x^2) + eps) zero, NaN, or infinite.
+    for epsilon in [f64::NAN, f64::INFINITY, 0.0, -1e-6] {
+        let error = RmsNormConfig::new(4)
+            .with_epsilon(epsilon)
+            .validate()
+            .expect_err("invalid epsilon must fail");
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, reason }
+                if field == "rms_norm.epsilon" && reason == "must be finite and greater than zero"),
+            "{epsilon}: {error:?}"
+        );
+    }
+    assert!(
+        RmsNormConfig::new(4)
+            .with_epsilon(f64::MIN_POSITIVE)
+            .validate()
+            .is_ok()
+    );
+}
+
+/// Scale-free normalization equals a unit-scale RmsNorm and the closed form, in every root graph.
+#[test]
+fn scale_free_rms_norm_matches_unit_scale_norm_and_closed_form() {
+    let device = Default::default();
+    let input = Tensor::<Flex, 2>::from_floats([[3.0, -4.0, 0.0], [1.0, 1.0, 1.0]], &device);
+    for root_mode in [
+        RmsNormRootMode::DivideBySqrt,
+        RmsNormRootMode::MultiplyByPower,
+        RmsNormRootMode::MultiplyByReciprocalSqrt,
+    ] {
+        let unit = RmsNormConfig::new(3)
+            .with_epsilon(1e-6)
+            .with_root_mode(root_mode)
+            .init::<Flex>(&device)
+            .unwrap()
+            .forward(input.clone());
+        let scale_free = scale_free_rms_norm(input.clone(), 1e-6, root_mode).unwrap();
+        assert_eq!(scale_free.clone().into_data(), unit.into_data());
+        let rms = (25.0_f32 / 3.0 + 1e-6).sqrt();
+        scale_free.into_data().assert_approx_eq::<f32>(
+            &TensorData::from([[3.0 / rms, -4.0 / rms, 0.0], [1.0, 1.0, 1.0]]),
+            Tolerance::absolute(1e-5),
+        );
+    }
+}
+
+/// The power-root graph reproduces the scale-free formula used by Muse-style norms exactly.
+#[test]
+fn scale_free_power_root_matches_reference_operation_order() {
+    let device = Default::default();
+    let input =
+        Tensor::<Flex, 3>::from_floats([[[0.3, -1.7, 2.9, 0.01]]], &device).cast(DType::F16);
+    let reference = {
+        let float = input.clone().cast(DType::F32);
+        let inverse = (float.clone().square().mean_dim(2) + 1e-6).powf_scalar(-0.5);
+        (float * inverse).cast(DType::F16)
+    };
+    let actual = scale_free_rms_norm(input, 1e-6, RmsNormRootMode::MultiplyByPower).unwrap();
+    assert_eq!(actual.dtype(), DType::F16);
+    assert_eq!(actual.into_data(), reference.into_data());
+}
+
+/// Non-finite and non-positive stabilizers are rejected with context.
+#[test]
+fn scale_free_rms_norm_rejects_invalid_epsilon() {
+    let device = Default::default();
+    for epsilon in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let error = scale_free_rms_norm(
+            Tensor::<Flex, 1>::ones([2], &device),
+            epsilon,
+            RmsNormRootMode::DivideBySqrt,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rms_norm.epsilon"));
+    }
 }

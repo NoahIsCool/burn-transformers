@@ -1,0 +1,62 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d sha256 861cbb946d6022fe11c888008e5ce65efd0666a1a6a414ca436ac5762a4b0dc8 (build B: --release --features metal --lib)
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/transformers-241387578fbba24d --test-threads 1 operations::tests::
+== start 2026-10-17T09:30:15Z
+
+running 34 tests
+test operations::tests::chained_materialization_preserves_lazy_initializer_values ... ok
+test operations::tests::contiguous_materialization_handles_contiguous_and_matrix_views ... ok
+test operations::tests::contiguous_materialization_leaves_packed_tensors_unchanged ... ok
+test operations::tests::contiguous_materialization_preserves_every_value_and_dtype ... ok
+test operations::tests::depthwise_column_timing ... ignored, release-mode timing benchmark
+test operations::tests::full_precision_projection_matches_burn_linear ... ok
+test operations::tests::inference_flex_random_column_projections_are_contiguous ... ok
+test operations::tests::inference_linear_records_preserve_layout_and_values ... ok
+test operations::tests::invalid_projection_shape_is_rejected ... ok
+test operations::tests::matmul_transposed_matches_burn_linear_for_every_rank ... ok
+test operations::tests::matmul_transposed_rejects_invalid_operands ... ok
+test operations::tests::metal_qfloat_projection_covers_qwen35_shapes ... ignored, requires a Metal-capable macOS host
+test operations::tests::metal_qfloat_projection_executes_quantized_matmul_dispatch ... ignored, requires a Metal-capable macOS host
+test operations::tests::metal_two_bit_packed_projection_is_rejected ... ignored, requires a Metal-capable macOS host
+test operations::tests::only_inference_flex_prefers_contiguous_storage ... ok
+test operations::tests::other_depthwise_convolutions_are_burn_conv1d ... ok
+test operations::tests::projection_contract_bias_width_rejection_preserves_weight_values ... ok
+test operations::tests::projection_contract_empty_inputs_are_contextual_errors ... ok
+test operations::tests::projection_contract_packed_activations_require_explicit_dequantization ... ok
+test operations::tests::projection_rejects_mixed_float_dtypes_and_accepts_explicit_conversion ... ok
+test operations::tests::qfloat_weight_executes_without_changing_parameter_dtype ... ok
+test operations::tests::rank_zero_activations_are_contextual_errors ... ok
+test operations::tests::region_runs_merge_fully_covered_inner_axes ... ok
+test operations::tests::region_write_timing ... ignored, release-mode timing benchmark
+test operations::tests::region_writes_copy_shared_or_strided_destinations ... ok
+test operations::tests::region_writes_match_slice_assign ... ok
+test operations::tests::region_writes_reuse_a_unique_destination_and_match_slice_assign ... ok
+test operations::tests::row_by_row_matmul_matches_one_matmul_exactly ... ok
+test operations::tests::single_column_depthwise_convolution_matches_conv1d_bitwise ... ok
+test operations::tests::single_row_products_are_limited_to_four_bit_cubecl_multi_row_weights ... ok
+test operations::tests::two_bit_packed_weights_are_rejected_only_on_cubecl ... ok
+test operations::tests::unqualified_region_writes_fall_back_to_slice_assign ... ok
+test operations::tests::zero_regions_write_positive_zero_in_place ... ok
+test operations::tests::zero_width_projections_are_rejected ... ok
+
+test result: ok. 29 passed; 0 failed; 5 ignored; 0 measured; 3477 filtered out; finished in 0.01s
+
+        0.01 real         0.00 user         0.02 sys
+            15958016  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1384  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 877  involuntary context switches
+           122566950  instructions retired
+            93783610  cycles elapsed
+             6357568  peak memory footprint
+== exit=0 end 2026-10-17T09:30:15Z

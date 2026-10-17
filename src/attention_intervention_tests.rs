@@ -634,3 +634,57 @@ fn materialized_pattern_edits_preserve_value_gradients() {
         .into_data()
         .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-6, 1e-6));
 }
+
+/// Structural transforms must succeed and keep the pattern dtype, and score edits may fail.
+///
+/// A failing transform is reported as `attention.pattern_transform` with the
+/// callback's message; a transform that changes the pattern dtype violates
+/// the documented contract even though its shape is unchanged; and an edit
+/// that fails at the score point aborts the run with that point's error.
+#[test]
+fn pattern_transform_and_score_edit_failures_are_contextual() {
+    let device = Default::default();
+    let points = Layer::decoder(0).self_attention();
+    let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+        .with_precision_mode(AttentionPrecisionMode::EagerFp32Softmax)
+        .init::<Flex>(&device)
+        .unwrap();
+    let run = |transform: fn(Tensor<Flex, 4>) -> Result<Tensor<Flex, 4>>| {
+        let mut hooks = Hooks::new();
+        hooks
+            .run(points.all(), |hooks| {
+                module.attend_with_pattern(projection(), None, None, true, points, hooks, transform)
+            })
+            .unwrap_err()
+    };
+    let failed = run(|_| Err(Error::configuration("test.transform", "refused")));
+    assert!(
+        matches!(&failed, Error::Configuration { field, reason }
+            if field == "attention.pattern_transform"
+                && reason.starts_with("structural transform failed:")
+                && reason.contains("refused")),
+        "{failed:?}"
+    );
+    let recast = run(|pattern| Ok(pattern.cast(DType::F64)));
+    assert!(
+        matches!(&recast, Error::Configuration { field, reason }
+            if field == "attention.pattern_transform"
+                && reason.contains("preserve pattern shape, dtype, and device")),
+        "{recast:?}"
+    );
+
+    let mut hooks = Hooks::new();
+    hooks.try_edit(points.scores(), |_| {
+        Err(Error::configuration("test.scores", "refused"))
+    });
+    let error = hooks
+        .run(points.all(), |hooks| {
+            module.attend_with_hooks(projection(), None, None, true, points, hooks)
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Intervention { point, reason, .. }
+            if *point == points.scores().info().name && reason.contains("refused")),
+        "{error:?}"
+    );
+}

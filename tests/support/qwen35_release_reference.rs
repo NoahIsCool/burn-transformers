@@ -983,10 +983,12 @@ fn read_bounded(path: &Path, expected: Option<u64>, maximum: u64) -> Vec<u8> {
 fn decode_f32(bytes: &[u8], label: &str) -> Vec<f32> {
     assert!(bytes.len().is_multiple_of(size_of::<f32>()));
     bytes
-        .chunks_exact(size_of::<f32>())
+        .as_chunks::<{ size_of::<f32>() }>()
+        .0
+        .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            let value = f32::from_le_bytes(bytes.try_into().expect("four-byte F32 chunk"));
+            let value = f32::from_le_bytes(*bytes);
             assert!(
                 value.is_finite(),
                 "{label} contains non-finite value at {index}"

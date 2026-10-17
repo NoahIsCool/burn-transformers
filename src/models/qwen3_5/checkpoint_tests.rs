@@ -398,3 +398,28 @@ fn dimension_products_are_checked() {
         .unwrap_err();
     assert!(error.reason.contains("overflows"));
 }
+
+/// A validated DeltaNet key width beyond `u64` is reported at its configuration product.
+///
+/// Validation bounds every extent and the gated query width, but not the
+/// DeltaNet products, so the checked contract dimensions are the gate that
+/// keeps an unrepresentable `in_proj_qkv` shape out of the inventory.
+#[test]
+fn delta_net_width_overflow_names_its_product() {
+    let fixture = golden(TINY_INVENTORY);
+    let mut config = config(&fixture.config.unwrap().to_string());
+    config.linear_num_key_heads = usize::MAX;
+    config.linear_num_value_heads = usize::MAX;
+    config
+        .validate()
+        .expect("each extent is individually valid");
+    let error = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::TextOnly,
+            include_mtp: false,
+        })
+        .unwrap_err();
+    assert_eq!(error.architecture, "qwen3_5");
+    assert_eq!(error.field, "linear_num_key_heads * linear_key_head_dim");
+    assert_eq!(error.reason, "overflows checkpoint tensor dimensions");
+}

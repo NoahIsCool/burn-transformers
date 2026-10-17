@@ -17,7 +17,8 @@ use thiserror::Error;
 use crate::{
     checkpoint::{
         CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        PackedLayoutPolicy, ParameterInstallError, TensorSink, execute_local_load_plan,
+        install_packed_parameter,
     },
     feed_forward::GatedFeedForward,
     normalization::RmsNorm,
@@ -184,10 +185,27 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, DeepseekV2CheckpointLoadError> {
+        self.load_checkpoint_with(root, options, DeepseekV2CheckpointOptions::default())
+    }
+
+    /// Loads a local checkpoint under explicit family checkpoint options.
+    ///
+    /// [`DeepseekV2CheckpointOptions`] has no fields yet, so this equals
+    /// [`Self::load_checkpoint`]. It exists so every family offers the same
+    /// `load_checkpoint` / `load_checkpoint_with` pair; see
+    /// [concrete-family loading](crate::checkpoint#loading-a-concrete-family).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load_checkpoint`].
+    pub fn load_checkpoint_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        family_options: DeepseekV2CheckpointOptions,
+    ) -> Result<ExecutionOutcome, DeepseekV2CheckpointLoadError> {
         let manifest = CheckpointManifest::discover(root, options)?;
-        let contract = self
-            .config()
-            .checkpoint_contract(DeepseekV2CheckpointOptions::default())?;
+        let contract = self.config().checkpoint_contract(family_options)?;
         let plan = contract.build_load_plan(&manifest, options)?;
         Ok(execute_local_load_plan(&manifest, &plan, self)?)
     }
@@ -287,6 +305,16 @@ fn install_layer_tensor<B: Backend>(
         "sparse_mlp.routed.router.weight" => {
             let sparse = sparse_mlp(layer, target)?;
             install_linear_weight(target, &mut sparse.routed.router, data)
+        }
+        "sparse_mlp.routed.correction_bias" => {
+            let sparse = sparse_mlp(layer, target)?;
+            let bias = sparse.routed.correction_bias.as_mut().ok_or_else(|| {
+                DeepseekV2LoadError::MissingComponent {
+                    target: target.into(),
+                    component: "noaux_tc selection bias",
+                }
+            })?;
+            install(target, bias, data)
         }
         _ if suffix.starts_with("sparse_mlp.routed.routed.") => {
             let remainder = &suffix["sparse_mlp.routed.routed.".len()..];
@@ -442,16 +470,24 @@ fn install_norm<B: Backend>(
     install(target, &mut norm.weight, data)
 }
 
-/// Installs a statically ranked float parameter with target context.
+/// Validates and installs one statically ranked parameter, keeping packed weights exact.
+///
+/// Float data is installed unchanged. Packed (QFloat) data, which only a
+/// quantized Burnpack sidecar produces, is installed as exactly the artifact:
+/// packed where the backend keeps its blocks through the parameter's load
+/// mapper, and otherwise as the exact dequantized values (see
+/// [`install_packed_parameter`]), never as a requantized approximation.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) -> Result<(), DeepseekV2LoadError> {
-    install_float_parameter(parameter, data).map_err(|source| DeepseekV2LoadError::Parameter {
-        target: target.into(),
-        source,
-    })
+    install_packed_parameter(parameter, data, PackedLayoutPolicy::DequantizeWhenInexact)
+        .map(|_| ())
+        .map_err(|source| DeepseekV2LoadError::Parameter {
+            target: target.into(),
+            source,
+        })
 }
 
 #[cfg(test)]

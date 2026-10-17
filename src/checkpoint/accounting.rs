@@ -11,7 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{CheckpointError, Result, TensorDType, TensorInventory};
+use super::{
+    CheckpointError, Result, TensorDType, TensorInventory, lexical::decimal_layer_between,
+};
 
 /// Immutable identity of one small checkpoint control file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,16 +90,16 @@ impl DecimalLayerTensorSelector {
     }
 
     /// Returns whether `name` has a canonical decimal component between both anchors.
+    ///
+    /// The verified [`decimal_layer_between`] strips the prefix, then the
+    /// suffix from the rest, and requires nonempty digits without a leading
+    /// zero (other than `0` itself), so each layer index has one spelling.
     fn matches(&self, name: &str) -> bool {
-        let Some(layer) = name
-            .strip_prefix(&self.prefix)
-            .and_then(|rest| rest.strip_suffix(&self.suffix))
-        else {
-            return false;
-        };
-        !layer.is_empty()
-            && layer.bytes().all(|byte| byte.is_ascii_digit())
-            && (layer == "0" || !layer.starts_with('0'))
+        decimal_layer_between(
+            name.as_bytes(),
+            self.prefix.as_bytes(),
+            self.suffix.as_bytes(),
+        )
     }
 }
 
@@ -314,13 +316,11 @@ fn validate_tensor_descriptor(
             expected.name, observed.dtype, observed.shape, expected.dtype, expected.shape
         ));
     }
-    let elements = expected.shape.iter().try_fold(1_u64, |total, dimension| {
-        total
-            .checked_mul(*dimension)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing pinned accounting tensor elements",
-            })
-    })?;
+    let elements = super::layout::element_count(&expected.shape).ok_or(
+        CheckpointError::ArithmeticOverflow {
+            context: "computing pinned accounting tensor elements",
+        },
+    )?;
     let expected_bytes = expected.dtype.storage_bytes(elements)?;
     if observed.byte_len != expected_bytes {
         return policy_mismatch(format!(

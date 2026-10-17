@@ -1,0 +1,38 @@
+== source c2936fecf26cca91cd4e4c6e1e7f74fb570aa9b5 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gpt_oss_artifacts-98a177a8f6a4ce38 sha256 00da5a3eb5e531d39c71697e9a31b796a991dce9a8e2e546fcc0071a7db521fb
+== Metal/F32 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_GPT_OSS_DIR=/Volumes/T9/models/openai/gpt-oss-20b
+== env TRANSFORMERS_GPT_OSS_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/gpt-oss-20b-6cee5e81-4layer-f32-reference.bundle
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gpt_oss_artifacts-98a177a8f6a4ce38 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-17T09:15:51+00:00 load 3.96 7.17 12.35 free_pct 91 swap_used_mib 9122
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... loaded 4 blocks as F32 in 9.913157708s
+prompt 0: 5 tokens, max |Δ| = 4.673004e-5, mean |Δ| = 4.405056670753809e-6
+prompt 1: 13 tokens, max |Δ| = 3.8146973e-5, mean |Δ| = 3.803721218192966e-6
+prompt 2: 8 tokens, max |Δ| = 4.9591064e-5, mean |Δ| = 4.411954888482253e-6
+prompt 3: 183 tokens, max |Δ| = 5.1021576e-5, mean |Δ| = 3.914985075923837e-6
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 12.81s
+
+       12.88 real        13.46 user         2.81 sys
+         16039641088  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1746156  page reclaims
+                  16  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               50974  involuntary context switches
+        198415750406  instructions retired
+         58076093964  cycles elapsed
+         30293878264  peak memory footprint
+== exit=0 wall=13.2s min_free_pct=74 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

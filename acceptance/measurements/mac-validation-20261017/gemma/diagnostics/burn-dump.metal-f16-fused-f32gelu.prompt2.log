@@ -1,0 +1,23 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T08:24:43Z load { 2.42 4.27 6.02 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump-gemma-patched metal f16 /Volumes/T9/models/google/gemma-3-4b-it 2\,21313\,835\,2939\,106703\,41193\,6658\,5149\,1547 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/gemma/diagnostics/data/burn/metal-f16-fused-f32gelu/prompt2 fused
+wrote 36 points for 9 tokens (eager=false, prefill=0) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/gemma/diagnostics/data/burn/metal-f16-fused-f32gelu/prompt2
+       13.15 real         2.86 user        10.39 sys
+          6550732800  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              737363  page reclaims
+                   9  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  78  voluntary context switches
+               53825  involuntary context switches
+        212135258037  instructions retired
+         48163405234  cycles elapsed
+         12953817432  peak memory footprint
+== exit=0 wall=13s

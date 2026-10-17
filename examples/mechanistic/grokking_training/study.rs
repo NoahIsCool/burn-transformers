@@ -398,7 +398,7 @@ fn evaluate<B: Backend>(model: &GrokkingTransformer<B>, pairs: &[usize]) -> AnyR
     for chunk in pairs.chunks(512) {
         let (inputs, _) = batch::<B>(chunk, &device);
         let logits = model.forward(inputs)?.into_data().to_vec::<f32>()?;
-        for (&pair, row) in chunk.iter().zip(logits.chunks_exact(P + 1)) {
+        for (&pair, row) in chunk.iter().zip(logits.as_chunks::<{ P + 1 }>().0.iter()) {
             if !row.iter().all(|v| v.is_finite()) {
                 return Err("nonfinite logits".into());
             }

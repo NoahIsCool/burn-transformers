@@ -1,8 +1,9 @@
 //! Deterministic GPT-NeoX graph and public activation-interface regressions.
 
-use super::{GptNeoXConfig, GptNeoXModel};
+use super::{GptNeoXConfig, GptNeoXForCausalLm};
+use crate::models::config::Validate;
 use crate::{
-    CausalLmInput, ForwardOptions, LogitsSelection,
+    CausalLmInput, Error, ForwardOptions, LogitsSelection,
     architecture::TokenMask,
     intervention::{Hooks, Layer, Stack},
 };
@@ -57,8 +58,8 @@ fn norm(module: &mut LayerNorm<B>, offset: f64) {
 }
 
 /// Materializes all model parameters to match the retained PyTorch oracle fixture.
-fn model() -> GptNeoXModel<B> {
-    let mut model = GptNeoXModel::init(config(), &Default::default()).unwrap();
+fn model() -> GptNeoXForCausalLm<B> {
+    let mut model = GptNeoXForCausalLm::init(config(), &Default::default()).unwrap();
     model.embed_in.weight = Param::from_tensor(tensor([13, 8], 0.1, 0.15));
     for (i, layer) in model.layers.iter_mut().enumerate() {
         let offset = 1.0 + i as f64 * 10.0;
@@ -117,6 +118,11 @@ fn assert_fixture(actual: Tensor<B, 3>, key: &str) {
 }
 
 /// Partial RoPE, parallel residuals, and hidden-state lens boundaries match the PyTorch oracle.
+///
+/// Hidden states follow the crate convention, `L + 2` tensors: the embedding,
+/// every block output, and the final normalized state. Hugging Face's `L + 1`
+/// tensors are crate indices `0..L` plus crate index `L + 1`; crate index `L`
+/// (the last block's raw output) has no Hugging Face counterpart.
 #[test]
 fn matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries() {
     let model = model();
@@ -130,19 +136,27 @@ fn matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries() {
     assert_fixture(output.logits.clone(), "logits");
     assert_fixture(hooks.get(&first_block).unwrap(), "block0");
     assert_fixture(output.final_hidden_state.clone().unwrap(), "final");
-    assert_eq!(output.hidden_states.len(), 3);
+    assert_eq!(output.hidden_states.len(), 4);
     assert!(
         difference(
             output.hidden_states[0].clone(),
             hooks.get(&embedding).unwrap()
         ) < 1e-7
     );
+    assert_fixture(output.hidden_states[1].clone(), "block0");
     assert!(
         difference(
             output.hidden_states[1].clone(),
             hooks.get(&first_block).unwrap()
         ) < 1e-7
     );
+    assert!(
+        difference(
+            output.hidden_states[2].clone(),
+            hooks.get(&last_block).unwrap()
+        ) < 1e-7
+    );
+    assert_fixture(output.hidden_states[3].clone(), "final");
     assert!(
         difference(
             output.logits,
@@ -296,6 +310,95 @@ fn invalid_inputs_and_unsupported_choices_return_contextual_errors() {
     );
 }
 
+/// Input-value, mask, and selection violations are `Error::Shape` naming the shared tensors.
+///
+/// Pins the public error contract adopted with the shared family glue:
+/// these violations were `Error::Configuration` before, and invalid logits
+/// positions were named `gpt_neox.logits.positions`.
+#[test]
+fn input_value_errors_are_shape_errors_with_shared_tensor_names() {
+    let model = model();
+    let shape_parts = |input: CausalLmInput<B>, options: &ForwardOptions| match model
+        .forward(input, options)
+        .unwrap_err()
+    {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    };
+
+    let bad_ids = CausalLmInput {
+        token_ids: Tensor::from_data([[1, -1, 2]], &Default::default()),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(bad_ids, &options()),
+        (
+            "gpt_neox.token_ids".into(),
+            "token values in 0..13".into(),
+            "observed range -1..=2".into()
+        )
+    );
+
+    let bad_position = CausalLmInput {
+        position_ids: Some(Tensor::from_data([[0, 2, 16]], &Default::default())),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(bad_position, &options()),
+        (
+            "gpt_neox.position_ids".into(),
+            "position values in 0..16".into(),
+            "observed range 0..=16".into()
+        )
+    );
+
+    let empty_mask = CausalLmInput {
+        token_mask: Some(TokenMask::new(Tensor::from_data(
+            [[false, false, false]],
+            &Default::default(),
+        ))),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(empty_mask, &options()),
+        (
+            "gpt_neox.token_mask".into(),
+            "at least one valid token in every row".into(),
+            "a fully masked row".into()
+        )
+    );
+
+    let misshapen_mask = CausalLmInput {
+        token_mask: Some(TokenMask::new(Tensor::from_data(
+            [[true, true]],
+            &Default::default(),
+        ))),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(misshapen_mask, &options()),
+        (
+            "gpt_neox.token_mask".into(),
+            "[1, 3]".into(),
+            "[1, 2]".into()
+        )
+    );
+
+    let selection = ForwardOptions {
+        logits: LogitsSelection::Positions(vec![3]),
+        ..Default::default()
+    };
+    let (tensor, _, actual) = shape_parts(input(), &selection);
+    assert_eq!(
+        (tensor.as_str(), actual.as_str()),
+        ("forward_options.logits.positions", "[3]")
+    );
+}
+
 /// Edited embedding, final norm, and MLP shapes fail before incompatible tensor operations.
 #[test]
 fn invalid_public_module_replacements_fail_before_backend_operations() {
@@ -358,4 +461,107 @@ fn replacing_attention_derives_partial_rope_from_the_new_head_width() {
     let (expected, _) = apply_rotary(projection.query, projection.key, &angles).unwrap();
     let actual = hooks.get(&query).unwrap();
     assert!((actual - expected).abs().max().into_scalar() < 1e-7);
+}
+
+/// Every extent must be nonzero and fit a signed 32-bit tensor index; errors name the field.
+#[test]
+fn zero_or_oversized_extents_name_the_field() {
+    let oversized = i32::MAX as usize + 1;
+    /// Sets one extent field of a configuration to the given value.
+    type Edit = fn(&mut GptNeoXConfig, usize);
+    let cases: [(&str, Edit); 6] = [
+        ("vocab_size", |config, value| config.vocab_size = value),
+        ("hidden_size", |config, value| config.hidden_size = value),
+        ("num_hidden_layers", |config, value| {
+            config.num_hidden_layers = value;
+        }),
+        ("num_attention_heads", |config, value| {
+            config.num_attention_heads = value;
+        }),
+        ("intermediate_size", |config, value| {
+            config.intermediate_size = value;
+        }),
+        ("max_position_embeddings", |config, value| {
+            config.max_position_embeddings = value;
+        }),
+    ];
+    for (field, edit) in cases {
+        for value in [0, oversized] {
+            let mut config = config();
+            edit(&mut config, value);
+            let error = Validate::validate(&config).unwrap_err();
+            assert_eq!(
+                (error.field, error.reason.as_str()),
+                (
+                    field,
+                    "must be nonzero and fit a signed 32-bit tensor index"
+                ),
+                "{field}={value}"
+            );
+        }
+    }
+}
+
+/// The re-initialization policy resets every LayerNorm as Hugging Face's `_init_weights` does.
+///
+/// Regression for GPT2-NEOX-INIT-DOC: the policy documentation claimed
+/// `ParameterInit` could not express ones; per-path `Ones`/`Zeros`
+/// overrides express the reset exactly.
+#[test]
+fn reinit_policy_resets_every_layer_norm() {
+    use crate::initialization::{ParameterInit, ParameterRole};
+
+    let config = GptNeoXConfig {
+        vocab_size: 13,
+        hidden_size: 8,
+        num_hidden_layers: 2,
+        num_attention_heads: 2,
+        intermediate_size: 12,
+        rotary_pct: 0.5,
+        max_position_embeddings: 16,
+        ..GptNeoXConfig::default()
+    };
+    let device = Default::default();
+    let mut model = GptNeoXForCausalLm::<B>::init(config.clone(), &device).unwrap();
+    let perturb = |norm: &mut LayerNorm<B>| {
+        norm.gamma = Param::from_tensor(Tensor::full([8], 2.0, &device));
+        norm.beta = Some(Param::from_tensor(Tensor::full([8], 0.5, &device)));
+    };
+    perturb(&mut model.layers[0].input_layernorm);
+    perturb(&mut model.layers[1].post_attention_layernorm);
+    perturb(&mut model.final_layer_norm);
+    let policy = config.reinit_policy();
+    policy.validate_for(&model).unwrap();
+    let (model, report) = policy.apply(model).unwrap();
+
+    let values = |tensor: Tensor<B, 1>| tensor.into_data().to_vec::<f32>().unwrap();
+    for norm in [
+        &model.layers[0].input_layernorm,
+        &model.layers[0].post_attention_layernorm,
+        &model.layers[1].input_layernorm,
+        &model.layers[1].post_attention_layernorm,
+        &model.final_layer_norm,
+    ] {
+        assert!(values(norm.gamma.val()).iter().all(|&value| value == 1.0));
+        assert!(
+            values(norm.beta.as_ref().unwrap().val())
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+    }
+    let others = report
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.role == ParameterRole::Other)
+        .collect::<Vec<_>>();
+    assert_eq!(others.len(), 2 * (2 * config.num_hidden_layers + 1));
+    for parameter in others {
+        let expected = if parameter.path.ends_with(".gamma") {
+            ParameterInit::Ones
+        } else {
+            assert!(parameter.path.ends_with(".beta"), "{}", parameter.path);
+            ParameterInit::Zeros
+        };
+        assert_eq!(parameter.init, expected, "{}", parameter.path);
+    }
 }

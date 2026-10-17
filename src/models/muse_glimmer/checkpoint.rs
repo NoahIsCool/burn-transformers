@@ -159,41 +159,27 @@ impl MuseGlimmerTextConfig {
     }
 }
 
-/// Checked shape terms shared across every layer mapping.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Number of embedding rows and vocabulary logits.
-    vocab: u64,
-    /// Residual width used by embeddings and normalization scales.
-    hidden: u64,
-    /// Expanded SwiGLU width.
-    intermediate: u64,
-    /// Concatenated query-head width after checked multiplication.
-    query: u64,
-    /// Concatenated native key/value-head width after checked multiplication.
-    key_value: u64,
-}
+mod dimensions; // Verified attention-width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&MuseGlimmerTextConfig> for Dimensions {
-    /// Contextual dimension conversion or multiplication failure.
+    /// Contextual multiplication failure.
     type Error = ConfigError;
 
-    /// Converts portable dimensions and checks projection-width products.
+    /// Converts portable dimensions and checks projection-width products with
+    /// the verified [`checkpoint_dimensions`].
     fn try_from(config: &MuseGlimmerTextConfig) -> Result<Self, Self::Error> {
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            query: product(
-                "num_attention_heads * head_dim",
-                config.num_attention_heads,
-                config.head_dim,
-            )?,
-            key_value: product(
-                "num_key_value_heads * head_dim",
-                config.num_key_value_heads,
-                config.head_dim,
-            )?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            attention_heads: config.num_attention_heads,
+            key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+        })
+        .map_err(|error| {
+            ConfigError::new(FAMILY, error.field(), "dimension product overflows usize")
         })
     }
 }
@@ -313,24 +299,6 @@ impl ContractBuilder {
             self.language(&format!("{mlp}.{projection}"), shape);
         }
     }
-}
-
-/// Converts one runtime dimension to the SafeTensors shape representation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Multiplies a projection width without truncation or overflow.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]

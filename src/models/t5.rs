@@ -14,11 +14,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use buckets::BucketGeometryError;
+
 use super::config::{
-    ConfigError, ModelConfig, TokenIds, Validate, model_type, nonzero, positive_finite,
-    probability, token_ids,
+    ConfigError, ModelConfig, TokenIds, Validate, layer_count, model_type, nonzero,
+    positive_finite, probability, token_ids,
 };
 
+mod buckets;
 mod checkpoint;
 mod generation;
 mod load;
@@ -181,7 +184,37 @@ impl T5Config {
 
 impl Validate for T5Config {
     /// Checks both stack depths, independent attention width, buckets, FFN, and IDs.
+    ///
+    /// The relative-bias geometry must suit both stacks: the bidirectional
+    /// encoder table needs `relative_attention_max_distance` above
+    /// `relative_attention_num_buckets / 4`, and the causal decoder table
+    /// needs it above `relative_attention_num_buckets / 2`.
     fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_stacks(T5Stacks::EncoderDecoder)
+    }
+}
+
+/// Which T5 stacks a validated configuration must be able to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum T5Stacks {
+    /// Only the bidirectional encoder (encoder-only recipes and classifiers).
+    EncoderOnly,
+    /// The complete encoder-decoder model, including the causal decoder table.
+    EncoderDecoder,
+}
+
+impl T5Config {
+    /// Validates the configuration for the stacks that will actually be built.
+    ///
+    /// T5 relative-bias tables split their `B` buckets differently per stack.
+    /// The bidirectional encoder uses `B / 2` buckets per direction, of which
+    /// `B / 4` are exact distances; the causal decoder uses all `B` buckets
+    /// for past keys, of which `B / 2` are exact. The logarithmic region needs
+    /// `max_distance > exact`, so the decoder bound `max_distance > B / 2` is
+    /// strictly stronger than the encoder bound `max_distance > B / 4`. A
+    /// full model must satisfy the decoder bound; an encoder-only recipe
+    /// legitimately needs only the encoder bound.
+    pub(crate) fn validate_stacks(&self, stacks: T5Stacks) -> Result<(), ConfigError> {
         /// Family label attached to configuration validation errors.
         const FAMILY: &str = "t5";
         model_type(FAMILY, &self.model_type, &["t5"])?;
@@ -204,27 +237,44 @@ impl Validate for T5Config {
         ] {
             nonzero(FAMILY, field, value)?;
         }
-        if self.relative_attention_num_buckets < 4 {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_num_buckets",
-                "must contain at least four buckets for bidirectional encoder attention",
-            ));
-        }
-        if !self.relative_attention_num_buckets.is_multiple_of(2) {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_num_buckets",
-                "must be even so bidirectional encoder buckets split by sign",
-            ));
-        }
-        let encoder_exact_buckets = self.relative_attention_num_buckets / 4;
-        if self.relative_attention_max_distance <= encoder_exact_buckets {
-            return Err(ConfigError::new(
-                FAMILY,
-                "relative_attention_max_distance",
-                "must exceed the encoder's exact-distance bucket region",
-            ));
+        // Both stacks are built, planned, and loaded one block at a time.
+        layer_count(FAMILY, "num_layers", self.num_layers)?;
+        layer_count(FAMILY, "num_decoder_layers", self.decoder_layers())?;
+        match buckets::bucket_geometry(
+            self.relative_attention_num_buckets,
+            self.relative_attention_max_distance,
+            stacks == T5Stacks::EncoderDecoder,
+        ) {
+            Ok(()) => {}
+            Err(BucketGeometryError::TooFewBuckets) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_num_buckets",
+                    "must contain at least four buckets for bidirectional encoder attention",
+                ));
+            }
+            Err(BucketGeometryError::OddBuckets) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_num_buckets",
+                    "must be even so bidirectional encoder buckets split by sign",
+                ));
+            }
+            Err(BucketGeometryError::EncoderDistance) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_max_distance",
+                    "must exceed the encoder's exact-distance bucket region",
+                ));
+            }
+            Err(BucketGeometryError::DecoderDistance) => {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "relative_attention_max_distance",
+                    "must exceed the causal decoder's exact-distance bucket region \
+                     (relative_attention_num_buckets / 2)",
+                ));
+            }
         }
         if !self.is_encoder_decoder {
             return Err(ConfigError::new(

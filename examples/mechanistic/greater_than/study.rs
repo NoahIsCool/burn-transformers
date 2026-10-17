@@ -514,7 +514,12 @@ impl Study {
 
     /// Compare projection of the clean final residual with ordinary clean logits.
     pub fn check_readout(&mut self, start: usize, logits: Tensor<B, 3>) -> Result<()> {
-        for (offset, actual) in tensor_values(logits)?.chunks_exact(50_257).enumerate() {
+        for (offset, actual) in tensor_values(logits)?
+            .as_chunks::<50_257>()
+            .0
+            .iter()
+            .enumerate()
+        {
             self.validation.maximum_readout_identity_error = self
                 .validation
                 .maximum_readout_identity_error
@@ -860,8 +865,10 @@ impl Oracle {
         let stride: usize = shape[1..].iter().product();
         let bytes = &view.data()[start * stride * 4..(start + count) * stride * 4];
         let values: Vec<_> = bytes
-            .chunks_exact(4)
-            .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|v| f32::from_le_bytes(*v))
             .collect();
         if values.iter().any(|x| !x.is_finite()) {
             return Err("nonfinite oracle values".into());

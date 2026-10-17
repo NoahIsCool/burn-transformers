@@ -14,6 +14,7 @@ use crate::checkpoint::{
 };
 
 use super::{ConfigError, Qwen3MoeConfig, Validate};
+use crate::models::config::{MoeInventory, moe_inventory};
 
 /// Family label attached to checkpoint geometry errors.
 const FAMILY: &str = "qwen3_moe";
@@ -63,22 +64,73 @@ impl Qwen3MoeCheckpointContract {
 }
 
 impl Qwen3MoeConfig {
+    /// Returns the exact length of [`Self::checkpoint_contract`]'s inventory, or `None` on overflow.
+    ///
+    /// With `L` blocks of which `S` are sparse, `E` routed experts, and
+    /// `b = 4` attention biases when `attention_bias` (else `0`), the
+    /// contract lists
+    ///
+    /// ```text
+    /// 3 + L · (8 + b) + S · (1 + 3E) + (L - S) · 3
+    /// ```
+    ///
+    /// tensors: the embedding, final norm, and LM head; two norms, four
+    /// projections, and two query/key norms per block; a router and three
+    /// matrices per expert in a sparse block; three dense-MLP matrices
+    /// otherwise. Validation bounds it by
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)
+    /// before any contract or graph is built, using checked arithmetic
+    /// because `L` and `E` come from untrusted metadata.
+    pub(crate) fn checkpoint_tensor_count(&self) -> Option<usize> {
+        let sparse_layers = self
+            .moe_layer_flags()
+            .into_iter()
+            .filter(|&sparse| sparse)
+            .count();
+        self.inventory(sparse_layers)
+    }
+
+    /// Returns the contract length for `sparse_layers` sparse blocks, or `None` on overflow.
+    ///
+    /// The formula of [`Self::checkpoint_tensor_count`], for a caller that
+    /// already counted the sparse blocks; the Verus-verified total is exact
+    /// or `None` exactly when it overflows `usize`.
+    pub(super) fn inventory(&self, sparse_layers: usize) -> Option<usize> {
+        moe_inventory(MoeInventory {
+            fixed: 3,
+            layers: self.num_hidden_layers,
+            per_layer: if self.attention_bias { 12 } else { 8 },
+            sparse_layers,
+            per_sparse_layer: 1,
+            experts: self.num_experts,
+            per_expert: 3,
+            per_dense_layer: 3,
+        })
+    }
+
     /// Derives the full parameter contract from validated topology metadata.
+    ///
+    /// Validation first bounds the inventory (see
+    /// [`MAX_CHECKPOINT_TENSORS`](crate::models::config::MAX_CHECKPOINT_TENSORS)),
+    /// so an absurd layer or expert count is an error rather than an
+    /// allocation proportional to it.
     pub fn checkpoint_contract(
         &self,
         _options: Qwen3MoeCheckpointOptions,
     ) -> Result<Qwen3MoeCheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
-        let mut expected = Vec::new();
+        // Validation proved the count fits the artifact limit.
+        let mut expected = Vec::with_capacity(self.checkpoint_tensor_count().unwrap_or(0));
         let mut mappings = MappingPlan::new();
+        let sparse_layers = self.moe_layer_flags();
         add(
             &mut expected,
             &mut mappings,
             "model.embed_tokens.weight",
             vec![dimensions.vocab, dimensions.hidden],
         );
-        for layer_index in 0..self.num_hidden_layers {
+        for (layer_index, &sparse) in sparse_layers.iter().enumerate() {
             let layer = format!("model.layers.{layer_index}");
             add(
                 &mut expected,
@@ -130,7 +182,7 @@ impl Qwen3MoeConfig {
                 }
             }
             let mlp = format!("{layer}.mlp");
-            if self.is_moe_layer(layer_index) {
+            if sparse {
                 add_mapped(
                     &mut expected,
                     &mut mappings,
@@ -180,50 +232,29 @@ impl Qwen3MoeConfig {
     }
 }
 
-/// Checked shape terms used by the contract builder.
-#[derive(Debug, Clone, Copy)]
-struct Dimensions {
-    /// Number of vocabulary rows in embedding and output matrices.
-    vocab: u64,
-    /// Residual-stream width shared by decoder blocks.
-    hidden: u64,
-    /// Intermediate width of dense feed-forward layers.
-    intermediate: u64,
-    /// Intermediate width of each routed expert.
-    moe_intermediate: u64,
-    /// Number of routed experts and router output channels.
-    experts: u64,
-    /// Concatenated query width: query heads times head dimension.
-    query: u64,
-    /// Concatenated native key/value width before head repetition.
-    key_value: u64,
-    /// Per-head query/key width used by headwise RMS normalization.
-    head_dim: u64,
-}
+mod dimensions; // Verified attention-width arithmetic of the tensor contract.
+
+use dimensions::{DimensionInputs, Dimensions, checkpoint_dimensions};
 
 impl TryFrom<&Qwen3MoeConfig> for Dimensions {
-    /// Configuration field and reason for a nonportable or overflowing dimension.
+    /// Configuration field and reason for an overflowing dimension.
     type Error = ConfigError;
 
-    /// Converts every dimension and checks projection-width products.
+    /// Converts every dimension and checks projection-width products with the
+    /// verified [`checkpoint_dimensions`].
     fn try_from(config: &Qwen3MoeConfig) -> Result<Self, Self::Error> {
-        Ok(Self {
-            vocab: dimension("vocab_size", config.vocab_size)?,
-            hidden: dimension("hidden_size", config.hidden_size)?,
-            intermediate: dimension("intermediate_size", config.intermediate_size)?,
-            moe_intermediate: dimension("moe_intermediate_size", config.moe_intermediate_size)?,
-            experts: dimension("num_experts", config.num_experts)?,
-            query: product(
-                "num_attention_heads * head_dim",
-                config.num_attention_heads,
-                config.head_dim,
-            )?,
-            key_value: product(
-                "num_key_value_heads * head_dim",
-                config.num_key_value_heads,
-                config.head_dim,
-            )?,
-            head_dim: dimension("head_dim", config.head_dim)?,
+        checkpoint_dimensions(DimensionInputs {
+            vocab: config.vocab_size,
+            hidden: config.hidden_size,
+            intermediate: config.intermediate_size,
+            moe_intermediate: config.moe_intermediate_size,
+            experts: config.num_experts,
+            attention_heads: config.num_attention_heads,
+            key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+        })
+        .map_err(|error| {
+            ConfigError::new(FAMILY, error.field(), "dimension product overflows usize")
         })
     }
 }
@@ -273,24 +304,6 @@ fn add_mapped(
 ) {
     expected.push(ExpectedTensor::new(target, shape));
     mappings.map(source, target);
-}
-
-/// Converts one `usize` dimension without truncation.
-fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
-    u64::try_from(value).map_err(|_| {
-        ConfigError::new(
-            FAMILY,
-            field,
-            "dimension cannot be represented by the checkpoint format",
-        )
-    })
-}
-
-/// Multiplies two projection dimensions without overflow.
-fn product(field: &'static str, left: usize, right: usize) -> Result<u64, ConfigError> {
-    left.checked_mul(right)
-        .ok_or_else(|| ConfigError::new(FAMILY, field, "dimension product overflows usize"))
-        .and_then(|value| dimension(field, value))
 }
 
 #[cfg(test)]

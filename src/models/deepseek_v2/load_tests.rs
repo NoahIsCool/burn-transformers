@@ -253,3 +253,403 @@ fn query_lora_and_invalid_expert_targets_are_typed() {
         Err(DeepseekV2LoadError::MissingComponent { .. })
     ));
 }
+
+/// One `[1]`-shaped F32 payload; every rejection below fails before its shape matters.
+fn scalar() -> TensorData {
+    TensorData::from([0.0_f32])
+}
+
+/// Returns the internal target named by a sink error.
+fn error_target(error: &DeepseekV2LoadError) -> String {
+    match error {
+        DeepseekV2LoadError::UnknownTarget { target }
+        | DeepseekV2LoadError::InvalidIndex { target, .. }
+        | DeepseekV2LoadError::MissingComponent { target, .. }
+        | DeepseekV2LoadError::Parameter { target, .. }
+        | DeepseekV2LoadError::InvalidAlias { target, .. } => target.clone(),
+    }
+}
+
+/// Malformed names, out-of-range indices, and absent components each produce one typed error.
+///
+/// The tiny model has a dense block 0 and a greedy-routed sparse block 1,
+/// a direct query projection, and no attention biases, so each target below
+/// names a component the configured topology does not own.
+#[test]
+fn sink_reports_every_target_rejection_with_its_reason() {
+    let device = Default::default();
+    let mut model = DeepseekV2ForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+    let invalid = |target: &str, reason: &str| DeepseekV2LoadError::InvalidIndex {
+        target: target.into(),
+        reason: reason.into(),
+    };
+    let missing = |target: &str, component: &'static str| DeepseekV2LoadError::MissingComponent {
+        target: target.into(),
+        component,
+    };
+    let unknown = |target: &str| DeepseekV2LoadError::UnknownTarget {
+        target: target.into(),
+    };
+    let sparse = "sparse routed/shared expert block";
+    let cases = [
+        unknown("model.bogus.weight"),
+        unknown("model.layers.0.bogus.weight"),
+        unknown("model.layers.1.sparse_mlp.shared_experts.bogus.weight"),
+        unknown("model.layers.1.sparse_mlp.routed.routed.0.bogus.weight"),
+        invalid(
+            "model.layers.0",
+            "expected `model.layers.<index>.<parameter>`",
+        ),
+        invalid("model.layers.0.", "parameter suffix must not be empty"),
+        invalid(
+            "model.layers.2.input_layernorm.weight",
+            "layer 2 is outside 0..2",
+        ),
+        invalid(
+            "model.layers.1.sparse_mlp.routed.routed.0",
+            "expected an expert index followed by a parameter",
+        ),
+        invalid(
+            "model.layers.1.sparse_mlp.routed.routed.x.gate_proj.weight",
+            "`x` is not a decimal expert index: invalid digit found in string",
+        ),
+        invalid(
+            "model.layers.1.sparse_mlp.routed.routed.4.gate_proj.weight",
+            "expert 4 is outside 0..4",
+        ),
+        missing(
+            "model.layers.0.self_attn.q_a_proj.weight",
+            "query down-projection",
+        ),
+        missing(
+            "model.layers.0.self_attn.q_a_proj.bias",
+            "query down-projection bias",
+        ),
+        missing(
+            "model.layers.0.self_attn.q_a_layernorm.weight",
+            "query latent RMSNorm",
+        ),
+        missing(
+            "model.layers.0.self_attn.q_b_proj.weight",
+            "query up-projection",
+        ),
+        missing(
+            "model.layers.0.self_attn.kv_a_proj_with_mqa.bias",
+            "configured linear bias",
+        ),
+        missing(
+            "model.layers.0.self_attn.o_proj.bias",
+            "configured linear bias",
+        ),
+        missing("model.layers.0.sparse_mlp.routed.router.weight", sparse),
+        missing("model.layers.0.sparse_mlp.routed.correction_bias", sparse),
+        missing(
+            "model.layers.0.sparse_mlp.routed.routed.0.gate_proj.weight",
+            sparse,
+        ),
+        missing(
+            "model.layers.0.sparse_mlp.shared_experts.up_proj.weight",
+            sparse,
+        ),
+        missing(
+            "model.layers.1.sparse_mlp.routed.correction_bias",
+            "noaux_tc selection bias",
+        ),
+        missing(
+            "model.layers.1.dense_mlp.gate_proj.weight",
+            "dense SwiGLU block",
+        ),
+    ];
+    for expected in cases {
+        let target = error_target(&expected);
+        assert_eq!(
+            model.write_tensor(&target, scalar()),
+            Err(expected),
+            "{target}"
+        );
+    }
+
+    let mut tied_config = tiny_config();
+    tied_config.tie_word_embeddings = true;
+    let mut tied = DeepseekV2ForCausalLm::<TestBackend>::init(tied_config, &device).unwrap();
+    assert_eq!(
+        tied.write_tensor("lm_head.weight", scalar()),
+        Err(missing(
+            "lm_head.weight",
+            "independent LM head for an untied checkpoint"
+        ))
+    );
+}
+
+/// Only the tied embedding-to-head alias is accepted, and only after its owner is installed.
+#[test]
+fn alias_requires_the_tied_installed_embedding_owner() {
+    let device = Default::default();
+    let alias = |target: &str, source: &str, reason: &str| DeepseekV2LoadError::InvalidAlias {
+        target: target.into(),
+        source_target: source.into(),
+        reason: reason.into(),
+    };
+    let mut config = tiny_config();
+    config.tie_word_embeddings = true;
+    let mut tied = DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    for (target, source) in [
+        ("lm_head.weight", "model.norm.weight"),
+        ("model.norm.weight", "model.embed_tokens.weight"),
+    ] {
+        assert_eq!(
+            tied.alias_tensor(target, source),
+            Err(alias(
+                target,
+                source,
+                "only the tied embedding-to-LM-head alias is supported"
+            ))
+        );
+    }
+    assert_eq!(
+        tied.alias_tensor("lm_head.weight", "model.embed_tokens.weight"),
+        Err(alias(
+            "lm_head.weight",
+            "model.embed_tokens.weight",
+            "the embedding storage owner has not been installed"
+        ))
+    );
+    tied.write_tensor(
+        "model.embed_tokens.weight",
+        TensorData::zeros::<f32, _>([32, 8]),
+    )
+    .unwrap();
+    tied.alias_tensor("lm_head.weight", "model.embed_tokens.weight")
+        .expect("the installed tied owner aliases the head");
+
+    let mut untied = DeepseekV2ForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+    assert_eq!(
+        untied.alias_tensor("lm_head.weight", "model.embed_tokens.weight"),
+        Err(alias(
+            "lm_head.weight",
+            "model.embed_tokens.weight",
+            "the configured model declares an independent LM head"
+        ))
+    );
+}
+
+/// Projections that carry a bias under `attention_bias`, in marker order.
+const MLA_BIASED_PROJECTIONS: [&str; 3] = ["q_a_proj", "kv_a_proj_with_mqa", "o_proj"];
+
+/// Distinct marker for an MLA projection bias target, `None` otherwise.
+///
+/// For `model.layers.{l}.self_attn.{projection}.bias` the marker is
+/// `kind + 10 * l`, with `kind` 1..=3 in [`MLA_BIASED_PROJECTIONS`] order, so
+/// a bias installed into another projection or another layer is visible.
+fn mla_bias_marker(name: &str) -> Option<f32> {
+    let rest = name.strip_prefix("model.layers.")?;
+    let (layer, suffix) = rest.split_once('.')?;
+    let projection = suffix.strip_prefix("self_attn.")?.strip_suffix(".bias")?;
+    let kind = MLA_BIASED_PROJECTIONS
+        .iter()
+        .position(|candidate| *candidate == projection)?;
+    Some(kind as f32 + 1.0 + 10.0 * layer.parse::<f32>().ok()?)
+}
+
+/// Biased low-rank-query attention installs each bias target into its own field and runs.
+///
+/// The contract adds `q_a_proj.bias`, `kv_a_proj_with_mqa.bias`, and
+/// `o_proj.bias` to each layer. Each carries a distinct constant from
+/// [`mla_bias_marker`], and reading every Burn bias back proves the
+/// dispatcher routes it to its own projection in its own layer rather than
+/// a same-shaped neighbor. The all-zero vocabulary projection makes the
+/// forward logits exactly zero whatever the biases contribute upstream.
+#[test]
+fn biased_low_rank_query_targets_install_and_run() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.q_lora_rank = Some(4);
+    config.attention_bias = true;
+    let contract = config.checkpoint_contract(Default::default()).unwrap();
+    let mut model = DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let mut biases = 0;
+    for expected in contract.expected_tensors() {
+        let shape = expected
+            .shape
+            .iter()
+            .map(|&value| value as usize)
+            .collect::<Vec<_>>();
+        let data = match mla_bias_marker(&expected.name) {
+            Some(marker) => {
+                biases += 1;
+                TensorData::full(shape, marker)
+            }
+            None => {
+                assert!(!expected.name.ends_with(".bias"), "{}", expected.name);
+                TensorData::zeros::<f32, _>(shape)
+            }
+        };
+        model
+            .write_tensor(&expected.name, data)
+            .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
+    }
+    assert_eq!(biases, 3 * 2);
+    for (index, layer) in model.model.layers.iter().enumerate() {
+        let attention = &layer.self_attn;
+        let projections = [
+            attention
+                .q_a_proj
+                .as_ref()
+                .expect("a low-rank query owns a down-projection"),
+            &attention.kv_a_proj_with_mqa,
+            &attention.o_proj,
+        ];
+        for (kind, projection) in projections.into_iter().enumerate() {
+            let expected = kind as f32 + 1.0 + 10.0 * index as f32;
+            let values = projection
+                .bias
+                .as_ref()
+                .expect("a biased projection owns a bias")
+                .val()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            assert!(!values.is_empty());
+            assert!(
+                values.iter().all(|&value| value == expected),
+                "layer {index} {} holds {values:?}, expected {expected}",
+                MLA_BIASED_PROJECTIONS[kind]
+            );
+        }
+    }
+    let output = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        output
+            .logits
+            .into_data()
+            .iter::<f32>()
+            .all(|value| value == 0.0)
+    );
+}
+
+/// A sink rejection during streaming is an execution failure with partial diagnostics.
+///
+/// The checkpoint matches the configuration's contract, so planning succeeds;
+/// removing block 1's expert bank afterwards makes the sink reject its first
+/// sparse tensor. Configuration and discovery failures carry no execution
+/// diagnostics.
+#[test]
+fn loader_distinguishes_configuration_planning_and_execution_failures() {
+    let device = Default::default();
+    let config = tiny_config();
+    let contract = config.checkpoint_contract(Default::default()).unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+
+    let mut model = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    model.model.layers[1].sparse_mlp = None;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .expect_err("the sink cannot install the expert bank");
+    let failure = error
+        .execution_failure()
+        .expect("execution reached the sink");
+    let target = failure.failed_target.as_deref().expect("failed target");
+    assert!(target.starts_with("model.layers.1.sparse_mlp."), "{target}");
+    assert!(matches!(
+        &failure.cause,
+        crate::checkpoint::ExecutionFailureCause::Sink(DeepseekV2LoadError::MissingComponent {
+            component: "sparse routed/shared expert block",
+            ..
+        })
+    ));
+
+    let mut model = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device).unwrap();
+    model.model.config.topk_group = model.model.config.n_group + 1;
+    let error = model
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .expect_err("an invalid configuration has no contract");
+    assert!(matches!(
+        &error,
+        DeepseekV2CheckpointLoadError::Config(config) if config.field == "topk_group"
+    ));
+    assert!(error.execution_failure().is_none());
+
+    let empty = TempDir::new().unwrap();
+    let mut model = DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let error = model
+        .load_checkpoint(empty.path(), &LoadOptions::default())
+        .expect_err("an empty directory has no checkpoint");
+    assert!(matches!(
+        error,
+        DeepseekV2CheckpointLoadError::Checkpoint(_)
+    ));
+    assert!(error.execution_failure().is_none());
+}
+
+/// A tied configuration whose model nevertheless owns an independent head rejects the alias.
+#[test]
+fn tied_alias_rejects_a_model_that_owns_a_head() {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.tie_word_embeddings = true;
+    let mut tied = DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let untied = DeepseekV2ForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+    tied.lm_head = untied.lm_head;
+    tied.write_tensor(
+        "model.embed_tokens.weight",
+        TensorData::zeros::<f32, _>([32, 8]),
+    )
+    .unwrap();
+    assert_eq!(
+        tied.alias_tensor("lm_head.weight", "model.embed_tokens.weight"),
+        Err(DeepseekV2LoadError::InvalidAlias {
+            target: "lm_head.weight".into(),
+            source_target: "model.embed_tokens.weight".into(),
+            reason: "the configured model declares an independent LM head".into(),
+        })
+    );
+}
+
+/// `load_checkpoint_with` under the (empty) family options equals `load_checkpoint`.
+#[test]
+fn load_checkpoint_with_default_options_matches_load_checkpoint() {
+    let device = Default::default();
+    let config = tiny_config();
+    let contract = config
+        .checkpoint_contract(DeepseekV2CheckpointOptions::default())
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    write_checkpoint(temp.path(), &contract, |_| {});
+    let detected = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &device)
+        .unwrap()
+        .load_checkpoint(temp.path(), &LoadOptions::default())
+        .unwrap();
+    let explicit = DeepseekV2ForCausalLm::<TestBackend>::init(config, &device)
+        .unwrap()
+        .load_checkpoint_with(
+            temp.path(),
+            &LoadOptions::default(),
+            DeepseekV2CheckpointOptions::default(),
+        )
+        .unwrap();
+    assert!(explicit.report.is_strictly_valid());
+    assert_eq!(explicit.report, detected.report);
+}
+
+/// Packed sidecar payloads install exactly the artifact, never a requantized approximation.
+///
+/// The sink's one installer must keep a packed column-layout weight exact on
+/// every backend (as exact dequantized values on Burn Flex, whose quantized
+/// transpose requantizes) and leave float payloads unchanged, as the
+/// certified Qwen3-MoE and Muse sinks do.
+#[test]
+fn packed_payloads_install_the_artifact_exactly() {
+    crate::checkpoint::packed_sink_support::assert_install_keeps_packed_weights_exact(
+        |parameter, data| install("model.layers.0.self_attn.o_proj.weight", parameter, data),
+    );
+}

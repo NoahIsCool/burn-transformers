@@ -64,7 +64,11 @@
 
 #![cfg(feature = "tokenizers")]
 
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[path = "support/kernel_trace.rs"]
 mod kernel_trace;
 
@@ -105,7 +109,11 @@ use burn::{
     nn::Linear,
     tensor::{DType, Int, Tensor, TensorData, backend::Backend},
 };
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use kernel_trace::{
     calibrated_dequantization_kernel_names, capture_kernel_launches, compact_kernel_id,
     packed_matmul_launches, whole_weight_dequantization_launches,
@@ -115,7 +123,10 @@ use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, DecodeState, ForwardOptions,
     LogitsSelection, cache::CacheConfig, models::qwen3_moe::Qwen3MoeForCausalLm,
 };
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 use transformers::{
     CausalLanguageModel,
     checkpoint::ExecutionStats,
@@ -134,11 +145,17 @@ const REPOSITORY: &str = "Qwen/Qwen3-30B-A3B";
 const REVISION: &str = "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39";
 
 /// Exact output path used by the create-only Q8 conversion and later Metal load.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const Q8_BURNPACK_ENV: &str = "TRANSFORMERS_QWEN3_MOE_Q8_BURNPACK";
 
 /// Exact output path used by the create-only Q4 conversion and later Metal load.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const Q4_BURNPACK_ENV: &str = "TRANSFORMERS_QWEN3_MOE_Q4_BURNPACK";
 
 /// Number of architecture parameters accepted by the strict checkpoint plan.
@@ -170,7 +187,11 @@ const Q4_LARGEST_PAYLOAD_BYTES: u64 = 175_030_272;
 /// Each of 48 layers launches four attention projections and three projections
 /// for each of its eight selected experts. The independent LM head adds one:
 /// `48 * (4 + 8 * 3) + 1 = 1_345`. Router matrices intentionally remain F16.
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const PACKED_DECODE_MATMUL_LAUNCHES: usize = 1_345;
 
 /// Exact BF16 bytes consumed by full-precision loading and sidecar conversion.
@@ -1249,7 +1270,10 @@ fn loads_pinned_qwen3_moe_f16_and_runs_metal_smoke() {
 }
 
 /// Converts every eligible Qwen3-MoE matrix into a persistent group-64 Q8 sidecar.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3-30B-A3B weights and an absent external Q8 Burnpack path"]
 fn quantizes_pinned_qwen3_moe_weights_to_q8_burnpack() {
@@ -1257,7 +1281,10 @@ fn quantizes_pinned_qwen3_moe_weights_to_q8_burnpack() {
 }
 
 /// Converts every eligible Qwen3-MoE matrix into a persistent group-64 Q4 sidecar.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3-30B-A3B weights and an absent external Q4 Burnpack path"]
 fn quantizes_pinned_qwen3_moe_weights_to_q4_burnpack() {
@@ -1265,7 +1292,10 @@ fn quantizes_pinned_qwen3_moe_weights_to_q4_burnpack() {
 }
 
 /// Loads the persistent Q8 sidecar and exercises packed Metal inference.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q8 Burnpack, and Metal"]
 fn loads_pinned_qwen3_moe_q8_and_runs_metal_smoke() {
@@ -1273,7 +1303,10 @@ fn loads_pinned_qwen3_moe_q8_and_runs_metal_smoke() {
 }
 
 /// Loads the persistent Q4 sidecar and exercises packed Metal inference.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q4 Burnpack, and Metal"]
 fn loads_pinned_qwen3_moe_q4_and_runs_metal_smoke() {
@@ -1281,7 +1314,11 @@ fn loads_pinned_qwen3_moe_q4_and_runs_metal_smoke() {
 }
 
 /// Audits every packed Q8 projection submitted by one recurrent Metal decode.
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q8 Burnpack, Metal, and kernel tracing"]
 fn audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels() {
@@ -1289,7 +1326,11 @@ fn audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels() {
 }
 
 /// Audits every packed Q4 projection submitted by one recurrent Metal decode.
-#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "kernel-tracing",
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 #[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q4 Burnpack, Metal, and kernel tracing"]
 fn audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels() {
@@ -1303,7 +1344,10 @@ fn audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels() {
 /// is reopened and fully validated before its content digest is reported. The
 /// caller must provide an exact path because finalization temporarily requires
 /// both the private staging bytes and the published Burnpack on that filesystem.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn quantize_pinned_qwen3_moe_weights_to_burnpack(
     scheme: SymmetricQuantization,
     output_environment: &str,
@@ -1447,7 +1491,10 @@ fn quantize_pinned_qwen3_moe_weights_to_burnpack(
 /// [`transformers::LoadedModel`]. This acceptance gate calls the compatibility
 /// API directly to exercise the concrete architecture sink while independently
 /// certifying its packed-payload and provenance-hash counters.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn load_pinned_qwen3_moe_burnpack_and_run_metal(
     scheme: SymmetricQuantization,
     output_environment: &str,
@@ -1552,7 +1599,10 @@ fn load_pinned_qwen3_moe_burnpack_and_run_metal(
 /// acceptance device. Conversion must therefore quantize the exact F16 plan that
 /// later installs the sidecar; Burnpack v2 deliberately rejects even a
 /// shape-compatible plan whose target dtype differs.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn metal_f16_load_options() -> LoadOptions {
     LoadOptions {
         dtype_policy: DTypePolicy::Cast(TensorDType::F16),
@@ -1561,7 +1611,10 @@ fn metal_f16_load_options() -> LoadOptions {
 }
 
 /// Reconstructs the exact immutable family plan for one target dtype policy.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn pinned_qwen3_moe_plan(
     root: &Path,
     options: LoadOptions,
@@ -1761,7 +1814,10 @@ const fn pinned_quantized_payload(scheme: SymmetricQuantization) -> (u64, u64) {
 }
 
 /// Checks complete one-shard-at-a-time consumption of the 16-shard checkpoint.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_complete_qwen3_moe_source_execution(execution: &ExecutionStats) {
     assert_eq!(execution.tensors_applied, PARAMETER_COUNT);
     assert_eq!(execution.aliases_applied, 0);
@@ -1793,7 +1849,10 @@ fn assert_complete_qwen3_moe_source_execution(execution: &ExecutionStats) {
 }
 
 /// Checks both bounded full-shard hash passes around a successful v2 operation.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_complete_qwen3_moe_provenance(provenance: ProvenanceExecutionStats) {
     for (phase, stats) in [
         ("pre-execution", provenance.pre_execution),
@@ -1826,7 +1885,10 @@ fn assert_complete_qwen3_moe_provenance(provenance: ProvenanceExecutionStats) {
 /// norms, and routers are read from SafeTensors. Hash I/O is intentionally
 /// separate from tensor-read counters, while the persisted official shard hashes
 /// are checked by [`assert_exact_qwen3_moe_burnpack`].
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_qwen3_moe_packed_overlay_execution(
     execution: &ExecutionStats,
     packed_payload_bytes: u64,
@@ -1872,7 +1934,10 @@ fn assert_qwen3_moe_packed_overlay_execution(
 }
 
 /// Reopens and validates the exact scheme, target set, and payload geometry.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_exact_qwen3_moe_burnpack(
     artifact: &mut QuantizedBurnpackArtifact,
     plan: &LoadPlan,
@@ -1942,7 +2007,10 @@ fn assert_exact_qwen3_moe_burnpack(
 }
 
 /// Requires QFloat storage for eligible matrices and F16 for every exclusion.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_qwen3_moe_mixed_parameter_dtypes(model: &Qwen3MoeForCausalLm<Metal>) {
     let mut quantized = 0_usize;
     let mut retained = 0_usize;
@@ -2041,7 +2109,10 @@ fn assert_qwen3_moe_mixed_parameter_dtypes(model: &Qwen3MoeForCausalLm<Metal>) {
 }
 
 /// Requires one bias-free linear weight to retain Burn's packed QFloat storage.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn assert_linear_qfloat(label: &str, linear: &Linear<Metal>) {
     assert!(
         matches!(linear.weight.val().dtype(), DType::QFloat(_)),
@@ -2054,7 +2125,10 @@ fn assert_linear_qfloat(label: &str, linear: &Linear<Metal>) {
 }
 
 /// Executes six-token stateless and cached prefill plus one recurrent decode.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[allow(clippy::too_many_arguments)]
 fn run_qwen3_moe_quantized_metal_smoke(
     model: &Qwen3MoeForCausalLm<Metal>,
@@ -2266,7 +2340,10 @@ fn run_qwen3_moe_quantized_metal_smoke(
 }
 
 /// Resolves a canonical, non-symlink Burnpack path on the checkpoint's volume.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn explicit_external_burnpack_path(
     checkpoint_root: &Path,
     environment: &str,
@@ -2284,7 +2361,10 @@ fn explicit_external_burnpack_path(
 }
 
 /// Applies the external-volume path policy with an injectable mount root for tests.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn validate_external_burnpack_path(
     checkpoint_root: &Path,
     supplied: &Path,
@@ -2371,7 +2451,10 @@ fn validate_external_burnpack_path(
 }
 
 /// Constructs an isolated two-volume tree for external-path policy tests.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 fn external_path_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let directory = tempfile::tempdir().expect("create path-policy fixture");
     let root = directory
@@ -2390,7 +2473,10 @@ fn external_path_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
 }
 
 /// Accepts canonical create-only and existing paths on the checkpoint volume.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 fn external_burnpack_path_accepts_only_the_selected_mode() {
     let (_directory, volumes, checkpoint, output_parent) = external_path_fixture();
@@ -2421,7 +2507,10 @@ fn external_burnpack_path_accepts_only_the_selected_mode() {
 }
 
 /// Rejects lexical escapes, another volume, wrong extensions, and relative paths.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 fn external_burnpack_path_rejects_unsafe_locations() {
     let (_directory, volumes, checkpoint, output_parent) = external_path_fixture();
@@ -2444,7 +2533,11 @@ fn external_burnpack_path_rejects_unsafe_locations() {
 }
 
 /// Rejects a symlinked parent and a symlink masquerading as an existing Burnpack.
-#[cfg(all(feature = "metal", not(feature = "rocm"), unix))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing")),
+    unix
+))]
 #[test]
 fn external_burnpack_path_rejects_symlink_components_and_targets() {
     use std::os::unix::fs::symlink;
@@ -2473,7 +2566,10 @@ fn external_burnpack_path_rejects_symlink_components_and_targets() {
 }
 
 /// Returns the stable precision label used by artifacts and reports.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 const fn quantization_label(scheme: SymmetricQuantization) -> &'static str {
     match scheme {
         SymmetricQuantization::Q8 => "q8",
@@ -2499,7 +2595,10 @@ fn quantized_payload_accounting_is_stable() {
 }
 
 /// Conversion and loading sign the same M3-compatible F16 target policy.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
 #[test]
 fn quantized_acceptance_uses_one_f16_load_policy() {
     assert_eq!(

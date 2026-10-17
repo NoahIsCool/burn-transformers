@@ -1,0 +1,14 @@
+[package]
+name = "flex-slice-assign-copy"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+burn = { version = "=0.21.0", features = ["flex"] }
+
+[profile.release]
+debug = false
+
+# Standalone: never join an enclosing workspace.
+[workspace]

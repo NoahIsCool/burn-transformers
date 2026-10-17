@@ -1,0 +1,95 @@
+diff --git a/gemm-common/src/gemm.rs b/gemm-common/src/gemm.rs
+index 07626e2..1951c5e 100644
+--- a/gemm-common/src/gemm.rs
++++ b/gemm-common/src/gemm.rs
+@@ -6,7 +6,7 @@ use crate::{
+     simd::MixedSimd,
+     Parallelism, Ptr,
+ };
+-use core::sync::atomic::{AtomicUsize, Ordering};
++use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ use dyn_stack::{DynStack, StackReq};
+ #[cfg(feature = "f16")]
+ use half::f16;
+@@ -124,6 +124,34 @@ static LHS_PACKING_THRESHOLD_SINGLE_THREAD: AtomicUsize =
+ static LHS_PACKING_THRESHOLD_MULTI_THREAD: AtomicUsize =
+     AtomicUsize::new(DEFAULT_LHS_PACKING_THRESHOLD_MULTI_THREAD);
+ 
++static LAYOUT_INDEPENDENT_ACCUMULATION: AtomicBool = AtomicBool::new(false);
++
++/// Whether every product accumulates each output along `k` in the same order
++/// whatever the operands' strides (default `false`).
++#[inline]
++pub fn get_layout_independent_accumulation() -> bool {
++    LAYOUT_INDEPENDENT_ACCUMULATION.load(Ordering::Relaxed)
++}
++
++/// Requests (`true`) or releases layout-independent accumulation.
++///
++/// By default the kernel, and with it the order in which each output
++/// accumulates its `k` products, depends on the operands' strides: a product
++/// whose operands are both contiguous along `k` (`lhs_cs == 1 && rhs_rs == 1`,
++/// e.g. a row-major `A` times the transpose of a row-major `B`) accumulates
++/// partial dot products in SIMD lanes and reduces them horizontally (the
++/// small-product horizontal microkernel on x86, and the row-major gemv), the
++/// column-major gemv accumulates one sequential pass over `k`, and the packed
++/// microkernel accumulates `k` in cache blocks. These orders round
++/// differently, so results depend on memory layout. When enabled, the gemv
++/// and horizontal shortcuts are skipped and every product takes the packed
++/// microkernel path, so `A · B` is bitwise independent of how `A` and `B` are
++/// strided, at the cost of packing the operands of matrix-vector products.
++#[inline]
++pub fn set_layout_independent_accumulation(value: bool) {
++    LAYOUT_INDEPENDENT_ACCUMULATION.store(value, Ordering::Relaxed);
++}
++
+ #[inline]
+ pub fn get_threading_threshold() -> usize {
+     THREADING_THRESHOLD.load(Ordering::Relaxed)
+@@ -257,7 +285,12 @@ pub unsafe fn gemm_basic_generic<
+         return;
+     }
+ 
+-    if (H_M > 0 && H_N > 0) && (!conj_dst && lhs_cs == 1 && rhs_rs == 1 && (m * n) <= 16 * 16) {
++    let layout_independent = get_layout_independent_accumulation();
++
++    if (H_M > 0 && H_N > 0)
++        && !layout_independent
++        && (!conj_dst && lhs_cs == 1 && rhs_rs == 1 && (m * n) <= 16 * 16)
++    {
+         let kc = 1024;
+         let mut depth = 0;
+         let mut conj_dst = conj_dst;
+@@ -319,28 +352,28 @@ pub unsafe fn gemm_basic_generic<
+             return;
+         }
+ 
+-        if n <= 1 && lhs_rs == 1 && dst_rs == 1 {
++        if n <= 1 && lhs_rs == 1 && dst_rs == 1 && !layout_independent {
+             gemv::mixed_gemv_colmajor(
+                 simd, m, n, k, dst, dst_cs, dst_rs, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+                 alpha, beta,
+             );
+             return;
+         }
+-        if n <= 1 && lhs_cs == 1 && rhs_rs == 1 {
++        if n <= 1 && lhs_cs == 1 && rhs_rs == 1 && !layout_independent {
+             gemv::mixed_gemv_rowmajor(
+                 simd, m, n, k, dst, dst_cs, dst_rs, lhs, lhs_cs, lhs_rs, rhs, rhs_cs, rhs_rs,
+                 alpha, beta,
+             );
+             return;
+         }
+-        if m <= 1 && rhs_cs == 1 && dst_cs == 1 {
++        if m <= 1 && rhs_cs == 1 && dst_cs == 1 && !layout_independent {
+             gemv::mixed_gemv_colmajor(
+                 simd, n, m, k, dst, dst_rs, dst_cs, rhs, rhs_rs, rhs_cs, lhs, lhs_rs, lhs_cs,
+                 alpha, beta,
+             );
+             return;
+         }
+-        if m <= 1 && rhs_rs == 1 && lhs_cs == 1 {
++        if m <= 1 && rhs_rs == 1 && lhs_cs == 1 && !layout_independent {
+             gemv::mixed_gemv_rowmajor(
+                 simd, n, m, k, dst, dst_rs, dst_cs, rhs, rhs_rs, rhs_cs, lhs, lhs_rs, lhs_cs,
+                 alpha, beta,

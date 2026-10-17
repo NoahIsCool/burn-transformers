@@ -1,0 +1,23 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== start 2026-10-17T07:36:57Z load { 2.89 4.94 6.38 }
+== cmd /Volumes/bag\ of\ holding/cargo-targets/tfm-polish-half-gates/release/burn-dump flex f32 /Volumes/T9/models/Qwen/Qwen3-4B 785\,6722\,315\,9625\,374\,12095\,13\,576\,6722\,315\,9856\,374\,19846\,13\,576\,6722\,315\,15344\,374\,21718\,13\,576\,6722\,315\,17689\,374\,24081\,13\,576\,6722\,315\,33311\,374\,80701\,13\,576\,6722 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/Qwen3-4B-burn-decode/flex-f32-fused fused 5
+wrote 38 points for 37 tokens (eager=false, prefill=5) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/mac-validation/llama-family/diagnostics/data/Qwen3-4B-burn-decode/flex-f32-fused
+       55.36 real        38.87 user        35.14 sys
+         18870763520  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1159049  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 236  voluntary context switches
+              220228  involuntary context switches
+        844645953307  instructions retired
+        263498572694  cycles elapsed
+         18870597576  peak memory footprint
+== exit=0 wall=55s

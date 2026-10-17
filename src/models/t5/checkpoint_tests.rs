@@ -340,6 +340,16 @@ fn known_hugging_face_embedding_aliases_are_exact_and_reported() {
             1
         );
         assert!(options.allow_unexpected.contains(&custom));
+        // T5 allowlists no unexpected keys: embedding copies are equivalences instead.
+        assert!(contract.allow_unexpected().is_empty());
+        assert_eq!(options.allow_unexpected.len(), 2);
+        let aliases = options.index_aliases.len();
+        contract.configure_load_options(&mut options);
+        assert_eq!(
+            options.index_aliases.len(),
+            aliases,
+            "aliases are added once"
+        );
     }
 }
 
@@ -460,7 +470,7 @@ fn official_reduced_flan_and_ul2_configs_generate_complete_contracts() {
     );
 }
 
-/// Overflowing attention dimensions fail before checkpoint inventory allocation.
+/// Overflowing attention dimensions fail before checkpoint inventory allocation and discovery.
 #[test]
 fn dimension_overflow_is_reported_before_inventory_allocation() {
     let config = T5Config {
@@ -472,9 +482,19 @@ fn dimension_overflow_is_reported_before_inventory_allocation() {
         num_layers: 1,
         num_decoder_layers: Some(1),
         relative_attention_num_buckets: 4,
-        relative_attention_max_distance: 2,
+        relative_attention_max_distance: 3,
         ..T5Config::default()
     };
     let error = config.checkpoint_contract().unwrap_err();
     assert!(error.reason.contains("overflows"));
+
+    // Planning reports the same configuration error before it looks for files.
+    let parent = tempfile::tempdir().unwrap();
+    let planned = config
+        .plan_checkpoint(parent.path().join("absent"), &LoadOptions::default())
+        .expect_err("an unrepresentable width cannot be planned");
+    assert!(
+        matches!(&planned, crate::models::t5::T5CheckpointLoadError::Config(error) if error.reason.contains("overflows")),
+        "{planned}"
+    );
 }

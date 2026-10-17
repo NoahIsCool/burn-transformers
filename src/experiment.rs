@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use burn::{
     module::Module,
-    tensor::{Bool, ElementConversion, Int, Tensor, backend::Backend},
+    tensor::{Bool, Int, Tensor, backend::Backend},
 };
 
 use crate::{
@@ -25,7 +25,12 @@ use crate::{
 };
 
 mod block;
+pub(crate) mod bounds;
+pub(crate) mod precedence;
+mod rotary;
 pub use block::{ResidualBlock, WidthAdapter};
+use bounds::PositionExtrema;
+pub use rotary::RotaryAttention;
 
 /// Attention connectivity and additive bias for a stateless operation.
 ///
@@ -153,11 +158,7 @@ impl<B: Backend> AttentionPolicy<B> {
 
 /// Checks broadcasting into `[batch, head, query_token, key_token]` one axis at a time.
 fn validate_plane(field: &str, actual: [usize; 4], expected: [usize; 4]) -> Result<()> {
-    if actual
-        .iter()
-        .zip(expected)
-        .any(|(actual, expected)| *actual != 1 && *actual != expected)
-    {
+    if !bounds::broadcasts_to(&actual, &expected) {
         return Err(Error::shape(
             field,
             format!("broadcastable to {expected:?}"),
@@ -179,13 +180,26 @@ pub struct EncoderContext<B: Backend> {
 }
 
 /// Positions, padding, attention choices, and optional source context for a pass.
+///
+/// # Validation cost
+///
+/// Position *values* live on the device. [`Self::new`] and [`Self::validate`]
+/// read their range back to the host in one synchronization; blocks call the
+/// sync-free [`Self::validate_layout`] instead, so a composed stack pays for
+/// value checks once per pass rather than once per block. The fields are public
+/// for experiments that rewrite a context directly: after assigning
+/// `positions`, `evaluated_context`, or `encoder`, call [`Self::validate`] again.
 #[derive(Clone, Debug)]
 pub struct ExecutionContext<B: Backend> {
     /// Absolute or architecture-defined logical positions, `[batch, token]`.
+    ///
+    /// Invariant: every value lies in `0..evaluated_context`.
     pub positions: Tensor<B, 2, Int>,
     /// Token validity; absence means all positions are valid.
     pub token_mask: Option<TokenMask<B>>,
     /// Evaluated positional extent used by context-dependent position encodings.
+    ///
+    /// This is the largest logical position plus one; dynamic RoPE scaling reads it.
     pub evaluated_context: usize,
     /// Optional default override; absence retains the architecture's policy.
     pub attention: Option<AttentionPolicy<B>>,
@@ -201,6 +215,9 @@ pub struct ExecutionContext<B: Backend> {
 
 impl<B: Backend> ExecutionContext<B> {
     /// Construct a context from nonnegative positions and token validity.
+    ///
+    /// The evaluated context becomes `max(positions) + 1`. Reading the position
+    /// range synchronizes the device once.
     pub fn new(positions: Tensor<B, 2, Int>, token_mask: Option<TokenMask<B>>) -> Result<Self> {
         let shape = positions.dims();
         if shape.contains(&0) {
@@ -209,35 +226,54 @@ impl<B: Backend> ExecutionContext<B> {
                 "positions must be nonempty",
             ));
         }
-        let low = positions
-            .clone()
-            .min()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("cannot inspect execution positions: {error}"))
-            })?
-            .elem::<i64>();
-        let high = positions
-            .clone()
-            .max()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("cannot inspect execution positions: {error}"))
-            })?
-            .elem::<i64>();
+        let [low, high] = read_int_scalars(
+            vec![positions.clone().min(), positions.clone().max()],
+            "execution positions",
+        )?
+        .try_into()
+        .map_err(|_| Error::BackendCapability("position range readback is incomplete".into()))?;
         if low < 0 {
             return Err(Error::configuration(
                 "execution.positions",
                 "positions must be nonnegative",
             ));
         }
-        let evaluated_context = usize::try_from(high)
-            .ok()
-            .and_then(|high| high.checked_add(1))
-            .ok_or_else(|| {
-                Error::configuration("execution.positions", "positional extent overflows usize")
-            })?;
-        let context = Self {
+        let evaluated_context = bounds::extent_after(high).ok_or_else(|| {
+            Error::configuration("execution.positions", "positional extent overflows usize")
+        })?;
+        let device = positions.device();
+        let context = Self::unchecked(positions, token_mask, evaluated_context);
+        context.validate_layout(shape, &device)?;
+        Ok(context)
+    }
+
+    /// Construct positions `0..tokens` for every row, with no padding.
+    ///
+    /// The range is known on the host, so no device synchronization occurs.
+    /// Padded batches whose positions should skip padding need explicit
+    /// positions and [`Self::new`].
+    pub fn contiguous(batch: usize, tokens: usize, device: &B::Device) -> Result<Self> {
+        if batch == 0 || tokens == 0 {
+            return Err(Error::configuration(
+                "execution.positions",
+                format!("positions must be nonempty, got [{batch}, {tokens}]"),
+            ));
+        }
+        let last = i64::try_from(tokens)
+            .map_err(|_| Error::configuration("execution.positions", "token count exceeds i64"))?;
+        let positions = Tensor::<B, 1, Int>::arange(0..last, device)
+            .reshape([1, tokens])
+            .expand([batch, tokens]);
+        Ok(Self::unchecked(positions, None, tokens))
+    }
+
+    /// Assembles a context without validation; callers establish the position invariant.
+    fn unchecked(
+        positions: Tensor<B, 2, Int>,
+        token_mask: Option<TokenMask<B>>,
+        evaluated_context: usize,
+    ) -> Self {
+        Self {
             positions,
             token_mask,
             evaluated_context,
@@ -246,9 +282,17 @@ impl<B: Backend> ExecutionContext<B> {
             cross_attention: None,
             layer_cross_attention: Vec::new(),
             encoder: None,
-        };
-        context.validate(shape, &context.positions.device())?;
-        Ok(context)
+        }
+    }
+
+    /// Attach a decoder cross-attention source after checking its layout.
+    ///
+    /// Source positions are checked for nonnegativity with one device
+    /// synchronization, matching [`Self::validate`].
+    pub fn with_encoder(mut self, encoder: EncoderContext<B>) -> Result<Self> {
+        self.encoder = Some(encoder);
+        self.validate(self.positions.dims(), &self.positions.device())?;
+        Ok(self)
     }
 
     /// Override attention for the whole pass.
@@ -266,12 +310,11 @@ impl<B: Backend> ExecutionContext<B> {
     }
 
     /// Resolve one layer's policy while preserving its default when no override exists.
+    ///
+    /// The most recent override for `layer` wins (the Verus-verified
+    /// `precedence::last_match`), then the pass-wide override, then the default.
     pub fn attention_for(&self, layer: Layer, default_causal: bool) -> AttentionPolicy<B> {
-        self.layer_attention
-            .iter()
-            .rev()
-            .find(|(candidate, _)| *candidate == layer)
-            .map(|(_, policy)| policy.clone())
+        latest_override(&self.layer_attention, layer)
             .or_else(|| self.attention.clone())
             .unwrap_or_else(|| {
                 if default_causal {
@@ -297,18 +340,61 @@ impl<B: Backend> ExecutionContext<B> {
     }
 
     /// Resolve cross-attention connectivity; its default permits every valid source token.
+    ///
+    /// The most recent per-layer override wins, then the decoder-wide override.
     pub fn cross_attention_for(&self, layer: Layer) -> AttentionPolicy<B> {
-        self.layer_cross_attention
-            .iter()
-            .rev()
-            .find(|(candidate, _)| *candidate == layer)
-            .map(|(_, policy)| policy.clone())
+        latest_override(&self.layer_cross_attention, layer)
             .or_else(|| self.cross_attention.clone())
             .unwrap_or_else(AttentionPolicy::bidirectional)
     }
 
-    /// Validate target/source positions and mask shape/device contracts.
+    /// Validate layouts and position values for a `[batch, token]` pass.
+    ///
+    /// Runs [`Self::validate_layout`], then reads the target position range (and
+    /// the source minimum, when an encoder is attached) in one device
+    /// synchronization. Call this once per pass, or after editing public fields.
     pub fn validate(&self, shape: [usize; 2], device: &B::Device) -> Result<()> {
+        self.validate_layout(shape, device)?;
+        self.validate_position_values()
+    }
+
+    /// Checks that target positions lie in `0..evaluated_context` and source positions are nonnegative.
+    ///
+    /// All extrema are concatenated and read back together: one synchronization
+    /// regardless of whether an encoder is attached. The verified
+    /// `bounds::position_extrema` classifies the readback, checking the target
+    /// range before the source minimum.
+    fn validate_position_values(&self) -> Result<()> {
+        let mut extrema = vec![self.positions.clone().min(), self.positions.clone().max()];
+        if let Some(encoder) = &self.encoder {
+            extrema.push(encoder.positions.clone().min());
+        }
+        let values = read_int_scalars(extrema, "execution positions")?;
+        match bounds::position_extrema(&values, self.evaluated_context, self.encoder.is_some()) {
+            PositionExtrema::Incomplete => Err(Error::BackendCapability(
+                "position range readback is incomplete".into(),
+            )),
+            PositionExtrema::OutOfRange { low, high } => Err(Error::configuration(
+                "execution.positions",
+                format!(
+                    "positions must lie within the nonnegative evaluated context 0..{}, found {low}..={high}",
+                    self.evaluated_context
+                ),
+            )),
+            PositionExtrema::NegativeSource => Err(Error::configuration(
+                "execution.encoder.positions",
+                "source positions must be nonnegative",
+            )),
+            PositionExtrema::Valid => Ok(()),
+        }
+    }
+
+    /// Validate shapes, devices, and the evaluated extent without reading device values.
+    ///
+    /// Blocks call this on every invocation; it inspects only tensor metadata,
+    /// so it never synchronizes the device. Position values are covered by
+    /// [`Self::new`] or [`Self::validate`].
+    pub fn validate_layout(&self, shape: [usize; 2], device: &B::Device) -> Result<()> {
         if shape.contains(&0) || self.positions.dims() != shape {
             return Err(Error::shape(
                 "execution.positions",
@@ -326,34 +412,6 @@ impl<B: Backend> ExecutionContext<B> {
             return Err(Error::configuration(
                 "execution.evaluated_context",
                 "must be positive",
-            ));
-        }
-        let low = self
-            .positions
-            .clone()
-            .min()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("cannot validate execution positions: {error}"))
-            })?
-            .elem::<i64>();
-        let high = self
-            .positions
-            .clone()
-            .max()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("cannot validate execution positions: {error}"))
-            })?
-            .elem::<i64>();
-        if low < 0
-            || usize::try_from(high)
-                .ok()
-                .is_none_or(|high| high >= self.evaluated_context)
-        {
-            return Err(Error::configuration(
-                "execution.positions",
-                "positions must lie within the nonnegative evaluated context",
             ));
         }
         if let Some(mask) = &self.token_mask {
@@ -389,23 +447,6 @@ impl<B: Backend> ExecutionContext<B> {
                     "source context must share the target device",
                 ));
             }
-            let source_min = encoder
-                .positions
-                .clone()
-                .min()
-                .try_into_scalar()
-                .map_err(|error| {
-                    Error::BackendCapability(format!(
-                        "cannot validate source execution positions: {error}"
-                    ))
-                })?
-                .elem::<i64>();
-            if source_min < 0 {
-                return Err(Error::configuration(
-                    "execution.encoder.positions",
-                    "source positions must be nonnegative",
-                ));
-            }
             if let Some(mask) = &encoder.token_mask
                 && (mask.as_tensor().dims() != [batch, tokens]
                     || mask.as_tensor().device() != *device)
@@ -418,6 +459,36 @@ impl<B: Backend> ExecutionContext<B> {
         }
         Ok(())
     }
+}
+
+/// Returns the most recently registered policy for `layer`, if any.
+fn latest_override<B: Backend>(
+    overrides: &[(Layer, AttentionPolicy<B>)],
+    layer: Layer,
+) -> Option<AttentionPolicy<B>> {
+    let matches = overrides
+        .iter()
+        .map(|(candidate, _)| *candidate == layer)
+        .collect::<Vec<_>>();
+    precedence::last_match(&matches).map(|index| overrides[index].1.clone())
+}
+
+// Host readback of device-side integer extrema.
+
+/// Reads one-element integer tensors from one device with a single synchronization.
+///
+/// Each input is a `[1]` tensor such as `positions.min()`. Concatenating them on
+/// the device before the readback replaces one blocking transfer per scalar with
+/// one in total. Integer storage may be I32 or I64 (mixed dtypes are widened
+/// losslessly); values return as `i64`, one per input. This is the crate's
+/// shared fused reader (`models::shared::checks::read_int_tensors`) applied to
+/// scalars. Readback failures become [`Error::BackendCapability`] rather than
+/// panics.
+pub(crate) fn read_int_scalars<B: Backend>(
+    scalars: Vec<Tensor<B, 1, Int>>,
+    purpose: &str,
+) -> Result<Vec<i64>> {
+    crate::models::shared::checks::read_int_tensors(scalars, purpose)
 }
 
 /// A representation at an explicit block and normalization boundary.
@@ -468,7 +539,7 @@ impl<B: Backend> HiddenState<B> {
                 "blocks require raw states before final normalization",
             ));
         }
-        if range.start != self.next_layer || range.start > range.end || range.end > total {
+        if !bounds::follows_cursor(self.next_layer, range.start, range.end, total) {
             return Err(Error::configuration(
                 "execution.range",
                 format!(

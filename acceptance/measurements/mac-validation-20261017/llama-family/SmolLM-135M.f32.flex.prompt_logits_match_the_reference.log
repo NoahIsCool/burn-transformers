@@ -1,0 +1,37 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 sha256 a86bc33ace5232a72f2d67be8ba329e94f93154b70fa821d59801ac8d6934dc5
+== Flex/F32 flex_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM-135M-1d461723
+== env TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=1e-3
+== cwd /Users/nover/repos/transformers-worktrees/tfm-polish-half
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/llama_family_artifacts-7eab91e568f61eb5 --ignored --exact --nocapture --test-threads 1 flex_prompt_logits_match_the_reference
+== start 2026-10-17T07:18:17+00:00 load 10.27 9.77 11.48
+
+running 1 test
+test flex_prompt_logits_match_the_reference ... prompt 0: 5 tokens, max |Δ| = 7.05719e-5
+prompt 1: 18 tokens, max |Δ| = 5.5789948e-5
+prompt 2: 8 tokens, max |Δ| = 9.10759e-5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.13s
+
+        1.13 real         0.46 user         0.53 sys
+           702185472  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               43135  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   8  voluntary context switches
+               14404  involuntary context switches
+          4853543325  instructions retired
+          3291097105  cycles elapsed
+           693273704  peak memory footprint
+== exit=0 wall=2.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

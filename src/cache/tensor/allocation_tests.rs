@@ -1,6 +1,7 @@
 //! Arithmetic boundaries for tensor geometry shared by cache implementations.
 
 use super::*;
+use crate::cache::tensor::plan::PORTABLE_TENSOR_ELEMENT_LIMIT;
 
 /// Integer histories and repeated tensors report their exact validated scalar counts.
 #[test]

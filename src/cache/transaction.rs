@@ -5,17 +5,20 @@
 //! for every row before metadata changes. Rollback restores every `L_b`.
 //!
 //! Allocation identity distinguishes active, stale, and foreign marks, including
-//! cloned handles. These integer transactions do not journal tensor values: ring
+//! cloned handles. The arithmetic itself is the Verus-verified ledger in
+//! `lengths.rs`, shared with the tensor-backed decode state. These integer transactions do not journal tensor values: ring
 //! and recurrent caches must stage their proposed data outside committed storage.
 
 use core::fmt;
 use std::sync::Arc;
 
-use super::{DecodeState, DecodeStateError};
+use super::lengths::{LengthLedger, LengthViolation};
+use super::state::length_error;
+use super::{DecodeStateError, SequenceLengths};
 
 /// A single-use logical checkpoint for speculative cache writes.
 ///
-/// The mark belongs to the [`DecodeState`] transaction that created it. A
+/// The mark belongs to the [`SequenceLengths`] transaction that created it. A
 /// cloned or otherwise stale mark is rejected after the original transaction
 /// commits or rolls back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +38,11 @@ impl CacheMark {
 }
 
 /// Shared allocation identity that remains distinct from every unrelated transaction.
+///
+/// Equality compares the allocation address, so a mark can only finish the
+/// transaction that issued it, even when another state has identical lengths.
 #[derive(Clone)]
-struct TransactionToken(
+pub(crate) struct TransactionToken(
     /// Address identity shared by cloned handles; the payload itself carries no state.
     Arc<()>,
 );
@@ -64,15 +70,6 @@ impl PartialEq for TransactionToken {
 
 impl Eq for TransactionToken {}
 
-/// Committed baselines and mark identity while a logical transaction is active.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ActiveTransaction {
-    /// Identity required by the mark that can finish this transaction.
-    token: TransactionToken,
-    /// Committed per-row lengths restored by rollback.
-    pub(crate) baseline_lengths: Vec<usize>,
-}
-
 /// Transactional lifecycle operations required by speculative decoding.
 ///
 /// A transaction consists only of appends after [`mark`](Self::mark). Calling
@@ -83,7 +80,7 @@ pub(crate) struct ActiveTransaction {
 /// Implementations owning physical storage must make those guarantees for both
 /// metadata and tensor values. In particular, a sliding ring must stage or
 /// journal proposals instead of overwriting committed slots. The pure
-/// [`DecodeState`] implementation tracks metadata only; tensor-backed callers
+/// [`SequenceLengths`] implementation tracks metadata only; tensor-backed callers
 /// can pair it with [`super::StagedRingTransactionPlan`].
 pub trait TransactionalCache {
     /// Opaque mark used to finish a transaction.
@@ -108,13 +105,13 @@ pub trait TransactionalCache {
     fn rollback(&mut self, mark: Self::Mark) -> Result<(), Self::Error>;
 }
 
-impl DecodeState {
+impl SequenceLengths {
     /// Commits a possibly ragged accepted prefix for each sequence.
     ///
     /// Each accepted count must be no greater than the number of tokens
     /// appended to that sequence since `mark`. Validation is atomic: a bad row
-    /// leaves the transaction active and all current lengths unchanged, so the
-    /// caller may still roll it back.
+    /// leaves the transaction active and all lengths unchanged, so the caller
+    /// may still roll it back.
     ///
     /// # Errors
     ///
@@ -125,60 +122,43 @@ impl DecodeState {
         mark: CacheMark,
         accepted_tokens: &[usize],
     ) -> Result<(), DecodeStateError> {
-        let active = self.validate_mark(&mark)?;
-        if accepted_tokens.len() != self.lengths.len() {
-            return Err(DecodeStateError::Transaction(
-                TransactionError::SequenceCountMismatch {
-                    expected: self.lengths.len(),
-                    actual: accepted_tokens.len(),
-                },
-            ));
-        }
-
-        let mut committed = Vec::with_capacity(self.lengths.len());
-        for (sequence, ((&baseline, &current), &accepted)) in active
-            .baseline_lengths
-            .iter()
-            .zip(&self.lengths)
-            .zip(accepted_tokens)
-            .enumerate()
-        {
-            let appended = current - baseline;
-            if accepted > appended {
-                return Err(DecodeStateError::Transaction(
-                    TransactionError::PrefixExceedsAppended {
-                        sequence,
-                        accepted,
-                        appended,
-                    },
-                ));
-            }
-            committed.push(baseline + accepted);
-        }
-
-        self.lengths = committed;
-        self.active_transaction = None;
+        self.check_mark(&mark)?;
+        let next = self.plan_commit(accepted_tokens).map_err(commit_error)?;
+        self.finish_transaction(next);
         Ok(())
     }
 
     /// Checks that a mark names the active transaction and its original logical lengths.
-    fn validate_mark(&self, mark: &CacheMark) -> Result<&ActiveTransaction, DecodeStateError> {
-        let active = self
-            .active_transaction
+    pub(crate) fn check_mark(&self, mark: &CacheMark) -> Result<(), TransactionError> {
+        let token = self
+            .transaction
             .as_ref()
-            .ok_or(DecodeStateError::Transaction(
-                TransactionError::NoActiveTransaction,
-            ))?;
-        if active.token != mark.token || active.baseline_lengths != mark.baseline_lengths {
-            return Err(DecodeStateError::Transaction(
-                TransactionError::StaleOrForeignMark,
-            ));
+            .ok_or(TransactionError::NoActiveTransaction)?;
+        if *token != mark.token || self.ledger.committed() != mark.baseline_lengths {
+            return Err(TransactionError::StaleOrForeignMark);
         }
-        Ok(active)
+        Ok(())
+    }
+
+    /// Plans a ragged commit through the verified ledger without publishing it.
+    pub(crate) fn plan_commit(&self, accepted: &[usize]) -> Result<LengthLedger, LengthViolation> {
+        self.ledger.committed_prefix(accepted)
+    }
+
+    /// Ends the active transaction by publishing a planned commit or rollback ledger.
+    pub(crate) fn finish_transaction(&mut self, ledger: LengthLedger) {
+        debug_assert!(!ledger.is_active());
+        self.ledger = ledger;
+        self.transaction = None;
+    }
+
+    /// Plans the rollback ledger: committed lengths with no working cursor.
+    pub(crate) fn plan_rollback(&self) -> Result<LengthLedger, LengthViolation> {
+        self.ledger.rolled_back()
     }
 }
 
-impl TransactionalCache for DecodeState {
+impl TransactionalCache for SequenceLengths {
     /// Single-use checkpoint carrying the transaction identity and baseline lengths.
     type Mark = CacheMark;
     /// Logical metadata and transaction validation errors.
@@ -186,19 +166,17 @@ impl TransactionalCache for DecodeState {
 
     /// Begins one append-only transaction, rejecting nesting and retaining every baseline length.
     fn mark(&mut self) -> Result<Self::Mark, Self::Error> {
-        if self.active_transaction.is_some() {
-            return Err(DecodeStateError::Transaction(
-                TransactionError::AlreadyActive,
-            ));
+        if self.transaction.is_some() {
+            return Err(TransactionError::AlreadyActive.into());
         }
-
+        let next = self
+            .ledger
+            .begun()
+            .map_err(|_| DecodeStateError::from(TransactionError::AlreadyActive))?;
         let token = TransactionToken::new();
-        let baseline_lengths = self.lengths.clone();
-        self.active_transaction = Some(ActiveTransaction {
-            token: token.clone(),
-            baseline_lengths: baseline_lengths.clone(),
-        });
-
+        let baseline_lengths = self.ledger.committed().to_vec();
+        self.ledger = next;
+        self.transaction = Some(token.clone());
         Ok(CacheMark {
             token,
             baseline_lengths,
@@ -211,22 +189,34 @@ impl TransactionalCache for DecodeState {
         mark: Self::Mark,
         accepted_tokens: usize,
     ) -> Result<(), Self::Error> {
-        let counts = vec![accepted_tokens; self.lengths.len()];
+        let counts = vec![accepted_tokens; self.lengths().len()];
         self.commit_prefix_per_sequence(mark, &counts)
     }
 
     /// Restores all baseline logical lengths and consumes the active transaction identity.
     fn rollback(&mut self, mark: Self::Mark) -> Result<(), Self::Error> {
-        let active = self.validate_mark(&mark)?;
-        let baseline_lengths = active.baseline_lengths.clone();
-        self.lengths = baseline_lengths;
-        self.active_transaction = None;
+        self.check_mark(&mark)?;
+        let next = self
+            .plan_rollback()
+            .map_err(|_| DecodeStateError::from(TransactionError::NoActiveTransaction))?;
+        self.finish_transaction(next);
         Ok(())
+    }
+}
+
+/// Maps a rejected commit plan to the transaction-specific public errors.
+fn commit_error(violation: LengthViolation) -> DecodeStateError {
+    match violation {
+        LengthViolation::CountMismatch { expected, actual } => {
+            TransactionError::SequenceCountMismatch { expected, actual }.into()
+        }
+        violation => length_error(violation, "commit"),
     }
 }
 
 /// Invalid transition in a [`TransactionalCache`] lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransactionError {
     /// A second mark was requested before finishing the active transaction.
     AlreadyActive,

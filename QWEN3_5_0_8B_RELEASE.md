@@ -104,7 +104,19 @@ multiple EOS IDs, token stop sequences, log probabilities, streaming callbacks,
 ragged rectangular batches, and optional bounded prefill chunks. Use
 `LocalTokenizer::encode_chat` for checkpoint chat templates; it deliberately
 disables tokenizer post-processing after rendering so role delimiters appear
-exactly once.
+exactly once. Chat rendering follows Hugging Face `apply_chat_template`,
+including tool prompts with boolean, null, and float arguments; it matches
+Transformers 5.2.0 byte for byte when mapping keys are supplied in sorted
+order, because templates see keys sorted. For streaming text, decode tokens
+incrementally with `LocalTokenizer::decode_stream`.
+
+Since this profile was recorded, cached prefill and decode run batched through
+shared cache steps, cached grouped-query attention folds query groups over
+native KV heads instead of repeating K/V, and DeltaNet chunked prefill uses an
+exact block-doubling inverse. Presence penalties now count generated tokens
+only by default, and F16 logits are processed in F32. The profile's Metal/F16 parity gate must be replayed on
+the integrated source before the next release (see
+[RELEASE_GATES.md](RELEASE_GATES.md#replays-required-after-the-polish-cycle)).
 
 ## Validated evidence and explicit exclusions
 

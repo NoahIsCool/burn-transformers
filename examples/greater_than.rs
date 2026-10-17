@@ -11,18 +11,9 @@
 //! probabilities retain their full-vocabulary mass. The fixed 194 prompt pairs
 //! provide a bounded adaptation, with clean-disjoint splits and reused corruptions.
 
-#[cfg(not(feature = "flex"))]
-/// Explain the required Cargo features and exit before accessing local artifacts.
-fn main() {
-    eprintln!("enable the flex feature to run this CPU example");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "flex")]
 #[path = "mechanistic/greater_than/study.rs"]
 mod study;
 
-#[cfg(feature = "flex")]
 /// Execute the pinned clean/corrupt node interventions and separate direct-path controls.
 ///
 /// All metrics keep the original clean year cutoff; each mini-batch is released
@@ -50,6 +41,14 @@ fn main() -> study::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/mechanistic/greater_than"));
     let started = Instant::now();
+    if !root.join("preparation.json").is_file() {
+        return Err(format!(
+            "{}: no prepared artifacts; run python3 examples/mechanistic/greater_than/prepare.py \
+             --checkpoint /local/gpt2, or pass the prepared directory as the first argument",
+            root.display()
+        )
+        .into());
+    }
     let (model, mut study) = Study::load(&root)?;
     let options = ForwardOptions::default(); // Only the final input token's logits.
 

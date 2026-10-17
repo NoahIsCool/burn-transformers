@@ -202,3 +202,114 @@ fn validation_errors_explain_invalid_geometry() {
     assert!(messages[2].contains("must be even"));
     assert!(messages[3].contains("must exceed exact-region boundary"));
 }
+
+/// Integer assembly clips any proposed logarithmic offset, including `usize::MAX`.
+#[test]
+fn bucket_assembly_clips_arbitrary_logarithmic_offsets() {
+    // Causal, 32 buckets: exact region 0..16, logarithmic region 16..32.
+    assert_eq!(combine_bucket(32, false, false, 20, usize::MAX), 31);
+    assert_eq!(combine_bucket(32, false, false, 20, 15), 31);
+    assert_eq!(combine_bucket(32, false, false, 20, 14), 30);
+    assert_eq!(combine_bucket(32, false, false, 7, usize::MAX), 7);
+    assert_eq!(combine_bucket(32, false, true, 1_000, usize::MAX), 0);
+    // Bidirectional, 32 buckets: 16 per direction, exact region 0..8 in each half.
+    assert_eq!(combine_bucket(32, true, true, 3, 0), 19);
+    assert_eq!(combine_bucket(32, true, false, 3, 0), 3);
+    assert_eq!(combine_bucket(32, true, true, 9, usize::MAX), 31);
+    assert_eq!(combine_bucket(32, true, false, 9, usize::MAX), 15);
+    // Smallest geometries: two causal buckets, four bidirectional buckets.
+    assert_eq!(combine_bucket(2, false, false, u64::MAX, usize::MAX), 1);
+    assert_eq!(combine_bucket(4, true, true, u64::MAX, usize::MAX), 3);
+}
+
+/// Signed and absolute displacements split into the exact direction and distance at the extremes.
+#[test]
+fn displacement_parts_are_exact_at_extremes() {
+    assert_eq!(signed_direction_distance(0), (false, 0));
+    assert_eq!(signed_direction_distance(1), (true, 1));
+    assert_eq!(signed_direction_distance(-1), (false, 1));
+    assert_eq!(signed_direction_distance(i64::MAX), (true, i64::MAX as u64));
+    assert_eq!(signed_direction_distance(i64::MIN), (false, 1u64 << 63));
+    assert_eq!(position_direction_distance(7, 7), (false, 0));
+    assert_eq!(
+        position_direction_distance(0, usize::MAX),
+        (true, usize::MAX as u64)
+    );
+    assert_eq!(
+        position_direction_distance(usize::MAX, 0),
+        (false, usize::MAX as u64)
+    );
+}
+
+/// The geometry check returns the first failed condition, and accepts the smallest valid tables.
+#[test]
+fn geometry_check_orders_failures_and_accepts_minimal_tables() {
+    // Odd and too small at once: the count check comes first.
+    assert_eq!(
+        checked_bucket_geometry(3, 0, true),
+        Err(T5BucketError::TooFewBuckets {
+            num_buckets: 3,
+            bidirectional: true,
+            minimum: 4,
+        })
+    );
+    // Odd and too short a distance at once: parity comes first.
+    assert_eq!(
+        checked_bucket_geometry(7, 0, true),
+        Err(T5BucketError::OddBidirectionalBucketCount { num_buckets: 7 })
+    );
+    assert!(checked_bucket_geometry(2, 2, false).is_ok());
+    assert!(checked_bucket_geometry(4, 2, true).is_ok());
+    assert!(checked_bucket_geometry(3, 2, false).is_ok());
+    assert_eq!(
+        checked_bucket_geometry(4, 1, true),
+        Err(T5BucketError::MaxDistanceNotBeyondExact {
+            max_distance: 1,
+            max_exact: 1,
+        })
+    );
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+
+    /// The overflow-free magnitude equals the standard library's `unsigned_abs`.
+    #[test]
+    fn signed_distance_matches_unsigned_abs(relative in proptest::num::i64::ANY) {
+        proptest::prop_assert_eq!(
+            signed_direction_distance(relative),
+            (relative > 0, relative.unsigned_abs())
+        );
+    }
+
+    /// Absolute positions agree with the signed displacement whenever it fits in `i64`.
+    #[test]
+    fn position_distance_matches_signed_displacement(
+        query in 0usize..1 << 40,
+        key in 0usize..1 << 40,
+    ) {
+        proptest::prop_assert_eq!(
+            position_direction_distance(query, key),
+            signed_direction_distance(key as i64 - query as i64)
+        );
+    }
+
+    /// Every proposed offset yields an in-range index on the correct side of the table.
+    #[test]
+    fn bucket_assembly_stays_in_range_for_any_offset(
+        per_direction in 2usize..64,
+        bidirectional in proptest::bool::ANY,
+        key_is_future in proptest::bool::ANY,
+        distance in proptest::num::u64::ANY,
+        offset in proptest::num::usize::ANY,
+    ) {
+        let num_buckets = if bidirectional { 2 * per_direction } else { per_direction };
+        let bucket = combine_bucket(num_buckets, bidirectional, key_is_future, distance, offset);
+        proptest::prop_assert!(bucket < num_buckets);
+        if bidirectional {
+            proptest::prop_assert_eq!(bucket >= num_buckets / 2, key_is_future);
+        } else if key_is_future {
+            proptest::prop_assert_eq!(bucket, 0);
+        }
+    }
+}

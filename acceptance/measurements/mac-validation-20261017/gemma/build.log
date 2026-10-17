@@ -1,0 +1,8 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 dirty=0
+== cmd CARGO_TARGET_DIR='/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates' cargo test --locked --release --features metal,tokenizers --test gemma_artifacts --no-run
+2026-10-17T08:02:33Z
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-polish-half)
+    Finished `release` profile [optimized] target(s) in 41.53s
+  Executable tests/gemma_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/deps/gemma_artifacts-ed4b3506eb75d979)
+== exit=0
+2026-10-17T08:03:15Z

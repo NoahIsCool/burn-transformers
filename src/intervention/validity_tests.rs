@@ -186,3 +186,18 @@ fn point_validity_preserves_gradients_only_at_valid_positions() {
         vec![1.0, 1.0, 0.0, 0.0]
     );
 }
+
+/// A validity mask with an empty axis is rejected at construction, naming the point.
+#[test]
+fn validity_masks_require_positive_extents() {
+    let point = Layer::decoder(0).mlp_activation();
+    let empty = Tensor::<Cpu, 3, burn::tensor::Int>::zeros([1, 0, 1], &Default::default()).bool();
+    let error = PointValidity::new(point.clone(), empty).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "invalid configuration at {}: activation validity must have positive rank and extents",
+            point.info().name
+        )
+    );
+}

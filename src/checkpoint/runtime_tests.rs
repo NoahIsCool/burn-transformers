@@ -143,16 +143,20 @@ fn i32_bytes(values: &[i32]) -> Vec<u8> {
 /// Decodes native-endian F32 sink bytes for numerical comparisons.
 fn tensor_f32(data: &TensorData) -> Vec<f32> {
     data.as_bytes()
-        .chunks_exact(4)
-        .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_ne_bytes(*bytes))
         .collect()
 }
 
 /// Decodes native-endian U16 sink bytes without changing their bit patterns.
 fn tensor_u16(data: &TensorData) -> Vec<u16> {
     data.as_bytes()
-        .chunks_exact(2)
-        .map(|bytes| u16::from_ne_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_ne_bytes(*bytes))
         .collect()
 }
 
@@ -1473,7 +1477,8 @@ fn every_f16_bit_pattern_casts_to_bf16_with_half_semantics() {
         }
     }
     assert_eq!(outcome.report.dtype_converted.len(), 1);
-    assert_eq!(outcome.stats.peak_host_staging_bytes, 262_144);
+    // Equal-width F16 -> BF16 converts the 131,072-byte source in place.
+    assert_eq!(outcome.stats.peak_host_staging_bytes, 131_072);
 }
 
 /// An unchanged F32 payload records one live buffer rather than source-plus-output storage.
@@ -2061,12 +2066,28 @@ fn in_memory_transpose_data(
     dtype: TensorDType,
     bytes: Vec<u8>,
 ) -> TensorData {
-    let payload_bytes = dtype.storage_bytes(rows * columns).unwrap();
+    in_memory_cast_transpose_data(rows, columns, dtype, dtype, bytes)
+}
+
+/// Executes one planned `Transpose2d` from `source_dtype` to `target_dtype`
+/// through the complete in-memory runtime.
+///
+/// The plan's staging budget is the source payload plus the target buffer,
+/// the two buffers `materialize_transpose` holds at once.
+fn in_memory_cast_transpose_data(
+    rows: u64,
+    columns: u64,
+    source_dtype: TensorDType,
+    target_dtype: TensorDType,
+    bytes: Vec<u8>,
+) -> TensorData {
+    let payload_bytes = source_dtype.storage_bytes(rows * columns).unwrap();
+    let staging_bytes = payload_bytes + target_dtype.storage_bytes(rows * columns).unwrap();
     let source = PlannedSource {
         name: "source".into(),
         shard: "memory.safetensors".into(),
         shape: vec![rows, columns],
-        dtype,
+        dtype: source_dtype,
         data_offsets: [0, payload_bytes],
     };
     let target = PlannedTensor {
@@ -2074,11 +2095,11 @@ fn in_memory_transpose_data(
         sources: vec![source],
         transform: PlannedTransform::Transpose2d,
         shape: vec![columns, rows],
-        dtype,
+        dtype: target_dtype,
     };
     let report = crate::checkpoint::LoadReport {
         memory: Some(crate::checkpoint::MemoryEstimate {
-            peak_host_staging_bytes: payload_bytes * 2,
+            peak_host_staging_bytes: staging_bytes,
             ..crate::checkpoint::MemoryEstimate::default()
         }),
         ..crate::checkpoint::LoadReport::default()
@@ -2089,18 +2110,56 @@ fn in_memory_transpose_data(
         aliases: Vec::new(),
         report,
         memory: crate::checkpoint::MemoryEstimate {
-            peak_host_staging_bytes: payload_bytes * 2,
+            peak_host_staging_bytes: staging_bytes,
             ..crate::checkpoint::MemoryEstimate::default()
         },
     };
     let mut source = MemorySource::default();
     source.tensors.insert(
         "source".into(),
-        SourceTensor::new("source", [rows, columns], dtype, bytes).unwrap(),
+        SourceTensor::new("source", [rows, columns], source_dtype, bytes).unwrap(),
     );
     let mut sink = CollectingSink::default();
     execute_load_plan(&plan, &mut source, &mut sink).unwrap();
     sink.tensors.remove("target").unwrap()
+}
+
+/// A planned BF16-to-F32 `Transpose2d` above the threaded-transpose threshold
+/// (`[1031, 1037]`, ragged final band) converts and places every scalar exactly.
+///
+/// Every finite BF16 value widens exactly to F32 by appending sixteen zero
+/// bits. Patterns with an all-ones exponent are folded to finite ones (NaN
+/// quieting is covered by the conversion tests), so the oracle is that shift
+/// applied at the naively transposed position.
+#[cfg(target_endian = "little")]
+#[test]
+fn planned_large_converting_transpose_is_exact_above_the_thread_threshold() {
+    let (rows, columns) = (1031_usize, 1037_usize);
+    let values = (0..rows * columns)
+        .map(|index| {
+            // A multiplicative hash spreads indices over the BF16 bit patterns.
+            let bits = (index as u32).wrapping_mul(0x9E37_79B9).rotate_left(7) as u16;
+            if bits & 0x7F80 == 0x7F80 {
+                bits & !0x0080
+            } else {
+                bits
+            }
+        })
+        .collect::<Vec<_>>();
+    let data = in_memory_cast_transpose_data(
+        rows as u64,
+        columns as u64,
+        TensorDType::BF16,
+        TensorDType::F32,
+        u16_bytes(&values),
+    );
+    assert_eq!(data.shape.as_slice(), [columns, rows]);
+    let output = data.as_slice::<f32>().unwrap();
+    for (index, value) in output.iter().enumerate() {
+        let (column, row) = (index / rows, index % rows);
+        let expected = u32::from(values[row * columns + column]) << 16;
+        assert_eq!(value.to_bits(), expected, "target ({column}, {row})");
+    }
 }
 
 /// Executes the numeric `u16` transpose used by the index-equation property test.
@@ -3311,4 +3370,446 @@ fn checkpoint_standards_override_alias_failure_keeps_successful_owner_and_alias(
     assert_eq!(tensor_f32(&sink.tensors["weight"]), [9.0]);
     assert_eq!(sink.aliases["a_alias"], "weight");
     assert!(!sink.aliases.contains_key("z_alias"));
+}
+
+// Defense-in-depth helpers: the public executor validates the plan before these
+// run, so their own guards are pinned here by calling them directly.
+
+/// Packed-load diagnostics explain the unsupported operation and its remedy.
+#[test]
+fn packed_parameter_install_errors_name_their_remedy() {
+    let autodiff = ParameterInstallError::QuantizedAutodiff.to_string();
+    assert!(autodiff.starts_with("Burn 0.21 autodiff cannot load or differentiate packed Q4/Q8"));
+    assert!(autodiff.ends_with("dequantize on the inner backend before loading floating data"));
+    let inexact = ParameterInstallError::InexactPackedLayout.to_string();
+    assert!(inexact.starts_with(
+        "the parameter's load mapper would not preserve the packed weight's exact blocks"
+    ));
+    assert!(inexact.contains("install dequantized values"));
+    assert_eq!(
+        ParameterInstallError::PayloadLength {
+            expected: 8,
+            actual: 4
+        }
+        .to_string(),
+        "expected 8 checkpoint float bytes, received 4"
+    );
+}
+
+/// Alias installation refuses a non-alias entry even when plan validation is bypassed.
+///
+/// `validate_plan` rejects the same edit first with the same message, so a
+/// public plan mutation is caught twice and never reaches `alias_tensor`.
+#[test]
+fn alias_installation_rejects_non_alias_entries_without_sink_calls() {
+    let (mut plan, mut source) = aliased_memory_fixture();
+    plan.aliases[0].transform = PlannedTransform::Identity;
+    let mut sink = CollectingSink::default();
+    let mut report = plan.report.without_progress();
+    let mut stats = ExecutionStats::default();
+    let (target, cause) = install_aliases(&plan, &mut sink, &mut report, &mut stats).unwrap_err();
+    assert_eq!(target.as_deref(), Some("alias"));
+    assert!(
+        matches!(&cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "entry `alias` in alias list is not an alias")
+    );
+    assert!(sink.events.is_empty());
+    assert_eq!(stats.aliases_applied, 0);
+    assert!(report.applied.is_empty());
+
+    let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+    assert!(
+        matches!(&failure.cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "entry `alias` in alias list is not an alias")
+    );
+    assert_eq!(failure.failed_target, None);
+    assert!(sink.events.is_empty());
+}
+
+/// The equivalence pass rechecks the observed pair against the staging bound.
+///
+/// Plan validation rejects an undersized bound before any read; this direct
+/// call shows the second guard measuring the payloads actually returned, after
+/// both reads and before any comparison or report record.
+#[test]
+fn equivalence_pass_bounds_observed_payload_pairs() {
+    let tensors = [
+        FixtureTensor::new("owner", TensorDType::F32, [2], f32_bytes(&[1.0, -2.0])),
+        FixtureTensor::new("copy", TensorDType::F32, [2], f32_bytes(&[1.0, -2.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("owner", [2])];
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("copy", "owner")],
+        ..LoadOptions::default()
+    };
+    let mut plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    plan.memory.peak_host_staging_bytes = 15;
+    let mut source = MemorySource {
+        tensors: tensors
+            .iter()
+            .map(|tensor| {
+                let payload = SourceTensor::new(
+                    &tensor.name,
+                    tensor.shape.clone(),
+                    tensor.dtype,
+                    tensor.bytes.clone(),
+                )
+                .unwrap();
+                (tensor.name.clone(), payload)
+            })
+            .collect(),
+        ..MemorySource::default()
+    };
+    let mut report = plan.report.without_progress();
+    let mut stats = ExecutionStats::default();
+    let (alias, error) =
+        verify_checkpoint_equivalences(&plan, &mut source, &mut report, &mut stats).unwrap_err();
+    assert_eq!(alias, "copy");
+    assert!(
+        matches!(&error, CheckpointError::MemoryEstimateExceeded { tensor, required: 16, planned: 15 }
+        if tensor == "copy")
+    );
+    assert_eq!(stats.equivalence_source_reads, 2);
+    assert_eq!(stats.equivalence_source_payload_bytes, 16);
+    assert_eq!(stats.largest_equivalence_pair_bytes, 16);
+    assert_eq!(stats.equivalences_verified, 0);
+    assert!(report.equivalence_verified.is_empty());
+}
+
+/// Builds a one-source planned descriptor for scheduling tests.
+fn scheduled_source(name: &str, shard: &str, start: u64) -> PlannedSource {
+    PlannedSource {
+        name: name.into(),
+        shard: shard.into(),
+        shape: vec![1],
+        dtype: TensorDType::F32,
+        data_offsets: [start, start + 4],
+    }
+}
+
+/// Builds a planned F32 target over `sources` with the given transform.
+fn scheduled_tensor(
+    target: &str,
+    sources: Vec<PlannedSource>,
+    transform: PlannedTransform,
+) -> PlannedTensor {
+    PlannedTensor {
+        target: target.into(),
+        sources,
+        transform,
+        shape: vec![1],
+        dtype: TensorDType::F32,
+    }
+}
+
+/// Only a well-formed unary slice joins a fused-source group.
+#[test]
+fn shared_slice_keys_require_exactly_one_slice_source() {
+    let slice = PlannedTransform::Slice {
+        axis: 0,
+        start: 0,
+        length: 1,
+    };
+    let source = scheduled_source("fused", "a.safetensors", 0);
+    let unary = scheduled_tensor("q", vec![source.clone()], slice.clone());
+    assert_eq!(
+        shared_slice_key(&unary),
+        Some(SharedSourceKey::from(&source))
+    );
+    let binary = scheduled_tensor("k", vec![source.clone(), source.clone()], slice.clone());
+    assert_eq!(shared_slice_key(&binary), None);
+    let sourceless = scheduled_tensor("v", Vec::new(), slice);
+    assert_eq!(shared_slice_key(&sourceless), None);
+    let identity = scheduled_tensor("o", vec![source], PlannedTransform::Identity);
+    assert_eq!(shared_slice_key(&identity), None);
+}
+
+/// Builds a planned F32 identity target of `elements` values from one physical source.
+fn sized_tensor(target: &str, shard: &str, start: u64, elements: u64) -> PlannedTensor {
+    PlannedTensor {
+        shape: vec![elements],
+        ..scheduled_tensor(
+            target,
+            vec![scheduled_source(target, shard, start)],
+            PlannedTransform::Identity,
+        )
+    }
+}
+
+/// Groups of at least [`LARGE_GROUP_BYTES`] run first in plan order; the rest keep physical order.
+#[test]
+fn large_groups_precede_the_physical_schedule_in_plan_order() {
+    let gib_elements = LARGE_GROUP_BYTES / 4;
+    let tensors = [
+        sized_tensor("a.small_late", "b.safetensors", 64, 8),
+        sized_tensor("b.large_late_shard", "b.safetensors", 128, gib_elements),
+        sized_tensor("c.small_early", "a.safetensors", 0, 8),
+        sized_tensor("d.just_below", "a.safetensors", 32, gib_elements - 1),
+        sized_tensor("e.large_early_shard", "a.safetensors", 16, gib_elements + 1),
+        sized_tensor("f.small_middle", "b.safetensors", 0, 8),
+    ];
+    let order = execution_groups(&tensors)
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|index| tensors[index].target.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        [
+            vec!["b.large_late_shard"],
+            vec!["e.large_early_shard"],
+            vec!["c.small_early"],
+            vec!["d.just_below"],
+            vec!["f.small_middle"],
+            vec!["a.small_late"],
+        ]
+    );
+}
+
+/// A fused source's slices are sized as one group, and an unrepresentable size counts as large.
+#[test]
+fn group_sizes_sum_fused_slices_and_saturate() {
+    let half = LARGE_GROUP_BYTES / 8;
+    let slice = |start: u64| PlannedTransform::Slice {
+        axis: 0,
+        start,
+        length: half,
+    };
+    let fused = scheduled_source("fused", "z.safetensors", 0);
+    let first = PlannedTensor {
+        shape: vec![half],
+        ..scheduled_tensor("q", vec![fused.clone()], slice(0))
+    };
+    let second = PlannedTensor {
+        shape: vec![half],
+        ..scheduled_tensor("k", vec![fused], slice(half))
+    };
+    let small = sized_tensor("small", "a.safetensors", 0, 8);
+    let tensors = [small, first, second];
+    let groups = execution_groups(&tensors);
+    assert_eq!(
+        groups,
+        [vec![1, 2], vec![0]],
+        "the fused pair totals 1 GiB and runs first"
+    );
+    assert_eq!(group_output_bytes(&tensors, &[1, 2]), LARGE_GROUP_BYTES);
+    let overflowing = PlannedTensor {
+        shape: vec![u64::MAX, 2],
+        ..scheduled_tensor("huge", Vec::new(), PlannedTransform::Identity)
+    };
+    assert_eq!(group_output_bytes(&[overflowing], &[0]), u64::MAX);
+    assert_eq!(
+        group_output_bytes(&tensors, &[7]),
+        0,
+        "indices outside the plan add nothing"
+    );
+}
+
+/// Group ordering is total: real sources first, then empty or sourceless groups.
+#[test]
+fn execution_group_order_places_missing_descriptors_last() {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+
+    let tensors = [
+        scheduled_tensor(
+            "late",
+            vec![scheduled_source("x", "b.safetensors", 0)],
+            PlannedTransform::Identity,
+        ),
+        scheduled_tensor(
+            "early",
+            vec![scheduled_source("y", "a.safetensors", 8)],
+            PlannedTransform::Identity,
+        ),
+        scheduled_tensor("orphan", Vec::new(), PlannedTransform::Identity),
+    ];
+    assert_eq!(execution_group_order(&tensors, &[1], &[0]), Less);
+    assert_eq!(execution_group_order(&tensors, &[0], &[2]), Less);
+    assert_eq!(execution_group_order(&tensors, &[2], &[0]), Greater);
+    // Groups whose index lies outside the plan sort after every real group.
+    assert_eq!(execution_group_order(&tensors, &[0], &[9]), Less);
+    assert_eq!(execution_group_order(&tensors, &[9], &[0]), Greater);
+    assert_eq!(execution_group_order(&tensors, &[], &[]), Equal);
+    assert_eq!(execution_group_order(&tensors, &[9], &[7]), Greater);
+
+    let first = scheduled_source("y", "a.safetensors", 8);
+    assert_eq!(physical_source_order(Some(&first), None), Less);
+    assert_eq!(physical_source_order(None, Some(&first)), Greater);
+    assert_eq!(physical_source_order(None, None), Equal);
+    let mut wider = first.clone();
+    wider.data_offsets[1] += 4;
+    assert_eq!(physical_source_order(Some(&first), Some(&wider)), Less);
+}
+
+/// Grouped installation refuses work items that bypass their own invariants.
+///
+/// Execution groups contain several targets only when every member is a unary
+/// slice, and only overridden targets may skip their source. Called directly
+/// with groups violating those invariants, installation fails before any sink
+/// call instead of indexing a missing descriptor or delivering nothing.
+#[test]
+fn grouped_installation_rejects_inconsistent_dispositions() {
+    let (plan, mut source) = aliased_memory_fixture();
+    let mut sourceless = plan.clone();
+    sourceless.tensors[0].sources.clear();
+    sourceless.tensors.push(PlannedTensor {
+        target: "weight_copy".into(),
+        ..sourceless.tensors[0].clone()
+    });
+    let mut sink = CollectingSink::default();
+    let mut report = plan.report.without_progress();
+    let mut stats = ExecutionStats::default();
+    let mut no_override = |_: &mut CollectingSink,
+                           _: &PlannedTensor|
+     -> Result<Option<TensorData>, SinkError> { Ok(None) };
+    let (target, cause) = install_group(
+        &sourceless,
+        &[0, 1],
+        &mut source,
+        &mut sink,
+        &mut no_override,
+        &TargetDisposition {
+            overridden: &[false, false],
+            can_skip_source: &[false, false],
+        },
+        &mut report,
+        &mut stats,
+    )
+    .unwrap_err();
+    assert_eq!(target.as_deref(), Some("weight"));
+    assert!(
+        matches!(&cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "fused-split target `weight` has no source descriptor")
+    );
+
+    let (target, cause) = install_group(
+        &plan,
+        &[0],
+        &mut source,
+        &mut sink,
+        &mut no_override,
+        &TargetDisposition {
+            overridden: &[false],
+            can_skip_source: &[true],
+        },
+        &mut report,
+        &mut stats,
+    )
+    .unwrap_err();
+    assert_eq!(target.as_deref(), Some("weight"));
+    assert!(
+        matches!(&cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message })
+        if message == "non-overridden target `weight` unexpectedly bypassed its source")
+    );
+    assert!(sink.events.is_empty());
+    assert_eq!(stats.source_reads, 0);
+}
+
+/// Installs a dtype-generic `weight` and a contract-pinned `router` into F32-backend parameters.
+struct DTypePolicySink {
+    /// Rank-two parameter whose contract leaves the dtype to [`DTypePolicy`].
+    weight: Param<Tensor<Flex<f32, i32>, 2>>,
+    /// Rank-one parameter whose contract pins F32.
+    router: Param<Tensor<Flex<f32, i32>, 1>>,
+}
+
+impl TensorSink for DTypePolicySink {
+    /// Rejection of an unknown target, an alias, or a failed parameter install.
+    type Error = SinkError;
+
+    /// Installs through [`install_float_parameter`], as every family sink does.
+    fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
+        let installed = match target {
+            "weight" => install_float_parameter(&mut self.weight, data),
+            "router" => install_float_parameter(&mut self.router, data),
+            _ => return Err(SinkError(target.into())),
+        };
+        installed.map_err(|error| SinkError(format!("{target}: {error}")))
+    }
+
+    /// Rejects aliases because this fixture owns two independent parameters.
+    fn alias_tensor(&mut self, target: &str, _source_target: &str) -> Result<(), Self::Error> {
+        Err(SinkError(target.into()))
+    }
+}
+
+/// `Auto` keeps a BF16 checkpoint's dtype on `Flex<f32, _>`; `Cast(F32)` executes in F32.
+///
+/// "Expected" in [`DTypePolicy::Auto`] is the contract's per-tensor dtype, not
+/// the backend's float element: the contract-pinned F32 `router` converts to
+/// F32 under every policy that permits conversion, while the dtype-generic
+/// `weight` keeps BF16 under `Auto` and becomes F32 only under `Cast(F32)`.
+/// `Preserve` refuses to convert the pinned tensor at planning time.
+#[test]
+fn auto_dtype_policy_keeps_checkpoint_floats_whatever_the_backend_float_element() {
+    let weight = FixtureTensor::new(
+        "weight",
+        TensorDType::BF16,
+        [2, 2],
+        u16_bytes(&[0x3F80, 0x4000, 0x4040, 0x4080]),
+    );
+    let router = FixtureTensor::new(
+        "router",
+        TensorDType::BF16,
+        [2],
+        u16_bytes(&[0xBF80, 0x3F00]),
+    );
+    let tensors = [weight, router];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [
+        ExpectedTensor::new("weight", [2, 2]),
+        ExpectedTensor::new("router", [2]).with_dtype(TensorDType::F32),
+    ];
+    let device = Default::default();
+    let load = |dtype_policy| {
+        let options = LoadOptions {
+            dtype_policy,
+            ..LoadOptions::default()
+        };
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &options,
+        )?;
+        let mut sink = DTypePolicySink {
+            weight: Param::from_tensor(Tensor::zeros([2, 2], &device)),
+            router: Param::from_tensor(Tensor::zeros([2], &device)),
+        };
+        execute_local_load_plan(&manifest, &plan, &mut sink).unwrap();
+        Ok::<_, CheckpointError>((sink.weight.val(), sink.router.val()))
+    };
+
+    let (weight, router) = load(DTypePolicy::Auto).unwrap();
+    assert_eq!(weight.dtype(), DType::BF16);
+    assert_eq!(router.dtype(), DType::F32);
+    assert_eq!(
+        weight.cast(DType::F32).into_data().to_vec::<f32>().unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+    assert_eq!(router.into_data().to_vec::<f32>().unwrap(), [-1.0, 0.5]);
+
+    let (weight, router) = load(DTypePolicy::Cast(TensorDType::F32)).unwrap();
+    assert_eq!(weight.dtype(), DType::F32);
+    assert_eq!(router.dtype(), DType::F32);
+    assert_eq!(
+        weight.into_data().to_vec::<f32>().unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+
+    assert!(matches!(
+        load(DTypePolicy::Preserve),
+        Err(CheckpointError::DTypeMismatch { tensor, .. }) if tensor == "router"
+    ));
 }

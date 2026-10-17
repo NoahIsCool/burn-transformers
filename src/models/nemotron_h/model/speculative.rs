@@ -1,30 +1,79 @@
 //! Batch-one lossless speculation with Nemotron-H Lightning's MTP stage.
 //!
-//! Let `y_0` be a token already selected by the target and let `h` be the
-//! target state immediately before `y_0`. The auxiliary stage repeatedly maps
-//! `(y_i, h_i)` to a draft distribution `q_i` and feedback state `h_(i+1)`.
-//! The target consumes `y_0` and verifies candidates under distributions `p_i`.
-//! Greedy verification accepts only exact target argmaxes. Stochastic
-//! verification accepts with `min(1, p_i(y_i) / q_i(y_i))`; a rejection draws
-//! from normalized `(p_i - q_i)_+`, preserving the target marginal exactly.
+//! # One cycle
 //!
-//! Model work occurs inside a target-plus-MTP cache transaction. Verification
-//! publishes only the accepted physical prefix; errors restore model cursors,
-//! KV/Mamba tensors, and all pseudo-random streams to the pre-cycle state.
+//! Let `y_0` be a token already selected by the target (the *lead*) and `h`
+//! the target's final hidden state immediately before it. A cycle
+//!
+//! 1. **drafts** `y_1..y_d` (`d <= K`): the MTP stage maps `(y_j, m_j)` to a
+//!    draft distribution `q_{j+1}` and a feedback state `m_{j+1}`, starting
+//!    from `m_0 = h`; drafting stops early at an end-of-sequence proposal;
+//! 2. **verifies** every draft in **one** target pass over
+//!    `[y_0, y_1, …, y_d]`, which yields the target distributions `p_0..p_d`
+//!    (`p_i` predicts the token after `y_i`). Greedy decoding accepts `y_{i+1}`
+//!    exactly when it is the target's choice under `p_i`; sampling accepts
+//!    with probability `min(1, p_i(y) / q_{i+1}(y))` and replaces the first
+//!    rejection by a draw from the normalized residual `(p_i - q_{i+1})_+`
+//!    (the shared [`SpeculativeVerifier`]), which preserves the target
+//!    marginal exactly. If every draft is accepted, `p_d` supplies a bonus;
+//! 3. **publishes** the accepted prefix chosen by [`speculative_commit`]: `t`
+//!    target tokens (the lead and the accepted non-EOS drafts) and the `t`
+//!    MTP pairs `(y_i, h^target_{i-1})` rebuilt from the verification pass's
+//!    hidden states, so the auxiliary cache matches a fresh
+//!    [`NemotronHForCausalLm::prefill_mtp_cache`] over the same prefix.
+//!
+//! A cycle therefore costs one target pass and `d` MTP passes for `t + 1`
+//! emitted tokens, instead of one target pass per token.
+//!
+//! # Determinism and atomicity
+//!
+//! All model work happens inside one target-plus-MTP cache transaction, and
+//! target sampling, draft sampling, and acceptance each own an independent
+//! seeded stream. Errors roll back the transaction and restore all three
+//! streams, so a retry is bit-for-bit identical.
+//!
+//! # Token history
+//!
+//! Logits are processed exactly as [`crate::generate_causal`] would process
+//! them: the caller passes the sequence's tokens before the lead and how many
+//! of them form the prompt, so presence and frequency penalties count only
+//! generated tokens (by default) and `min_new_tokens` counts generated tokens.
+//!
 //! Like vLLM's model-side speculator, this object executes one cycle rather
-//! than owning a complete generation loop: the caller enforces the global
-//! `max_new_tokens` budget, stop-sequence matching, and padding. EOS tokens are
-//! handled within a cycle because they determine the publishable cache prefix.
+//! than owning a generation loop: the caller enforces the global
+//! `max_new_tokens` budget, stop sequences, and padding. EOS tokens are
+//! handled within a cycle because they determine the publishable prefix.
+//!
+//! # Usage
+//!
+//! ```text
+//! state   = model.new_speculative_decode_state(cache, 1, K, device)
+//! prefill = model.prefill_speculative(prompt, &mut state)        // target + MTP banks
+//! lead    = decoder.select_lead(prefill.logits, &prompt, P)
+//! hidden  = prefill.hidden_state; history = prompt
+//! loop:
+//!     cycle   = decoder.speculate(&model, lead, hidden, &history, P, &mut state)
+//!     history += cycle.token_ids[..last]   // the lead and accepted drafts
+//!     lead     = cycle.token_ids[last]; hidden = cycle.continuation_hidden_state
+//! ```
 
-use burn::tensor::{Int, Tensor, TensorData, activation::softmax, backend::Backend};
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CausalLanguageModel, DecodeInput, Error, ForwardOptions, GenerationConfig, LogitsProcessor,
-    LogitsSelection, Result, SamplingStrategy,
+    Error, GenerationConfig, LogitsProcessor, Result, SamplingStrategy,
+    generation::speculative::{
+        SpeculativeOutcome, SpeculativeVerifier, Verdict, normalized_probabilities,
+        speculative_commit,
+    },
 };
 
-use super::{NemotronHDecodeState, NemotronHForCausalLm};
+use super::{
+    NemotronHDecodeState, NemotronHForCausalLm,
+    cycle::{ExtentError, bounded_end, shifted_alignment},
+    mtp::DraftPairs,
+    plan::verification_tokens,
+};
 
 /// XOR seed domain separating MTP proposal sampling from target sampling.
 const DRAFT_SEED_DOMAIN: u64 = 0x4452_4146_545f_4e48;
@@ -53,6 +102,11 @@ impl Default for NemotronHSpeculativeConfig {
 
 impl NemotronHSpeculativeConfig {
     /// Validates proposal capacity and ordinary generation controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns a generation error for zero drafts or an overflowing staging
+    /// capacity, and the errors of [`GenerationConfig::validate`].
     pub fn validate(&self, vocabulary_size: usize) -> Result<()> {
         if self.max_draft_tokens == 0 {
             return Err(Error::Generation(
@@ -101,12 +155,16 @@ pub struct NemotronHSpeculativeDecoder<B: Backend> {
     target: LogitsProcessor<B>,
     /// MTP-logit processing with an independent proposal sampling stream.
     draft: LogitsProcessor<B>,
-    /// Independent randomness for acceptance and residual correction sampling.
-    verifier: SplitMix64,
+    /// Acceptance tests and residual corrections with their own stream.
+    verifier: SpeculativeVerifier,
 }
 
 impl<B: Backend> NemotronHSpeculativeDecoder<B> {
     /// Creates a lossless decoder for one fixed vocabulary and device.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`NemotronHSpeculativeConfig::validate`].
     pub fn new(
         config: NemotronHSpeculativeConfig,
         vocabulary_size: usize,
@@ -117,7 +175,10 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         let mut draft_config = config.generation.clone();
         draft_config.seed ^= DRAFT_SEED_DOMAIN;
         let draft = LogitsProcessor::new(draft_config, vocabulary_size, device)?;
-        let verifier = SplitMix64::new(config.generation.seed ^ VERIFY_SEED_DOMAIN);
+        let verifier = SpeculativeVerifier::new(
+            config.generation.strategy,
+            config.generation.seed ^ VERIFY_SEED_DOMAIN,
+        );
         Ok(Self {
             config,
             vocabulary_size,
@@ -133,22 +194,46 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         &self.config
     }
 
-    /// Selects the guaranteed lead token from one target-logit row.
-    pub fn select_lead(&self, target_logits: Tensor<B, 2>, history: &[u32]) -> Result<u32> {
-        let history = history_tensor(history, &target_logits.device())?;
-        selected_token(self.target.process_and_select(target_logits, history)?)
+    /// Selects the guaranteed lead token from one target-logit row `[1, vocabulary]`.
+    ///
+    /// `history` holds every token before the lead, of which the first
+    /// `prompt_length` are the prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a shape error for mis-sized logits or a prompt longer than the
+    /// history, and the processing and sampling errors of [`LogitsProcessor`].
+    pub fn select_lead(
+        &self,
+        target_logits: Tensor<B, 2>,
+        history: &[u32],
+        prompt_length: usize,
+    ) -> Result<u32> {
+        check_prompt_length(history, prompt_length)?;
+        let processed =
+            self.target
+                .process_with_prompt_lengths(target_logits, &[history], &[prompt_length])?;
+        first_token(self.target.select(processed)?)
     }
 
     /// Runs one active speculative cycle.
     ///
-    /// The caller remains responsible for global token budgets and stop
-    /// sequences; see the module-level scheduler boundary.
+    /// `history_before_lead` holds every token before `lead_token` (its length
+    /// must equal the target cache length) and its first `prompt_length`
+    /// tokens are the prompt. The caller remains responsible for global token
+    /// budgets and stop sequences; see the module-level scheduler boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors before any model work, and model, cache, or
+    /// sampling errors after restoring the cache and every random stream.
     pub fn speculate(
         &mut self,
         model: &NemotronHForCausalLm<B>,
         lead_token: u32,
         target_hidden_before_lead: Tensor<B, 3>,
         history_before_lead: &[u32],
+        prompt_length: usize,
         state: &mut NemotronHDecodeState<B>,
     ) -> Result<NemotronHSpeculativeOutput<B>> {
         self.speculate_if_active(
@@ -156,6 +241,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
             lead_token,
             target_hidden_before_lead,
             history_before_lead,
+            prompt_length,
             true,
             state,
         )
@@ -165,6 +251,10 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
     ///
     /// An inactive cycle performs no model work, draws no randomness, and does
     /// not open a cache transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::speculate`] for an active cycle.
     #[allow(clippy::too_many_arguments)]
     pub fn speculate_if_active(
         &mut self,
@@ -172,6 +262,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         lead_token: u32,
         target_hidden_before_lead: Tensor<B, 3>,
         history_before_lead: &[u32],
+        prompt_length: usize,
         active: bool,
         state: &mut NemotronHDecodeState<B>,
     ) -> Result<NemotronHSpeculativeOutput<B>> {
@@ -190,6 +281,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
             lead_token,
             &target_hidden_before_lead,
             history_before_lead,
+            prompt_length,
             state,
         )?;
         if self.is_eos(lead_token) {
@@ -208,22 +300,14 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         let target_snapshot = self.target.clone();
         let draft_snapshot = self.draft.clone();
         let verifier_snapshot = self.verifier;
-        match self.run_transaction(
-            model,
+        let cycle = Cycle {
             lead_token,
-            target_hidden_before_lead,
-            history_before_lead,
-            state,
-        ) {
+            hidden_before_lead: target_hidden_before_lead,
+            history: history_before_lead,
+            prompt_length,
+        };
+        match self.run_transaction(model, cycle, state) {
             Ok(pending) => {
-                let output = NemotronHSpeculativeOutput {
-                    token_ids: pending.token_ids,
-                    drafted_tokens: pending.drafted_tokens,
-                    accepted_draft_tokens: pending.accepted_draft_tokens,
-                    all_drafts_accepted: pending.all_drafts_accepted,
-                    terminated: pending.terminated,
-                    continuation_hidden_state: pending.continuation_hidden_state,
-                };
                 if let Err(error) = state.commit_prefixes(
                     mark,
                     pending.target_cache_tokens,
@@ -239,7 +323,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
                     })?;
                     return Err(error);
                 }
-                Ok(output)
+                Ok(pending.output)
             }
             Err(error) => {
                 self.target = target_snapshot;
@@ -255,148 +339,194 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         }
     }
 
-    /// Executes all model work while both physical banks remain staged.
+    /// Drafts, verifies, and stages one cycle while both banks remain in a transaction.
     fn run_transaction(
         &mut self,
         model: &NemotronHForCausalLm<B>,
-        lead_token: u32,
-        target_hidden_before_lead: Tensor<B, 3>,
-        history_before_lead: &[u32],
+        cycle: Cycle<'_, B>,
         state: &mut NemotronHDecodeState<B>,
     ) -> Result<PendingCycle<B>> {
-        let device = target_hidden_before_lead.device();
-        let mut generated_history = history_before_lead.to_vec();
-        generated_history.push(lead_token);
-        let mut proposals = Vec::with_capacity(self.config.max_draft_tokens);
-        let mut draft_probabilities = Vec::with_capacity(self.config.max_draft_tokens);
-        let mut feedback_hidden = target_hidden_before_lead;
-        let mut draft_input = lead_token;
+        // `sequence` grows to `history, y_0, y_1, …, y_d`; the lead sits at `base`.
+        let base = cycle.history.len();
+        let mut sequence = Vec::with_capacity(base + self.config.max_draft_tokens + 1);
+        sequence.extend_from_slice(cycle.history);
+        sequence.push(cycle.lead_token);
+        let probabilities = self.draft(model, &cycle, &mut sequence, state)?;
+        let drafted = probabilities.len();
+        let last_is_eos = self.is_eos(sequence[base + drafted]);
+        let evaluated = verification_tokens(drafted, last_is_eos).ok_or_else(|| {
+            Error::Generation("Nemotron-H verification length overflows usize".into())
+        })?;
+        let (logits, hidden) = model.verify_tokens(&sequence[base..base + evaluated], state)?;
+        // Row `i` predicts the token after `y_i` from the history `sequence[..=base + i]`.
+        let histories = (0..evaluated)
+            .map(|row| &sequence[..base + row + 1])
+            .collect::<Vec<_>>();
+        let processed = self.target.process_with_prompt_lengths(
+            logits,
+            &histories,
+            &vec![cycle.prompt_length; evaluated],
+        )?;
+        let (outcome, last) = self.judge(
+            processed,
+            &sequence[base + 1..base + 1 + drafted],
+            &probabilities,
+        )?;
+        let commit = speculative_commit(drafted, outcome).ok_or_else(|| {
+            Error::Generation(
+                "Nemotron-H speculative outcome is inconsistent with its draft".into(),
+            )
+        })?;
+        let kept = commit.target_cache_tokens;
 
+        // MTP pair `i` of the kept prefix is `(y_i, h^target before y_i)`.
+        let pair_hidden = if kept > 1 {
+            Tensor::cat(
+                vec![
+                    cycle.hidden_before_lead.clone(),
+                    hidden.clone().narrow(1, 0, kept - 1),
+                ],
+                1,
+            )
+        } else {
+            cycle.hidden_before_lead.clone()
+        };
+        let kept_tokens = sequence[base..base + kept]
+            .iter()
+            .map(|&token| i64::from(token))
+            .collect::<Vec<_>>();
+        model.append_mtp_pairs(
+            Tensor::<B, 2, Int>::from_data(
+                TensorData::new(kept_tokens, [1, kept]),
+                state.tensor_state().device(),
+            ),
+            pair_hidden,
+            state,
+        )?;
+
+        let mut token_ids = sequence[base..base + kept].to_vec();
+        token_ids.push(last);
+        let terminated = self.is_eos(last);
+        Ok(PendingCycle {
+            output: NemotronHSpeculativeOutput {
+                token_ids,
+                drafted_tokens: drafted,
+                accepted_draft_tokens: match outcome {
+                    SpeculativeOutcome::Rejected { accepted }
+                    | SpeculativeOutcome::AcceptedEndOfSequence { accepted } => accepted,
+                    SpeculativeOutcome::AllAccepted => drafted,
+                },
+                all_drafts_accepted: outcome == SpeculativeOutcome::AllAccepted,
+                terminated,
+                continuation_hidden_state: (!terminated).then(|| hidden.narrow(1, kept - 1, 1)),
+            },
+            target_cache_tokens: kept,
+            mtp_cache_tokens: commit.draft_cache_tokens,
+        })
+    }
+
+    /// Proposes up to `K` drafts with the MTP stage and appends them to `sequence`.
+    ///
+    /// Returns each draft's processed probability vector when sampling (for
+    /// the acceptance test) and `None` entries for greedy decoding.
+    fn draft(
+        &mut self,
+        model: &NemotronHForCausalLm<B>,
+        cycle: &Cycle<'_, B>,
+        sequence: &mut Vec<u32>,
+        state: &mut NemotronHDecodeState<B>,
+    ) -> Result<Vec<Option<Vec<f64>>>> {
+        let sampling = self.config.generation.strategy == SamplingStrategy::Sample;
+        let mut pairs = DraftPairs::new();
+        let mut probabilities = Vec::with_capacity(self.config.max_draft_tokens);
+        let mut feedback = cycle.hidden_before_lead.clone();
+        let mut input = cycle.lead_token;
         for _ in 0..self.config.max_draft_tokens {
-            let output = model.forward_mtp_cached(
-                token_tensor::<B>(draft_input, &device),
-                feedback_hidden,
-                None,
-                state,
+            let prediction = model.draft_mtp(input, feedback, &mut pairs, state)?;
+            feedback = prediction.hidden_state;
+            let processed = self.draft.process_with_prompt_lengths(
+                prediction.logits.squeeze_dim::<2>(1),
+                &[sequence.as_slice()],
+                &[cycle.prompt_length],
             )?;
-            feedback_hidden = output.hidden_state;
-            let processed = self.draft.process(
-                output.logits.squeeze_dim::<2>(1),
-                history_tensor(&generated_history, &device)?,
-            )?;
-            let probabilities = (self.config.generation.strategy == SamplingStrategy::Sample)
-                .then(|| normalized_probabilities(processed.clone()))
-                .transpose()?;
-            let proposal = selected_token(self.draft.select(processed)?)?;
-            proposals.push(proposal);
-            draft_probabilities.push(probabilities);
-            generated_history.push(proposal);
-            draft_input = proposal;
+            probabilities.push(
+                sampling
+                    .then(|| normalized_probabilities(processed.clone()))
+                    .transpose()?,
+            );
+            let proposal = first_token(self.draft.select(processed)?)?;
+            sequence.push(proposal);
+            input = proposal;
             if self.is_eos(proposal) {
                 break;
             }
         }
+        Ok(probabilities)
+    }
 
-        let drafted_tokens = proposals.len();
-        let mut emitted = vec![lead_token];
-        let mut target_history = history_before_lead.to_vec();
-        target_history.push(lead_token);
-        let mut target_output = decode_one(model, lead_token, state, &device)?;
-        let mut target_cache_tokens = 1usize;
-        let mut accepted = 0usize;
-
-        for (proposal, q) in proposals.iter().copied().zip(&draft_probabilities) {
-            let processed = self
-                .target
-                .process(target_output.0, history_tensor(&target_history, &device)?)?;
-            let correction = match self.config.generation.strategy {
-                SamplingStrategy::Greedy => {
-                    let target = selected_token(self.target.select(processed)?)?;
-                    (target != proposal).then_some(target)
-                }
-                SamplingStrategy::Sample => {
-                    let p = normalized_probabilities(processed)?;
-                    let q = q.as_deref().ok_or_else(|| {
+    /// Applies the acceptance rule to every draft in order.
+    ///
+    /// `processed` holds the target's processed logits after the lead and each
+    /// evaluated draft. Returns the outcome and the final emitted token: the
+    /// correction of the first rejection, an accepted EOS draft, or the bonus
+    /// drawn from the last row when every draft is accepted.
+    fn judge(
+        &mut self,
+        processed: Tensor<B, 2>,
+        proposals: &[u32],
+        probabilities: &[Option<Vec<f64>>],
+    ) -> Result<(SpeculativeOutcome, u32)> {
+        let greedy_choices = match self.config.generation.strategy {
+            // One device argmax and one readback cover every verified row.
+            SamplingStrategy::Greedy => Some(tokens(self.target.select(processed.clone())?)?),
+            SamplingStrategy::Sample => None,
+        };
+        for (index, (&proposal, draft)) in proposals.iter().zip(probabilities).enumerate() {
+            let verdict = match &greedy_choices {
+                Some(choices) => Verdict::greedy(proposal, choices[index]),
+                None => {
+                    let target = normalized_probabilities(processed.clone().narrow(0, index, 1))?;
+                    let draft = draft.as_deref().ok_or_else(|| {
                         Error::Generation(
                             "Nemotron-H stochastic verification lost its draft distribution".into(),
                         )
                     })?;
-                    (!self.accept(proposal, &p, q)?)
-                        .then(|| self.sample_residual(&p, q))
-                        .transpose()?
+                    self.verifier.verify(proposal, &target, draft)?
                 }
             };
-            if let Some(correction) = correction {
-                emitted.push(correction);
-                let terminated = self.is_eos(correction);
-                return Ok(PendingCycle {
-                    token_ids: emitted,
-                    drafted_tokens,
-                    accepted_draft_tokens: accepted,
-                    all_drafts_accepted: false,
-                    terminated,
-                    continuation_hidden_state: (!terminated).then_some(target_output.1),
-                    target_cache_tokens,
-                    mtp_cache_tokens: (accepted + 1).min(drafted_tokens),
-                });
+            match verdict {
+                Verdict::Rejected { correction } => {
+                    return Ok((SpeculativeOutcome::Rejected { accepted: index }, correction));
+                }
+                Verdict::Accepted if self.is_eos(proposal) => {
+                    return Ok((
+                        SpeculativeOutcome::AcceptedEndOfSequence {
+                            accepted: index + 1,
+                        },
+                        proposal,
+                    ));
+                }
+                Verdict::Accepted => {}
             }
-
-            emitted.push(proposal);
-            accepted += 1;
-            if self.is_eos(proposal) {
-                return Ok(PendingCycle {
-                    token_ids: emitted,
-                    drafted_tokens,
-                    accepted_draft_tokens: accepted,
-                    all_drafts_accepted: false,
-                    terminated: true,
-                    continuation_hidden_state: None,
-                    target_cache_tokens,
-                    mtp_cache_tokens: accepted.min(drafted_tokens),
-                });
-            }
-            target_history.push(proposal);
-            target_output = decode_one(model, proposal, state, &device)?;
-            target_cache_tokens += 1;
         }
-
-        // Consume the final accepted token once in the shifted auxiliary stream.
-        // The resulting logits are unused; its KV restores target=MTP+1 at the
-        // next stable boundary after the unconsumed target bonus token.
-        let last = *proposals
-            .last()
-            .ok_or_else(|| Error::Generation("Nemotron-H MTP produced no proposal".into()))?;
-        model.forward_mtp_cached(
-            token_tensor::<B>(last, &device),
-            feedback_hidden,
-            None,
-            state,
-        )?;
-        let processed = self
-            .target
-            .process(target_output.0, history_tensor(&target_history, &device)?)?;
-        let bonus = selected_token(self.target.select(processed)?)?;
-        emitted.push(bonus);
-        let terminated = self.is_eos(bonus);
-        Ok(PendingCycle {
-            token_ids: emitted,
-            drafted_tokens,
-            accepted_draft_tokens: accepted,
-            all_drafts_accepted: true,
-            terminated,
-            continuation_hidden_state: (!terminated).then_some(target_output.1),
-            target_cache_tokens,
-            mtp_cache_tokens: drafted_tokens + 1,
-        })
+        let drafted = proposals.len();
+        let bonus = match greedy_choices {
+            Some(choices) => *choices.get(drafted).ok_or_else(|| {
+                Error::Generation("Nemotron-H verification omitted the bonus row".into())
+            })?,
+            None => first_token(self.target.select(processed.narrow(0, drafted, 1))?)?,
+        };
+        Ok((SpeculativeOutcome::AllAccepted, bonus))
     }
 
-    /// Checks batch, shift alignment, vocabulary, shape, and free capacity.
+    /// Checks batch, shift alignment, vocabulary, history, shape, and free capacity.
     fn validate_cycle(
         &self,
         model: &NemotronHForCausalLm<B>,
         lead_token: u32,
         hidden: &Tensor<B, 3>,
         history_before_lead: &[u32],
+        prompt_length: usize,
         state: &NemotronHDecodeState<B>,
     ) -> Result<()> {
         state.validate_for_model(model)?;
@@ -415,6 +545,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
                 "Nemotron-H speculative hidden state must use the decode-state device".into(),
             ));
         }
+        check_prompt_length(history_before_lead, prompt_length)?;
         if history_before_lead
             .iter()
             .any(|&token| token as usize >= model.config().vocab_size)
@@ -452,7 +583,7 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         let mtp = state.tensor_state().mtp_lengths().ok_or_else(|| {
             Error::Cache("Nemotron-H speculative state has no independent MTP cursor".into())
         })?;
-        if target.len() != 1 || mtp.len() != 1 || mtp[0].checked_add(1) != Some(target[0]) {
+        if !shifted_alignment(target, mtp) {
             return Err(Error::Cache(format!(
                 "Nemotron-H speculative alignment requires target = MTP + 1, found target={target:?}, MTP={mtp:?}"
             )));
@@ -464,51 +595,16 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
                 format!("{} tokens", history_before_lead.len()),
             ));
         }
-        let requested = target[0].checked_add(required_staging).ok_or_else(|| {
-            Error::Generation("Nemotron-H speculative target length overflows usize".into())
-        })?;
-        if requested > state.tensor_state().capacity() {
-            return Err(Error::Generation(format!(
+        match bounded_end(target[0], required_staging, state.tensor_state().capacity()) {
+            Ok(_) => Ok(()),
+            Err(ExtentError::Overflow) => Err(Error::Generation(
+                "Nemotron-H speculative target length overflows usize".into(),
+            )),
+            Err(ExtentError::Exceeds(requested)) => Err(Error::Generation(format!(
                 "Nemotron-H speculative suffix reaches {requested}, exceeding cache capacity {}",
                 state.tensor_state().capacity()
-            )));
+            ))),
         }
-        Ok(())
-    }
-
-    /// Applies exact greedy or stochastic acceptance to one proposal.
-    fn accept(&mut self, proposal: u32, p: &[f64], q: &[f64]) -> Result<bool> {
-        let index = proposal as usize;
-        if index >= p.len() || p.len() != q.len() {
-            return Err(Error::Generation(
-                "Nemotron-H proposal probabilities have incompatible vocabulary shapes".into(),
-            ));
-        }
-        if self.config.generation.strategy == SamplingStrategy::Greedy {
-            return Ok(argmax(p)? == proposal);
-        }
-        let q_value = q[index];
-        if !(q_value.is_finite() && q_value > 0.0) {
-            return Err(Error::Generation(
-                "Nemotron-H draft selected a token with zero or invalid probability".into(),
-            ));
-        }
-        Ok(self.verifier.next_unit() < (p[index] / q_value).min(1.0))
-    }
-
-    /// Draws a correction from normalized positive residual `(p-q)_+`.
-    fn sample_residual(&mut self, p: &[f64], q: &[f64]) -> Result<u32> {
-        if p.len() != q.len() {
-            return Err(Error::Generation(
-                "Nemotron-H target and draft distributions have different vocabularies".into(),
-            ));
-        }
-        let residual = p
-            .iter()
-            .zip(q)
-            .map(|(&target, &draft)| (target - draft).max(0.0))
-            .collect::<Vec<_>>();
-        sample_weights(&residual, self.verifier.next_unit())
     }
 
     /// Returns whether a token terminates ordinary generation.
@@ -517,223 +613,69 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
     }
 }
 
-/// Model outputs and cache-prefix lengths waiting for atomic publication.
+/// Inputs of one active cycle.
+struct Cycle<'a, B: Backend> {
+    /// Target-selected token that starts the cycle.
+    lead_token: u32,
+    /// Target final hidden state `[1, 1, hidden]` immediately before the lead.
+    hidden_before_lead: Tensor<B, 3>,
+    /// Every token before the lead, prompt first.
+    history: &'a [u32],
+    /// Number of leading prompt tokens in `history`.
+    prompt_length: usize,
+}
+
+/// A verified cycle waiting for atomic publication.
 struct PendingCycle<B: Backend> {
-    /// Lead token, accepted drafts, and any correction or target bonus to emit.
-    token_ids: Vec<u32>,
-    /// Number of proposals produced, possibly shortened by a draft EOS.
-    drafted_tokens: usize,
-    /// Verified proposals retained in `token_ids`, including an accepted EOS.
-    accepted_draft_tokens: usize,
-    /// Whether all proposals were accepted and target sampling supplied a bonus.
-    all_drafts_accepted: bool,
-    /// Whether the final emitted token is EOS.
-    terminated: bool,
-    /// Target state before the last emitted token; absent when EOS ends the cycle.
-    continuation_hidden_state: Option<Tensor<B, 3>>,
+    /// The caller-visible result.
+    output: NemotronHSpeculativeOutput<B>,
     /// Number of staged target tokens to publish from this transaction.
     target_cache_tokens: usize,
-    /// Number of staged auxiliary pairs to publish, including any catch-up step.
+    /// Number of staged MTP pairs to publish (rebuilt from target hidden states).
     mtp_cache_tokens: usize,
 }
 
-/// Consumes one target token and retains the hidden state needed by a correction.
-fn decode_one<B: Backend>(
-    model: &NemotronHForCausalLm<B>,
-    token: u32,
-    state: &mut NemotronHDecodeState<B>,
-    device: &B::Device,
-) -> Result<(Tensor<B, 2>, Tensor<B, 3>)> {
-    let output = model.decode(
-        DecodeInput {
-            token_ids: token_tensor(token, device),
-            token_mask: None,
-            position_ids: None,
-        },
-        state,
-        &ForwardOptions {
-            logits: LogitsSelection::Last,
-            hidden_states: true,
-            ..Default::default()
-        },
-    )?;
-    let hidden = output.final_hidden_state.ok_or_else(|| {
-        Error::Generation("Nemotron-H target decode omitted its requested hidden state".into())
-    })?;
-    Ok((output.logits.squeeze_dim::<2>(1), hidden))
-}
-
-/// Creates one checked batch-one token tensor.
-fn token_tensor<B: Backend>(token: u32, device: &B::Device) -> Tensor<B, 2, Int> {
-    Tensor::from_data(TensorData::new(vec![i64::from(token)], [1, 1]), device)
-}
-
-/// Creates optional batch-one history for the public logits processor.
-fn history_tensor<B: Backend>(
-    history: &[u32],
-    device: &B::Device,
-) -> Result<Option<Tensor<B, 2, Int>>> {
-    if history.is_empty() {
-        return Ok(None);
+/// Requires the prompt to be a prefix of the history.
+fn check_prompt_length(history: &[u32], prompt_length: usize) -> Result<()> {
+    if prompt_length > history.len() {
+        return Err(Error::shape(
+            "nemotron_h.speculative.prompt_length",
+            format!("at most the {} history tokens", history.len()),
+            prompt_length.to_string(),
+        ));
     }
-    let values = history.iter().copied().map(i64::from).collect::<Vec<_>>();
-    Ok(Some(Tensor::from_data(
-        TensorData::new(values, [1, history.len()]),
-        device,
-    )))
+    Ok(())
 }
 
-/// Reads a selected token with checked signed-to-unsigned conversion.
-fn selected_token<B: Backend>(token: Tensor<B, 1, Int>) -> Result<u32> {
-    let values = token
+/// Reads selected token IDs `[n]` with checked signed-to-unsigned conversion.
+fn tokens<B: Backend>(selected: Tensor<B, 1, Int>) -> Result<Vec<u32>> {
+    selected
         .try_into_data()
         .map_err(|error| {
             Error::BackendCapability(format!(
-                "failed to read Nemotron-H selected token from the backend: {error}"
+                "failed to read Nemotron-H selected tokens from the backend: {error}"
             ))
         })?
         .convert::<i64>()
         .into_vec::<i64>()
         .map_err(|error| {
-            Error::BackendCapability(format!("failed to decode Nemotron-H token: {error}"))
-        })?;
-    let value = *values
-        .first()
-        .ok_or_else(|| Error::Generation("Nemotron-H token selector returned no row".into()))?;
-    u32::try_from(value)
-        .map_err(|_| Error::Generation(format!("Nemotron-H selected invalid token {value}")))
-}
-
-/// Reproduces backend softmax and returns one finite host probability row.
-fn normalized_probabilities<B: Backend>(logits: Tensor<B, 2>) -> Result<Vec<f64>> {
-    let [batch, vocabulary] = logits.dims();
-    if batch != 1 || vocabulary == 0 {
-        return Err(Error::shape(
-            "nemotron_h.speculative.logits",
-            "[1, nonzero_vocabulary]",
-            format!("[{batch}, {vocabulary}]"),
-        ));
-    }
-    let values = logits
-        .clone()
-        .try_into_data()
-        .map_err(|error| Error::BackendCapability(error.to_string()))?
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .map_err(|error| Error::BackendCapability(error.to_string()))?;
-    if values.iter().any(|value| value.is_nan()) {
-        return Err(Error::Generation(
-            "Nemotron-H processed logits contain NaN".into(),
-        ));
-    }
-    if values
-        .iter()
-        .any(|value| value.is_infinite() && value.is_sign_positive())
-    {
-        return Err(Error::Generation(
-            "Nemotron-H processed logits contain positive infinity".into(),
-        ));
-    }
-    if !values
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max)
-        .is_finite()
-    {
-        return Err(Error::Generation(
-            "Nemotron-H processed logits assign zero mass to every token".into(),
-        ));
-    }
-    let probabilities = softmax(logits, 1)
-        .try_into_data()
-        .map_err(|error| Error::BackendCapability(error.to_string()))?
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .map_err(|error| Error::BackendCapability(error.to_string()))?;
-    if probabilities
-        .iter()
-        .any(|value| !value.is_finite() || *value < 0.0)
-    {
-        return Err(Error::Generation(
-            "Nemotron-H softmax produced an invalid probability".into(),
-        ));
-    }
-    let mut probabilities = probabilities.into_iter().map(f64::from).collect::<Vec<_>>();
-    let total = probabilities.iter().sum::<f64>();
-    if !(total.is_finite() && total > 0.0) {
-        return Err(Error::Generation(
-            "Nemotron-H processed logits cannot be normalized".into(),
-        ));
-    }
-    probabilities.iter_mut().for_each(|value| *value /= total);
-    Ok(probabilities)
-}
-
-/// Returns the lowest-ID greatest-probability token.
-fn argmax(probabilities: &[f64]) -> Result<u32> {
-    let (index, _) = probabilities
-        .iter()
-        .copied()
-        .enumerate()
-        .max_by(|(left_index, left), (right_index, right)| {
-            left.total_cmp(right)
-                .then_with(|| right_index.cmp(left_index))
+            Error::BackendCapability(format!("failed to decode Nemotron-H tokens: {error}"))
+        })?
+        .into_iter()
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                Error::Generation(format!("Nemotron-H selected invalid token {value}"))
+            })
         })
-        .ok_or_else(|| Error::Generation("cannot select from an empty distribution".into()))?;
-    u32::try_from(index).map_err(|_| Error::Generation("selected token does not fit u32".into()))
+        .collect()
 }
 
-/// Samples finite non-negative weights using inverse CDF.
-fn sample_weights(weights: &[f64], uniform: f64) -> Result<u32> {
-    if weights
-        .iter()
-        .any(|weight| !weight.is_finite() || *weight < 0.0)
-    {
-        return Err(Error::Generation(
-            "Nemotron-H rejection residual contains an invalid weight".into(),
-        ));
-    }
-    let total = weights.iter().sum::<f64>();
-    if !(total.is_finite() && total > 0.0) {
-        return Err(Error::Generation(
-            "Nemotron-H rejection residual has no positive mass".into(),
-        ));
-    }
-    let threshold = uniform * total;
-    let mut cumulative = 0.0;
-    for (index, &weight) in weights.iter().enumerate() {
-        cumulative += weight;
-        if threshold < cumulative {
-            return u32::try_from(index)
-                .map_err(|_| Error::Generation("sampled token does not fit u32".into()));
-        }
-    }
-    u32::try_from(weights.len() - 1)
-        .map_err(|_| Error::Generation("sampled token does not fit u32".into()))
-}
-
-/// Small deterministic stream dedicated to acceptance decisions.
-#[derive(Debug, Clone, Copy)]
-struct SplitMix64 {
-    /// Wrapping generator counter restored together with the cache on failure.
-    state: u64,
-}
-
-impl SplitMix64 {
-    /// Creates a stream in one architecture-specific seed domain.
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    /// Returns a uniformly distributed IEEE-754 value in `[0, 1)`.
-    fn next_unit(&mut self) -> f64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut value = self.state;
-        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        value ^= value >> 31;
-        ((value >> 11) as f64) * (1.0 / ((1_u64 << 53) as f64))
-    }
+/// Reads the first selected token ID.
+fn first_token<B: Backend>(selected: Tensor<B, 1, Int>) -> Result<u32> {
+    tokens(selected)?
+        .first()
+        .copied()
+        .ok_or_else(|| Error::Generation("Nemotron-H token selector returned no row".into()))
 }
 
 #[cfg(test)]

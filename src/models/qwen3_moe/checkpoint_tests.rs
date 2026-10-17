@@ -218,3 +218,107 @@ fn tied_head_contract_uses_storage_alias() {
     assert_eq!(plan.aliases.len(), 1);
     assert_eq!(plan.aliases[0].target, "lm_head.weight");
 }
+
+/// A validated topology whose query width `heads * head_dim` overflows fails contract derivation.
+///
+/// Validation checks each extent but not the fused projection product, so
+/// the checked dimension conversion is the gate that keeps an unrepresentable
+/// `[heads * head_dim, hidden]` shape out of the tensor inventory.
+#[test]
+fn overflowing_attention_width_is_a_contract_error() {
+    let config = Qwen3MoeConfig {
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 1 << (usize::BITS - 2),
+        max_position_embeddings: 32,
+        ..tiny_config()
+    };
+    config
+        .validate()
+        .expect("each extent is individually valid");
+    let error = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .expect_err("the query width does not fit usize");
+    assert_eq!(error.architecture, "qwen3_moe");
+    assert_eq!(error.field, "num_attention_heads * head_dim");
+    assert_eq!(error.reason, "dimension product overflows usize");
+}
+
+/// The validation-time count equals the contract's length for every optional branch.
+///
+/// Validation bounds the inventory with [`Qwen3MoeConfig::checkpoint_tensor_count`]
+/// before building it, so the formula must track the builder exactly.
+#[test]
+fn tensor_count_matches_the_contract_for_every_branch() {
+    for (bias, step, dense_layers, tied) in [
+        (false, 1, vec![], false),
+        (true, 1, vec![], false),
+        (false, 2, vec![], true),
+        (true, 1, vec![0], false),
+        (false, 1, vec![2, 0], true),
+    ] {
+        let config = Qwen3MoeConfig {
+            num_hidden_layers: 3,
+            attention_bias: bias,
+            decoder_sparse_step: step,
+            mlp_only_layers: dense_layers.clone(),
+            tie_word_embeddings: tied,
+            ..tiny_config()
+        };
+        let contract = config.checkpoint_contract(Default::default()).unwrap();
+        assert_eq!(
+            config.checkpoint_tensor_count(),
+            Some(contract.expected_tensors().len()),
+            "bias={bias} step={step} dense={dense_layers:?}"
+        );
+        let flags = config.moe_layer_flags();
+        assert_eq!(
+            flags,
+            (0..3)
+                .map(|layer| config.is_moe_layer(layer))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Layers times experts beyond the artifact limit fail validation before any contract exists.
+///
+/// Regression for CFG-COUNT-1: `num_experts = moe_intermediate_size = 2^32`
+/// passed validation and the process was killed while listing the contract;
+/// 2^18 experts took 2.5 s and 388 MB to reach a shape-mismatch error.
+#[test]
+fn expert_inventories_beyond_the_artifact_limit_are_rejected_before_listing() {
+    use crate::models::config::{MAX_CHECKPOINT_TENSORS, MAX_EXPERTS};
+
+    let config = Qwen3MoeConfig {
+        num_hidden_layers: 48,
+        num_experts: MAX_EXPERTS,
+        ..tiny_config()
+    };
+    let count = config.checkpoint_tensor_count().unwrap();
+    assert!(count > MAX_CHECKPOINT_TENSORS);
+    let error = config.checkpoint_contract(Default::default()).unwrap_err();
+    assert_eq!(error.field, "num_experts");
+    assert!(
+        error.reason.contains(&count.to_string()),
+        "{}",
+        error.reason
+    );
+    for experts in [MAX_EXPERTS + 1, usize::MAX] {
+        let error = Qwen3MoeConfig {
+            num_experts: experts,
+            ..tiny_config()
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(error.field, "num_experts");
+    }
+    // One layer of the largest bank fits the limit (about 3.1 million tensors) and is accepted.
+    let config = Qwen3MoeConfig {
+        num_hidden_layers: 1,
+        num_experts: MAX_EXPERTS,
+        ..tiny_config()
+    };
+    assert_eq!(config.checkpoint_tensor_count(), Some(12 + 3 * MAX_EXPERTS));
+    config.validate().unwrap();
+}

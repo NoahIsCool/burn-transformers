@@ -18,8 +18,8 @@ use crate::{
     CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection, Seq2SeqInput,
     cache::CacheConfig,
     checkpoint::{
-        CheckpointManifest, ExpectedTensor, LoadReport, MappingPlan, TensorOperation,
-        TensorTransform,
+        CheckpointError, CheckpointManifest, ExpectedTensor, LoadReport, MappingPlan,
+        TensorOperation, TensorTransform,
         quantization::{
             BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedExecutionSupport, QuantizationExclusion,
             QuantizationGroupSize, QuantizedBurnpackArtifact, QuantizedCheckpointOptions,
@@ -27,9 +27,20 @@ use crate::{
         },
     },
     models::{
-        deepseek_v2::model::tests_support::tiny_config as tiny_deepseek_config,
-        muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
-        qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection,
+        AutoCausalConfig,
+        deepseek_v2::{
+            DeepseekV2CheckpointOptions, model::tests_support::tiny_config as tiny_deepseek_config,
+        },
+        muse_glimmer::{
+            MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerLayerType,
+            MuseGlimmerTextConfig,
+        },
+        nemotron_h::{NemotronHBlockType, NemotronHCheckpointOptions, NemotronHConfig},
+        qwen3_5::{
+            Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5LayerType, Qwen3_5TextConfig,
+        },
+        qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig},
+        t5::T5FeedForwardProjection,
     },
 };
 
@@ -67,7 +78,9 @@ fn write_contract_checkpoint(root: &Path, expected: &[ExpectedTensor], mappings:
                 tensors.push((source.clone(), source_shape));
             }
             TensorOperation::Alias { .. } => {}
-            TensorOperation::Split { .. } | TensorOperation::Concatenate { .. } => {
+            TensorOperation::Split { .. }
+            | TensorOperation::Concatenate { .. }
+            | TensorOperation::DequantizeMxfp4 { .. } => {
                 panic!("automatic family fixture supports map and alias contracts only")
             }
         }
@@ -444,6 +457,20 @@ fn automatic_packed_loading_rejects_uncertified_causal_families() {
     assert!(matches!(error, Error::BackendCapability(_)));
 }
 
+/// Reports whether a packed column-layout projection's dtype shows an exact install on the test backend.
+///
+/// The packed blocks survive the `[out, in]` to `[in, out]` load transpose only
+/// where [`crate::checkpoint::packed_layout_is_exact`] holds, and then stay
+/// QFloat; elsewhere (Burn Flex 0.21) certified loaders install the exact
+/// dequantized F32 values instead of a requantized approximation.
+fn is_exact_packed_install(dtype: DType) -> bool {
+    if crate::checkpoint::packed_layout_is_exact::<TestBackend>(&Default::default()) {
+        matches!(dtype, DType::QFloat(_))
+    } else {
+        dtype == DType::F32
+    }
+}
+
 /// Qwen3-MoE uses the public automatic path for a provenance-bound packed overlay.
 #[test]
 fn automatic_qwen3_moe_loads_v2_quantized_burnpack() {
@@ -522,15 +549,16 @@ fn automatic_qwen3_moe_loads_v2_quantized_burnpack() {
         AutoCausalLm::Qwen3Moe(model) => model,
         model => panic!("expected Qwen3-MoE automatic variant, found {model:?}"),
     };
-    assert!(matches!(
+    // Packed where the backend keeps the artifact's blocks through the
+    // column-layout transpose, exact dequantized F32 otherwise (Flex).
+    assert!(is_exact_packed_install(
         model
             .lm_head
             .as_ref()
             .expect("untied fixture LM head")
             .weight
             .val()
-            .dtype(),
-        DType::QFloat(_)
+            .dtype()
     ));
     assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F32);
     assert!(loaded.load_report().is_strictly_valid());
@@ -691,48 +719,218 @@ fn generation_defaults_reject_invalid_artifacts_and_tokens() {
     );
 }
 
-/// Qwen namespace detection accepts exactly one official layout.
+/// Every registered causal family reaches its own strict loader, never the fallback.
 #[test]
-fn qwen_namespace_detection_is_unambiguous() {
-    assert_eq!(
-        classify_qwen_names(["model.language_model.embed_tokens.weight"])
-            .expect("wrapped namespace"),
-        Qwen3_5CheckpointSource::Multimodal
-    );
-    assert_eq!(
-        classify_qwen_names(["model.embed_tokens.weight"]).expect("text namespace"),
-        Qwen3_5CheckpointSource::TextOnly
-    );
-    assert!(
-        classify_qwen_names([
-            "model.language_model.embed_tokens.weight",
-            "model.embed_tokens.weight"
-        ])
-        .is_err()
-    );
-    assert!(classify_qwen_names(["foreign.weight"]).is_err());
+fn every_registered_family_reaches_its_strict_loader() {
+    for family in AutoCausalConfig::ALL {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(
+            root.path().join("config.json"),
+            json!({"model_type": family.model_type(), "vocab_size": "not an integer"}).to_string(),
+        )
+        .unwrap();
+        let error = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options("fixture/registry", "registry"),
+            &Default::default(),
+        )
+        .unwrap_err();
+        // Detection succeeded, so the error is the family parser's own JSON diagnostic.
+        assert!(
+            matches!(&error, Error::Configuration { field, reason }
+                if field == "config" && reason.starts_with("invalid model config JSON: ")),
+            "{family:?}: {error}"
+        );
+    }
 }
 
-/// Muse namespace detection accepts exactly one language-tower layout.
+/// Absurd counts in an untrusted `config.json` are contextual errors before any planning.
+///
+/// Regression for CFG-COUNT-1: a directory holding only a Llama
+/// `config.json` with `num_hidden_layers = 2^64 - 1` panicked with
+/// `capacity overflow`, and a one-tensor Qwen3-MoE checkpoint declaring
+/// `2^32` experts was killed while its tensor contract was being listed.
 #[test]
-fn muse_namespace_detection_is_unambiguous() {
-    assert_eq!(
-        classify_muse_names(["model.language_model.embed_tokens.weight"])
-            .expect("wrapped namespace"),
-        MuseGlimmerCheckpointSource::Multimodal
-    );
-    assert_eq!(
-        classify_muse_names(["model.embed_tokens.weight"]).expect("text namespace"),
-        MuseGlimmerCheckpointSource::TextOnly
-    );
+fn absurd_counts_fail_before_checkpoint_planning() {
+    use crate::models::config::{MAX_EXPERTS, MAX_LAYERS};
+
+    let tiny_moe = |experts: usize| {
+        let mut config = serde_json::to_value(Qwen3MoeConfig {
+            num_hidden_layers: 48,
+            num_experts: experts,
+            ..Qwen3MoeConfig::default()
+        })
+        .unwrap();
+        config["moe_intermediate_size"] = json!(1_u64 << 32);
+        config
+    };
+    let cases = [
+        (
+            json!({"model_type": "llama", "num_hidden_layers": u64::MAX}),
+            "llama.num_hidden_layers",
+        ),
+        (
+            json!({"model_type": "llama", "num_hidden_layers": MAX_LAYERS + 1}),
+            "llama.num_hidden_layers",
+        ),
+        (tiny_moe(1 << 32), "qwen3_moe.num_experts"),
+        // Within the per-field bound, but 48 layers of it exceed the
+        // ten-million-tensor artifact limit.
+        (tiny_moe(MAX_EXPERTS), "qwen3_moe.num_experts"),
+    ];
+    for (config, field) in cases {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+        // One real tensor, so discovery would succeed if planning were reached.
+        let mut mappings = MappingPlan::new();
+        mappings.map("model.embed_tokens.weight", "model.embed_tokens.weight");
+        write_contract_checkpoint(
+            root.path(),
+            &[ExpectedTensor::new("model.embed_tokens.weight", vec![2, 2])],
+            &mappings,
+        );
+        let options = AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        };
+        let outcome = std::panic::catch_unwind(|| {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+        });
+        let error = outcome
+            .unwrap_or_else(|_| panic!("{field} panicked"))
+            .expect_err("absurd counts must not load");
+        assert!(
+            matches!(&error, Error::Configuration { field: actual, .. } if actual == field),
+            "{field}: {error}"
+        );
+    }
+
+    let root = tempfile::tempdir().expect("temporary model root");
+    std::fs::write(
+        root.path().join("config.json"),
+        json!({"model_type": "t5", "num_layers": u64::MAX}).to_string(),
+    )
+    .unwrap();
+    let error = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .expect_err("absurd T5 depth must not load");
+    assert!(error.to_string().contains("t5.num_layers"), "{error}");
+}
+
+/// A configuration with no checkpoint beside it is a typed missing-artifact error.
+#[test]
+fn a_directory_without_weights_is_a_typed_missing_artifact() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &tiny_automatic_qwen_config());
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .unwrap_err();
     assert!(
-        classify_muse_names([
-            "model.language_model.embed_tokens.weight",
-            "model.embed_tokens.weight"
-        ])
-        .is_err()
+        matches!(
+            &error,
+            Error::CheckpointPlan(CheckpointError::ArtifactNotFound { .. })
+        ),
+        "{error}"
     );
-    assert!(classify_muse_names(["foreign.weight"]).is_err());
+
+    write_auto_metadata(root.path(), &tiny_automatic_t5_config());
+    let error = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions {
+            load_tokenizer: false,
+            ..AutoLoadOptions::default()
+        },
+        &Default::default(),
+    )
+    .map(drop)
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::CheckpointPlan(CheckpointError::ArtifactNotFound { .. })
+        ),
+        "{error}"
+    );
+}
+
+/// In-bound depths far beyond a one-tensor checkpoint fail before any contract is built.
+///
+/// Regression for the residual of CFG-COUNT-1: a Llama `config.json` with
+/// 2^18 layers, or a T5 one with 2^18 blocks per stack, planned against a
+/// one-tensor checkpoint used to build the whole contract (seconds and
+/// gigabytes in debug builds) before strict validation failed. The depths
+/// here are smaller so that a regression stays cheap; the error variant
+/// proves the early exit, since a built contract fails strict validation
+/// instead.
+#[test]
+fn depths_beyond_the_checkpoint_fail_before_the_contract() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tiny_goldens/llama3/config.json");
+    let mut llama: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+    llama["num_hidden_layers"] = json!(4096);
+    let mut t5 = serde_json::to_value(tiny_automatic_t5_config()).unwrap();
+    t5["num_layers"] = json!(2048);
+    t5["num_decoder_layers"] = json!(2048);
+
+    let options = AutoLoadOptions {
+        load_tokenizer: false,
+        ..AutoLoadOptions::default()
+    };
+    for (config, required, seq2seq) in [(llama, 4096, false), (t5, 4096, true)] {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+        let mut mappings = MappingPlan::new();
+        mappings.map("model.embed_tokens.weight", "model.embed_tokens.weight");
+        write_contract_checkpoint(
+            root.path(),
+            &[ExpectedTensor::new("model.embed_tokens.weight", vec![2, 2])],
+            &mappings,
+        );
+        let error = if seq2seq {
+            AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+                .unwrap_err()
+        } else {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(drop)
+                .unwrap_err()
+        };
+        assert!(
+            matches!(
+                &error,
+                Error::CheckpointPlan(CheckpointError::TooFewTensors { required: r, available: 1 })
+                    if *r == required
+            ),
+            "{error}"
+        );
+    }
+}
+
+/// Packed-sidecar certification names only registered causal families.
+#[test]
+fn packed_certification_names_registered_families() {
+    for model_type in PACKED_CAUSAL_MODEL_TYPES {
+        assert!(
+            AutoCausalConfig::from_model_type(model_type).is_some(),
+            "{model_type}"
+        );
+    }
 }
 
 /// Required config reading rejects missing files and non-directory roots.
@@ -998,8 +1196,8 @@ fn local_generation_defaults_validate_active_fields() {
             "temperature must be finite and greater than zero",
         ),
         (
-            json!({"do_sample": true, "top_k": 9}),
-            "top_k must be in 1..=8, found 9",
+            json!({"do_sample": true, "top_p": 0.0}),
+            "top_p must be finite and in (0, 1], found 0",
         ),
         (
             json!({"max_new_tokens": 0}),
@@ -1119,13 +1317,13 @@ fn automatic_loads_preserve_family_config_error_context() {
         )
         .unwrap_err();
         assert!(matches!(error, Error::Configuration { field, reason }
-            if field == "auto_causal.config" && reason == format!("{family}.vocab_size: must be nonzero")));
+            if field == format!("{family}.vocab_size") && reason == "must be nonzero"));
     }
     write_auto_metadata(root.path(), &json!({"model_type": "t5", "vocab_size": 0}));
     assert!(
         matches!(AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
         &Default::default()).unwrap_err(), Error::Configuration { field, reason }
-        if field == "auto_seq2seq.config" && reason == "t5.vocab_size: must be nonzero")
+        if field == "t5.vocab_size" && reason == "must be nonzero")
     );
 }
 
@@ -1264,7 +1462,9 @@ fn automatic_causal_load_preserves_namespace_and_sidecar_errors() {
         write_auto_metadata(root.path(), &config);
         for (names, expected) in [
             (
-                vec!["foreign.weight"],
+                // Two tensors, so the two-layer Muse fixture passes the
+                // pre-contract tensor budget and namespace detection is reached.
+                vec!["foreign.weight", "foreign.bias"],
                 format!(
                     "{family} checkpoint contains neither official language parameter namespace"
                 ),
@@ -1288,9 +1488,16 @@ fn automatic_causal_load_preserves_namespace_and_sidecar_errors() {
                 mappings.map(name, name);
             }
             write_contract_checkpoint(root.path(), &expected_tensors, &mappings);
+            let error = AutoCausalLm::<TestBackend>::load_local(
+                root.path(),
+                &AutoLoadOptions::default(),
+                &Default::default(),
+            )
+            .map(drop)
+            .unwrap_err();
             assert!(
-                matches!(AutoCausalLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
-                &Default::default()).unwrap_err(), Error::Checkpoint(reason) if reason == expected)
+                matches!(&error, Error::CheckpointPlan(cause) if cause.to_string() == expected),
+                "{error}"
             );
         }
     }
@@ -1579,8 +1786,8 @@ fn automatic_muse_glimmer_loads_q8_q4_and_preserves_all_execution_paths() {
                 ("FFN down", &layer.mlp.down_proj),
             ] {
                 assert!(
-                    matches!(linear.weight.val().dtype(), DType::QFloat(_)),
-                    "Muse layer {layer_index} {projection} must retain packed storage"
+                    is_exact_packed_install(linear.weight.val().dtype()),
+                    "Muse layer {layer_index} {projection} must hold the exact artifact"
                 );
             }
             for (projection, linear) in [
@@ -1608,15 +1815,14 @@ fn automatic_muse_glimmer_loads_q8_q4_and_preserves_all_execution_paths() {
                 assert_eq!(norm.weight.val().dtype(), DType::F32);
             }
         }
-        assert!(matches!(
+        assert!(is_exact_packed_install(
             model
                 .lm_head
                 .as_ref()
                 .expect("independent Muse LM head")
                 .weight
                 .val()
-                .dtype(),
-            DType::QFloat(_)
+                .dtype()
         ));
         assert!(loaded.load_report().is_strictly_valid());
         assert_eq!(loaded.load_report().applied.len(), 35);
@@ -1715,16 +1921,15 @@ fn automatic_muse_glimmer_rejects_unaligned_reference_only_burnpack() {
     )
     .expect_err("automatic execution must reject row-unaligned sidecars");
     assert!(
-        matches!(&error, Error::Checkpoint(message) if message.contains("packed quantized execution is unavailable")),
+        matches!(&error, Error::CheckpointExecution { message, .. }
+            if message.contains("packed quantized execution is unavailable")),
         "unexpected error: {error}"
     );
 }
 
-/// The Nemotron branch loads a complete heterogeneous hybrid schedule.
-#[test]
-fn automatic_nemotron_h_loads_complete_strict_fixture() {
-    let root = tempfile::tempdir().expect("temporary model root");
-    let config = NemotronHConfig {
+/// Builds the tiny Nemotron-H schedule used by the automatic-load fixtures.
+fn loadable_nemotron_config() -> NemotronHConfig {
+    NemotronHConfig {
         vocab_size: 16,
         hidden_size: 8,
         layers_block_type: vec![
@@ -1758,7 +1963,14 @@ fn automatic_nemotron_h_loads_complete_strict_fixture() {
         eos_token_id: Some(TokenIds::Many(vec![7, 6, 7])),
         pad_token_id: Some(TokenIds::One(0)),
         ..NemotronHConfig::default()
-    };
+    }
+}
+
+/// The Nemotron branch loads a complete heterogeneous hybrid schedule.
+#[test]
+fn automatic_nemotron_h_loads_complete_strict_fixture() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
     let contract = config
         .checkpoint_contract(NemotronHCheckpointOptions::default())
         .expect("valid Nemotron-H contract");
@@ -1796,11 +2008,9 @@ fn automatic_nemotron_h_loads_complete_strict_fixture() {
     assert_finite_forward(&loaded, config.vocab_size);
 }
 
-/// The encoder-decoder registry retains the same pass-two audit as causal loads.
-#[test]
-fn automatic_t5_load_retains_execution_stats() {
-    let root = tempfile::tempdir().expect("temporary model root");
-    let config = T5Config {
+/// A two-encoder-layer, one-decoder-layer gated-GELU T5 with untied embeddings.
+fn tiny_automatic_t5_config() -> T5Config {
+    T5Config {
         vocab_size: 13,
         d_model: 4,
         d_kv: 2,
@@ -1815,7 +2025,14 @@ fn automatic_t5_load_retains_execution_stats() {
         is_gated_act: None,
         tie_word_embeddings: false,
         ..T5Config::default()
-    };
+    }
+}
+
+/// The encoder-decoder registry retains the same pass-two audit as causal loads.
+#[test]
+fn automatic_t5_load_retains_execution_stats() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = tiny_automatic_t5_config();
     let contract = config
         .checkpoint_contract()
         .expect("valid tiny T5 contract");
@@ -1905,5 +2122,784 @@ fn automatic_flan_load_bundles_and_executes_real_weights() {
             .expect("F32 reference backend")
             .iter()
             .all(|value| value.is_finite())
+    );
+}
+
+/// NVIDIA's legacy bare `Infinity` literal loads through the automatic registry (AUTO-1).
+#[test]
+fn automatic_nemotron_h_accepts_legacy_infinity_literal() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .expect("valid Nemotron-H contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    let config_path = root.path().join("config.json");
+    let json = std::fs::read_to_string(&config_path).unwrap();
+    let legacy = json.replace(
+        "\"time_step_limit\":[0.0,null]",
+        "\"time_step_limit\":[0.0,Infinity]",
+    );
+    assert_ne!(legacy, json, "fixture must contain the unbounded limit");
+    std::fs::write(&config_path, legacy).unwrap();
+
+    let loaded = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("nvidia/tiny-nemotron-h-fixture", "legacy-literal"),
+        &Default::default(),
+    )
+    .expect("legacy Nemotron-H config must load like its family parser accepts it");
+    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+    let crate::models::AutoCausalConfigRef::NemotronH(parsed) = loaded.model().config() else {
+        panic!("Nemotron-H model must expose its configuration");
+    };
+    assert_eq!(parsed.time_step_limit, [Some(0.0), None]);
+}
+
+/// Sampling defaults follow the pinned Hugging Face `GenerationConfig` semantics (AUTO-2).
+#[test]
+fn sampling_defaults_follow_hugging_face_generation() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    for (json, vocabulary_size, top_k, top_p) in [
+        // Unset top_k means Hugging Face's default of 50.
+        (
+            json!({"do_sample": true, "temperature": 0.3, "top_p": 0.95}),
+            64,
+            Some(50),
+            Some(0.95),
+        ),
+        // The default and explicit values are clamped to the vocabulary.
+        (json!({"do_sample": true}), 16, Some(16), None),
+        (json!({"do_sample": true, "top_k": 9}), 8, Some(8), None),
+        // Zero disables top-k; top_p >= 1 disables nucleus filtering.
+        (
+            json!({"do_sample": true, "top_k": 0, "top_p": 1.0}),
+            64,
+            None,
+            None,
+        ),
+        (
+            json!({"do_sample": true, "top_k": null, "top_p": 1.5}),
+            64,
+            Some(50),
+            None,
+        ),
+        // Greedy decoding ignores every warper.
+        (
+            json!({"do_sample": false, "top_k": 5, "top_p": 0.5}),
+            64,
+            None,
+            None,
+        ),
+        (json!({}), 64, None, None),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let config = normalize_generation_defaults(root.path(), None, None, vocabulary_size, None)
+            .unwrap_or_else(|error| panic!("{json}: {error}"));
+        assert_eq!((config.top_k, config.top_p), (top_k, top_p), "{json}");
+    }
+    // Python's `json` writes NaN as a bare literal, which is not JSON: the file
+    // fails to parse before any sampling setting is interpreted.
+    std::fs::write(&path, br#"{"do_sample": true, "top_p": NaN}"#).unwrap();
+    let error = normalize_generation_defaults(root.path(), None, None, 8, None).unwrap_err();
+    assert!(matches!(error, Error::Json { .. }), "{error}");
+}
+
+/// A NaN `top_p` is kept so validation rejects it, rather than silently disabling nucleus sampling.
+///
+/// JSON cannot spell NaN, so the parsed configuration is built directly; this
+/// exercises the `top_p < 1` filter in `apply_local_generation_config`.
+#[test]
+fn nan_top_p_is_rejected_instead_of_disabling_nucleus_sampling() {
+    let applied = |top_p: f64| {
+        let local = LocalGenerationConfig {
+            do_sample: Some(true),
+            top_p: Some(top_p),
+            ..LocalGenerationConfig::default()
+        };
+        let mut config = GenerationConfig::default();
+        apply_local_generation_config(&mut config, &local, 64, GenerationConsumer::Causal).unwrap();
+        config
+    };
+    let config = applied(f64::NAN);
+    assert!(config.top_p.is_some_and(f64::is_nan));
+    let error = config.validate(64).unwrap_err();
+    assert!(
+        error.to_string().contains("top_p must be finite"),
+        "{error}"
+    );
+    // Values at or above one disable nucleus filtering, as Hugging Face's
+    // warper condition `top_p < 1.0` does.
+    for top_p in [1.0, 1.5, f64::INFINITY] {
+        let config = applied(top_p);
+        assert_eq!(config.top_p, None, "{top_p}");
+        config.validate(64).unwrap();
+    }
+    // Non-positive values are kept so validation rejects them, as Hugging Face's warper does.
+    for top_p in [0.0, -0.5, f64::NEG_INFINITY] {
+        let config = applied(top_p);
+        assert_eq!(config.top_p, Some(top_p));
+        assert!(config.validate(64).is_err(), "{top_p}");
+    }
+}
+
+/// Behavior-changing settings without an equivalent are reported, neutral ones are not.
+#[test]
+fn unsupported_generation_settings_are_reported_not_dropped() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "do_sample": false,
+            "num_beams": 4,
+            "max_length": 512,
+            "no_repeat_ngram_size": 3,
+            "min_p": 0.1,
+            "typical_p": 0.5,
+            "length_penalty": 1,
+            "bad_words_ids": [],
+            "suppress_tokens": null,
+            "renormalize_logits": false,
+            "num_return_sequences": 1,
+            "unknown_future_field": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let resolved = resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root.path(),
+        None,
+        None,
+        64,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        resolved.unsupported,
+        BTreeMap::from([
+            ("max_length".to_owned(), json!(512)),
+            ("num_beams".to_owned(), json!(4)),
+        ])
+    );
+    // Applied settings are not reported: the n-gram constraint is active, and
+    // greedy decoding ignores min-p exactly as Hugging Face does.
+    assert_eq!(resolved.config.no_repeat_ngram_size, 3);
+    assert_eq!(resolved.config.min_p, None);
+    // Sampling-only warpers matter once sampling is enabled.
+    std::fs::write(
+        &path,
+        br#"{"do_sample": true, "min_p": 0.1, "typical_p": 1.0, "epsilon_cutoff": 0.0003}"#,
+    )
+    .unwrap();
+    let resolved = resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root.path(),
+        None,
+        None,
+        64,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        resolved.unsupported.keys().collect::<Vec<_>>(),
+        ["epsilon_cutoff"]
+    );
+    assert_eq!(resolved.config.min_p, Some(0.1));
+    // Explicit defaults bypass the file and report nothing.
+    let explicit = GenerationConfig::default();
+    let resolved = resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root.path(),
+        None,
+        None,
+        64,
+        Some(&explicit),
+    )
+    .unwrap();
+    assert!(resolved.unsupported.is_empty());
+}
+
+/// `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` follow Hugging Face's processor rules.
+///
+/// Min-p is a sampling warper (ignored by greedy decoding); the n-gram and
+/// minimum-length constraints apply under every strategy, and zero or `null`
+/// disables them. A `min_new_tokens` above the length bound is clamped and
+/// reported (Hugging Face only warns); an out-of-range `min_p` fails
+/// validation, and negative counts are not valid JSON for the typed fields.
+#[test]
+fn generation_constraints_follow_hugging_face_processors() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let resolve = |json: serde_json::Value| {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        resolve_generation_defaults(
+            GenerationConsumer::Causal,
+            root.path(),
+            None,
+            None,
+            64,
+            None,
+        )
+    };
+    for (json, min_p, ngram, min_new) in [
+        (json!({"do_sample": true, "min_p": 0.05}), Some(0.05), 0, 0),
+        (json!({"do_sample": true, "min_p": 0.0}), Some(0.0), 0, 0),
+        (json!({"do_sample": false, "min_p": 0.05}), None, 0, 0),
+        (json!({"no_repeat_ngram_size": 3}), None, 3, 0),
+        (
+            json!({"do_sample": true, "no_repeat_ngram_size": 2}),
+            None,
+            2,
+            0,
+        ),
+        (json!({"no_repeat_ngram_size": 0}), None, 0, 0),
+        (
+            json!({"min_new_tokens": 4, "max_new_tokens": 8}),
+            None,
+            0,
+            4,
+        ),
+        (
+            json!({"min_new_tokens": null, "no_repeat_ngram_size": null, "min_p": null}),
+            None,
+            0,
+            0,
+        ),
+        // A minimum equal to the bound is reachable and applied as declared.
+        (
+            json!({"min_new_tokens": 8, "max_new_tokens": 8}),
+            None,
+            0,
+            8,
+        ),
+    ] {
+        let resolved = resolve(json.clone()).unwrap_or_else(|error| panic!("{json}: {error}"));
+        let config = &resolved.config;
+        assert_eq!(
+            (
+                config.min_p,
+                config.no_repeat_ngram_size,
+                config.min_new_tokens
+            ),
+            (min_p, ngram, min_new),
+            "{json}"
+        );
+        assert!(resolved.unsupported.is_empty(), "{json}");
+        crate::LogitsProcessor::<TestBackend>::new(config.clone(), 64, &Default::default())
+            .expect("resolved defaults build a logits processor");
+    }
+    // Hugging Face only warns about an unreachable minimum and suppresses EOS
+    // for the whole run; the clamped minimum generates the same tokens, and
+    // the declared value is reported because a larger bound would not restore it.
+    for (json, max_new_tokens) in [
+        (json!({"min_new_tokens": 300}), 256),
+        (json!({"min_new_tokens": 9, "max_new_tokens": 8}), 8),
+    ] {
+        let resolved = resolve(json.clone()).unwrap_or_else(|error| panic!("{json}: {error}"));
+        assert_eq!(resolved.config.max_new_tokens, max_new_tokens, "{json}");
+        assert_eq!(resolved.config.min_new_tokens, max_new_tokens, "{json}");
+        assert_eq!(
+            resolved.unsupported,
+            BTreeMap::from([("min_new_tokens".to_owned(), json["min_new_tokens"].clone())]),
+            "{json}"
+        );
+    }
+    let error = resolve(json!({"do_sample": true, "min_p": 1.5})).unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason) if reason == "min_p must be in [0, 1], found 1.5"),
+        "{error}"
+    );
+    for json in [
+        json!({"no_repeat_ngram_size": -1}),
+        json!({"min_new_tokens": -2}),
+    ] {
+        assert!(
+            matches!(resolve(json.clone()).unwrap_err(), Error::Json { .. }),
+            "{json}"
+        );
+    }
+}
+
+/// Seq2seq beam search reads none of the processor constraints, so they are reported, not applied.
+///
+/// Regression: these settings were once applied to the defaults of every
+/// automatic load, which hid them from a T5 bundle's unsupported report even
+/// though its beam search never reads [`GenerationConfig`]. Hugging Face beam
+/// search applies all three, so dropping them silently would diverge.
+#[test]
+fn seq2seq_defaults_report_processor_constraints_that_beam_search_ignores() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let resolve = |consumer, json: serde_json::Value| {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        resolve_generation_defaults(consumer, root.path(), None, None, 64, None)
+            .unwrap_or_else(|error| panic!("{json}: {error}"))
+    };
+    let declared = json!({
+        "do_sample": true,
+        "min_p": 0.05,
+        "no_repeat_ngram_size": 3,
+        "min_new_tokens": 300,
+        "num_beams": 4
+    });
+    let seq2seq = resolve(GenerationConsumer::Seq2SeqBeamSearch, declared.clone());
+    assert_eq!(
+        (
+            seq2seq.config.min_p,
+            seq2seq.config.no_repeat_ngram_size,
+            seq2seq.config.min_new_tokens
+        ),
+        (None, 0, 0)
+    );
+    assert_eq!(
+        seq2seq.unsupported,
+        BTreeMap::from([
+            ("do_sample".to_owned(), json!(true)),
+            ("min_new_tokens".to_owned(), json!(300)),
+            ("min_p".to_owned(), json!(0.05)),
+            ("no_repeat_ngram_size".to_owned(), json!(3)),
+            ("num_beams".to_owned(), json!(4)),
+        ])
+    );
+    // The same file applies every constraint to causal generation.
+    let causal = resolve(GenerationConsumer::Causal, declared);
+    assert_eq!(
+        (
+            causal.config.min_p,
+            causal.config.no_repeat_ngram_size,
+            causal.config.min_new_tokens
+        ),
+        (Some(0.05), 3, 256)
+    );
+    assert_eq!(
+        causal.unsupported.keys().collect::<Vec<_>>(),
+        ["min_new_tokens", "num_beams"]
+    );
+    // Neutral values (zero, null, unit penalties, and warpers under greedy
+    // decoding) are not reported.
+    for neutral in [
+        json!({"min_new_tokens": 0, "no_repeat_ngram_size": 0, "do_sample": false, "min_p": 0.0}),
+        json!({"min_new_tokens": null, "no_repeat_ngram_size": null, "min_p": null}),
+        json!({"do_sample": false, "min_p": 0.3, "temperature": 0.7, "top_k": 10, "top_p": 0.9}),
+        json!({"repetition_penalty": 1.0, "presence_penalty": 0.5}),
+    ] {
+        let resolved = resolve(GenerationConsumer::Seq2SeqBeamSearch, neutral.clone());
+        assert!(resolved.unsupported.is_empty(), "{neutral}");
+    }
+}
+
+/// Seq2seq loads leave sampling and the repetition penalty neutral and report them.
+///
+/// Regression for follow-up 170 (FU-BW): `repetition_penalty` and
+/// `do_sample` with its warpers were copied into the seq2seq defaults, which
+/// beam search never reads, and were not reported, although Hugging Face
+/// beam search applies `RepetitionPenaltyLogitsProcessor` and `do_sample`
+/// selects beam sampling.
+#[test]
+fn seq2seq_defaults_report_sampling_and_repetition_penalty() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let declared = json!({
+        "repetition_penalty": 1.3,
+        "presence_penalty": 0.5,
+        "do_sample": true,
+        "temperature": 0.7,
+        "top_k": 10,
+        "top_p": 0.9,
+        "seed": 7
+    });
+    std::fs::write(&path, serde_json::to_vec(&declared).unwrap()).unwrap();
+    let resolve = |consumer| {
+        resolve_generation_defaults(consumer, root.path(), None, None, 64, None).unwrap()
+    };
+    let seq2seq = resolve(GenerationConsumer::Seq2SeqBeamSearch);
+    let neutral = GenerationConfig::default();
+    assert_eq!(seq2seq.config.strategy, SamplingStrategy::Greedy);
+    assert_eq!(
+        (
+            seq2seq.config.repetition_penalty,
+            seq2seq.config.presence_penalty,
+            seq2seq.config.temperature,
+            seq2seq.config.top_k,
+            seq2seq.config.top_p,
+        ),
+        (
+            neutral.repetition_penalty,
+            neutral.presence_penalty,
+            neutral.temperature,
+            neutral.top_k,
+            neutral.top_p,
+        )
+    );
+    assert_eq!(seq2seq.config.seed, 7);
+    assert_eq!(
+        seq2seq.unsupported,
+        BTreeMap::from([
+            ("do_sample".to_owned(), json!(true)),
+            ("repetition_penalty".to_owned(), json!(1.3)),
+            ("temperature".to_owned(), json!(0.7)),
+            ("top_k".to_owned(), json!(10)),
+            ("top_p".to_owned(), json!(0.9)),
+        ])
+    );
+    // Causal generation applies every one of them and reports none.
+    let causal = resolve(GenerationConsumer::Causal);
+    assert_eq!(causal.config.strategy, SamplingStrategy::Sample);
+    assert_eq!(
+        (
+            causal.config.repetition_penalty,
+            causal.config.presence_penalty,
+            causal.config.temperature,
+            causal.config.top_k,
+            causal.config.top_p,
+        ),
+        (1.3, 0.5, 0.7, Some(10), Some(0.9))
+    );
+    assert!(causal.unsupported.is_empty(), "{:?}", causal.unsupported);
+    // Disabled warpers are not reported even while sampling.
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"do_sample": true, "temperature": 1.0, "top_k": 0, "top_p": 1.0}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resolve(GenerationConsumer::Seq2SeqBeamSearch).unsupported,
+        BTreeMap::from([("do_sample".to_owned(), json!(true))])
+    );
+}
+
+/// An automatic T5 load reports the n-gram and minimum-length constraints its beam search ignores.
+#[test]
+fn automatic_t5_load_reports_processor_constraints() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = tiny_automatic_t5_config();
+    let contract = config
+        .checkpoint_contract()
+        .expect("valid tiny T5 contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    std::fs::write(
+        root.path().join("generation_config.json"),
+        br#"{"no_repeat_ngram_size": 3, "min_new_tokens": 300}"#,
+    )
+    .unwrap();
+    let loaded = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("google/tiny-flan-fixture", "constraints"),
+        &Default::default(),
+    )
+    .expect("an unreachable minimum does not fail a seq2seq load");
+    assert_eq!(
+        loaded.unsupported_generation_settings(),
+        &BTreeMap::from([
+            ("min_new_tokens".to_owned(), json!(300)),
+            ("no_repeat_ngram_size".to_owned(), json!(3)),
+        ])
+    );
+    let defaults = loaded.generation_defaults();
+    assert_eq!(
+        (defaults.no_repeat_ngram_size, defaults.min_new_tokens),
+        (0, 0)
+    );
+}
+
+/// Automatic loads attach the unsupported-settings report to the bundle.
+#[test]
+fn automatic_loads_attach_unsupported_generation_settings() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .expect("valid Nemotron-H contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    std::fs::write(
+        root.path().join("generation_config.json"),
+        br#"{"max_new_tokens":5,"num_beams":2}"#,
+    )
+    .unwrap();
+    let loaded = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("nvidia/tiny-nemotron-h-fixture", "beams"),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.unsupported_generation_settings(),
+        &BTreeMap::from([("num_beams".to_owned(), json!(2))])
+    );
+}
+
+/// Every Llama-family `model_type` loads strictly through the one registry entry.
+#[test]
+fn llama_family_aliases_load_through_one_registry_entry() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_goldens");
+    for (case, model_type) in [
+        ("llama3", "llama"),
+        ("mistral-sliding", "mistral"),
+        ("qwen2", "qwen2"),
+        ("qwen3", "qwen3"),
+        ("smollm3", "smollm3"),
+        ("olmo2", "olmo2"),
+    ] {
+        let loaded = AutoCausalLm::<TestBackend>::load_local(
+            fixtures.join(case),
+            &fixture_options("fixture/tiny-goldens", case),
+            &Default::default(),
+        )
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(loaded.source().model_type(), model_type);
+        assert!(loaded.load_report().is_strictly_valid(), "{case}");
+        let model = loaded.model();
+        assert_eq!(model.family(), AutoCausalConfig::Llama);
+        assert_eq!(model.config().model_type(), "llama");
+        let crate::models::AutoCausalConfigRef::Llama(config) = model.config() else {
+            panic!("{case}: wrong registry variant");
+        };
+        assert_eq!(config.model_type, model_type);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &Default::default())
+            .unwrap();
+        let input = CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3, 4]], &Default::default()),
+            token_mask: None,
+            position_ids: None,
+        };
+        let logits = model
+            .prefill(input, &mut state, &ForwardOptions::default())
+            .unwrap()
+            .logits;
+        assert_eq!(logits.dims(), [1, 1, 96]);
+    }
+}
+
+/// A malformed `generation_config.json` stops causal and encoder-decoder loads with its error.
+#[test]
+fn malformed_generation_artifacts_stop_causal_and_seq2seq_loads() {
+    for config in [
+        serde_json::to_value(packed_muse_config()).unwrap(),
+        serde_json::to_value(tiny_automatic_t5_config()).unwrap(),
+    ] {
+        let root = tempfile::tempdir().expect("temporary model root");
+        write_auto_metadata(root.path(), &config);
+        std::fs::write(root.path().join("generation_config.json"), b"{").unwrap();
+        let expected = normalize_generation_defaults(root.path(), None, None, 16, None)
+            .expect_err("the artifact itself is malformed");
+        let options = fixture_options("fixture/generation", "generation");
+        let error = if config["model_type"] == "t5" {
+            AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err()
+        } else {
+            AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&expected),
+            "{error}"
+        );
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+}
+
+/// A Muse checkpoint holding only the multimodal namespace plans the multimodal contract.
+///
+/// The wrapped embedding alone selects the multimodal source, whose mapping
+/// renames it to the text target `model.embed_tokens.weight`; the strict plan
+/// then reports that target's shape, proving the wrapped source was mapped.
+#[test]
+fn wrapped_muse_namespaces_plan_the_multimodal_contract() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &packed_muse_config());
+    // Two wrapped tensors keep the two-layer fixture within the pre-contract
+    // tensor budget; the embedding is still the first mapped mismatch.
+    let names = [
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.norm.weight",
+    ];
+    let expected_tensors = names
+        .iter()
+        .map(|name| ExpectedTensor::new(*name, vec![1]))
+        .collect::<Vec<_>>();
+    let mut mappings = MappingPlan::default();
+    for name in names {
+        mappings.map(name, name);
+    }
+    write_contract_checkpoint(root.path(), &expected_tensors, &mappings);
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("fixture/muse", "muse"),
+        &Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::CheckpointPlan(CheckpointError::ShapeMismatch { tensor, .. })
+            if tensor == "model.embed_tokens.weight"),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "checkpoint error: shape mismatch for `model.embed_tokens.weight`: mapped [1], \
+         expected [128, 64]"
+    );
+}
+
+/// File name of the one shard in indexed automatic-load fixtures.
+const INDEXED_SHARD: &str = "model-00001-of-00001.safetensors";
+
+/// Moves a single-file fixture into the `INDEXED_SHARD` file.
+///
+/// Returns the index `weight_map` that assigns every tensor to that shard,
+/// and the shard's physical tensor bytes, which is the total a correct index
+/// declares.
+fn reshard_contract_checkpoint(root: &Path) -> (Map<String, Value>, u64) {
+    let single = root.join("model.safetensors");
+    let bytes = std::fs::read(&single).expect("single-file fixture");
+    let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let header_end = 8 + usize::try_from(header_len).unwrap();
+    let header: Map<String, Value> =
+        serde_json::from_slice(&bytes[8..header_end]).expect("fixture header");
+    let physical = u64::try_from(bytes.len() - header_end).unwrap();
+    std::fs::rename(&single, root.join(INDEXED_SHARD)).expect("rename fixture into a shard");
+    let weight_map = header
+        .keys()
+        .filter(|name| *name != "__metadata__")
+        .map(|name| (name.clone(), json!(INDEXED_SHARD)))
+        .collect();
+    (weight_map, physical)
+}
+
+/// Writes the standard shard index with `weight_map` and a declared `total_size`.
+fn write_shard_index(root: &Path, weight_map: &Map<String, Value>, total_size: u64) {
+    std::fs::write(
+        root.join("model.safetensors.index.json"),
+        serde_json::to_vec(&json!({
+            "metadata": {"total_size": total_size},
+            "weight_map": weight_map,
+        }))
+        .unwrap(),
+    )
+    .expect("index fixture");
+}
+
+/// Only a recorded repository and revision together select Nemotron-H's pinned accounting.
+///
+/// The fixture's index overstates its tensor bytes by four. Without a
+/// complete repository/revision pair, discovery uses the generic strict policy
+/// and reports the plain total-size mismatch. With both, the pinned NVIDIA
+/// Lightning policy is consulted instead, and it rejects the fixture because
+/// the supplied repository is not the pinned one. A correct total loads with
+/// complete provenance, so the index layout itself is valid.
+#[test]
+fn nemotron_applies_pinned_accounting_only_with_complete_provenance() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .expect("valid Nemotron-H contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    let (weight_map, physical) = reshard_contract_checkpoint(root.path());
+    write_shard_index(root.path(), &weight_map, physical + 4);
+    let load = |options: &AutoLoadOptions| {
+        AutoCausalLm::<TestBackend>::load_local(root.path(), options, &Default::default())
+    };
+
+    let generic = format!(
+        "checkpoint index declares {} tensor bytes, validated index entries describe {physical}",
+        physical + 4
+    );
+    let incomplete = [
+        (None, None),
+        (Some("nvidia/fixture"), None),
+        (None, Some("fixture-revision")),
+    ];
+    for (repository, revision) in incomplete {
+        let options = AutoLoadOptions {
+            load_tokenizer: false,
+            repository: repository.map(Into::into),
+            revision: revision.map(Into::into),
+            ..AutoLoadOptions::default()
+        };
+        let error = load(&options).map(|_| ()).unwrap_err();
+        assert!(
+            matches!(&error, Error::CheckpointPlan(cause) if cause.to_string() == generic),
+            "{repository:?} {revision:?}: {error}"
+        );
+    }
+
+    let complete = fixture_options("nvidia/fixture", "fixture-revision");
+    let error = load(&complete).map(|_| ()).unwrap_err();
+    assert!(
+        matches!(&error, Error::CheckpointPlan(cause) if cause.to_string()
+            == "checkpoint index total-size policy mismatch: supplied repository \
+                `nvidia/fixture` does not match pinned \
+                `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`"),
+        "{error}"
+    );
+
+    write_shard_index(root.path(), &weight_map, physical);
+    let loaded = load(&complete).expect("a correct index total loads");
+    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+}
+
+/// A tokenizer whose IDs outrun the model vocabulary fails the bundle after a complete load.
+#[cfg(feature = "tokenizers")]
+#[test]
+fn tokenizers_beyond_the_model_vocabulary_fail_the_bundle() {
+    use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
+
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_goldens/llama3");
+    let root = tempfile::tempdir().expect("temporary model root");
+    for file in ["config.json", "model.safetensors"] {
+        std::fs::copy(fixture.join(file), root.path().join(file)).unwrap();
+    }
+    let vocabulary = [("unknown".to_owned(), 0_u32), ("far".to_owned(), 4096_u32)]
+        .into_iter()
+        .collect();
+    let model = WordLevel::builder()
+        .vocab(vocabulary)
+        .unk_token("unknown".into())
+        .build()
+        .expect("word-level tokenizer");
+    Tokenizer::new(model)
+        .save(root.path().join("tokenizer.json"), false)
+        .expect("save tokenizer fixture");
+    let error = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &AutoLoadOptions::default(),
+        &Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Tokenizer(reason) if reason.contains("tokenizer emits ID 4096")),
+        "{error}"
     );
 }

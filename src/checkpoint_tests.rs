@@ -647,6 +647,130 @@ fn pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict() {
     assert!(plan.report.is_strictly_valid());
 }
 
+/// A pinned policy that fails authentication cannot excuse a defective index total.
+///
+/// Discovery consults the policy only after the declared and observed totals
+/// differ; every policy rejection is then returned verbatim, so a stale
+/// configuration digest or a sub-byte accounted tensor never yields a manifest.
+#[test]
+fn pinned_policy_rejections_fail_discovery_and_planning_revalidation() {
+    use sha2::{Digest, Sha256};
+
+    use super::accounting::{
+        DecimalLayerTensorSelector, PinnedAccountingTensor, PinnedControlFile,
+        PinnedIndexTotalSizePolicy,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let router = "backbone.layers.0.mixer.gate.weight";
+    let excluded = "mtp.layers.1.mixer.gate.weight";
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[
+            FixtureTensor::new(router, TensorDType::BF16, [1]),
+            FixtureTensor::new(excluded, TensorDType::BF16, [1]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[(router, "part.safetensors"), (excluded, "part.safetensors")],
+        Some(6),
+    );
+    let config = b"{}";
+    fs::write(temp.path().join("config.json"), config).unwrap();
+    let index = fs::read(temp.path().join("model.safetensors.index.json")).unwrap();
+    let policy = PinnedIndexTotalSizePolicy {
+        supplied_repository: "test/pinned".into(),
+        supplied_revision: "0123456789abcdef".into(),
+        expected_repository: "test/pinned".into(),
+        expected_revision: "0123456789abcdef".into(),
+        config: PinnedControlFile::new(
+            "config.json",
+            config.len() as u64,
+            format!("{:x}", Sha256::digest(config)),
+        ),
+        index: PinnedControlFile::new(
+            "model.safetensors.index.json",
+            index.len() as u64,
+            format!("{:x}", Sha256::digest(&index)),
+        ),
+        expected_physical_tensor_bytes: 4,
+        expected_declared_total_size: 6,
+        duplicated_tensor_selector: DecimalLayerTensorSelector::new(
+            "backbone.layers.",
+            ".mixer.gate.weight",
+        ),
+        duplicated_tensors: vec![PinnedAccountingTensor::new(
+            router,
+            TensorDType::BF16,
+            vec![1],
+        )],
+        excluded_tensors: vec![PinnedAccountingTensor::new(
+            excluded,
+            TensorDType::BF16,
+            vec![1],
+        )],
+    };
+
+    // A configuration file that no longer matches its pinned digest.
+    let mut stale = policy.clone();
+    stale.config.sha256 = "0".repeat(64);
+    let error = super::artifact::discover_checkpoint_with_index_total_size_policy(
+        temp.path(),
+        &LoadOptions::default(),
+        &stale,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, CheckpointError::IndexTotalSizePolicyMismatch { reason }
+            if reason.starts_with("configuration identity")),
+        "{error}"
+    );
+
+    // A public manifest edited to describe an accounted four-bit scalar cannot
+    // pass: the policy's own byte equation rejects the partial byte.
+    let manifest = super::artifact::discover_checkpoint_with_index_total_size_policy(
+        temp.path(),
+        &LoadOptions::default(),
+        &policy,
+    )
+    .unwrap();
+    let mut sub_byte_policy = policy.clone();
+    sub_byte_policy.excluded_tensors = vec![PinnedAccountingTensor::new(
+        excluded,
+        TensorDType::F4,
+        vec![1],
+    )];
+    let mut sub_byte_manifest = manifest.clone();
+    sub_byte_manifest.tensors.get_mut(excluded).unwrap().dtype = TensorDType::F4;
+    assert!(matches!(
+        super::artifact::validate_manifest_index_total_size_policy(
+            &sub_byte_manifest,
+            &sub_byte_policy
+        ),
+        Err(CheckpointError::MisalignedTensorStorage { .. })
+    ));
+
+    // A tampered shape whose element count overflows is an arithmetic error,
+    // never a wrapped count that could match a small recorded byte length.
+    let huge = vec![u64::MAX, 2];
+    let mut huge_policy = policy.clone();
+    huge_policy.excluded_tensors = vec![PinnedAccountingTensor::new(
+        excluded,
+        TensorDType::BF16,
+        huge.clone(),
+    )];
+    let mut huge_manifest = manifest.clone();
+    huge_manifest.tensors.get_mut(excluded).unwrap().shape = huge;
+    assert!(matches!(
+        super::artifact::validate_manifest_index_total_size_policy(&huge_manifest, &huge_policy),
+        Err(CheckpointError::ArithmeticOverflow {
+            context: "computing pinned accounting tensor elements"
+        })
+    ));
+}
+
 #[test]
 /// Explicit and unique nonstandard indexes can omit optional total-size metadata.
 fn explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size() {
@@ -1457,7 +1581,8 @@ fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
     );
     assert!(matches!(
         discover_checkpoint(temp.path(), &LoadOptions::default()),
-        Err(CheckpointError::InvalidMapping { .. })
+        Err(CheckpointError::InvalidTensorName { shard, tensor, .. })
+        if shard == "model.safetensors" && tensor.is_empty()
     ));
 
     let temp = TempDir::new().unwrap();
@@ -1467,38 +1592,216 @@ fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
         br#"{"huge":{"dtype":"F16","shape":[18446744073709551615,2],"data_offsets":[0,0]}}"#,
         0,
     );
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
     assert!(matches!(
-        discover_checkpoint(temp.path(), &LoadOptions::default()),
-        Err(CheckpointError::ArithmeticOverflow { .. })
+        &error,
+        CheckpointError::InvalidTensorHeader { shard, tensor, source }
+        if shard == "model.safetensors" && tensor == "huge"
+            && matches!(**source, CheckpointError::ArithmeticOverflow { .. })
     ));
+    assert!(error.to_string().contains("`huge` in `model.safetensors`"));
+
+    // A trailing zero does not excuse an overflowing prefix: the pinned
+    // SafeTensors validator multiplies left to right and rejects this header.
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"empty":{"dtype":"F32","shape":[18446744073709551615,2,0],"data_offsets":[0,0]}}"#,
+        0,
+    );
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(matches!(
+        &error,
+        CheckpointError::InvalidTensorHeader { shard, tensor, source }
+        if shard == "model.safetensors" && tensor == "empty"
+            && matches!(**source, CheckpointError::ArithmeticOverflow { .. })
+    ));
+
+    // A zero before any large dimension keeps every prefix at zero; the
+    // reference accepts it as an empty tensor, and so does discovery.
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"empty":{"dtype":"F32","shape":[0,18446744073709551615,2],"data_offsets":[0,0]}}"#,
+        0,
+    );
+    let inventory = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert_eq!(inventory.tensor("empty").unwrap().byte_len, 0);
+}
+
+/// A malformed header, its data size, and a predicate on the wrapped inner error.
+type HeaderCase = (&'static [u8], usize, fn(&CheckpointError) -> bool);
+
+/// Header-entry failures name their shard and tensor around the violated rule.
+#[test]
+fn header_entry_errors_name_their_shard_and_tensor() {
+    let cases: [HeaderCase; 3] = [
+        (
+            br#"{"w":{"dtype":"F8_E4M3FNUZ","shape":[1],"data_offsets":[0,1]}}"#,
+            1,
+            |error| matches!(error, CheckpointError::UnsupportedDType { dtype } if dtype == "F8_E4M3FNUZ"),
+        ),
+        (
+            br#"{"w":{"dtype":"F4","shape":[3],"data_offsets":[0,2]}}"#,
+            2,
+            |error| {
+                matches!(
+                    error,
+                    CheckpointError::MisalignedTensorStorage { elements: 3, .. }
+                )
+            },
+        ),
+        (
+            br#"{"w":{"dtype":"F32","shape":[2],"data_offsets":[0,4]}}"#,
+            4,
+            |error| {
+                matches!(
+                    error,
+                    CheckpointError::TensorByteLengthMismatch {
+                        expected: 8,
+                        actual: 4,
+                        ..
+                    }
+                )
+            },
+        ),
+    ];
+    for (header, data_bytes, inner) in cases {
+        let temp = TempDir::new().unwrap();
+        write_raw_shard(temp.path(), "model.safetensors", header, data_bytes);
+        let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+        let CheckpointError::InvalidTensorHeader {
+            shard,
+            tensor,
+            source,
+        } = &error
+        else {
+            panic!("expected contextual header error, found {error}");
+        };
+        assert_eq!(
+            (shard.as_str(), tensor.as_str()),
+            ("model.safetensors", "w")
+        );
+        assert!(inner(source), "unexpected inner error {source}");
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}
+
+/// Discovers a one-shard checkpoint and returns its `InvalidDataOffsets` tensor and reason.
+fn invalid_data_offsets(header: &[u8], data_bytes: usize) -> (String, String) {
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(temp.path(), "model.safetensors", header, data_bytes);
+    match discover_checkpoint(temp.path(), &LoadOptions::default()) {
+        Err(CheckpointError::InvalidDataOffsets {
+            tensor,
+            shard,
+            reason,
+        }) => {
+            assert_eq!(shard, "model.safetensors");
+            (tensor, reason)
+        }
+        other => panic!("expected InvalidDataOffsets, found {other:?}"),
+    }
 }
 
 #[test]
 /// Reversed payload ranges and ranges outside the file produce distinct diagnostics.
 fn reversed_and_out_of_file_ranges_are_distinguished() {
-    let temp = TempDir::new().unwrap();
-    write_raw_shard(
-        temp.path(),
-        "model.safetensors",
-        br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[2,0]}}"#,
-        2,
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[2,0]}}"#,
+            2,
+        ),
+        ("a".to_owned(), "end 0 precedes start 2".to_owned())
     );
-    assert!(matches!(
-        discover_checkpoint(temp.path(), &LoadOptions::default()),
-        Err(CheckpointError::InvalidDataOffsets { .. })
-    ));
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
+            2,
+        ),
+        (
+            "a".to_owned(),
+            "end 4 exceeds data section size 2".to_owned()
+        )
+    );
+}
 
+#[test]
+/// An out-of-section range is reported at the first violation in byte-offset order, not name order.
+///
+/// `a` sorts first by name but lies after `b` in the data section, and both
+/// end past its two bytes. The verified tiling walks ranges in offset order,
+/// so `b`, which the walk reaches first, is the reported tensor.
+fn out_of_section_ranges_report_the_first_violation_in_offset_order() {
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[4,6]},"b":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
+            2,
+        ),
+        ("b".to_owned(), "end 4 exceeds data section size 2".to_owned())
+    );
+}
+
+#[test]
+/// A gap between consecutive ranges and an uncovered data tail are rejected with their own reasons.
+fn gaps_and_uncovered_data_tails_are_rejected() {
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]},"b":{"dtype":"F16","shape":[1],"data_offsets":[4,6]}}"#,
+            6,
+        ),
+        (
+            "b".to_owned(),
+            "range starts at 4, next contiguous byte is 2".to_owned()
+        )
+    );
+    assert_eq!(
+        invalid_data_offsets(
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#,
+            6,
+        ),
+        (
+            "<end-of-data>".to_owned(),
+            "tensor ranges cover 2 bytes, data section has 6".to_owned()
+        )
+    );
+}
+
+#[test]
+/// Every per-entry header error is reported before any cross-tensor layout error.
+///
+/// `a` has a self-consistent range that ends past the data section, while `b`
+/// declares a range whose length disagrees with its shape. The per-entry byte
+/// length check covers every entry before the tiling sees any range, so `b`'s
+/// length mismatch wins even though `a` sorts first by name and by offset.
+fn header_entry_errors_precede_layout_errors() {
     let temp = TempDir::new().unwrap();
     write_raw_shard(
         temp.path(),
         "model.safetensors",
-        br#"{"a":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
-        2,
+        br#"{"a":{"dtype":"F16","shape":[4],"data_offsets":[0,8]},"b":{"dtype":"F16","shape":[1],"data_offsets":[8,12]}}"#,
+        4,
     );
-    assert!(matches!(
-        discover_checkpoint(temp.path(), &LoadOptions::default()),
-        Err(CheckpointError::InvalidDataOffsets { .. })
-    ));
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            CheckpointError::InvalidTensorHeader { shard, tensor, source }
+                if shard == "model.safetensors"
+                    && tensor == "b"
+                    && matches!(
+                        source.as_ref(),
+                        CheckpointError::TensorByteLengthMismatch {
+                            expected: 2,
+                            actual: 4,
+                            ..
+                        }
+                    )
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1852,7 +2155,23 @@ fn malformed_split_and_concatenate_operations_are_rejected() {
     bad_split.split("a", 0, [("x".into(), 1), ("y".into(), 2)]);
     assert!(matches!(
         build_load_plan(&manifest, &expected, &bad_split, &LoadOptions::default()),
-        Err(CheckpointError::InvalidMapping { .. })
+        Err(CheckpointError::InvalidMapping { message })
+            if message == "split sections for `a` sum to 3, axis 0 has length 2"
+    ));
+    // Section lengths whose running sum wraps `u64` are an arithmetic error,
+    // never a wrapped total that could accidentally equal the axis length.
+    let mut wrapping_split = MappingPlan::new();
+    wrapping_split.split("a", 0, [("x".into(), u64::MAX), ("y".into(), 3)]);
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &wrapping_split,
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::ArithmeticOverflow {
+            context: "summing split section lengths"
+        })
     ));
 
     let expected = [ExpectedTensor::new("joined", [4, 3])];
@@ -2623,7 +2942,7 @@ fn checkpoint_contract_missing_second_shard_keeps_partial_report_then_retries() 
     assert_eq!(plan.report, original_report);
 }
 
-/// A malformed preferred index must not silently select another valid checkpoint.
+/// Two standard artifacts are ambiguous; neither a malformed nor a repaired index is preferred silently.
 #[test]
 fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair() {
     let temp = TempDir::new().unwrap();
@@ -2640,7 +2959,17 @@ fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair
     let index = temp.path().join("model.safetensors.index.json");
     fs::write(&index, br#"{"weight_map": ["not-an-object"]}"#).unwrap();
     let before = fs::read(&index).unwrap();
-    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    let ambiguous = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(matches!(
+        &ambiguous,
+        CheckpointError::AmbiguousArtifacts { candidates }
+        if candidates == &["model.safetensors", "model.safetensors.index.json"]
+    ));
+    let index_only = LoadOptions {
+        artifact: ArtifactSelection::Index("model.safetensors.index.json".into()),
+        ..LoadOptions::default()
+    };
+    let error = discover_checkpoint(temp.path(), &index_only).unwrap_err();
     assert_unique_map_type_error(error, "checkpoint index", &index, "sequence", before.len());
     let single = discover_checkpoint(
         temp.path(),
@@ -2655,7 +2984,11 @@ fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair
     assert_eq!(fs::read(&index).unwrap(), before);
 
     write_index(temp.path(), &[("indexed", "part.safetensors")], Some(4));
-    let repaired = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::AmbiguousArtifacts { .. })
+    ));
+    let repaired = discover_checkpoint(temp.path(), &index_only).unwrap();
     assert!(matches!(repaired.source, ArtifactSource::Index { .. }));
     assert!(repaired.tensor("indexed").is_some());
     assert!(repaired.tensor("single").is_none());
@@ -2664,7 +2997,7 @@ fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair
         &repaired,
         &expected,
         &MappingPlan::identity(&expected),
-        &LoadOptions::default(),
+        &index_only,
     )
     .unwrap();
     let mut sink = CheckpointContractSink::default();
@@ -2672,6 +3005,82 @@ fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair
     assert_eq!(outcome.report.applied, ["indexed"]);
     assert!(outcome.report.is_strictly_valid());
     assert_eq!(sink.events, ["write:indexed"]);
+}
+
+/// A standard index that names only `model.safetensors` agrees with it and is accepted.
+#[test]
+fn auto_discovery_accepts_an_index_that_names_only_the_single_file() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[
+            FixtureTensor::new("a", TensorDType::F32, [2]),
+            FixtureTensor::new("b", TensorDType::F16, [3]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[("a", "model.safetensors"), ("b", "model.safetensors")],
+        Some(14),
+    );
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(
+        &manifest.source,
+        ArtifactSource::Index { relative_path, declared_total_size: Some(14), .. }
+        if relative_path == "model.safetensors.index.json"
+    ));
+    assert_eq!(manifest.shards.len(), 1);
+    assert_eq!(manifest.shards[0].relative_path, "model.safetensors");
+    assert!(manifest.tensor("a").is_some() && manifest.tensor("b").is_some());
+
+    // The index is still validated against the file it names.
+    write_index(temp.path(), &[("a", "model.safetensors")], None);
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::IndexMismatch { tensor, .. }) if tensor == "b"
+    ));
+}
+
+/// Both standard artifacts stay ambiguous unless the index names exactly the single file.
+#[test]
+fn auto_discovery_rejects_indexes_that_do_not_name_only_the_single_file() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F32, [1])],
+    );
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("b", TensorDType::F32, [1])],
+    );
+    let ambiguous = |temp: &TempDir| {
+        matches!(
+            discover_checkpoint(temp.path(), &LoadOptions::default()),
+            Err(CheckpointError::AmbiguousArtifacts { candidates })
+            if candidates == ["model.safetensors", "model.safetensors.index.json"]
+        )
+    };
+    write_index(
+        temp.path(),
+        &[("a", "model.safetensors"), ("b", "part.safetensors")],
+        None,
+    );
+    assert!(ambiguous(&temp), "an index that also names another shard");
+    write_index(temp.path(), &[], None);
+    assert!(ambiguous(&temp), "an empty weight_map");
+    let mut options = LoadOptions::default();
+    write_index(temp.path(), &[("a", "model.safetensors")], None);
+    options.limits.max_index_bytes = 1;
+    assert!(
+        matches!(
+            discover_checkpoint(temp.path(), &options),
+            Err(CheckpointError::AmbiguousArtifacts { .. })
+        ),
+        "an index over the size limit"
+    );
 }
 
 proptest! {
@@ -2760,4 +3169,229 @@ fn checkpoint_standards_duplicate_resolved_alias_is_rejected_before_planning() {
     );
     assert_eq!(manifest.tensors, before.tensors);
     assert_eq!(manifest.tensor_bytes, before.tensor_bytes);
+}
+
+/// An alias declared before a primary operation on the same target still collides.
+#[test]
+fn alias_before_primary_target_is_a_collision_for_every_operation() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("embed", TensorDType::F32, [2, 2]),
+        FixtureTensor::new("head_source", TensorDType::F32, [2, 2]),
+        FixtureTensor::new("fused", TensorDType::F32, [4, 2]),
+        FixtureTensor::new("left", TensorDType::F32, [1, 2]),
+        FixtureTensor::new("right", TensorDType::F32, [1, 2]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("embedding", [2, 2]),
+        ExpectedTensor::new("head", [2, 2]),
+        ExpectedTensor::new("other", [2, 2]),
+    ];
+    let operations: [fn(&mut MappingPlan); 3] = [
+        |plan| {
+            plan.map("head_source", "head");
+        },
+        |plan| {
+            plan.split(
+                "fused",
+                0,
+                [("head".to_owned(), 2), ("other".to_owned(), 2)],
+            );
+        },
+        |plan| {
+            plan.concatenate(["left".to_owned(), "right".to_owned()], "head", 0);
+        },
+    ];
+    for primary in operations {
+        let mut mappings = MappingPlan::new();
+        mappings
+            .map("embed", "embedding")
+            .alias("embedding", "head");
+        primary(&mut mappings);
+        assert!(matches!(
+            build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default()),
+            Err(CheckpointError::MappingTargetCollision { tensor }) if tensor == "head"
+        ));
+    }
+}
+
+/// Casts the executor cannot perform are rejected while planning, not at execution.
+#[test]
+fn planner_rejects_float_casts_outside_the_runtime_formats() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("fp8", TensorDType::F8_E4M3, [4]),
+        FixtureTensor::new("half", TensorDType::BF16, [4]),
+    ]);
+    let generic = [
+        ExpectedTensor::new("fp8", [4]),
+        ExpectedTensor::new("half", [4]),
+    ];
+    let identity = MappingPlan::identity(&generic);
+    let cast_to_fp8 = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F8_E4M3),
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(&manifest, &generic, &identity, &cast_to_fp8),
+        Err(CheckpointError::InvalidMapping { message }) if message.contains("castable")
+    ));
+    let cast_fp8_source = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::BF16),
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(&manifest, &generic, &identity, &cast_fp8_source),
+        Err(CheckpointError::UnsupportedDTypeConversion {
+            source_dtype: TensorDType::F8_E4M3,
+            target_dtype: TensorDType::BF16
+        })
+    ));
+    let typed = [
+        ExpectedTensor::new("fp8", [4]).with_dtype(TensorDType::BF16),
+        ExpectedTensor::new("half", [4]),
+    ];
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &typed,
+            &MappingPlan::identity(&typed),
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::UnsupportedDTypeConversion {
+            source_dtype: TensorDType::F8_E4M3,
+            target_dtype: TensorDType::BF16
+        })
+    ));
+    // FP8 storage loads unchanged when no conversion is requested.
+    let plan = build_load_plan(&manifest, &generic, &identity, &LoadOptions::default()).unwrap();
+    assert!(plan.report.dtype_converted.is_empty());
+}
+
+/// A nested index resolves co-located shards and records root-relative shard paths.
+#[test]
+fn nested_index_resolves_shards_beside_it() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "text_encoder/part-1.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F32, [2])],
+    );
+    write_shard(
+        temp.path(),
+        "text_encoder/part-2.safetensors",
+        &[FixtureTensor::new("b", TensorDType::F16, [3])],
+    );
+    let index = json!({
+        "metadata": {"total_size": 14},
+        "weight_map": {"a": "part-1.safetensors", "b": "part-2.safetensors"},
+    });
+    fs::write(
+        temp.path()
+            .join("text_encoder/model.safetensors.index.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+    let options = LoadOptions {
+        artifact: ArtifactSelection::Index("text_encoder/model.safetensors.index.json".into()),
+        ..LoadOptions::default()
+    };
+    let manifest = discover_checkpoint(temp.path(), &options).unwrap();
+    assert_eq!(
+        manifest
+            .shards
+            .iter()
+            .map(|shard| shard.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "text_encoder/part-1.safetensors",
+            "text_encoder/part-2.safetensors"
+        ]
+    );
+    assert_eq!(
+        manifest.tensor("b").unwrap().shard,
+        "text_encoder/part-2.safetensors"
+    );
+    let expected = [ExpectedTensor::new("a", [2]), ExpectedTensor::new("b", [3])];
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    let mut sink = CheckpointContractSink::default();
+    let outcome = execute_local_load_plan(&manifest, &plan, &mut sink).unwrap();
+    assert_eq!(outcome.report.applied, ["a", "b"]);
+    assert_eq!(outcome.stats.source.shard_opens, 2);
+}
+
+/// Shard names in a nested index cannot climb out of the index directory.
+#[test]
+fn nested_index_shard_names_must_be_normal_relative_paths() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "outside.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F32, [1])],
+    );
+    fs::create_dir_all(temp.path().join("nested")).unwrap();
+    for shard in [
+        "../outside.safetensors",
+        "/outside.safetensors",
+        "a\\b.safetensors",
+    ] {
+        let index = json!({"weight_map": {"a": shard}});
+        fs::write(
+            temp.path().join("nested/model.safetensors.index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let options = LoadOptions {
+            artifact: ArtifactSelection::Index("nested/model.safetensors.index.json".into()),
+            ..LoadOptions::default()
+        };
+        assert!(
+            matches!(
+                discover_checkpoint(temp.path(), &options),
+                Err(CheckpointError::UnsafeRelativePath { path, .. }) if path == shard
+            ),
+            "{shard} escaped the index directory"
+        );
+    }
+}
+
+/// The tight staging figure never exceeds the conservative planned bound.
+#[test]
+fn required_staging_is_the_largest_operation_and_within_the_planned_bound() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("cast", TensorDType::BF16, [8]),
+        FixtureTensor::new("widen", TensorDType::BF16, [4]),
+        FixtureTensor::new("matrix", TensorDType::F32, [2, 3]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("cast", [8]).with_dtype(TensorDType::F16),
+        ExpectedTensor::new("widen", [4]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("matrix", [3, 2]),
+    ];
+    let mut mappings = MappingPlan::new();
+    mappings
+        .map("cast", "cast")
+        .map("widen", "widen")
+        .transpose_2d("matrix", "matrix");
+    let plan = build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default()).unwrap();
+    let staging = |target: &str| {
+        plan.tensors
+            .iter()
+            .find(|tensor| tensor.target == target)
+            .unwrap()
+            .staging_bytes()
+            .unwrap()
+    };
+    // BF16 -> F16 converts in place: only the 16-byte source is staged.
+    assert_eq!(staging("cast"), 16);
+    // BF16 -> F32 needs the 8-byte source plus a 16-byte output.
+    assert_eq!(staging("widen"), 24);
+    // The transpose holds the 24-byte source and a 24-byte output.
+    assert_eq!(staging("matrix"), 48);
+    assert_eq!(plan.required_host_staging_bytes().unwrap(), 48);
+    assert!(plan.required_host_staging_bytes().unwrap() <= plan.memory.peak_host_staging_bytes);
 }

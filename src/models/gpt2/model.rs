@@ -12,34 +12,63 @@
 //!
 //! # Precision and visibility
 //!
-//! Shared eager attention requests F32 softmax; weights and residuals retain their
-//! backend dtype. Configuration chooses exact or tanh GELU explicitly. Causality
-//! and padding are independent: padding excludes keys, while padded queries still
-//! execute. Every batch row needs a valid token; physical positions include padding.
-//! There is no decode cache or implicit dropout. The final readout is `LN(z) E^T`,
-//! reusing the single registered token embedding `E` without a second weight owner.
+//! Attention defaults to [`AttentionPrecisionMode::EagerFp32Softmax`], which
+//! materializes the score plane, runs the softmax in F32, and exposes the
+//! `scores` and `pattern` hook points that interpretability work needs.
+//! [`Gpt2Model::set_attention_precision`] switches every block to
+//! [`AttentionPrecisionMode::BackendDefault`], the backend's fused or flash
+//! kernel, which is faster and lighter but has no score or pattern points.
+//! Weights and residuals retain their backend dtype. Configuration chooses
+//! exact or tanh GELU explicitly. Causality and padding are independent:
+//! padding excludes keys, while padded queries still execute. Every batch row
+//! needs a valid token; physical positions include padding. There is no decode
+//! cache or implicit dropout. The final readout is `LN(z) E^T`, reusing the
+//! single registered token embedding `E` without a second weight owner.
+//!
+//! # Initialization
+//!
+//! Random parameters follow GPT-2 ([`Gpt2Config::init_policy`]): `N(0, s^2)`
+//! embeddings and projections with `s = initializer_range`, zero biases, and
+//! `s / sqrt(2 * n_layer)` for the residual-writing `o_proj` and `down_proj`.
+//! They are constructed lazily, so loading a checkpoint never samples them.
 
 use burn::{
-    module::Module,
+    module::{Initializer, Module},
     nn::{
         Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, LinearLayout,
     },
-    tensor::{ElementConversion, Int, Tensor, backend::Backend},
+    tensor::{Tensor, backend::Backend},
 };
 
 use crate::{
-    CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result,
+    CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::TokenMask,
     attention::{
         AttentionPrecisionMode, GroupedQueryAttention, GroupedQueryAttentionConfig,
         padding_attention_mask,
     },
-    feed_forward::{DenseFeedForward, apply_activation},
+    feed_forward::DenseFeedForward,
     intervention::{Hooks, Layer, PointInfo, Stack},
     operations,
 };
 
 use super::Gpt2Config;
+use crate::models::shared::{
+    ImplicitPositions, InputContract, InputNames, ValidatedInput, ensure_same_device,
+    select_hidden, validate_input, validate_nonempty_mask,
+};
+
+mod experiment;
+
+/// Tensor names reported by GPT-2 input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "gpt2.token_ids",
+    token_mask: "gpt2.token_mask",
+    position_ids: "gpt2.position_ids",
+};
+
+/// Owner named when a tensor is on another device than the weights.
+const PARAMETERS: &str = "GPT-2 parameters";
 
 // Editable block equations and intermediate activation boundaries.
 
@@ -58,18 +87,28 @@ pub struct Gpt2Block<B: Backend> {
     pub causal: bool,
 }
 
-/// Creates checkpoint-native `[input, output]` GPT-2 Conv1D projections.
-fn linear<B: Backend>(input: usize, output: usize, device: &B::Device) -> Linear<B> {
-    operations::init_linear(
+/// Creates a checkpoint-native `[input, output]` GPT-2 Conv1D projection.
+///
+/// Weights draw `N(0, std^2)` and the bias is zero, as in Hugging Face
+/// `GPT2PreTrainedModel._init_weights`. Both parameters stay lazy until first
+/// use, so a checkpoint load replaces them without sampling.
+fn linear<B: Backend>(input: usize, output: usize, std: f64, device: &B::Device) -> Linear<B> {
+    let mut projection = operations::init_linear(
         &LinearConfig::new(input, output)
             .with_bias(true)
-            .with_layout(LinearLayout::Row),
+            .with_layout(LinearLayout::Row)
+            .with_initializer(Initializer::Normal { mean: 0.0, std }),
         device,
-    )
+    );
+    projection.bias = Some(Initializer::Zeros.init([output], device));
+    projection
 }
 
 impl<B: Backend> Gpt2Block<B> {
     /// Builds a randomly initialized block with its zero-based attention scaling index.
+    ///
+    /// Parameters follow [`Gpt2Config::init_policy`]; attention starts in the
+    /// eager, fully hookable precision mode.
     pub fn init(config: &Gpt2Config, index: usize, device: &B::Device) -> Result<Self> {
         config.validate()?;
         let mut attention_config = GroupedQueryAttentionConfig::new(
@@ -96,10 +135,11 @@ impl<B: Backend> Gpt2Block<B> {
         let mut attention = attention_config.init(device)?;
         // HF Conv1D is already [input, output]. Row layout preserves that
         // parameter/record convention; importing must not transpose it again.
-        attention.q_proj = linear(config.n_embd, config.n_embd, device);
-        attention.k_proj = linear(config.n_embd, config.n_embd, device);
-        attention.v_proj = linear(config.n_embd, config.n_embd, device);
-        attention.o_proj = linear(config.n_embd, config.n_embd, device);
+        let (std, residual_std) = (config.initializer_range, config.residual_projection_std());
+        attention.q_proj = linear(config.n_embd, config.n_embd, std, device);
+        attention.k_proj = linear(config.n_embd, config.n_embd, std, device);
+        attention.v_proj = linear(config.n_embd, config.n_embd, std, device);
+        attention.o_proj = linear(config.n_embd, config.n_embd, residual_std, device);
         let norm = || {
             LayerNormConfig::new(config.n_embd)
                 .with_epsilon(config.layer_norm_epsilon)
@@ -111,12 +151,45 @@ impl<B: Backend> Gpt2Block<B> {
             attention,
             mlp_norm: norm(),
             mlp: DenseFeedForward {
-                up_proj: linear(config.n_embd, config.intermediate_size()?, device),
-                down_proj: linear(config.intermediate_size()?, config.n_embd, device),
+                up_proj: linear(config.n_embd, config.intermediate_size()?, std, device),
+                down_proj: linear(
+                    config.intermediate_size()?,
+                    config.n_embd,
+                    residual_std,
+                    device,
+                ),
                 activation: config.activation_function.activation(),
             },
             causal: config.causal,
         })
+    }
+
+    /// Lists the points block `index` emits, in execution order.
+    ///
+    /// Scores and patterns appear only in the eager attention precision mode.
+    fn activation_points(&self, index: usize) -> Vec<PointInfo> {
+        let layer = Layer::decoder(index);
+        let attention = layer.self_attention();
+        let mut points = vec![
+            layer.residual_pre().info(),
+            layer.attention_input().info(),
+            attention.query().info(),
+            attention.key().info(),
+            attention.value().info(),
+        ];
+        if self.attention.precision_mode == AttentionPrecisionMode::EagerFp32Softmax {
+            points.extend([attention.scores().info(), attention.pattern().info()]);
+        }
+        points.extend([
+            attention.head_context().info(),
+            layer.attention_output().info(),
+            layer.mlp_input().info(),
+            layer.mlp_pre_activation().info(),
+            layer.mlp_activation().info(),
+            layer.mlp_output().info(),
+            layer.residual_post().info(),
+        ]);
+        points
     }
 
     /// Runs this block on `[batch, token, channel]` states, without embedding or readout.
@@ -126,7 +199,16 @@ impl<B: Backend> Gpt2Block<B> {
         hidden: Tensor<B, 3>,
         mask: Option<&TokenMask<B>>,
     ) -> Result<Tensor<B, 3>> {
-        validate_mask(mask, hidden.dims()[0], hidden.dims()[1], &hidden.device())?;
+        let [batch, sequence, _] = hidden.dims();
+        if let Some(mask) = mask {
+            ensure_same_device(
+                INPUT_NAMES.token_mask,
+                &mask.as_tensor().device(),
+                &hidden.device(),
+                "the GPT-2 hidden states",
+            )?;
+        }
+        validate_nonempty_mask(mask, batch, sequence, INPUT_NAMES.token_mask)?;
         self.forward_inner(hidden, mask, 0, None)
     }
 
@@ -179,20 +261,9 @@ impl<B: Backend> Gpt2Block<B> {
         let hidden = residual + emit(&mut hooks, layer.attention_output(), mixed)?;
         let residual = hidden.clone();
         let normalized = emit(&mut hooks, layer.mlp_input(), self.mlp_norm.forward(hidden))?;
-        let mixed = if hooks.is_some() {
-            let projected = emit(
-                &mut hooks,
-                layer.mlp_pre_activation(),
-                operations::linear(normalized, &self.mlp.up_proj)?,
-            )?;
-            let activated = emit(
-                &mut hooks,
-                layer.mlp_activation(),
-                apply_activation(projected, self.mlp.activation),
-            )?;
-            operations::linear(activated, &self.mlp.down_proj)?
-        } else {
-            self.mlp.forward(normalized)?
+        let mixed = match hooks.as_deref_mut() {
+            Some(hooks) => self.mlp.forward_with_hooks(normalized, layer, hooks)?,
+            None => self.mlp.forward(normalized)?,
         };
         let hidden = residual + emit(&mut hooks, layer.mlp_output(), mixed)?;
         emit(&mut hooks, layer.residual_post(), hidden)
@@ -228,12 +299,21 @@ pub struct Gpt2Model<B: Backend> {
 
 impl<B: Backend> Gpt2Model<B> {
     /// Constructs random parameters; loading pretrained values is a separate operation.
+    ///
+    /// Parameters follow [`Gpt2Config::init_policy`] and stay lazy until first use.
     pub fn init(config: Gpt2Config, device: &B::Device) -> Result<Self> {
         config.validate()?;
+        let embedding = |rows: usize| {
+            EmbeddingConfig::new(rows, config.n_embd)
+                .with_initializer(Initializer::Normal {
+                    mean: 0.0,
+                    std: config.initializer_range,
+                })
+                .init(device)
+        };
         Ok(Self {
-            token_embedding: EmbeddingConfig::new(config.vocab_size, config.n_embd).init(device),
-            position_embedding: EmbeddingConfig::new(config.n_positions, config.n_embd)
-                .init(device),
+            token_embedding: embedding(config.vocab_size),
+            position_embedding: embedding(config.n_positions),
             layers: (0..config.n_layer)
                 .map(|index| Gpt2Block::init(&config, index, device))
                 .collect::<Result<_>>()?,
@@ -245,32 +325,32 @@ impl<B: Backend> Gpt2Model<B> {
         })
     }
 
+    /// Sets every block's attention precision mode.
+    ///
+    /// [`AttentionPrecisionMode::EagerFp32Softmax`] (the default) exposes
+    /// score and pattern hook points; [`AttentionPrecisionMode::BackendDefault`]
+    /// runs the backend's fused attention kernel without them. The catalog of
+    /// [`Self::activation_points`] follows each block's mode.
+    pub fn set_attention_precision(&mut self, mode: AttentionPrecisionMode) {
+        for block in &mut self.layers {
+            block.attention.precision_mode = mode;
+        }
+    }
+
+    /// Returns the model with every block's attention precision mode set to `mode`.
+    #[must_use]
+    pub fn with_attention_precision(mut self, mode: AttentionPrecisionMode) -> Self {
+        self.set_attention_precision(mode);
+        self
+    }
+
     /// Available points in execution order; the embedding point includes absolute positions.
     /// Attention points expose Q/K/V before head repetition and contexts before projection.
     /// Scores/patterns require the block's explicit eager attention precision mode.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let mut points = vec![Stack::Decoder.embedding().info()];
         for (index, block) in self.layers.iter().enumerate() {
-            let layer = Layer::decoder(index);
-            points.extend([layer.residual_pre().info(), layer.attention_input().info()]);
-            let attention = layer.self_attention();
-            points.extend([
-                attention.query().info(),
-                attention.key().info(),
-                attention.value().info(),
-            ]);
-            if block.attention.precision_mode == AttentionPrecisionMode::EagerFp32Softmax {
-                points.extend([attention.scores().info(), attention.pattern().info()]);
-            }
-            points.push(attention.head_context().info());
-            points.extend([
-                layer.attention_output().info(),
-                layer.mlp_input().info(),
-                layer.mlp_pre_activation().info(),
-                layer.mlp_activation().info(),
-                layer.mlp_output().info(),
-                layer.residual_post().info(),
-            ]);
+            points.extend(block.activation_points(index));
         }
         points.push(Stack::Decoder.final_norm().info());
         points
@@ -308,46 +388,8 @@ impl<B: Backend> Gpt2Model<B> {
         retain_hidden_states: bool,
         mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<Gpt2ModelOutput<B>> {
-        let [batch, sequence] = input.token_ids.dims();
-        let device = self.token_embedding.weight.lazy_device();
-        if batch == 0 || sequence == 0 || sequence > self.config.n_positions {
-            return Err(Error::shape(
-                "gpt2.token_ids",
-                "nonempty batch and sequence within position capacity",
-                format!("{:?}", input.token_ids.dims()),
-            ));
-        }
-        ensure_device("gpt2.token_ids", &input.token_ids.device(), &device)?;
-        validate_indices(
-            "gpt2.token_ids",
-            input.token_ids.clone(),
-            self.config.vocab_size,
-        )?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence, &device)?;
-        let positions = match &input.position_ids {
-            Some(positions) => {
-                if positions.dims() != [batch, sequence] {
-                    return Err(Error::shape(
-                        "gpt2.position_ids",
-                        format!("[{batch}, {sequence}]"),
-                        format!("{:?}", positions.dims()),
-                    ));
-                }
-                ensure_device("gpt2.position_ids", &positions.device(), &device)?;
-                validate_indices(
-                    "gpt2.position_ids",
-                    positions.clone(),
-                    self.config.n_positions,
-                )?;
-                positions.clone()
-            }
-            None => Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-                .unsqueeze_dim(0)
-                .repeat_dim(0, batch),
-        };
-        let mut hidden = self.token_embedding.forward(input.token_ids.clone())
-            + self.position_embedding.forward(positions);
-        hidden = emit(&mut hooks, Stack::Decoder.embedding(), hidden)?;
+        let (hidden, _) = self.embed_tokens(input)?;
+        let mut hidden = emit(&mut hooks, Stack::Decoder.embedding(), hidden)?;
         let mut states = Vec::new();
         if retain_hidden_states {
             states.push(hidden.clone());
@@ -375,6 +417,36 @@ impl<B: Backend> Gpt2Model<B> {
             last_hidden_state: hidden,
             hidden_states: states,
         })
+    }
+
+    /// Validates the input and adds token and absolute-position embeddings.
+    ///
+    /// Token IDs, mask rows, and positions share one device-to-host readback.
+    /// Default positions are the physical columns `0..sequence`, including
+    /// padding, as in Hugging Face GPT-2. Returns the raw `[batch, token,
+    /// channel]` embedding and the validated input summary.
+    fn embed_tokens(&self, input: &CausalLmInput<B>) -> Result<(Tensor<B, 3>, ValidatedInput<B>)> {
+        let [batch, sequence] = input.token_ids.dims();
+        let device = self.token_embedding.weight.lazy_device();
+        if batch == 0 || sequence == 0 || sequence > self.config.n_positions {
+            return Err(Error::shape(
+                "gpt2.token_ids",
+                "nonempty batch and sequence within position capacity",
+                format!("{:?}", input.token_ids.dims()),
+            ));
+        }
+        // Learned absolute positions number physical columns, including padding.
+        let validated = validate_input(
+            input,
+            &device,
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.n_positions)
+                .with_implicit_positions(ImplicitPositions::PhysicalColumns),
+        )?;
+        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
+        let hidden = self.token_embedding.forward(input.token_ids.clone())
+            + self.position_embedding.forward(positions);
+        Ok((hidden, validated))
     }
 
     /// Applies the final affine LayerNorm to an existing residual tensor.
@@ -409,24 +481,35 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
         self.model.activation_points()
     }
 
+    /// Sets every block's attention precision mode (see [`Gpt2Model::set_attention_precision`]).
+    pub fn set_attention_precision(&mut self, mode: AttentionPrecisionMode) {
+        self.model.set_attention_precision(mode);
+    }
+
+    /// Returns the model with every block's attention precision mode set to `mode`.
+    #[must_use]
+    pub fn with_attention_precision(mut self, mode: AttentionPrecisionMode) -> Self {
+        self.set_attention_precision(mode);
+        self
+    }
+
     /// Projects already normalized states with the tied token embedding.
+    ///
+    /// One rank-2 product against the transposed view of the `[vocabulary,
+    /// n_embd]` table ([`operations::matmul_transposed`]); the table is never copied.
     pub fn project(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         validate_hidden(
             &hidden,
             self.model.config.n_embd,
             &self.model.token_embedding.weight.lazy_device(),
         )?;
-        let [batch, sequence, width] = hidden.dims();
         let embedding = self.model.token_embedding.weight.val();
         if hidden.dtype() != embedding.dtype() {
             return Err(Error::BackendCapability(
                 "GPT-2 readout activations and tied embedding must share a floating dtype".into(),
             ));
         }
-        Ok(hidden
-            .reshape([batch * sequence, width])
-            .matmul(embedding.transpose())
-            .reshape([batch, sequence, self.model.config.vocab_size]))
+        operations::matmul_transposed(hidden, embedding)
     }
 
     /// Normalizes a final residual then projects it. Useful for direct-effect interventions.
@@ -511,17 +594,6 @@ fn validate_options(options: &ForwardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Returns a contextual error before combining tensors from different devices.
-fn ensure_device<D: PartialEq>(name: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::configuration(
-            name,
-            "tensor and parameters must share a device",
-        ));
-    }
-    Ok(())
-}
-
 /// Checks a nonempty `[batch, token, width]` residual and its parameter device.
 fn validate_hidden<B: Backend>(
     hidden: &Tensor<B, 3>,
@@ -536,7 +608,7 @@ fn validate_hidden<B: Backend>(
             format!("{:?}", hidden.dims()),
         ));
     }
-    ensure_device("gpt2.hidden", &hidden.device(), device)
+    ensure_same_device("gpt2.hidden", &hidden.device(), device, PARAMETERS)
 }
 
 /// Checks affine LayerNorm vector widths, floating dtypes, and devices against the residual.
@@ -552,7 +624,7 @@ fn validate_norm<B: Backend>(hidden: &Tensor<B, 3>, norm: &LayerNorm<B>, name: &
                 format!("{:?}", parameter.dims()),
             ));
         }
-        ensure_device(name, &parameter.device(), &hidden.device())?;
+        ensure_same_device(name, &parameter.device(), &hidden.device(), PARAMETERS)?;
         if parameter.dtype() != hidden.dtype() {
             return Err(Error::configuration(
                 name,
@@ -561,112 +633,6 @@ fn validate_norm<B: Backend>(hidden: &Tensor<B, 3>, norm: &LayerNorm<B>, name: &
         }
     }
     Ok(())
-}
-
-/// Reads extrema to reject negative or out-of-range embedding indices before backend lookup.
-fn validate_indices<B: Backend>(name: &str, ids: Tensor<B, 2, Int>, limit: usize) -> Result<()> {
-    let minimum = ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("{name} range read: {error}")))?
-        .elem::<i64>();
-    let maximum = ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("{name} range read: {error}")))?
-        .elem::<i64>();
-    if minimum < 0 || maximum >= limit as i64 {
-        return Err(Error::configuration(
-            name,
-            format!("expected indices in 0..{limit}, observed {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Checks `[batch, token]` mask shape and device and rejects rows without any valid token.
-///
-/// Valid entries mark visible keys; padded query positions remain part of the stateless graph.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    device: &B::Device,
-) -> Result<()> {
-    if let Some(mask) = mask {
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "gpt2.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-        ensure_device("gpt2.token_mask", &mask.as_tensor().device(), device)?;
-        let least = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| Error::BackendCapability(format!("gpt2 mask read: {error}")))?
-            .elem::<i64>();
-        if least == 0 {
-            return Err(Error::configuration(
-                "gpt2.token_mask",
-                "each batch row needs a valid token",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Selects all, explicit, or per-row last valid token states while preserving rank three.
-///
-/// Explicit positions retain caller order; last-token selection accounts for padding holes.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, _] = hidden.dims();
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Positions(indices) => {
-            if indices.is_empty() || indices.iter().any(|index| *index >= sequence) {
-                return Err(Error::configuration(
-                    "gpt2.logits",
-                    "positions must be nonempty and within the sequence",
-                ));
-            }
-            Ok(Tensor::cat(
-                indices
-                    .iter()
-                    .map(|index| hidden.clone().narrow(1, *index, 1))
-                    .collect(),
-                1,
-            ))
-        }
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let mask = crate::architecture::tensor_bool_values(
-                    mask.as_tensor().clone(),
-                    "gpt2 token mask",
-                )?;
-                let mut rows = Vec::with_capacity(batch);
-                for (row, valid) in mask.chunks(sequence).enumerate() {
-                    let last = valid
-                        .iter()
-                        .rposition(|value| *value)
-                        .ok_or_else(|| Error::configuration("gpt2.token_mask", "empty row"))?;
-                    rows.push(hidden.clone().narrow(0, row, 1).narrow(1, last, 1));
-                }
-                Ok(Tensor::cat(rows, 0))
-            }
-        },
-    }
 }
 
 #[cfg(test)]

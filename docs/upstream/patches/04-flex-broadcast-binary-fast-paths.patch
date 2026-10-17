@@ -1,0 +1,135 @@
+diff --git a/crates/burn-flex/src/ops/binary.rs b/crates/burn-flex/src/ops/binary.rs
+index 704d59f..dd9a850 100644
+--- a/crates/burn-flex/src/ops/binary.rs
++++ b/crates/burn-flex/src/ops/binary.rs
+@@ -79,7 +79,15 @@ where
+     // `powf` (which have no SIMD fast path and go straight to
+     // `binary_op_typed`) don't pay for a memcpy they can't benefit
+     // from. Their strided fallback handles non-contig lhs directly.
+-    if simd_hint.is_some() && !lhs.layout().is_contiguous() && rhs.layout().strides().contains(&0) {
++    if let Some(simd_op) = simd_hint
++        && !lhs.layout().is_contiguous()
++        && rhs.layout().strides().contains(&0)
++    {
++        // Rows that are contiguous or stride-0 in both operands are read in
++        // place, without first materializing the strided lhs.
++        if let Some(out) = row_wise_broadcast_f32(&lhs, rhs, simd_op) {
++            return out;
++        }
+         lhs = lhs.to_contiguous();
+     }
+ 
+@@ -115,9 +123,113 @@ where
+         return apply_broadcast_pattern_f32(lhs, rhs, simd_op, pattern);
+     }
+ 
++    // Any other broadcast whose innermost axis is a contiguous row or a
++    // repeated scalar in both operands (e.g. RoPE tables `[b, 1, s, d]`
++    // against `[b, h, s, d]`, or an outer product `[.., 1, n] * [.., p, 1]`).
++    if let Some(simd_op) = simd_hint
++        && let Some(out) = row_wise_broadcast_f32(&lhs, rhs, simd_op)
++    {
++        return out;
++    }
++
+     binary_op_typed(lhs, rhs, op)
+ }
+ 
++/// Minimum innermost extent for [`row_wise_broadcast_f32`]; shorter rows are
++/// left to the strided fallback, whose per-element walk is then comparable.
++#[cfg(feature = "simd")]
++const ROW_WISE_MIN_ROW_LEN: usize = 8;
++
++/// Row-wise broadcast for operands of the same logical shape whose innermost
++/// axis is, in each operand, either a contiguous run (stride 1) or one
++/// repeated scalar (stride 0); the outer axes may have arbitrary strides.
++///
++/// The output is a fresh contiguous tensor. Every element is one `f32`
++/// operation `lhs op rhs`, so the result is bit-identical to the strided
++/// fallback. Returns `None` when the layout does not fit.
++#[cfg(feature = "simd")]
++fn row_wise_broadcast_f32(
++    lhs: &FlexTensor,
++    rhs: &FlexTensor,
++    simd_op: BinaryOp,
++) -> Option<FlexTensor> {
++    match simd_op {
++        BinaryOp::Add => row_wise_broadcast_f32_with(lhs, rhs, |a, b| a + b),
++        BinaryOp::Sub => row_wise_broadcast_f32_with(lhs, rhs, |a, b| a - b),
++        BinaryOp::Mul => row_wise_broadcast_f32_with(lhs, rhs, |a, b| a * b),
++        BinaryOp::Div => row_wise_broadcast_f32_with(lhs, rhs, |a, b| a / b),
++    }
++}
++
++/// [`row_wise_broadcast_f32`] monomorphized for one operation, so the inner
++/// row loops autovectorize.
++#[cfg(feature = "simd")]
++fn row_wise_broadcast_f32_with<Op>(lhs: &FlexTensor, rhs: &FlexTensor, op: Op) -> Option<FlexTensor>
++where
++    Op: Fn(f32, f32) -> f32 + Copy,
++{
++    let shape = lhs.layout().shape();
++    let ndims = shape.num_dims();
++    if ndims == 0 || rhs.layout().num_dims() != ndims || rhs.layout().shape() != shape {
++        return None;
++    }
++    let row_len = shape[ndims - 1];
++    let numel = lhs.layout().num_elements();
++    if numel == 0 || row_len < ROW_WISE_MIN_ROW_LEN {
++        return None;
++    }
++    let l_strides = lhs.layout().strides();
++    let r_strides = rhs.layout().strides();
++    let (l_inner, r_inner) = (l_strides[ndims - 1], r_strides[ndims - 1]);
++    if !matches!(l_inner, 0 | 1) || !matches!(r_inner, 0 | 1) {
++        return None;
++    }
++    let lhs_data: &[f32] = lhs.storage();
++    let rhs_data: &[f32] = rhs.storage();
++    let outer_dims = ndims - 1;
++    let mut index = alloc::vec![0usize; outer_dims];
++    let mut l_offset = lhs.layout().start_offset() as isize;
++    let mut r_offset = rhs.layout().start_offset() as isize;
++    let mut out = alloc::vec![0.0f32; numel];
++    for out_row in out.chunks_exact_mut(row_len) {
++        let (l, r) = (l_offset as usize, r_offset as usize);
++        match (l_inner, r_inner) {
++            (1, 1) => {
++                let (l_row, r_row) = (&lhs_data[l..l + row_len], &rhs_data[r..r + row_len]);
++                for ((o, &a), &b) in out_row.iter_mut().zip(l_row).zip(r_row) {
++                    *o = op(a, b);
++                }
++            }
++            (1, _) => {
++                let (l_row, b) = (&lhs_data[l..l + row_len], rhs_data[r]);
++                for (o, &a) in out_row.iter_mut().zip(l_row) {
++                    *o = op(a, b);
++                }
++            }
++            (_, 1) => {
++                let (a, r_row) = (lhs_data[l], &rhs_data[r..r + row_len]);
++                for (o, &b) in out_row.iter_mut().zip(r_row) {
++                    *o = op(a, b);
++                }
++            }
++            _ => out_row.fill(op(lhs_data[l], rhs_data[r])),
++        }
++        // Advance the outer (row) index, odometer style.
++        for d in (0..outer_dims).rev() {
++            index[d] += 1;
++            l_offset += l_strides[d];
++            r_offset += r_strides[d];
++            if index[d] < shape[d] {
++                break;
++            }
++            l_offset -= l_strides[d] * shape[d] as isize;
++            r_offset -= r_strides[d] * shape[d] as isize;
++            index[d] = 0;
++        }
++    }
++    Some(make_tensor(out, shape.clone(), DType::F32))
++}
++
+ /// Categorization of the two broadcast patterns we can accelerate.
+ ///
+ /// Consumers assume `lhs` and `rhs` already share the same logical
