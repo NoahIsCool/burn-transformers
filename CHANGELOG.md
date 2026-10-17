@@ -456,6 +456,14 @@ code written against unreleased sources.
   when driven through the quantized executor directly.
 - The packed Q4/Q8 Metal guard also rejects builds with
   `attention-kernel-tracing`, which enables CubeCL autotuning.
+- `operations::linear` with a packed Q4 weight on a CubeCL backend no longer
+  returns wrong values for multi-row inputs. With F32 activations Burn 0.21's
+  multi-row kernels were unrelated to the dequantized reference (relative error
+  up to 1.0 for 2 to 32 rows on an M3 Max), so short prefills and batched decode
+  through Q4 weights were wrong; such products now run one row at a time on the
+  same packed storage, with no dequantization. F16 activations on Metal were
+  measured correct and keep one matmul. 2-bit packed weights, which those
+  kernels get wrong even for one row, are rejected on CubeCL backends.
 - The FP32 router projection (`RouterProjectionPrecision::Fp32`, used by
   DeepSeek-V2 and Nemotron-H) gets a weight and bias gradient on every
   backward pass. Under `Autodiff<Flex>`, a loss that reached the router only

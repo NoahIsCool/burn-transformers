@@ -65,7 +65,18 @@ fn packed_weight(
 }
 
 /// Proves one packed scheme reaches a quantized matmul kernel without dequantization.
-fn assert_packed_projection_kernel(scheme: SymmetricQuantization, scheme_marker: &str) {
+///
+/// A one-row F16 input must submit exactly one packed matmul. Three-row inputs
+/// must submit one packed matmul with F16 activations and `f32_three_row_launches`
+/// with F32 activations: one for Q8, and one per row for Q4, whose multi-row
+/// Burn 0.21 kernels are wrong with F32 activations and which
+/// `operations::linear` therefore multiplies row by row. None may launch a
+/// whole-weight dequantization.
+fn assert_packed_projection_kernel(
+    scheme: SymmetricQuantization,
+    scheme_marker: &str,
+    f32_three_row_launches: usize,
+) {
     let device = Default::default();
     let weight = packed_weight(scheme, &device);
     assert!(matches!(weight.dtype(), DType::QFloat(_)));
@@ -123,8 +134,31 @@ fn assert_packed_projection_kernel(scheme: SymmetricQuantization, scheme_marker:
         "packed matmul must not launch a calibrated whole-weight dequantization kernel: {dequantizations:#?}"
     );
     assert!(matches!(projection.weight.val().dtype(), DType::QFloat(_)));
+
+    for (dtype, expected) in [(DType::F16, 1), (DType::F32, f32_three_row_launches)] {
+        let rows = Tensor::<Metal, 2>::ones([3, MATRIX_WIDTH], &device).cast(dtype);
+        let (_, rows_trace) = capture_kernel_launches(|| {
+            let output = linear(rows, &projection).expect("packed Metal projection must dispatch");
+            <Metal<f32, i32> as Backend>::sync(&device)
+                .expect("packed Metal projection must synchronize");
+            output
+                .cast(DType::F32)
+                .into_data()
+                .to_vec::<f32>()
+                .expect("packed Metal output must be readable")
+        });
+        assert_eq!(
+            packed_matmul_launches(&rows_trace).len(),
+            expected,
+            "a three-row {dtype:?} {scheme_marker} projection must submit {expected} packed matmuls; trace: {rows_trace:#?}"
+        );
+        assert!(
+            whole_weight_dequantization_launches(&rows_trace, &dequantization_names).is_empty(),
+            "a three-row packed projection must not dequantize the weight: {rows_trace:#?}"
+        );
+    }
     eprintln!(
-        "{scheme_marker} packed Metal kernel: launches=1, quantized_view=true, packed_axis=1, whole_weight_dequantizations=0"
+        "{scheme_marker} packed Metal kernel: launches=1, quantized_view=true, packed_axis=1, whole_weight_dequantizations=0; three F32 rows: launches={f32_three_row_launches}"
     );
 }
 
@@ -132,6 +166,6 @@ fn assert_packed_projection_kernel(scheme: SymmetricQuantization, scheme_marker:
 #[test]
 #[ignore = "requires a Metal-capable macOS host"]
 fn packed_q4_q8_matmul_launches_quantized_metal_kernels() {
-    assert_packed_projection_kernel(SymmetricQuantization::Q4, "Q4S");
-    assert_packed_projection_kernel(SymmetricQuantization::Q8, "Q8S");
+    assert_packed_projection_kernel(SymmetricQuantization::Q4, "Q4S", 3);
+    assert_packed_projection_kernel(SymmetricQuantization::Q8, "Q8S", 1);
 }
