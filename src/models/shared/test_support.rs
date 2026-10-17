@@ -323,7 +323,10 @@ pub(crate) fn assert_weights_ignore_burn_seed<M: Module<TestBackend>>(
 }
 
 /// [`ModuleVisitor`] collecting every float parameter's F32 bit patterns in visit order.
-struct ParameterBits(Vec<Vec<u32>>);
+struct ParameterBits(
+    /// One entry per float parameter: its elements' F32 bit patterns, row-major.
+    Vec<Vec<u32>>,
+);
 
 impl ModuleVisitor<TestBackend> for ParameterBits {
     /// Records one parameter as bit patterns, so even `-0.0` against `0.0` counts.
