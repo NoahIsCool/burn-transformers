@@ -227,6 +227,17 @@ Items about APIs added during this cycle (GPT-2, GPT-NeoX, hooks, staged
 execution, `ModularLayer`, `InitPolicy`, transfer, and cache steps) affect only
 code written against unreleased sources.
 
+- **Package name.** The Cargo package is `burn-transformers` (was
+  `transformers`, a crates.io name that belongs to another publisher), after
+  the GitHub repository. `[lib] name = "transformers"` keeps every
+  `use transformers::…` path, so the library, its doctests, examples, and
+  integration tests are unchanged. Dependents change the dependency key
+  ([MIGRATION.md](MIGRATION.md#dependency)) to
+  `burn-transformers = { git = "https://github.com/NoahIsCool/burn-transformers", … }`
+  (or keep it with `transformers = { package = "burn-transformers", … }`, as
+  `fuzz/Cargo.toml` now does); `cargo -p` selectors name `burn-transformers`,
+  and `cargo package` writes `burn-transformers-0.1.0.crate`. Nothing is
+  published.
 - **Public API.** Exhaustive matches on `MixerSpec`, `FeedForwardSpec`, both
   `RopeScaling` enums, `QuantizationExclusion`, and `RopeConfigError` need arms
   for their new variants. `GenerationConfig`, `ChatMessage`,

@@ -1,10 +1,18 @@
 # Support policy
 
-This document defines what a support claim means for the `transformers` crate.
-It does not broaden the [model status page](ARCHITECTURE_COMPATIBILITY.md) or
-any committed acceptance record.
+This document defines what a support claim means for the `transformers`
+library, whose Cargo package is `burn-transformers`. It does not broaden the
+[model status page](ARCHITECTURE_COMPATIBILITY.md) or any committed
+acceptance record.
 
 ## Version compatibility
+
+The package is named `burn-transformers` because the crates.io name
+`transformers` belongs to another publisher; the library keeps the name
+`transformers`, so imports do not depend on the package name. This project
+has published nothing to crates.io under either name. Version 0.1.0 was a
+source release of the package `transformers`; a dependency on it changes its
+key when upgrading ([MIGRATION.md](MIGRATION.md#dependency)).
 
 Version 0.1 requires Rust 1.92 or newer and pins Burn 0.21. Before 1.0, a minor
 crate release may contain source-breaking API changes. Patch releases preserve

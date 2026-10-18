@@ -15,6 +15,21 @@ every public 0.1.0 path, and each fix below compiles against the current
 source. APIs added after 0.1.0 that changed during this cycle are listed
 separately under [unreleased sources](#if-you-built-on-unreleased-sources).
 
+### Dependency
+
+The Cargo package is renamed from `transformers` to `burn-transformers`,
+because the crates.io name `transformers` belongs to another publisher. The
+library keeps the name `transformers` (`[lib] name = "transformers"`), so no
+`use transformers::…` path changes; only manifests and Cargo commands that
+name the package do. Cargo rejects a dependency whose key or `package` names
+a package that does not exist, so a 0.1.0 dependency fails until it changes:
+
+| If your project | Change it to |
+| --- | --- |
+| Depends on `transformers = { path = "…" }` or `transformers = { git = "…" }` | Rename the key, keeping the other options: `burn-transformers = { path = "…" }` or `burn-transformers = { git = "…" }`. To keep the key, add the package instead: `transformers = { package = "burn-transformers", path = "…" }`. |
+| Runs `cargo … -p transformers` or `--package transformers` | Use `-p burn-transformers`. |
+| Looks for the archive `transformers-VERSION.crate` | Cargo now writes `burn-transformers-VERSION.crate`. |
+
 ### Compilation
 
 | If your code | Change it to |
@@ -160,8 +175,9 @@ python3 scripts/check_release.py --gate source --offline
 
 The manifest, registry dependencies, nested fuzz package, and coverage helper
 package are already standalone. Consumer path dependencies must point at this
-checkout, for example `../transformers` from a sibling project. HMM itself has
-no dependency on this crate.
+checkout, for example `../transformers` from a sibling project, and now name
+the package `burn-transformers` ([Dependency](#dependency)). HMM itself has no
+dependency on this crate.
 
 ### Historical reproduction
 
