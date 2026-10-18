@@ -10,7 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.12"
-transformers = { path = "..", default-features = false, features = ["std", "flex", "chat-templates"] }
+# The package is `burn-transformers`; the key keeps the `transformers` import path.
+transformers = { package = "burn-transformers", path = "..", default-features = false, features = ["std", "flex", "chat-templates"] }
 burn = { version = "=0.21.0", default-features = false, features = ["std", "flex"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

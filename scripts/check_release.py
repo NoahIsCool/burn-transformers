@@ -362,8 +362,9 @@ def write_guide_doctests(crate: Path, directory: Path, offline: bool) -> dict:
     ``cargo metadata`` then adds only the scratch package, so the checked
     command can run with ``--locked`` against the same dependency versions.
     The dependency key stays ``transformers``, the library name the guides
-    import, and names this crate's ``package.name`` explicitly, so a package
-    renamed with ``[lib] name = "transformers"`` needs no change here.
+    import, and names this crate's ``package.name`` (``burn-transformers``,
+    whose ``[lib] name`` is ``transformers``) explicitly, read from the
+    manifest so that a later rename needs no change here.
     """
 
     directory.mkdir(parents=True)

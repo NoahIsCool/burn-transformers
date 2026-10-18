@@ -1,5 +1,7 @@
 [package]
-name = "transformers"
+# The crates.io name `transformers` belongs to another publisher, so the
+# package takes the repository's name; `[lib]` below keeps the import path.
+name = "burn-transformers"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
@@ -45,6 +47,11 @@ include = [
     "/deny.toml",
     "/Cargo.lock",
 ]
+
+# Dependents write `use transformers::…` whatever the package is called, so
+# doctests, examples, integration tests, and the fuzz harnesses are unchanged.
+[lib]
+name = "transformers"
 
 [features]
 default = ["std", "flex"]

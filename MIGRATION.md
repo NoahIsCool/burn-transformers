@@ -15,6 +15,35 @@ every public 0.1.0 path, and each fix below compiles against the current
 source. APIs added after 0.1.0 that changed during this cycle are listed
 separately under [unreleased sources](#if-you-built-on-unreleased-sources).
 
+### Dependency
+
+The Cargo package is renamed from `transformers` to `burn-transformers`,
+because the crates.io name `transformers` belongs to another publisher. The
+library keeps the name `transformers` (`[lib] name = "transformers"`), so no
+`use transformers::…` path changes; only manifests and Cargo commands that
+name the package do. Change a 0.1.0 dependency on this repository even where
+Cargo still accepts it:
+
+- A path dependency, `transformers = { path = "…" }`, fails: Cargo reads only
+  the manifest at that path and reports
+  ``no matching package named `transformers` found``.
+- A git dependency, `transformers = { git = "…" }`, is not rejected, because
+  the historical acceptance snapshots
+  `acceptance/measurements/v0_3-*/executed-source/` keep that name and Cargo
+  searches every manifest in the checkout, and the path dependencies those
+  manifests name, for the package. On the machine that recorded the
+  acceptance harnesses, their absolute path dependencies can lead Cargo to
+  another checkout, which it builds however stale, with only a
+  `skipping duplicate package` warning. Elsewhere it picks a snapshot, which
+  has no library target, so `use transformers::…` fails as an unresolved
+  import.
+
+| If your project | Change it to |
+| --- | --- |
+| Depends on `transformers = { path = "…" }` or `transformers = { git = "…" }` | Rename the key, keeping the other options: `burn-transformers = { path = "…" }` or `burn-transformers = { git = "…" }`. To keep the key, add the package instead: `transformers = { package = "burn-transformers", path = "…" }`, or the same with `git = "…"`. |
+| Runs `cargo … -p transformers` or `--package transformers` | Use `-p burn-transformers`. |
+| Looks for the archive `transformers-VERSION.crate` | Cargo now writes `burn-transformers-VERSION.crate`. |
+
 ### Compilation
 
 | If your code | Change it to |
@@ -160,8 +189,9 @@ python3 scripts/check_release.py --gate source --offline
 
 The manifest, registry dependencies, nested fuzz package, and coverage helper
 package are already standalone. Consumer path dependencies must point at this
-checkout, for example `../transformers` from a sibling project. HMM itself has
-no dependency on this crate.
+checkout, for example `../transformers` from a sibling project, and now name
+the package `burn-transformers` ([Dependency](#dependency)). HMM itself has no
+dependency on this crate.
 
 ### Historical reproduction
 

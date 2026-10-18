@@ -17,6 +17,21 @@
 //! stateless, differentiable forward graph for native Burn training without forcing
 //! inference sessions into the serialized parameter tree.
 //!
+//! # Package and library names
+//!
+//! The Cargo package is `burn-transformers`, because the crates.io name
+//! `transformers` belongs to another publisher; this library keeps the name
+//! `transformers`. A dependent names the package and imports the library:
+//!
+//! ```toml
+//! [dependencies]
+//! burn-transformers = { git = "https://github.com/NoahIsCool/burn-transformers" }
+//! ```
+//!
+//! ```
+//! use transformers::{Error, Result};
+//! ```
+//!
 //! # Tensor conventions
 //!
 //! Unless a type documents a more specific layout, token tensors use
