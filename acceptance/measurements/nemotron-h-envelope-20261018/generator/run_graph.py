@@ -14,7 +14,9 @@ appends one JSON line to logs/runs.jsonl.
 import datetime as dt
 import hashlib
 import json
+import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -33,11 +35,12 @@ PRECISION = ACCEPTANCE / "nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bund
 GRAPHS_DIR = ACCEPTANCE / "nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs"
 CONTROLS_DIR = ACCEPTANCE / "nemotron-h-envelope-20261018"
 OFFLOAD = Path("/Volumes/T9/transformers-offload/nemotron-h-envelope-20261018")
-#: label -> (device, attention, output, CPU resident budget in GiB or None)
+#: label -> (device, attention, output, resident budget in GiB). A resident MPS load
+#: (attempt 1) grew swap by 12.5 GiB in 80 s, so MPS uses the CPU's 16 GiB budget.
 GRAPHS = {
     "cpu-sdpa": ("cpu", "sdpa", GRAPHS_DIR / "f16-cpu-sdpa.bundle", 16),
-    "mps-sdpa": ("mps", "sdpa", GRAPHS_DIR / "f16-mps-sdpa.bundle", None),
-    "mps-eager-control": ("mps", "eager", CONTROLS_DIR / "f16-mps-eager-control.bundle", None),
+    "mps-sdpa": ("mps", "sdpa", GRAPHS_DIR / "f16-mps-sdpa.bundle", 16),
+    "mps-eager-control": ("mps", "eager", CONTROLS_DIR / "f16-mps-eager-control.bundle", 16),
 }
 #: Watchdog policy of the earlier rounds, plus a system-volume reserve.
 MIN_FREE_MEMORY_PERCENT = 10
@@ -45,9 +48,11 @@ PRESSURED_FREE_PERCENT = 30
 MAX_PRESSURED_SWAPIN_BYTES = 1 << 30
 MAX_SWAP_GROWTH_BYTES = 8 << 30
 MIN_ROOT_FREE_BYTES = 10 << 30
-#: An MPS graph starts only when this much memory is free (it holds about 65 GB).
-MPS_START_FREE_PERCENT = 70
-MPS_START_WAIT_SECONDS = 1800
+#: A graph starts only when this much memory is free and the system volume
+#: (which holds macOS swap) has this much room, waiting up to START_WAIT_SECONDS.
+START_FREE_PERCENT = 70
+START_ROOT_FREE_BYTES = 15 << 30
+START_WAIT_SECONDS = 1800
 
 
 def sha256(path):
@@ -109,6 +114,14 @@ def time_figures(text):
             "time_real_seconds": pick(r"^\s*([0-9.]+) real", float)[0]}
 
 
+def kill_group(child):
+    """Kills the child's whole process group (attempt 1 killed only /usr/bin/time and orphaned the generator)."""
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def main():
     """Runs one graph; returns its exit status."""
     label, export = sys.argv[1], Path(sys.argv[2]).resolve()
@@ -136,19 +149,23 @@ def main():
         if output.exists():
             write(f"SKIP: {output} exists")
             return 0
-        if device == "mps":
-            waited = 0
-            while (free_memory_percent() or 0) < MPS_START_FREE_PERCENT and waited < MPS_START_WAIT_SECONDS:
-                time.sleep(60)
-                waited += 60
-            free = free_memory_percent() or 0
-            write(f"== mps start gate: free-memory {free}% after waiting {waited}s (needs {MPS_START_FREE_PERCENT}%)")
-            if free < MPS_START_FREE_PERCENT:
-                write("REFUSED: not enough free memory for the whole F16 model on MPS")
-                return 4
+        waited = 0
+        ready = lambda: ((free_memory_percent() or 0) >= START_FREE_PERCENT
+                         and shutil.disk_usage("/").free >= START_ROOT_FREE_BYTES)
+        while not ready() and waited < START_WAIT_SECONDS:
+            time.sleep(60)
+            waited += 60
+        free, root = free_memory_percent() or 0, shutil.disk_usage("/").free
+        write(f"== start gate: free-memory {free}% system-volume {root / 2**30:.1f} GiB after waiting {waited}s "
+              f"(needs {START_FREE_PERCENT}% and {START_ROOT_FREE_BYTES >> 30} GiB)")
+        if not ready():
+            write("REFUSED: the host has not recovered enough free memory or system-volume space")
+            return 4
         swap0, swapin0 = swap_used_bytes() or 0, swapins_bytes() or 0
         started = time.monotonic()
-        child = subprocess.Popen(["/usr/bin/time", "-l"] + command, stdout=log, stderr=subprocess.STDOUT)
+        # A session of its own lets the watchdog kill /usr/bin/time and the generator together.
+        child = subprocess.Popen(["/usr/bin/time", "-l"] + command, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
 
         def watchdog():
             """Kills the child on memory pressure, swap growth, pressured swap-ins, or a full system volume."""
@@ -179,7 +196,7 @@ def main():
                     reason = f"system volume down to {root / 2**30:.1f} GiB free"
                 if reason:
                     figures["killed"] = reason
-                    child.kill()
+                    kill_group(child)
                     return
                 time.sleep(5)
 

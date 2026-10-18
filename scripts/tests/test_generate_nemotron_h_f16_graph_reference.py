@@ -130,6 +130,9 @@ class GraphToolTests(unittest.TestCase):
         self.assertEqual(GRAPH.check_loaded(fake_torch, model("sdpa", "eager"), "mps", "sdpa"),
                          {"attention_implementation": "sdpa", "experts_implementation": "eager"})
         GRAPH.check_loaded(fake_torch, model("sdpa", "grouped_mm", device="meta"), "cpu", "sdpa")
+        GRAPH.check_loaded(fake_torch, model("sdpa", "eager"), "mps", "sdpa", offloaded=True)
+        with self.assertRaises(ValueError):
+            GRAPH.check_loaded(fake_torch, model("sdpa", "eager", device="meta"), "mps", "sdpa")
         for candidate, device in ((model("eager", "eager"), "mps"), (model("sdpa", "grouped_mm"), "mps"),
                                   (model("sdpa", "eager", buffer_dtype="f16"), "mps"),
                                   (model("sdpa", "eager", buffers=22), "mps"),
@@ -141,19 +144,29 @@ class GraphToolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             GRAPH.check_tiny_loaded(tiny, "cpu", "sdpa")
 
-    def test_arguments_keep_offload_on_the_cpu(self) -> None:
-        """A budget needs an offload directory, and MPS refuses one."""
+    def test_arguments_pair_the_budget_with_an_offload_directory(self) -> None:
+        """A budget needs an offload directory on either device, and only CPU and MPS exist."""
 
         base = ["--model-dir", "m", "--transformers-dir", "t", "--oracle-dir", "o", "--precision-dir", "p",
                 "--output", "b", "--attn-implementation", "sdpa"]
-        cpu = GRAPH.parse_arguments(base + ["--device", "cpu", "--max-resident-gib", "16", "--offload-dir", "d"])
-        self.assertEqual((cpu.device, cpu.max_resident_gib, cpu.offload_dir), ("cpu", 16.0, Path("d")))
+        for device in ("cpu", "mps"):
+            parsed = GRAPH.parse_arguments(base + ["--device", device, "--max-resident-gib", "16", "--offload-dir", "d"])
+            self.assertEqual((parsed.device, parsed.max_resident_gib, parsed.offload_dir), (device, 16.0, Path("d")))
         self.assertIsNone(GRAPH.parse_arguments(base + ["--device", "mps"]).max_resident_gib)
-        for extra in (["--device", "cpu", "--max-resident-gib", "16"], ["--device", "cpu", "--offload-dir", "d"],
-                      ["--device", "mps", "--max-resident-gib", "16", "--offload-dir", "d"],
+        for extra in (["--device", "cpu", "--max-resident-gib", "16"], ["--device", "mps", "--offload-dir", "d"],
                       ["--device", "cuda"]):
             with self.assertRaises(SystemExit):
                 GRAPH.parse_arguments(base + extra)
+
+    def test_resident_blocks_move_to_the_device_and_offloaded_ones_stay_on_disk(self) -> None:
+        """The precision tool's CPU block map keeps its disk entries and places the rest on the device."""
+
+        cpu_map = {"model.embeddings": "cpu", "model.layers.0": "cpu", "model.layers.1": "disk", "lm_head": "cpu"}
+        self.assertEqual(GRAPH.on_device(cpu_map, "mps"), {"model.embeddings": "mps", "model.layers.0": "mps",
+                                                           "model.layers.1": "disk", "lm_head": "mps"})
+        self.assertEqual(GRAPH.on_device(cpu_map, "cpu"), cpu_map)
+        with self.assertRaisesRegex(ValueError, "unexpected placements"):
+            GRAPH.on_device({"lm_head": "cuda:0"}, "mps")
 
     def test_system_volume_guard_refuses_a_shortfall(self) -> None:
         """The free-space sample passes above its minimum and raises below it."""
@@ -246,6 +259,20 @@ class DeviceAwareCallTests(unittest.TestCase):
             self.assertTrue(torch.equal(actual[kind], expected[kind]), kind)
         self.assertEqual(list(actual["teacher"].shape), [len(generated), 11])
         self.assertEqual(list(actual["cached"].shape), [len(generated), 11])
+
+    def test_hook_devices_name_where_offloaded_blocks_execute(self) -> None:
+        """Every module carrying an Accelerate hook reports its execution device type, once."""
+
+        import torch
+
+        model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2), torch.nn.ReLU())
+        self.assertEqual(GRAPH.hook_devices(torch, model), [])
+        model[0]._hf_hook = types.SimpleNamespace(execution_device="cpu")
+        model[1]._hf_hook = types.SimpleNamespace(execution_device=torch.device("cpu"))
+        model[2]._hf_hook = types.SimpleNamespace(execution_device=None)
+        self.assertEqual(GRAPH.hook_devices(torch, model), ["cpu"])
+        model[1]._hf_hook = types.SimpleNamespace(execution_device="meta")
+        self.assertEqual(GRAPH.hook_devices(torch, model), ["cpu", "meta"])
 
     def test_authenticated_payloads_decode_to_row_tensors(self) -> None:
         """Payload bytes decode to `[rows, vocabulary]` F32 tensors in row-major order."""

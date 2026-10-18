@@ -21,7 +21,8 @@ for label in "$@"; do
   until mkdir "$LOCK" 2>/dev/null; do sleep 60; done
   held=1; echo "$(date -u +%FT%TZ) lock acquired for $label"
   mounted || exit 5
-  python3 -I "$HERE/run_graph.py" "$label" "$EXPORT"; echo "$(date -u +%FT%TZ) $label exit=$?"
+  python3 -I "$HERE/run_graph.py" "$label" "$EXPORT"; status=$?
+  echo "$(date -u +%FT%TZ) $label exit=$status"
   release
 done
 echo "$(date -u +%FT%TZ) done"

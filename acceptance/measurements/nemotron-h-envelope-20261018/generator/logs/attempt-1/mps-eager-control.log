@@ -1,0 +1,18 @@
+== source 4155bf0a915fb491833e1552f2e48bec7e808b24 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-4155bf0)
+== tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-4155bf0/scripts/generate_nemotron_h_f16_graph_reference.py sha256 05bcbeafc85736a00efb7a0d4b64cc1e3f9dc70140b8fe88e5ad73d1c24b59ef
+== cmd /usr/bin/time -l ["/Volumes/bag of holding/models/transformers-acceptance/envs/muse-cfa309-py311/bin/python", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-4155bf0/scripts/generate_nemotron_h_f16_graph_reference.py", "--model-dir", "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9", "--transformers-dir", "/Volumes/bag of holding/models/hf-transformers-reference", "--oracle-dir", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle", "--precision-dir", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle", "--device", "mps", "--attn-implementation", "eager", "--output", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-h-envelope-20261018/f16-mps-eager-control.bundle"]
+== start 2026-10-18T08:21:24+00:00
+== start uptime 4:21  up 16 days, 13:41, 3 users, load averages: 3.55 2.68 2.95
+== start top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== start top-cpu 80435 125.2 3052560       00:10 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python
+== start top-cpu  1960  47.0  20064 02-13:38:58 /System/Library/PrivateFrameworks/CacheDelete.framework/deleted
+== start top-cpu   554  43.5   8336 16-13:39:36 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+== start top-cpu  1833  37.1  13280 02-13:38:58 /usr/libexec/mobileassetd
+== start top-cpu  1966  21.9   7056 02-13:38:58 /usr/libexec/triald_system
+== start top-cpu  6933  20.2 168272 02-18:00:59 /Applications/Firefox.app/Contents/MacOS/firefox
+== start top-cpu  2075  10.6   6448 02-13:38:57 /System/Library/CoreServices/TimeMachine/backupd
+== start top-cpu   796   7.1  23008 16-13:39:28 /usr/sbin/coreaudiod
+== start free-memory 32% swap-used 19631114813 bytes
+== start disk / free 9.9 GiB
+== start disk /Volumes/bag of holding free 20.3 GiB
+== start disk /Volumes/T9 free 293.6 GiB

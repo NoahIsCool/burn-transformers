@@ -59,11 +59,16 @@ Usage::
         --max-resident-gib 16 --offload-dir /path/to/offload \\
         --output /path/to/f16-graphs/f16-cpu-sdpa.bundle
 
-On the CPU memory is the F16 model (about 63 GB) unless ``--max-resident-gib``
-with ``--offload-dir`` keeps only the leading blocks resident, as in the
-precision tool. On MPS the whole F16 model (about 65 GB) must fit in unified
-memory; the system volume's free space is checked before loading and after
-every forward, because MPS may write temporary graph files there.
+Memory is the whole F16 model (about 63 GB) unless ``--max-resident-gib``
+with ``--offload-dir`` keeps only the leading blocks resident on the device,
+as in the precision tool: Accelerate then loads every other block from a
+temporary offload folder while it runs, on the requested device, so the
+computation is unchanged (the self-check proves it bit for bit on the tiny
+model, on either device). On MPS a resident 65 GB load drove this 96 GiB
+host into more than 12 GiB of swap within 80 seconds, so MPS graphs use a
+budget too. On MPS the system volume's free space is checked before loading
+and after the evaluation, because macOS swap and temporary MPS files live
+there.
 """
 
 from __future__ import annotations
@@ -208,12 +213,13 @@ def load_options(device: str, attention: str) -> dict[str, Any]:
     return options
 
 
-def check_loaded(torch: Any, model: Any, device: str, attention: str) -> dict[str, Any]:
+def check_loaded(torch: Any, model: Any, device: str, attention: str, offloaded: bool = False) -> dict[str, Any]:
     """Requires the loaded model to run the requested graph; checks the F32 router corrections.
 
     Returns the resolved implementations. On MPS every parameter and buffer
-    must live on the device; on the CPU, parameters offloaded to disk live on
-    the meta device until Accelerate loads them.
+    must live on the device, except, with `offloaded`, parameters offloaded
+    to disk, which live on the meta device until Accelerate loads them onto
+    the device for their block's forward (as on the CPU).
     """
 
     attn = model.config._attn_implementation
@@ -225,7 +231,8 @@ def check_loaded(torch: Any, model: Any, device: str, attention: str) -> dict[st
         raise ValueError("the official class must keep its 23 router-correction buffers in F32")
     if device == "mps":
         placed = {tensor.device.type for tensor in list(model.parameters()) + list(model.buffers())}
-        if placed != {"mps"}:
+        allowed = {"mps", "meta"} if offloaded else {"mps"}
+        if "mps" not in placed or not placed <= allowed:
             raise ValueError(f"MPS graph has tensors on {sorted(placed)}")
     return {"attention_implementation": attn, "experts_implementation": experts}
 
@@ -351,8 +358,8 @@ def self_check(torch: Any, transformers: Any, model_dir: Path, device: str, atte
        precision tool's ``evaluate`` bit for bit.
     2. In F16 on the requested graph, the requested implementations resolve
        and every row is finite.
-    3. With `offload` (CPU only), every other block offloaded to disk gives
-       the same rows as all blocks resident, bit for bit.
+    3. With `offload`, every other block offloaded to disk gives the same
+       rows on the requested device as all blocks resident, bit for bit.
     """
 
     prompt, generated = [5, 9, 17, 3, 44, 60], [11, 22, 33, 44, 55, 66, 77, 88, 99, 100]
@@ -379,10 +386,10 @@ def self_check(torch: Any, transformers: Any, model_dir: Path, device: str, atte
         finite = all(bool(torch.isfinite(rows[kind]).all()) for kind, _ in PRECISION.KINDS)
         offloaded_equal = None
         if offload:
-            device_map = {f"model.{name}": "cpu" for name, _ in graph_model.model.named_children() if name != "layers"}
-            device_map["lm_head"] = "cpu"
+            device_map = {f"model.{name}": device for name, _ in graph_model.model.named_children() if name != "layers"}
+            device_map["lm_head"] = device
             for index in range(len(graph_model.model.layers)):
-                device_map[f"model.layers.{index}"] = "disk" if index % 2 else "cpu"
+                device_map[f"model.layers.{index}"] = "disk" if index % 2 else device
             offloaded_model = load(
                 torch.float16, device, attention, device_map=device_map, offload_folder=str(root / "offload"), **extra
             )
@@ -401,6 +408,25 @@ def check_tiny_loaded(model: Any, device: str, attention: str) -> dict[str, str]
     if attn != attention or experts != resolved_experts(device):
         raise ValueError(f"tiny model loaded {attn}/{experts}, expected {attention}/{resolved_experts(device)}")
     return {"attention_implementation": attn, "experts_implementation": experts}
+
+
+def hook_devices(torch: Any, model: Any) -> list[str]:
+    """Device types on which Accelerate's hooks execute the model's modules (empty without hooks)."""
+
+    devices = {
+        torch.device(module._hf_hook.execution_device).type
+        for module in model.modules()
+        if getattr(getattr(module, "_hf_hook", None), "execution_device", None) is not None
+    }
+    return sorted(devices)
+
+
+def on_device(device_map: dict[str, str], device: str) -> dict[str, str]:
+    """Places the resident entries of the precision tool's CPU block map on `device`; disk entries stay on disk."""
+
+    if set(device_map.values()) - {"cpu", "disk"}:
+        raise ValueError(f"unexpected placements {sorted(set(device_map.values()))}")
+    return {name: placement if placement == "disk" else device for name, placement in device_map.items()}
 
 
 def rows_from(torch: Any, payloads: dict[str, bytes]) -> dict[str, Any]:
@@ -448,7 +474,8 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     offload_root, offloaded_blocks = None, 0
     if offload:
         budget = int(arguments.max_resident_gib * 2**30)
-        options["device_map"] = PRECISION.block_device_map(torch, transformers, model_dir, DTYPE, budget)
+        options["device_map"] = on_device(PRECISION.block_device_map(torch, transformers, model_dir, DTYPE, budget),
+                                          device)
         offload_root = Path(tempfile.mkdtemp(prefix=".offload.", dir=arguments.offload_dir.resolve(strict=True)))
         options["offload_folder"] = str(offload_root)
         offloaded_blocks = sum(value == "disk" for value in options["device_map"].values())
@@ -457,7 +484,10 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     try:
         model = timed(samples, "load", lambda: transformers.NemotronHForCausalLM.from_pretrained(
             model_dir, local_files_only=True, trust_remote_code=False, dtype=torch.float16, **options).eval())
-        resolved = check_loaded(torch, model, device, attention)
+        resolved = check_loaded(torch, model, device, attention, offload)
+        executes_on = hook_devices(torch, model)
+        if offload and executes_on != [device]:
+            raise ValueError(f"offloaded blocks execute on {executes_on}, not {device}")
 
         def run() -> dict[str, Any]:
             """Evaluates the three row families and synchronizes the device."""
@@ -532,6 +562,7 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
             "self_check": widening,
             "max_resident_gib": arguments.max_resident_gib,
             "offloaded_blocks": offloaded_blocks,
+            "offload_execution_devices": executes_on,
             "system_volume": system,
             "timings": samples,
         },
@@ -553,14 +584,12 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-resident-gib",
         type=float,
-        help="CPU only: keep at most this many GiB of decoder blocks in memory and offload the rest to --offload-dir",
+        help="keep at most this many GiB of decoder blocks on the device and offload the rest to --offload-dir",
     )
     parser.add_argument("--offload-dir", type=Path, help="directory for temporary offloaded blocks")
     arguments = parser.parse_args(argv)
     if (arguments.max_resident_gib is None) != (arguments.offload_dir is None):
         parser.error("--max-resident-gib and --offload-dir go together")
-    if arguments.device == "mps" and arguments.max_resident_gib is not None:
-        parser.error("an MPS graph keeps the whole model on the device; --max-resident-gib is CPU only")
     return arguments
 
 
