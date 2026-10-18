@@ -750,14 +750,17 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   ([record](acceptance/measurements/half-precision-envelope-20261018.json)).
   Every Llama-family and Gemma gate in F32 and Flex/BF16 passes, and every
   Metal/F16 gate of the four F16-calibrated Llama-family checkpoints; Qwen2-7B
-  in F16 is uncalibrated. Qwen3.5-0.8B's parity, benchmarks (confirmed by a
-  controlled rerun against the pre-change binary), and memory gate pass
+  in F16 is uncalibrated. Qwen3.5-0.8B's parity and memory gates pass
   again, as do the larger checkpoints' official gates, smokes, and audits and
   the Qwen3.8-27B Q8/Q4 conversions, except the Nemotron-H official-precision
   gate, whose cached row at decision 22 falls below its official F16 floor
   (`0.998558` against `0.998635`) with the once-rounded Mamba-2 convolution
-  SiLU; a control reverting only that site passes. No bound was changed and
-  no checkpoint is promoted.
+  SiLU; a control reverting only that site passes. Qwen3.5-0.8B's benchmarks
+  keep their tokens and every warm median, but their single-sample cold
+  first token breaches the approved September 10 baseline, in the pre-change
+  binary too: not attributable to this branch; the breach of the approved
+  baseline awaits the maintainer (review record below). No bound was changed
+  and no checkpoint is promoted.
 - A half-precision follow-ups record holds the round's decisions verbatim,
   with their rationale and review flags. It also records a rerun of every
   Llama-family and Gemma gate at the integrated head `8181605`: 106 processes
@@ -770,6 +773,17 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   repeats the pre-SiLU round's printed statistics. The Nemotron-H
   official-precision failure was not rerun and stands. No checkpoint is
   promoted.
+- A half-precision review record holds the review round at `1e38eec`: the
+  eager-attention and convolution-SiLU tests, seven failing mutations, the
+  torch 2.10.0 probe, and 33 single-process runs (every gemma-3-4b-it gate,
+  reproducing `8181605` exactly where it ran there, the Gemma Metal/F16 runs
+  failing as uncalibrated, and the operation-level tests on Flex and Metal),
+  checked by `scripts/tests/test_half_precision_review_record.py`
+  ([record](acceptance/measurements/half-precision-review-20261018.json)).
+  It records the Qwen3.5-0.8B cold-first-token breach of the approved
+  baseline for the maintainer and corrects the envelope record's benchmark
+  verdict and its claim that no real-checkpoint gate selects the eager graph
+  (Muse-Glimmer's does). No checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

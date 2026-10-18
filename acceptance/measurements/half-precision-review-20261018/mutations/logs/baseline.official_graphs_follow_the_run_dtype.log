@@ -1,0 +1,7 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== mutation none (baseline) 2026-10-18T06:58:10+00:00
+== cmd cargo test --locked --test gemma_artifacts official_graphs_follow_the_run_dtype -- --exact
+running 1 test
+test official_graphs_follow_the_run_dtype ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+== exit=0 expected=0

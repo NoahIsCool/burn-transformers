@@ -1,0 +1,51 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 fe057e7a1b3accafa001d43aeb2f4288304493dcc19665cab747ace2b727e45d
+== metal/F32 metal::metal_long_context_logits_cross_the_sliding_window
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 metal::metal_long_context_logits_cross_the_sliding_window
+== start 2026-10-18T06:50:46+00:00 load 5.20 7.44 6.02 free 91%
+
+running 1 test
+test metal::metal_long_context_logits_cross_the_sliding_window ... F32 matrix products use F32 inputs; tolerance 5e-3
+load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 8.058548e-5
+windowed: positions 1016..1024: max |Δ| = 6.3562393e-4
+windowed: positions 1024..1032: max |Δ| = 1.449585e-4
+windowed: positions 1032..1088: max |Δ| = 1.1320114e-3
+windowed: positions 1088..1237: max |Δ| = 4.7779083e-4
+long prompt (1237 tokens, window 1024): max |Δ| = 6.3562393e-4 before the window, 1.1320114e-3 at or beyond it
+unwindowed: positions 0..4: max |Δ| = 8.058548e-5
+unwindowed: positions 1016..1024: max |Δ| = 6.3562393e-4
+unwindowed: positions 1024..1032: max |Δ| = 1.7369881e0
+unwindowed: positions 1032..1088: max |Δ| = 1.1642223e1
+unwindowed: positions 1088..1237: max |Δ| = 3.5908627e1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 11.24s
+
+       11.33 real         4.63 user         3.19 sys
+         17077469184  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1756946  page reclaims
+                  21  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               56594  involuntary context switches
+         88215032305  instructions retired
+         28181423575  cycles elapsed
+         29849233848  peak memory footprint
+== exit=0 wall=12.2s min_free_pct=78 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0

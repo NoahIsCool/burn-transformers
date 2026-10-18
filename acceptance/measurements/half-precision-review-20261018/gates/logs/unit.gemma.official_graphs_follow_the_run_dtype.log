@@ -1,0 +1,33 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 fe057e7a1b3accafa001d43aeb2f4288304493dcc19665cab747ace2b727e45d
+== unit official_graphs_follow_the_run_dtype
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --exact --nocapture --test-threads 1 official_graphs_follow_the_run_dtype
+== start 2026-10-18T06:47:58+00:00 load 9.68 8.91 6.13 free 91%
+
+running 1 test
+test official_graphs_follow_the_run_dtype ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+
+        0.00 real         0.00 user         0.00 sys
+             7520256  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 722  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  11  involuntary context switches
+            38120079  instructions retired
+            13020703  cycles elapsed
+             2720248  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0

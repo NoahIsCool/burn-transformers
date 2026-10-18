@@ -762,11 +762,17 @@ record promotes no checkpoint.
   continuations are unchanged, but the single-sample cold first token (which
   includes lazy kernel compilation) reads `0.432` s against `0.168` s and
   `0.411` s against `0.366` s. A controlled rerun alternating `7bd057e` and
-  `f9f78b5` binaries three times does not confirm a regression: the head's
-  median cold first token is lower (`0.299` against `0.368` s, and `0.302`
-  against `0.406` s in the public benchmark), cold samples of the two binaries
-  together range from `0.228` to `0.760` s, and every warm median stays within
-  `+3.2%` of the base's. The supervised memory run passes its 93 phases with
+  `f9f78b5` binaries three times shows the slowdown is not attributable to
+  this branch: the head's median cold first token is lower (`0.299` against
+  `0.368` s, and `0.302` against `0.406` s in the public benchmark), and every
+  warm median stays within `+3.2%` of the base's. Against the approved
+  baseline it confirms the breach in the baseline benchmark, where all six
+  cold samples of both binaries (`0.228` to `0.760` s) exceed `1.1 x 0.168`
+  s; in the public benchmark the base binary's median (`0.406` s, `+11.0%`)
+  exceeds `1.1 x 0.366` s and the head's three samples (`0.234` to `0.307` s)
+  do not. The breach of the approved baseline awaits the maintainer
+  ([review record](acceptance/measurements/half-precision-review-20261018.json)).
+  The supervised memory run passes its 93 phases with
   no sampling or validation error and a kernel lifetime maximum of 3.67 GB.
 - Larger checkpoints whose numerics the SiLU change touches: the Qwen3.8-27B
   official gate (prompt cosine `0.999999873`, 32/32 greedy tokens) and MTP
@@ -802,8 +808,9 @@ record promotes no checkpoint.
   `65,504` gives infinity). The eager attention graph
   (`AttentionPrecisionMode::EagerFp32Softmax`: opt-in for the Llama family,
   the F16/BF16 default of Muse-Glimmer, the default of GPT-2 and GPT-NeoX, and
-  the graph of score and pattern hooks) still exceeds the envelope in Flex/BF16 cached decode on Qwen3-4B
-  (`1.106` against `1.054`, mean `0.157` against `0.100`) although its prompts
+  the graph of score and pattern hooks) still exceeds the envelope in Flex/BF16
+  cached decode on Qwen3-4B (`1.106` against `1.054`, mean `0.157` against
+  `0.100`) although its prompts
   and stateless rows stay within it; a fused dump reproduces the gate's own
   statistics exactly. End to end, once-rounded SiLU moves SmolLM-135M's
   Flex/BF16 prefill medians by `-3.7%` and `+0.7%` and its decode medians by
@@ -924,6 +931,64 @@ profile), and its integrated-head rerun:
 - a first CUDA run of the real-checkpoint gates, F32 (with explicit
   tolerances on a TF32 device) and the Llama-family and Gemma half-precision
   profiles; no CUDA run of any gate has been recorded.
+
+### Review round (October 18)
+
+The [half-precision review record](acceptance/measurements/half-precision-review-20261018.json)
+answers a review of the two rounds above. Every binary was built from the code
+head `1e38eec`, and each of its 33 runs ran in its own process in the clean
+worktree, under the heavy-model lock except for the bundle-only tests.
+
+- Eager attention: a new operation-level test pins all five rounding points
+  of Transformers' eager attention (`Q K^T` summed in F32 and rounded, the
+  unrounded scale in F32, the mask and bias added in the dtype, an F32
+  softmax rounded once, and `P V` summed in F32 and rounded) on grouped heads
+  with a causal mask, a bias, and a fully masked row. It compares a host
+  emulation and Transformers 5.2.0's own `eager_attention_forward` bit for
+  bit. BF16 matched; F16 on Flex did not (10 of 120 probabilities and 45 of
+  96 outputs), because Flex's F16 GEMM keeps F16 partial sums, so on inference
+  Flex the eager graph now forms its two F16 products from F32 operands
+  (`90f6152`). Metal's F16 products are F32 sums rounded once, and Metal's
+  eager graph, Muse-Glimmer's half-precision default, equals Transformers'
+  eager attention on the grid (ignored Metal tests); no gate profile changes.
+  A torch 2.10.0 probe supplies the PyTorch evidence the eager-scale change
+  lacked: on the CPU, `x * (1/sqrt(128))` with a Python float equals the F32
+  product rounded once on every finite BF16 and F16 value, while MPS flushes
+  the 1,120 BF16 values whose F32 product is subnormal to zero.
+- The once-rounded SiLU is pinned at the Mamba-2 and Gated DeltaNet
+  convolution sites (`f7b8d99`). Seven mutations, run in a scratch clone,
+  each fail their test: either convolution call site reverted to
+  `activation::silu`, either eager product formed by Flex's own F16 GEMM, the
+  softmax in the dtype, the dtype-rounded scale, and an F16 Gemma run reading
+  the BF16 graphs.
+- Gemma F16 is uncalibrated (all official F16 graphs overflow). The
+  gate-level refusal of `f16` anticipated decision (d) and was withdrawn
+  (`e2f7279`), so the five Metal/F16 gates fail as uncalibrated before
+  loading. All 10 F32 and 5 Flex/BF16 Gemma gates and the two BF16 bundle-only
+  tests reproduce their `8181605` output exactly, and Metal BF16 still fails
+  with the contextual load error. Of the 33 runs, 27 pass and 6 fail as
+  expected.
+- Documentation: the Nemotron-H official-precision gate passed at `9a9c730`
+  and fails at `f9f78b5`, pending review of the floor rule; the eager graph is
+  also the half-precision default of Muse-Glimmer (and the default of GPT-2
+  and GPT-NeoX), so Muse's `f9f78b5` statistics reflect both the SiLU and the
+  eager-scale changes.
+- Benchmarks: Qwen3.5-0.8B's single-sample cold first token breaches the
+  approved September 10 baseline. In the baseline benchmark all six
+  controlled samples of both binaries exceed `1.1x`; in the public benchmark
+  the gate run (`+12.2%`) and the base binary's median (`+11.0%`) do, and the
+  head's three samples do not. The base binary `7bd057e` shows the breach
+  too, so it is not attributable to this branch. The breach of the approved
+  baseline awaits the maintainer, and nothing is re-baselined.
+- Source validation at `1e38eec` (formatting, warning-denied Clippy on
+  nightly and 1.99.1, the Rust tests in three feature sets, MSRV 1.92, both
+  rustdoc builds, the documentation audit, the Python tests, and
+  `check_release.py --gate source --offline`) passes. Not run: the
+  Llama-family gates (no change reaches them), the Metal checkpoint gates
+  (Metal's graph is unchanged), the Nemotron-H gate (its failure stands), the
+  benchmarks, CUDA, and coverage. `scripts/tests/test_half_precision_review_record.py`
+  recomputes every status, quote, benchmark figure, and identity from the
+  committed evidence.
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.

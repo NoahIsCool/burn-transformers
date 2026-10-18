@@ -97,6 +97,21 @@ stage reports. The envelope and October 17 records stay byte-identical, and
 status, comparison, and identity from the committed logs. The record promotes
 no checkpoint.
 
+The [half-precision review record](half-precision-review-20261018.json)
+answers a review of the envelope and follow-ups records at the code head
+`1e38eec`. It records the eager-attention rounding-point test that exposed
+Flex's F16 partial sums in the eager graph (fixed), the convolution SiLU
+call-site tests, seven mutations that each fail their test, a torch 2.10.0
+probe of PyTorch's scalar multiply and matrix products, and 33 single-process
+runs: every gemma-3-4b-it gate, whose 17 runs with an `8181605` counterpart
+reproduce it exactly, the Gemma Metal/F16 runs now failing as uncalibrated,
+and the new operation-level tests on Flex and Metal. It also records that
+Qwen3.5-0.8B's cold first token breaches the approved September 10 baseline
+in the base binary as well, which awaits the maintainer, and corrects two
+statements of the envelope record, which stays byte-identical with the other
+earlier records. `scripts/tests/test_half_precision_review_record.py`
+recomputes its statuses, figures, and identities. It promotes no checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the
