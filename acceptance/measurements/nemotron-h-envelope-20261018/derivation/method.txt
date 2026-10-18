@@ -1,0 +1,92 @@
+Nemotron-H official-precision envelope: method, fixed before any new data
+=========================================================================
+
+Registered 2026-10-18T07:27:09Z at source fa8426e5dc8cbcb269c29e211b119ea0acd61054
+(branch claude/tfm-nemotron-envelope), before any new official evaluation was
+generated and before any Burn row of this round was computed. Nothing below
+may change after the official graphs are measured; the derivation
+(derivation/envelope.txt, written later) applies this method as stated.
+
+What was already known when this was written
+--------------------------------------------
+- The precision bundle (manifest 5da4427d...) holds the official F32 truth
+  rows and the official CPU/F16 (eager attention) rows; the MPS/F16 oracle
+  (manifest bd3abb41...) holds the official MPS/F16 (eager attention) rows.
+  Their worst-row cosines against F32 (precision manifest) are
+    MPS/F16 eager: prompt 0.999194502, teacher 0.994466421 (decision 18),
+                   cached 0.998635047 (decision 22)
+    CPU/F16 eager: prompt 0.999194145, teacher 0.998632038 (decision 27),
+                   cached 0.999096934 (decision 26)
+- From the envelope round's record: Burn's Metal/F16 cached row 22 at
+  fa8426e's library code is 0.998558 against F32 (the failure this round
+  revisits); at 9a9c730 Burn's minima were prompt 0.999224, teacher 0.997612
+  (decision 30), cached 0.998777 (decision 22). No other Burn row at the
+  current library code is known (the failing run stopped at cached row 22).
+  The method below has no free parameter that could be chosen against these.
+
+Official graphs
+---------------
+The pinned official class (Transformers cfa309, PyTorch 2.10.0, CPython
+3.11.9, the oracle's environment) in float16 on this host, on the oracle's
+prompt and its 32 recorded greedy tokens, called exactly as the oracle and the
+precision tool call it (stateless prompt row, 32 teacher-forced rows of one
+stateless chunk, prefill plus 31 one-token cached decodes), in the envelope
+round's four graphs:
+
+    (device, attention)   source
+    cpu / eager           existing: precision bundle float16 rows
+    cpu / sdpa            new
+    mps / eager           existing: the MPS/F16 oracle
+    mps / sdpa            new
+
+Each new graph differs from the existing graph on its device only in the
+attention implementation: the CPU graphs keep the precision tool's experts
+setting (Transformers' default request, grouped_mm), the MPS graphs the
+oracle's (eager). Each new bundle is create-only, authenticated by SHA-256,
+and records the requested and resolved attention and experts
+implementations. If fewer than three graphs can be produced, nothing is
+adopted: leave-one-out over two graphs is weak, and the round recommends
+instead.
+
+Statistic
+---------
+For a row a and its F32 truth row r (same path, same decision), with the
+cosine c = <a, r> / (|a| |r|) accumulated in F64 as the gate does, the
+normalized deviation is
+
+    delta(a, r) = | a/|a| - r/|r| |_2 = sqrt(2 (1 - c)),
+
+the L2 distance between the unit-normalized rows: a distance in the same
+sense as the envelope round's |a - r| statistics, and a monotone function of
+the cosine the gate already uses (so a bound on delta is a cosine floor
+1 - delta^2 / 2). For path k in {prompt (1 row), teacher (32), cached (32)}
+and graph g:
+
+    D[g, k] = max over the path's rows of delta     (the gated statistic)
+    m[g, k] = mean over the path's rows of delta    (reported, not gated)
+
+Envelope and slack
+------------------
+    E[k]      = max over the four graphs of D[g, k]
+    rho[g, k] = D[g, k] / max over the other graphs h != g of D[h, k]
+    s[k]      = round_up(max over g of rho[g, k])
+
+round_up is the envelope round's (scripts/derive_half_precision_envelope.py):
+ceiling to two significant digits of the shortest decimal that round-trips
+the F64 ratio. One slack per path, from that path's official graphs alone.
+For transparency the derivation also reports, without adopting them: the
+pooled slack (max of rho over every path), the same ratios on the cosine
+deficit 1 - c (which scales as delta^2), and the leave-one-out ratios of m.
+
+Gate rule (to be implemented only if the derivation is sound)
+-------------------------------------------------------------
+Every Burn row of path k must have exact top-1 (unchanged) and
+
+    delta(burn, truth) <= s[k] * E[k]      (inclusive),
+
+equivalently cosine >= 1 - (s[k] E[k])^2 / 2. The envelope is computed in the
+test from the authenticated rows of all four graphs; the slacks are compiled
+constants that a bundle-only test re-derives from the same rows; the implied
+cosine floor must stay at or above 0.99 (the existing
+MINIMUM_HALF_PRECISION_FLOOR), or the gate refuses to judge. Every row is
+measured before the bound is applied, so a failing run reports all rows.
