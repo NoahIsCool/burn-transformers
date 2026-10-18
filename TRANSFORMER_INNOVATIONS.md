@@ -509,7 +509,14 @@ dtype, promotes only softmax to FP32, casts the probabilities back, and then
 multiplies by V. Burn 0.21 flash attention instead keeps QK accumulation in
 strict FP32; an adversarial Metal F16 gate confirms that omitting the score
 rounding changes output bits. Muse therefore opts into the shared explicit
-eager mode for F16, while F32 retains backend-native arithmetic.
+eager mode for F16, while F32 retains backend-native arithmetic. In F16 and
+BF16 that mode rounds where Transformers' `eager_attention_forward` does:
+$QK^\top$ and the probability-value product are F32 sums rounded once (on
+Flex, whose F16 GEMM keeps F16 partial sums, formed from F32 operands), the
+unrounded score scale multiplies in F32, and the mask and bias are added in
+the dtype; [`attention/dispatch.rs`](src/attention/dispatch.rs) pins all
+five rounding points against an emulation and Transformers' own eager
+function, on Flex and (ignored) on Metal; CUDA and ROCm are unmeasured.
 
 The production Muse path does not advertise flash attention. Burn 0.21's
 ordinary `metal` feature does not enable its attention autotuner, and the
