@@ -1,0 +1,48 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== flex/BF16 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-18T01:05:02+00:00 load 6.49 17.66 24.15 free 88%
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... BF16 bounds of prompt 0: max 2.1603655815124512e-1, mean 2.5301299734788268e-2 (1.5 and 1.3 times the official envelope 1.4402437210083008e-1, 1.9462538257529437e-2)
+BF16 bounds of prompt 1: max 3.1826046109199524e-1, mean 2.8753225198114015e-2 (1.5 and 1.3 times the official envelope 2.1217364072799683e-1, 2.211786553701078e-2)
+BF16 bounds of prompt 2: max 2.764549255371094e-1, mean 3.0192502750317814e-2 (1.5 and 1.3 times the official envelope 1.8430328369140625e-1, 2.3225002115629088e-2)
+BF16 bounds of decode rows: max 3.4666943550109863e-1, mean 2.370211167493396e-2 (1.5 and 1.3 times the official envelope 2.3111295700073242e-1, 1.8232393596103045e-2)
+BF16 bounds of prompt 1 decoded rows: max 3.1826046109199524e-1, mean 2.8753225198114015e-2 (1.5 and 1.3 times the official envelope 2.1217364072799683e-1, 2.211786553701078e-2)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official envelope, greedy steps at 3.4666944e-1
+batched row 0: max |Δ| = 3.125e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 0: max |Δ| = 9.23929214477539e-2 to the reference (bound 2.1603655815124512e-1)
+batched row 1: max |Δ| = 3.125e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 1: max |Δ| = 1.7108556628227234e-1 to the reference (bound 3.1826046109199524e-1)
+batched row 2: max |Δ| = 3.125e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 2: max |Δ| = 1.0316753387451172e-1 to the reference (bound 2.764549255371094e-1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 17.31s
+
+       17.34 real        96.19 user         8.54 sys
+         20943241216  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1284458  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   2  voluntary context switches
+              497907  involuntary context switches
+        307567672803  instructions retired
+        347660680231  cycles elapsed
+         20943240384  peak memory footprint
+== exit=0 wall=18.4s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

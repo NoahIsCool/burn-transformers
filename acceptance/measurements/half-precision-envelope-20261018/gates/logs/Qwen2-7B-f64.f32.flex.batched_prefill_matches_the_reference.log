@@ -1,0 +1,39 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== flex/F32 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen2-7B
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64
+== env TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-18T01:06:50+00:00 load 5.11 13.97 21.93 free 89%
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... F32 matrix products use F32 inputs; tolerance 2.5e-3
+batched row 0: max |Δ| = 3.0994415e-5
+batched row 1: max |Δ| = 3.361702e-5
+batched row 2: max |Δ| = 4.4822693e-5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 7.32s
+
+        7.40 real        24.44 user         5.21 sys
+         34614394880  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2118483  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               74500  involuntary context switches
+        175785922942  instructions retired
+        100851419510  cycles elapsed
+         34621514760  peak memory footprint
+== exit=0 wall=8.1s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

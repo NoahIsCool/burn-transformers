@@ -1,0 +1,134 @@
+### SmolLM-135M
+  flex-bf16 (distance reference: official-bf16)
+    p0 (5 tok, bound max 1.7565 mean 0.22833)
+        base: truth max 1.1665 (0.664) mean 0.15910 (0.697) | to official-bf16 max 0.8125 mean 0.11765
+        patched: truth max 1.3682 (0.779) mean 0.15088 (0.661) | to official-bf16 max 0.3125 mean 0.07088
+    p1 (18 tok, bound max 1.3215 mean 0.09058)
+        base: truth max 1.4356 (1.086) mean 0.07920 (0.874) | to official-bf16 max 0.7812 mean 0.09469
+        patched: truth max 1.1741 (0.888) mean 0.08293 (0.915) | to official-bf16 max 0.5625 mean 0.09400
+    p2 (8 tok, bound max 1.9828 mean 0.08464)
+        base: truth max 2.2152 (1.117) mean 0.16123 (1.905) | to official-bf16 max 1.2812 mean 0.15081
+        patched: truth max 2.0306 (1.024) mean 0.13211 (1.561) | to official-bf16 max 1.6250 mean 0.10787
+    token-weighted mean distance to official-bf16: base 0.11288; patched 0.09385
+  metal-f16 (distance reference: torch-cpu-float16-eager)
+    p0 (5 tok, bound max 1.7565 mean 0.22833)
+        base: truth max 0.2778 (0.158) mean 0.02623 (0.115) | to torch-cpu-float16-eager max 0.1641 mean 0.01943 | to official-bf16 mean 0.21544
+        patched: truth max 0.3872 (0.220) mean 0.03593 (0.157) | to torch-cpu-float16-eager max 0.2734 mean 0.03524 | to official-bf16 mean 0.21963
+    p1 (18 tok, bound max 1.3215 mean 0.09058)
+        base: truth max 0.1586 (0.120) mean 0.01130 (0.125) | to torch-cpu-float16-eager max 0.0977 mean 0.01469 | to official-bf16 mean 0.07592
+        patched: truth max 0.1615 (0.122) mean 0.01122 (0.124) | to torch-cpu-float16-eager max 0.1191 mean 0.01267 | to official-bf16 mean 0.07361
+    p2 (8 tok, bound max 1.9828 mean 0.08464)
+        base: truth max 0.2811 (0.142) mean 0.01586 (0.187) | to torch-cpu-float16-eager max 0.1953 mean 0.01031 | to official-bf16 mean 0.07287
+        patched: truth max 0.1795 (0.091) mean 0.01690 (0.200) | to torch-cpu-float16-eager max 0.0703 mean 0.01658 | to official-bf16 mean 0.06845
+    token-weighted mean distance to torch-cpu-float16-eager: base 0.01432; patched 0.01732
+  block0 flex-bf16-base: SiLU(Burn pre-act) != F.silu-cpu 28.247% of 47616; != x*sigmoid(x) 0.000% of 47616; gate pre-act pos0 != torch 0.000% of 4608; residual pos0 != official cpu 40.220% of 1728, mps 40.278% of 1728
+  block0 flex-bf16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.006% of 47616; != x*sigmoid(x) 28.241% of 47616; gate pre-act pos0 != torch 0.000% of 4608; residual pos0 != official cpu 0.000% of 1728, mps 0.058% of 1728
+  block0 metal-f16-base: SiLU(Burn pre-act) != F.silu-cpu 27.982% of 47616; != x*sigmoid(x) 0.002% of 47616; gate pre-act pos0 != torch 2.018% of 4608; residual pos0 != official cpu 38.252% of 1728, mps 38.252% of 1728
+  block0 metal-f16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.000% of 47616; != x*sigmoid(x) 27.984% of 47616; gate pre-act pos0 != torch 2.018% of 4608; residual pos0 != official cpu 11.748% of 1728, mps 11.748% of 1728
+### Qwen3-4B
+  flex-bf16 (distance reference: official-bf16)
+    p0 (5 tok, bound max 0.8400 mean 0.09357)
+        base: truth max 0.7688 (0.915) mean 0.05881 (0.629) | to official-bf16 max 0.5625 mean 0.07025
+        patched: truth max 0.7000 (0.833) mean 0.05060 (0.541) | to official-bf16 max 0.4375 mean 0.04917
+    p1 (13 tok, bound max 0.8413 mean 0.05204)
+        base: truth max 0.7323 (0.870) mean 0.04988 (0.959) | to official-bf16 max 0.5000 mean 0.05504
+        patched: truth max 0.8573 (1.019) mean 0.04397 (0.845) | to official-bf16 max 0.3750 mean 0.04813
+    p2 (8 tok, bound max 1.0554 mean 0.06462)
+        base: truth max 0.6613 (0.627) mean 0.03949 (0.611) | to official-bf16 max 0.3125 mean 0.04277
+        patched: truth max 0.8795 (0.833) mean 0.04769 (0.738) | to official-bf16 max 0.3438 mean 0.04324
+    token-weighted mean distance to official-bf16: base 0.05419; patched 0.04683
+  metal-f16 (distance reference: torch-cpu-float16-eager)
+    p0 (5 tok, bound max 0.8400 mean 0.09357)
+        base: truth max 0.0473 (0.056) mean 0.00498 (0.053) | to torch-cpu-float16-eager max 0.0488 mean 0.00618 | to official-bf16 mean 0.07832
+        patched: truth max 0.0567 (0.068) mean 0.00752 (0.080) | to torch-cpu-float16-eager max 0.0938 mean 0.00913 | to official-bf16 mean 0.08100
+    p1 (13 tok, bound max 0.8413 mean 0.05204)
+        base: truth max 0.0645 (0.077) mean 0.00583 (0.112) | to torch-cpu-float16-eager max 0.0459 mean 0.00569 | to official-bf16 mean 0.04555
+        patched: truth max 0.0567 (0.067) mean 0.00713 (0.137) | to torch-cpu-float16-eager max 0.0488 mean 0.00568 | to official-bf16 mean 0.04662
+    p2 (8 tok, bound max 1.0554 mean 0.06462)
+        base: truth max 0.1691 (0.160) mean 0.00668 (0.103) | to torch-cpu-float16-eager max 0.0352 mean 0.00402 | to official-bf16 mean 0.05096
+        patched: truth max 0.1691 (0.160) mean 0.00628 (0.097) | to torch-cpu-float16-eager max 0.0391 mean 0.00419 | to official-bf16 mean 0.05074
+    token-weighted mean distance to torch-cpu-float16-eager: base 0.00527; patched 0.00588
+  block0 flex-bf16-base: SiLU(Burn pre-act) != F.silu-cpu 27.014% of 252928; != x*sigmoid(x) 0.000% of 252928; gate pre-act pos0 != torch 1.199% of 29184; residual pos0 != official cpu 56.315% of 7680, mps 56.315% of 7680
+  block0 flex-bf16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.006% of 252928; != x*sigmoid(x) 27.009% of 252928; gate pre-act pos0 != torch 1.199% of 29184; residual pos0 != official cpu 2.044% of 7680, mps 2.044% of 7680
+  block0 metal-f16-base: SiLU(Burn pre-act) != F.silu-cpu 25.202% of 252928; != x*sigmoid(x) 0.004% of 252928; gate pre-act pos0 != torch 18.675% of 29184; residual pos0 != official cpu 36.654% of 7680, mps 40.130% of 7680
+  block0 metal-f16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.001% of 252928; != x*sigmoid(x) 25.206% of 252928; gate pre-act pos0 != torch 18.675% of 29184; residual pos0 != official cpu 18.438% of 7680, mps 27.279% of 7680
+### SmolLM3-3B
+  flex-bf16 (distance reference: official-bf16)
+    p0 (5 tok, bound max 7.5373 mean 0.18772)
+        base: truth max 6.2811 (0.833) mean 0.16731 (0.891) | to official-bf16 max 0.3750 mean 0.04880
+        patched: truth max 6.2811 (0.833) mean 0.18077 (0.963) | to official-bf16 max 0.5000 mean 0.05979
+    p1 (13 tok, bound max 8.0055 mean 0.09465)
+        base: truth max 6.6712 (0.833) mean 0.09712 (1.026) | to official-bf16 max 0.8125 mean 0.05036
+        patched: truth max 6.6712 (0.833) mean 0.09868 (1.043) | to official-bf16 max 0.9375 mean 0.05210
+    p2 (8 tok, bound max 6.3937 mean 0.21227)
+        base: truth max 5.3281 (0.833) mean 0.20557 (0.968) | to official-bf16 max 0.7500 mean 0.06138
+        patched: truth max 5.3281 (0.833) mean 0.21004 (0.989) | to official-bf16 max 0.9375 mean 0.08347
+    token-weighted mean distance to official-bf16: base 0.05345; patched 0.06323
+  metal-f16 (distance reference: torch-cpu-float16-eager)
+    p0 (5 tok, bound max 7.5373 mean 0.18772)
+        base: truth max 0.4033 (0.054) mean 0.01577 (0.084) | to torch-cpu-float16-eager max 0.0703 mean 0.00717 | to official-bf16 mean 0.16154
+        patched: truth max 0.4033 (0.054) mean 0.01825 (0.097) | to torch-cpu-float16-eager max 0.0703 mean 0.00999 | to official-bf16 mean 0.16297
+    p1 (13 tok, bound max 8.0055 mean 0.09465)
+        base: truth max 0.5111 (0.064) mean 0.00973 (0.103) | to torch-cpu-float16-eager max 0.0903 mean 0.00720 | to official-bf16 mean 0.08045
+        patched: truth max 0.4955 (0.062) mean 0.00919 (0.097) | to torch-cpu-float16-eager max 0.0938 mean 0.00717 | to official-bf16 mean 0.07888
+    p2 (8 tok, bound max 6.3937 mean 0.21227)
+        base: truth max 0.4430 (0.069) mean 0.01553 (0.073) | to torch-cpu-float16-eager max 0.1094 mean 0.01147 | to official-bf16 mean 0.17562
+        patched: truth max 0.4430 (0.069) mean 0.01746 (0.082) | to torch-cpu-float16-eager max 0.1328 mean 0.01361 | to official-bf16 mean 0.17784
+    token-weighted mean distance to torch-cpu-float16-eager: base 0.00851; patched 0.00970
+  block0 flex-bf16-base: SiLU(Burn pre-act) != F.silu-cpu 27.449% of 286208; != x*sigmoid(x) 0.000% of 286208; gate pre-act pos0 != torch 0.021% of 33024; residual pos0 != official cpu 34.326% of 6144, mps 34.342% of 6144
+  block0 flex-bf16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.007% of 286208; != x*sigmoid(x) 27.442% of 286208; gate pre-act pos0 != torch 0.021% of 33024; residual pos0 != official cpu 0.277% of 6144, mps 0.081% of 6144
+  block0 metal-f16-base: SiLU(Burn pre-act) != F.silu-cpu 25.723% of 286208; != x*sigmoid(x) 0.002% of 286208; gate pre-act pos0 != torch 5.772% of 33024; residual pos0 != official cpu 34.733% of 6144, mps 35.173% of 6144
+  block0 metal-f16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.001% of 286208; != x*sigmoid(x) 25.726% of 286208; gate pre-act pos0 != torch 5.772% of 33024; residual pos0 != official cpu 10.091% of 6144, mps 10.742% of 6144
+### Qwen2-7B-f64
+  flex-bf16 (distance reference: official-bf16)
+    p0 (5 tok, bound max 10.1867 mean 0.50521)
+        base: truth max 8.5827 (0.843) mean 0.26560 (0.526) | to official-bf16 max 2.7656 mean 0.18451
+        patched: truth max 8.6764 (0.852) mean 0.28237 (0.559) | to official-bf16 max 2.7500 mean 0.18880
+    p1 (13 tok, bound max 8.2148 mean 0.37448)
+        base: truth max 6.6581 (0.811) mean 0.14639 (0.391) | to official-bf16 max 2.3516 mean 0.21124
+        patched: truth max 6.5956 (0.803) mean 0.13817 (0.369) | to official-bf16 max 2.3125 mean 0.20411
+    p2 (8 tok, bound max 12.8668 mean 0.81001)
+        base: truth max 11.2223 (0.872) mean 0.37605 (0.464) | to official-bf16 max 2.5625 mean 0.40230
+        patched: truth max 11.1286 (0.865) mean 0.38797 (0.479) | to official-bf16 max 2.5938 mean 0.38655
+    token-weighted mean distance to official-bf16: base 0.26489; patched 0.25730
+  metal-f16 (distance reference: torch-cpu-float16-eager)
+    p0 (5 tok, bound max 10.1867 mean 0.50521)
+        base: truth max 2.2135 (0.217) mean 0.24172 (0.478) | to official-bf16 mean 0.54816
+        patched: truth max 2.2262 (0.219) mean 0.24220 (0.479) | to official-bf16 mean 0.54915
+    p1 (13 tok, bound max 8.2148 mean 0.37448)
+        base: truth max 6.0631 (0.738) mean 0.35889 (0.958) | to official-bf16 mean 0.41761
+        patched: truth max 6.0552 (0.737) mean 0.35851 (0.957) | to official-bf16 mean 0.41736
+    p2 (8 tok, bound max 12.8668 mean 0.81001)
+        base: truth max 2.0040 (0.156) mean 0.22659 (0.280) | to official-bf16 mean 0.64967
+        patched: truth max 2.0157 (0.157) mean 0.23005 (0.284) | to official-bf16 mean 0.65016
+  block0 flex-bf16-base: SiLU(Burn pre-act) != F.silu-cpu 29.217% of 492544; != x*sigmoid(x) 0.000% of 492544; gate pre-act pos0 != torch 48.379% of 56832; residual pos0 != official cpu 59.924% of 10752, mps 59.942% of 10752
+  block0 flex-bf16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.003% of 492544; != x*sigmoid(x) 29.214% of 492544; gate pre-act pos0 != torch 48.379% of 56832; residual pos0 != official cpu 54.371% of 10752, mps 54.408% of 10752
+  block0 metal-f16-base: SiLU(Burn pre-act) != F.silu-cpu 24.904% of 492544; != x*sigmoid(x) 0.002% of 492544; gate pre-act pos0 != torch 47.318% of 56832; residual pos0 != official cpu 57.980% of 10752, mps 57.999% of 10752
+  block0 metal-f16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.000% of 492544; != x*sigmoid(x) 24.906% of 492544; gate pre-act pos0 != torch 47.318% of 56832; residual pos0 != official cpu 53.283% of 10752, mps 53.302% of 10752
+### Llama-3.1-8B
+  flex-bf16 (distance reference: official-bf16)
+    p0 (6 tok, bound max 0.1649 mean 0.02060)
+        base: truth max 0.1285 (0.779) mean 0.01754 (0.851) | to official-bf16 max 0.1875 mean 0.02053
+        patched: truth max 0.1538 (0.933) mean 0.01798 (0.873) | to official-bf16 max 0.1875 mean 0.01966
+    p1 (14 tok, bound max 0.2546 mean 0.02654)
+        base: truth max 0.1604 (0.630) mean 0.01906 (0.718) | to official-bf16 max 0.2109 mean 0.02637
+        patched: truth max 0.1711 (0.672) mean 0.01889 (0.712) | to official-bf16 max 0.2109 mean 0.02453
+    p2 (9 tok, bound max 0.2182 mean 0.02787)
+        base: truth max 0.1340 (0.614) mean 0.01937 (0.695) | to official-bf16 max 0.1875 mean 0.02506
+        patched: truth max 0.1512 (0.693) mean 0.01979 (0.710) | to official-bf16 max 0.2500 mean 0.02314
+    token-weighted mean distance to official-bf16: base 0.02476; patched 0.02309
+  metal-f16 (distance reference: torch-cpu-float16-eager)
+    p0 (6 tok, bound max 0.1649 mean 0.02060)
+        base: truth max 0.1038 (0.629) mean 0.00424 (0.206) | to torch-cpu-float16-eager max 0.0195 mean 0.00218 | to official-bf16 mean 0.01817
+        patched: truth max 0.1027 (0.623) mean 0.00438 (0.213) | to torch-cpu-float16-eager max 0.0234 mean 0.00226 | to official-bf16 mean 0.01802
+    p1 (14 tok, bound max 0.2546 mean 0.02654)
+        base: truth max 0.1038 (0.408) mean 0.00407 (0.153) | to torch-cpu-float16-eager max 0.0273 mean 0.00315 | to official-bf16 mean 0.02291
+        patched: truth max 0.1027 (0.403) mean 0.00375 (0.141) | to torch-cpu-float16-eager max 0.0273 mean 0.00300 | to official-bf16 mean 0.02282
+    p2 (9 tok, bound max 0.2182 mean 0.02787)
+        base: truth max 0.1038 (0.475) mean 0.00413 (0.148) | to torch-cpu-float16-eager max 0.0244 mean 0.00328 | to official-bf16 mean 0.02452
+        patched: truth max 0.1027 (0.471) mean 0.00397 (0.142) | to torch-cpu-float16-eager max 0.0234 mean 0.00307 | to official-bf16 mean 0.02423
+    token-weighted mean distance to torch-cpu-float16-eager: base 0.00299; patched 0.00287
+  block0 flex-bf16-base: SiLU(Burn pre-act) != F.silu-cpu 26.877% of 415744; != x*sigmoid(x) 0.000% of 415744; gate pre-act pos0 != torch 14.934% of 43008; residual pos0 != official cpu 11.548% of 12288, mps 10.970% of 12288
+  block0 flex-bf16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.015% of 415744; != x*sigmoid(x) 26.862% of 415744; gate pre-act pos0 != torch 14.934% of 43008; residual pos0 != official cpu 3.687% of 12288, mps 2.563% of 12288
+  block0 metal-f16-base: SiLU(Burn pre-act) != F.silu-cpu 25.619% of 415744; != x*sigmoid(x) 0.008% of 415744; gate pre-act pos0 != torch 11.775% of 43008; residual pos0 != official cpu 72.192% of 12288, mps 72.274% of 12288
+  block0 metal-f16-patched: SiLU(Burn pre-act) != F.silu-cpu 0.002% of 415744; != x*sigmoid(x) 25.630% of 415744; gate pre-act pos0 != torch 11.775% of 43008; residual pos0 != official cpu 3.955% of 12288, mps 4.004% of 12288

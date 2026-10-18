@@ -1,0 +1,34 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149 sha256 055ecc55988b8b8f7411da6302e1c4be5ee2b74d126de428d4c23cffa19b6ed2 build B
+== metal/F16 matches_pinned_qwen38_official_reference_on_metal
+== env TRANSFORMERS_QWEN38_DIR=/Volumes/bag of holding/models/Qwen/Qwen3.8-27B-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+== env TRANSFORMERS_QWEN38_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149 --ignored --exact --nocapture --test-threads 1 matches_pinned_qwen38_official_reference_on_metal
+== start 2026-10-18T02:46:26+00:00 load 3.44 3.30 3.93 free 76%
+
+running 1 test
+test matches_pinned_qwen38_official_reference_on_metal ... Qwen3.8 official F16 parity: prompt_cosine=0.999999873, top1=799, greedy_tokens=32
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 258.63s
+
+      258.73 real       142.96 user        45.92 sys
+         16924459008  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             3812085  page reclaims
+                 430  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 197  voluntary context switches
+              883851  involuntary context switches
+       2211360993982  instructions retired
+        677975232355  cycles elapsed
+         64569599360  peak memory footprint
+== exit=0 wall=259.2s min_free_pct=35 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

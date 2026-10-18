@@ -1,0 +1,25 @@
+== source 7bd057ecc56d60df2776639befd30058720d3c09 dirty=0
+== tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/tool/scripts/generate_causal_lm_reference.py sha256 58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b
+== start 2026-10-17T20:39:23+00:00 free 380.9 GiB free-memory 89%
+== cmd ["/usr/bin/time", "-l", "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/tool/scripts/generate_causal_lm_reference.py", "--model-dir", "/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B", "--output", "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa", "--repository", "HuggingFaceTB/SmolLM3-3B", "--revision", "1fa6fa281b5c635c89171a2b53769609cc1199c6", "--dtype", "bfloat16", "--device", "cpu", "--attn-implementation", "sdpa", "--greedy-tokens", "32", "--decode-tokens-from", "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28", "--prompt", "The capital of France is", "--prompt", "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n", "--prompt", "Rotary position embeddings encode relative distance because"]
+{"bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa", "prompts": 3}
+       42.24 real        40.56 user         4.48 sys
+          7134117888  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              486196  page reclaims
+                   4  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  38  voluntary context switches
+              407543  involuntary context switches
+        502445171955  instructions retired
+        146798902687  cycles elapsed
+           769693576  peak memory footprint
+== exit=0 wall=45s lowest-free-memory=89%
+== reference.json sha256 a920754e0538f90bf4f550c0b64411bf9e5334cacbf738be4bdb6027c70b6135

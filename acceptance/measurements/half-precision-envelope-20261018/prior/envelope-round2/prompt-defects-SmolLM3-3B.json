@@ -1,0 +1,97 @@
+{
+ "truth": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28",
+ "truth_manifest_sha256": "cf399f62351665297f181c12c68f89d163315cf87001b78a62c0c0335dbd40d7",
+ "tool_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+ "script_sha256": "963497c156f58e7dd70e61840ae206e8ace994033e20ffa0eb060d3a14fcc376",
+ "model_class": "SmolLM3ForCausalLM",
+ "defects": {
+  "none": [
+   {
+    "max": 6.281063079833984,
+    "position": 0,
+    "mean": 0.15643366756693425,
+    "sha256_f32le": "aead6c7715a397ea661b74e7acdb6a221cc212fd34f18ff81457a65b2c533aef"
+   },
+   {
+    "max": 6.671215057373047,
+    "position": 0,
+    "mean": 0.0788765337917555,
+    "sha256_f32le": "2482bc62bf72464f45b6317a808bffb24851ea2c90cc4f0704642dbdcecca66f"
+   },
+   {
+    "max": 5.328104019165039,
+    "position": 0,
+    "mean": 0.17689148640009886,
+    "sha256_f32le": "01a540724ff475aca9761db357b385fe097ab9d60cda68a59cd8ad35e1d09c21"
+   }
+  ],
+  "silu-twice-rounded": [
+   {
+    "max": 6.281063079833984,
+    "position": 0,
+    "mean": 0.19867190149738095
+   },
+   {
+    "max": 6.671215057373047,
+    "position": 0,
+    "mean": 0.10050104495696643
+   },
+   {
+    "max": 5.328104019165039,
+    "position": 0,
+    "mean": 0.17273332532415148
+   }
+  ],
+  "rmsnorm-bf16": [
+   {
+    "max": 6.781063079833984,
+    "position": 0,
+    "mean": 0.19005732821525292
+   },
+   {
+    "max": 2.2947816848754883,
+    "position": 0,
+    "mean": 0.08719367980057478
+   },
+   {
+    "max": 2.828104019165039,
+    "position": 0,
+    "mean": 0.21495461595596901
+   }
+  ],
+  "softmax-bf16": [
+   {
+    "max": 6.281063079833984,
+    "position": 0,
+    "mean": 0.1653512605816778
+   },
+   {
+    "max": 6.671215057373047,
+    "position": 0,
+    "mean": 0.08489741309896759
+   },
+   {
+    "max": 5.328104019165039,
+    "position": 0,
+    "mean": 0.2361627426662451
+   }
+  ],
+  "rope-angles-bf16": [
+   {
+    "max": 6.281063079833984,
+    "position": 0,
+    "mean": 0.1753132259120857
+   },
+   {
+    "max": 6.671215057373047,
+    "position": 0,
+    "mean": 0.08398000683578784
+   },
+   {
+    "max": 5.328104019165039,
+    "position": 0,
+    "mean": 0.18678835270286484
+   }
+  ]
+ }
+}

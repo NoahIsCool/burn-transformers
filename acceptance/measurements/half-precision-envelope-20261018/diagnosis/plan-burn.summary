@@ -1,0 +1,8 @@
+2026-10-18T03:25:35+00:00 lock acquired
+burn-metal-f32.log: == exit=101 wall=38.5s end=2026-10-18T03:26:13+00:00 load_end 1.59 min_free_pct=68 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+burn-metal-f16.log: == exit=101 wall=14.2s end=2026-10-18T03:26:27+00:00 load_end 1.65 min_free_pct=75 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+qwen3-4b-flex-bf16-fused-decode.log: == exit=0 wall=70.1s end=2026-10-18T03:27:38+00:00 load_end 1.62 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+qwen3-4b-flex-bf16-eager-decode.log: == exit=0 wall=60.0s end=2026-10-18T03:28:38+00:00 load_end 1.75 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+qwen3-4b-flex-bf16-eager-prompt1.log: == exit=0 wall=13.2s end=2026-10-18T03:28:51+00:00 load_end 1.58 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=4 pressured_swapin_mib=0
+qwen3-4b-flex-bf16-eager-prompt2.log: == exit=0 wall=9.2s end=2026-10-18T03:29:00+00:00 load_end 1.57 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+2026-10-18T03:29:00+00:00 lock released

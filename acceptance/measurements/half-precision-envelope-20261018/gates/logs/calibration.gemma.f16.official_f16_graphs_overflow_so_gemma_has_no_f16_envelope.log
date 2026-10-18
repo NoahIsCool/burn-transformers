@@ -1,0 +1,46 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17 build A
+== bundles/F16 official_f16_graphs_overflow_so_gemma_has_no_f16_envelope
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 official_f16_graphs_overflow_so_gemma_has_no_f16_envelope
+== start 2026-10-18T00:56:48+00:00 load 66.14 49.59 33.44 free 88%
+
+running 1 test
+test official_f16_graphs_overflow_so_gemma_has_no_f16_envelope ... 
+thread 'official_f16_graphs_overflow_so_gemma_has_no_f16_envelope' (40555180) panicked at tests/support/half_precision_calibration.rs:1642:5:
+uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 0; a checkpoint whose official evaluation overflows in this dtype has no envelope, so the run fails
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38: uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 0; a checkpoint whose official evaluation overflows in this dtype has no envelope, so the run fails
+
+thread 'official_f16_graphs_overflow_so_gemma_has_no_f16_envelope' (40555180) panicked at tests/support/half_precision_calibration.rs:1642:5:
+uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 0; a checkpoint whose official evaluation overflows in this dtype has no envelope, so the run fails
+/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long: uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 0; a checkpoint whose official evaluation overflows in this dtype has no envelope, so the run fails
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.01s
+
+        0.01 real         0.00 user         0.00 sys
+             9486336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 844  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   8  voluntary context switches
+                  20  involuntary context switches
+            57301423  instructions retired
+            30375459  cycles elapsed
+             3670544  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

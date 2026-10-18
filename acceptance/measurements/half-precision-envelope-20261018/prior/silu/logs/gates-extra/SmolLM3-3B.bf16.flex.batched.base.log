@@ -1,0 +1,46 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 48b39504ecde9466d766834ee38675950aea7498d71fb418191ee92c2086fa89
+== flex/bf16 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-17T22:26:05+00:00 load 5.75 5.35 6.88
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... BF16 bounds of prompt 0: max 7.537275695800781e0, mean 1.877204010803211e-1 (1.2 × official BF16 6.281063079833984e0, 1.5643366756693425e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+BF16 bounds of prompt 1: max 8.005458068847656e0, mean 9.465184055010659e-2 (1.2 × official BF16 6.671215057373047e0, 7.88765337917555e-2; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+BF16 bounds of prompt 2: max 6.393724822998046e0, mean 2.1226978368011862e-1 (1.2 × official BF16 5.328104019165039e0, 1.7689148640009886e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official calibration, greedy steps at 7.5372753e0
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 2.2758150100708008e-1 to the reference (bound 7.537275695800781e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.587728500366211e-1 to the reference (bound 8.005458068847656e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 4.991941452026367e-1 to the reference (bound 6.393724822998046e0)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 5.26s
+
+        5.28 real        17.22 user         4.56 sys
+          8009285632  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              495741  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              206986  involuntary context switches
+        128880234796  instructions retired
+         73711987056  cycles elapsed
+          8003066120  peak memory footprint
+== exit=0 wall=6.1s end=2026-10-17T22:26:11+00:00 load_end 6.65 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

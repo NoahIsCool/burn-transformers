@@ -1,0 +1,38 @@
+== probe tests/probe_metal_overflow.rs sha256 59232b7595baeeff393a45e4c8dc133d123e76a1e9d5c5d061f0d164f918c44d (calls Burn 0.21.0 only, in the scratch probe tree)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-probe/release/deps/probe_metal_overflow-94fb383c477b470e sha256 afeef62674fd31a5ca3836ce12c0de70e0440a9947d5ff2fd11bc231f581f156
+== Metal F16 overflow semantics above 65,504: cast, add, multiply, square, matmul, sum, mean
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/probe
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-probe/release/deps/probe_metal_overflow-94fb383c477b470e --exact --nocapture --test-threads 1 metal_f16_overflow_semantics
+== start 2026-10-18T03:25:34+00:00 load 1.80 2.14 2.98
+
+running 1 test
+test metal_f16_overflow_semantics ... F32 -> F16 cast: [60000.0, 65504.0, 65504.0, inf, inf, inf]
+F16 add: [inf, inf, inf, -inf]
+F16 mul x2: [inf, inf, inf, -inf]
+F16 square: [inf, inf, inf, inf]
+F16 matmul 4 x 300 x 300 = 360000: [inf]
+F16 sum of 4 x 40000: [inf]
+F16 mean of 4 x 40000: [40000.0]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+        0.61 real         0.02 user         0.03 sys
+            37388288  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2609  page reclaims
+                   7  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  35  voluntary context switches
+                 300  involuntary context switches
+           289136980  instructions retired
+           139842966  cycles elapsed
+           191021872  peak memory footprint
+== exit=0 wall=1.0s end=2026-10-18T03:25:35+00:00 load_end 1.80 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

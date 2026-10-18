@@ -1,0 +1,36 @@
+== source 7bd057ecc56d60df2776639befd30058720d3c09
+== start 2026-10-17T21:11:11Z
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/decode_defects.py /Volumes/T9/models/Qwen/Qwen2-7B /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/decode-defects-Qwen2-7B.json cpu-eager mps-sdpa
+cpu-eager none             decode-vs-stateless max 1.7500 (steps > 0.5: 9, median 0.2969); decoded prompt 1 vs F32 max 6.8456 mean 0.31212
+cpu-eager rope+1           decode-vs-stateless max 3.0000 (steps > 0.5: 32, median 1.5625); decoded prompt 1 vs F32 max 6.8456 mean 0.47944
+cpu-eager skip-newest-key  decode-vs-stateless max 22.3750 (steps > 0.5: 32, median 16.2188); decoded prompt 1 vs F32 max 21.1524 mean 3.49304
+cpu-eager skip-prev-key    decode-vs-stateless max 17.2344 (steps > 0.5: 32, median 10.4375); decoded prompt 1 vs F32 max 18.1439 mean 2.98846
+cpu-eager kv-e5m2          decode-vs-stateless max 10.1289 (steps > 0.5: 32, median 2.8828); decoded prompt 1 vs F32 max 19.6047 mean 1.88660
+cpu-eager kv-e4m3          decode-vs-stateless max 16.7500 (steps > 0.5: 32, median 1.7188); decoded prompt 1 vs F32 max 6.8456 mean 0.55487
+cpu-eager rope-bf16        decode-vs-stateless max 5.2539 (steps > 0.5: 21, median 0.5938); decoded prompt 1 vs F32 max 6.8456 mean 0.37809
+mps-sdpa none             decode-vs-stateless max 0.3750 (steps > 0.5: 0, median 0.1562); decoded prompt 1 vs F32 max 6.7206 mean 0.14931
+mps-sdpa rope+1           decode-vs-stateless max 2.1875 (steps > 0.5: 32, median 1.2500); decoded prompt 1 vs F32 max 6.7206 mean 0.19206
+mps-sdpa skip-newest-key  decode-vs-stateless max 21.5273 (steps > 0.5: 32, median 15.4688); decoded prompt 1 vs F32 max 20.7922 mean 3.06225
+mps-sdpa skip-prev-key    decode-vs-stateless max 17.5000 (steps > 0.5: 32, median 10.5938); decoded prompt 1 vs F32 max 18.6439 mean 3.10548
+mps-sdpa kv-e5m2          decode-vs-stateless max 9.9062 (steps > 0.5: 32, median 3.3047); decoded prompt 1 vs F32 max 14.6380 mean 1.80252
+mps-sdpa kv-e4m3          decode-vs-stateless max 9.6875 (steps > 0.5: 32, median 2.5625); decoded prompt 1 vs F32 max 6.7206 mean 0.62294
+mps-sdpa rope-bf16        decode-vs-stateless max 0.2500 (steps > 0.5: 0, median 0.1562); decoded prompt 1 vs F32 max 6.7206 mean 0.14306
+      117.31 real       340.70 user        41.16 sys
+         14838185984  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              885437  page reclaims
+               66600  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   5  voluntary context switches
+             4588919  involuntary context switches
+       3010147854282  instructions retired
+       1329011580157  cycles elapsed
+         17258154624  peak memory footprint
+== exit=0 end 2026-10-17T21:13:08Z

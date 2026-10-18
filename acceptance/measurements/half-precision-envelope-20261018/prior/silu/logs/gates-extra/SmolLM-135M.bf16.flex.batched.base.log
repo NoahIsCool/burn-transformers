@@ -1,0 +1,46 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 48b39504ecde9466d766834ee38675950aea7498d71fb418191ee92c2086fa89
+== flex/bf16 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM-135M-1d461723
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-17T22:23:18+00:00 load 2.85 4.03 6.79
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... BF16 bounds of prompt 0: max 1.7564580917358399e0, mean 2.283324482324453e-1 (1.2 × official BF16 1.4637150764465332e0, 1.9027704019370442e-1; /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16)
+BF16 bounds of prompt 1: max 1.321504783630371e0, mean 9.058183002097439e-2 (1.2 × official BF16 1.1012539863586426e0, 7.548485835081199e-2; /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16)
+BF16 bounds of prompt 2: max 1.9828147888183594e0, mean 8.464016019030864e-2 (1.2 × official BF16 1.6523456573486328e0, 7.05334668252572e-2; /Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official calibration, greedy steps at 1.756458e0
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 1.8778610229492188e-1 to the reference (bound 1.7564580917358399e0)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.716398239135742e-1 to the reference (bound 1.321504783630371e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 2.524232864379883e-1 to the reference (bound 1.9828147888183594e0)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.82s
+
+        0.83 real         1.09 user         0.84 sys
+           501104640  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               30842  page reclaims
+                   9  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               37627  involuntary context switches
+         10388805565  instructions retired
+          6804904538  cycles elapsed
+           491127720  peak memory footprint
+== exit=0 wall=1.0s end=2026-10-17T22:23:19+00:00 load_end 2.85 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

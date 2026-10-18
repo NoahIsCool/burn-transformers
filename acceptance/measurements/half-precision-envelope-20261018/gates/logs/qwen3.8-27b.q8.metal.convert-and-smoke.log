@@ -1,0 +1,36 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149 sha256 055ecc55988b8b8f7411da6302e1c4be5ee2b74d126de428d4c23cffa19b6ed2 build B
+== host/Q8 + metal quantizes_pinned_qwen38_weights_to_q8_burnpack
+== env TRANSFORMERS_QWEN38_DIR=/Volumes/bag of holding/models/Qwen/Qwen3.8-27B-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+== env TRANSFORMERS_QWEN38_Q8_OUTPUT_DIR=/Volumes/bag of holding/models/transformers-acceptance/half-precision-envelope-20261018/qwen3.8-27b-q8-1d4bf0f2
+== env TRANSFORMERS_QWEN38_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149 --ignored --exact --nocapture --test-threads 1 quantizes_pinned_qwen38_weights_to_q8_burnpack
+== start 2026-10-18T03:29:49+00:00 load 2.62 2.20 2.76 free 90%
+
+running 1 test
+test quantizes_pinned_qwen38_weights_to_q8_burnpack ... Qwen3.8 q8 Metal: tensors=497, top1=271, cached_cosine=1.000000000
+Qwen3.8 q8: tensors=497, excluded=369, payload_bytes=27223326720, artifact_bytes=27223690786, largest_tensor_bytes=1350860800
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 814.76s
+
+      814.76 real       930.96 user        87.18 sys
+         44340363264  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             8349286  page reclaims
+                 417  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               53396  voluntary context switches
+             1762780  involuntary context switches
+      13584610547226  instructions retired
+       3493072748879  cycles elapsed
+         45159676624  peak memory footprint
+== exit=0 wall=815.5s min_free_pct=46 max_swap_growth_mib=0 swapin_mib=57 pressured_swapin_mib=0

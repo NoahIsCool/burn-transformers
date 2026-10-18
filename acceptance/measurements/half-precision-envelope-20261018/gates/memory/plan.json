@@ -1,0 +1,32 @@
+[
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/memory/qwen35-memory.log",
+  "cmd": [
+   "python3",
+   "-I",
+   "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src/scripts/profile_process_memory.py",
+   "--output-dir",
+   "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/memory-run",
+   "--",
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "qwen::qwen35_metal_baseline_benchmark",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads=1"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/memory/qwen35-memory-benchmark.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export of the gate head)",
+   "supervisor /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src/scripts/profile_process_memory.py sha256 1c3cd1e7c265df9381d559bdb051bc63c2a386cb6573ee7b05dc30e28e666828",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "Qwen3.5-0.8B Metal/F16 supervised process-memory run (separate, instrumented, not timing-comparable)"
+  ]
+ }
+]

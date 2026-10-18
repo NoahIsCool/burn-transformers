@@ -1,0 +1,43 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-eeac4fbe7112ebfc sha256 2619d2b2d641f774e4336ee541fed881a24e54338721f908a38343943b1ff104 build D
+== metal/F16 matches_pinned_muse_glimmer_official_f16_reference_on_metal
+== env TRANSFORMERS_MUSE_GLIMMER_DIR=/Volumes/bag of holding/models/meta-models/Muse-Glimmer-30B-a4e59da52a7bc87ae7251dd5545c0dd437c44b68
+== env TRANSFORMERS_MUSE_GLIMMER_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-eeac4fbe7112ebfc --ignored --exact --nocapture --test-threads 1 matches_pinned_muse_glimmer_official_f16_reference_on_metal
+== start 2026-10-18T01:22:59+00:00 load 3.71 4.95 10.49 free 92%
+
+running 1 test
+test matches_pinned_muse_glimmer_official_f16_reference_on_metal ... 
+thread 'matches_pinned_muse_glimmer_official_f16_reference_on_metal' (40763371) panicked at tests/muse_glimmer_artifacts.rs:3327:5:
+git ["rev-parse", "--show-toplevel"] failed: fatal: not a git repository (or any of the parent directories): .git
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    matches_pinned_muse_glimmer_official_f16_reference_on_metal
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.26s
+
+        0.71 real         0.16 user         0.07 sys
+            96452608  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                6835  page reclaims
+                   8  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  22  voluntary context switches
+                 843  involuntary context switches
+          2364917066  instructions retired
+           765253908  cycles elapsed
+            90096216  peak memory footprint
+== exit=101 wall=1.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

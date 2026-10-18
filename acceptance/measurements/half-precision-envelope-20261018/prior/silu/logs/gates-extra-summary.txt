@@ -1,0 +1,40 @@
+Llama-3.1-8B.bf16.flex.batched.base ok. 20.90GB |  | 
+Llama-3.1-8B.bf16.flex.batched.patched ok. 20.90GB |  | 
+Llama-3.1-8B.bf16.flex.cached.base ok. 20.96GB |  | cached decode: 32 decode steps from position 6: max |Δ| = 1.875e-1 to the stateless pass, at step 21 (tolerance 5e-1) 
+Llama-3.1-8B.bf16.flex.cached.patched ok. 20.96GB |  | cached decode: 32 decode steps from position 6: max |Δ| = 1.5625e-1 to the stateless pass, at step 4 (tolerance 5e-1) 
+Llama-3.1-8B.f16.metal.batched.base ok. 22.48GB |  | 
+Llama-3.1-8B.f16.metal.batched.patched ok. 22.48GB |  | 
+Llama-3.1-8B.f16.metal.cached.base ok. 22.47GB |  | cached decode: 32 decode steps from position 6: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+Llama-3.1-8B.f16.metal.cached.patched ok. 22.47GB |  | cached decode: 32 decode steps from position 6: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+Qwen2-7B-f64.bf16.flex.batched.base ok. 19.23GB |  | 
+Qwen2-7B-f64.bf16.flex.batched.patched ok. 19.22GB |  | 
+Qwen2-7B-f64.bf16.flex.cached.base ok. 19.26GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 3.28125e-1 to the stateless pass, at step 21 (tolerance 5e-1) 
+Qwen2-7B-f64.bf16.flex.cached.patched ok. 19.26GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 3.28125e-1 to the stateless pass, at step 21 (tolerance 5e-1) 
+Qwen2-7B-f64.f16.metal.batched.base ok. 21.29GB |  | 
+Qwen2-7B-f64.f16.metal.batched.patched ok. 21.29GB |  | 
+Qwen2-7B-f64.f16.metal.cached.base ok. 21.29GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+Qwen2-7B-f64.f16.metal.cached.patched ok. 21.29GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+Qwen3-4B.bf16.flex.batched.base ok. 10.71GB |  | 
+Qwen3-4B.bf16.flex.batched.patched ok. 10.71GB |  | 
+Qwen3-4B.bf16.flex.cached.base FAILED. 10.72GB | cached decode step 1 at position 6: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 | cached decode step 1 at position 6: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 
+Qwen3-4B.bf16.flex.cached.patched FAILED. 10.72GB | cached decode step 11 at position 16: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 | cached decode step 11 at position 16: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 
+Qwen3-4B.f16.metal.batched.base ok. 11.77GB |  | 
+Qwen3-4B.f16.metal.batched.patched ok. 11.77GB |  | 
+Qwen3-4B.f16.metal.cached.base ok. 11.77GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+Qwen3-4B.f16.metal.cached.patched ok. 11.77GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+SmolLM-135M.bf16.flex.batched.base ok. 0.49GB |  | 
+SmolLM-135M.bf16.flex.batched.patched ok. 0.50GB |  | 
+SmolLM-135M.bf16.flex.cached.base FAILED. 0.52GB | prompt 1 decoded after a 4-token prefill: max |Δ| = 1.4355907440185547e0 exceeds the half-precision bound 1.321504783630371e0 of prompt 1 | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+SmolLM-135M.bf16.flex.cached.patched ok. 0.53GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+SmolLM-135M.f16.metal.batched.base ok. 0.79GB |  | 
+SmolLM-135M.f16.metal.batched.patched ok. 0.79GB |  | 
+SmolLM-135M.f16.metal.cached.base ok. 0.87GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+SmolLM-135M.f16.metal.cached.patched ok. 0.87GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+SmolLM3-3B.bf16.flex.batched.base ok. 8.00GB |  | 
+SmolLM3-3B.bf16.flex.batched.patched ok. 8.00GB |  | 
+SmolLM3-3B.bf16.flex.cached.base FAILED. 8.04GB | cached decode step 13 at position 18: max |Δ| = 5.15625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 | cached decode step 13 at position 18: max |Δ| = 5.15625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 
+SmolLM3-3B.bf16.flex.cached.patched FAILED. 8.04GB | cached decode step 6 at position 11: max |Δ| = 5.3125e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 | cached decode step 6 at position 11: max |Δ| = 5.3125e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1 
+SmolLM3-3B.f16.metal.batched.base ok. 9.25GB |  | 
+SmolLM3-3B.f16.metal.batched.patched ok. 9.26GB |  | 
+SmolLM3-3B.f16.metal.cached.base ok. 9.26GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 
+SmolLM3-3B.f16.metal.cached.patched ok. 9.25GB |  | cached decode: 32 decode steps from position 5: max |Δ| = 0e0 to the stateless pass, at step 0 (tolerance 5e-1) 

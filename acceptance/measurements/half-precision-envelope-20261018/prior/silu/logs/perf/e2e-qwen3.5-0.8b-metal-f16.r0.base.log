@@ -1,0 +1,28 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench sha256 0649431d691b49b63d421bc4a2c74a823e65afd7c81e0a2d25870f4929b6b44c
+== round 0
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench e2e /Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17 f16 128,512 128 3 10
+== start 2026-10-17T21:58:00+00:00 load 4.76 7.01 15.08
+load 0.83 s
+{"kind":"e2e","backend":"cubecl<wgpu<msl>>","dtype":"F16","source":128,"decode_steps":128,"prefill_median_s":0.061992,"prefill_tok_per_s":2064.77,"decode_median_s":3.812230,"decode_tok_per_s":33.576,"prefill_s":[0.0619925, 0.061266459, 0.056868709, 0.063784375, 0.061753125, 0.063393917, 0.060526917, 0.075011709, 0.060750708, 0.126659875],"decode_s":[3.568593792, 3.3232935, 3.6179820830000002, 3.744144667, 3.9069568329999997, 3.769105958, 4.43261275, 3.812230125, 6.980220291, 10.443647167],"checksums":[4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496, 4367.058307528496]}
+{"kind":"e2e","backend":"cubecl<wgpu<msl>>","dtype":"F16","source":512,"decode_steps":128,"prefill_median_s":0.160060,"prefill_tok_per_s":3198.80,"decode_median_s":3.449614,"decode_tok_per_s":37.106,"prefill_s":[0.159517625, 0.159816416, 0.160060125, 0.160897333, 0.160857625, 0.15980025, 0.159991542, 0.16048375, 0.160273042, 0.159890916],"decode_s":[3.578980417, 3.601024208, 3.449613791, 3.451307291, 3.378494167, 3.43456925, 3.452824833, 3.426893416, 3.4087595410000002, 3.429134333],"checksums":[109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238, 109198.38992661238]}
+      113.47 real       169.03 user        44.05 sys
+          2447015936  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              205442  page reclaims
+                  72  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1569822  involuntary context switches
+       1265675317739  instructions retired
+        731842522290  cycles elapsed
+          3490744384  peak memory footprint
+== exit=0 wall=114.1s end=2026-10-17T21:59:54+00:00 load_end 14.57 min_free_pct=81 max_swap_growth_mib=0 swapin_mib=9 pressured_swapin_mib=0

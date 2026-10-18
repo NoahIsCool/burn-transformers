@@ -1,0 +1,24 @@
+== source 7a50e44 (git archive export) tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bundles/tool/scripts/generate_causal_lm_reference.py sha256 a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602
+== start 2026-10-17T23:59:17+00:00 free 324.1 GiB free-memory 91%
+== cmd ["/usr/bin/time", "-l", "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bundles/tool/scripts/generate_causal_lm_reference.py", "--model-dir", "/Volumes/T9/models/meta-llama/Llama-3.1-8B", "--output", "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44", "--repository", "meta-llama/Llama-3.1-8B", "--revision", "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b", "--dtype", "bfloat16", "--device", "cpu", "--attn-implementation", "sdpa", "--greedy-tokens", "32", "--decode-tokens-from", "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b", "--prompt-decode", "--prompt", "The capital of France is", "--prompt", "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n", "--prompt", "Rotary position embeddings encode relative distance because"]
+{"bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44", "prompts": 3}
+       29.08 real       122.42 user         6.58 sys
+         15955968000  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1024311  page reclaims
+                   3  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  45  voluntary context switches
+              410900  involuntary context switches
+       1268290035035  instructions retired
+        445407888076  cycles elapsed
+           753086680  peak memory footprint
+== exit=0 wall=30s lowest-free-memory=90%
+== reference.json sha256 ab385a3df2896debafc3ebbc028e55d06e0808b4f9cdde7ee17c9f8ce0769894

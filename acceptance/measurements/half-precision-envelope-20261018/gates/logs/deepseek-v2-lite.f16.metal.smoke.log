@@ -1,0 +1,33 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/deepseek_v2_artifacts-e5795b3d2098c1d7 sha256 c3264271cb894b29b30e907544f7ee3d2c733328adcabfe895d3ec3ca3b143b5 build B
+== metal/F16 loads_pinned_deepseek_v2_lite_f16_and_runs_metal_smoke
+== env TRANSFORMERS_DEEPSEEK_V2_DIR=/Volumes/bag of holding/models/deepseek-ai/DeepSeek-V2-Lite-604d5664dddd88a0433dbae533b7fe9472482de0
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/deepseek_v2_artifacts-e5795b3d2098c1d7 --ignored --exact --nocapture --test-threads 1 loads_pinned_deepseek_v2_lite_f16_and_runs_metal_smoke
+== start 2026-10-18T01:47:30+00:00 load 3.72 5.04 6.57 free 90%
+
+running 1 test
+test loads_pinned_deepseek_v2_lite_f16_and_runs_metal_smoke ... DeepSeek-V2-Lite F16 Metal: prompt_tokens=6, prompt_ids=[17464, 1843, 11, 25890, 39671, 13], first_top1=185, first_text="\n", cached_cosine=1.000000000, decoded_cosine=0.999999047, min_prefill_hidden_cosine=1.000000000, min_decode_hidden_cosine=0.999991206, cache_scalars_per_layer_token=576, cache_bytes_per_token=31104, stateless_logits_fnv1a64=0ca5e425de82b815, cached_logits_fnv1a64=0ca5e425de82b815, decoded_logits_fnv1a64=7274ef594287ceea, extended_logits_fnv1a64=fc079bf9a8925816, stateless_trace_fnv1a64=5883a074285bbc9b, cached_trace_fnv1a64=5883a074285bbc9b, decoded_trace_fnv1a64=495d510ee3bf1381, extended_trace_fnv1a64=a8247cb39ee1883d, load_seconds=17.594, shard_opens=4, max_open_shards=1, source_reads=5291, stateless_seconds=0.673, prefill_seconds=0.216, decode_seconds=0.264, extended_seconds=0.232
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 116.57s
+
+      116.60 real        79.32 user        18.51 sys
+          2870198272  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2018481  page reclaims
+                 103  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 306  voluntary context switches
+              736370  involuntary context switches
+       1223305080498  instructions retired
+        347861751827  cycles elapsed
+         33367509032  peak memory footprint
+== exit=0 wall=117.3s min_free_pct=76 max_swap_growth_mib=0 swapin_mib=18 pressured_swapin_mib=0

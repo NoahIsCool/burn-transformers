@@ -1,0 +1,21 @@
+{
+ "A": {
+  "llama_family_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894",
+  "gemma_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a"
+ },
+ "B": {
+  "local_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149",
+  "qwen35_benchmarks": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+  "muse_glimmer_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-88ebcadea94bbe9e",
+  "qwen3_moe_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen3_moe_artifacts-41d0a0ee9d952c0e",
+  "deepseek_v2_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/deepseek_v2_artifacts-e5795b3d2098c1d7",
+  "nemotron_h_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525"
+ },
+ "C": {
+  "muse_glimmer_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-f3ba9cac779dfedd",
+  "qwen3_moe_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen3_moe_artifacts-3bee698dd371354a"
+ },
+ "D": {
+  "muse_glimmer_artifacts": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-eeac4fbe7112ebfc"
+ }
+}

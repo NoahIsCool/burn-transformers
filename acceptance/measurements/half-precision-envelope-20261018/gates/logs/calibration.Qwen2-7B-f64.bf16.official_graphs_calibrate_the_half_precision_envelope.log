@@ -1,0 +1,72 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== bundles/BF16 official_graphs_calibrate_the_half_precision_envelope
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 official_graphs_calibrate_the_half_precision_envelope
+== start 2026-10-18T00:55:21+00:00 load 48.27 42.41 29.37 free 88%
+
+running 1 test
+test official_graphs_calibrate_the_half_precision_envelope ... /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64 (Float64): reference.json SHA-256 a1272a0a6d5b44e733ed3a1b7845e3849cfb20237918d9926ba0ca1939ed8687
+decode truth: reference.json SHA-256 3aea8037c0b5bec905de4df2d8d267fdf5f82e2db50986e87d69c08fbe1d8f59, 32 rows from position 5
+official cpu-eager BF16: /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44 reference.json SHA-256 42105860fcc72fa3b9a3de15643012f5f6c1fc57f7ff8426b0580e0daace8251
+official cpu-sdpa BF16: /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44 reference.json SHA-256 a897755bfe8b5b60a861c6a9ae9b93f3ed24d054306835a83937dd0b7eee6f77
+official mps-eager BF16: /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44 reference.json SHA-256 d337ca8e7de2286b84554f171858ed44da2e5b1f757ac4b625e3e05db63015aa
+official mps-sdpa BF16: /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44 reference.json SHA-256 f24dbe590750ebcd6fb465b562a19c16523dd93ec629653a3c58fdfdd2e9ea55
+prompt 0 (5 tokens): official cpu-eager max |Δ| = 8.488914847373962e0 at row 0, token 114438, mean |Δ| = 4.210097347725022e-1
+prompt 0 (5 tokens): official cpu-sdpa max |Δ| = 8.488914847373962e0 at row 0, token 114438, mean |Δ| = 2.7890702977271126e-1
+prompt 0 (5 tokens): official mps-eager max |Δ| = 8.520164847373962e0 at row 0, token 114438, mean |Δ| = 3.820545854755952e-1
+prompt 0 (5 tokens): official mps-sdpa max |Δ| = 8.520164847373962e0 at row 0, token 114438, mean |Δ| = 2.7559010801976447e-1
+prompt 0 (5 tokens): envelope max 8.520164847373962e0, mean 4.210097347725022e-1; bounds max 1.2780247271060944e1, mean 5.473126552042529e-1
+prompt 1 (13 tokens): official cpu-eager max |Δ| = 6.845636606216431e0 at row 0, token 108336, mean |Δ| = 3.1206549464708855e-1
+prompt 1 (13 tokens): official cpu-sdpa max |Δ| = 6.845636606216431e0 at row 0, token 108336, mean |Δ| = 1.547485550919481e-1
+prompt 1 (13 tokens): official mps-eager max |Δ| = 6.720636606216431e0 at row 0, token 108336, mean |Δ| = 3.059822681317847e-1
+prompt 1 (13 tokens): official mps-sdpa max |Δ| = 6.720636606216431e0 at row 0, token 108336, mean |Δ| = 1.4553498895540018e-1
+prompt 1 (13 tokens): envelope max 6.845636606216431e0, mean 3.1206549464708855e-1; bounds max 1.0268454909324646e1, mean 4.056851430412151e-1
+prompt 2 (8 tokens): official cpu-eager max |Δ| = 1.072231149673462e1 at row 0, token 114438, mean |Δ| = 6.750068808521248e-1
+prompt 2 (8 tokens): official cpu-sdpa max |Δ| = 1.072231149673462e1 at row 0, token 114438, mean |Δ| = 3.6072444525068104e-1
+prompt 2 (8 tokens): official mps-eager max |Δ| = 1.087856149673462e1 at row 0, token 114438, mean |Δ| = 6.423174308382151e-1
+prompt 2 (8 tokens): official mps-sdpa max |Δ| = 1.087856149673462e1 at row 0, token 114438, mean |Δ| = 3.7281087507058186e-1
+prompt 2 (8 tokens): envelope max 1.087856149673462e1, mean 6.750068808521248e-1; bounds max 1.631784224510193e1, mean 8.775089451077622e-1
+decode rows (cached): official cpu-eager max |Δ| = 1.773395299911499e0 at row 26, token 117303, mean |Δ| = 2.58413699152772e-1
+decode rows (cached): official cpu-sdpa max |Δ| = 3.386249542236328e-1 at row 0, token 53649, mean |Δ| = 5.117701067213888e-2
+decode rows (cached): official mps-eager max |Δ| = 2.0084052085876465e0 at row 1, token 10289, mean |Δ| = 2.728105812880618e-1
+decode rows (cached): official mps-sdpa max |Δ| = 4.0681350231170654e-1 at row 19, token 87556, mean |Δ| = 6.293514269831775e-2
+decode rows (cached): envelope max 2.106660842895508e0, mean 2.837751864187919e-1; bounds max 3.1599912643432617e0, mean 3.6890774234442947e-1
+decode rows (stateless): official cpu-eager max |Δ| = 2.106660842895508e0 at row 16, token 143765, mean |Δ| = 2.837751864187919e-1
+decode rows (stateless): official cpu-sdpa max |Δ| = 3.386249542236328e-1 at row 0, token 53649, mean |Δ| = 4.825153688033966e-2
+decode rows (stateless): official mps-eager max |Δ| = 1.590362548828125e0 at row 30, token 3837, mean |Δ| = 2.4126810702437226e-1
+decode rows (stateless): official mps-sdpa max |Δ| = 3.138771057128906e-1 at row 0, token 71436, mean |Δ| = 4.890813040236534e-2
+decode rows (stateless): envelope max 2.106660842895508e0, mean 2.837751864187919e-1; bounds max 3.1599912643432617e0, mean 3.6890774234442947e-1
+prompt 1 decoded after a 3-token prefill: official cpu-eager max |Δ| = 6.845636606216431e0 at row 0, token 108336, mean |Δ| = 3.1212101284393967e-1
+prompt 1 decoded after a 3-token prefill: official cpu-sdpa max |Δ| = 6.845636606216431e0 at row 0, token 108336, mean |Δ| = 1.474974944353188e-1
+prompt 1 decoded after a 3-token prefill: official mps-eager max |Δ| = 6.720636606216431e0 at row 0, token 108336, mean |Δ| = 3.036905522544674e-1
+prompt 1 decoded after a 3-token prefill: official mps-sdpa max |Δ| = 6.720636606216431e0 at row 0, token 108336, mean |Δ| = 1.4930609062738348e-1
+prompt 1 decoded after a 3-token prefill: envelope max 6.845636606216431e0, mean 3.1212101284393967e-1; bounds max 1.0268454909324646e1, mean 4.0575731669712156e-1
+greedy: threshold 2.5560494542121887e1; 0 of 32 steps decisive []
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 1.25s
+
+        1.25 real         0.79 user         0.12 sys
+           119570432  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                7561  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   7  voluntary context switches
+                1897  involuntary context switches
+         10773988810  instructions retired
+          3186762280  cycles elapsed
+           114082392  peak memory footprint
+== exit=0 wall=2.1s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

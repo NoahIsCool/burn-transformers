@@ -1,0 +1,29 @@
+== source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)
+== binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench sha256 c1dd3ca5e1b2accd4f1fb096fc50aeefbc66a9552c1f542b7e3c8a5403d9cade
+== round 2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench e2e /Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17 f16 128,512 128 3 10
+== start 2026-10-17T22:06:39+00:00 load 7.63 8.42 12.42
+load 0.91 s
+{"kind":"e2e","backend":"cubecl<wgpu<msl>>","dtype":"F16","source":128,"decode_steps":128,"prefill_median_s":0.062792,"prefill_tok_per_s":2038.49,"decode_median_s":3.519640,"decode_tok_per_s":36.367,"prefill_s":[0.063647917, 0.064247417, 0.065811833, 0.062335916, 0.065274583, 0.062791709, 0.060929291, 0.0618685, 0.061054792, 0.060694667],"decode_s":[3.563244916, 3.5697865, 3.487162, 3.519639917, 3.480337834, 3.52741725, 3.557944667, 3.5047145410000002, 3.495579375, 3.486699042],"checksums":[5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293, 5397.643531501293]}
+{"kind":"e2e","backend":"cubecl<wgpu<msl>>","dtype":"F16","source":512,"decode_steps":128,"prefill_median_s":0.171671,"prefill_tok_per_s":2982.44,"decode_median_s":3.844968,"decode_tok_per_s":33.290,"prefill_s":[0.175690584, 0.170023125, 0.171860125, 0.171411084, 0.175742333, 0.1710145, 0.172775625, 0.171671333, 0.171220125, 0.17128625],"decode_s":[3.870369459, 3.844968208, 3.853971, 3.863472917, 3.889608458, 3.7821307920000002, 3.840691833, 3.8203766249999997, 3.793740833, 3.817052084],"checksums":[109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028, 109000.52144438028]}
+      100.43 real       161.04 user        41.85 sys
+          2448556032  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              205902  page reclaims
+                  21  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1550491  involuntary context switches
+       1264723335280  instructions retired
+        712394243036  cycles elapsed
+          3492366424  peak memory footprint
+== exit=0 wall=101.4s end=2026-10-17T22:08:20+00:00 load_end 5.26 min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

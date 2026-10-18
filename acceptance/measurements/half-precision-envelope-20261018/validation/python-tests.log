@@ -1,0 +1,236 @@
+== source 1816d734e9f575b36c36fe47073f420230b0764a dirty=0
+== cmd python3 -m unittest discover -s scripts/tests
+.................................................................................ss...........ss......................ss......ss................................................................usage: python3 -m unittest [-h] --dtype {bfloat16,float16} --cases CASES
+                           --output OUTPUT
+python3 -m unittest: error: argument --dtype: invalid choice: 'float32' (choose from 'bfloat16', 'float16')
+..........usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: argument --device: invalid choice: 'cuda' (choose from 'cpu', 'mps')
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: argument --attn-implementation: invalid choice: 'flash_attention_2' (choose from 'eager', 'sdpa')
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --device mps has no float64 kernels
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --bf16-resident evaluates the eager CPU graph only
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --bf16-resident evaluates the eager CPU graph only
+.........usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --bf16-resident needs --dtype float32 or float64
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --bf16-resident needs --dtype float32 or float64
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --device mps has no float64 kernels
+........[1mGptOssForCausalLM LOAD REPORT[0m from: /var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/tmp9jxq_sxu/gpt-oss-bf16
+Key                                                 | Status     |  | 
+----------------------------------------------------+------------+--+-
+model.layers.{2, 3}.self_attn.q_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.down_proj_bias      | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.router.weight               | UNEXPECTED |  | 
+model.layers.{2, 3}.input_layernorm.weight          | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.o_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.sinks                 | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.q_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.v_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.k_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.gate_up_proj_bias   | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.router.bias                 | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.down_proj           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.v_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.gate_up_proj        | UNEXPECTED |  | 
+model.layers.{2, 3}.post_attention_layernorm.weight | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.k_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.o_proj.weight         | UNEXPECTED |  | 
+
+[3mNotes:
+- UNEXPECTED[3m	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.[0m
+[1mGptOssForCausalLM LOAD REPORT[0m from: /var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/tmp9jxq_sxu/gpt-oss-bf16
+Key                                                 | Status     |  | 
+----------------------------------------------------+------------+--+-
+model.layers.{2, 3}.self_attn.q_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.down_proj_bias      | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.router.weight               | UNEXPECTED |  | 
+model.layers.{2, 3}.input_layernorm.weight          | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.o_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.sinks                 | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.q_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.v_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.k_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.gate_up_proj_bias   | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.router.bias                 | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.down_proj           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.v_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.gate_up_proj        | UNEXPECTED |  | 
+model.layers.{2, 3}.post_attention_layernorm.weight | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.k_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.o_proj.weight         | UNEXPECTED |  | 
+
+[3mNotes:
+- UNEXPECTED[3m	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.[0m
+...Using MXFP4 quantized models requires a GPU, we will default to dequantizing the model to bf16
+...[1mGptOssForCausalLM LOAD REPORT[0m from: /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/tests/fixtures/tiny_goldens/gpt-oss
+Key                                                 | Status     |  | 
+----------------------------------------------------+------------+--+-
+model.layers.{2, 3}.self_attn.q_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.down_proj_bias      | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.router.weight               | UNEXPECTED |  | 
+model.layers.{2, 3}.input_layernorm.weight          | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.o_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.sinks                 | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.q_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.v_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.k_proj.weight         | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.gate_up_proj_bias   | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.router.bias                 | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.down_proj           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.v_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.mlp.experts.gate_up_proj        | UNEXPECTED |  | 
+model.layers.{2, 3}.post_attention_layernorm.weight | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.k_proj.bias           | UNEXPECTED |  | 
+model.layers.{2, 3}.self_attn.o_proj.weight         | UNEXPECTED |  | 
+
+[3mNotes:
+- UNEXPECTED[3m	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.[0m
+....usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --greedy-tokens must be at least one
+....usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: argument --dtype: invalid choice: 'half' (choose from 'float32', 'float64', 'bfloat16', 'float16')
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: argument --dtype: invalid choice: 'float8' (choose from 'float32', 'float64', 'bfloat16', 'float16')
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: argument --dtype: invalid choice: 'fp16' (choose from 'float32', 'float64', 'bfloat16', 'float16')
+.......usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output OUTPUT
+                           [--repository REPOSITORY] [--revision REVISION]
+                           [--prompt PROMPTS] [--greedy-tokens GREEDY_TOKENS]
+                           [--dtype {float32,float64,bfloat16,float16}]
+                           [--num-hidden-layers NUM_HIDDEN_LAYERS]
+                           [--bf16-resident] [--no-special-tokens]
+                           [--device {cpu,mps}]
+                           [--attn-implementation {eager,sdpa}]
+                           [--decode-tokens-from DECODE_TOKENS_FROM]
+                           [--prompt-decode]
+python3 -m unittest: error: --num-hidden-layers must be at least one
+................................................................................................................usage: python3 -m unittest [-h] --model-dir MODEL_DIR --transformers-dir
+                           TRANSFORMERS_DIR --oracle-dir ORACLE_DIR --output
+                           OUTPUT [--max-resident-gib MAX_RESIDENT_GIB]
+                           [--offload-dir OFFLOAD_DIR]
+python3 -m unittest: error: --max-resident-gib and --offload-dir go together
+usage: python3 -m unittest [-h] --model-dir MODEL_DIR --transformers-dir
+                           TRANSFORMERS_DIR --oracle-dir ORACLE_DIR --output
+                           OUTPUT [--max-resident-gib MAX_RESIDENT_GIB]
+                           [--offload-dir OFFLOAD_DIR]
+python3 -m unittest: error: --max-resident-gib and --offload-dir go together
+..............................................usage: python3 -m unittest [-h] --model-dir MODEL_DIR --output-dir OUTPUT_DIR
+python3 -m unittest: error: the following arguments are required: --model-dir, --output-dir
+.........................................................ssssss........................................................................................
+----------------------------------------------------------------------
+Ran 549 tests in 9.368s
+
+OK (skipped=14)
+== exit=0

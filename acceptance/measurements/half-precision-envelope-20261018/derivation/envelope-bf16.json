@@ -1,0 +1,2386 @@
+{
+ "dtype": "bfloat16",
+ "cases": [
+  {
+   "name": "SmolLM-135M-1d461723",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723",
+    "dtype": "float32",
+    "reference_json_sha256": "3d3235dc28250bf45284bcf16cb8525db6b1f800f7ec700286909e4afea05010"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "3e765467b7fb41699cf0a7191b8683265799acff219d2999c46165372519e01f"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "ef0e42bf995cc9e8e0e7cf929c26608b88f941f9669870ee33593fc6d37da144",
+     "prompt": [
+      {
+       "max": 1.4637150764465332,
+       "position": 0,
+       "token": 5166,
+       "mean": 0.19027704019370442
+      },
+      {
+       "max": 1.1012539863586426,
+       "position": 0,
+       "token": 19178,
+       "mean": 0.07548485835081199
+      },
+      {
+       "max": 1.6523456573486328,
+       "position": 0,
+       "token": 7953,
+       "mean": 0.0705334668252572
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.5823216438293457,
+       "position": 7,
+       "token": 9958,
+       "mean": 0.09562347935257969
+      },
+      "stateless": {
+       "max": 0.5823216438293457,
+       "position": 7,
+       "token": 9958,
+       "mean": 0.09562347935257969
+      }
+     },
+     "decode": {
+      "max": 0.5823216438293457,
+      "mean": 0.09562347935257969
+     },
+     "prompt_decode": {
+      "max": 1.1012539863586426,
+      "position": 0,
+      "token": 19178,
+      "mean": 0.07548485835081199
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "1ec6281bc4131d46d2ed41d0021efb8d92c6236e449a416c477fa191dc05cb75",
+     "prompt": [
+      {
+       "max": 1.4637150764465332,
+       "position": 0,
+       "token": 5166,
+       "mean": 0.1915275090358907
+      },
+      {
+       "max": 1.1012539863586426,
+       "position": 0,
+       "token": 19178,
+       "mean": 0.09662856062930555
+      },
+      {
+       "max": 1.6523456573486328,
+       "position": 0,
+       "token": 7953,
+       "mean": 0.12889974913884333
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.5539953708648682,
+       "position": 12,
+       "token": 11282,
+       "mean": 0.08403427699071753
+      },
+      "stateless": {
+       "max": 0.4283599853515625,
+       "position": 14,
+       "token": 12630,
+       "mean": 0.07902418560112662
+      }
+     },
+     "decode": {
+      "max": 0.5539953708648682,
+      "mean": 0.08403427699071753
+     },
+     "prompt_decode": {
+      "max": 1.1012539863586426,
+      "position": 0,
+      "token": 19178,
+      "mean": 0.09662856062930555
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "1f99c24fd0c154f36940b48b6c7d4bce93f81c4e2b3b2f6f47ab04eaf2497255",
+     "prompt": [
+      {
+       "max": 1.4190130233764648,
+       "position": 0,
+       "token": 2253,
+       "mean": 0.17817185729153964
+      },
+      {
+       "max": 1.0803256034851074,
+       "position": 0,
+       "token": 38460,
+       "mean": 0.08553217354902086
+      },
+      {
+       "max": 1.7180819511413574,
+       "position": 0,
+       "token": 42057,
+       "mean": 0.154788663286548
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.5543371438980103,
+       "position": 13,
+       "token": 42979,
+       "mean": 0.07451666816720254
+      },
+      "stateless": {
+       "max": 0.5280262231826782,
+       "position": 13,
+       "token": 29373,
+       "mean": 0.08967788713271922
+      }
+     },
+     "decode": {
+      "max": 0.5543371438980103,
+      "mean": 0.08967788713271922
+     },
+     "prompt_decode": {
+      "max": 1.6012539863586426,
+      "position": 0,
+      "token": 19178,
+      "mean": 0.09622200559244252
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "265d7dc75a1a4a8d090c292dd0999716a9d527c07d102603963b3d9293c31c26",
+     "prompt": [
+      {
+       "max": 1.4190130233764648,
+       "position": 0,
+       "token": 2253,
+       "mean": 0.1910818464784018
+      },
+      {
+       "max": 1.0803256034851074,
+       "position": 0,
+       "token": 38460,
+       "mean": 0.09197122393485214
+      },
+      {
+       "max": 1.7180819511413574,
+       "position": 0,
+       "token": 42057,
+       "mean": 0.10597216817924614
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.44302892684936523,
+       "position": 25,
+       "token": 24273,
+       "mean": 0.09584497919549785
+      },
+      "stateless": {
+       "max": 0.48865699768066406,
+       "position": 6,
+       "token": 29370,
+       "mean": 0.09491315290805065
+      }
+     },
+     "decode": {
+      "max": 0.48865699768066406,
+      "mean": 0.09584497919549785
+     },
+     "prompt_decode": {
+      "max": 1.6012539863586426,
+      "position": 0,
+      "token": 19178,
+      "mean": 0.10293841819545138
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 1.4637150764465332,
+      "mean": 0.1915275090358907
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.993471074476555
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 1.0023323123870864
+      },
+      "mps-eager": {
+       "max": 0.969459867026449,
+       "mean": 0.9302677103065737
+      },
+      "mps-sdpa": {
+       "max": 0.969459867026449,
+       "mean": 0.9976731146364703
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 1.1012539863586426,
+      "mean": 0.09662856062930555
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.7811857887482483
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 1.050639063994108
+      },
+      "mps-eager": {
+       "max": 0.9809958618694893,
+       "mean": 0.8851645206342919
+      },
+      "mps-sdpa": {
+       "max": 0.9809958618694893,
+       "mean": 0.9518016550787683
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 1.7180819511413574,
+      "mean": 0.154788663286548
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9617385574948537,
+       "mean": 0.4556759217868829
+      },
+      "cpu-sdpa": {
+       "max": 0.9617385574948537,
+       "mean": 0.8327467038088018
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.2008453415981333
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.6846248680568309
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.5823216438293457,
+      "mean": 0.09584497919549785
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0504828158087205,
+       "mean": 0.9976889781313806
+      },
+      "cpu-sdpa": {
+       "max": 0.9513563109586585,
+       "mean": 0.8767728648499189
+      },
+      "mps-eager": {
+       "max": 0.9519432254873622,
+       "mean": 0.9356555542653995
+      },
+      "mps-sdpa": {
+       "max": 0.8391530743512414,
+       "mean": 1.0023163750620436
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 1.6012539863586426,
+      "mean": 0.10293841819545138
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.6877447274076531,
+       "mean": 0.7333011296859766
+      },
+      "cpu-sdpa": {
+       "max": 0.6877447274076531,
+       "mean": 0.9387025983421936
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.9347531007300282
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 1.0653001299517668
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "Qwen3-4B-531c80e2",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2",
+    "dtype": "float32",
+    "reference_json_sha256": "70fc11946cb9adc97af7a173d419438a9ca2350940b8519ddb33497172985b3a"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "32bc3c6ac11c521f768097eff37d210b711731156d1a04ad6464e45ffcbb5bb4"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "c54b972c1cacc3a9a0a3ad0688777496d81880c104902083429cbcecb8f16bbb",
+     "prompt": [
+      {
+       "max": 0.7000284194946289,
+       "position": 0,
+       "token": 330,
+       "mean": 0.07797086951588278
+      },
+      {
+       "max": 0.7010948657989502,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.04336637812924364
+      },
+      {
+       "max": 0.8795242309570312,
+       "position": 0,
+       "token": 27,
+       "mean": 0.053848711138326316
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.702824592590332,
+       "position": 13,
+       "token": 108586,
+       "mean": 0.0772793192216247
+      },
+      "stateless": {
+       "max": 0.702824592590332,
+       "position": 13,
+       "token": 108586,
+       "mean": 0.07722186134909961
+      }
+     },
+     "decode": {
+      "max": 0.702824592590332,
+      "mean": 0.0772793192216247
+     },
+     "prompt_decode": {
+      "max": 0.7010948657989502,
+      "position": 0,
+      "token": 15486,
+      "mean": 0.04336637812924364
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "d3179fc1a52d444a6430608db605768098258bbc1b9595cadc9a6013fbac932d",
+     "prompt": [
+      {
+       "max": 0.7000284194946289,
+       "position": 0,
+       "token": 330,
+       "mean": 0.061442183880046616
+      },
+      {
+       "max": 0.7010948657989502,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.04598431860703825
+      },
+      {
+       "max": 0.8795242309570312,
+       "position": 0,
+       "token": 27,
+       "mean": 0.03995566525338362
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.5408167839050293,
+       "position": 1,
+       "token": 128117,
+       "mean": 0.055191706112294424
+      },
+      "stateless": {
+       "max": 0.5558032989501953,
+       "position": 1,
+       "token": 101195,
+       "mean": 0.0753482266915425
+      }
+     },
+     "decode": {
+      "max": 0.5558032989501953,
+      "mean": 0.0753482266915425
+     },
+     "prompt_decode": {
+      "max": 0.7010948657989502,
+      "position": 0,
+      "token": 15486,
+      "mean": 0.0446608381077015
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "73b9763a3a94f0666d841eafd18473be2ab0a56d9579d5133c448932ec370861",
+     "prompt": [
+      {
+       "max": 0.7000284194946289,
+       "position": 0,
+       "token": 330,
+       "mean": 0.07365400235135325
+      },
+      {
+       "max": 0.8573448657989502,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.05640854694761243
+      },
+      {
+       "max": 0.8795242309570312,
+       "position": 0,
+       "token": 27,
+       "mean": 0.04145880483969663
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.6846914291381836,
+       "position": 4,
+       "token": 103635,
+       "mean": 0.06878316699237746
+      },
+      "stateless": {
+       "max": 0.5971531867980957,
+       "position": 1,
+       "token": 107077,
+       "mean": 0.06161309271022948
+      }
+     },
+     "decode": {
+      "max": 0.6846914291381836,
+      "mean": 0.06878316699237746
+     },
+     "prompt_decode": {
+      "max": 0.8885948657989502,
+      "position": 0,
+      "token": 15486,
+      "mean": 0.056089415791486096
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "3c9c9c5094b73bfa6d3fc04fb2535b43f6fe8755c0418e7f62c6cd85b5c350cb",
+     "prompt": [
+      {
+       "max": 0.7000284194946289,
+       "position": 0,
+       "token": 330,
+       "mean": 0.048821566467382095
+      },
+      {
+       "max": 0.8573448657989502,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.06317436302734737
+      },
+      {
+       "max": 0.8795242309570312,
+       "position": 0,
+       "token": 27,
+       "mean": 0.039906253941096266
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.48957324028015137,
+       "position": 4,
+       "token": 107997,
+       "mean": 0.04727937497256743
+      },
+      "stateless": {
+       "max": 0.44727325439453125,
+       "position": 8,
+       "token": 79592,
+       "mean": 0.0648188424963043
+      }
+     },
+     "decode": {
+      "max": 0.48957324028015137,
+      "mean": 0.0648188424963043
+     },
+     "prompt_decode": {
+      "max": 0.8885948657989502,
+      "position": 0,
+      "token": 15486,
+      "mean": 0.052056432986956655
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.7000284194946289,
+      "mean": 0.07797086951588278
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 1.0586100826393205
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.7880146041917713
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.9446348720832185
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.6261513661513941
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.8573448657989502,
+      "mean": 0.06317436302734737
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.817751285120962,
+       "mean": 0.686455328571669
+      },
+      "cpu-sdpa": {
+       "max": 0.817751285120962,
+       "mean": 0.7278952474302309
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.8929025041881925
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 1.1199431016370351
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 0.8795242309570312,
+      "mean": 0.053848711138326316
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 1.2988486124126377
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.7419985438601435
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.7699126676067964
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.7410809487823259
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.702824592590332,
+      "mean": 0.0772793192216247
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0264837015339487,
+       "mean": 1.0256289048179945
+      },
+      "cpu-sdpa": {
+       "max": 0.7908136750049188,
+       "mean": 0.9750115224935646
+      },
+      "mps-eager": {
+       "max": 0.9741995888542875,
+       "mean": 0.8900591734655214
+      },
+      "mps-sdpa": {
+       "max": 0.6965795526246158,
+       "mean": 0.838760526738263
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.8885948657989502,
+      "mean": 0.056089415791486096
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.7889927038556366,
+       "mean": 0.7731650885874675
+      },
+      "cpu-sdpa": {
+       "max": 0.7889927038556366,
+       "mean": 0.7962435956496563
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.0774732837637944
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.9280972577870634
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "SmolLM3-3B-1fa6fa28",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28",
+    "dtype": "float32",
+    "reference_json_sha256": "cf399f62351665297f181c12c68f89d163315cf87001b78a62c0c0335dbd40d7"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "62309448594bb87c9bfc55e95624e43a0078326e60107ccd19c7c8382528909c"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "43997a92a0109d96f5a6c90d8baef0a4b83909999d8412579bd6e4d47bdcb443",
+     "prompt": [
+      {
+       "max": 6.281063079833984,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.15643366756693425
+      },
+      {
+       "max": 6.671215057373047,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.0788765337917555
+      },
+      {
+       "max": 5.328104019165039,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.17689148640009886
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.6119890213012695,
+       "position": 23,
+       "token": 54964,
+       "mean": 0.07029972500535271
+      },
+      "stateless": {
+       "max": 0.7261867523193359,
+       "position": 7,
+       "token": 73917,
+       "mean": 0.07143772274848961
+      }
+     },
+     "decode": {
+      "max": 0.7261867523193359,
+      "mean": 0.07143772274848961
+     },
+     "prompt_decode": {
+      "max": 6.671215057373047,
+      "position": 0,
+      "token": 9125,
+      "mean": 0.0788765337917555
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "32777e0f8d68b366d1c5990f02995e78e74296ce4a1be0d37619ac540cbce417",
+     "prompt": [
+      {
+       "max": 6.281063079833984,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.15753326262088257
+      },
+      {
+       "max": 6.671215057373047,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.0809905586424218
+      },
+      {
+       "max": 5.328104019165039,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.17167795455537324
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.7409572601318359,
+       "position": 28,
+       "token": 124209,
+       "mean": 0.06837693334322124
+      },
+      "stateless": {
+       "max": 0.6179122924804688,
+       "position": 17,
+       "token": 73917,
+       "mean": 0.07526052633058619
+      }
+     },
+     "decode": {
+      "max": 0.7409572601318359,
+      "mean": 0.07526052633058619
+     },
+     "prompt_decode": {
+      "max": 6.671215057373047,
+      "position": 0,
+      "token": 9125,
+      "mean": 0.0809905586424218
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "64029e10ad1f3173041802f408ad7eae595f36ca86b707a5e745b741cbb906e9",
+     "prompt": [
+      {
+       "max": 6.281063079833984,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.1773629611648614
+      },
+      {
+       "max": 6.671215057373047,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.08655552755954085
+      },
+      {
+       "max": 5.328104019165039,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.15340184640856092
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.7030706405639648,
+       "position": 23,
+       "token": 82764,
+       "mean": 0.07895688308808414
+      },
+      "stateless": {
+       "max": 0.6721315383911133,
+       "position": 13,
+       "token": 34668,
+       "mean": 0.06838268237386716
+      }
+     },
+     "decode": {
+      "max": 0.7030706405639648,
+      "mean": 0.07895688308808414
+     },
+     "prompt_decode": {
+      "max": 6.671215057373047,
+      "position": 0,
+      "token": 9125,
+      "mean": 0.09404314896495344
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "f59a92073599fd93ecbb05d3ec8ca53be1866f2af84db679861973c7d90ba902",
+     "prompt": [
+      {
+       "max": 6.281063079833984,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.15427934535266868
+      },
+      {
+       "max": 6.671215057373047,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.09710516759448501
+      },
+      {
+       "max": 5.328104019165039,
+       "position": 0,
+       "token": 9125,
+       "mean": 0.2050163219352627
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.6553716659545898,
+       "position": 23,
+       "token": 37818,
+       "mean": 0.06153778955119137
+      },
+      "stateless": {
+       "max": 0.6712079048156738,
+       "position": 18,
+       "token": 65769,
+       "mean": 0.07230628405267796
+      }
+     },
+     "decode": {
+      "max": 0.6712079048156738,
+      "mean": 0.07230628405267796
+     },
+     "prompt_decode": {
+      "max": 6.671215057373047,
+      "position": 0,
+      "token": 9125,
+      "mean": 0.08308894571258592
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 6.281063079833984,
+      "mean": 0.1773629611648614
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.8819973828781925
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.8881970710584448
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.1258762639335458
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.8698509786903245
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 6.671215057373047,
+      "mean": 0.09710516759448501
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.8122794671561352
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.834049934197545
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.8913586135909897
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 1.1218829153076
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 5.328104019165039,
+      "mean": 0.2050163219352627
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.862816602748123
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.8373867647941875
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.7482421153619178
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 1.1589948510667731
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.7409572601318359,
+      "mean": 0.07895688308808414
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9800656412896582,
+       "mean": 0.904768779547615
+      },
+      "cpu-sdpa": {
+       "max": 1.0203398199778846,
+       "mean": 0.9531851231592526
+      },
+      "mps-eager": {
+       "max": 0.9488680095244224,
+       "mean": 1.0491141497105865
+      },
+      "mps-sdpa": {
+       "max": 0.9058658858356393,
+       "mean": 0.9157692303027364
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 6.671215057373047,
+      "mean": 0.09404314896495344
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.8387270594389602
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.8612063667987566
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.1318370712063113
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.8835193911206677
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "Qwen2-7B-453ed157-f64",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64",
+    "dtype": "float64",
+    "reference_json_sha256": "a1272a0a6d5b44e733ed3a1b7845e3849cfb20237918d9926ba0ca1939ed8687"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager",
+    "dtype": "float64",
+    "reference_json_sha256": "3aea8037c0b5bec905de4df2d8d267fdf5f82e2db50986e87d69c08fbe1d8f59"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "42105860fcc72fa3b9a3de15643012f5f6c1fc57f7ff8426b0580e0daace8251",
+     "prompt": [
+      {
+       "max": 8.488914847373962,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.4210097347725022
+      },
+      {
+       "max": 6.845636606216431,
+       "position": 0,
+       "token": 108336,
+       "mean": 0.31206549464708855
+      },
+      {
+       "max": 10.72231149673462,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.6750068808521247
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 1.773395299911499,
+       "position": 26,
+       "token": 117303,
+       "mean": 0.25841369915277224
+      },
+      "stateless": {
+       "max": 2.106660842895508,
+       "position": 16,
+       "token": 143765,
+       "mean": 0.2837751864187916
+      }
+     },
+     "decode": {
+      "max": 2.106660842895508,
+      "mean": 0.2837751864187916
+     },
+     "prompt_decode": {
+      "max": 6.845636606216431,
+      "position": 0,
+      "token": 108336,
+      "mean": 0.31212101284393967
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "a897755bfe8b5b60a861c6a9ae9b93f3ed24d054306835a83937dd0b7eee6f77",
+     "prompt": [
+      {
+       "max": 8.488914847373962,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.2789070297727113
+      },
+      {
+       "max": 6.845636606216431,
+       "position": 0,
+       "token": 108336,
+       "mean": 0.15474855509194813
+      },
+      {
+       "max": 10.72231149673462,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.3607244452506811
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.3386249542236328,
+       "position": 0,
+       "token": 53649,
+       "mean": 0.05117701067213886
+      },
+      "stateless": {
+       "max": 0.3386249542236328,
+       "position": 0,
+       "token": 53649,
+       "mean": 0.04825153688033966
+      }
+     },
+     "decode": {
+      "max": 0.3386249542236328,
+      "mean": 0.05117701067213886
+     },
+     "prompt_decode": {
+      "max": 6.845636606216431,
+      "position": 0,
+      "token": 108336,
+      "mean": 0.1474974944353188
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "d337ca8e7de2286b84554f171858ed44da2e5b1f757ac4b625e3e05db63015aa",
+     "prompt": [
+      {
+       "max": 8.520164847373962,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.38205458547559507
+      },
+      {
+       "max": 6.720636606216431,
+       "position": 0,
+       "token": 108336,
+       "mean": 0.3059822681317848
+      },
+      {
+       "max": 10.87856149673462,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.6423174308382146
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 2.0084052085876465,
+       "position": 1,
+       "token": 10289,
+       "mean": 0.27281058128806185
+      },
+      "stateless": {
+       "max": 1.590362548828125,
+       "position": 30,
+       "token": 3837,
+       "mean": 0.2412681070243721
+      }
+     },
+     "decode": {
+      "max": 2.0084052085876465,
+      "mean": 0.27281058128806185
+     },
+     "prompt_decode": {
+      "max": 6.720636606216431,
+      "position": 0,
+      "token": 108336,
+      "mean": 0.30369055225446756
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "f24dbe590750ebcd6fb465b562a19c16523dd93ec629653a3c58fdfdd2e9ea55",
+     "prompt": [
+      {
+       "max": 8.520164847373962,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.2755901080197646
+      },
+      {
+       "max": 6.720636606216431,
+       "position": 0,
+       "token": 108336,
+       "mean": 0.14553498895540018
+      },
+      {
+       "max": 10.87856149673462,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.372810875070582
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.40681350231170654,
+       "position": 19,
+       "token": 87556,
+       "mean": 0.06293514269831772
+      },
+      "stateless": {
+       "max": 0.3138771057128906,
+       "position": 0,
+       "token": 71436,
+       "mean": 0.04890813040236532
+      }
+     },
+     "decode": {
+      "max": 0.40681350231170654,
+      "mean": 0.06293514269831772
+     },
+     "prompt_decode": {
+      "max": 6.720636606216431,
+      "position": 0,
+      "token": 108336,
+      "mean": 0.1493060906273834
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 8.520164847373962,
+      "mean": 0.4210097347725022
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9963322305894549,
+       "mean": 1.1019622608335256
+      },
+      "cpu-sdpa": {
+       "max": 0.9963322305894549,
+       "mean": 0.6624716882696837
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.9074720936845866
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.6545931964463556
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 6.845636606216431,
+      "mean": 0.31206549464708855
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 1.0198809772620017
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.4958848631020599
+      },
+      "mps-eager": {
+       "max": 0.9817401934706133,
+       "mean": 0.9805065711536509
+      },
+      "mps-sdpa": {
+       "max": 0.9817401934706133,
+       "mean": 0.46636040014607866
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 10.87856149673462,
+      "mean": 0.6750068808521247
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9856368877404517,
+       "mean": 1.0508929828842584
+      },
+      "cpu-sdpa": {
+       "max": 0.9856368877404517,
+       "mean": 0.5344011379488528
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.9515716788358615
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.5523067773767696
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 2.106660842895508,
+      "mean": 0.2837751864187916
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0489222164370688,
+       "mean": 1.040191275129289
+      },
+      "cpu-sdpa": {
+       "max": 0.16074013781839153,
+       "mean": 0.18034350119891213
+      },
+      "mps-eager": {
+       "max": 0.95335953832378,
+       "mean": 0.9613616494482772
+      },
+      "mps-sdpa": {
+       "max": 0.19310820898562875,
+       "mean": 0.22177817409813586
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 6.845636606216431,
+      "mean": 0.31212101284393967
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 1.0277600357564238
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.4725650897111097
+      },
+      "mps-eager": {
+       "max": 0.9817401934706133,
+       "mean": 0.9729897692159312
+      },
+      "mps-sdpa": {
+       "max": 0.9817401934706133,
+       "mean": 0.47835962489983447
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "Llama-3.1-8B-d04e592b",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b",
+    "dtype": "float32",
+    "reference_json_sha256": "3b6b5196d7a864c6d219b29a3366e357057d6e38b1dad00129d1310f0f801edf"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "80ad3b22de3138c9bbdd605130859fbe191be0da10e55ff9da814e3dac395a6a"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "9add667e3f835e35d9fb4ba5cf2f9bcc60adc94b02b0d4e72540f429ff663cbb",
+     "prompt": [
+      {
+       "max": 0.13741159439086914,
+       "position": 4,
+       "token": 56704,
+       "mean": 0.017169639360766542
+      },
+      {
+       "max": 0.21217364072799683,
+       "position": 5,
+       "token": 18217,
+       "mean": 0.02211786553701078
+      },
+      {
+       "max": 0.18185949325561523,
+       "position": 7,
+       "token": 29532,
+       "mean": 0.023225002115629088
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.16821298003196716,
+       "position": 30,
+       "token": 6181,
+       "mean": 0.017066065937132092
+      },
+      "stateless": {
+       "max": 0.155190110206604,
+       "position": 30,
+       "token": 30279,
+       "mean": 0.017384463530097934
+      }
+     },
+     "decode": {
+      "max": 0.16821298003196716,
+      "mean": 0.017384463530097934
+     },
+     "prompt_decode": {
+      "max": 0.21217364072799683,
+      "position": 5,
+      "token": 18217,
+      "mean": 0.02211786553701078
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "ab385a3df2896debafc3ebbc028e55d06e0808b4f9cdde7ee17c9f8ce0769894",
+     "prompt": [
+      {
+       "max": 0.12471485137939453,
+       "position": 4,
+       "token": 93573,
+       "mean": 0.016973135582040718
+      },
+      {
+       "max": 0.15228271484375,
+       "position": 3,
+       "token": 279,
+       "mean": 0.019969349619092292
+      },
+      {
+       "max": 0.17655277252197266,
+       "position": 4,
+       "token": 86542,
+       "mean": 0.0196473027345859
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.15695643424987793,
+       "position": 30,
+       "token": 73720,
+       "mean": 0.017563205134984845
+      },
+      "stateless": {
+       "max": 0.23111295700073242,
+       "position": 30,
+       "token": 48571,
+       "mean": 0.017625018428828118
+      }
+     },
+     "decode": {
+      "max": 0.23111295700073242,
+      "mean": 0.017625018428828118
+     },
+     "prompt_decode": {
+      "max": 0.16265106201171875,
+      "position": 13,
+      "token": 50609,
+      "mean": 0.019870277818068667
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "47f2e9e1c6178f10b5abce039343af66b009629103f37bc53150616af006e846",
+     "prompt": [
+      {
+       "max": 0.14402437210083008,
+       "position": 4,
+       "token": 102847,
+       "mean": 0.019462538257529437
+      },
+      {
+       "max": 0.163696750998497,
+       "position": 12,
+       "token": 88174,
+       "mean": 0.020003720471795727
+      },
+      {
+       "max": 0.1663680076599121,
+       "position": 4,
+       "token": 60285,
+       "mean": 0.021328779899517945
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.19943571090698242,
+       "position": 30,
+       "token": 38841,
+       "mean": 0.01723935236878332
+      },
+      "stateless": {
+       "max": 0.16805458068847656,
+       "position": 27,
+       "token": 13970,
+       "mean": 0.017597986676734626
+      }
+     },
+     "decode": {
+      "max": 0.19943571090698242,
+      "mean": 0.017597986676734626
+     },
+     "prompt_decode": {
+      "max": 0.15839099884033203,
+      "position": 7,
+      "token": 79442,
+      "mean": 0.021147695548934396
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "0b89b2e58716eade2814e705b6b077baf9eac3dff0b40beaddf296c84b6f49fa",
+     "prompt": [
+      {
+       "max": 0.14150238037109375,
+       "position": 4,
+       "token": 118963,
+       "mean": 0.018802558682964498
+      },
+      {
+       "max": 0.1587618589401245,
+       "position": 13,
+       "token": 11,
+       "mean": 0.019534763352966382
+      },
+      {
+       "max": 0.18430328369140625,
+       "position": 1,
+       "token": 269,
+       "mean": 0.018464281299302974
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.15853190422058105,
+       "position": 30,
+       "token": 13841,
+       "mean": 0.018232393596103045
+      },
+      "stateless": {
+       "max": 0.21089988946914673,
+       "position": 30,
+       "token": 38834,
+       "mean": 0.017830334020899473
+      }
+     },
+     "decode": {
+      "max": 0.21089988946914673,
+      "mean": 0.018232393596103045
+     },
+     "prompt_decode": {
+      "max": 0.16139239072799683,
+      "position": 5,
+      "token": 18217,
+      "mean": 0.019500690729943947
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.14402437210083008,
+      "mean": 0.019462538257529437
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9540857035965316,
+       "mean": 0.8821891129295099
+      },
+      "cpu-sdpa": {
+       "max": 0.8659287977460014,
+       "mean": 0.8720925995084096
+      },
+      "mps-eager": {
+       "max": 1.0178229632824716,
+       "mean": 1.0351005193331955
+      },
+      "mps-sdpa": {
+       "max": 0.9824891322701222,
+       "mean": 0.9660897481185624
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.21217364072799683,
+      "mean": 0.02211786553701078
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.2961383743648334,
+       "mean": 1.10568759287533
+      },
+      "cpu-sdpa": {
+       "max": 0.7177268312936854,
+       "mean": 0.9028606121904809
+      },
+      "mps-eager": {
+       "max": 0.7715225625427882,
+       "mean": 0.9044145981592409
+      },
+      "mps-sdpa": {
+       "max": 0.7482638201210613,
+       "mean": 0.883211959141266
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 0.18430328369140625,
+      "mean": 0.023225002115629088
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9867403858094962,
+       "mean": 1.088904392330196
+      },
+      "cpu-sdpa": {
+       "max": 0.9579469718922051,
+       "mean": 0.8459548307797311
+      },
+      "mps-eager": {
+       "max": 0.9026860744297719,
+       "mean": 0.9183542715444967
+      },
+      "mps-sdpa": {
+       "max": 1.0134377941565915,
+       "mean": 0.7950174216293214
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.23111295700073242,
+      "mean": 0.018232393596103045
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.7278388118734255,
+       "mean": 0.9534932118739283
+      },
+      "cpu-sdpa": {
+       "max": 1.0958420015414125,
+       "mean": 0.9666870307470355
+      },
+      "mps-eager": {
+       "max": 0.8629360875961203,
+       "mean": 0.9652044085147429
+      },
+      "mps-sdpa": {
+       "max": 0.912540310184679,
+       "mean": 1.0344609663659405
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.21217364072799683,
+      "mean": 0.02211786553701078
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.30447129028097,
+       "mean": 1.04587591994747
+      },
+      "cpu-sdpa": {
+       "max": 0.7665941040255551,
+       "mean": 0.8983813462840197
+      },
+      "mps-eager": {
+       "max": 0.7465159116696627,
+       "mean": 0.9561363646752913
+      },
+      "mps-sdpa": {
+       "max": 0.7606618342138892,
+       "mean": 0.8816714568280831
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "gemma-3-4b-it-093f9f38",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38",
+    "dtype": "float32",
+    "reference_json_sha256": "a3e0fd391940cb5789160c5f08ea4a60fa6eab75075eac3cdb4737afe5c86c86"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "c044b0e00262df5cec60c4993a2c11ce6f78995f01e6eb6807bf4a286ed42273"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "548c2e28df6801caddc3f8dae42a4375edc096a80e2a5b9583ee549d65f7d92e",
+     "prompt": [
+      {
+       "max": 0.38358402252197266,
+       "position": 5,
+       "token": 1,
+       "mean": 0.0377085699479953
+      },
+      {
+       "max": 0.5921669006347656,
+       "position": 1,
+       "token": 23130,
+       "mean": 0.05219429958334904
+      },
+      {
+       "max": 0.7478094100952148,
+       "position": 3,
+       "token": 33178,
+       "mean": 0.0633858395716251
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 1.5193042755126953,
+       "position": 13,
+       "token": 101201,
+       "mean": 0.05984923910529846
+      },
+      "stateless": {
+       "max": 1.5193042755126953,
+       "position": 13,
+       "token": 101201,
+       "mean": 0.059997967276282815
+      }
+     },
+     "decode": {
+      "max": 1.5193042755126953,
+      "mean": 0.059997967276282815
+     },
+     "prompt_decode": {
+      "max": 0.5921669006347656,
+      "position": 1,
+      "token": 23130,
+      "mean": 0.05219429958334904
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "95b76071529f7d89af503d46411d59122a5d1704df03025fd8875066162d27bb",
+     "prompt": [
+      {
+       "max": 0.3608736991882324,
+       "position": 1,
+       "token": 102870,
+       "mean": 0.04012126221866881
+      },
+      {
+       "max": 0.6167106628417969,
+       "position": 1,
+       "token": 8512,
+       "mean": 0.04841416345710845
+      },
+      {
+       "max": 0.5793013572692871,
+       "position": 1,
+       "token": 50375,
+       "mean": 0.055430698017004114
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 1.0153064727783203,
+       "position": 13,
+       "token": 160546,
+       "mean": 0.05437070095010451
+      },
+      "stateless": {
+       "max": 0.9409065246582031,
+       "position": 13,
+       "token": 150758,
+       "mean": 0.051554753518220905
+      }
+     },
+     "decode": {
+      "max": 1.0153064727783203,
+      "mean": 0.05437070095010451
+     },
+     "prompt_decode": {
+      "max": 0.6167106628417969,
+      "position": 1,
+      "token": 8512,
+      "mean": 0.04841416345710845
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "8872219571da0e878ad7563814aebf0dd7615be5a267cc684439fa8a874a23d9",
+     "prompt": [
+      {
+       "max": 0.4133453369140625,
+       "position": 1,
+       "token": 39818,
+       "mean": 0.04420361211499568
+      },
+      {
+       "max": 0.5344839096069336,
+       "position": 1,
+       "token": 48074,
+       "mean": 0.053166013867418316
+      },
+      {
+       "max": 0.9080333709716797,
+       "position": 3,
+       "token": 51963,
+       "mean": 0.06989888427975205
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 1.2777099609375,
+       "position": 13,
+       "token": 234665,
+       "mean": 0.0566392629346753
+      },
+      "stateless": {
+       "max": 1.151249885559082,
+       "position": 13,
+       "token": 238849,
+       "mean": 0.0566407504219568
+      }
+     },
+     "decode": {
+      "max": 1.2777099609375,
+      "mean": 0.0566407504219568
+     },
+     "prompt_decode": {
+      "max": 0.6155204772949219,
+      "position": 1,
+      "token": 190421,
+      "mean": 0.054467048824793966
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "8b5cbefc9fe4674dd5473d26d1dbedcfa5f2e1533017c05571980c3ecde28d5d",
+     "prompt": [
+      {
+       "max": 0.38038337230682373,
+       "position": 1,
+       "token": 31159,
+       "mean": 0.041876562230302734
+      },
+      {
+       "max": 0.5489139556884766,
+       "position": 1,
+       "token": 80140,
+       "mean": 0.04945982009698449
+      },
+      {
+       "max": 1.28997802734375,
+       "position": 3,
+       "token": 3546,
+       "mean": 0.06711009753857503
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 1.020665168762207,
+       "position": 13,
+       "token": 15039,
+       "mean": 0.05612717135623533
+      },
+      "stateless": {
+       "max": 0.9829361438751221,
+       "position": 13,
+       "token": 16848,
+       "mean": 0.05199217130789653
+      }
+     },
+     "decode": {
+      "max": 1.020665168762207,
+      "mean": 0.05612717135623533
+     },
+     "prompt_decode": {
+      "max": 0.5214219093322754,
+      "position": 1,
+      "token": 17284,
+      "mean": 0.04864220159492012
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.4133453369140625,
+      "mean": 0.04420361211499568
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9279989109970836,
+       "mean": 0.8530653524398971
+      },
+      "cpu-sdpa": {
+       "max": 0.8730561759385729,
+       "mean": 0.907646689919669
+      },
+      "mps-eager": {
+       "max": 1.0775874714395464,
+       "mean": 1.0555692674077493
+      },
+      "mps-sdpa": {
+       "max": 0.9202556272841375,
+       "mean": 0.9473561147301915
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.6167106628417969,
+      "mean": 0.053166013867418316
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9602021439131053,
+       "mean": 0.9817230178946185
+      },
+      "cpu-sdpa": {
+       "max": 1.041447372659164,
+       "mean": 0.9106224058444612
+      },
+      "mps-eager": {
+       "max": 0.8666688316106564,
+       "mean": 1.018617249236529
+      },
+      "mps-sdpa": {
+       "max": 0.8900672369747691,
+       "mean": 0.9302901703393437
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 1.28997802734375,
+      "mean": 0.06989888427975205
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.5797070913177195,
+       "mean": 0.9068219074562022
+      },
+      "cpu-sdpa": {
+       "max": 0.44907846877217883,
+       "mean": 0.7930126294313541
+      },
+      "mps-eager": {
+       "max": 0.7039138277738348,
+       "mean": 1.0415553969292628
+      },
+      "mps-sdpa": {
+       "max": 1.4206284356745107,
+       "mean": 0.9601025571450378
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 1.5193042755126953,
+      "mean": 0.059997967276282815
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.189083846852011,
+       "mean": 1.0592721111446397
+      },
+      "cpu-sdpa": {
+       "max": 0.668270661211495,
+       "mean": 0.9062090503788991
+      },
+      "mps-eager": {
+       "max": 0.8409835880349456,
+       "mean": 0.944044490059697
+      },
+      "mps-sdpa": {
+       "max": 0.6717977334841498,
+       "mean": 0.9354845489644178
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.6167106628417969,
+      "mean": 0.054467048824793966
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9602021439131053,
+       "mean": 0.9582729505181058
+      },
+      "cpu-sdpa": {
+       "max": 1.0019336246165287,
+       "mean": 0.8888706934139935
+      },
+      "mps-eager": {
+       "max": 0.9980701070719442,
+       "mean": 1.0435440126524846
+      },
+      "mps-sdpa": {
+       "max": 0.8454887206418131,
+       "mean": 0.8930574107546962
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "gemma-3-4b-it-093f9f38-long",
+   "dtype": "bfloat16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long",
+    "dtype": "float32",
+    "reference_json_sha256": "b73b85f0f503524a16eba289ed633bdd73139fbfa3008640732ef5d39b774cf4"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "2d406b41c80dff78ce4ac62312bcedde29f2b9cb3f1b6d276527291cae814503"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44",
+     "reference_json_sha256": "28b23b0553b6159df1e7038951535efefc5bfcc107a6d4b782691805e760c305",
+     "prompt": [
+      {
+       "max": 8.071844696998596,
+       "position": 855,
+       "token": 13763,
+       "mean": 0.06616651691120136
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.4518778324127197,
+       "position": 2,
+       "token": 23795,
+       "mean": 0.04056927598135153
+      },
+      "stateless": {
+       "max": 0.43581295013427734,
+       "position": 2,
+       "token": 35265,
+       "mean": 0.04172913313765292
+      }
+     },
+     "decode": {
+      "max": 0.4518778324127197,
+      "mean": 0.04172913313765292
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "d9391318217efe3e2b7541d72c8dde30e61e1685422e3e475f0b67e40e1ffa2f",
+     "prompt": [
+      {
+       "max": 5.947952747344971,
+       "position": 428,
+       "token": 7626,
+       "mean": 0.056726944550414785
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.34149718284606934,
+       "position": 2,
+       "token": 113768,
+       "mean": 0.03474515303396419
+      },
+      "stateless": {
+       "max": 0.3681964874267578,
+       "position": 3,
+       "token": 4394,
+       "mean": 0.03789222901985498
+      }
+     },
+     "decode": {
+      "max": 0.3681964874267578,
+      "mean": 0.03789222901985498
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44",
+     "reference_json_sha256": "aa92c6f80ab809409dd2fbd35a0e0687e2f951b531b3761c1ec25cd8305987fa",
+     "prompt": [
+      {
+       "max": 7.983282566070557,
+       "position": 733,
+       "token": 238019,
+       "mean": 0.06501359773600456
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.5736312866210938,
+       "position": 2,
+       "token": 80161,
+       "mean": 0.046490049774778996
+      },
+      "stateless": {
+       "max": 0.5105862617492676,
+       "position": 2,
+       "token": 255305,
+       "mean": 0.04525257919466602
+      }
+     },
+     "decode": {
+      "max": 0.5736312866210938,
+      "mean": 0.046490049774778996
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "82676b9ac5a62c8a7e780af91d62a9ced4901db14fc26bf17ba060f491f782c5",
+     "prompt": [
+      {
+       "max": 10.183736801147461,
+       "position": 1040,
+       "token": 23795,
+       "mean": 0.05493600754584412
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.4345073699951172,
+       "position": 2,
+       "token": 54166,
+       "mean": 0.03911402827404808
+      },
+      "stateless": {
+       "max": 0.43691015243530273,
+       "position": 2,
+       "token": 114027,
+       "mean": 0.039966515784842366
+      }
+     },
+     "decode": {
+      "max": 0.43691015243530273,
+      "mean": 0.039966515784842366
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 10.183736801147461,
+      "mean": 0.06616651691120136
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.7926211030993157,
+       "mean": 1.017733508302038
+      },
+      "cpu-sdpa": {
+       "max": 0.5840638719840815,
+       "mean": 0.8573361149801049
+      },
+      "mps-eager": {
+       "max": 0.7839246753874308,
+       "mean": 0.9825754894013224
+      },
+      "mps-sdpa": {
+       "max": 1.2616368603987318,
+       "mean": 0.8302689957153235
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.5736312866210938,
+      "mean": 0.046490049774778996
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.787749627595196,
+       "mean": 0.8975927825375466
+      },
+      "cpu-sdpa": {
+       "max": 0.641869605117906,
+       "mean": 0.8150610550735877
+      },
+      "mps-eager": {
+       "max": 1.269438873684716,
+       "mean": 1.114090954667597
+      },
+      "mps-sdpa": {
+       "max": 0.7616567691223217,
+       "mean": 0.8596789200798906
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "uncalibrated": [],
+ "slacks": {
+  "max": {
+   "largest": [
+    {
+     "ratio": 1.4206284356745107,
+     "case": "gemma-3-4b-it-093f9f38",
+     "kind": "prompt",
+     "prompt": 2,
+     "graph": "mps-sdpa"
+    },
+    {
+     "ratio": 1.30447129028097,
+     "case": "Llama-3.1-8B-d04e592b",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.2961383743648334,
+     "case": "Llama-3.1-8B-d04e592b",
+     "kind": "prompt",
+     "prompt": 1,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.269438873684716,
+     "case": "gemma-3-4b-it-093f9f38-long",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.2616368603987318,
+     "case": "gemma-3-4b-it-093f9f38-long",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-sdpa"
+    },
+    {
+     "ratio": 1.189083846852011,
+     "case": "gemma-3-4b-it-093f9f38",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.0958420015414125,
+     "case": "Llama-3.1-8B-d04e592b",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "cpu-sdpa"
+    },
+    {
+     "ratio": 1.0775874714395464,
+     "case": "gemma-3-4b-it-093f9f38",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-eager"
+    }
+   ],
+   "count": 128,
+   "largest_by_kind": {
+    "prompt": 1.4206284356745107,
+    "decode": 1.269438873684716,
+    "prompt_decode": 1.30447129028097
+   },
+   "slack": 1.5
+  },
+  "mean": {
+   "largest": [
+    {
+     "ratio": 1.2988486124126377,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "prompt",
+     "prompt": 2,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.2008453415981333,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "prompt",
+     "prompt": 2,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.1589948510667731,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "prompt",
+     "prompt": 2,
+     "graph": "mps-sdpa"
+    },
+    {
+     "ratio": 1.1318370712063113,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.1258762639335458,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.1218829153076,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "prompt",
+     "prompt": 1,
+     "graph": "mps-sdpa"
+    },
+    {
+     "ratio": 1.1199431016370351,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "prompt",
+     "prompt": 1,
+     "graph": "mps-sdpa"
+    },
+    {
+     "ratio": 1.114090954667597,
+     "case": "gemma-3-4b-it-093f9f38-long",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    }
+   ],
+   "count": 128,
+   "largest_by_kind": {
+    "prompt": 1.2988486124126377,
+    "decode": 1.114090954667597,
+    "prompt_decode": 1.1318370712063113
+   },
+   "slack": 1.3
+  }
+ }
+}

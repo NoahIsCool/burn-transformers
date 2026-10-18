@@ -1,0 +1,48 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== metal/F16 metal::metal_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_batched_prefill_matches_the_reference
+== start 2026-10-18T01:00:08+00:00 load 15.04 36.00 31.36 free 88%
+
+running 1 test
+test metal::metal_batched_prefill_matches_the_reference ... F16 bounds of prompt 0: max 1.5104503631591795e-1, mean 1.7173070232383528e-2 (1.7 and 1.7 times the official envelope 8.885002136230469e-2, 1.0101806019049135e-2)
+F16 bounds of prompt 1: max 9.974029064178466e-2, mean 1.0936770106939572e-2 (1.7 and 1.7 times the official envelope 5.8670759201049805e-2, 6.433394180552689e-3)
+F16 bounds of prompt 2: max 2.8752803802490234e-1, mean 1.112420461114093e-2 (1.7 and 1.7 times the official envelope 1.6913414001464844e-1, 6.543649771259371e-3)
+F16 bounds of decode rows: max 1.9297208786010742e-1, mean 2.8723791494685597e-2 (1.7 and 1.7 times the official envelope 1.1351299285888672e-1, 1.689634793805035e-2)
+F16 bounds of prompt 1 decoded rows: max 1.0378084182739257e-1, mean 1.3028007143125887e-2 (1.7 and 1.7 times the official envelope 6.104755401611328e-2, 7.663533613603463e-3)
+F32 matrix products use F32 inputs; the F16 run is judged by the official envelope, greedy steps at 1.9297208e-1
+batched row 0: max |Δ| = 0e0 to the stateless pass (provisional tolerance 5e-1)
+batched row 0: max |Δ| = 5.670738220214844e-2 to the reference (bound 1.5104503631591795e-1)
+batched row 1: max |Δ| = 0e0 to the stateless pass (provisional tolerance 5e-1)
+batched row 1: max |Δ| = 2.7817964553833008e-2 to the reference (bound 9.974029064178466e-2)
+batched row 2: max |Δ| = 0e0 to the stateless pass (provisional tolerance 5e-1)
+batched row 2: max |Δ| = 1.77687406539917e-2 to the reference (bound 2.8752803802490234e-1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 5.61s
+
+        5.64 real         3.51 user         2.05 sys
+          4674322432  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              659684  page reclaims
+                  11  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               28765  involuntary context switches
+         75676095803  instructions retired
+         19863960666  cycles elapsed
+         11848814096  peak memory footprint
+== exit=0 wall=6.1s min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

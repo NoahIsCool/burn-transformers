@@ -1,0 +1,28 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench sha256 0649431d691b49b63d421bc4a2c74a823e65afd7c81e0a2d25870f4929b6b44c
+== round 1
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench act flex bf16 14336 1,128,512 50
+== start 2026-10-17T22:22:16+00:00 load 4.75 4.53 7.18
+{"kind":"act","backend":"flex","dtype":"BF16","tokens":1,"intermediate":14336,"reps":50,"median_us":33.916,"min_us":31.542,"max_us":36.000}
+{"kind":"act","backend":"flex","dtype":"BF16","tokens":128,"intermediate":14336,"reps":50,"median_us":4466.083,"min_us":4426.583,"max_us":4578.250}
+{"kind":"act","backend":"flex","dtype":"BF16","tokens":512,"intermediate":14336,"reps":50,"median_us":17848.416,"min_us":17696.500,"max_us":18033.167}
+        1.36 real         1.35 user         0.01 sys
+           158892032  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                9946  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  32  involuntary context switches
+         35407075268  instructions retired
+          5032381137  cycles elapsed
+           153551448  peak memory footprint
+== exit=0 wall=2.0s end=2026-10-17T22:22:19+00:00 load_end 4.69 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

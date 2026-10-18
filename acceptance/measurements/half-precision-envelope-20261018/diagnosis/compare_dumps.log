@@ -1,0 +1,15 @@
+== gate f9f78b5 Flex/BF16 printed: prompt 0 max 7.000284194946289e-1, cached rows max 6.992225646972656e-1, stateless rows max 4.096488952636719e-1
+
+== Flex/BF16 fused attention
+fused prompt 0: max |Δ| = 0.700028 (bound 1.05004, 0.667 of it), mean |Δ| = 0.0505968 (bound 0.101362, 0.499 of it): within the envelope
+fused cached decode rows: max |Δ| = 0.699223 (bound 1.05424, 0.663 of it), mean |Δ| = 0.073401 (bound 0.100463, 0.731 of it): within the envelope
+fused stateless decode rows: max |Δ| = 0.409649 (bound 1.05424, 0.389 of it), mean |Δ| = 0.0470581 (bound 0.100463, 0.468 of it): within the envelope
+fused cached-versus-stateless gap max |Δ| = 0.625
+
+== Flex/BF16 eager attention
+eager prompt 0: max |Δ| = 0.765031 (bound 1.05004, 0.729 of it), mean |Δ| = 0.0889105 (bound 0.101362, 0.877 of it): within the envelope
+eager cached decode rows: max |Δ| = 1.10598 (bound 1.05424, 1.049 of it), mean |Δ| = 0.157189 (bound 0.100463, 1.565 of it): OUTSIDE the envelope
+eager stateless decode rows: max |Δ| = 0.819347 (bound 1.05424, 0.777 of it), mean |Δ| = 0.0995237 (bound 0.100463, 0.991 of it): within the envelope
+eager cached-versus-stateless gap max |Δ| = 0.8125
+eager prompt 1: max |Δ| = 0.857345 (bound 1.28602, 0.667 of it), mean |Δ| = 0.056795 (bound 0.0821267, 0.692 of it): within the envelope
+eager prompt 2: max |Δ| = 0.879524 (bound 1.31929, 0.667 of it), mean |Δ| = 0.0436784 (bound 0.0700033, 0.624 of it): within the envelope

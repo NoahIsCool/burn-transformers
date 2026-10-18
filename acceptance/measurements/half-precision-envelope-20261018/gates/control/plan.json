@@ -1,0 +1,302 @@
+[
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r1.base.baseline.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r1.base.baseline.json"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 bb47fea2da42514c7b0026d9c04129eb407cac93fe3e98f88312c763202e5e13",
+   "round 1 base baseline",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r1.base.public.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_public_causal_greedy_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r1.base.public.json"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 bb47fea2da42514c7b0026d9c04129eb407cac93fe3e98f88312c763202e5e13",
+   "round 1 base public",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r1.head.baseline.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r1.head.baseline.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "round 1 head baseline",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r1.head.public.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_public_causal_greedy_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r1.head.public.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "round 1 head public",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r2.head.baseline.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r2.head.baseline.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "round 2 head baseline",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r2.head.public.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_public_causal_greedy_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r2.head.public.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "round 2 head public",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r2.base.baseline.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r2.base.baseline.json"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 bb47fea2da42514c7b0026d9c04129eb407cac93fe3e98f88312c763202e5e13",
+   "round 2 base baseline",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r2.base.public.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_public_causal_greedy_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r2.base.public.json"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 bb47fea2da42514c7b0026d9c04129eb407cac93fe3e98f88312c763202e5e13",
+   "round 2 base public",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r3.base.baseline.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r3.base.baseline.json"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 bb47fea2da42514c7b0026d9c04129eb407cac93fe3e98f88312c763202e5e13",
+   "round 3 base baseline",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r3.base.public.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_public_causal_greedy_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r3.base.public.json"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 bb47fea2da42514c7b0026d9c04129eb407cac93fe3e98f88312c763202e5e13",
+   "round 3 base public",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r3.head.baseline.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r3.head.baseline.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "round 3 head baseline",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/logs/r3.head.public.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_public_causal_greedy_benchmark"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+   "TRANSFORMERS_BENCH_METADATA_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json",
+   "TRANSFORMERS_BENCH_OUTPUT_JSON": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r3.head.public.json"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df",
+   "round 3 head public",
+   "half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert"
+  ]
+ }
+]

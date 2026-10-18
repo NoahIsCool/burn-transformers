@@ -1,0 +1,35 @@
+== waiting for the lock at 2026-10-17T20:41:38Z
+== lock taken at 2026-10-17T22:40:39Z
+== sha256 469ef1ee8bf23b91fee66cbe7fb444a32c8ee5bf2294d194f86af74eafdc97e0 /Volumes/bag of holding/cargo-targets/followups-gemma/release/deps/gemma_artifacts-7e9fb558e3797b0a
+== sha256 4c286d708b52968b771767e8d37b27bdb423adc4e11ab7e46cb86a8a6ac9f323 /Volumes/bag of holding/cargo-targets/followups-gemma/release/deps/metal_bf16_probe-5c2b593db1bdc288
+== sha256 8d452a135d084efef72b8d5d18bcf1ad7688c5131a88e49513a6e0eb897ab366 /Volumes/bag of holding/cargo-targets/followups-gemma-patched/release/deps/gemma_artifacts-34288ae37266667d
+== sha256 cd75294b41b89f108885117e2a250df661dffe88b37fe67c0850c738166e7480 /Volumes/bag of holding/cargo-targets/followups-gemma-patched/release/deps/metal_bf16_probe-e1d5bee79a62a658
+== sha256 bd0b540335a7fa7c50956256f3a48925a04f915aeabcdb40e3c137cd4b65ff6c /Volumes/bag of holding/cargo-targets/followups-gemma-burn022/release/burn022-metal-bf16-probe
+2026-10-17T22:40:49Z probe-unpatched: exit=0
+2026-10-17T22:40:55Z probe-unpatched-kernel-log: exit=0
+2026-10-17T22:41:17Z probe-patched: exit=0
+2026-10-17T22:41:20Z probe-burn022: exit=0
+2026-10-17T22:41:22Z gate-bf16-unpatched.metal_prompt_logits_match_the_reference: exit=101
+2026-10-17T22:41:23Z gate-bf16-unpatched.metal_cached_greedy_matches_the_reference: exit=101
+2026-10-17T22:41:24Z gate-bf16-unpatched.metal_batched_prefill_matches_the_reference: exit=101
+2026-10-17T22:41:36Z gate-bf16-unpatched.metal_long_context_logits_cross_the_sliding_window: exit=101
+2026-10-17T22:41:46Z gate-bf16-unpatched.metal_long_context_cached_decode_wraps_the_rings: exit=101
+2026-10-17T22:43:01Z gate-f16-unpatched.metal_prompt_logits_match_the_reference: exit=101
+2026-10-17T22:43:06Z gate-bf16-patched.metal_prompt_logits_match_the_reference: exit=101
+2026-10-17T22:43:10Z gate-bf16-patched.metal_cached_greedy_matches_the_reference: exit=101
+2026-10-17T22:43:14Z gate-bf16-patched.metal_batched_prefill_matches_the_reference: exit=101
+2026-10-17T22:45:00Z gate-bf16-patched.metal_long_context_logits_cross_the_sliding_window: exit=101
+2026-10-17T22:52:36Z gate-bf16-patched.metal_long_context_cached_decode_wraps_the_rings: exit=101
+2026-10-17T22:52:41Z weights-4b: exit=0
+2026-10-17T22:53:57Z weights-12b: exit=0
+2026-10-17T22:58:33Z weights-27b: exit=0
+2026-10-17T22:59:04Z points-4b-float32: exit=0
+2026-10-17T22:59:09Z points-4b-float16: exit=0
+2026-10-17T22:59:13Z points-4b-bfloat16: exit=0
+2026-10-17T22:59:28Z points-4b-long-float32: exit=0
+2026-10-17T22:59:37Z clamp-4b: exit=0
+2026-10-17T23:00:55Z points-12b-bfloat16: exit=0
+2026-10-17T23:01:06Z points-12b-float16: exit=0
+2026-10-17T23:04:51Z points-27b-bfloat16: exit=0
+2026-10-17T23:05:24Z points-27b-float16: exit=0
+== lock released at 2026-10-17T23:05:24Z

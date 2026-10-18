@@ -1,0 +1,25 @@
+== source 7bd057ecc56d60df2776639befd30058720d3c09 dirty=0
+== tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/tool/scripts/generate_causal_lm_reference.py sha256 58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b
+== start 2026-10-17T20:33:36+00:00 free 381.2 GiB free-memory 90%
+== cmd ["/usr/bin/time", "-l", "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/tool/scripts/generate_causal_lm_reference.py", "--model-dir", "/Volumes/T9/models/Qwen/Qwen3-4B", "--output", "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-eager", "--repository", "Qwen/Qwen3-4B", "--revision", "531c80e289d6cff3a7cd8c0db8110231d23a6f7a", "--dtype", "bfloat16", "--device", "cpu", "--attn-implementation", "eager", "--greedy-tokens", "32", "--decode-tokens-from", "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2", "--prompt", "The capital of France is", "--prompt", "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n", "--prompt", "Rotary position embeddings encode relative distance because"]
+{"bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-eager", "prompts": 3}
+       77.15 real        57.07 user        21.31 sys
+          9062301696  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              107527  page reclaims
+              491031  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  64  voluntary context switches
+             1853825  involuntary context switches
+        687221393466  instructions retired
+        264922662711  cycles elapsed
+           842358008  peak memory footprint
+== exit=0 wall=80s lowest-free-memory=89%
+== reference.json sha256 7eb05f668f348b7a2335c705fdf81181d22cb45ab79a0ba1de27a3275810daf7

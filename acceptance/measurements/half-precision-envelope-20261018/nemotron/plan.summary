@@ -1,0 +1,5 @@
+2026-10-18T04:31:33+00:00 lock acquired
+base.official-precision.log: == exit=0 wall=318.5s end=2026-10-18T04:36:51+00:00 load_end 2.72 min_free_pct=42 max_swap_growth_mib=1 swapin_mib=0 pressured_swapin_mib=0
+isolate.official-precision.log: == exit=0 wall=290.2s end=2026-10-18T04:41:42+00:00 load_end 1.89 min_free_pct=50 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+head.official-precision.log: == exit=101 wall=282.7s end=2026-10-18T04:46:24+00:00 load_end 2.50 min_free_pct=52 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+2026-10-18T04:46:24+00:00 lock released

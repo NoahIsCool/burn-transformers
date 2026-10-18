@@ -1,0 +1,5 @@
+== source 1816d734e9f575b36c36fe47073f420230b0764a dirty=0
+== cmd cargo +1.92.0 check --locked --all-targets
+    Checking transformers v0.1.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.57s
+== exit=0

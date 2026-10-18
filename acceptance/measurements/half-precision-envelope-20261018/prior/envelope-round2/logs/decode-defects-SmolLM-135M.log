@@ -1,0 +1,36 @@
+== source 7bd057ecc56d60df2776639befd30058720d3c09
+== start 2026-10-17T21:06:38Z
+== cmd python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/decode_defects.py /Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 /Volumes/T9/transformers-references/SmolLM-135M-1d461723 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/decode-defects-SmolLM-135M.json cpu-eager mps-sdpa
+cpu-eager none             decode-vs-stateless max 0.0000 (steps > 0.5: 0, median 0.0000); decoded prompt 1 vs F32 max 1.1013 mean 0.07548
+cpu-eager rope+1           decode-vs-stateless max 1.2344 (steps > 0.5: 21, median 0.6250); decoded prompt 1 vs F32 max 2.4009 mean 0.14350
+cpu-eager skip-newest-key  decode-vs-stateless max 8.2812 (steps > 0.5: 32, median 2.8125); decoded prompt 1 vs F32 max 5.9470 mean 0.71721
+cpu-eager skip-prev-key    decode-vs-stateless max 18.1328 (steps > 0.5: 32, median 10.7578); decoded prompt 1 vs F32 max 16.3658 mean 2.07472
+cpu-eager kv-e5m2          decode-vs-stateless max 2.4219 (steps > 0.5: 31, median 1.0156); decoded prompt 1 vs F32 max 1.8793 mean 0.23983
+cpu-eager kv-e4m3          decode-vs-stateless max 0.9062 (steps > 0.5: 20, median 0.5625); decoded prompt 1 vs F32 max 1.1093 mean 0.16333
+cpu-eager rope-bf16        decode-vs-stateless max 0.7344 (steps > 0.5: 1, median 0.3125); decoded prompt 1 vs F32 max 1.1013 mean 0.08517
+mps-sdpa none             decode-vs-stateless max 0.4941 (steps > 0.5: 0, median 0.3125); decoded prompt 1 vs F32 max 1.6013 mean 0.10294
+mps-sdpa rope+1           decode-vs-stateless max 1.3750 (steps > 0.5: 22, median 0.5781); decoded prompt 1 vs F32 max 2.3072 mean 0.17612
+mps-sdpa skip-newest-key  decode-vs-stateless max 8.1328 (steps > 0.5: 32, median 2.9375); decoded prompt 1 vs F32 max 6.1032 mean 0.76265
+mps-sdpa skip-prev-key    decode-vs-stateless max 18.2969 (steps > 0.5: 32, median 10.9258); decoded prompt 1 vs F32 max 16.3658 mean 2.10444
+mps-sdpa kv-e5m2          decode-vs-stateless max 2.9375 (steps > 0.5: 32, median 1.0625); decoded prompt 1 vs F32 max 1.6013 mean 0.25032
+mps-sdpa kv-e4m3          decode-vs-stateless max 1.6250 (steps > 0.5: 26, median 0.5938); decoded prompt 1 vs F32 max 1.6013 mean 0.18348
+mps-sdpa rope-bf16        decode-vs-stateless max 0.5469 (steps > 0.5: 1, median 0.3125); decoded prompt 1 vs F32 max 1.6013 mean 0.11650
+       34.11 real        25.48 user        14.33 sys
+          1422213120  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              161101  page reclaims
+                 867  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   7  voluntary context switches
+             2428199  involuntary context switches
+        298298080535  instructions retired
+        135714009711  cycles elapsed
+          2186562392  peak memory footprint
+== exit=0 end 2026-10-17T21:07:12Z

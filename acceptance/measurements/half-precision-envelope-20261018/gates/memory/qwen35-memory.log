@@ -1,0 +1,31 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export of the gate head)
+== supervisor /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src/scripts/profile_process_memory.py sha256 1c3cd1e7c265df9381d559bdb051bc63c2a386cb6573ee7b05dc30e28e666828
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df
+== Qwen3.5-0.8B Metal/F16 supervised process-memory run (separate, instrumented, not timing-comparable)
+== env TRANSFORMERS_BENCH_METADATA_JSON=/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-baseline.json
+== env TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/memory/qwen35-memory-benchmark.json
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src/scripts/profile_process_memory.py --output-dir /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/memory-run -- /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1
+== start 2026-10-18T03:17:25+00:00 load 1.63 2.36 3.61
+{"status": "passed", "report": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/memory-run/report.json"}
+      208.29 real       239.40 user        71.48 sys
+          2447163392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              248021  page reclaims
+                 110  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                 558  messages sent
+                 558  messages received
+                   0  signals received
+                 129  voluntary context switches
+             2967631  involuntary context switches
+         22890098032  instructions retired
+          8890853841  cycles elapsed
+            15516296  peak memory footprint
+== exit=0 wall=208.9s end=2026-10-18T03:20:54+00:00 load_end 2.76 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

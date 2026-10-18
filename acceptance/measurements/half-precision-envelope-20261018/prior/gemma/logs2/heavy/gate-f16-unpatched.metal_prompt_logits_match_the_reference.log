@@ -1,0 +1,44 @@
+== step gate-f16-unpatched.metal_prompt_logits_match_the_reference
+== start 2026-10-17T22:41:46Z load (33.4453125, 24.71533203125, 14.353515625)
+== env {'TRANSFORMERS_GEMMA_DTYPE': 'f16', 'TRANSFORMERS_GEMMA_DIR': '/Volumes/T9/models/google/gemma-3-4b-it', 'TRANSFORMERS_GEMMA_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38', 'TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16', 'TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long', 'TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16'}
+== cmd ['/Volumes/bag of holding/cargo-targets/followups-gemma/release/deps/gemma_artifacts-7e9fb558e3797b0a', '--ignored', '--exact', '--nocapture', '--test-threads', '1', 'metal::metal_prompt_logits_match_the_reference']
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 4.6030082702636715e-1, mean 4.525028393759436e-2 (1.2 × official BF16 3.8358402252197266e-1, 3.77085699479953e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+F16 bounds of prompt 1: max 7.106002807617188e-1, mean 6.263315950001885e-2 (1.2 × official BF16 5.921669006347656e-1, 5.219429958334905e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+F16 bounds of prompt 2: max 8.973712921142578e-1, mean 7.606300748595012e-2 (1.2 × official BF16 7.478094100952148e-1, 6.33858395716251e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16)
+F32 matrix products use F32 inputs; the F16 run is judged by the official calibration, greedy steps at 4.603008e-1
+load: 439 vision-tower tensors intentionally ignored
+
+thread 'metal::metal_prompt_logits_match_the_reference' (40075459) panicked at tests/support/half_precision_calibration.rs:667:9:
+prompt 0: the compared logits hold a non-finite value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    metal::metal_prompt_logits_match_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 75.00s
+
+       75.06 real         6.50 user        12.52 sys
+          6628212736  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              742019  page reclaims
+                 101  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   3  voluntary context switches
+              132989  involuntary context switches
+         71358093232  instructions retired
+         29489638948  cycles elapsed
+         13030838640  peak memory footprint
+
+== exit=101 wall=75.1s end 2026-10-17T22:43:01Z

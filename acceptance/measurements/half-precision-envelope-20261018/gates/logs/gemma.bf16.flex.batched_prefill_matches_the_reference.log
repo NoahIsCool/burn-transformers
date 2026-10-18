@@ -1,0 +1,52 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17 build A
+== flex/BF16 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=bf16
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-18T01:12:42+00:00 load 3.14 8.77 16.97 free 90%
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... BF16 bounds of prompt 0: max 6.200180053710938e-1, mean 5.746469574949437e-2 (1.5 and 1.3 times the official envelope 4.133453369140625e-1, 4.420361211499567e-2)
+BF16 bounds of prompt 1: max 9.250659942626953e-1, mean 6.911581802764383e-2 (1.5 and 1.3 times the official envelope 6.167106628417969e-1, 5.316601386741833e-2)
+BF16 bounds of prompt 2: max 1.934967041015625e0, mean 9.086854956367765e-2 (1.5 and 1.3 times the official envelope 1.28997802734375e0, 6.989888427975204e-2)
+BF16 bounds of decode rows: max 2.278956413269043e0, mean 7.799735745916767e-2 (1.5 and 1.3 times the official envelope 1.5193042755126953e0, 5.9997967276282815e-2)
+BF16 bounds of prompt 1 decoded rows: max 9.250659942626953e-1, mean 7.080716347223216e-2 (1.5 and 1.3 times the official envelope 6.167106628417969e-1, 5.446704882479397e-2)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official envelope, greedy steps at 2.2789564e0
+load: 439 vision-tower tensors intentionally ignored
+batched row 0: max |Δ| = 3.125e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 0: max |Δ| = 2.3218679428100586e-1 to the reference (bound 6.200180053710938e-1)
+batched row 1: max |Δ| = 6.25e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 1: max |Δ| = 3.420844078063965e-1 to the reference (bound 9.250659942626953e-1)
+batched row 2: max |Δ| = 6.25e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 2: max |Δ| = 1.630082130432129e-1 to the reference (bound 1.934967041015625e0)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 9.24s
+
+        9.26 real        25.12 user         6.13 sys
+         12272779264  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              755938  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              259473  involuntary context switches
+        217530523982  instructions retired
+        106582993355  cycles elapsed
+         12268463656  peak memory footprint
+== exit=0 wall=10.2s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

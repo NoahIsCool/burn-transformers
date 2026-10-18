@@ -1,0 +1,564 @@
+{
+  "schema_version": 1,
+  "created_utc": "20261018T015840.911811Z",
+  "gates": [
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "fmt",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--check"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "00-source.log",
+      "seconds": 2.095793
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "clippy",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--all-targets",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "01-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T01:58:43.008565+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23191134208,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 47.644481
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "test",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--all-targets"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "02-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T01:59:30.653443+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23190732800,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 137.880166
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "test",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--doc"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "03-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:01:48.533969+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23191216128,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 3.938031
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "check",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "04-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:01:52.472372+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23191064576,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 17.25682
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "check",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "05-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:02:09.729649+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23187656704,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 11.2902
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "doc",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--no-deps"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "06-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:02:21.020264+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23187300352,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 7.157915
+    },
+    {
+      "gate": "source",
+      "command": [
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/scripts/tests",
+        "-v"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "07-source.log",
+      "seconds": 7.658805
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "fmt",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/scripts/coverage-layout/Cargo.toml",
+        "--check"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "08-source.log",
+      "seconds": 0.092145
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "clippy",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/scripts/coverage-layout/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/target",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "09-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:02:35.930443+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23186059264,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 2.774696
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "test",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/scripts/coverage-layout/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/target"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "10-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:02:38.705573+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23153876992,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 3.304986
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "build",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/scripts/coverage-layout/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/target"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "11-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:02:42.010967+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 23025475584,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 0.034849
+    },
+    {
+      "gate": "source",
+      "command": [
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/scripts/check_documentation.py",
+        "--standards",
+        "--classifier",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/target/debug/transformers-coverage-layout",
+        "--output",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/target/release-gates/20261018T015840.911811Z/documentation.json"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "12-source.log",
+      "seconds": 22.840695
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "activation_workbench"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "13-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:03:04.887611+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22995324928,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 64.809312
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "attention_head_attribution"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "14-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:04:09.697632+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22991331328,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 1.713306
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "custom_composition"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "15-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:04:11.411671+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22991204352,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 3.081726
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "t5_classifier"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "16-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:04:14.494041+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22991106048,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 2.964997
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "mla_encoder_decoder"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "17-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:04:17.459578+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22990970880,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 2.551883
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "qwen_prefix",
+        "--",
+        "--random"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "18-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:04:20.012011+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22990925824,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 2.341248
+    },
+    {
+      "gate": "source",
+      "command": [
+        "cargo",
+        "+stable",
+        "run",
+        "--release",
+        "--manifest-path",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff,train",
+        "--example",
+        "burn_training",
+        "--",
+        "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git/target/release-gates/20261018T015840.911811Z/burn_training"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "19-source.log",
+      "storage_preflight": {
+        "checked_path": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate-git",
+        "checked_utc": "2026-10-18T02:04:22.353814+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 22990815232,
+        "passed": true,
+        "target_environment": {
+          "CARGO_TARGET_DIR": "/Volumes/bag of holding/cargo-targets/tfm-half-followups2"
+        }
+      },
+      "seconds": 9.836509
+    }
+  ],
+  "passed": true
+}

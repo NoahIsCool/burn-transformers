@@ -1,0 +1,71 @@
+[
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/logs/base.official-precision.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/nemotron_h_artifacts-4cd54efee0f15525",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "compares_pinned_nemotron_f16_with_official_base_reference"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bench-base/src",
+  "env": {
+   "TRANSFORMERS_NEMOTRON_H_DIR": "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+   "TRANSFORMERS_NEMOTRON_H_PRECISION_DIR": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle"
+  },
+  "header": [
+   "source 7bd057ecc56d60df2776639befd30058720d3c09 (base: git archive export)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-bench-base/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 9cbeaf4eb0277156759d2ade8574c19005f8eaf556d6037d5ca0e8b47e4892f8",
+   "Nemotron-H official-precision gate, base: attribution of the f9f78b5 failure (cached row 22 below its official F16 floor)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/logs/isolate.official-precision.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-nemotron-isolate/release/deps/nemotron_h_artifacts-4cd54efee0f15525",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "compares_pinned_nemotron_f16_with_official_base_reference"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/isolate/src",
+  "env": {
+   "TRANSFORMERS_NEMOTRON_H_DIR": "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+   "TRANSFORMERS_NEMOTRON_H_PRECISION_DIR": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 plus isolate.diff sha256 b65944517c508e605de30771177aa4dced5adfa9f9591c50613dd406d9e555c3 (the Mamba-2 convolution SiLU composed as before c10974e; nothing else changed)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-nemotron-isolate/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 dbb45277cd3f5e8fbe341173456e928a325191d3134b931c097be75480be8bed",
+   "Nemotron-H official-precision gate, isolate: attribution of the f9f78b5 failure (cached row 22 below its official F16 floor)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/logs/head.official-precision.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "compares_pinned_nemotron_f16_with_official_base_reference"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src",
+  "env": {
+   "TRANSFORMERS_NEMOTRON_H_DIR": "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+   "TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+   "TRANSFORMERS_NEMOTRON_H_PRECISION_DIR": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle"
+  },
+  "header": [
+   "source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (gate head: git archive export), rerun for determinism",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 651e75ca83bfa0bd1d6f5298f9a439fabfc5d502ff54441baefd545fe4ae2692",
+   "Nemotron-H official-precision gate, head: attribution of the f9f78b5 failure (cached row 22 below its official F16 floor)"
+  ]
+ }
+]

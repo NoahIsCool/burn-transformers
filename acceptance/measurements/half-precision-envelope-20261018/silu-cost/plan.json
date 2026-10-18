@@ -1,0 +1,125 @@
+[
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/silu-cost/logs/e2e-smollm-135m-flex-bf16.r1.base.half2.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench",
+   "e2e-flex",
+   "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "bf16",
+   "32,128",
+   "128",
+   "3",
+   "10"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base",
+  "header": [
+   "source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)",
+   "binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench sha256 0649431d691b49b63d421bc4a2c74a823e65afd7c81e0a2d25870f4929b6b44c",
+   "round 1",
+   "half2 S9 rerun of the SiLU end-to-end cost series, r1, base binary (unchanged since the SiLU measurement round)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/silu-cost/logs/e2e-smollm-135m-flex-bf16.r1.patched.half2.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench",
+   "e2e-flex",
+   "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "bf16",
+   "32,128",
+   "128",
+   "3",
+   "10"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo",
+  "header": [
+   "source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)",
+   "binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4",
+   "binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench sha256 c1dd3ca5e1b2accd4f1fb096fc50aeefbc66a9552c1f542b7e3c8a5403d9cade",
+   "round 1",
+   "half2 S9 rerun of the SiLU end-to-end cost series, r1, patched binary (unchanged since the SiLU measurement round)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/silu-cost/logs/e2e-smollm-135m-flex-bf16.r2.patched.half2.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench",
+   "e2e-flex",
+   "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "bf16",
+   "32,128",
+   "128",
+   "3",
+   "10"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo",
+  "header": [
+   "source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)",
+   "binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4",
+   "binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench sha256 c1dd3ca5e1b2accd4f1fb096fc50aeefbc66a9552c1f542b7e3c8a5403d9cade",
+   "round 2",
+   "half2 S9 rerun of the SiLU end-to-end cost series, r2, patched binary (unchanged since the SiLU measurement round)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/silu-cost/logs/e2e-smollm-135m-flex-bf16.r2.base.half2.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench",
+   "e2e-flex",
+   "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "bf16",
+   "32,128",
+   "128",
+   "3",
+   "10"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base",
+  "header": [
+   "source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)",
+   "binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench sha256 0649431d691b49b63d421bc4a2c74a823e65afd7c81e0a2d25870f4929b6b44c",
+   "round 2",
+   "half2 S9 rerun of the SiLU end-to-end cost series, r2, base binary (unchanged since the SiLU measurement round)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/silu-cost/logs/e2e-smollm-135m-flex-bf16.r3.base.half2.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench",
+   "e2e-flex",
+   "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "bf16",
+   "32,128",
+   "128",
+   "3",
+   "10"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base",
+  "header": [
+   "source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)",
+   "binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench sha256 0649431d691b49b63d421bc4a2c74a823e65afd7c81e0a2d25870f4929b6b44c",
+   "round 3",
+   "half2 S9 rerun of the SiLU end-to-end cost series, r3, base binary (unchanged since the SiLU measurement round)"
+  ]
+ },
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/silu-cost/logs/e2e-smollm-135m-flex-bf16.r3.patched.half2.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench",
+   "e2e-flex",
+   "/Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4",
+   "bf16",
+   "32,128",
+   "128",
+   "3",
+   "10"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo",
+  "header": [
+   "source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)",
+   "binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4",
+   "binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench sha256 c1dd3ca5e1b2accd4f1fb096fc50aeefbc66a9552c1f542b7e3c8a5403d9cade",
+   "round 3",
+   "half2 S9 rerun of the SiLU end-to-end cost series, r3, patched binary (unchanged since the SiLU measurement round)"
+  ]
+ }
+]

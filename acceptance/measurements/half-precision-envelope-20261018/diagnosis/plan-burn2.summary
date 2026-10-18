@@ -1,0 +1,4 @@
+2026-10-18T04:46:32+00:00 lock acquired
+burn2-metal-f32.log: == exit=0 wall=111.5s end=2026-10-18T04:48:23+00:00 load_end 1.53 min_free_pct=67 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0
+burn2-metal-f16.log: == exit=0 wall=69.0s end=2026-10-18T04:49:32+00:00 load_end 1.40 min_free_pct=73 max_swap_growth_mib=0 swapin_mib=33 pressured_swapin_mib=0
+2026-10-18T04:49:32+00:00 lock released

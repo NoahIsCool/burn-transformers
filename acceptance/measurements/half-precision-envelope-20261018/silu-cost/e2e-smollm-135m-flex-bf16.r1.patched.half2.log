@@ -1,0 +1,30 @@
+== source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)
+== binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench sha256 c1dd3ca5e1b2accd4f1fb096fc50aeefbc66a9552c1f542b7e3c8a5403d9cade
+== round 1
+== half2 S9 rerun of the SiLU end-to-end cost series, r1, patched binary (unchanged since the SiLU measurement round)
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench e2e-flex /Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 bf16 32,128 128 3 10
+== start 2026-10-18T03:57:56+00:00 load 2.94 2.67 2.80
+load 0.15 s
+{"kind":"e2e","backend":"flex","dtype":"BF16","source":32,"decode_steps":128,"prefill_median_s":0.193178,"prefill_tok_per_s":165.65,"decode_median_s":15.388793,"decode_tok_per_s":8.318,"prefill_s":[0.192352375, 0.195213, 0.193881959, 0.1940365, 0.193178459, 0.198305667, 0.188403, 0.187186958, 0.189929792, 0.1873365],"decode_s":[15.388793375, 15.367218334, 15.510577542, 15.500192791, 15.536374916, 15.742676958, 14.6999615, 14.690269917, 14.664405708, 14.649368833],"checksums":[109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202, 109027.81707382202]}
+{"kind":"e2e","backend":"flex","dtype":"BF16","source":128,"decode_steps":128,"prefill_median_s":0.325574,"prefill_tok_per_s":393.15,"decode_median_s":14.825463,"decode_tok_per_s":8.634,"prefill_s":[0.324329459, 0.324898583, 0.329586583, 0.324592125, 0.323855291, 0.325573875, 0.322375083, 0.328689916, 0.332461375, 0.33963625],"decode_s":[15.304025, 14.758264958, 14.776302667, 14.782980583, 14.825462541, 14.798581458, 14.802943333, 16.235745625, 16.963994541, 18.361496584],"checksums":[-13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715, -13702.573409199715]}
+      403.97 real       407.96 user        19.38 sys
+           510689280  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               31103  page reclaims
+                 339  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              935747  involuntary context switches
+       2158063462636  instructions retired
+       1625468262467  cycles elapsed
+           501924776  peak memory footprint
+== exit=0 wall=404.1s end=2026-10-18T04:04:40+00:00 load_end 13.23 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0

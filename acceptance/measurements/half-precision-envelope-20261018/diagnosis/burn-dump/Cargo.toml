@@ -1,0 +1,11 @@
+[package]
+name = "burn-dump"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+transformers = { path = "../../gates/src", features = ["metal", "tokenizers"] }
+burn = { version = "=0.21.0", default-features = false }
+
+[workspace]

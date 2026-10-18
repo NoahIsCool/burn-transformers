@@ -1,0 +1,9 @@
+torch 2.10.0
+cpu  torch.bfloat16  n=65280: F.silu == once-rounded F32 65280; F.silu == composed 64363; composed == once 64363; composed differs on 917 (1.40%)
+     |x| <= 16: n=33538, composed differs from once-rounded on 837 (2.50%); F.silu differs from once-rounded on 0
+mps  torch.bfloat16  n=65280: F.silu == once-rounded F32 64772; F.silu == composed 64361; composed == once 63853; composed differs on 1427 (2.19%)
+     |x| <= 16: n=33538, composed differs from once-rounded on 1345 (4.01%); F.silu differs from once-rounded on 508
+cpu  torch.float16   n=63488: F.silu == once-rounded F32 63487; F.silu == composed 53325; composed == once 53324; composed differs on 10164 (16.01%)
+     |x| <= 16: n=38914, composed differs from once-rounded on 9891 (25.42%); F.silu differs from once-rounded on 1
+mps  torch.float16   n=63488: F.silu == once-rounded F32 63486; F.silu == composed 53325; composed == once 53325; composed differs on 10163 (16.01%)
+     |x| <= 16: n=38914, composed differs from once-rounded on 9890 (25.42%); F.silu differs from once-rounded on 2

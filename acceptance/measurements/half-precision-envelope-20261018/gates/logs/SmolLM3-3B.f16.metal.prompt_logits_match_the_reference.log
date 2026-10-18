@@ -1,0 +1,45 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== metal/F16 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-18T01:01:41+00:00 load 8.07 28.17 28.80 free 88%
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 6.822066783905029e-1, mean 2.8110727803035352e-2 (1.7 and 1.7 times the official envelope 4.0129804611206055e-1, 1.653572223707962e-2)
+F16 bounds of prompt 1: max 8.555608749389648e-1, mean 1.790146093719726e-2 (1.7 and 1.7 times the official envelope 5.032711029052734e-1, 1.05302711395278e-2)
+F16 bounds of prompt 2: max 7.531159400939941e-1, mean 3.204668442305583e-2 (1.7 and 1.7 times the official envelope 4.430093765258789e-1, 1.8850990837091665e-2)
+F16 bounds of decode rows: max 1.4852561950683593e-1, mean 1.8095516837573062e-2 (1.7 and 1.7 times the official envelope 8.736801147460938e-2, 1.0644421669160626e-2)
+F16 bounds of prompt 1 decoded rows: max 8.555608749389648e-1, mean 1.7715232683466395e-2 (1.7 and 1.7 times the official envelope 5.032711029052734e-1, 1.0420725107921408e-2)
+F32 matrix products use F32 inputs; the F16 run is judged by the official envelope, greedy steps at 6.8220663e-1
+prompt 0: 5 tokens, max |Δ| = 4.0325117111206055e-1 at position 0 (bound 6.822066783905029e-1), mean |Δ| = 1.8253133888886722e-2 (bound 2.8110727803035352e-2)
+prompt 1: 13 tokens, max |Δ| = 4.9545860290527344e-1 at position 0 (bound 8.555608749389648e-1), mean |Δ| = 9.188743784845901e-3 (bound 1.790146093719726e-2)
+prompt 2: 8 tokens, max |Δ| = 4.430093765258789e-1 at position 0 (bound 7.531159400939941e-1), mean |Δ| = 1.7457259179296858e-2 (bound 3.204668442305583e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 4.34s
+
+        4.36 real         2.67 user         1.57 sys
+          3482402816  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              492209  page reclaims
+                   7  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  15  voluntary context switches
+               22198  involuntary context switches
+         58311072322  instructions retired
+         15288497639  cycles elapsed
+          9302248304  peak memory footprint
+== exit=0 wall=5.1s min_free_pct=85 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

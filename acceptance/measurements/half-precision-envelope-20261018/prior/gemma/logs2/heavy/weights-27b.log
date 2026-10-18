@@ -1,0 +1,33 @@
+== step weights-27b
+== start 2026-10-17T22:53:57Z load (103.25634765625, 259.9765625, 166.9892578125)
+== env {'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'HF_HUB_DISABLE_PROGRESS_BARS': '1'}
+== cmd ['/Library/Frameworks/Python.framework/Versions/3.11/bin/python3', '-I', '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/scripts2/gemma3_weight_ranges.py', '/Volumes/T9/models/google/gemma-3-27b-it', '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/logs2/heavy/weights-27b.json']
+/Volumes/T9/models/google/gemma-3-27b-it: 808 language-model tensors; largest |w| 1168 (language_model.model.layers.61.post_feedforward_layernorm.weight); tensors with |w| > 65504: 0; nonzero |w| < 2^-24: 145120
+   gain |1+w| 1169 at channel 104: language_model.model.layers.61.post_feedforward_layernorm.weight
+   gain |1+w| 1097 at channel 104: language_model.model.layers.30.post_feedforward_layernorm.weight
+   gain |1+w| 961 at channel 104: language_model.model.layers.18.post_feedforward_layernorm.weight
+   gain |1+w| 953 at channel 104: language_model.model.layers.31.post_feedforward_layernorm.weight
+   gain |1+w| 949 at channel 104: language_model.model.layers.26.post_feedforward_layernorm.weight
+   gain |1+w| 865 at channel 104: language_model.model.layers.22.post_feedforward_layernorm.weight
+   gain |1+w| 801 at channel 104: language_model.model.layers.36.post_feedforward_layernorm.weight
+   gain |1+w| 789 at channel 104: language_model.model.layers.59.post_attention_layernorm.weight
+      275.43 real       118.59 user       165.29 sys
+         26985840640  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+            23553171  page reclaims
+             3297056  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   1  voluntary context switches
+             2509051  involuntary context switches
+       1825646643216  instructions retired
+        981423122130  cycles elapsed
+         24129015488  peak memory footprint
+
+== exit=0 wall=275.5s end 2026-10-17T22:58:33Z
