@@ -61,6 +61,22 @@ lists its failing gates, the gates it did not run, and its open findings;
 status, and identity to the committed logs and to the earlier records it
 repeats. It promotes no checkpoint.
 
+The [October 18 official-envelope round](half-precision-envelope-20261018.json)
+records the 57 official half-precision bundles that the envelope rule reads
+(four BF16 and four F16 graphs per truth, from the generator at `7a50e44`,
+by file digest), the leave-one-out derivation of its slacks, and the Burn
+runs at `f9f78b5` after the once-rounded SiLU and eager-scale fixes: the
+Llama-family and Gemma gates in F32 and half precision, the Qwen3.5-0.8B
+parity, benchmark, controlled benchmark rerun, and memory gates, the larger
+checkpoints' official gates, smokes, and audits, the Qwen3.8-27B Q8/Q4
+conversions, probes, diagnoses, and the source checks at `1816d73`. Each test
+process has its own log, named by source commit and binary digest, beside
+the copied harness in its campaign directory. It lists its failing gate, the
+gates it did not run, the decisions that await the maintainer, and its open
+findings, and leaves the October 17 records byte-identical;
+`scripts/tests/test_half_precision_envelope_record.py` ties every quoted
+figure, status, and identity to the committed logs. It promotes no checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the

@@ -162,10 +162,17 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   and `InvalidTensorName`, `QuantizedCheckpointOptions::unaligned`, and
   `BurnpackArtifactSummary::packed_execution`.
 - Tooling: `scripts/generate_causal_lm_reference.py` (local Transformers
-  references for any causal checkpoint, with `--dtype {float32,float64,bfloat16}`
-  and `--num-hidden-layers`; a `float64` reference measures this crate's
-  error alone when an F32 reference's own rounding is as large as the
-  tolerance, as for Qwen2-7B) and `scripts/generate_tiny_goldens.py`;
+  references for any causal checkpoint, with
+  `--dtype {float32,float64,bfloat16,float16}` and `--num-hidden-layers`; a
+  `float64` reference measures this crate's error alone when an F32
+  reference's own rounding is as large as the tolerance, as for Qwen2-7B;
+  `--device {cpu,mps}` and `--attn-implementation {eager,sdpa}` select the
+  official graph, `--decode-tokens-from` records cached and stateless decode
+  rows at a truth's greedy positions, `--prompt-decode` the official
+  quarter-prefill decode of the longest prompt, and non-finite results are
+  recorded as data), `scripts/derive_half_precision_envelope.py` (the
+  official-graph envelope and its leave-one-out slacks, from the bundles
+  alone), and `scripts/generate_tiny_goldens.py`;
   `scripts/generate_diffllama_reference.py` and
   `scripts/generate_tokenization_goldens.py` regenerate and check the pinned
   DiffLlama and tokenizer and chat-template goldens.
@@ -679,6 +686,53 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   record traces to the calibration rule's width, the decode tolerance, and
   the twice-rounded half-precision SiLU, remain open; no bound was changed
   and no checkpoint is promoted.
+- The Llama-family and Gemma half-precision gates are now judged against the
+  envelope of the four official graphs that Transformers 5.2.0 runs in the
+  run's dtype on this host (CPU and MPS, eager and SDPA attention), read at
+  run time from `TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS`,
+  `TRANSFORMERS_GEMMA_OFFICIAL_DIRS`, and
+  `TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS`, instead of `1.2` times the CPU-eager
+  BF16 twin, which Transformers' own other BF16 graphs failed on 5 of 7
+  bundles. A run passes a prompt when its maximum and mean deviation from the
+  F32 (F64) truth stay within `s_max` and `s_mean` times the largest official
+  ones; the slacks are the official graphs' pooled leave-one-out maxima,
+  rounded up (BF16 `1.5`/`1.3`, F16 `1.7`/`1.7`), derived by
+  `scripts/derive_half_precision_envelope.py` and re-derived, never tuned,
+  when its inputs change. F16 runs are calibrated on the official F16 graphs
+  instead of reusing the BF16 bounds; a truth whose official graph is
+  non-finite in the run's dtype (Qwen2-7B and gemma-3-4b-it in F16) fails as
+  uncalibrated. Decode steps are judged by truth-anchored rows: the cached and
+  stateless decode rows must each meet the official graphs' decode envelope
+  against an F32 (F64) CPU-eager decode truth
+  (`TRANSFORMERS_*_DECODE_TRUTH_DIR`), which F32 runs also check at their
+  tolerance, and the quarter-prefill decoded prompt is judged against the
+  official graphs' own cached decode. The `0.5` self-consistency tolerance
+  remains only, as provisional, for cached prefills, batched rows, and chunk
+  ends. Pairing fails closed on graph identity, generator script, decode
+  rows, and the decode truth's digests; the retired single-bundle variables
+  are refused. Gemma refuses `TRANSFORMERS_GEMMA_DTYPE=f16`, because its
+  official F16 graphs overflow; Metal is qualified in F32 for Gemma.
+- Operation-level tests pin the half-precision rounding points of SiLU, tanh
+  GELU, the sigmoid output gate (every finite F16 and BF16 input), RMSNorm in
+  both conventions, RoPE, and the eager and fused attention scores to the
+  references, and pin three Burn deviations as findings: Flex's F32-to-BF16
+  cast ignores the three lowest F32 bits, Flex's F16 matmul keeps F16 partial
+  sums, and tanh GELU overflows for BF16 inputs of at least `2^127`.
+- An official-envelope round records the 57 official BF16 and F16 bundles
+  that the envelope rule reads, the derivation of its slacks, and the Burn
+  runs at `f9f78b5`, each in its own process with its log, checked by
+  `scripts/tests/test_half_precision_envelope_record.py`
+  ([record](acceptance/measurements/half-precision-envelope-20261018.json)).
+  Every Llama-family and Gemma gate in F32 and Flex/BF16 passes, and every
+  Metal/F16 gate of the four F16-calibrated Llama-family checkpoints; Qwen2-7B
+  in F16 is uncalibrated. Qwen3.5-0.8B's parity, benchmarks (confirmed by a
+  controlled rerun against the pre-change binary), and memory gate pass
+  again, as do the larger checkpoints' official gates, smokes, and audits and
+  the Qwen3.8-27B Q8/Q4 conversions, except the Nemotron-H official-precision
+  gate, whose cached row at decision 22 falls below its official F16 floor
+  (`0.998558` against `0.998635`) with the once-rounded Mamba-2 convolution
+  SiLU; a control reverting only that site passes. No bound was changed and
+  no checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.
