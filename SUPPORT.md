@@ -109,10 +109,29 @@ same holds for families whose real-checkpoint parity has been measured but not
 recorded as accepted, such as the Llama, Gemma, and gpt-oss checkpoints listed
 on the [model status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence):
 they are experimentally validated, not supported. That includes the
-half-precision runs of the Llama-family and Gemma gates. The measured Gemma 3
-checkpoints (gemma-3-4b-it, 12b-it, and 27b-it) overflow F16 in Transformers
-as well, so their F16 logits are non-finite; use BF16 or F32 for them. No real-checkpoint
+half-precision runs of the Llama-family and Gemma gates. No real-checkpoint
 gate has been recorded on CUDA, so no checkpoint is validated there.
+
+Gemma 3 is not supported in F16, and the crate says so instead of returning
+NaN. The measured Gemma 3 checkpoints (gemma-3-4b-it, 12b-it, and 27b-it)
+overflow F16 in Transformers as well: in gemma-3-4b-it the residual addition
+after block 5's MLP reaches `73,509.6`, beyond F16's `65,504`, and the logits
+are non-finite. Gemma 3 therefore declares F16 a numeric-range hazard, and
+loading a `gemma3` or `gemma3_text` checkpoint whose parameters (and so
+activations) would be F16, cast or stored, fails before any weight is read
+with `CheckpointError::RangeHazard` (through `AutoCausalLm::load_local`,
+`Error::CheckpointPlan`). The refusal is family-wide: it also covers the
+unmeasured sizes (such as 1B and 270M) and fine-tunes. Load these checkpoints
+in F32, or in BF16 on a backend that can store it (Burn 0.21's Metal backend
+cannot). Packed Q4/Q8 weights with F32 activations keep the residual stream
+in F32 as well (llama.cpp keeps activations in F32 for 4-bit GGUF files,
+which is why those run), but this crate's automatic packed path is not
+certified for Gemma. Setting
+`LoadOptions::range_hazards` to `RangeHazardPolicy::Accept` is the explicit
+opt-in for experiments that need the faithful F16 graph (studying the
+overflow, truncated stacks, interventions); its logits are expected to be
+non-finite, and generation from them has no defined result. Gemma 2 declares
+no hazard: no Gemma 2 checkpoint has been measured in F16.
 
 Version 0.1 promotes exactly three profiles on the validated Apple M3 Max host:
 
