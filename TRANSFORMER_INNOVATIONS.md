@@ -958,6 +958,15 @@ variant.
 the relevant family model files. **Reference:**
 [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202).
 
+**Precision:** Transformers' `silu` activation is PyTorch's fused `silu`,
+which evaluates F16 and BF16 inputs in F32 and rounds once; the crate's SiLU
+does the same (`apply_activation`, and the Gated DeltaNet and Mamba-2
+convolutions). Burn's composed `x * sigmoid(x)` would round the sigmoid to the
+activation dtype first, which on Flex misses the once-rounded value for 27% of
+BF16 and F16 inputs with `2^-8 <= |x| < 16`. gpt-oss's clamped unit is the
+exception: its reference composes `gate * torch.sigmoid(gate * alpha)` per
+operation, and so does the crate.
+
 <a id="innovation-clamped-swiglu"></a>
 ### Clamped SwiGLU
 
