@@ -1310,12 +1310,15 @@ impl EagerGrid {
         }
     }
 
-    /// The operands cast to `dtype`, with the explicit mask.
+    /// The operands cast to `dtype` on Flex, with the explicit mask.
     fn operands(&self, dtype: DType) -> Operands<TestBackend> {
-        let device = Default::default();
+        self.operands_on(dtype, &Default::default())
+    }
+
+    /// The operands cast to `dtype` on `device`, with the explicit mask.
+    fn operands_on<B: Backend>(&self, dtype: DType, device: &B::Device) -> Operands<B> {
         let tensor = |values: &[f32], shape: [usize; 4]| {
-            Tensor::<TestBackend, 4>::from_data(TensorData::new(values.to_vec(), shape), &device)
-                .cast(dtype)
+            Tensor::<B, 4>::from_data(TensorData::new(values.to_vec(), shape), device).cast(dtype)
         };
         Operands {
             query: tensor(
@@ -1345,12 +1348,12 @@ impl EagerGrid {
                     Self::VALUE_DIM,
                 ],
             ),
-            mask: Some(Tensor::<TestBackend, 4, Bool>::from_data(
+            mask: Some(Tensor::<B, 4, Bool>::from_data(
                 TensorData::new(
                     self.mask.clone(),
                     [Self::BATCH, Self::QUERY_HEADS, Self::QUERIES, Self::KEYS],
                 ),
-                &device,
+                device,
             )),
             bias: Some(tensor(
                 &self.bias,
@@ -1649,4 +1652,59 @@ fn half_precision_eager_attention_rounds_like_transformers_eager() {
             assert!(moved > 0, "{dtype:?}: the grid does not detect {variant:?}");
         }
     }
+}
+
+/// Metal's eager F16 attention (Muse-Glimmer's half-precision default) equals Transformers' eager attention on [`EagerGrid`].
+///
+/// [`f32_accumulated_matmul`] keeps Metal's own F16 products, which are F32
+/// sums rounded once (`operations_tests.rs`,
+/// `metal_f16_matmul_is_an_f32_sum_rounded_once`), so on Metal the eager graph
+/// must already round where Transformers' `eager_attention_forward` does: its
+/// output must equal [`TRANSFORMERS_EAGER_F16`] on every row with a visible
+/// key, and the fully masked row must be zero. Burn 0.21 cannot store BF16 on
+/// Metal. Run serially on a Metal host with `cargo test --release --features
+/// metal --lib
+/// attention::dispatch::tests::metal_half_precision_eager_attention_matches_transformers_eager
+/// -- --ignored --exact --nocapture --test-threads=1`.
+#[cfg(all(
+    feature = "metal",
+    target_os = "macos",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+#[test]
+#[ignore = "requires a Metal-capable macOS host"]
+fn metal_half_precision_eager_attention_matches_transformers_eager() {
+    use burn::backend::Metal;
+
+    let device = Default::default();
+    let problem = EagerGrid::new();
+    let operands = problem.operands_on::<Metal>(DType::F16, &device);
+    let geometry = operands.geometry().unwrap();
+    let options = AttentionModuleOptions {
+        scale: None,
+        softcap: None,
+        is_causal: true,
+    };
+    let actual = eager(operands, options, geometry)
+        .unwrap()
+        .cast(DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let pinned = TRANSFORMERS_EAGER_F16.map(|bits| burn::tensor::f16::from_bits(bits).to_f32());
+    let row = EagerGrid::QUERIES * EagerGrid::VALUE_DIM;
+    let supported =
+        |values: &[f32]| [&values[..row], &values[row + EagerGrid::VALUE_DIM..]].concat();
+    let differing = differing_bits(&supported(&actual), &supported(&pinned));
+    eprintln!(
+        "Metal F16 eager attention: {differing} of {} supported outputs differ from Transformers' eager_attention_forward; fully masked row {:?}",
+        actual.len() - EagerGrid::VALUE_DIM,
+        &actual[row..row + EagerGrid::VALUE_DIM]
+    );
+    assert_eq!(differing, 0);
+    assert!(
+        actual[row..row + EagerGrid::VALUE_DIM]
+            .iter()
+            .all(|&value| value == 0.0)
+    );
 }
