@@ -771,7 +771,9 @@ record promotes no checkpoint.
 - Larger checkpoints whose numerics the SiLU change touches: the Qwen3.8-27B
   official gate (prompt cosine `0.999999873`, 32/32 greedy tokens) and MTP
   smoke, the Muse-Glimmer-30B official gate (minimum hidden cosine
-  `0.999931849`, 32/32 greedy tokens), streaming audit, and Q8/Q4 packed
+  `0.999931849`, 32/32 greedy tokens; Muse's numerics also moved with the
+  eager-scale change, since its F16/BF16 default is the eager graph with
+  128-wide heads, and no control separates the two), streaming audit, and Q8/Q4 packed
   smokes, the DeepSeek-V2-Lite metadata gate and smoke, the Qwen3-30B-A3B F16,
   Q8, and Q4 smokes and packed-kernel audits, and the Nemotron-H smoke pass.
   Fresh create-only Qwen3.8-27B Q8 and Q4 conversions, under `c15f24e`'s
@@ -797,9 +799,10 @@ record promotes no checkpoint.
   eager graph's block-27 statistics, and in both block 27's residual at
   positions after the first moves by up to `77.5` from Burn's F32 run. Metal
   F16 arithmetic overflows as IEEE F16 does (a cast, sum, or product beyond
-  `65,504` gives infinity). The opt-in eager attention graph
-  (`AttentionPrecisionMode::EagerFp32Softmax`, also used for score and pattern
-  hooks) still exceeds the envelope in Flex/BF16 cached decode on Qwen3-4B
+  `65,504` gives infinity). The eager attention graph
+  (`AttentionPrecisionMode::EagerFp32Softmax`: opt-in for the Llama family,
+  the F16/BF16 default of Muse-Glimmer, the default of GPT-2 and GPT-NeoX, and
+  the graph of score and pattern hooks) still exceeds the envelope in Flex/BF16 cached decode on Qwen3-4B
   (`1.106` against `1.054`, mean `0.157` against `0.100`) although its prompts
   and stateless rows stay within it; a fused dump reproduces the gate's own
   statistics exactly. End to end, once-rounded SiLU moves SmolLM-135M's
