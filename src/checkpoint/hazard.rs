@@ -177,10 +177,10 @@ pub enum RangeHazardPolicy {
     /// studying where and how the overflow happens, truncated stacks whose
     /// blocks stay in range, or interventions that keep activations finite.
     /// Its consequences are the reference's own: activations beyond the
-    /// dtype's largest finite value become infinite and then NaN (see the
-    /// [module documentation](self)), so logits are expected to be non-finite,
-    /// and generation, whose processors assume finite or `-inf` logits, has
-    /// no defined result. Nothing is clamped, widened, or checked at run
+    /// dtype's largest finite value become infinite, normalization and
+    /// attention softmax then turn them into NaN at every position that reads
+    /// them, so logits are expected to be non-finite, and generation, whose
+    /// processors assume finite or `-inf` logits, has no defined result. Nothing is clamped, widened, or checked at run
     /// time, and the load report does not record the acceptance.
     Accept,
 }

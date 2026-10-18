@@ -97,7 +97,13 @@ pub struct AutoLoadOptions {
     /// Its default [`DTypePolicy::Auto`](crate::checkpoint::DTypePolicy::Auto)
     /// keeps the checkpoint's float dtype (for example BF16) whatever the
     /// backend's float element; set `dtype_policy:
-    /// DTypePolicy::Cast(TensorDType::F32)` to execute in F32.
+    /// DTypePolicy::Cast(TensorDType::F32)` to execute in F32. Its
+    /// [`range_hazards`](LoadOptions::range_hazards) policy refuses a dtype
+    /// the selected family declares its checkpoints overflow (Gemma 3 in
+    /// F16) unless it is set to
+    /// [`RangeHazardPolicy::Accept`](crate::checkpoint::RangeHazardPolicy::Accept);
+    /// the refusal is [`crate::Error::CheckpointPlan`], raised before the
+    /// graph is allocated.
     pub checkpoint: LoadOptions,
     /// Explicit normalized generation defaults, bypassing local defaults when set.
     pub generation: Option<GenerationConfig>,
