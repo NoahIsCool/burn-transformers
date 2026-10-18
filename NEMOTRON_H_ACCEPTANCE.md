@@ -449,12 +449,14 @@ cargo test --release --manifest-path Cargo.toml \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
-Run the heavier corresponding-path Burn/official comparison only with both
-authenticated local inputs and serialized Metal execution:
+Run the heavier corresponding-path Burn/official comparison only with every
+authenticated local input and serialized Metal execution:
 
 ```sh
 TRANSFORMERS_NEMOTRON_H_DIR=/absolute/path/to/pinned-checkpoint \
 TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle \
+TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle \
+TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs \
 cargo test --release --manifest-path Cargo.toml \
   --no-default-features --features std,metal,tokenizers \
   --test nemotron_h_artifacts \
@@ -462,9 +464,36 @@ cargo test --release --manifest-path Cargo.toml \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
-That command reauthenticates all checkpoint and oracle bytes, strictly reloads
-the complete F16 graph, and checks corresponding streams only. It never treats
-the official cached-versus-teacher cosine as a Burn parity criterion.
+That command reauthenticates all checkpoint, oracle, precision, and F16-graph
+bytes, strictly reloads the complete F16 graph, and checks corresponding
+streams only. It never treats the official cached-versus-teacher cosine as a
+Burn parity criterion. The bundle-only
+`official_f16_graphs_admit_each_other_leave_one_out` takes the last three
+variables, needs no checkpoint or Metal, and re-derives each path's
+leave-one-out slack from the four official F16 graphs.
+
+The two SDPA graphs come from
+[`scripts/generate_nemotron_h_f16_graph_reference.py`](scripts/generate_nemotron_h_f16_graph_reference.py),
+run in the oracle's CPython 3.11.9 environment with the clean `cfa309`
+checkout; the CPU graph used the precision tool's 16 GiB resident budget:
+
+```sh
+/absolute/path/to/pinned/python3.11 -I \
+  scripts/generate_nemotron_h_f16_graph_reference.py \
+  --model-dir /absolute/path/to/pinned-checkpoint \
+  --transformers-dir /absolute/path/to/transformers-cfa309c \
+  --oracle-dir /absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle \
+  --precision-dir /absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle \
+  --device cpu --attn-implementation sdpa \
+  --max-resident-gib 16 --offload-dir /absolute/path/on/external-volume \
+  --output /absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle
+```
+
+and the MPS graph with `--device mps --attn-implementation sdpa` and no
+budget (`f16-mps-sdpa.bundle`). The envelope and its slacks follow from the
+bundles alone with
+[`scripts/derive_nemotron_h_envelope.py`](scripts/derive_nemotron_h_envelope.py)
+(`--precision-dir`, `--oracle-dir`, and one `--graph` per SDPA bundle).
 
 Generate a new immutable base oracle only from generator commit `0f222f6`, the
 pinned CPython 3.11.9 environment, the exact clean Transformers checkout, and an
