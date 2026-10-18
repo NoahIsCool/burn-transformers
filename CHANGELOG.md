@@ -727,6 +727,14 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   references, and pin three Burn deviations as findings: Flex's F32-to-BF16
   cast ignores the three lowest F32 bits, Flex's F16 matmul keeps F16 partial
   sums, and tanh GELU overflows for BF16 inputs of at least `2^127`.
+- The once-rounded SiLU is pinned at the Mamba-2 and Gated DeltaNet
+  convolution sites themselves, not only in the shared helper: each mixer is
+  built so that its F32 recurrent state after one token holds the
+  post-convolution activation exactly (an identity convolution and exact
+  unit factors), which must equal the F32 SiLU rounded once in BF16 and F16
+  (BF16 `SiLU(2.8125) = 2.65625`, not the composed `2.640625`) and Burn's
+  graph bit for bit in F32, in both scan modes. Reverting either call site to
+  `activation::silu` fails its test.
 - An official-envelope round records the 57 official BF16 and F16 bundles
   that the envelope rule reads, the derivation of its slacks, and the Burn
   runs at `f9f78b5`, each in its own process with its log, checked by
