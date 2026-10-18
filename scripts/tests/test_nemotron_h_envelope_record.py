@@ -12,6 +12,11 @@ rounded slacks, and the cosine floors from the derivation's per-graph worst
 rows; require the method, the derivation, and its assessment to precede every
 Burn run; tie the compiled Rust constants (slacks, bundle digests, generator
 digest) to the evidence; and require the earlier records to keep their bytes.
+
+The maintainer did not adopt the envelope rule (decision of 2026-10-18, see
+``nemotron-h-envelope-decision-20261018.json``), so the compiled slacks were
+removed after this record's code head; the test reads them from the code
+head's source in Git, which the published crate (without Git history) skips.
 """
 
 import datetime as dt
@@ -22,16 +27,17 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
-from repository_evidence import repository_evidence
+from repository_evidence import PACKAGE_CONTENTS, repository_evidence
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENTS = ROOT / "acceptance/measurements"
 RECORD = MEASUREMENTS / "nemotron-h-envelope-20261018.json"
 ENVELOPE_ROUND = MEASUREMENTS / "half-precision-envelope-20261018.json"
-PARITY = ROOT / "tests/support/nemotron_h_parity.rs"
+PARITY = "tests/support/nemotron_h_parity.rs"
 GRAPH_READER = ROOT / "tests/support/nemotron_h_f16_graphs.rs"
 GENERATOR = ROOT / "scripts/generate_nemotron_h_f16_graph_reference.py"
 SPEC = importlib.util.spec_from_file_location("derive_half_precision_envelope",
@@ -64,6 +70,21 @@ def quoted_entries(value):
     elif isinstance(value, list):
         for child in value:
             yield from quoted_entries(child)
+
+
+def source_at(commit, relative):
+    """Text of the repository file ``relative`` at ``commit``, read from Git.
+
+    The published crate carries no Git history, so there the calling test is
+    skipped; in a Git checkout a missing commit or path fails it.
+    """
+    if PACKAGE_CONTENTS.is_packaged_archive(ROOT):
+        raise unittest.SkipTest(f"{relative} at {commit} needs the Git history of the repository")
+    shown = subprocess.run(["git", "-C", str(ROOT), "show", f"{commit}:{relative}"],
+                           capture_output=True, text=True, check=False)
+    if shown.returncode:
+        raise AssertionError(f"git show {commit}:{relative} failed: {shown.stderr.strip()}")
+    return shown.stdout
 
 
 def utc(stamp):
@@ -175,8 +196,8 @@ class NemotronEnvelopeRecordTests(unittest.TestCase):
         self.assertEqual(recorded["largest_ratio"], {k: derivation["paths"][k]["largest_ratio"] for k in PATHS})
 
     def test_compiled_constants_are_the_evidence(self):
-        """The Rust slacks, pinned bundle digests, and generator digest are the derivation's and the bundles'."""
-        parity = PARITY.read_text()
+        """The code head's Rust slacks, and the pinned bundle and generator digests, are the derivation's and the bundles'."""
+        parity = source_at(self.record["code_head"], PARITY)
         for kind, name in (("prompt", "PROMPT_SLACK"), ("teacher", "TEACHER_SLACK"), ("cached", "CACHED_SLACK")):
             value = float(re.search(rf"pub\(super\) const {name}: f64 = ([0-9.]+);", parity).group(1))
             self.assertEqual(value, self.record["derivation"]["slacks"][kind], name)

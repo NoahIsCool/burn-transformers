@@ -37,12 +37,14 @@
 //! ```
 //!
 //! To compare both Burn paths with their corresponding authenticated official
-//! rows, additionally select the external MPS/F16 oracle bundle, the official
-//! precision bundle (its F32 rows are the truth;
-//! `scripts/generate_nemotron_h_precision_reference.py`), and the directory of
-//! official F16 graph bundles (`scripts/generate_nemotron_h_f16_graph_reference.py`);
-//! the four official F16 graphs set each path's envelope (see
-//! `tests/support/nemotron_h_parity.rs`):
+//! rows, additionally select the external MPS/F16 oracle bundle and the
+//! official precision bundle (its F32 rows are the truth, and its F16 rows and
+//! the oracle set each path's floor; see
+//! `scripts/generate_nemotron_h_precision_reference.py` and
+//! `tests/support/nemotron_h_parity.rs`). The directory of official F16 graph
+//! bundles (`scripts/generate_nemotron_h_f16_graph_reference.py`) is optional:
+//! when it is set, the four-graph envelope is printed as a diagnostic that
+//! judges no row:
 //!
 //! ```text
 //! TRANSFORMERS_NEMOTRON_H_DIR=/absolute/pinned/checkpoint \
@@ -57,9 +59,9 @@
 //! ```
 //!
 //! Without the checkpoint or Metal, the bundle-only
-//! `official_f16_graphs_admit_each_other_leave_one_out` (the last three
-//! variables) re-derives each path's leave-one-out slack from the official
-//! graphs and fails unless it is the compiled constant.
+//! `reports_official_f16_floors_and_four_graph_envelope` (the last three
+//! variables) prints the gate's per-path floors and the four-graph envelope
+//! diagnostic from the official bundles alone.
 //!
 //! The separately produced numerical oracle is deliberately fail-closed. Its
 //! JSON and every binary payload require independent SHA-256 anchors before the
@@ -1890,18 +1892,23 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
 ///
 /// Logit rows are judged against the official class's F32 rows of the same
 /// path from the precision bundle (`TRANSFORMERS_NEMOTRON_H_PRECISION_DIR`).
-/// Each row needs exact top-1 and a normalized deviation
-/// `sqrt(2 (1 - cosine))` within its path's bound `s E`: `E` is the largest
-/// worst-row deviation of the four official F16 graphs (CPU and MPS, each with
-/// eager and SDPA attention: the precision bundle's F16 rows, the MPS/F16
-/// oracle, and `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR`), computed here from
-/// the authenticated rows, and `s` the path's leave-one-out slack derived from
-/// those graphs alone (`nemotron_h_parity`). Every row of all three paths is
-/// measured before any bound is applied, so a failing run reports each path's
-/// rows and every violation. The bound is per path, not per decision. Cosines
-/// against the F16 oracle are still reported. The three available hidden
-/// traces, recorded only at F16, keep the `0.999` threshold at their exact
-/// stateless/prefill/decode semantic points.
+/// Each row needs exact top-1 and a cosine at least the path's official F16
+/// floor: the worst cosine that the MPS/F16 oracle or the official CPU/F16
+/// evaluation reaches against F32 on that path, computed here from the
+/// authenticated rows with no slack (prompt `0.999194`, teacher `0.994466`,
+/// cached `0.998635`; `nemotron_h_parity`). Each Burn F16 row must therefore be
+/// at least as faithful to F32 as the worst official F16 row on its path (a
+/// per-path, not per-decision, bound); a `0.999` floor against the F16 oracle
+/// was unreachable even for the oracle, which is `0.994466` from F32 at teacher
+/// decision 18. Every row of all three paths is measured before any floor is
+/// applied, so a failing run reports each path's rows and every violation.
+/// When `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is set, the four-graph
+/// envelope (CPU and MPS, each with eager and SDPA attention) and Burn's worst
+/// row of each path as a multiple of it are printed as a diagnostic that
+/// judges nothing; the maintainer did not adopt that envelope as the rule.
+/// Cosines against the F16 oracle are still reported. The three available
+/// hidden traces, recorded only at F16, keep the `0.999` threshold at their
+/// exact stateless/prefill/decode semantic points.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 #[test]
 #[ignore = "requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory"]
@@ -1911,7 +1918,8 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         REFERENCE_VOCABULARY_SIZE,
     };
     use nemotron_h_parity::{
-        TruthPathSummary, assert_corresponding_hidden_trace, assert_within_envelopes,
+        BurnEnvelopeRatio, TruthPathSummary, assert_corresponding_hidden_trace,
+        assert_within_floors,
     };
     use nemotron_h_precision_reference::RowKind;
 
@@ -1925,16 +1933,24 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         .map(|&token| token as usize)
         .collect::<Vec<_>>();
 
-    // The F32 truth and each path's official F16 envelope, from authenticated rows only.
+    // The F32 truth and each path's official F16 floor, from authenticated rows only.
     let precision = nemotron_h_precision_reference::load_and_validate_precision_bundle(
         reference.generation_token_ids(),
     );
-    let graphs =
-        nemotron_h_f16_graphs::load_and_validate_f16_graphs(reference.generation_token_ids());
-    let [prompt_envelope, teacher_envelope, cached_envelope] =
-        official_f16_envelopes(&reference, &precision, &graphs);
-    for envelope in [&prompt_envelope, &teacher_envelope, &cached_envelope] {
-        envelope.report("Nemotron official F16 envelope");
+    let [prompt_floor, teacher_floor, cached_floor] = official_f16_floors(&reference, &precision);
+    // The four-graph envelope is a diagnostic only: it is printed, never applied.
+    let envelopes = nemotron_h_f16_graphs::load_if_configured(reference.generation_token_ids())
+        .map(|graphs| official_f16_envelopes(&reference, &precision, &graphs));
+    match &envelopes {
+        Some(envelopes) => {
+            for envelope in envelopes {
+                envelope.report(ENVELOPE_DIAGNOSTIC);
+            }
+        }
+        None => eprintln!(
+            "{ENVELOPE_DIAGNOSTIC}: skipped, TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR is unset \
+             (the gate's floors do not read the graph bundles)"
+        ),
     }
     let oracle_prompt = oracle_matrix(&reference, RowKind::Prompt);
     let oracle_teacher = oracle_matrix(&reference, RowKind::Teacher);
@@ -2006,7 +2022,7 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         &stateless.logits,
     );
     assert_eq!(stateless_logits.len(), REFERENCE_VOCABULARY_SIZE);
-    let mut prompt_summary = TruthPathSummary::new(prompt_envelope);
+    let mut prompt_summary = TruthPathSummary::new(RowKind::Prompt, prompt_floor);
     prompt_summary.observe(
         "Nemotron stateless prompt",
         &stateless_logits,
@@ -2074,7 +2090,7 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         "Nemotron official-parity teacher-forced logits",
         &teacher.logits,
     );
-    let mut stateless_summary = TruthPathSummary::new(teacher_envelope);
+    let mut stateless_summary = TruthPathSummary::new(RowKind::Teacher, teacher_floor);
     let mut teacher_oracle_minimum = f64::INFINITY;
     for (decision, &expected) in generated.iter().enumerate() {
         let position = prompt_length - 1 + decision;
@@ -2096,7 +2112,7 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
     drop(teacher);
     drop(teacher_values);
 
-    let mut cached_summary = TruthPathSummary::new(cached_envelope);
+    let mut cached_summary = TruthPathSummary::new(RowKind::Cached, cached_floor);
     let mut cached_oracle_minimum = f64::INFINITY;
     let mut state = loaded
         .model()
@@ -2226,7 +2242,7 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
     eprintln!(
         "Nemotron 3.5 official corresponding-path parity: load_seconds={load_seconds:.3}, \
          stateless_prompt_seconds={stateless_prompt_seconds:.3}, teacher_seconds={teacher_seconds:.3}, \
-         cached_seconds={cached_seconds:.3}, f16_envelope_floors[prompt,teacher,cached]=[{:.9}, {:.9}, {:.9}], \
+         cached_seconds={cached_seconds:.3}, f16_floors[prompt,teacher,cached]=[{prompt_floor:.9}, {teacher_floor:.9}, {cached_floor:.9}], \
          f32_truth_prompt_cosine={:.12}, f32_truth_teacher_minimum={:.12}@{}, f32_truth_cached_minimum={:.12}@{}, \
          f16_oracle_prompt_cosine={stateless_prompt_oracle:.12}, f16_oracle_teacher_minimum={teacher_oracle_minimum:.12}, \
          f16_oracle_cached_minimum={cached_oracle_minimum:.12}, \
@@ -2236,9 +2252,6 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
          stateless_hidden_sha256={}, cached_prefill_hidden_sha256={}, \
          cached_decode_hidden_sha256={}, official_crossed_path_minimum_diagnostic={:.12}, \
          decisions_per_path={}, total_seconds={:.3}",
-        prompt_summary.envelope.floor,
-        stateless_summary.envelope.floor,
-        cached_summary.envelope.floor,
         prompt_worst.cosine,
         teacher_worst.cosine,
         teacher_worst.decision,
@@ -2257,14 +2270,20 @@ fn compares_pinned_nemotron_f16_with_official_base_reference() {
         REFERENCE_DECISIONS,
         started.elapsed().as_secs_f64(),
     );
-    for summary in [&prompt_summary, &stateless_summary, &cached_summary] {
+    let summaries = [&prompt_summary, &stateless_summary, &cached_summary];
+    for summary in summaries {
         summary.report("Nemotron Burn F16 against the F32 truth");
     }
-    assert_within_envelopes(
-        "Nemotron Burn F16 against the F32 truth",
-        &[&prompt_summary, &stateless_summary, &cached_summary],
-    );
+    if let Some(envelopes) = &envelopes {
+        for (envelope, summary) in envelopes.iter().zip(summaries) {
+            BurnEnvelopeRatio::measure(envelope, summary).report(ENVELOPE_DIAGNOSTIC);
+        }
+    }
+    assert_within_floors("Nemotron Burn F16 against the F32 truth", &summaries);
 }
+
+/// Prefix of every line of the four-graph envelope diagnostic, which judges no row.
+const ENVELOPE_DIAGNOSTIC: &str = "Nemotron four-graph F16 envelope diagnostic (not a gate)";
 
 /// Flattens the oracle's rows of one family into a row-major `[rows, vocabulary]` matrix.
 fn oracle_matrix(
@@ -2295,7 +2314,30 @@ fn oracle_matrix(
     }
 }
 
-/// Each path's envelope over the four official F16 graphs, against the official F32 truth.
+/// Each path's official F16 floor: the worst cosine of the MPS/F16 oracle or the CPU/F16 rows against F32.
+///
+/// These are the gate's only bounds on the logit rows, in `RowKind::ALL`
+/// order (prompt, teacher-forced, cached), with no slack.
+fn official_f16_floors(
+    reference: &nemotron_h_base_reference::ValidatedBaseReference,
+    precision: &nemotron_h_precision_reference::ValidatedPrecisionReference,
+) -> [f64; 3] {
+    use nemotron_h_precision_reference::{Precision, RowKind};
+    RowKind::ALL.map(|kind| {
+        let oracle = oracle_matrix(reference, kind);
+        nemotron_h_parity::half_precision_floor(
+            "Nemotron official F16 floor",
+            precision.matrix(Precision::Float32, kind),
+            &[
+                oracle.as_slice(),
+                precision.matrix(Precision::Float16, kind),
+            ],
+            nemotron_h_base_reference::REFERENCE_VOCABULARY_SIZE,
+        )
+    })
+}
+
+/// Each path's envelope over the four official F16 graphs, against the official F32 truth; a diagnostic only.
 fn official_f16_envelopes(
     reference: &nemotron_h_base_reference::ValidatedBaseReference,
     precision: &nemotron_h_precision_reference::ValidatedPrecisionReference,
@@ -2320,24 +2362,30 @@ fn official_f16_envelopes(
     })
 }
 
-/// Re-derives each path's leave-one-out slack from the four official F16 graphs alone.
+/// Prints the gate's per-path official F16 floors and the four-graph envelope diagnostic from the bundles alone.
 ///
-/// Needs only the oracle, precision, and F16 graph bundles. Fails if any
-/// official graph lies outside the envelope of the other three under the
-/// compiled slack, or if the compiled slack is not the largest leave-one-out
-/// ratio rounded up to two significant digits.
+/// Needs only the oracle, precision, and F16 graph bundles (no checkpoint, no
+/// Metal). The floors are computed exactly as
+/// `compares_pinned_nemotron_f16_with_official_base_reference` computes them;
+/// the envelope, the leave-one-out ratios, and the slack the registered
+/// method would round to are printed and judge nothing. It fails only if a
+/// bundle does not authenticate or a floor leaves `[0.99, 1]`.
 #[test]
 #[ignore = "requires the external Nemotron oracle, precision, and F16 graph bundles"]
-fn official_f16_graphs_admit_each_other_leave_one_out() {
+fn reports_official_f16_floors_and_four_graph_envelope() {
     let reference = nemotron_h_base_reference::load_and_validate_reference_bundle();
     let precision = nemotron_h_precision_reference::load_and_validate_precision_bundle(
         reference.generation_token_ids(),
     );
+    let [prompt, teacher, cached] = official_f16_floors(&reference, &precision);
+    eprintln!(
+        "Nemotron official F16 floors (the gate's rule) [prompt, teacher, cached]: \
+         [{prompt:.9}, {teacher:.9}, {cached:.9}]"
+    );
     let graphs =
         nemotron_h_f16_graphs::load_and_validate_f16_graphs(reference.generation_token_ids());
     for envelope in official_f16_envelopes(&reference, &precision, &graphs) {
-        envelope.report("Nemotron official F16 envelope");
-        envelope.assert_leave_one_out("Nemotron official F16 envelope");
+        envelope.report(ENVELOPE_DIAGNOSTIC);
     }
 }
 

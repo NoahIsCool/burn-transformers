@@ -1,12 +1,15 @@
-//! Strict reader for the pinned official Nemotron-H F16 graph bundles of the precision envelope.
+//! Strict reader for the pinned official Nemotron-H F16 graph bundles of the four-graph envelope diagnostic.
 //!
-//! The precision gate bounds each path by the envelope of four official F16
-//! graphs (see `nemotron_h_parity`): CPU eager (the precision bundle's
-//! `float16` rows), MPS eager (the oracle), and the two bundles read here,
-//! which `scripts/generate_nemotron_h_f16_graph_reference.py` wrote by
-//! evaluating the same official class and checkout in float16 with SDPA
-//! attention on the CPU and on MPS, on the oracle's prompt and greedy tokens.
-//! Each new graph differs from its device's existing graph only in the
+//! The Nemotron-H official-precision gate judges Burn's rows by per-path
+//! floors from two official F16 evaluations only (the MPS/F16 oracle and the
+//! precision bundle's CPU/F16 rows; see `nemotron_h_parity`). The four-graph
+//! envelope, which the maintainer did not adopt as the gate's rule
+//! (2026-10-18), is printed beside that verdict as a diagnostic over CPU eager
+//! (the precision bundle's `float16` rows), MPS eager (the oracle), and the two
+//! bundles read here, which `scripts/generate_nemotron_h_f16_graph_reference.py`
+//! wrote by evaluating the same official class and checkout in float16 with
+//! SDPA attention on the CPU and on MPS, on the oracle's prompt and greedy
+//! tokens. Each new graph differs from its device's existing graph only in the
 //! attention implementation (the CPU keeps the precision tool's default
 //! experts request, which resolves to `grouped_mm`; MPS keeps the oracle's
 //! `eager` experts). Both ran with the precision tool's 16 GiB resident
@@ -21,7 +24,10 @@
 //! byte is authenticated by a pinned SHA-256 before any value is used, and each
 //! manifest must name the graph, the precision bundle, the oracle, the
 //! checkout, the checkpoint config, the generator and the precision tool it
-//! reused, and the passed self-check this gate relies on.
+//! reused, and the passed self-check the diagnostic relies on. The gate reads
+//! the bundles only when the variable is set ([`load_if_configured`]); a set
+//! variable is held to every check, so a supplied but altered bundle fails the
+//! run instead of silently dropping the diagnostic.
 
 #![allow(dead_code)]
 
@@ -314,6 +320,11 @@ fn graphs_root() -> PathBuf {
 }
 
 /// Authenticates both pinned bundles named by the environment and loads every row.
+///
+/// # Panics
+///
+/// If `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is unset, or on any
+/// authentication, inventory, manifest, or row-geometry mismatch.
 pub(super) fn load_and_validate_f16_graphs(oracle_generated_ids: &[u32]) -> ValidatedF16Graphs {
     let root = graphs_root();
     let mut rows = Vec::new();
@@ -333,6 +344,16 @@ pub(super) fn load_and_validate_f16_graphs(oracle_generated_ids: &[u32]) -> Vali
         }
     }
     ValidatedF16Graphs { rows }
+}
+
+/// Loads both pinned bundles for the gate's envelope diagnostic when the environment names them.
+///
+/// Returns `None` when `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is unset: the
+/// gate's floors do not depend on these graphs, so it runs without them and
+/// says the diagnostic was skipped. A set variable (even an empty one) is held
+/// to every check of [`load_and_validate_f16_graphs`].
+pub(super) fn load_if_configured(oracle_generated_ids: &[u32]) -> Option<ValidatedF16Graphs> {
+    std::env::var_os(GRAPHS_DIR_ENV).map(|_| load_and_validate_f16_graphs(oracle_generated_ids))
 }
 
 #[cfg(test)]

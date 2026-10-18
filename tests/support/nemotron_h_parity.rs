@@ -13,47 +13,64 @@
 //! two official F16 runs of the same code already disagree by cosine `0.9943`
 //! on a teacher-forced row.
 //!
-//! # Envelope rule
+//! # Gate rule: per-path official F16 floors
 //!
-//! For a row `a` and its F32 truth row `r`, with the cosine `c` accumulated in
-//! F64 ([`cosine_similarity`]), the *normalized deviation* is
+//! For a Burn row `a` and its F32 truth row `r` of the same path and decision,
+//! the cosine `c = <a, r> / (|a| |r|)` is accumulated in F64
+//! ([`cosine_similarity`]): products of F32 values are exact in F64, and the
+//! sums' worst-case relative error, `n 2^-53` or about `1.5e-11` over the
+//! `n = 131,072` vocabulary entries, is far below the `1e-6`-scale margins the
+//! floors separate. For each path `k` (prompt, teacher-forced, cached) the
+//! floor is the worst cosine against F32 that either official F16 evaluation
+//! the gate is calibrated on reaches on that path ([`half_precision_floor`]):
+//!
+//! ```text
+//! floor[k] = min over g in {MPS/F16 oracle, CPU/F16}, rows i of k, of cos(official[g, i], truth[i])
+//! ```
+//!
+//! Every Burn row of the path must have exact top-1 and
+//!
+//! ```text
+//! cos(burn[i], truth[i]) >= floor[k]      (inclusive, no slack),
+//! ```
+//!
+//! so a Burn F16 row must be at least as faithful to F32 as the worst official
+//! F16 row of its path. The floor must lie in
+//! `[MINIMUM_HALF_PRECISION_FLOOR, 1]`. The bound is per path, not per
+//! decision: half-precision deviations spike at implementation-specific rows.
+//! Every row of a path is measured before any row is judged
+//! ([`TruthPathSummary`], [`assert_within_floors`]), so a failing run reports
+//! every row and every violation rather than stopping at the first.
+//!
+//! # Four-graph envelope: a printed diagnostic, never a gate
+//!
+//! The Nemotron-H envelope round registered
+//! (`acceptance/measurements/nemotron-h-envelope-20261018/derivation/method.txt`)
+//! and derived a rule over four official F16 graphs ([`OfficialF16Graph`]:
+//! CPU and MPS, each with eager and SDPA attention). With the *normalized
+//! deviation*
 //!
 //! ```text
 //! delta(a, r) = | a/|a| - r/|r| |_2 = sqrt(2 (1 - c))
 //! ```
 //!
-//! the L2 distance between the unit-normalized rows ([`normalized_deviation`]):
-//! a distance, like the `|a - r|` statistics of the Llama-family and Gemma
-//! envelope, and a monotone function of the cosine. For each path `k`
-//! (prompt, teacher-forced, cached) the four official F16 graphs
-//! ([`OfficialF16Graph`]: CPU and MPS, each with eager and SDPA attention)
-//! each have a worst row `D[g, k] = max delta`, and the path's *envelope* is
-//! `E[k] = max_g D[g, k]` ([`PathEnvelope`]). Every Burn row of the path must
-//! have exact top-1 and
+//! ([`normalized_deviation`]), the L2 distance between unit-normalized rows
+//! and a monotone function of the cosine, each graph `g` has a worst row
+//! `D[g, k] = max delta`, the path's envelope is `E[k] = max_g D[g, k]`, and
+//! graph `g`'s leave-one-out ratio is `D[g, k] / max_{h != g} D[h, k]`
+//! ([`PathEnvelope`]). The method would have admitted Burn rows with
+//! `delta <= s[k] E[k]`, `s[k]` the largest ratio rounded up to two
+//! significant digits ([`round_up_two_significant`]).
 //!
-//! ```text
-//! delta(burn, truth) <= s[k] E[k]      (inclusive),
-//! ```
-//!
-//! that is, a cosine of at least `1 - (s[k] E[k])^2 / 2`, which must stay at
-//! or above [`MINIMUM_HALF_PRECISION_FLOOR`]. The bound is per path, not per
-//! decision: half-precision deviations spike at implementation-specific rows.
-//!
-//! # Slack
-//!
-//! The slacks [`PROMPT_SLACK`], [`TEACHER_SLACK`], and [`CACHED_SLACK`] come
-//! from the official graphs only, never from Burn: graph `g`'s
-//! *leave-one-out* ratio `D[g, k] / max_{h != g} D[h, k]` is how far the
-//! envelope of the other three must stretch to admit it, and `s[k]` is the
-//! largest such ratio of the path rounded up to two significant digits
-//! ([`round_up_two_significant`], the envelope round's rounding), as
-//! `scripts/derive_nemotron_h_envelope.py` derives them. The method was
-//! registered before any new official graph or Burn row
-//! (`acceptance/measurements/nemotron-h-envelope-20261018/derivation/method.txt`);
-//! the slacks must be re-derived, never tuned, whenever a graph, a version,
-//! the prompt, or the checkpoint changes, and
-//! [`PathEnvelope::assert_leave_one_out`] fails if the compiled constants are
-//! not exactly the derivation's.
+//! The maintainer did not adopt that rule (decision of 2026-10-18,
+//! `acceptance/measurements/nemotron-h-envelope-decision-20261018.json`):
+//! every largest ratio is at most `1.0046`, so every `s[k]` is `1.1` only by
+//! rounding, and Burn's cached decision 22 lies at `1.023 E`. The envelope
+//! therefore judges nothing. When the four graphs are supplied, the gate prints
+//! each graph's worst row and leave-one-out ratio, the slack the registered
+//! method would round to (marked not adopted), and Burn's worst row of each
+//! path as a multiple of `E` ([`BurnEnvelopeRatio`]), beside the floor
+//! verdict.
 
 #![allow(dead_code)]
 
@@ -272,35 +289,284 @@ pub(super) fn assert_corresponding_hidden_trace(
     }
 }
 
-/// Lowest implied cosine floor accepted; a looser official F16 envelope is too wide to gate on.
+// ---------------------------------------------------------------------------
+// Gate rule: per-path official F16 floors
+// ---------------------------------------------------------------------------
+
+/// Lowest per-path floor accepted; a looser official F16 floor is too wide to gate on.
 pub(super) const MINIMUM_HALF_PRECISION_FLOOR: f64 = 0.99;
 
-/// Slack of the prompt row's envelope: the largest leave-one-out ratio `1.0002` (CPU eager), rounded up.
-pub(super) const PROMPT_SLACK: f64 = 1.1;
+/// Worst cosine any official half-precision row reaches against its F32 truth row.
+///
+/// `truth` and every matrix in `official` are row-major `[rows, width]`
+/// matrices of the same path; rows pair by index. The gate passes the MPS/F16
+/// oracle and the precision bundle's CPU/F16 rows, so the floor is the worst
+/// row of either official evaluation, with no slack.
+///
+/// # Panics
+///
+/// If `width` is zero, `official` is empty, `truth` holds no whole rows, a
+/// matrix has another shape, a value is non-finite, a row has a zero norm, or
+/// the floor lies outside `[MINIMUM_HALF_PRECISION_FLOOR, 1]`.
+pub(super) fn half_precision_floor(
+    label: &str,
+    truth: &[f32],
+    official: &[&[f32]],
+    width: usize,
+) -> f64 {
+    assert!(width > 0, "{label} row width must be nonzero");
+    assert!(
+        !official.is_empty(),
+        "{label} needs at least one official half-precision matrix"
+    );
+    assert!(
+        !truth.is_empty() && truth.len().is_multiple_of(width),
+        "{label} truth must hold whole rows"
+    );
+    assert_finite(label, "F32 truth", truth);
+    let mut floor = f64::INFINITY;
+    for matrix in official {
+        assert_eq!(
+            matrix.len(),
+            truth.len(),
+            "{label} official matrix shape changed"
+        );
+        assert_finite(label, "official half-precision", matrix);
+        for (row, reference) in matrix.chunks_exact(width).zip(truth.chunks_exact(width)) {
+            floor = floor.min(cosine_similarity(row, reference));
+        }
+    }
+    assert!(
+        (MINIMUM_HALF_PRECISION_FLOOR..=1.0).contains(&floor),
+        "{label} official half-precision floor {floor} is outside [{MINIMUM_HALF_PRECISION_FLOOR}, 1]"
+    );
+    floor
+}
 
-/// Slack of the teacher-forced rows' envelope: the largest leave-one-out ratio `1.0042` (CPU SDPA), rounded up.
-pub(super) const TEACHER_SLACK: f64 = 1.1;
+/// Whether `value >= bound`; a NaN on either side never is, so it fails every floor.
+fn at_least(value: f64, bound: f64) -> bool {
+    matches!(
+        value.partial_cmp(&bound),
+        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+    )
+}
 
-/// Slack of the cached rows' envelope: the largest leave-one-out ratio `1.0046` (MPS SDPA), rounded up.
-pub(super) const CACHED_SLACK: f64 = 1.1;
+/// One Burn row measured against its F32 truth row, before any floor is applied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TruthRowObservation {
+    /// Zero-based decision.
+    pub(super) decision: usize,
+    /// F64-accumulated cosine against the F32 truth row.
+    pub(super) cosine: f64,
+    /// Stable Burn argmax, with lower token ID winning an exact tie.
+    pub(super) actual_top1_token_id: usize,
+    /// Authenticated token the row must predict.
+    pub(super) expected_top1_token_id: usize,
+}
 
-/// Returns the compiled slack of one row family.
-pub(super) const fn slack(kind: RowKind) -> f64 {
-    match kind {
-        RowKind::Prompt => PROMPT_SLACK,
-        RowKind::Teacher => TEACHER_SLACK,
-        RowKind::Cached => CACHED_SLACK,
+/// Measures one Burn row against its F32 truth row; judges nothing but the row's identity.
+///
+/// The row family and stream must match, both rows must be finite and
+/// nonempty with equal length, and the truth's argmax must equal the
+/// authenticated `expected_top1` (otherwise the truth row is not the one the
+/// oracle predicted from). Burn's top-1 and cosine are recorded for
+/// [`CompletedTruthSummary::violations`].
+pub(super) fn measure_row_against_truth(
+    label: &str,
+    actual_kind: RowKind,
+    actual: &[f32],
+    truth: TruthRow<'_>,
+    expected_top1: usize,
+) -> TruthRowObservation {
+    assert_eq!(
+        actual_kind,
+        truth.kind(),
+        "{label} compared a different row family"
+    );
+    assert_eq!(
+        actual_kind.path(),
+        truth.path(),
+        "{label} crossed the stateless and cached streams"
+    );
+    assert_eq!(
+        actual.len(),
+        truth.values().len(),
+        "{label} vector length changed"
+    );
+    assert!(!actual.is_empty(), "{label} vectors must not be empty");
+    assert_finite(label, "Burn", actual);
+    assert_finite(label, "F32 truth", truth.values());
+    assert_eq!(
+        stable_top1(truth.values()),
+        expected_top1,
+        "{label} F32 truth disagrees with the authenticated token at decision {}",
+        truth.decision()
+    );
+    TruthRowObservation {
+        decision: truth.decision(),
+        cosine: cosine_similarity(actual, truth.values()),
+        actual_top1_token_id: stable_top1(actual),
+        expected_top1_token_id: expected_top1,
     }
 }
 
-/// One of the four official F16 graphs whose envelope bounds each path.
+/// Ordered rows of one family measured against its F32 truth under one official F16 floor.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TruthPathSummary {
+    /// Row family required for every observed row.
+    kind: RowKind,
+    /// Official F16 floor the rows must reach.
+    floor: f64,
+    /// Rows observed so far, in decision order.
+    rows: Vec<TruthRowObservation>,
+}
+
+impl TruthPathSummary {
+    /// Starts an empty sequence for `kind` judged by `floor`.
+    pub(super) const fn new(kind: RowKind, floor: f64) -> Self {
+        Self {
+            kind,
+            floor,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Measures and records the next decision in strict contiguous order.
+    ///
+    /// # Panics
+    ///
+    /// On a skipped or repeated decision, or as [`measure_row_against_truth`].
+    pub(super) fn observe(
+        &mut self,
+        label: &str,
+        actual: &[f32],
+        truth: TruthRow<'_>,
+        expected_top1: usize,
+    ) -> TruthRowObservation {
+        assert_eq!(
+            truth.decision(),
+            self.rows.len(),
+            "{label} must compare every decision once and in order"
+        );
+        let observation = measure_row_against_truth(label, self.kind, actual, truth, expected_top1);
+        self.rows.push(observation);
+        observation
+    }
+
+    /// Completes the sequence only after exactly `expected_rows` decisions.
+    pub(super) fn finish(self, expected_rows: usize) -> CompletedTruthSummary {
+        assert!(expected_rows > 0, "a truth sequence cannot be empty");
+        assert_eq!(
+            self.rows.len(),
+            expected_rows,
+            "truth parity did not cover every expected row"
+        );
+        CompletedTruthSummary {
+            kind: self.kind,
+            floor: self.floor,
+            rows: self.rows,
+        }
+    }
+}
+
+/// Every row of one fully covered family, with the official F16 floor that judges it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CompletedTruthSummary {
+    /// Row family compared.
+    pub(super) kind: RowKind,
+    /// Official F16 floor applied.
+    pub(super) floor: f64,
+    /// Every row, in decision order.
+    pub(super) rows: Vec<TruthRowObservation>,
+}
+
+impl CompletedTruthSummary {
+    /// The row with the lowest cosine (first on ties).
+    pub(super) fn worst(&self) -> TruthRowObservation {
+        self.rows
+            .iter()
+            .copied()
+            .reduce(|worst, row| {
+                if row.cosine < worst.cosine {
+                    row
+                } else {
+                    worst
+                }
+            })
+            .expect("a completed summary has rows")
+    }
+
+    /// Describes every row that misses its top-1 token or the official F16 floor.
+    pub(super) fn violations(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for row in &self.rows {
+            if row.actual_top1_token_id != row.expected_top1_token_id {
+                out.push(format!(
+                    "{:?} decision {}: top-1 {} instead of {}",
+                    self.kind, row.decision, row.actual_top1_token_id, row.expected_top1_token_id
+                ));
+            }
+            if !at_least(row.cosine, self.floor) {
+                out.push(format!(
+                    "{:?} decision {}: cosine {} against the F32 truth is below the official F16 floor {}",
+                    self.kind, row.decision, row.cosine, self.floor
+                ));
+            }
+        }
+        out
+    }
+
+    /// Prints the lowest cosine, its margin over the floor, and every row's cosine.
+    pub(super) fn report(&self, label: &str) {
+        let worst = self.worst();
+        eprintln!(
+            "{label} {:?}: {} rows, minimum cosine {:.12} at decision {} (official F16 floor {:.9}, margin {:+.3e})",
+            self.kind,
+            self.rows.len(),
+            worst.cosine,
+            worst.decision,
+            self.floor,
+            worst.cosine - self.floor,
+        );
+        let cosines = self
+            .rows
+            .iter()
+            .map(|row| format!("{:.9}", row.cosine))
+            .collect::<Vec<_>>();
+        eprintln!("{label} {:?} cosines: [{}]", self.kind, cosines.join(", "));
+    }
+}
+
+/// Asserts that every completed family meets its top-1 and floor contract, listing every violation.
+///
+/// # Panics
+///
+/// If any row of any family has another top-1 token or a cosine below its floor.
+pub(super) fn assert_within_floors(label: &str, summaries: &[&CompletedTruthSummary]) {
+    let violations = summaries
+        .iter()
+        .flat_map(|summary| summary.violations())
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "{label}: {} row(s) outside the official F16 floor contract: {}",
+        violations.len(),
+        violations.join("; ")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Four-graph envelope: a printed diagnostic, never a gate
+// ---------------------------------------------------------------------------
+
+/// One of the four official F16 graphs of the envelope diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OfficialF16Graph {
-    /// CPU, eager attention: the precision bundle's `float16` rows.
+    /// CPU, eager attention: the precision bundle's `float16` rows (also a floor input).
     CpuEager,
     /// CPU, SDPA attention: the CPU SDPA graph bundle.
     CpuSdpa,
-    /// MPS, eager attention: the MPS/F16 oracle.
+    /// MPS, eager attention: the MPS/F16 oracle (also a floor input).
     MpsEager,
     /// MPS, SDPA attention: the MPS SDPA graph bundle.
     MpsSdpa,
@@ -322,17 +588,12 @@ impl OfficialF16Graph {
     }
 }
 
-/// Whether `value <= bound`; a NaN on either side never is, so it fails every bound.
-fn at_most(value: f64, bound: f64) -> bool {
-    matches!(
-        value.partial_cmp(&bound),
-        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-    )
-}
-
 /// Returns `sqrt(2 (1 - c))`, the distance between two unit-normalized rows whose cosine is `c`.
 ///
-/// A cosine rounded above 1 reads as 1, so equal rows have deviation 0.
+/// `|a/|a| - r/|r||^2 = 2 - 2 c` for unit rows. The subtraction `1 - c` is
+/// exact in F64 for `c` in `[0.5, 1]` (Sterbenz), so the deviation carries the
+/// cosine's own relative error. A cosine rounded above 1 reads as 1, so equal
+/// rows have deviation 0.
 pub(super) fn normalized_deviation(cosine: f64) -> f64 {
     assert!(
         cosine.is_finite(),
@@ -343,9 +604,11 @@ pub(super) fn normalized_deviation(cosine: f64) -> f64 {
 
 /// Rounds a positive `value` up to two significant digits of its shortest round-trip decimal.
 ///
-/// This is `scripts/derive_half_precision_envelope.py`'s `round_up`: `1.4206`
-/// becomes `1.5`, `1.2988` becomes `1.3`, and `1.3` stays `1.3`, because the
-/// shortest decimal that reads back as the F64 `1.3` is `1.3` itself.
+/// This is `scripts/derive_half_precision_envelope.py`'s `round_up`, which the
+/// registered method uses for its (not adopted) slack: `1.4206` becomes `1.5`,
+/// `1.2988` becomes `1.3`, `1.0046` becomes `1.1`, and `1.3` stays `1.3`,
+/// because the shortest decimal that reads back as the F64 `1.3` is `1.3`
+/// itself.
 pub(super) fn round_up_two_significant(value: f64) -> f64 {
     assert!(
         value.is_finite() && value > 0.0,
@@ -381,10 +644,10 @@ pub(super) struct GraphWorstRow {
     pub(super) decision: usize,
 }
 
-/// The four official F16 graphs' worst rows on one path, their envelope, and the bound it sets.
+/// The four official F16 graphs' worst rows on one path and their envelope; a diagnostic, not a gate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct PathEnvelope {
-    /// Row family the envelope bounds.
+    /// Row family the envelope describes.
     pub(super) kind: RowKind,
     /// Each graph's worst row, in [`OfficialF16Graph::ALL`] order.
     pub(super) graphs: [GraphWorstRow; 4],
@@ -392,48 +655,27 @@ pub(super) struct PathEnvelope {
     pub(super) envelope: f64,
     /// Graph attaining the envelope (first in [`OfficialF16Graph::ALL`] order on ties).
     pub(super) envelope_graph: OfficialF16Graph,
-    /// `s[k]` applied to the envelope.
-    pub(super) slack: f64,
-    /// `s[k] E[k]`, the largest normalized deviation a Burn row may have.
-    pub(super) bound: f64,
-    /// `1 - bound^2 / 2`, the equivalent cosine floor.
-    pub(super) floor: f64,
 }
 
 impl PathEnvelope {
-    /// Measures the official graphs of `kind` against its F32 truth under the compiled slack.
+    /// Measures the four official graphs of `kind` against its F32 truth.
     ///
     /// `truth` and every `official` matrix are row-major `[rows, width]`
-    /// matrices of the same path, in [`OfficialF16Graph::ALL`] order.
+    /// matrices of the same path, in [`OfficialF16Graph::ALL`] order. No bound
+    /// or floor is derived: the result judges no Burn row.
     ///
     /// # Panics
     ///
-    /// As [`Self::with_slack`].
+    /// If a matrix holds a different number of values than `kind`'s rows of
+    /// `width`, a non-finite value or a zero row, or if the envelope is zero
+    /// (four graphs equal to the truth are not half-precision evaluations, and
+    /// leave-one-out ratios over them are undefined).
     pub(super) fn measure(
         label: &str,
         kind: RowKind,
         truth: &[f32],
         official: [&[f32]; 4],
         width: usize,
-    ) -> Self {
-        Self::with_slack(label, kind, truth, official, width, slack(kind))
-    }
-
-    /// Measures the official graphs of `kind` and applies `slack` to their envelope.
-    ///
-    /// # Panics
-    ///
-    /// If a matrix holds a different number of values than `kind`'s rows of
-    /// `width`, a non-finite value or a zero row, if the envelope is zero
-    /// (four graphs equal to the truth are not half-precision evaluations),
-    /// or if the implied cosine floor is below [`MINIMUM_HALF_PRECISION_FLOOR`].
-    pub(super) fn with_slack(
-        label: &str,
-        kind: RowKind,
-        truth: &[f32],
-        official: [&[f32]; 4],
-        width: usize,
-        slack: f64,
     ) -> Self {
         assert!(width > 0, "{label} row width must be nonzero");
         assert_eq!(
@@ -442,10 +684,6 @@ impl PathEnvelope {
             "{label} truth must hold every {kind:?} row"
         );
         assert_finite(label, "F32 truth", truth);
-        assert!(
-            slack.is_finite() && slack >= 1.0,
-            "{label} slack {slack} must be finite and at least 1"
-        );
         let graphs = official.map(|matrix| {
             assert_eq!(
                 matrix.len(),
@@ -488,28 +726,19 @@ impl PathEnvelope {
                 });
         assert!(
             largest.deviation > 0.0,
-            "{label} official F16 graphs equal the F32 truth, so they cannot set a half-precision envelope"
-        );
-        let bound = slack * largest.deviation;
-        let floor = 1.0 - bound * bound / 2.0;
-        assert!(
-            (MINIMUM_HALF_PRECISION_FLOOR..=1.0).contains(&floor),
-            "{label} official F16 envelope floor {floor} is outside [{MINIMUM_HALF_PRECISION_FLOOR}, 1]"
+            "{label} official F16 graphs equal the F32 truth, so they cannot form a half-precision envelope"
         );
         Self {
             kind,
             graphs,
             envelope: largest.deviation,
             envelope_graph: OfficialF16Graph::ALL[index],
-            slack,
-            bound,
-            floor,
         }
     }
 
     /// Each graph's worst deviation over the largest of the other three graphs' worst deviations.
     ///
-    /// A zero denominator gives an infinite or NaN ratio, which no slack admits.
+    /// A zero denominator gives an infinite or NaN ratio.
     pub(super) fn leave_one_out(&self) -> [f64; 4] {
         std::array::from_fn(|graph| {
             let others = (0..4)
@@ -532,7 +761,12 @@ impl PathEnvelope {
         (OfficialF16Graph::ALL[best], ratios[best])
     }
 
-    /// Prints the envelope and every leave-one-out ratio.
+    /// The slack the registered method would round the largest leave-one-out ratio to; not adopted.
+    pub(super) fn registered_method_slack(&self) -> f64 {
+        round_up_two_significant(self.largest_leave_one_out().1)
+    }
+
+    /// Prints every graph's worst row and leave-one-out ratio, the envelope, and the not-adopted slack.
     pub(super) fn report(&self, label: &str) {
         for ((graph, worst), ratio) in OfficialF16Graph::ALL
             .iter()
@@ -548,275 +782,94 @@ impl PathEnvelope {
                 worst.decision,
             );
         }
+        let (graph, largest) = self.largest_leave_one_out();
+        let slack = self.registered_method_slack();
+        let bound = slack * self.envelope;
         eprintln!(
-            "{label} {:?}: envelope {:.6e} ({}), slack {}, bound {:.6e}, cosine floor {:.9}",
+            "{label} {:?}: envelope {:.6e} ({}); largest leave-one-out {largest:.4} ({}); the registered \
+             method's slack {slack} (cosine floor {:.9}) is not adopted and judges no row",
             self.kind,
             self.envelope,
             self.envelope_graph.label(),
-            self.slack,
-            self.bound,
-            self.floor,
-        );
-    }
-
-    /// Asserts that every official graph lies within the envelope of the other three and that the slack is the derivation's.
-    ///
-    /// # Panics
-    ///
-    /// If any leave-one-out ratio exceeds the slack, or the slack is not the
-    /// largest ratio rounded up to two significant digits: the slacks must then
-    /// be re-derived with `scripts/derive_nemotron_h_envelope.py`, never tuned.
-    pub(super) fn assert_leave_one_out(&self, label: &str) {
-        let ratios = self.leave_one_out();
-        let outside = OfficialF16Graph::ALL
-            .iter()
-            .zip(ratios)
-            .filter(|(_, ratio)| !at_most(*ratio, self.slack))
-            .map(|(graph, ratio)| format!("{} {ratio:.4}", graph.label()))
-            .collect::<Vec<_>>();
-        assert!(
-            outside.is_empty(),
-            "{label} {:?}: official graphs outside the envelope of the other three under slack {}: {}; \
-             re-derive the slacks with scripts/derive_nemotron_h_envelope.py",
-            self.kind,
-            self.slack,
-            outside.join(", ")
-        );
-        let (graph, largest) = self.largest_leave_one_out();
-        let derived = round_up_two_significant(largest);
-        assert_eq!(
-            derived,
-            self.slack,
-            "{label} {:?}: the largest leave-one-out ratio {largest} ({}) derives slack {derived}, not the compiled {}",
-            self.kind,
             graph.label(),
-            self.slack
+            1.0 - bound * bound / 2.0,
         );
     }
 }
 
-/// One Burn row measured against its F32 truth row, before any bound is applied.
+/// Burn's worst row of one path as a multiple of the four-graph envelope; a diagnostic, not a gate.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct TruthRowObservation {
-    /// Zero-based decision.
-    pub(super) decision: usize,
-    /// F64-accumulated cosine against the F32 truth row.
-    pub(super) cosine: f64,
-    /// [`normalized_deviation`] of that cosine.
+pub(super) struct BurnEnvelopeRatio {
+    /// Envelope the rows were compared with.
+    pub(super) envelope: PathEnvelope,
+    /// Burn's lowest-cosine row of the path (its largest normalized deviation).
+    pub(super) worst: TruthRowObservation,
+    /// [`normalized_deviation`] of that row's cosine.
     pub(super) deviation: f64,
-    /// Stable Burn argmax, with lower token ID winning an exact tie.
-    pub(super) actual_top1_token_id: usize,
-    /// Authenticated token the row must predict.
-    pub(super) expected_top1_token_id: usize,
+    /// `deviation / E[k]`.
+    pub(super) of_envelope: f64,
+    /// Burn rows of the path whose deviation exceeds `E[k]`.
+    pub(super) rows_beyond_envelope: usize,
+    /// Burn rows of the path.
+    pub(super) rows: usize,
 }
 
-/// Measures one Burn row against its F32 truth row; judges nothing but the row's identity.
-///
-/// The row family and stream must match, both rows must be finite and
-/// nonempty with equal length, and the truth's argmax must equal the
-/// authenticated `expected_top1` (otherwise the truth row is not the one the
-/// oracle predicted from). Burn's top-1 and distance are recorded for
-/// [`CompletedTruthSummary::violations`].
-pub(super) fn measure_row_against_truth(
-    label: &str,
-    actual_kind: RowKind,
-    actual: &[f32],
-    truth: TruthRow<'_>,
-    expected_top1: usize,
-) -> TruthRowObservation {
-    assert_eq!(
-        actual_kind,
-        truth.kind(),
-        "{label} compared a different row family"
-    );
-    assert_eq!(
-        actual_kind.path(),
-        truth.path(),
-        "{label} crossed the stateless and cached streams"
-    );
-    assert_eq!(
-        actual.len(),
-        truth.values().len(),
-        "{label} vector length changed"
-    );
-    assert!(!actual.is_empty(), "{label} vectors must not be empty");
-    assert_finite(label, "Burn", actual);
-    assert_finite(label, "F32 truth", truth.values());
-    assert_eq!(
-        stable_top1(truth.values()),
-        expected_top1,
-        "{label} F32 truth disagrees with the authenticated token at decision {}",
-        truth.decision()
-    );
-    let cosine = cosine_similarity(actual, truth.values());
-    TruthRowObservation {
-        decision: truth.decision(),
-        cosine,
-        deviation: normalized_deviation(cosine),
-        actual_top1_token_id: stable_top1(actual),
-        expected_top1_token_id: expected_top1,
-    }
-}
-
-/// Ordered rows of one family measured against its F32 truth under one envelope.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct TruthPathSummary {
-    /// Envelope whose bound the rows must meet.
-    envelope: PathEnvelope,
-    /// Rows observed so far, in decision order.
-    rows: Vec<TruthRowObservation>,
-}
-
-impl TruthPathSummary {
-    /// Starts an empty sequence judged by `envelope`.
-    pub(super) const fn new(envelope: PathEnvelope) -> Self {
-        Self {
-            envelope,
-            rows: Vec::new(),
-        }
-    }
-
-    /// Measures and records the next decision in strict contiguous order.
+impl BurnEnvelopeRatio {
+    /// Measures a completed Burn path against the envelope of the same path.
     ///
     /// # Panics
     ///
-    /// On a skipped or repeated decision, or as [`measure_row_against_truth`].
-    pub(super) fn observe(
-        &mut self,
-        label: &str,
-        actual: &[f32],
-        truth: TruthRow<'_>,
-        expected_top1: usize,
-    ) -> TruthRowObservation {
+    /// If the summary and the envelope describe different row families.
+    pub(super) fn measure(envelope: &PathEnvelope, summary: &CompletedTruthSummary) -> Self {
         assert_eq!(
-            truth.decision(),
-            self.rows.len(),
-            "{label} must compare every decision once and in order"
+            envelope.kind, summary.kind,
+            "the envelope diagnostic compared different row families"
         );
-        let observation =
-            measure_row_against_truth(label, self.envelope.kind, actual, truth, expected_top1);
-        self.rows.push(observation);
-        observation
-    }
-
-    /// Completes the sequence only after exactly `expected_rows` decisions.
-    pub(super) fn finish(self, expected_rows: usize) -> CompletedTruthSummary {
-        assert!(expected_rows > 0, "a truth sequence cannot be empty");
-        assert_eq!(
-            self.rows.len(),
-            expected_rows,
-            "truth parity did not cover every expected row"
-        );
-        CompletedTruthSummary {
-            envelope: self.envelope,
-            rows: self.rows,
+        let worst = summary.worst();
+        let deviation = normalized_deviation(worst.cosine);
+        Self {
+            envelope: *envelope,
+            worst,
+            deviation,
+            of_envelope: deviation / envelope.envelope,
+            rows_beyond_envelope: summary
+                .rows
+                .iter()
+                .filter(|row| normalized_deviation(row.cosine) > envelope.envelope)
+                .count(),
+            rows: summary.rows.len(),
         }
     }
-}
 
-/// Every row of one fully covered family, with the envelope that judges it.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct CompletedTruthSummary {
-    /// Envelope and bound applied.
-    pub(super) envelope: PathEnvelope,
-    /// Every row, in decision order.
-    pub(super) rows: Vec<TruthRowObservation>,
-}
-
-impl CompletedTruthSummary {
-    /// The row with the lowest cosine (first on ties).
-    pub(super) fn worst(&self) -> TruthRowObservation {
-        self.rows
-            .iter()
-            .copied()
-            .reduce(|worst, row| {
-                if row.cosine < worst.cosine {
-                    row
-                } else {
-                    worst
-                }
-            })
-            .expect("a completed summary has rows")
+    /// Whether Burn's worst row lies further outside the envelope than any official graph lies outside the other three.
+    pub(super) fn beyond_every_official_graph(&self) -> bool {
+        self.of_envelope > self.envelope.largest_leave_one_out().1
     }
 
-    /// Describes every row that misses its top-1 token or the envelope bound.
-    pub(super) fn violations(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for row in &self.rows {
-            if row.actual_top1_token_id != row.expected_top1_token_id {
-                out.push(format!(
-                    "{:?} decision {}: top-1 {} instead of {}",
-                    self.envelope.kind,
-                    row.decision,
-                    row.actual_top1_token_id,
-                    row.expected_top1_token_id
-                ));
-            }
-            if !at_most(row.deviation, self.envelope.bound) {
-                out.push(format!(
-                    "{:?} decision {}: cosine {} (delta {:.6e}, {:.4} of the envelope) against the F32 truth is \
-                     below the official F16 envelope floor {} (bound {:.6e} = slack {} x envelope {:.6e} from {})",
-                    self.envelope.kind,
-                    row.decision,
-                    row.cosine,
-                    row.deviation,
-                    row.deviation / self.envelope.envelope,
-                    self.envelope.floor,
-                    self.envelope.bound,
-                    self.envelope.slack,
-                    self.envelope.envelope,
-                    self.envelope.envelope_graph.label(),
-                ));
-            }
-        }
-        out
-    }
-
-    /// Prints every row's cosine and its distance relative to the envelope.
+    /// Prints Burn's ratio to the envelope beside the official graphs' largest leave-one-out ratio.
     pub(super) fn report(&self, label: &str) {
-        let worst = self.worst();
+        let (graph, largest) = self.envelope.largest_leave_one_out();
         eprintln!(
-            "{label} {:?}: {} rows, minimum cosine {:.12} at decision {} (delta {:.6e}, {:.4} of the envelope, \
-             {:.4} of the bound {:.6e}; floor {:.9})",
+            "{label} {:?}: Burn's worst row, decision {} (cosine {:.12}, delta {:.6e}), is {:.4} of the envelope \
+             {:.6e} ({}); {} of {} Burn rows exceed the envelope; the largest official leave-one-out ratio is \
+             {largest:.4} ({}){}; diagnostic only, the official F16 floor decides",
             self.envelope.kind,
-            self.rows.len(),
-            worst.cosine,
-            worst.decision,
-            worst.deviation,
-            worst.deviation / self.envelope.envelope,
-            worst.deviation / self.envelope.bound,
-            self.envelope.bound,
-            self.envelope.floor,
-        );
-        let cosines = self
-            .rows
-            .iter()
-            .map(|row| format!("{:.9}", row.cosine))
-            .collect::<Vec<_>>();
-        eprintln!(
-            "{label} {:?} cosines: [{}]",
-            self.envelope.kind,
-            cosines.join(", ")
+            self.worst.decision,
+            self.worst.cosine,
+            self.deviation,
+            self.of_envelope,
+            self.envelope.envelope,
+            self.envelope.envelope_graph.label(),
+            self.rows_beyond_envelope,
+            self.rows,
+            graph.label(),
+            if self.beyond_every_official_graph() {
+                ", which Burn's row exceeds"
+            } else {
+                ""
+            },
         );
     }
-}
-
-/// Asserts that every completed family meets its top-1 and envelope contract, listing every violation.
-///
-/// # Panics
-///
-/// If any row of any family has another top-1 token or exceeds its bound.
-pub(super) fn assert_within_envelopes(label: &str, summaries: &[&CompletedTruthSummary]) {
-    let violations = summaries
-        .iter()
-        .flat_map(|summary| summary.violations())
-        .collect::<Vec<_>>();
-    assert!(
-        violations.is_empty(),
-        "{label}: {} row(s) outside the official F16 envelope contract: {}",
-        violations.len(),
-        violations.join("; ")
-    );
 }
 
 /// Computes cosine with F64 products and sums after validating nonzero norms.
@@ -874,7 +927,7 @@ fn assert_finite(label: &str, side: &str, values: &[f32]) {
 
 #[cfg(test)]
 mod tests {
-    //! Synthetic tests for path identity, row ordering, and numerical parity gates.
+    //! Synthetic tests for path identity, row ordering, the official F16 floor gate, and the envelope diagnostic.
 
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -908,213 +961,75 @@ mod tests {
         2.0 * (angle / 2.0).sin()
     }
 
-    /// The normalized deviation is the distance between unit-normalized rows.
-    #[test]
-    fn normalized_deviation_is_the_unit_row_distance() {
-        assert_eq!(normalized_deviation(1.0), 0.0);
-        assert_eq!(normalized_deviation(1.0 + f64::EPSILON), 0.0);
-        assert!((normalized_deviation(0.0) - 2.0_f64.sqrt()).abs() < 1e-15);
-        assert!((normalized_deviation(0.1_f64.cos()) - chord(0.1)).abs() < 1e-12);
-        let rows = plane_rows(RowKind::Prompt, 0.02, None);
-        let truth = plane_rows(RowKind::Prompt, 0.0, None);
-        let measured = normalized_deviation(cosine_similarity(&rows, &truth));
-        assert!((measured - chord(0.02)).abs() < 1e-7);
-        assert!(catch_unwind(|| normalized_deviation(f64::NAN)).is_err());
+    /// The cosine of an F32 unit row at `angle` from `e0`, as the gate measures it against `e0`.
+    fn plane_cosine(angle: f64) -> f64 {
+        cosine_similarity(&[angle.cos() as f32, angle.sin() as f32], &[1.0, 0.0])
     }
 
-    /// Bounds are inclusive, and a NaN never meets one.
+    /// The floor is the worst official half-precision row and must stay meaningful.
     #[test]
-    fn bounds_are_inclusive_and_refuse_nan() {
-        assert!(at_most(1.0, 1.0));
-        assert!(at_most(0.5, 1.0));
-        assert!(!at_most(1.0 + f64::EPSILON, 1.0));
-        assert!(!at_most(f64::NAN, 1.0));
-        assert!(!at_most(0.5, f64::NAN));
-    }
-
-    /// Slack rounding is the envelope round's ceiling to two significant digits of the shortest decimal.
-    #[test]
-    fn slack_rounding_matches_the_envelope_round() {
-        for (value, rounded) in [
-            (1.4206, 1.5),
-            (1.2988, 1.3),
-            (1.3, 1.3),
-            (1.300_000_01, 1.4),
-            (1.0, 1.0),
-            (0.95, 0.95),
-            (12.5, 13.0),
-            (99.5, 100.0),
-            (1.666, 1.7),
-            (1.6981, 1.7),
-            (2.0, 2.0),
-            (4.045, 4.1),
-        ] {
-            assert_eq!(round_up_two_significant(value), rounded, "{value}");
-        }
-        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(catch_unwind(|| round_up_two_significant(invalid)).is_err());
-        }
-    }
-
-    /// The compiled slacks are two-significant-digit values of at least one, one per family.
-    #[test]
-    fn compiled_slacks_are_rounded_and_per_path() {
-        for (kind, value) in [
-            (RowKind::Prompt, PROMPT_SLACK),
-            (RowKind::Teacher, TEACHER_SLACK),
-            (RowKind::Cached, CACHED_SLACK),
-        ] {
-            assert_eq!(slack(kind), value);
-            assert!(value >= 1.0);
-            assert_eq!(round_up_two_significant(value), value);
-        }
+    fn half_precision_floor_takes_the_worst_official_row() {
+        let truth = [1.0, 0.0, 0.0, 1.0];
+        let close = [1.0, 0.01, 0.0, 1.0];
+        let closer = [1.0, 0.0, 0.001, 1.0];
+        let floor = half_precision_floor("synthetic", &truth, &[&close, &closer], 2);
+        assert_eq!(floor, cosine_similarity(&close[..2], &truth[..2]));
+        assert!(floor < 1.0 && floor > 0.9999);
         assert_eq!(
-            OfficialF16Graph::ALL.map(OfficialF16Graph::label),
-            ["cpu-eager", "cpu-sdpa", "mps-eager", "mps-sdpa"]
+            half_precision_floor("synthetic", &truth, &[&closer, &close], 2),
+            floor,
+            "the floor does not depend on the order of the official evaluations"
         );
-    }
-
-    /// The envelope is the largest of each graph's worst row, and the bound its slack multiple.
-    #[test]
-    fn path_envelope_takes_each_graphs_worst_row() {
-        let kind = RowKind::Teacher;
-        let truth = plane_rows(kind, 0.0, None);
-        let graphs = [
-            plane_rows(kind, 0.010, None),
-            plane_rows(kind, 0.011, Some((7, 0.012))),
-            plane_rows(kind, 0.010, Some((18, 0.030))),
-            plane_rows(kind, 0.012, None),
-        ];
-        let envelope = PathEnvelope::with_slack(
-            "synthetic",
-            kind,
-            &truth,
-            [&graphs[0], &graphs[1], &graphs[2], &graphs[3]],
-            2,
-            2.5,
-        );
-        assert_eq!(envelope.envelope_graph, OfficialF16Graph::MpsEager);
-        assert_eq!(envelope.graphs[2].decision, 18);
-        assert_eq!(envelope.graphs[1].decision, 7);
-        assert_eq!(envelope.graphs[0].decision, 0, "the first row wins ties");
-        assert!((envelope.envelope - chord(0.030)).abs() < 1e-7);
-        assert_eq!(envelope.bound, 2.5 * envelope.envelope);
-        assert_eq!(envelope.floor, 1.0 - envelope.bound * envelope.bound / 2.0);
-        let ratios = envelope.leave_one_out();
-        assert!((ratios[2] - chord(0.030) / chord(0.012)).abs() < 1e-5);
-        assert!((ratios[0] - chord(0.010) / chord(0.030)).abs() < 1e-5);
-        assert_eq!(
-            envelope.largest_leave_one_out(),
-            (OfficialF16Graph::MpsEager, ratios[2])
-        );
-        envelope.assert_leave_one_out("synthetic");
-        envelope.report("synthetic");
-    }
-
-    /// Only the derived slack passes the leave-one-out check; a wider or narrower one fails.
-    #[test]
-    fn leave_one_out_check_requires_the_derived_slack() {
-        let kind = RowKind::Prompt;
-        let truth = plane_rows(kind, 0.0, None);
-        let graphs = [
-            plane_rows(kind, 0.010, None),
-            plane_rows(kind, 0.011, None),
-            plane_rows(kind, 0.020, None),
-            plane_rows(kind, 0.012, None),
-        ];
-        let measure = |slack: f64| {
-            PathEnvelope::with_slack(
-                "synthetic",
-                kind,
-                &truth,
-                [&graphs[0], &graphs[1], &graphs[2], &graphs[3]],
-                2,
-                slack,
-            )
-        };
-        let (_, largest) = measure(1.0).largest_leave_one_out();
-        let derived = round_up_two_significant(largest);
-        assert_eq!(derived, 1.7);
-        measure(derived).assert_leave_one_out("synthetic");
-        for wrong in [1.6, 1.8] {
-            let envelope = measure(wrong);
-            assert!(catch_unwind(|| envelope.assert_leave_one_out("synthetic")).is_err());
-        }
-    }
-
-    /// Equal, too-wide, malformed, or non-finite official graphs and an invalid slack are refused.
-    #[test]
-    fn path_envelope_refuses_unusable_graphs() {
-        let kind = RowKind::Prompt;
-        let truth = plane_rows(kind, 0.0, None);
-        let near = plane_rows(kind, 0.01, None);
-        let wide = plane_rows(kind, 0.2, None);
-        let mut infinite = near.clone();
-        infinite[1] = f32::INFINITY;
-        let attempt = |graphs: [&[f32]; 4], width: usize, slack: f64| {
-            catch_unwind(|| {
-                PathEnvelope::with_slack("synthetic", kind, &truth, graphs, width, slack)
-            })
-        };
-        assert!(attempt([&near, &near, &near, &near], 2, 1.0).is_ok());
-        assert!(attempt([&truth, &truth, &truth, &truth], 2, 1.0).is_err());
-        assert!(attempt([&near, &near, &wide, &near], 2, 1.0).is_err());
-        assert!(attempt([&near, &near, &near[..1], &near], 2, 1.0).is_err());
-        assert!(attempt([&near, &near, &infinite, &near], 2, 1.0).is_err());
-        assert!(attempt([&near, &near, &near, &near], 0, 1.0).is_err());
-        assert!(attempt([&near, &near, &near, &near], 2, 0.9).is_err());
-        assert!(attempt([&near, &near, &near, &near], 2, f64::NAN).is_err());
-        let short_truth = &truth[..1];
+        assert_eq!(half_precision_floor("synthetic", &truth, &[&truth], 2), 1.0);
+        let far = [1.0, 1.0, 0.0, 1.0];
+        assert!(catch_unwind(|| half_precision_floor("synthetic", &truth, &[&far], 2)).is_err());
+        assert!(catch_unwind(|| half_precision_floor("synthetic", &truth, &[], 2)).is_err());
+        assert!(catch_unwind(|| half_precision_floor("synthetic", &truth, &[&close], 0)).is_err());
         assert!(
-            catch_unwind(|| PathEnvelope::with_slack(
-                "synthetic",
-                kind,
-                short_truth,
-                [&near[..1], &near[..1], &near[..1], &near[..1]],
-                2,
-                1.0
-            ))
-            .is_err(),
-            "a truth without a whole row is refused"
+            catch_unwind(|| half_precision_floor("synthetic", &truth, &[&close[..2]], 2)).is_err()
         );
+        assert!(
+            catch_unwind(|| half_precision_floor("synthetic", &truth[..3], &[&close[..3]], 2))
+                .is_err()
+        );
+        let infinite = [1.0, f32::INFINITY, 0.0, 1.0];
+        assert!(
+            catch_unwind(|| half_precision_floor("synthetic", &truth, &[&infinite], 2)).is_err()
+        );
+        assert!(
+            catch_unwind(|| half_precision_floor("synthetic", &infinite, &[&close], 2)).is_err()
+        );
+        let zero = [0.0, 0.0, 0.0, 1.0];
+        assert!(catch_unwind(|| half_precision_floor("synthetic", &truth, &[&zero], 2)).is_err());
     }
 
-    /// An envelope of the given kind from four graphs at known angles.
-    fn synthetic_envelope(kind: RowKind) -> PathEnvelope {
-        let truth = plane_rows(kind, 0.0, None);
-        let graphs = [
-            plane_rows(kind, 0.010, None),
-            plane_rows(kind, 0.011, None),
-            plane_rows(kind, 0.012, None),
-            plane_rows(kind, 0.010, None),
-        ];
-        PathEnvelope::with_slack(
-            "synthetic",
-            kind,
-            &truth,
-            [&graphs[0], &graphs[1], &graphs[2], &graphs[3]],
-            2,
-            1.5,
-        )
-    }
-
-    /// Rows are measured without judgment; a completed path lists every top-1 and bound violation.
+    /// Floors are inclusive, and a NaN never reaches one.
     #[test]
-    fn truth_rows_are_judged_after_the_whole_path() {
-        let envelope = synthetic_envelope(RowKind::Cached);
+    fn floors_are_inclusive_and_refuse_nan() {
+        assert!(at_least(1.0, 1.0));
+        assert!(at_least(1.0, 0.5));
+        assert!(!at_least(1.0 - f64::EPSILON, 1.0));
+        assert!(!at_least(f64::NAN, 0.5));
+        assert!(!at_least(0.5, f64::NAN));
+    }
+
+    /// Rows are measured without judgment; a completed path lists every top-1 and floor violation.
+    #[test]
+    fn truth_rows_are_judged_by_the_floor_after_the_whole_path() {
+        let floor = plane_cosine(0.015);
         let truth_values = [1.0, 0.0];
-        let mut summary = TruthPathSummary::new(envelope);
+        let mut summary = TruthPathSummary::new(RowKind::Cached, floor);
         for decision in 0..RowKind::Cached.rows() {
             let angle: f64 = match decision {
                 3 => 0.019,
-                5 => 0.017,
-                9 => 0.0,
+                5 => 0.015,
                 _ => 0.012,
             };
-            let mut actual = [angle.cos() as f32, angle.sin() as f32];
-            if decision == 9 {
-                actual = [0.0, 1.0];
-            }
+            let actual = if decision == 9 {
+                [0.0, 1.0]
+            } else {
+                [angle.cos() as f32, angle.sin() as f32]
+            };
             let observation = summary.observe(
                 "synthetic",
                 &actual,
@@ -1124,21 +1039,32 @@ mod tests {
             assert_eq!(observation.decision, decision);
         }
         let completed = summary.finish(RowKind::Cached.rows());
+        assert_eq!((completed.kind, completed.floor), (RowKind::Cached, floor));
         assert_eq!(completed.rows.len(), RowKind::Cached.rows());
         assert_eq!(completed.worst().decision, 9);
         let violations = completed.violations();
         assert_eq!(violations.len(), 3, "{violations:?}");
-        assert!(violations[0].contains("decision 3") && violations[0].contains("envelope floor"));
+        assert!(
+            violations[0].contains("decision 3") && violations[0].contains("official F16 floor")
+        );
         assert!(violations[1].contains("decision 9: top-1 1 instead of 0"));
-        assert!(violations[2].contains("decision 9") && violations[2].contains("envelope floor"));
+        assert!(
+            violations[2].contains("decision 9") && violations[2].contains("official F16 floor")
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|violation| violation.contains("decision 5")),
+            "a row exactly at the floor passes"
+        );
         completed.report("synthetic");
-        let message = catch_unwind(|| assert_within_envelopes("synthetic", &[&completed]))
+        let message = catch_unwind(|| assert_within_floors("synthetic", &[&completed]))
             .expect_err("violations must fail")
             .downcast::<String>()
             .expect("formatted panic");
         assert!(message.contains("3 row(s)"));
 
-        let mut within = TruthPathSummary::new(synthetic_envelope(RowKind::Prompt));
+        let mut within = TruthPathSummary::new(RowKind::Prompt, floor);
         within.observe(
             "synthetic",
             &[0.012_f64.cos() as f32, 0.012_f64.sin() as f32],
@@ -1147,14 +1073,15 @@ mod tests {
         );
         let within = within.finish(1);
         assert!(within.violations().is_empty());
-        assert_within_envelopes("synthetic", &[&within]);
+        assert_within_floors("synthetic", &[&within]);
+        assert_within_floors("synthetic", &[]);
     }
 
     /// Order, coverage, row family, the truth's authenticated token, and finiteness fail immediately.
     #[test]
     fn truth_summary_enforces_order_coverage_and_identity() {
         let values = [3.0, 1.0];
-        let mut summary = TruthPathSummary::new(synthetic_envelope(RowKind::Cached));
+        let mut summary = TruthPathSummary::new(RowKind::Cached, 0.99);
         summary.observe(
             "synthetic",
             &values,
@@ -1173,11 +1100,17 @@ mod tests {
         );
         assert!(catch_unwind(|| summary.clone().finish(2)).is_err());
         assert!(catch_unwind(|| summary.clone().finish(0)).is_err());
-        assert_eq!(summary.clone().finish(1).rows.len(), 1);
+        let done = summary.clone().finish(1);
+        assert_eq!(
+            (done.rows.len(), done.floor, done.kind),
+            (1, 0.99, RowKind::Cached)
+        );
         for (kind, actual, top1) in [
             (RowKind::Teacher, &values[..], 0),
+            (RowKind::Prompt, &values[..], 0),
             (RowKind::Cached, &values[..], 1),
             (RowKind::Cached, &values[..1], 0),
+            (RowKind::Cached, &[][..], 0),
             (RowKind::Cached, &[f32::NAN, 1.0][..], 0),
         ] {
             assert!(
@@ -1192,6 +1125,268 @@ mod tests {
                 "{kind:?} top1={top1} must be refused"
             );
         }
+    }
+
+    /// The normalized deviation is the distance between unit-normalized rows.
+    #[test]
+    fn normalized_deviation_is_the_unit_row_distance() {
+        assert_eq!(normalized_deviation(1.0), 0.0);
+        assert_eq!(normalized_deviation(1.0 + f64::EPSILON), 0.0);
+        assert!((normalized_deviation(0.0) - 2.0_f64.sqrt()).abs() < 1e-15);
+        assert!((normalized_deviation(0.1_f64.cos()) - chord(0.1)).abs() < 1e-12);
+        let rows = plane_rows(RowKind::Prompt, 0.02, None);
+        let truth = plane_rows(RowKind::Prompt, 0.0, None);
+        let measured = normalized_deviation(cosine_similarity(&rows, &truth));
+        assert!((measured - chord(0.02)).abs() < 1e-7);
+        assert!(catch_unwind(|| normalized_deviation(f64::NAN)).is_err());
+        assert!(catch_unwind(|| normalized_deviation(f64::INFINITY)).is_err());
+    }
+
+    /// Slack rounding is the envelope round's ceiling to two significant digits of the shortest decimal.
+    #[test]
+    fn slack_rounding_matches_the_envelope_round() {
+        for (value, rounded) in [
+            (1.4206, 1.5),
+            (1.2988, 1.3),
+            (1.3, 1.3),
+            (1.300_000_01, 1.4),
+            (1.0, 1.0),
+            (1.0002, 1.1),
+            (1.0046, 1.1),
+            (0.95, 0.95),
+            (12.5, 13.0),
+            (99.5, 100.0),
+            (1.666, 1.7),
+            (1.6981, 1.7),
+            (2.0, 2.0),
+            (4.045, 4.1),
+        ] {
+            assert_eq!(round_up_two_significant(value), rounded, "{value}");
+        }
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(catch_unwind(|| round_up_two_significant(invalid)).is_err());
+        }
+    }
+
+    /// The diagnostic's graphs keep the derivation's names and order.
+    #[test]
+    fn official_graphs_keep_the_derivation_order() {
+        assert_eq!(
+            OfficialF16Graph::ALL.map(OfficialF16Graph::label),
+            ["cpu-eager", "cpu-sdpa", "mps-eager", "mps-sdpa"]
+        );
+    }
+
+    /// The envelope is the largest of each graph's worst row, with each graph's leave-one-out ratio.
+    #[test]
+    fn path_envelope_takes_each_graphs_worst_row() {
+        let kind = RowKind::Teacher;
+        let truth = plane_rows(kind, 0.0, None);
+        let graphs = [
+            plane_rows(kind, 0.010, None),
+            plane_rows(kind, 0.011, Some((7, 0.012))),
+            plane_rows(kind, 0.010, Some((18, 0.030))),
+            plane_rows(kind, 0.012, None),
+        ];
+        let envelope = PathEnvelope::measure(
+            "synthetic",
+            kind,
+            &truth,
+            [&graphs[0], &graphs[1], &graphs[2], &graphs[3]],
+            2,
+        );
+        assert_eq!(envelope.kind, kind);
+        assert_eq!(envelope.envelope_graph, OfficialF16Graph::MpsEager);
+        assert_eq!(envelope.graphs[2].decision, 18);
+        assert_eq!(envelope.graphs[1].decision, 7);
+        assert_eq!(envelope.graphs[0].decision, 0, "the first row wins ties");
+        assert!((envelope.envelope - chord(0.030)).abs() < 1e-7);
+        let ratios = envelope.leave_one_out();
+        assert!((ratios[2] - chord(0.030) / chord(0.012)).abs() < 1e-5);
+        assert!((ratios[0] - chord(0.010) / chord(0.030)).abs() < 1e-5);
+        assert_eq!(
+            envelope.largest_leave_one_out(),
+            (OfficialF16Graph::MpsEager, ratios[2])
+        );
+        assert_eq!(envelope.registered_method_slack(), 2.5);
+        envelope.report("synthetic");
+    }
+
+    /// The registered method's slack is the largest leave-one-out ratio rounded up, as reported, never applied.
+    #[test]
+    fn registered_method_slack_rounds_the_largest_ratio() {
+        let kind = RowKind::Prompt;
+        let truth = plane_rows(kind, 0.0, None);
+        let graphs = [
+            plane_rows(kind, 0.010, None),
+            plane_rows(kind, 0.011, None),
+            plane_rows(kind, 0.020, None),
+            plane_rows(kind, 0.012, None),
+        ];
+        let envelope = PathEnvelope::measure(
+            "synthetic",
+            kind,
+            &truth,
+            [&graphs[0], &graphs[1], &graphs[2], &graphs[3]],
+            2,
+        );
+        let (graph, largest) = envelope.largest_leave_one_out();
+        assert_eq!(graph, OfficialF16Graph::MpsEager);
+        assert!((largest - chord(0.020) / chord(0.012)).abs() < 1e-5);
+        assert_eq!(envelope.registered_method_slack(), 1.7);
+        let tied = PathEnvelope::measure(
+            "synthetic",
+            kind,
+            &truth,
+            [&graphs[0], &graphs[0], &graphs[0], &graphs[0]],
+            2,
+        );
+        assert_eq!(tied.leave_one_out(), [1.0; 4]);
+        assert_eq!(
+            tied.largest_leave_one_out(),
+            (OfficialF16Graph::CpuEager, 1.0)
+        );
+        assert_eq!(tied.envelope_graph, OfficialF16Graph::CpuEager);
+        assert_eq!(tied.registered_method_slack(), 1.0);
+    }
+
+    /// Equal, malformed, or non-finite official graphs are refused; a wide one is measured, since nothing is gated.
+    #[test]
+    fn path_envelope_refuses_unusable_graphs() {
+        let kind = RowKind::Prompt;
+        let truth = plane_rows(kind, 0.0, None);
+        let near = plane_rows(kind, 0.01, None);
+        let wide = plane_rows(kind, 0.2, None);
+        let mut infinite = near.clone();
+        infinite[1] = f32::INFINITY;
+        let attempt = |graphs: [&[f32]; 4], width: usize| {
+            catch_unwind(|| PathEnvelope::measure("synthetic", kind, &truth, graphs, width))
+        };
+        assert!(attempt([&near, &near, &near, &near], 2).is_ok());
+        assert!(attempt([&near, &near, &wide, &near], 2).is_ok());
+        assert!(attempt([&truth, &truth, &truth, &truth], 2).is_err());
+        assert!(attempt([&near, &near, &near[..1], &near], 2).is_err());
+        assert!(attempt([&near, &near, &infinite, &near], 2).is_err());
+        assert!(attempt([&near, &near, &near, &near], 0).is_err());
+        let short_truth = &truth[..1];
+        assert!(
+            catch_unwind(|| PathEnvelope::measure(
+                "synthetic",
+                kind,
+                short_truth,
+                [&near[..1], &near[..1], &near[..1], &near[..1]],
+                2,
+            ))
+            .is_err(),
+            "a truth without a whole row is refused"
+        );
+        assert!(
+            catch_unwind(|| PathEnvelope::measure(
+                "synthetic",
+                kind,
+                &infinite,
+                [&near, &near, &near, &near],
+                2,
+            ))
+            .is_err(),
+            "a non-finite truth is refused"
+        );
+    }
+
+    /// Four synthetic graphs of `kind` whose envelope is the chord of `0.012` (MPS eager) and largest ratio `1.2`.
+    fn synthetic_envelope(kind: RowKind) -> PathEnvelope {
+        let truth = plane_rows(kind, 0.0, None);
+        let graphs = [
+            plane_rows(kind, 0.010, None),
+            plane_rows(kind, 0.009, None),
+            plane_rows(kind, 0.012, None),
+            plane_rows(kind, 0.008, None),
+        ];
+        PathEnvelope::measure(
+            "synthetic",
+            kind,
+            &truth,
+            [&graphs[0], &graphs[1], &graphs[2], &graphs[3]],
+            2,
+        )
+    }
+
+    /// A completed Burn path whose rows sit at `angles` from the truth, every top-1 exact.
+    fn synthetic_burn(kind: RowKind, floor: f64, angles: &[f64]) -> CompletedTruthSummary {
+        let truth_values = [1.0, 0.0];
+        let mut summary = TruthPathSummary::new(kind, floor);
+        for (decision, angle) in angles.iter().enumerate() {
+            summary.observe(
+                "synthetic",
+                &[angle.cos() as f32, angle.sin() as f32],
+                TruthRow::synthetic(kind, decision, &truth_values),
+                0,
+            );
+        }
+        summary.finish(angles.len())
+    }
+
+    /// The diagnostic reports Burn's worst row as a multiple of the envelope and counts rows beyond it.
+    #[test]
+    fn burn_envelope_ratio_reports_the_worst_row_against_the_envelope() {
+        let kind = RowKind::Cached;
+        let envelope = synthetic_envelope(kind);
+        assert_eq!(envelope.envelope_graph, OfficialF16Graph::MpsEager);
+        let (_, largest) = envelope.largest_leave_one_out();
+        assert!((largest - chord(0.012) / chord(0.010)).abs() < 1e-5);
+        let mut angles = vec![0.006; kind.rows()];
+        angles[22] = 0.0124;
+        angles[5] = 0.0121;
+        let burn = synthetic_burn(kind, plane_cosine(0.0125), &angles);
+        let ratio = BurnEnvelopeRatio::measure(&envelope, &burn);
+        assert_eq!(ratio.worst.decision, 22);
+        assert_eq!(ratio.deviation, normalized_deviation(ratio.worst.cosine));
+        assert_eq!(ratio.of_envelope, ratio.deviation / envelope.envelope);
+        assert!((ratio.of_envelope - chord(0.0124) / chord(0.012)).abs() < 1e-4);
+        assert_eq!((ratio.rows_beyond_envelope, ratio.rows), (2, kind.rows()));
+        assert!(
+            !ratio.beyond_every_official_graph(),
+            "1.033 of the envelope is inside the official graphs' largest ratio 1.2"
+        );
+        ratio.report("synthetic");
+
+        angles[22] = 0.0150;
+        let burn = synthetic_burn(kind, plane_cosine(0.0125), &angles);
+        let ratio = BurnEnvelopeRatio::measure(&envelope, &burn);
+        assert!(ratio.of_envelope > largest);
+        assert!(ratio.beyond_every_official_graph());
+        ratio.report("synthetic");
+
+        let within = synthetic_burn(kind, plane_cosine(0.0125), &vec![0.005; kind.rows()]);
+        let ratio = BurnEnvelopeRatio::measure(&envelope, &within);
+        assert_eq!(ratio.rows_beyond_envelope, 0);
+        assert!(ratio.of_envelope < 1.0);
+
+        let other_path = synthetic_burn(RowKind::Prompt, 0.99, &[0.005]);
+        assert!(catch_unwind(|| BurnEnvelopeRatio::measure(&envelope, &other_path)).is_err());
+    }
+
+    /// The floor alone decides: the envelope never admits a row below the floor or rejects one above it.
+    #[test]
+    fn the_envelope_diagnostic_never_changes_the_floor_verdict() {
+        let kind = RowKind::Cached;
+        let envelope = synthetic_envelope(kind);
+        let slack_bound = envelope.registered_method_slack() * envelope.envelope;
+        // Below the floor yet within the not-adopted `s E` bound, as Burn's cached decision 22 is.
+        let mut angles = vec![0.006; kind.rows()];
+        angles[22] = 0.0124;
+        let failing = synthetic_burn(kind, plane_cosine(0.0122), &angles);
+        let ratio = BurnEnvelopeRatio::measure(&envelope, &failing);
+        assert!(ratio.of_envelope > 1.0 && ratio.deviation <= slack_bound);
+        let violations = failing.violations();
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].starts_with("Cached decision 22: cosine"));
+        assert!(catch_unwind(|| assert_within_floors("synthetic", &[&failing])).is_err());
+        // At or above the floor yet outside the envelope: passes.
+        let passing = synthetic_burn(kind, plane_cosine(0.0124), &angles);
+        assert!(BurnEnvelopeRatio::measure(&envelope, &passing).of_envelope > 1.0);
+        assert!(passing.violations().is_empty());
+        assert_within_floors("synthetic", &[&passing]);
     }
 
     /// Exact and positive-scaled vectors satisfy both mathematical gates.
