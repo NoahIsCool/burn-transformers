@@ -784,21 +784,32 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   baseline for the maintainer and corrects the envelope record's benchmark
   verdict and its claim that no real-checkpoint gate selects the eager graph
   (Muse-Glimmer's does). No checkpoint is promoted.
-- A Nemotron-H envelope round replaces the Nemotron-H official-precision
-  gate's floor (the worst cosine of two official F16 graphs, no slack) with an
-  envelope over four official F16 graphs (CPU and MPS, eager and SDPA
-  attention) and per-path leave-one-out slacks from those graphs alone, on
-  the normalized deviation `sqrt(2 (1 - cosine))`: new
+- A Nemotron-H envelope round evaluated replacing the Nemotron-H
+  official-precision gate's floor (the worst cosine of two official F16
+  graphs, no slack) with an envelope over four official F16 graphs (CPU and
+  MPS, eager and SDPA attention) and per-path leave-one-out slacks from those
+  graphs alone, on the normalized deviation `sqrt(2 (1 - cosine))`: new
   `scripts/generate_nemotron_h_f16_graph_reference.py` and
-  `scripts/derive_nemotron_h_envelope.py`, a strict reader of the two new SDPA
-  bundles, and a bundle-only test that re-derives the slacks. The method and
-  the derivation were committed before any Burn row; every slack is `1.1`,
-  set by rounding largest ratios of `1.0002` to `1.0046`. The gate passes at
-  `2cf83d7`, cached decision 22 at `0.998558` against the new `0.998333`
-  floor (`1.023` of the envelope), checked by
+  `scripts/derive_nemotron_h_envelope.py` and a strict reader of the two new
+  SDPA bundles. The method and the derivation were committed before any Burn
+  row; every slack is `1.1`, set by rounding largest ratios of `1.0002` to
+  `1.0046`. Under that rule the gate passed at `2cf83d7`, cached decision 22
+  at `0.998558` against `0.998333` (`1.023` of the envelope), checked by
   `scripts/tests/test_nemotron_h_envelope_record.py`
-  ([record](acceptance/measurements/nemotron-h-envelope-20261018.json)). The
-  rule awaits review; no checkpoint is promoted.
+  ([record](acceptance/measurements/nemotron-h-envelope-20261018.json)).
+- The maintainer did not adopt that rule (October 18): the Nemotron-H gate
+  judges by its two official F16 floors again and fails at cached decision 22
+  (`0.998558` against `0.998635`), an open finding inferred from the rows
+  measured at `2cf83d7`. The four-graph envelope is a printed diagnostic
+  (Burn's worst row of each path as a multiple of it, the leave-one-out
+  ratios, and the slack the method would round to, marked not adopted), the
+  F16 graph bundles are optional for the gate, and the bundle-only test prints
+  the floors and the envelope. The decision record corrects the envelope
+  record's teacher decision-30, decision-18 spike, hidden-trace, and MPS
+  budget statements, checked by
+  `scripts/tests/test_nemotron_h_envelope_decision_record.py`
+  ([record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)).
+  No checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

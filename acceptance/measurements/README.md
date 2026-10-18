@@ -112,18 +112,32 @@ statements of the envelope record, which stays byte-identical with the other
 earlier records. `scripts/tests/test_half_precision_review_record.py`
 recomputes its statuses, figures, and identities. It promotes no checkpoint.
 
-The [Nemotron-H envelope record](nemotron-h-envelope-20261018.json) replaces
-the Nemotron-H official-precision gate's two-graph floor with an envelope
-over four official F16 graphs (CPU and MPS, eager and SDPA attention) and a
-per-path leave-one-out slack from those graphs alone. It holds the method
-registered before any new data, the two new SDPA graph bundles' manifests and
-generator logs (a first, resident MPS attempt swapped and was stopped), a
-control repeating the oracle's MPS eager graph (not bitwise equal to it), the
-derivation and its assessment written before any Burn row, and the gate run
-at `2cf83d7`, which passes with every slack at the rounding's `1.1`.
+The [Nemotron-H envelope record](nemotron-h-envelope-20261018.json) proposes
+to replace the Nemotron-H official-precision gate's two-graph floor with an
+envelope over four official F16 graphs (CPU and MPS, eager and SDPA
+attention) and a per-path leave-one-out slack from those graphs alone. It
+holds the method registered before any new data, the two new SDPA graph
+bundles' manifests and generator logs (a first, resident MPS attempt swapped
+and was stopped), a control repeating the oracle's MPS eager graph (not
+bitwise equal to it), the derivation and its assessment written before any
+Burn row, and the gate run at `2cf83d7`, which passes the proposed rule with
+every slack at the rounding's `1.1`.
 `scripts/tests/test_nemotron_h_envelope_record.py` recomputes its statuses,
 figures, quotes, ordering, and identities, and the earlier records stay
 byte-identical. It promotes no checkpoint.
+
+The [Nemotron-H envelope decision record](nemotron-h-envelope-decision-20261018.json)
+records the maintainer's decision of October 18 not to adopt that rule: the
+gate judges by its two official F16 floors again and fails at cached
+decision 22 (`0.998558` against `0.998635`), an open finding inferred from
+the rows the envelope record measured, and the four-graph envelope is a
+printed diagnostic. It holds the bundle-only run that recomputes the floors
+and the envelope at the new source, the source checks, and corrections of
+four envelope-record statements. The envelope record and the earlier records
+stay byte-identical, and
+`scripts/tests/test_nemotron_h_envelope_decision_record.py` recomputes the
+decision record's verdict, figures, quotes, and identities. It promotes no
+checkpoint.
 
 ## Published and repository-only records
 

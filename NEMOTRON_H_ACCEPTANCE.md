@@ -16,14 +16,16 @@ library code: the recurrent cached row at decision 22 is `0.998558` against the
 `0.998635` floor, attributed by two controls to the once-rounded Mamba-2
 convolution SiLU
 ([half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)).
-Under the official four-graph F16 envelope that replaced that floor, it passes
-at `2cf83d7`, which compiles the library code of `fa8426e`: the same row
-reproduces `0.998558` against the cached floor `0.998333`, a pass that rests on
-the envelope's rounded slack
-([Nemotron-H envelope record](acceptance/measurements/nemotron-h-envelope-20261018.json);
-see [the envelope rule](#official-f16-envelope)). Real-weight
-MTP parity and the remaining release gates are incomplete, so the model is not
-advertised as supported. The committed machine-readable state remains
+A four-graph official F16 envelope proposed to replace that floor passed at
+`2cf83d7` only through its rounded slack
+([Nemotron-H envelope record](acceptance/measurements/nemotron-h-envelope-20261018.json)),
+and the maintainer did not adopt it (decision of October 18,
+[envelope decision record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)).
+The gate keeps its two-graph floors and fails at cached decision 22
+(`0.998558` against `0.998635`), an open finding; the four-graph data is a
+printed diagnostic (see [the envelope diagnostic](#official-f16-envelope-diagnostic)).
+Real-weight MTP parity and the remaining release gates are incomplete, so the
+model is not advertised as supported. The committed machine-readable state remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
 An external, authenticated seven-file base-model oracle now proves the official
 Transformers graph can load and execute the complete language tower. It does
@@ -329,14 +331,18 @@ so the clamp asymmetry, not precision, drives the official path split.
 
 The gate then judged Burn's logit rows against the official F32 rows of the
 same path, from the authenticated precision bundle (it still does). Each path's
-floor was the worst cosine either official F16 evaluation reaches against F32
-on that path, computed in the test from authenticated rows and required to
-stay at or above `0.99`: prompt `0.999194`, teacher `0.994466`, cached
-`0.998635` (replaced by the [official F16 envelope](#official-f16-envelope)).
-Every Burn F16 row had to be at least as close to F32 as the worst official F16
-row on its path, with exact top-1 everywhere. This is a per-path bound, not a per-decision
-one: half-precision deviations spike at implementation-specific rows. The three
-hidden traces exist only at F16 and keep the `0.999` floor against the oracle.
+floor is the worst cosine either official F16 evaluation (the MPS/F16 oracle
+and the CPU/F16 rows, both with eager attention) reaches against F32 on that
+path, computed in the test from authenticated rows with no slack and required
+to stay at or above `0.99`: prompt `0.999194`, teacher `0.994466`, cached
+`0.998635`. Every Burn F16 row must be at least as close to F32 as the worst
+official F16 row on its path, with exact top-1 everywhere. This is a per-path
+bound, not a per-decision one: half-precision deviations spike at
+implementation-specific rows. Every row is measured before any is judged, so a
+failing run lists each violation. A four-graph envelope evaluated as a
+replacement was not adopted and is printed as a
+[diagnostic](#official-f16-envelope-diagnostic). The three hidden traces exist
+only at F16 and keep the `0.999` floor against the oracle.
 
 On source `9a9c730` the gate passed: against F32, Burn reaches `0.999224` on
 the prompt row, at least `0.997612` on every teacher-forced row (decision 30),
@@ -362,20 +368,20 @@ composed as before, both pass with every statistic of the `9a9c730` run.
 ([half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json)).
 No floor was changed in that round.
 
-### Official F16 envelope
+### Official F16 envelope diagnostic
 
-The per-path floor was the worst row of only two official F16 graphs, with
-no slack. The [Nemotron-H envelope round](acceptance/measurements/nemotron-h-envelope-20261018.json)
-replaced it with the rule the Llama-family and Gemma gates use: an envelope
-over the four official F16 graphs (CPU and MPS, each with eager and SDPA
-attention) and a slack derived from those graphs alone by leave-one-out. The
-method was committed before any new data
+The per-path floor is the worst row of only two official F16 graphs, with no
+slack. The [Nemotron-H envelope round](acceptance/measurements/nemotron-h-envelope-20261018.json)
+proposed to replace it with the rule the Llama-family and Gemma gates use: an
+envelope over the four official F16 graphs (CPU and MPS, each with eager and
+SDPA attention) and a slack derived from those graphs alone by leave-one-out.
+The method was committed before any new data
 ([method](acceptance/measurements/nemotron-h-envelope-20261018/derivation/method.txt)),
 and the derivation before any Burn row of the round. The statistic is a row's
 normalized deviation from its F32 truth row, `sqrt(2 (1 - cosine))`, the
 distance between the unit-normalized rows; each path's envelope is the largest
-worst-row deviation of the four graphs, and its bound the envelope times the
-path's slack.
+worst-row deviation of the four graphs, and the proposed bound the envelope
+times the path's slack.
 
 The two SDPA graphs came from
 [`scripts/generate_nemotron_h_f16_graph_reference.py`](scripts/generate_nemotron_h_f16_graph_reference.py),
@@ -394,30 +400,56 @@ self-check proves bitwise neutral). Against the official F32 rows:
 
 The largest leave-one-out ratios are `1.0002` (prompt), `1.0042` (teacher),
 and `1.0046` (cached), so every slack is `1.1`, the ceiling to two significant
-digits; the cosine floors become `0.999025`, `0.993248`, and `0.998333`
-(from `0.999194`, `0.994466`, and `0.998635`). The worst rows coincide across
-graphs (teacher decision 18 in all but CPU eager, cached decision 22 in both
-MPS graphs), so the four graphs agree at their spikes and the 10% slack comes
-from the rounding, not from a measured spread. A control repeating the
+digits; the proposed cosine floors would be `0.999025`, `0.993248`, and
+`0.998333` (instead of `0.999194`, `0.994466`, and `0.998635`). The worst
+rows coincide across graphs (teacher decision 18 in all but CPU eager, cached
+decision 22 in both MPS graphs), so the four graphs agree at their spikes and
+the 10% slack comes from the rounding, not from a measured spread. A control repeating the
 oracle's MPS eager graph with this tool on the current macOS 27.0.1 (the
 oracle ran on macOS 15.7.9) is not bitwise equal to the oracle (cosine
 `0.999686` at teacher decision 28), and its cached decision 22 (`0.998596`) lies
 `1.0097` times the envelope out: an official repeat moves the cached envelope
 by about 1%. The control is reported, not adopted.
 
-On source `2cf83d7` (the library code of `fa8426e`) the gate passes: against
-F32, Burn reaches `0.999200` on the prompt row (`0.996` of the envelope),
-at least `0.996039` on teacher rows (decision 30, `0.84` of the envelope), and
-at least `0.998558` on cached rows (decision 22, `1.0231` of the envelope and
-`0.930` of the bound), with 32/32 top-1 on both paths. The cached row is
-further outside the four-graph envelope than any official graph is outside
-the other three (`1.0046`), so the pass depends on the rounded slack. At
-teacher decision 30 every official F16 graph is near `0.99996`, and Burn's
-row fell from `0.997612` at `9a9c730` to `0.996039`: a Burn-side deviation that
-the per-path bound admits and that remains unexplained. Against the F16
-oracle Burn moved closer than at `9a9c730` (cached minimum `0.999701` from
-`0.999299`; hidden traces at least `0.999995` from `0.999802`), consistent
-with the once-rounded SiLU matching the official `F.silu`.
+On source `2cf83d7` (the library code of `fa8426e`) the gate passed under the
+proposed rule: against F32, Burn reached `0.999200` on the prompt row (`0.996`
+of the envelope), at least `0.996039` on teacher rows (decision 30, `0.84` of
+the envelope), and `0.998557984` on cached decision 22 (`1.0231` of the
+envelope and `0.930` of the bound), with 32/32 top-1 on both paths. The cached
+row is further outside the four-graph envelope than any official graph is
+outside the other three (`1.0046`), so the pass depended on the rounded slack.
+
+The maintainer did not adopt the rule (October 18): "Its slack is 1.1 only
+because leave-one-out ratios of at most 1.0046 round up, and Burn's cached
+decision 22 sits at 1.023 times the envelope"
+([envelope decision record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)).
+The gate's criterion is the two-graph floors above, so it fails at cached
+decision 22, `0.998557984` against `0.998635047` (the oracle's own decision
+22), and at no other row: prompt `0.999200341` against `0.999194145`, teacher
+minimum `0.996039427` against `0.994466421`. That verdict applies the restored
+rule to the rows measured at `2cf83d7`, whose library code the current source
+compiles; the restored gate was not rerun on the checkpoint. The bundle-only
+`reports_official_f16_floors_and_four_graph_envelope` recomputes the three
+floors and the envelope from the authenticated bundles at the current source.
+When `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is set, the gate prints the
+envelope, each graph's leave-one-out ratio, the slack the method would round
+to (marked not adopted), and Burn's worst row of each path as a multiple of
+the envelope; none of it judges a row.
+
+At teacher decision 30 the official F16 graphs reach `0.999958` (CPU eager),
+`0.999346` (CPU SDPA), `0.999968` (MPS eager), and `0.999954` (MPS SDPA) from
+F32 (the MPS eager control `0.999957`). Burn's row fell from `0.997612` at
+`9a9c730` to `0.996039`, a deficit `1 - cosine` six times CPU SDPA's and 85
+to 125 times the other three graphs': a Burn-side deviation that the per-path
+floor admits and that remains unexplained. The teacher decision-18 spike
+(cosines near `0.9944`) is absent only from CPU eager (`0.999688` there); CPU
+SDPA, which differs from it only in the
+attention implementation, has it, and both MPS graphs have it with either
+attention implementation, so neither the device nor the attention path alone
+accounts for it. Against the F16 oracle Burn moved closer than at `9a9c730`
+(cached minimum `0.999701` from `0.999299`; hidden traces at least
+`0.99999496` from `0.999802`), consistent with the once-rounded SiLU matching
+the official `F.silu`.
 
 The exact official cache has physical batch one while `DynamicCache.batch_size`
 reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution
@@ -527,18 +559,20 @@ cargo test --release --manifest-path Cargo.toml \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
-That command reauthenticates all checkpoint, oracle, precision, and F16-graph
-bytes, strictly reloads the complete F16 graph, and checks corresponding
-streams only. It never treats the official cached-versus-teacher cosine as a
-Burn parity criterion. The bundle-only
-`official_f16_graphs_admit_each_other_leave_one_out` takes the last three
-variables, needs no checkpoint or Metal, and re-derives each path's
-leave-one-out slack from the four official F16 graphs.
+That command reauthenticates all checkpoint, oracle, and precision bytes,
+strictly reloads the complete F16 graph, and checks corresponding streams
+only. It never treats the official cached-versus-teacher cosine as a Burn
+parity criterion. `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is optional: when
+set, its bundles are authenticated too and the four-graph envelope is printed
+as a diagnostic; when unset, the gate says the diagnostic was skipped. The
+bundle-only `reports_official_f16_floors_and_four_graph_envelope` takes the
+last three variables, needs no checkpoint or Metal, and prints the gate's
+floors and the four-graph envelope from the official bundles alone.
 
 The two SDPA graphs come from
 [`scripts/generate_nemotron_h_f16_graph_reference.py`](scripts/generate_nemotron_h_f16_graph_reference.py),
 run in the oracle's CPython 3.11.9 environment with the clean `cfa309`
-checkout; the CPU graph used the precision tool's 16 GiB resident budget:
+checkout, both with the precision tool's 16 GiB resident budget:
 
 ```sh
 /absolute/path/to/pinned/python3.11 -I \
@@ -552,9 +586,10 @@ checkout; the CPU graph used the precision tool's 16 GiB resident budget:
   --output /absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle
 ```
 
-and the MPS graph with `--device mps --attn-implementation sdpa` and no
-budget (`f16-mps-sdpa.bundle`). The envelope and its slacks follow from the
-bundles alone with
+and the MPS graph with `--device mps --attn-implementation sdpa` and the same
+`--max-resident-gib 16 --offload-dir` (`f16-mps-sdpa.bundle`; a resident MPS
+load swapped beyond the watchdog's limit). The envelope diagnostic and the
+registered method's slacks follow from the bundles alone with
 [`scripts/derive_nemotron_h_envelope.py`](scripts/derive_nemotron_h_envelope.py)
 (`--precision-dir`, `--oracle-dir`, and one `--graph` per SDPA bundle).
 
@@ -591,16 +626,19 @@ contract. The stateless, cached-prefill, and one-token decode smoke was replayed
 on the integrated source after the Mamba-2 scan, `dt` softplus, batched cached
 execution, and MTP verification changes
 ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)),
-and the official base gate passed against the official F32 rows at `9a9c730`,
-failed its two-graph floor at `f9f78b5` with the once-rounded Mamba-2
-convolution SiLU, and passes the four-graph F16 envelope at `2cf83d7`
-([official F16 envelope](#official-f16-envelope)). Before this checkpoint can
-be advertised as supported:
+and the official base gate passed against the official F32 rows at `9a9c730`
+and fails its two-graph floor since `f9f78b5` with the once-rounded Mamba-2
+convolution SiLU (cached decision 22, `0.998558` against `0.998635`), an open
+finding; the four-graph envelope under which it passed at `2cf83d7` was not
+adopted ([envelope diagnostic](#official-f16-envelope-diagnostic)). Before
+this checkpoint can be advertised as supported:
 
-1. Record official F32 hidden traces too, so the hidden-trace checks can use
-   the same F32 truth and F16-envelope floors as the logit rows.
-2. Generate the MTP evidence with pinned vLLM and independently review and pin
+1. Resolve the official-precision failure at cached decision 22 (and explain
+   teacher decision 30) without widening the floors by an unmeasured slack.
+2. Record official F32 hidden traces too, so the hidden-trace checks can use
+   the same F32 truth and F16 floors as the logit rows.
+3. Generate the MTP evidence with pinned vLLM and independently review and pin
    every combined-bundle hash; do not reuse the base loader as MTP evidence.
-3. Exercise real-weight MTP draft/verification state handling, padding,
+4. Exercise real-weight MTP draft/verification state handling, padding,
    context boundaries, native Q8/Q4 quality and packed kernels, the 32K stress
    gate, and standardized memory/latency/throughput reporting.
